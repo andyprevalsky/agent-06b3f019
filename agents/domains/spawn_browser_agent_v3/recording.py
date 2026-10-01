@@ -1280,13 +1280,17 @@ class BrowserAgentRecorder:
         if self._cursor and "cursor" not in next_metadata:
             next_metadata["cursor"] = dict(self._cursor)
         self._last_metadata = next_metadata
-        # capture() already swallows screenshot/write failures; suppress any
-        # unexpected escape so a recording glitch cannot abort Place order.
+        # Keep immediate frames when the page responds quickly, including after
+        # provider recovery. A slow diagnostic screenshot must not hold up the
+        # browser action; the background loop and observations cover those gaps.
         with contextlib.suppress(Exception):
-            await self.capture(label, action=action, metadata=next_metadata, force=force)
+            await asyncio.wait_for(
+                self.capture(label, action=action, metadata=next_metadata, force=force),
+                timeout=0.2,
+            )
 
     async def _screenshot_bytes(self, *, allow_slow_fallback: bool) -> tuple[bytes, str]:
-        # Forced (action) frames get the full budget; best-effort idle frames use
+        # Forced lifecycle frames get the full budget; best-effort idle frames use
         # a short timeout so a slow page.screenshot (fonts/stability wait) can't
         # stall the capture loop and block a later forced frame behind the lock.
         timeout_ms = 2500 if allow_slow_fallback else 1200
@@ -1426,7 +1430,10 @@ class BrowserAgentRecorder:
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
         try:
-            await asyncio.wait_for(self.capture("recording stopped", action="stop", force=True), timeout=7)
+            # A short task may finish before the background loop samples its
+            # final action; keep that label on the terminal frame.
+            final_label = self._last_label if self._last_label != "idle" else "recording stopped"
+            await asyncio.wait_for(self.capture(final_label, action="stop", force=True), timeout=7)
         except asyncio.TimeoutError:
             logger.warning(
                 "Browser agent recording final frame capture timed out",

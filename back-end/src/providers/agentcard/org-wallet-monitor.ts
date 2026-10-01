@@ -67,7 +67,10 @@ function optionalString(record: Record<string, unknown>, key: string): string | 
   return typeof value === 'string' && value.trim() !== '' ? value : undefined;
 }
 
-export function extractAgentCardOrgWallet(result: unknown): AgentCardOrgWallet {
+export function extractAgentCardOrgWallet(
+  result: unknown,
+  livemodeOverride?: boolean
+): AgentCardOrgWallet {
   const outer = asRecord(result);
   const structured = asRecord(outer?.structuredContent);
   const wallet = asRecord(structured?.wallet);
@@ -78,9 +81,13 @@ export function extractAgentCardOrgWallet(result: unknown): AgentCardOrgWallet {
       `AgentCard get_company_wallet returned no structured wallet (outer=${outerKeys}; structured=${structuredKeys})`
     );
   }
+  const livemode = livemodeOverride ?? wallet.livemode;
+  if (typeof livemode !== 'boolean') {
+    throw new Error('AgentCard wallet mode is unknown');
+  }
 
   return {
-    livemode: wallet.livemode === true,
+    livemode,
     balanceCents: requiredNumber(wallet, 'balance_cents'),
     committedCents: requiredNumber(wallet, 'committed_cents'),
     availableCents: requiredNumber(wallet, 'available_cents'),
@@ -88,6 +95,23 @@ export function extractAgentCardOrgWallet(result: unknown): AgentCardOrgWallet {
     chain: optionalString(wallet, 'chain'),
     stablecoin: optionalString(wallet, 'stablecoin'),
   };
+}
+
+/** The current get_company_wallet contract omits mode; whoami is its authority. */
+export async function readAgentCardOrgWallet(
+  callOrgTool: AgentCardOrgToolCaller
+): Promise<AgentCardOrgWallet> {
+  const result = await callOrgTool('get_company_wallet', {});
+  const wallet = asRecord(asRecord(asRecord(result)?.structuredContent)?.wallet);
+  if (wallet === undefined)
+    throw new Error('AgentCard get_company_wallet returned no structured wallet');
+  if (typeof wallet?.livemode === 'boolean') return extractAgentCardOrgWallet(result);
+  const whoami = asRecord(asRecord(await callOrgTool('whoami', {}))?.structuredContent);
+  const mode = optionalString(whoami ?? {}, 'mode');
+  if (mode !== 'sandbox' && mode !== 'production') {
+    throw new Error('AgentCard organization mode is unknown');
+  }
+  return extractAgentCardOrgWallet(result, mode === 'production');
 }
 
 function formatUsd(cents: number): string {
@@ -111,8 +135,7 @@ function lowBalanceMessage(params: {
 export async function monitorAgentCardOrgWallet(
   dependencies: MonitorDependencies
 ): Promise<MonitorResult> {
-  const rawWallet = await dependencies.callOrgTool('get_company_wallet', {});
-  const wallet = extractAgentCardOrgWallet(rawWallet);
+  const wallet = await readAgentCardOrgWallet(dependencies.callOrgTool);
 
   if (!wallet.livemode) return { status: 'sandbox_ignored', wallet };
 

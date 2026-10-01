@@ -576,6 +576,37 @@ def test_fingerprint_ignores_verified_checkout_summary_annotations():
     ]
 
 
+def test_fingerprint_ignores_verified_product_card_descriptions():
+    """A long card description must not make the next browser run mint another card."""
+    from domains.request_payment_card.service import normalize_payment_payload
+
+    for title, description, slug in (
+        ("Aurora Notebook", "Hardcover planning notebook with dotted pages", "aurora-notebook"),
+        ("Ceramic Mug", "Matte white mug for long checkout tests", "ceramic-mug"),
+        ("Canvas Tote", "Heavy canvas tote with reinforced handles", "canvas-tote"),
+    ):
+        bare = _sample_tool_call()
+        bare["merchant"] = "Rose Labs Test Payment"
+        bare["line_items"][0]["name"] = title
+        bare["line_items"][0]["product_url"] = f"https://shop.example/p/{slug}"
+        described = _sample_tool_call()
+        described["merchant"] = bare["merchant"]
+        described["line_items"][0].update(bare["line_items"][0])
+        described["line_items"][0]["name"] = f"{title} - {description}"
+        base_fingerprint = normalize_payment_payload(bare, "user-123")["fingerprint"]
+        assert normalize_payment_payload(described, "user-123")["fingerprint"] == base_fingerprint
+        described["line_items"][0]["name"] = f"{title} - Red"
+        assert normalize_payment_payload(described, "user-123")["fingerprint"] != base_fingerprint
+
+    described["line_items"][0]["name"] = (
+        "Different Tote - Heavy canvas tote with reinforced handles"
+    )
+    bare["line_items"][0]["name"] = "Different Tote"
+    assert normalize_payment_payload(described, "user-123")["fingerprint"] != normalize_payment_payload(
+        bare, "user-123"
+    )["fingerprint"]
+
+
 def test_fingerprint_preserves_non_ascii_suffixes_and_distinct_merchant_echo():
     """Only the ASCII suffixes the backend recognizes may be removed."""
     from domains.request_payment_card.service import normalize_payment_payload
@@ -1044,6 +1075,10 @@ async def run_all_tests():
     result.record(
         "fingerprint_checkout_summary_stability",
         test_fingerprint_ignores_verified_checkout_summary_annotations,
+    )
+    result.record(
+        "fingerprint_product_description_stability",
+        test_fingerprint_ignores_verified_product_card_descriptions,
     )
     result.record(
         "fingerprint_non_ascii_suffix_distinct",

@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/lib/workspace-env.sh"
 . "$SCRIPT_DIR/lib/workspace-db-lock.sh"
+. "$SCRIPT_DIR/lib/local-pg-image.sh"
 normalize_conductor_workspace_env
 
 export LOCAL_DB_PORT=$(($CONDUCTOR_PORT + 5))
@@ -81,6 +82,7 @@ create_docker_postgres() {
     fi
 
     # Create Postgres container (recreate if port mapping drifted)
+    recreate_if_stale_pg_image "$DB_CONTAINER" "$DB_VOLUME"
     if docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
         EXISTING_PORT=$(docker port "$DB_CONTAINER" 5432/tcp 2>/dev/null | head -1 | awk -F: '{print $NF}' || true)
         if [ "$EXISTING_PORT" != "$LOCAL_DB_PORT" ]; then
@@ -105,7 +107,7 @@ create_docker_postgres() {
                 -e POSTGRES_DB=victoria \
                 -p "$LOCAL_DB_PORT:5432" \
                 -v "$DB_VOLUME:/var/lib/postgresql/data" \
-                postgres:16-alpine >/dev/null; then
+                "$LOCAL_PG_IMAGE" >/dev/null; then
                 return 1
             fi
         else
@@ -132,7 +134,7 @@ create_docker_postgres() {
             -e POSTGRES_DB=victoria \
             -p "$LOCAL_DB_PORT:5432" \
             -v "$DB_VOLUME:/var/lib/postgresql/data" \
-            postgres:16-alpine >/dev/null; then
+            "$LOCAL_PG_IMAGE" >/dev/null; then
             return 1
         fi
     fi

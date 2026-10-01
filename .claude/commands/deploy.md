@@ -728,7 +728,7 @@ if ! docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q
   else
     docker run -d --name "$DB_CONTAINER" -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=victoria \
       -p "$LOCAL_DB_PORT:5432" -v "$DB_VOLUME:/var/lib/postgresql/data" \
-      postgres:16-alpine >/dev/null
+      pgvector/pgvector:pg16 >/dev/null
     # Wait + push schema + seed for fresh containers
     for i in $(seq 1 30); do docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null && break; sleep 1; done
     (cd back-end && DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
@@ -1126,14 +1126,16 @@ With the full stack from Step 5 still running (backend, worker, **and frontend o
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
+CONDUCTOR_PORT=$(jq -er '.ports.backend' .context/services.json)
+LOCAL_DB_PORT=$(jq -er '.database.runtime_port' .context/services.json)
 # UI specs: four workers. Exclude the latency ratchet so Chromium renderer
 # contention cannot become part of the product latency measurement (same split
 # as chat-lifecycle-ratchet.yml).
 SEMANTIC_GREP_INVERT="chat full-lifecycle latency" SEMANTIC_WORKERS=4 \
-  BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+  LOCAL_DB_PORT=$LOCAL_DB_PORT BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
   bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh
 # Latency ratchet: one worker, sequential samples across every chat path.
-SEMANTIC_WORKERS=1 BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+SEMANTIC_WORKERS=1 LOCAL_DB_PORT=$LOCAL_DB_PORT BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
   bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh chat-lifecycle-latency
 ```
 
@@ -1142,7 +1144,7 @@ The runner generates one authenticated session per Playwright invocation. UI spe
 This runs every `.spec.ts` under `front-end/tests-e2e/` via headless Chromium. To run a single test:
 
 ```bash
-BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+LOCAL_DB_PORT=$LOCAL_DB_PORT BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
   bash front-end/scripts/run-semantic-tests.sh login
 ```
 
@@ -1178,12 +1180,22 @@ real sandbox. Do NOT downgrade this to WARN, gate it behind a change classifier,
 or skip it because "claude-code wasn't touched."
 
 With the full stack from Step 5 still running (backend on `$CONDUCTOR_PORT`, DB on
-`$LOCAL_DB_PORT`), run the claude-code blackbox with the smoke phase enabled
-against the existing backend:
+`$LOCAL_DB_PORT`), create the separate local database required by the standalone
+blackbox runner, then run the claude-code blackbox with the smoke phase enabled:
 
 ```bash
+cd "$(git rev-parse --show-toplevel)"
+source scripts/lib/workspace-env.sh
+normalize_conductor_workspace_env
+CONDUCTOR_PORT=$(jq -er '.ports.backend' .context/services.json)
+LOCAL_DB_PORT=$(jq -er '.database.runtime_port' .context/services.json)
+E2B_DB_NAME="victoria_$CONDUCTOR_WORKSPACE_NAME"
+if ! psql "postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$E2B_DB_NAME" \
+  -At -c 'SELECT 1' >/dev/null 2>&1; then
+  PGPASSWORD=postgres createdb -h localhost -p "$LOCAL_DB_PORT" -U postgres "$E2B_DB_NAME"
+fi
 cd back-end && BLACKBOX_SMOKE=1 \
-  BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
+  BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$E2B_DB_NAME" \
   bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- \
   bash scripts/run-blackbox-tests.sh claude-code
 ```

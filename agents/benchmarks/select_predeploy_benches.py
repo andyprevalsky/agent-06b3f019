@@ -297,15 +297,13 @@ def categories_triggered_by_paths(changed_files: Sequence[str]) -> list[str]:
 
 
 def _eligible(task: TaskRef, surface: str) -> bool:
-    if not task.eligible_status:
+    if not task.eligible_status or task.production_only:
         return False
     # Both local and cloud predeploy execute against isolated backends. The
     # catalog's production-only lifecycles belong to explicit production runs.
     if task.raw.get("production_only"):
         return False
     if surface == "cloud" and task.local_only:
-        return False
-    if surface == "local" and task.production_only:
         return False
     return True
 

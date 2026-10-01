@@ -47,22 +47,39 @@ const LOCAL_DATABASE_URL = (() => {
   return 'postgresql://postgres:postgres@localhost:5432/victoria?connection_limit=50&pool_timeout=30';
 })();
 
-function seedBrowserControlSession(agentId: string, taskId: string, userId: string): void {
-  execFileSync('npx', ['tsx', seedScript], {
-    cwd: path.join(repoRoot, 'back-end'),
-    env: {
-      ...process.env,
-      ALLOW_E2E_DB_SEED: '1',
-      DATABASE_URL: LOCAL_DATABASE_URL,
-      DIRECT_URL: process.env.SEMANTIC_DIRECT_URL ?? LOCAL_DATABASE_URL,
-      AGENT_ID: agentId,
-      TASK_ID: taskId,
-      USER_ID: userId,
-      DEBUG_URL: LIVE_VIEW_V1,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    encoding: 'utf8',
-  });
+async function seedBrowserControlSession(
+  agentId: string,
+  taskId: string,
+  userId: string,
+): Promise<void> {
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      execFileSync('npx', ['tsx', seedScript], {
+        cwd: path.join(repoRoot, 'back-end'),
+        env: {
+          ...process.env,
+          ALLOW_E2E_DB_SEED: '1',
+          DATABASE_URL: LOCAL_DATABASE_URL,
+          DIRECT_URL: process.env.SEMANTIC_DIRECT_URL ?? LOCAL_DATABASE_URL,
+          AGENT_ID: agentId,
+          TASK_ID: taskId,
+          USER_ID: userId,
+          DEBUG_URL: LIVE_VIEW_V1,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        encoding: 'utf8',
+      });
+      return;
+    } catch (error) {
+      // The concurrent E2B gate regenerates Prisma's native client in this
+      // workspace. Retry only the brief window when its dylib is being replaced.
+      const stderr = (error as { stderr?: string }).stderr ?? '';
+      if (!stderr.includes('segment __TEXT extends beyond end of file') || attempt === 5) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+  }
 }
 
 async function postToolMessage(
@@ -84,8 +101,9 @@ async function openFullscreenFromChip(page: import('@playwright/test').Page): Pr
   const chip = page.locator('[data-testid="browser-status-chip"]');
   await expect(chip).toBeVisible();
   await chip.click();
-  await expect(page.getByText("Agent's Browser")).toBeVisible();
-  const header = page.getByText("Agent's Browser").locator('xpath=ancestor::div[2]');
+  const browserHeading = page.getByRole('heading', { name: "Agent's Browser", exact: true });
+  await expect(browserHeading).toBeVisible();
+  const header = browserHeading.locator('xpath=ancestor::div[2]');
   const buttons = header.getByRole('button');
   const count = await buttons.count();
   await buttons.nth(Math.max(0, count - 2)).click();
@@ -105,7 +123,7 @@ test.describe('browser-take-control', () => {
     const userId = await resolveTestUserId();
 
     try {
-      seedBrowserControlSession(agentId, taskId, userId);
+      await seedBrowserControlSession(agentId, taskId, userId);
 
       await postToolMessage(agentId, {
         toolCallId: 'call-take-control',

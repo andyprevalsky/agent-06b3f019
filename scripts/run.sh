@@ -47,6 +47,7 @@ normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-service-readiness.sh"
 . "$SCRIPT_DIR/lib/seed-cache.sh"
 . "$SCRIPT_DIR/lib/fast-mode-cache-schema.sh"
+. "$SCRIPT_DIR/lib/local-pg-image.sh"
 
 RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
@@ -745,6 +746,26 @@ if $DOCKER_OK && ! docker_can_create_container; then
     DOCKER_OK=false
 fi
 
+# A local benchmark must keep its own Postgres server. Under parallel deploy
+# load Docker Desktop can miss the short probe budget even while healthy; two
+# such fallbacks exhaust the shared system Postgres connection limit and make
+# independent benchmark agents fail. Cloud/Linux may explicitly choose system
+# Postgres, but on macOS retry Docker and fail clearly if it stays unavailable.
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ "$(uname -s)" = "Darwin" ] && \
+   [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && ! $DOCKER_OK; then
+    for attempt in 1 2 3 4 5 6; do
+        if docker_available_for_workspace_db "$DB_CONTAINER" true && docker_can_create_container; then
+            DOCKER_OK=true
+            break
+        fi
+        [ "$attempt" -eq 6 ] || sleep 1
+    done
+    if ! $DOCKER_OK; then
+        echo "❌ Isolated macOS benchmark requires Docker Postgres; Docker did not recover" >&2
+        exit 1
+    fi
+fi
+
 DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
 DB_OWNED_CONTAINER_ID=""
 USE_SYSTEM_PG=false
@@ -808,8 +829,10 @@ elif $DOCKER_OK && ! $USE_SYSTEM_PG; then
             -e POSTGRES_DB=victoria \
             -p "$LOCAL_DB_PORT:5432" \
             -v "$DB_VOLUME:/var/lib/postgresql/data" \
-            postgres:16-alpine >/dev/null
+            "$LOCAL_PG_IMAGE" >/dev/null
     }
+
+    recreate_if_stale_pg_image "$DB_CONTAINER" "$DB_VOLUME"
 
     if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
         ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | grep -o '[0-9]*$' || true)

@@ -238,7 +238,7 @@ done
 require_text "$WORKFLOW" 'name: Collect production evidence outside the investigator process' "production evidence must be collected before the model runs"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool collect-evidence' "trusted evidence collection is required"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool pin-baseline' "trusted baseline must be pinned before the model runs"
-require_text "$WORKFLOW" 'image: postgres:16' "Auto RCA deploy gates require an isolated local Postgres service"
+require_text "$WORKFLOW" 'image: pgvector/pgvector:pg16' "Auto RCA deploy gates require an isolated local Postgres service with pgvector"
 require_text "$WORKFLOW" 'name: Hydrate Auto RCA test environment' "Auto RCA must hydrate dependencies before running investigators or deploy gates"
 require_text "$WORKFLOW" 'name: Reclaim hosted-runner disk for RCA workspace' "Auto RCA must reserve disk for two investigators and full deploy gates"
 require_text "$WORKFLOW" '/opt/hostedtoolcache/CodeQL' "Auto RCA must remove unused hosted-runner toolchains before hydrating dependencies"

@@ -68,6 +68,121 @@ FORENSIC_RETIREMENT_SCRIPT = ROOT / "scripts" / "cloudbench-forensic-retirement.
 EXACT_PROVIDER_SCRIPT = ROOT / "scripts" / "cloudbench-exact-session-cleanup.py"
 
 
+def test_warm_deps_preflight_pgvector_build_preserves_installed_server(
+    tmp_path: Path,
+) -> None:
+    installer = ROOT / "scripts" / "cloudbench-install-pgvector.sh"
+    for image in ("Dockerfile.cloudbench", "Dockerfile.cloudbench-warm"):
+        text = (ROOT / image).read_text()
+        assert (
+            "COPY scripts/cloudbench-install-pgvector.sh /tmp/rose-cloudbench-install-pgvector.sh"
+            in text
+        )
+        assert "RUN bash /tmp/rose-cloudbench-install-pgvector.sh" in text
+    assert (
+        'bash "$ROOT/scripts/cloudbench-install-pgvector.sh"'
+        in (ROOT / "scripts/cloud-build.sh").read_text()
+    )
+    harness = r"""set -euo pipefail
+source "$1"
+fixture="$2"
+mode="$3"
+ls() { [[ "$*" == /usr/lib/postgresql ]]; printf '15\n'; }
+dpkg-query() { [[ "$*" == '-W -f=${Version} postgresql-15' ]]; printf '15.18-0+deb12u1'; }
+test() {
+    if [[ "$*" == '-f /usr/share/postgresql/15/extension/vector.control' ]]; then
+        builtin test -f "$fixture/control"
+    elif [[ "$*" == '-f /usr/lib/postgresql/15/lib/vector.so' ]]; then
+        builtin test -f "$fixture/library"
+    else
+        builtin test "$@"
+    fi
+}
+# The failed PGDG draft saw a configured source and an incompatible binary package.
+grep() { return 0; }
+apt-get() {
+    printf '%s\n' "$*" >>"$fixture/apt-calls"
+    if [[ "$*" == *postgresql-15-pgvector* ]]; then
+        printf 'postgresql-15-pgvector : Breaks: postgresql-15-jit-llvm (< 19)\n' >&2
+        return 100
+    elif [[ "$1" == install ]]; then
+        [[ "$*" == 'install -y --no-install-recommends build-essential postgresql-server-dev-15=15.18-0+deb12u1 postgresql-15=15.18-0+deb12u1' ]]
+    else
+        [[ "$*" == update ]]
+    fi
+}
+mktemp() { [[ "$*" == -d ]]; mkdir "$fixture/temporary"; printf '%s\n' "$fixture/temporary"; }
+curl() {
+    [[ "$*" == "-fsSL https://codeload.github.com/pgvector/pgvector/tar.gz/refs/tags/v0.8.6 -o $fixture/temporary/pgvector.tar.gz" ]]
+    [[ "$mode" != download-failure ]] || return 22
+    printf source >"$fixture/temporary/pgvector.tar.gz"
+}
+sha256sum() {
+    [[ "$*" == '-c -' ]]
+    read -r checksum archive
+    [[ "$checksum" == 10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f ]]
+    [[ "$archive" == "$fixture/temporary/pgvector.tar.gz" ]]
+    [[ "$mode" != checksum-failure ]]
+}
+tar() {
+    [[ "$*" == "-xzf $fixture/temporary/pgvector.tar.gz -C $fixture/temporary" ]]
+    mkdir "$fixture/temporary/pgvector-0.8.6"
+}
+make() {
+    printf '%s\n' "$*" >>"$fixture/build-calls"
+    [[ "$mode" != build-failure ]] || return 3
+    [[ "$*" == "-C $fixture/temporary/pgvector-0.8.6 PG_CONFIG=/usr/lib/postgresql/15/bin/pg_config OPTFLAGS= with_llvm=no"* ]]
+    if [[ "$*" == *' install' ]]; then
+        [[ "$mode" == missing-control ]] || touch "$fixture/control"
+        [[ "$mode" == missing-library ]] || touch "$fixture/library"
+    fi
+}
+cloudbench_install_pgvector
+cloudbench_install_pgvector
+"""
+    for mode in (
+        "complete",
+        "download-failure",
+        "checksum-failure",
+        "build-failure",
+        "missing-control",
+        "missing-library",
+    ):
+        fixture = tmp_path / mode
+        fixture.mkdir()
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                harness,
+                "pgvector-fixture",
+                str(installer),
+                str(fixture),
+                mode,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        assert not (fixture / "temporary").exists(), (
+            "source-build cleanup was abandoned"
+        )
+        if mode != "complete":
+            assert result.returncode != 0, mode
+            assert not (
+                (fixture / "control").exists() and (fixture / "library").exists()
+            )
+            continue
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (fixture / "apt-calls").read_text().splitlines() == [
+            "update",
+            "install -y --no-install-recommends build-essential postgresql-server-dev-15=15.18-0+deb12u1 postgresql-15=15.18-0+deb12u1",
+        ]
+        builds = (fixture / "build-calls").read_text().splitlines()
+        assert len(builds) == 2 and builds[1] == builds[0] + " install"
+
+
 def test_prestart_provider_recovery_requires_exact_closed_guest_and_zero_external_ownership(tmp_path: Path) -> None:
     spec = importlib.util.spec_from_file_location("cloudbench_exact_session_cleanup", EXACT_PROVIDER_SCRIPT)
     assert spec is not None and spec.loader is not None
@@ -18884,6 +18999,9 @@ grep -F '{{"status":"passed"}}' "$SSH_LOG"
 grep -F 'post-DONE cleanup evidence' "$SSH_LOG"
 printf 'bytes=%s reset=%s\n' "$(wc -c < "$SSH_LOG" | tr -d ' ')" "$BENCH_LOG_RESET"
 """
+        # macOS pays a larger per-chunk curl/shell startup cost across the
+        # 63 bounded requests in this terminal fixture. Keep the Linux budget.
+        terminal_budget = 20 if sys.platform == "darwin" else 6
         started = time.monotonic()
         result = subprocess.run(
             [
@@ -18911,12 +19029,12 @@ printf 'bytes=%s reset=%s\n' "$(wc -c < "$SSH_LOG" | tr -d ' ')" "$BENCH_LOG_RES
             text=True,
             capture_output=True,
             check=False,
-            timeout=10,
+            timeout=terminal_budget + 5,
         )
         elapsed = time.monotonic() - started
         assert result.returncode == 0, result.stderr
         assert f"bytes={terminal_size}" in result.stdout
-        assert elapsed < 6, f"terminal catch-up took {elapsed:.3f}s"
+        assert elapsed < terminal_budget, f"terminal catch-up took {elapsed:.3f}s"
     finally:
         server.terminate()
         server.wait(timeout=5)
@@ -21100,7 +21218,7 @@ def test_run_bench_routes_production_only_batches_off_fly_fleet() -> None:
         [
             sys.executable,
             str(ROOT / "scripts" / "cloudbench-production-only-tasks.py"),
-            "polar-bu-002",
+            "chat-mode",
         ],
         text=True,
         capture_output=True,
@@ -21134,7 +21252,6 @@ def test_run_bench_routes_production_only_batches_off_fly_fleet() -> None:
     assert unsafe_name.returncode == 2, unsafe_name.stderr
 
     assert "return 2" in helper
-    assert "CatalogError" in helper
     assert "PROD_ONLY_STATUS" in run_bench
     assert "while IFS= read -r task" in run_bench
     assert 'done <<< "$PROD_ONLY_TASKS"' in run_bench

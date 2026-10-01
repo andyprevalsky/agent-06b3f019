@@ -139,6 +139,7 @@ from .repo import (
     save_browser_credential_ref_message,
     upload_file_to_session,
 )
+from .resume_store import hydrate_resume_context, persist_resume_context
 from .service import (
     AuthRuntimeState,
     accumulate_model_usage,
@@ -157,7 +158,6 @@ from .service import (
     safe_time,
     select_auth_assistance_current_url,
 )
-from .resume_store import hydrate_resume_context, persist_resume_context
 from .service_actions import (
     SITE_WRITE_LOCK_APPROVAL_KEY,
     _get_base_domain,
@@ -184,6 +184,7 @@ from .service_crypto import (
     has_payment_card_secret_refs,
     is_usable_email_otp,
 )
+from .step_timing import StepPhaseTimer
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .types import ClaudeTokenState
 from .verifier_reject_circuit import (
@@ -817,6 +818,17 @@ async def _capture_preserved_evidence_after_evaluate(
     )
     _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
     return state
+
+
+def _replace_resume_image_blocks(value: Any) -> Any:
+    """Replace image payloads with valid text blocks in simulated resume history."""
+    if isinstance(value, dict):
+        if value.get("type") == "image_url" or "image_url" in value:
+            return {"type": "text", "text": "[image omitted from Temporal resume]"}
+        return {key: _replace_resume_image_blocks(nested) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_replace_resume_image_blocks(item) for item in value]
+    return value
 
 
 
@@ -2300,7 +2312,7 @@ def _browser_tool_arguments(unified_action: Dict[str, Any]) -> Dict[str, Any]:
     if unified_action.get("index") is not None and "index" not in args:
         args["index"] = unified_action["index"]
     coords = unified_action.get("coordinates")
-    if action_name == "click_coordinates" and isinstance(coords, dict):
+    if action_name in {"click", "click_coordinates"} and "index" not in args and isinstance(coords, dict):
         args.setdefault("x", coords.get("x"))
         args.setdefault("y", coords.get("y"))
     return args
@@ -2338,6 +2350,11 @@ def _append_browser_turn_messages(
     action_name = unified_action.get("action") or "unknown"
     thinking = unified_action.get("thinking") or ""
     args = _browser_tool_arguments(unified_action)
+    # The provider normalizes click_coordinates to an internal click + coordinates.
+    # Reconstruct the advertised tool name here so the next LLM turn does not see
+    # a successful but invalid-looking click({}) and try to correct a valid action.
+    if action_name == "click" and "index" not in args and {"x", "y"} <= args.keys():
+        action_name = "click_coordinates"
     turn_messages.append(
         {
             "role": "assistant",
@@ -2380,6 +2397,51 @@ def _append_browser_turn_messages(
                 ],
             }
         )
+
+
+def _resolve_payment_card_tool_result_for_resume(
+    turn_messages: List[Dict[str, Any]],
+    payment_card_refs: Dict[str, Any],
+    payment_card_last4: Any,
+) -> bool:
+    """Finish the pending browser tool result with safe refs after approval."""
+    if not has_payment_card_secret_refs(payment_card_refs):
+        return False
+
+    for index in range(len(turn_messages) - 1, 0, -1):
+        message = turn_messages[index]
+        if message.get("role") != "tool" or message.get("name") != "request_payment_card":
+            continue
+        prior = turn_messages[index - 1]
+        if prior.get("role") != "assistant" or not any(
+            call.get("id") == message.get("tool_call_id")
+            and (call.get("function") or {}).get("name") == "request_payment_card"
+            for call in prior.get("tool_calls") or []
+        ):
+            continue
+        try:
+            previous_result = json.loads(message.get("content") or "")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(previous_result, dict) or previous_result.get("status") != "awaiting_payment_card_approval":
+            continue
+
+        finished_result: Dict[str, Any] = {
+            "success": True,
+            "status": "payment_card_ready",
+            "card_secret_refs": {
+                "card_number": "card_number",
+                "card_name": "card_name",
+                "card_expiry": "card_expiry",
+                "card_cvv": "card_cvv",
+            },
+        }
+        safe_last4 = _normalize_payment_card_last4(payment_card_last4)
+        if safe_last4:
+            finished_result["card_last4"] = safe_last4
+        turn_messages[index] = {**message, "content": json_dumps_compact(finished_result)}
+        return True
+    return False
 
 
 async def _get_browser_state_soft(
@@ -4843,7 +4905,7 @@ def _simulated_browser_resume_payload(
 ) -> Dict[str, Any]:
     compact_state = _compact_simulated_resume_value(browser_state)
     compact_actions = [_compact_simulated_resume_value(entry) for entry in action_entries[-30:]]
-    compact_turns = [_compact_simulated_resume_value(message) for message in turn_messages[-24:]]
+    compact_turns = [_compact_browser_turn_message_for_resume(message) for message in turn_messages[-24:]]
     return {
         "simulated_browser_state": compact_state,
         "simulated_action_entries": compact_actions,
@@ -4893,6 +4955,37 @@ def _compact_simulated_resume_value(value: Any) -> Any:
         if len(value) > _SIMULATED_RESUME_MAX_TEXT_CHARS:
             return value[:_SIMULATED_RESUME_MAX_TEXT_CHARS] + "…[truncated for Temporal resume]"
     return value
+
+
+def _compact_browser_turn_message_for_resume(message: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep payment tool JSON parseable when a large cart crosses a resume boundary."""
+    compact = _compact_simulated_resume_value(_replace_resume_image_blocks(message))
+    if message.get("role") == "tool" and message.get("name") == "request_payment_card":
+        try:
+            result = json.loads(message.get("content") or "")
+        except (TypeError, ValueError):
+            result = None
+        if isinstance(result, dict) and result.get("status") == "awaiting_payment_card_approval":
+            compact["content"] = json_dumps_compact(
+                {"success": result.get("success", True), "status": "awaiting_payment_card_approval"}
+            )
+    if message.get("role") == "assistant":
+        for original_call, compact_call in zip(message.get("tool_calls") or [], compact.get("tool_calls") or []):
+            original_function = original_call.get("function") or {}
+            if original_function.get("name") != "request_payment_card":
+                continue
+            arguments = original_function.get("arguments")
+            if not isinstance(arguments, str) or len(arguments) <= _SIMULATED_RESUME_MAX_TEXT_CHARS:
+                continue
+            try:
+                request = json.loads(arguments)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(request, dict):
+                compact_call["function"]["arguments"] = json_dumps_compact(
+                    _summarize_payment_request_for_log(request)
+                )
+    return compact
 
 
 def _simulated_browser_verifier_context(
@@ -5050,6 +5143,12 @@ async def _spawn_browser_agent_activity_v3_simulated(
     browser_state = dict(resume.get("simulated_browser_state") or {})
     action_entries = list(resume.get("simulated_action_entries") or [])
     turn_messages = list(resume.get("simulated_turn_messages") or [])
+    if resume.get("approval_type") == "payment":
+        _resolve_payment_card_tool_result_for_resume(
+            turn_messages,
+            resume.get("payment_card_refs") or {},
+            resume.get("payment_card_last4"),
+        )
     frames: List[Dict[str, Any]] = []
     visited_urls = list(resume.get("simulated_visited_urls") or [])
     reasoning_messages = list(resume.get("simulated_reasoning_messages") or [])
@@ -5353,6 +5452,12 @@ async def _spawn_browser_agent_activity_v3_simulated(
                 result = {"success": True, "status": "awaiting_payment_card_approval"}
                 action_entries.append(
                     {"step": iteration, "action": action_name, "thinking": thinking, "params": params, "result": result}
+                )
+                _append_browser_turn_messages(
+                    turn_messages,
+                    unified_action=action,
+                    result=result,
+                    tool_call_id=action_call_id,
                 )
                 await save_step(
                     title=title_done,
@@ -5928,6 +6033,12 @@ async def _spawn_browser_agent_activity_v3_real(
         for message in ((write_lock_resume_state or {}).get("browser_turn_messages") or [])
         if isinstance(message, dict)
     ]
+    if (write_lock_resume_state or {}).get("approval_type") == "payment":
+        _resolve_payment_card_tool_result_for_resume(
+            browser_turn_messages,
+            (write_lock_resume_state or {}).get("payment_card_refs") or {},
+            payment_card_last4,
+        )
     otp_user_messages: List[Dict[str, str]] = []
     seen_otp_codes: set[str] = set()
     available_file_paths: Dict[str, str] = {}
@@ -7115,10 +7226,13 @@ async def _spawn_browser_agent_activity_v3_real(
         observe_page_state: Dict[str, Any] = {}
         consecutive_budget_free = 0
         consecutive_keystroke_free = 0
+        step_timer = StepPhaseTimer(agent_id=agent_id, task_id=task_id)
         while iteration < MAX_ITERATIONS:
             iteration += 1
+            step_timer.start_step(iteration)
             browser_activity_checkpoint(f"Step {iteration}")
             await _wait_for_browser_user_control(config, task_id)
+            step_timer.mark("user_control_wait")
 
             # TAB/INPUT/LIVE-VIEW STATE MACHINE:
             # browser-use focus changes -> resolve matching Playwright target
@@ -7134,6 +7248,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 browser_recorder=browser_recorder,
                 cursor_observer=observe_cursor,
             )
+            step_timer.mark("tab_rebind")
 
             # Handle pending write lock action
             if pending_write_lock_action:
@@ -7231,6 +7346,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     otp_history_count = len(otp_user_messages)
             except Exception as e:
                 logger.warning("Failed to fetch OTPs", error=str(e))
+            step_timer.mark("otp_fetch")
 
             # One guarded state fetch supplies URL + observe text (avoid double DOM).
             browser_activity_checkpoint(f"Step {iteration} - resolving page state")
@@ -7248,6 +7364,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         dom_service.ensure_browser_overlays_suppressed(),
                         timeout=BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
                     )
+                step_timer.mark("overlay_suppress")
                 observe_page_state = await asyncio.wait_for(
                     dom_service.get_browser_state(include_screenshot=False),
                     timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
@@ -7269,7 +7386,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 if recovered:
                     continue
                 raise
+            step_timer.mark("observe_state")
             await record_passkey_usage_once()
+            step_timer.mark("passkey_usage")
             auth_runtime_state.observe_page_text(observe_page_state.get("title") or "")
 
             # Clicks, form submissions, and server redirects can cross an auth
@@ -7545,6 +7664,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                     task_id=task_id,
                                     iteration=iteration,
                                 )
+                step_timer.mark("realm_and_payment_prep")
                 if browser_recorder:
                     with contextlib.suppress(Exception):
                         # Reuse observe_page_state from earlier in this iteration —
@@ -7555,6 +7675,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             browser_state=observe_page_state,
                             action_entries=action_entries,
                         )
+                step_timer.mark("record_observation")
 
                 # Fast Mode: replay the recorded decision when the browser request
                 # fingerprint matches. The live browser session still executes the
@@ -7605,6 +7726,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     iteration=iteration,
                 )
                 await browser_stream.start()
+                step_timer.mark("thinking_stream_start")
                 rose_client.set_thinking_stream(browser_stream)
                 decision_succeeded = False
                 try:
@@ -7641,11 +7763,23 @@ async def _spawn_browser_agent_activity_v3_real(
                         timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                     )
                     decision_succeeded = True
+                    step_timer.mark("llm_decision")
                 finally:
                     rose_client.set_thinking_stream(None)
                     await browser_stream.finish()
                     if not decision_succeeded:
                         await browser_stream.finish_tools(status="ERROR")
+                step_timer.mark("thinking_stream_finish")
+                llm_timing = llm_result.get("timing") if isinstance(llm_result.get("timing"), dict) else {}
+                step_timer.annotate(
+                    llm_round_trip_ms=(
+                        int(llm_timing["round_trip_s"] * 1000)
+                        if isinstance(llm_timing.get("round_trip_s"), (int, float))
+                        else None
+                    ),
+                    llm_mode=llm_result.get("mode"),
+                    llm_from_fast_cache=bool((llm_result.get("usage") or {}).get("from_fast_cache")),
+                )
                 llm_result = {**llm_result, "_thinking_stream_id": browser_stream.stream_id}
                 # Track waterfall fall-through so subsequent iterations skip claudeAuth.
                 if llm_result.get("mode") != "claude" and browser_use_mode == "claude":
@@ -9111,6 +9245,8 @@ Based on this feedback, I need to continue working on the task and address the i
                 with contextlib.suppress(Exception):
                     browser_network_recorder = network_recorder_task.result()
 
+            step_timer.mark("pre_action_bookkeeping")
+            step_timer.annotate(action=action_name)
             browser_activity_checkpoint(f"Step {iteration} - executing {action_name}")
             try:
                 result = await asyncio.wait_for(
@@ -9265,6 +9401,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     ),
                     "supervisor_recovered": True,
                 }
+            step_timer.mark("execute_action")
             if isinstance(result, dict) and result.get("current_url"):
                 current_url = str(result.get("current_url") or "")
                 if current_url and (not visited_urls or current_url != visited_urls[-1]):
@@ -9710,8 +9847,11 @@ Based on this feedback, I need to continue working on the task and address the i
                     consecutive_keystroke_free=consecutive_keystroke_free,
                 )
 
+            step_timer.mark("post_action_bookkeeping")
             await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)
+            step_timer.mark("loop_delay")
 
+        step_timer.finish()
         # Max iterations reached
         logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")
 

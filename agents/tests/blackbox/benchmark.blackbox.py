@@ -8,6 +8,7 @@ import json
 import pathlib
 import importlib.util
 import os
+import signal
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -463,16 +464,77 @@ def test_autoscaler_runtime_handoff_is_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def _run_owned_benchmark_commands(commands, cwd, timeout=60):
+    # Do not poll/wait leaders until cleanup: an unreaped child pins its PID
+    # and group even after exit, so group signals cannot target a reused PGID.
+    deadline = time.monotonic() + timeout
+    children = []
+
+    def snapshot():
+        rows = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,pgid=,stat="],
+            capture_output=True, text=True, check=True, timeout=2,
+        ).stdout
+        table = {}
+        for row in rows.splitlines():
+            pid, parent, group, state = row.split()
+            table[int(pid)] = (int(parent), int(group), state)
+        live = {}
+        for child, _ in children:
+            assert table.get(child.pid, (None,))[0] == os.getpid(), "owned benchmark leader was reaped before cleanup"
+            assert table[child.pid][1] == child.pid, "owned benchmark process group changed"
+            live[child.pid] = [pid for pid, (_, group, state) in table.items() if group == child.pid and not state.startswith("Z")]
+        return table, live
+
+    with contextlib.ExitStack() as stack:
+        try:
+            for command in commands:
+                output = stack.enter_context(tempfile.TemporaryFile(mode="w+"))
+                child = subprocess.Popen(
+                    command,
+                    cwd=cwd, stdout=output, stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                children.append((child, output))
+            while True:
+                table, _ = snapshot()
+                if all(table[child.pid][2].startswith("Z") for child, _ in children):
+                    break
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired("owned benchmark commands", timeout)
+                time.sleep(0.05)
+        finally:
+            # Native snapshots do not reap; keep each exact leader identity pinned
+            # through bounded TERM/KILL group cleanup, including after leader exit.
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                _, live = snapshot()
+                for child, _ in children:
+                    if live[child.pid]:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(child.pid, sig)
+                cleanup_deadline = time.monotonic() + 3
+                while any(snapshot()[1].values()) and time.monotonic() < cleanup_deadline:
+                    time.sleep(0.05)
+                if not any(snapshot()[1].values()):
+                    break
+            remaining = snapshot()[1]
+            assert not any(remaining.values()), "owned benchmark group members survived cleanup"
+            for child, _ in children:
+                child.wait(timeout=3)
+        failures = []
+        for child, output in children:
+            if child.returncode:
+                output.seek(0)
+                failures.append(output.read())
+        assert not failures, "\n".join(failures)
+
+
 def test_boot_terminal_runtime_evidence_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     suite = str(repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py")
-    result = subprocess.run(
+    groups = [
+        [suite + "::test_boot_terminal_runtime_evidence_collects_complete_logs"],
         [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-q",
-            suite + "::test_boot_terminal_runtime_evidence_collects_complete_logs",
             suite + "::test_boot_terminal_result_preserves_sealed_capture_when_stream_is_truncated",
             suite + "::test_watchdog_collects_cancelled_artifact_after_bounded_shutdown",
             suite + "::test_controller_term_collects_original_runtime_evidence_before_proxy_retirement",
@@ -481,13 +543,9 @@ def test_boot_terminal_runtime_evidence_is_in_permanent_gate():
             str(repo_root / "agents/benchmarks/cloudbench_runtime_retention_test.py"),
             str(repo_root / "agents/benchmarks/cloudbench_worker_evidence_test.py"),
         ],
-        cwd=repo_root,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=60,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
+    ]
+    commands = [[sys.executable, "-m", "pytest", "-q", *targets] for targets in groups]
+    _run_owned_benchmark_commands(commands, cwd=repo_root)
 
 
 def test_cloudbench_pool_vm_shapes_are_in_permanent_gate():
@@ -737,8 +795,9 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
     # Count tracks the -k filter above. I-03/I-04 token+fetch-ref cases,
     # controller-token/private-repo auth, bounded dependency-refresh ownership,
-    # isolated-backend queue alignment, and exact workspace replay cover 31 cases.
-    assert "31 passed" in result.stdout
+    # isolated-backend queue alignment, exact workspace replay, and pgvector
+    # installation cover 32 cases.
+    assert "32 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
@@ -2946,6 +3005,7 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
 
     assert [task.name for task in get_tasks_by_tag("agentcard-lifecycle-sandbox")] == [
         "agent-payment-test-shop",
+        "agent-payment-new-user-journey",
         "agent-payment-setup-resume",
         "agent-payment-idempotent-abandonment",
         "agent-payment-abandonment",
@@ -3234,7 +3294,7 @@ def test_agentcard_setup_attention_is_not_auto_approved():
 
     from benchmarks.run_benchmark import _should_auto_approve_attention
 
-    task = SimpleNamespace(agentcard_setup_action="complete")
+    task = SimpleNamespace(agentcard_setup_action="complete", complete_subscription_checkout=False)
     assert _should_auto_approve_attention(
         task,
         {"metadata": {"attentionKind": "payment_approval"}},
@@ -13086,6 +13146,22 @@ def test_canonical_base_cache_token_is_revisioned_not_daily():
     assert "20260803" not in token
 
 
+def test_isolated_postgres_default_keeps_macos_stacks_separate():
+    from benchmarks.local import apply_isolated_postgres_default
+
+    mac_env = {}
+    apply_isolated_postgres_default(mac_env, "darwin")
+    assert "ROSE_USE_SYSTEM_PG" not in mac_env
+
+    linux_env = {}
+    apply_isolated_postgres_default(linux_env, "linux")
+    assert linux_env["ROSE_USE_SYSTEM_PG"] == "true"
+
+    explicit_env = {"ROSE_USE_SYSTEM_PG": "false"}
+    apply_isolated_postgres_default(explicit_env, "linux")
+    assert explicit_env["ROSE_USE_SYSTEM_PG"] == "false"
+
+
 # This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
 @patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
 def test_local_isolated_stack_opts_into_fast_seed_dump():
@@ -18809,7 +18885,7 @@ def test_predeploy_selector_rejects_production_only_tasks():
 
 
 async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, judge_cases):
-    """Keep native checks serial while existing live judge I/O progresses.
+    """Bound isolated native checks while existing live judge I/O progresses.
 
     These checks only spawn isolated subprocesses. Defer their BlackboxResult
     recording until judges finish so capture resets remain on the main loop.
@@ -18817,7 +18893,8 @@ async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, ju
     import inspect
 
     stop = threading.Event()
-    outcomes = []
+    outcomes = [None] * len(subprocess_cases)
+    queued = iter(enumerate(subprocess_cases))
 
     def run_case(case):
         try:
@@ -18829,11 +18906,14 @@ async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, ju
             return error
         return None
 
-    async def run_subprocess_cases():
-        for name, case in subprocess_cases:
+    async def run_subprocess_lane():
+        for index, (name, case) in queued:
             if stop.is_set():
                 break
-            outcomes.append((name, await asyncio.to_thread(run_case, case)))
+            outcomes[index] = (name, await asyncio.to_thread(run_case, case))
+
+    async def run_subprocess_cases():
+        await asyncio.gather(run_subprocess_lane(), run_subprocess_lane())
 
     pending = asyncio.create_task(run_subprocess_cases())
     interrupted = None
@@ -18851,7 +18931,10 @@ async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, ju
                 interrupted = interrupted or error
                 stop.set()
         pending.result()
-        for name, error in outcomes:
+        for outcome in outcomes:
+            if outcome is None:
+                continue
+            name, error = outcome
             def report(error=error):
                 if error is not None:
                     raise error
@@ -18866,17 +18949,30 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
 
     started, release = threading.Event(), threading.Event()
     seen, resets = [], []
+    admission_lock = threading.Lock()
+    active = peak = 0
+
+    def native_enter():
+        nonlocal active, peak
+        with admission_lock:
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                started.set()
+        assert release.wait(2), "judge did not observe two bounded native lanes"
+        with admission_lock:
+            active -= 1
     main_thread = threading.get_ident()
     judges_finished = False
 
     def native_failure():
         seen.append(("native_failure", threading.get_ident()))
-        started.set()
-        assert release.wait(2), "judge did not progress while native subprocess waited"
+        native_enter()
         raise RuntimeError("owned native failure")
 
     def native_success():
         seen.append(("native_success", threading.get_ident()))
+        native_enter()
 
     async def unexecuted_native():
         raise AssertionError("must be rejected before becoming a false pass")
@@ -18914,7 +19010,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         ("test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics", "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics"),
         ("test_blue_bottle_tree_proof_passes_with_subagent_evidence", "blue_bottle_tree_proof_passes_with_subagent_evidence"),
     ]
-    invoked_controllers, invoked_judges = [], []
+    invoked_controllers, invoked_judges, reported_controllers = [], [], []
     replacements = {}
     for index, (name, _) in enumerate(controller_cases):
         def controller(index=index, name=name):
@@ -18933,6 +19029,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
     judge_names = [name for _, name in judge_cases]
     def record_registered(self, name, case):
         if name in controller_names:
+            reported_controllers.append(name)
             index = controller_names.index(name)
             if index < 3:
                 original_record(result, ("native_failure", "native_success", "unexecuted_native")[index], case)
@@ -18954,9 +19051,11 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         patch.object(_test_utils, "clear_captures", side_effect=lambda: resets.append((threading.get_ident(), judges_finished))),
     ):
         await run_all_tests()
-    assert invoked_controllers == [name for name, _ in controller_cases]
+    assert sorted(invoked_controllers) == sorted(name for name, _ in controller_cases)
+    assert reported_controllers == controller_names, "native results must preserve registration order"
     assert invoked_judges == [name for name, _ in judge_cases]
-    assert [name for name, _ in seen] == ["native_failure", "native_success"]
+    assert sorted(name for name, _ in seen) == ["native_failure", "native_success"]
+    assert peak == 2 and active == 0, "native admission must progress with exactly two bounded lanes"
     assert "native_failure: owned native failure" in result.errors, "native wait finished before the judge progressed"
     assert all(thread != main_thread for _, thread in seen)
     assert result.summary() == {"passed": 3, "failed": 3, "total": 6}
@@ -18967,9 +19066,9 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
     started.clear()
     release.clear()
     seen.clear()
+    active = peak = 0
     def owned_native():
-        started.set()
-        assert release.wait(2)
+        native_enter()
         seen.append("drained")
     def forbidden_next_native():
         seen.append("started_after_cancellation")
@@ -18977,7 +19076,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         await asyncio.Event().wait()
     with contextlib.redirect_stdout(io.StringIO()):
         owner = asyncio.create_task(_run_benchmark_subprocess_and_judge_cases(
-            BlackboxResult(), [("owned", owned_native), ("forbidden", forbidden_next_native)], [("waiting", waiting_judge)],
+            BlackboxResult(), [("owned_one", owned_native), ("owned_two", owned_native), ("forbidden", forbidden_next_native)], [("waiting", waiting_judge)],
         ))
         try:
             assert await asyncio.to_thread(started.wait, 2)
@@ -18994,7 +19093,85 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             pass
         else:
             raise AssertionError("owner cancellation was swallowed")
-    assert seen == ["drained"], seen
+    assert seen == ["drained", "drained"], seen
+    assert peak == 2 and active == 0
+
+    # A successful leader exit must not leave its TERM-ignoring descendant,
+    # and cleanup must not turn another child's real failure into success.
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[3]
+    identity_path = repo_root / "scripts/process-identity.py"
+    spec = importlib.util.spec_from_file_location("benchmark_control_identity", identity_path)
+    assert spec is not None and spec.loader is not None
+    identity = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(identity)
+    with tempfile.TemporaryDirectory() as scratch:
+        descendant = Path(scratch) / "descendant.json"
+        descendant_code = (
+            "import json,os,pathlib,runpy,signal,time;"
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+            f"identity=runpy.run_path({str(identity_path)!r});"
+            f"pathlib.Path({str(descendant)!r}).write_text(json.dumps("
+            "{'pid':os.getpid(),'birth':identity['current_identity'](os.getpid())}));"
+            "time.sleep(30)"
+        )
+        leader_code = (
+            "import pathlib,subprocess,sys,time\n"
+            f"subprocess.Popen([sys.executable,'-c',{descendant_code!r}])\n"
+            f"ready=pathlib.Path({str(descendant)!r})\n"
+            "deadline=time.monotonic()+2\n"
+            "while not ready.exists() and time.monotonic()<deadline:time.sleep(.01)\n"
+            "assert ready.exists()\n"
+        )
+
+        def descendant_live():
+            if not descendant.exists():
+                return False
+            owner = json.loads(descendant.read_text())
+            observed = subprocess.run(
+                ["ps", "-p", str(owner["pid"]), "-o", "stat="],
+                capture_output=True, text=True, timeout=2,
+            )
+            assert observed.returncode in (0, 1), "native control process observation failed"
+            if observed.returncode == 1 and not observed.stdout.strip():
+                return False
+            assert observed.stdout.strip(), "native control process state is missing"
+            if observed.stdout.strip().startswith("Z"):
+                return False
+            try:
+                return identity.current_identity(owner["pid"]) == owner["birth"]
+            except (OSError, ValueError, IndexError):
+                gone = subprocess.run(
+                    ["ps", "-p", str(owner["pid"]), "-o", "stat="],
+                    capture_output=True, text=True, timeout=2,
+                )
+                assert (gone.returncode == 1 and not gone.stdout.strip()) or (
+                    gone.returncode == 0 and gone.stdout.strip().startswith("Z")
+                ), "native control descendant identity is unobservable"
+                return False
+
+        try:
+            commands = [
+                [sys.executable, "-c", leader_code],
+                [sys.executable, "-c", "print('owned child failure',flush=True);raise SystemExit(7)"],
+            ]
+            try:
+                await asyncio.to_thread(_run_owned_benchmark_commands, commands, repo_root)
+            except AssertionError as error:
+                assert "owned child failure" in str(error), "child exit 7 was not preserved"
+            else:
+                raise AssertionError("failed native child was accepted")
+            assert descendant.exists(), "real inherited descendant never started"
+            assert not descendant_live(), "exited leader left a live owned descendant"
+        finally:
+            if descendant_live():
+                owner = json.loads(descendant.read_text())
+                identity.main(["process-identity.py", "--expect", owner["birth"], "--signal", "KILL", str(owner["pid"])])
+            cleanup_deadline = time.monotonic() + 3
+            while descendant_live() and time.monotonic() < cleanup_deadline:
+                await asyncio.sleep(0.02)
+            assert not descendant_live(), "native control descendant survived exact cleanup"
 
 
 async def run_all_tests():
@@ -19426,6 +19603,7 @@ async def run_all_tests():
         "canonical_base_cache_token_is_revisioned",
         test_canonical_base_cache_token_is_revisioned_not_daily,
     )
+    r.record("isolated_postgres_default", test_isolated_postgres_default_keeps_macos_stacks_separate)
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
     r.record(
         "dotenv_fast_mode_cache_falls_back_to_database_url",

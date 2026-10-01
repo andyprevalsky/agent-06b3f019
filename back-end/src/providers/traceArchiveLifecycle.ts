@@ -1,4 +1,5 @@
 import { createLogger } from './logger';
+import { scheduleFinalizeEmbedding } from './plannerMemoryEmbedding';
 import { type PlannerMemoryRunInput, upsertPlannerMemoryFromRun } from './plannerMemoryStore';
 import { collectFixture, collectFixtureSnapshot } from './traceArchiveFixture';
 import {
@@ -199,10 +200,13 @@ const finalizeInFlight = new Map<string, Promise<FinalizeAgentResult>>();
 /** Keep the finalized archive authoritative when its derived search index is unavailable. */
 export async function bestEffortIndexPlannerMemory(
   input: PlannerMemoryRunInput,
-  write: (value: PlannerMemoryRunInput) => Promise<void> = upsertPlannerMemoryFromRun
+  write: (value: PlannerMemoryRunInput) => Promise<void> = upsertPlannerMemoryFromRun,
+  embed: (rootAgentId: string) => void = scheduleFinalizeEmbedding
 ): Promise<boolean> {
   try {
     await write(input);
+    // Detached: the retrieval embedding round trip never delays finalize.
+    embed(input.rootAgentId);
     return true;
   } catch (error) {
     log.warn('Planner memory index update failed after trace archive finalization', {

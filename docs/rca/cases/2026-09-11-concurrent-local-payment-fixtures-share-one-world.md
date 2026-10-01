@@ -182,6 +182,43 @@ cloud slices of ten outcomes with no infrastructure failures, and required a
 temporary five-minute cloud proof backstop while retaining the normal 120-minute
 backstop. No task or evaluator weakening was requested.
 
+### October 1 external-resource admission fixture maintenance
+
+Main integration introduced serialization for tasks tagged
+`agentcard-lifecycle-sandbox`, including the ordinary pair used by this offline
+fixture. The real scheduler correctly waited for the first payment task to finish,
+while that task's fixture writer waited for its sibling. The private HTTP servers
+share no external cardholder, so retaining that catalog resource claim misrepresented
+the fixture. This is a recurrence of fixture admission drifting from the modeled
+resource boundary, not evidence that the production payment lock is wrong.
+
+The merged coverage run passed 103 of 104 agent domains; the benchmark domain
+exhausted its unchanged 300-second budget after reporting this fixture failure.
+The single and exclusive controls passed in the focused reproduction; the ordinary
+pair failed and cancellation never reached its observation barrier. Searches for
+`Local fixture world isolation failed` and `parallel fixture worlds benchmark
+controller scheduling` led back to this case and the September 30 judge-scheduling
+case. The original private results and exact process-cleanup receipts are retained.
+
+Fixture-local dataclass copies now remove only the shared external sandbox tag at
+both the coordinator and benchmark-child task lookup. Every other task field and
+the production catalog stay unchanged. All eight original lifecycle assertions
+are AST-identical, including overlapping task lifetimes, independent backend/
+database/queue identities, cohort configuration, and cleanup before stack stop.
+A small control also runs the actual scheduler with the original production tags
+and requires peak concurrency one, preventing a removed payment semaphore from
+silently satisfying the offline fixture.
+
+The identical focused command, from `agents/` with its venv activated,
+`python -c "from benchmarks.local_worlds_test import test_local_parallel_fixture_worlds; test_local_parallel_fixture_worlds()"`,
+failed before the fixture correction in 33.550 seconds and passed afterward in
+21.380 seconds. This corrects the fixture's resource metadata; it is not an
+unchanged-artifact proof of a production behavior change. The unchanged lifecycle
+assertions remain the acceptance predicate. No timeout, task, evaluator, provider
+behavior, or cloud acceptance requirement changed. These results grant zero
+cloud-slice credit. Only the failed benchmark domain and unfinished coverage tails
+need rerunning; the 103 successful domain receipts remain intact.
+
 ## Reusable lesson
 
 Give concurrently mutated benchmark fixtures separate owned worlds and bind every result to its actual run identity.

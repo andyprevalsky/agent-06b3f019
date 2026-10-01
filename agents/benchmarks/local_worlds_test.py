@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -23,6 +24,15 @@ IDENTITY = runpy.run_path(str(REPO / "scripts/process-identity.py"))
 PAIR = ["agent-payment-abandonment", "agent-payment-idempotent-abandonment"]
 EXCLUSIVE_PAIR = ["agent-payment-abandonment", "agent-payment-setup-resume"]
 USER = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+
+
+def independent_fixture_task(name):
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name(name)
+    # These worlds use separate private HTTP servers, not the shared external
+    # AgentCard sandbox. Preserve every task field except that resource claim.
+    return replace(task, tags=[tag for tag in task.tags if tag != "agentcard-lifecycle-sandbox"])
 
 
 def atomic(path, value):
@@ -79,7 +89,6 @@ def spawn(folder, args, **kwargs):
 def serve(folder, world):
     ident = identify(folder, "stack-server")
     state = {}
-    names = json.loads(os.environ["WORLD_TEST_TASKS"])
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -122,9 +131,10 @@ def serve(folder, world):
 
 def local_driver(folder, argv):
     sys.path.insert(0, str(REPO / "agents"))
-    from benchmarks import local
+    from benchmarks import local, local_worlds
 
     identify(folder, "local-controller")
+    local_worlds.get_task_by_name = independent_fixture_task
     local.BENCHMARK_CONTEXT_ROOT = folder / "worlds"
     # No Docker, provider, database, tunnel, or web builds. The real stack allocator's
     # run/context identity remains; its port availability boundary is modeled.
@@ -204,6 +214,20 @@ async def benchmark(folder, argv):
     from benchmarks import run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
 
+    # Keep the real shared-sandbox contract covered: independent fixture
+    # admission must not conceal a removed production payment semaphore.
+    active = peak = 0
+
+    async def observe_admission(_task):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+
+    await asyncio.gather(*bench._parallel_task_runners([get_task_by_name(n) for n in PAIR], 2, observe_admission))
+    assert peak == 1, "shared external sandbox tasks must remain serialized"
+
     identify(folder, "benchmark")
     task_names = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--task"]
     port = int(argv[argv.index("--port") + 1])
@@ -281,7 +305,7 @@ async def benchmark(folder, argv):
         }.items():
             stack.enter_context(patch.object(bench, name, value))
         await asyncio.wait_for(
-            asyncio.gather(*bench._parallel_task_runners([get_task_by_name(n) for n in task_names], width, run)), 10
+            asyncio.gather(*bench._parallel_task_runners([independent_fixture_task(n) for n in task_names], width, run)), 10
         )
     event(folder, "root_cleanup_complete", world=str(context))
     receipt = Path(os.environ["BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE"])

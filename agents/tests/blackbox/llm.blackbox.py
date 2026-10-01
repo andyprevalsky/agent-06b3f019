@@ -3334,6 +3334,94 @@ async def test_call_llm_structured_streaming_retries_malformed_output():
     assert response.response == "recovered"
 
 
+async def test_structured_escalation_keeps_anthropic_exclusion():
+    """A truncated refusal reroute must not return to the excluded provider family."""
+    from helpers.llm import call_llm_structured_streaming
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    calls = []
+
+    async def fake_cached_complete(*_args, **kwargs):
+        calls.append(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "qwen/qwen3.8-27b", "pool_name": "rose-1-flash"})
+        yield StreamChunk(kind="content", data={"text": '{"response":"ok","tool_calls":[]}'})
+        yield StreamChunk(
+            kind="usage",
+            data={"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": "length" if len(calls) == 1 else "stop"},
+        )
+        yield StreamChunk(kind="done", data={})
+
+    async def on_chunk(_text: str, _tokens: int):
+        pass
+
+    with patch("providers.fast_cache.rose_cache.cached_complete", new=fake_cached_complete):
+        response, _usage, _detected = await call_llm_structured_streaming(
+            messages=[{"role": "user", "content": "finish this"}],
+            model="rose-labs/rose-1-flash",
+            temperature=0.7,
+            max_tokens=512,
+            response_model=create_agent_action_model([]),
+            on_chunk=on_chunk,
+            call_site="test_escalation_exclusion",
+            _exclude_anthropic_family=True,
+        )
+
+    assert response.response == "ok"
+    assert [call["max_tokens"] for call in calls] == [512, 32768]
+    assert [call["_exclude_anthropic_family"] for call in calls] == [True, True]
+
+
+async def test_structured_deferred_cache_key_matches_excluded_read():
+    """A rerouted response must be stored under the same excluded-policy key it read."""
+    from helpers.llm import call_llm_structured_streaming
+    from providers.fast_cache.context import FastCacheContext, reset_context, set_context
+    from providers.fast_cache.rose_cache import request_key_material
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    ctx = FastCacheContext(enabled=True, goal="excluded-policy-key-parity")
+    captured = []
+
+    async def fake_cached_complete(*_args, **kwargs):
+        captured.append(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "qwen/qwen3.8-27b", "pool_name": "rose-1-flash"})
+        yield StreamChunk(kind="content", data={"text": '{"response":"ok","tool_calls":[]}'})
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": "stop"})
+        yield StreamChunk(kind="done", data={})
+
+    async def on_chunk(_text: str, _tokens: int):
+        pass
+
+    token = set_context(ctx)
+    cache_set = AsyncMock(return_value=True)
+    try:
+        with (
+            patch("providers.fast_cache.rose_cache.cached_complete", new=fake_cached_complete),
+            patch("helpers.llm.fast_cache_client.cache_set", new=cache_set),
+        ):
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "same request"}],
+                model="rose-labs/rose-1-flash",
+                temperature=0.7,
+                max_tokens=512,
+                response_model=create_agent_action_model([]),
+                on_chunk=on_chunk,
+                call_site="test_excluded_cache_parity",
+                _exclude_anthropic_family=True,
+            )
+    finally:
+        reset_context(token)
+
+    assert len(captured) == 1
+    assert cache_set.await_count == 1
+    read_key = ctx.llm_key(
+        "test_excluded_cache_parity",
+        request_key_material({**captured[0], "provider_fast_mode": ctx.provider_fast_mode}),
+    )
+    assert cache_set.await_args.args[0] == read_key
+
+
 async def test_structured_parse_retry_rewinds_streamed_text_for_delta_consumers():
     """A parse retry must not strand delta consumers on the rejected attempt's text.
 
@@ -8504,6 +8592,14 @@ async def run_all_tests():
     await r.record_async(
         "call_llm_structured_streaming_retries_malformed_output",
         test_call_llm_structured_streaming_retries_malformed_output,
+    )
+    await r.record_async(
+        "structured_escalation_keeps_anthropic_exclusion",
+        test_structured_escalation_keeps_anthropic_exclusion,
+    )
+    await r.record_async(
+        "structured_deferred_cache_key_matches_excluded_read",
+        test_structured_deferred_cache_key_matches_excluded_read,
     )
     await r.record_async(
         "structured_parse_retry_rewinds_streamed_text_for_delta_consumers",

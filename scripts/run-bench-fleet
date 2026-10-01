@@ -204,6 +204,10 @@ wait_for_script_snapshot_claim() {
             # snapshot between polls. Absence is therefore a completed local
             # lifecycle; tracked --wait still reports its exact run status.
             12) return 0 ;;
+            # The owner may remove the snapshot after the existence check but
+            # before Python opens the helper inside it. Python exits 2 for the
+            # missing file; confirm the directory is gone before accepting it.
+            2) [ ! -e "$CLOUDBENCH_SCRIPT_SNAPSHOT" ] && return 0; return 1 ;;
             10) ;;
             *) return 1 ;;
         esac

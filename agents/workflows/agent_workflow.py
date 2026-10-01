@@ -2752,8 +2752,11 @@ class AgentWorkflow:
         if result and not result.get("has_credits", True):
             workflow.logger.warning("💰 Credits depleted - pausing agent")
             self._has_credits = False
-            self.is_paused = True
             if result.get("tier") is None:
+                # A subscription gate must remain awake to receive the Stripe
+                # webhook resolution. raise_gate_direct treats is_paused as an
+                # explicit interruption, so setting it before the wait exits
+                # the gate immediately and leaves the agent unable to resume.
                 checkout_url = None
                 try:
                     checkout_url = await workflow.execute_activity(
@@ -2777,7 +2780,21 @@ class AgentWorkflow:
                         ),
                         gate_key="subscription",
                     )
-                    self.is_paused = False
+                    restored = await workflow.execute_activity(
+                        check_user_usage,
+                        args=[self.user_id],
+                        start_to_close_timeout=timedelta(seconds=15),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                    if restored is None:
+                        restored = await workflow.execute_activity(
+                            check_user_usage,
+                            args=[self.user_id],
+                            start_to_close_timeout=timedelta(seconds=15),
+                            retry_policy=RetryPolicy(maximum_attempts=2),
+                        )
+                    self._has_credits = bool(restored and restored.get("has_credits"))
+                    self.is_paused = self.is_paused or not self._has_credits
                 except GateRejectedError:
                     self.is_paused = True
                 except Exception as e:

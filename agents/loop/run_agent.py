@@ -1452,6 +1452,10 @@ async def run_agent(
                         False,
                         False,
                         resolved_cache_sequence_id,
+                        # Appended LAST on purpose: these args are positional and recorded in
+                        # Temporal history, so a new parameter may only be added at the end, where
+                        # an older replayed history falls back to the default.
+                        exclude_anthropic_family_on_llm_retry,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),

@@ -240,7 +240,7 @@ if ! $STACK_DB_EXPECTED && ! $DB_FOUND; then
 fi
 
 if $STACK_DB_EXPECTED && ! $DB_FOUND; then
-  echo "❌ The database recorded for existing backend $TEST_BASE_URL is unavailable."
+  echo "❌ The explicitly selected local test database is unavailable."
   echo "   Refusing to select a different local database because fixtures would be invisible to the backend."
   exit 1
 fi

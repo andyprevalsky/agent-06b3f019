@@ -196,3 +196,11 @@ barrier released provisioning. Existing evidence does not distinguish actual
 snapshot restoration time from inventory delay. No speculative speed change or
 timeout reduction was made; this rendering repair does not establish the cause
 of that delay or the earlier live backend OOM.
+
+The exact-head automated review of `69855bee` subsequently identified that the
+frontend's GFM renderer also parses tables. One additional table row in the same
+permanent fixture reproduced the mismatch: CommonMark alone selected source
+table separators instead of the rendered header. Enabling the existing parser's
+table rule makes the unchanged expectation pass. The review and its original
+skipped acknowledgment are preserved separately; the later substantive finding
+was addressed rather than treating the acknowledgment as approval.

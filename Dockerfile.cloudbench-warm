@@ -60,6 +60,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gosu \
     && rm -rf /var/lib/apt/lists/*
 
+# Compile pgvector for the installed server; third-party binary/JIT packages can differ.
+COPY scripts/cloudbench-install-pgvector.sh /tmp/rose-cloudbench-install-pgvector.sh
+RUN bash /tmp/rose-cloudbench-install-pgvector.sh \
+    && rm -f /tmp/rose-cloudbench-install-pgvector.sh \
+    && rm -rf /var/lib/apt/lists/*
+
 # Real isolated phone/payment benchmarks expose each per-machine frontend and
 # backend callback route through its own random Cloudflare Quick Tunnel. Bake
 # the agent into new warm images; cloudbench-run.sh also installs it as a

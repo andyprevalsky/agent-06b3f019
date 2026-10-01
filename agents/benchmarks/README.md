@@ -51,6 +51,19 @@ Suite selection (`run_benchmark.py --suite ...`) runs only `status: "ready"` ben
 
 ## Quick Start
 
+The daily `agent-payment-new-user-journey` task exercises an isolated, fresh
+non-admin account from exhausted free credit through a real Stripe **test-mode**
+subscription Checkout, subscription-gate resolution, payment-card approval,
+test-portal order confirmation, and backend settlement. Its evaluator requires
+the subscription gate before the payment approval, a `tp_` order ID from the
+portal, and exact $43.96 purchase, hold, wallet-funding, and AgentCard transfer
+records. The harness completes the hosted test Checkout and delivers the signed
+session webhook to the isolated backend; it does not seed a subscription or
+payment method. Run it with `scripts/run-bench --local
+agent-payment-new-user-journey` from the repo root. It requires the Stripe test
+secret and webhook secret plus sandbox AgentCard org credentials listed in the
+task contract.
+
 ```bash
 cd agents
 

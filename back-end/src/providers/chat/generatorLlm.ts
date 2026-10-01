@@ -79,7 +79,6 @@ export function requireGeneratorParsedJson(fullJson: string): {
 
 const log = createLogger('GeneratorLLM');
 
-// FilePointer interface for type safety when processing
 interface ChatMessage {
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
   text: string;

@@ -301,6 +301,9 @@ const EXPLICIT_GATE_CODES = new Set([
   'kyc_required',
   'org_onboarding_required',
   'org_wallet_funding_required',
+  'org_funding_required',
+  'insufficient_balance',
+  'deposit_confirming',
   'wallet_funding_required',
   'payment_method_required',
 ]);
@@ -328,10 +331,14 @@ function errorCode(record: Record<string, unknown>, text: string): string | unde
   return /\bfunding_in_progress\b/i.test(text) ? 'funding_in_progress' : undefined;
 }
 
-function throwForGate(record: Record<string, unknown>, result: unknown): void {
+function throwForGate(
+  record: Record<string, unknown>,
+  result: unknown,
+  companyFlowMint = false
+): void {
   const text = resultText(result);
   const code = errorCode(record, text);
-  if (code === 'funding_in_progress') {
+  if (code === 'funding_in_progress' || (companyFlowMint && code === 'deposit_confirming')) {
     const transferId = companyTransferId(record, text);
     const retryAfterSeconds = optionalNumber(record, ['retry_after_seconds', 'retryAfterSeconds']);
     if (transferId === undefined) {
@@ -355,6 +362,9 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
   }
   if (
     code === 'kyc_required' ||
+    code === 'org_funding_required' ||
+    code === 'insufficient_balance' ||
+    code === 'deposit_confirming' ||
     code === 'org_wallet_funding_required' ||
     code === 'wallet_funding_required' ||
     code === 'payment_method_required'
@@ -363,7 +373,9 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
       `AgentCard organization setup required: ${code}`,
       409,
       undefined,
-      `agentcard_${code}`,
+      code === 'org_funding_required' || code === 'insufficient_balance'
+        ? 'agentcard_org_wallet_funding_required'
+        : `agentcard_${code}`,
       { agentcardStatus: code, agentcardResult: record }
     );
   }
@@ -457,7 +469,7 @@ export class AgentCardOrgMcpProvider implements CardProvider {
         );
       }
     }
-    throwForGate(record, result);
+    throwForGate(record, result, fundsSource === 'company_flow');
     const cardId = requiredString(field(record, ['card_id', 'cardId', 'id']), 'card_id');
     const details = await this.getDetails(cardId);
     let transferId = companyTransferId(record, resultText(result));
@@ -593,18 +605,36 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     const result = await this.toolCaller('get_card_details', { card_id: cardId });
     const record = resultRecord(result);
     throwForGate(record, result);
-    const text = resultText(result) || optionalString(record, ['message']) || '';
+    // The org MCP now redacts credentials from structuredContent.message and
+    // returns PAN/CVV only in text content. Older responses put them in the
+    // structured message, so read both without logging either value.
+    const text = [resultText(result), optionalString(record, ['message']) ?? ''].join('\n');
     const pan =
       optionalString(record, ['pan', 'card_number', 'cardNumber', 'number']) ??
-      labeledValue(text, 'PAN')?.replace(/\s+/g, '');
+      (labeledValue(text, 'PAN') ?? labeledValue(text, 'Card Number'))?.replace(/\s+/g, '');
     const cvv =
-      optionalString(record, ['cvv', 'cvc', 'security_code']) ?? labeledValue(text, 'CVV');
+      optionalString(record, ['cvv', 'cvc', 'security_code']) ??
+      labeledValue(text, 'CVV') ??
+      labeledValue(text, 'CVC');
     const expiry =
       optionalString(record, ['expiry', 'expiration', 'expires']) ?? labeledValue(text, 'Expiry');
     const balanceCents =
       optionalNumber(record, ['balance_cents', 'balanceCents']) ??
       dollarsToCents(labeledValue(text, 'Balance'));
-    const status = optionalString(record, ['cardStatus', 'status']) ?? labeledValue(text, 'Status');
+    const knownCardStatuses = new Set(['OPEN', 'CLOSED', 'FROZEN', 'LOCKED', 'PAUSED']);
+    let status = [
+      optionalString(record, ['cardStatus']),
+      optionalString(record, ['status']),
+      labeledValue(text, 'Status'),
+    ]
+      .map((candidate) => candidate?.toUpperCase())
+      .find((candidate) => candidate !== undefined && knownCardStatuses.has(candidate));
+    if (status === undefined) {
+      const cardResult = await this.toolCaller('get_card', { card_id: cardId });
+      const cardRecord = resultRecord(cardResult);
+      throwForGate(cardRecord, cardResult);
+      status = optionalString(asRecord(cardRecord.card) ?? cardRecord, ['status']);
+    }
     if (balanceCents === undefined) {
       throw new AgentCardProviderError('AgentCard Organization MCP response missing balance_cents');
     }

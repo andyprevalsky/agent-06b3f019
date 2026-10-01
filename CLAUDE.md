@@ -372,7 +372,7 @@ Run durable publication with the agents environment, for example
 `agents/venv/bin/python scripts/publish_evidence_links.py --run-json <run.json> --agent-id <id>`.
 Transcript verification must follow both root-message ownership and the actual
 renderer: user/attachment text is literal; assistant Thoughts use Markdown.
-Use the existing CommonMark parser for rendered snippets, preserving literal
+Use the existing CommonMark parser with GFM table/strikethrough rules for snippets, preserving literal
 delimiter runs and line boundaries. A fresh-browser timeout can mean the verifier
 expected text the UI never renders; capture that exact predicate before changing
 timeouts. The existing publisher browser-validation blackbox owns these cases.
@@ -452,13 +452,20 @@ teardown, alongside the task-execution duration where available). Inspect the
 critical path and task trajectories before advancing: provider retries and
 latency, browser steps and session recording, archive writes, evaluator timing,
 and cleanup receipts. Recovered errors must be checked for lost evidence or a
-material slowdown. Include smoke-tagged tasks in representative slices while
-preserving the three-completion requirement; a one-response chat smoke cannot
-qualify by adding synthetic calls. Apply and validate any infrastructure-only
-change that can reduce the slice's end-to-end wall clock by more than 5% without
-changing benchmark tasks, prompts, model behavior, scoring, evidence standards,
-or result classification. A source change or INFRA failure restarts the ten-slice
-streak on a clean commit; forensic recovery never retroactively grants credit.
+material slowdown. Include compatible smoke-tagged tasks where the selected
+suites provide them; a one-response chat smoke cannot qualify by adding synthetic
+calls. For the current campaign, the user waived routine speedup reviews while
+whole-slice and individual-benchmark end-to-end wall clocks stay within 20 minutes.
+Inspect actual spikes above that threshold without speculative optimization or
+changes to tasks, prompts, models, scoring, evidence or result classification.
+The independent 30-minute cancellation cutoff remains unchanged. An INFRA failure
+or runtime/runner change that invalidates earlier results restarts the ten-slice
+streak on a clean commit. The October 1 user clarification preserves credit for
+documentation and test-only changes when the exercised runtime and proof inputs
+are verified unchanged; record that comparison instead of resetting on SHA alone.
+Freeze the campaign candidate and avoid opportunistic main updates. An observation
+timeout requires exact-owner reconciliation, not an automatic restart. Forensic
+recovery never retroactively grants credit.
 If cloud collection reports `driver exited without cleanup acknowledgement`,
 inspect the guest's original finalization error first. For `archive: TimeoutError`,
 check the last `browser_archive_observation` by exact browser task: a recording
@@ -501,6 +508,15 @@ Fly's legacy `cloudbench-warm` donor has a 40 GB volume, although current
 volume's size, and a 40 GB snapshot cannot be restored into a smaller volume.
 This is provisioned capacity, not a 40 GB upload by the controller. The stopped
 20 GB capability pool is claimed and returned across sequential slices.
+Cloud images install pgvector through `scripts/cloudbench-install-pgvector.sh`.
+It builds the pinned, checksum-verified release against headers matching the
+installed PostgreSQL version; it preserves that server and checks both the
+extension control file and shared library. A newer distro/PGDG binary can require
+an incompatible JIT package even when the PostgreSQL major version matches.
+Run `fly auth docker` immediately before a long-build image's `docker push`:
+expired registry credentials can report `app repository not found`. Keep auth
+output private. Updating the image does not refresh dependencies on persistent
+volumes; use the owned warm donor's normal `--refresh-deps` path afterward.
 Task-free infra probes use the default 4 GB primary shape so they can borrow
 that pool even when sampled names are browser/payment tasks; they also skip
 the payment-only bundled frontend build and launch one worker, since no sampled
@@ -708,7 +724,11 @@ TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
   The agents `benchmark` blackbox domain also contains real Blue Bottle LLM
   judge replays. Full agents coverage needs the complete authoritative env and
   working outbound access; HTTP capture does not replace live responses with
-  mocks. On Andy's Mac, run that full suite natively when an isolated Linux
+  mocks. Its existing runner control checks two bounded native lanes, ordered
+  result reporting, cancellation drain, and exited-parent descendant cleanup.
+  The terminal-evidence fixtures share one 60-second deadline across two isolated
+  pytest groups; do not raise that limit or omit targets to mask serial waits.
+  On Andy's Mac, run that full suite natively when an isolated Linux
   container lacks those prerequisites, and retain Linux checks for the cloud
   controller and affected platform-specific regressions. In particular, run
   `bash scripts/tests/cloudbench-multi-workstream.test.sh` on Linux at the

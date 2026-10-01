@@ -113,6 +113,8 @@ for source, rendered in (
      "A complete visible phrase on the next line"),
     ("![Invisible image description](https://example.com/image.png)\n\n"
      "Visible text after the image", "Visible text after the image"),
+    ("| Completed benchmark evidence | Result |\n| --- | --- |\n| Receipt | Ready |",
+     "Completed benchmark evidence"),
 ):
     assert mod.visible_transcript_snippets([
         {"role": "ASSISTANT", "text": source},

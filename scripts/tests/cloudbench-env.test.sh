@@ -2034,8 +2034,10 @@ require_text "$HELPER_SRC" \
   rc=0
   cloudbench_tcp_listener_present not-a-port || rc=$?
   [ "$rc" -eq 2 ] || fail "bad port arg must exit 2 (got $rc)"
-  # Occupy free_port briefly and assert exit 0.
-  python3 - "$free_port" <<'PY' &
+  # Keep the listener alive until the parent finishes probing it. A short
+  # sleep races with slow probes when coverage suites share the host.
+  listener_ready="$TMP_ROOT/tcp-listener-ready"
+  python3 - "$free_port" "$listener_ready" <<'PY' &
 import socket, sys, threading, time
 port = int(sys.argv[1])
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2054,17 +2056,18 @@ def accept_connections():
         connection.close()
 
 threading.Thread(target=accept_connections, daemon=True).start()
-time.sleep(2)
+open(sys.argv[2], "w").close()
+while True:
+    time.sleep(1)
 s.close()
 PY
   listener_pid=$!
   trap 'kill "$listener_pid" 2>/dev/null || true' RETURN
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if cloudbench_tcp_listener_present "$free_port"; then
-      break
-    fi
+  for _ in $(seq 1 100); do
+    [ -f "$listener_ready" ] && break
     sleep 0.05
   done
+  [ -f "$listener_ready" ] || fail "occupied port listener did not become ready"
   cloudbench_tcp_listener_present "$free_port" \
     || fail "occupied port probe must exit 0"
   kill "$listener_pid" 2>/dev/null || true

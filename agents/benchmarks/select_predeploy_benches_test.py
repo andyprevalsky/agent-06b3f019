@@ -718,7 +718,10 @@ def test_cloud_surface_skips_local_only_even_with_pass_streak(tmp_path: Path) ->
     assert "cloud-payment" in cloud.selected
 
 
-def test_local_surface_skips_production_only_even_with_pass_streak(tmp_path: Path) -> None:
+@pytest.mark.parametrize("surface", ["local", "cloud"])
+def test_predeploy_surfaces_skip_production_only_even_with_pass_streak(
+    tmp_path: Path, surface: str
+) -> None:
     catalog = tmp_path / "tasks.json"
     attempts = tmp_path / "attempts.jsonl"
     catalog.write_text(
@@ -780,16 +783,16 @@ def test_local_surface_skips_production_only_even_with_pass_streak(tmp_path: Pat
     ):
         rows.extend([(name, True)] * 3)
     _write_attempts(attempts, rows)
-    local = select_predeploy_benches(
+    selected = select_predeploy_benches(
         catalog=catalog,
         changed_files=["back-end/src/providers/agentcard/org-runtime.ts"],
-        surface="local",
+        surface=surface,
         cap=20,
         repo_root=ROOT,
         attempts_file=attempts,
     )
-    assert "prod-payment" not in local.selected
-    assert "local-payment" in local.selected
+    assert "prod-payment" not in selected.selected
+    assert "local-payment" in selected.selected
 
 
 def test_cli_report_prints_total_and_history_gate() -> None:

@@ -1,12 +1,56 @@
 import asyncio
+import multiprocessing
 import os
 from argparse import Namespace
 from pathlib import Path
+import tempfile
 
 import pytest
 
 import benchmarks.local as local_runner
 import benchmarks.run_benchmark as rb
+
+
+def _hold_sandbox_payment_lock(ready, release):
+    async def hold():
+        async with rb._sandbox_agentcard_payment_lock():
+            ready.send(True)
+            await asyncio.to_thread(release.recv)
+
+    asyncio.run(hold())
+
+
+def test_sandbox_payment_lock_serializes_separate_benchmark_processes(monkeypatch):
+    with tempfile.TemporaryDirectory() as directory:
+        monkeypatch.setenv("BENCHMARK_AGENTCARD_LOCK_PATH", str(Path(directory) / "payment.lock"))
+        context = multiprocessing.get_context("spawn")
+        ready_rx, ready_tx = context.Pipe(duplex=False)
+        release_rx, release_tx = context.Pipe(duplex=False)
+        holder = context.Process(target=_hold_sandbox_payment_lock, args=(ready_tx, release_rx))
+        holder.start()
+        try:
+            assert ready_rx.poll(15), "first benchmark did not acquire the payment lock"
+            assert ready_rx.recv() is True
+
+            async def verify_wait():
+                async def acquire():
+                    async with rb._sandbox_agentcard_payment_lock():
+                        return True
+
+                waiter = asyncio.create_task(acquire())
+                await asyncio.sleep(0.2)
+                assert not waiter.done(), "second benchmark entered while the first held the lock"
+                release_tx.send(True)
+                assert await asyncio.wait_for(waiter, timeout=10)
+
+            asyncio.run(verify_wait())
+            holder.join(timeout=10)
+            assert holder.exitcode == 0
+        finally:
+            if holder.is_alive():
+                release_tx.send(True)
+                holder.terminate()
+                holder.join(timeout=5)
 
 
 def _args(*, task=None, suite=None, exclude_task=None):

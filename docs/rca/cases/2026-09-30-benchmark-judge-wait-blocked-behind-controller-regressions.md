@@ -108,13 +108,81 @@ The final proof retains the original failed aggregate and both causal controls.
 No partial result is promoted into an aggregate pass, and none of this offline
 evidence supplies fleet credit.
 
+## October 1 recurrence: native groups still serialized
+
+The integrated main tree again exceeded the unchanged 300-second domain bound.
+The original 103 passing domains were retained; the failed benchmark domain was
+replayed alone. Its local-world isolation fixture was corrected separately. A
+private per-case observation of the same registered runner then timed out at
+300.038 seconds: all four real judges passed by 60.417 seconds, while the native
+terminal-evidence group did not start until 282.532 seconds. Earlier native
+checks consumed 5.363 seconds (Prisma), 42.864 (boot payload), 26.673 (bundled
+frontend), 46.480 (dependencies), 46.686 (private fleet source), 32.825 (Fly
+completion), and 32.305 (autoscaler). There was no terminal model failure.
+
+Archive searches used “benchmark domain exceeded 300 seconds” and “controller
+native subprocess judge wait registration”. This is a recurrence: overlapping
+judges removed their additive wait, but the previous fix still serialized all
+thirteen independent native subprocess groups. The guard proved judge overlap;
+it did not prevent the native queue from again exhausting the same whole-domain
+budget. Increasing that budget would hide the unbounded additive scheduling cost.
+
+The existing helper now admits at most two native subprocess groups. Admission
+and result indexing stay on the main event loop; results are published in their
+registration order after judges finish. Cancellation closes admission and joins
+both active lanes, including repeated cancellation. The native groups preserve
+their target assertions and use isolated subprocess environments and
+private temporary fixtures. No task, prompt, model, evaluator, model-call count,
+production worker concurrency, or timeout changes. This affects only offline
+verification scheduling and adds no production work at 10,000 agents.
+
+The same existing owning control now asserts two simultaneous owned lanes,
+exactly-once invocation, registration-order reporting, coroutine rejection,
+main-thread capture resets, and cancellation of two active lanes before a third
+queued case. The final unchanged control failed against the original serial
+helper in 6.178 seconds and passed against the bounded helper in 1.366 seconds.
+The first real bounded-domain replay finished in 227.690 seconds but failed the
+terminal-evidence group's existing 60-second timeout. A focused observation of
+its unchanged eight targets established another additive queue: the first
+27 fault arms consumed 45.739 seconds, and 52 cases passed before the remaining
+targets could finish. The original fixture timeouts and assertions were sound.
+Archive searches covered terminal-evidence subprocess timeouts and exited-parent
+process-group cleanup; the complete-log and terminal-zombie cases informed the
+ownership checks without replacing this runtime reproduction.
+
+The same eight targets now use two isolated pytest children under one shared
+60-second deadline. File-backed output avoids pipe backpressure. Independent
+review caught an exited leader leaving inherited descendants in the first draft.
+The unchanged real-native control failed that draft in 0.690 seconds and passed
+the correction in 5.114 seconds, including a TERM-ignoring descendant and a real
+child exit 7. The wrapper retains unreaped leaders to pin their process groups,
+observes state without reaping, drains the exact groups with bounded TERM/KILL,
+then joins the leaders and requires both successful results. The existing
+registered ownership control includes that small real-native failure/descendant
+case and rejects an unobservable live identity instead of treating it as absence.
+
+The canonical benchmark domain passed in 238.293 seconds. Combined with the
+103 retained passing domains, the original remaining coverage steps passed:
+162 fast-cache tests, 109 unit tests, and 81% total coverage against the unchanged
+80% threshold. That execution retained all 947 input hashes. The final cleanup
+amendment was verified separately: the existing owning control passed in 3.567
+seconds and all eight real fixture targets passed in 40.561 seconds under the
+same shared 60-second limit. Independent AST review preserved the other 480
+definitions and the exact eight targets, so their earlier passing checks were
+retained rather than replaying unrelated model calls. Original failures and
+intermediate receipts remain private; none of this evidence supplies fleet credit.
+
 ## Human feedback
 
 The user required compact, robust runner tests without massive additional
 verification. The repair adds one fast owning control, preserves the existing
-controller commands and model calls, and leaves the 300-second domain bound
+controller target assertions and model calls, and leaves the 300-second domain bound
 unchanged. After the actual later fixture failure, the required final combined
 agents gate supplies the complete replay instead of a second standalone domain.
+The October 1 clarification keeps the full 100-task cloud acceptance gate while
+avoiding unnecessary resets and repetition of unaffected checks. Documentation
+and test-only edits require an explicit unchanged-runtime comparison; actual
+infrastructure failures still invalidate the streak.
 
 ## Reusable lesson
 

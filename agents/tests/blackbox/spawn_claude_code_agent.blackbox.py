@@ -3488,7 +3488,7 @@ async def test_cc_execute_tool_paused_cancels_activity():
     assert error.metadata.get("success") is False
 
 
-async def run_all_tests():
+async def _run_all_tests():
     print("spawn-claude-code-agent blackbox tests:")
     r = BlackboxResult()
     await r.record_async("session_create_mock", test_claude_code_session_create_mock)
@@ -3731,6 +3731,13 @@ async def run_all_tests():
     )
     teardown_mock()
     return r.all_passed
+
+
+async def run_all_tests():
+    # Suite fixtures must control this gate even when agents/.env disables the
+    # production verifier. Individual disabled-path tests override it to "1".
+    with patch.dict(os.environ, {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "0"}):
+        return await _run_all_tests()
 
 
 

@@ -32,7 +32,7 @@ fi
 # Cloud VMs often have a Docker daemon that cannot overlay-mount images.
 # Fall back to the same system Postgres path setup-db.sh / run.sh already use.
 if ! $USE_SYSTEM_PG; then
-    if ! docker run --rm --entrypoint true postgres:16-alpine >/dev/null 2>&1; then
+    if ! docker run --rm --entrypoint true pgvector/pgvector:pg16 >/dev/null 2>&1; then
         echo "⚠️  Docker Postgres unavailable — falling back to system Postgres (set ROSE_USE_SYSTEM_PG=true to skip Docker)."
         USE_SYSTEM_PG=true
     fi
@@ -148,12 +148,13 @@ else
     # older image silently produced an EMPTY source db, and the gate then failed
     # with the misleading "no Cookie rows" message instead of naming the cause.
     # Pick the image from the dump header so a newer publisher just works.
-    SRC_PG_IMAGE=postgres:16-alpine
+    # pgvector images: prod dumps carry CREATE EXTENSION vector (planner memory).
+    SRC_PG_IMAGE=pgvector/pgvector:pg16
     DUMP_FORMAT_VERSION="$(
         head -c 8 "$DUMP" | od -An -tu1 -j5 -N2 | awk 'NF{printf "%d.%d", $1, $2; exit}'
     )"
     case "$DUMP_FORMAT_VERSION" in
-        1.1[6-9]|1.[2-9][0-9]) SRC_PG_IMAGE=postgres:18-alpine ;;
+        1.1[6-9]|1.[2-9][0-9]) SRC_PG_IMAGE=pgvector/pgvector:pg18 ;;
     esac
     echo "   dump archive format $DUMP_FORMAT_VERSION -> $SRC_PG_IMAGE" | tee -a "$SUMMARY"
     docker run -d --name "$SRC_CONTAINER" \
@@ -164,7 +165,9 @@ else
     [ -n "$SRC_PORT" ] || { echo "❌ could not resolve source postgres port" | tee -a "$SUMMARY"; exit 1; }
     SRC_READY=0
     for _ in $(seq 1 60); do
-        docker exec "$SRC_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && { SRC_READY=1; break; }
+        # The image's temporary init server accepts Unix sockets before it
+        # stops for the final launch. TCP is ready only for the final server.
+        docker exec "$SRC_CONTAINER" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && { SRC_READY=1; break; }
         sleep 1
     done
     # Falling through the timeout used to continue into pg_restore against a
@@ -333,7 +336,7 @@ for i in $(seq 1 "$RUNS"); do
         fi
         docker run -d --name "$CONTAINER" \
             -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=victoria \
-            -p "$PORT_MAPPING" postgres:16-alpine >/dev/null || {
+            -p "$PORT_MAPPING" pgvector/pgvector:pg16 >/dev/null || {
                 echo "❌ could not start throwaway postgres" | tee -a "$SUMMARY"; exit 1; }
         PORT="$(docker port "$CONTAINER" 5432/tcp | tail -1 | sed 's/.*://')"
         [ -n "$PORT" ] || {
@@ -341,7 +344,7 @@ for i in $(seq 1 "$RUNS"); do
 
         # Wait for readiness rather than sleeping a guess.
         for _ in $(seq 1 60); do
-            docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
+            docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break
             sleep 1
         done
 
