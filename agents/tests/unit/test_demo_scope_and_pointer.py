@@ -977,14 +977,12 @@ def test_for_each_timeout_recovers_terminal_child_without_completion_signal(monk
         pending_children={child_id},
     )
 
-    class FakeManager:
-        async def _reconcile_terminal_child_result(self, workflow, agent_id):
-            assert agent_id == child_id
-            workflow.child_results[agent_id] = {"status": "completed", "summary": "saved result"}
-            workflow.pending_children.discard(agent_id)
-            return True
+    async def fetch_terminal_result(activity, *, args, **_kwargs):
+        assert activity is handler.fetch_child_terminal_result_activity
+        assert args == [child_id]
+        return {"status": "completed", "summary": "saved result"}
 
-    monkeypatch.setattr(handler, "get_sub_agent_manager", lambda: FakeManager())
+    monkeypatch.setattr(handler.workflow, "execute_activity", fetch_terminal_result)
     recovered = asyncio.run(
         handler._recover_oai_demo_for_each_timeout(
             workflow_instance, child_id, TimeoutError("activity timed out")
