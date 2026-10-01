@@ -131,7 +131,7 @@ with tempfile.TemporaryDirectory() as tmp:
     if mod.AGENTS_VENV_PYTHON.is_file():
         assert calls[0][0] == str(mod.AGENTS_VENV_PYTHON), calls[0][0]
     manifest = mod.write_manifest(
-        agent_id="agent-1", run_id="", fe_status="skipped", message_count=0,
+        agent_id="agent-1", run_id="", token="", fe_status="skipped", message_count=0,
         dump_html=html, dump_https_url=url, source_dump=dump,
     )
     assert json.loads(manifest.read_text())["llm_dump_https_url"] == url

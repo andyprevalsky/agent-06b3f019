@@ -1,0 +1,1326 @@
+{
+ "paraphrases": [
+  {
+   "query": "go through this csv and dig up a fun fact on everyone in it",
+   "positive_task": "agent-for-each",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "I attached a spreadsheet of people and companies. Can you have a separate agent look each one up online and find something interesting about them, then give me all the facts together in one summary?",
+   "positive_task": "agent-for-each",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "rose labs test shop: get a one-time card for notebook, mug, tote but don't pay",
+   "positive_task": "agent-payment-abandonment",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Use a single browser agent on the Rose Labs test payment page. Add only the Aurora Notebook, Ceramic Mug and Canvas Tote, get to checkout, and request a single-use card for that exact total. Stop there and don't actually pay.",
+   "positive_task": "agent-payment-abandonment",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "run the rose labs test checkout twice for notebook/mug/tote, pay on the 2nd",
+   "positive_task": "agent-payment-idempotent-abandonment",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Do the Rose Labs test payment checkout twice, one after the other, with just the Aurora Notebook, Ceramic Mug and Canvas Tote. The first time, get a one-time card and leave checkout unsubmitted. The second time, get the card again, make sure the last 4 digits match, then place the order and send me the confirmation.",
+   "positive_task": "agent-payment-idempotent-abandonment",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "get a $1 one-time card for the rose labs lifecycle probe, don't order",
+   "positive_task": "agent-payment-production-abandonment",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "On roselabs.ai's test payment page, use one browser agent to set up checkout for the Agent Card Lifecycle Probe item. Request a single-use card for exactly one dollar, but don't hit Place order or pay.",
+   "positive_task": "agent-payment-production-abandonment",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "buy the $1 Agent Card Lifecycle Probe on roselabs.ai using a one-time card",
+   "positive_task": "agent-payment-production-purchase",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Have a browser agent go to the roselabs.ai test payment page and actually buy the Agent Card Lifecycle Probe for $1. Get a single-use card for exactly $1 through Rose instead of using a test card, place the order, pay through Stripe, and tell me the confirmation.",
+   "positive_task": "agent-payment-production-purchase",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "check out the notebook, mug and tote on the rose labs test store",
+   "positive_task": "agent-payment-setup-resume",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Go to the Rose Labs test payment page and buy only the Aurora Notebook, Ceramic Mug and Canvas Tote through the normal checkout. If it asks me to do the one-time agent payment setup, wait until I finish it, then pick up the same checkout on your own.",
+   "positive_task": "agent-payment-setup-resume",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "buy aurora notebook, ceramic mug, canvas tote on the rose labs test page",
+   "positive_task": "agent-payment-test-shop",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Send a browser agent (not a general one) to the Rose Labs test payment page and finish checkout for just three things: the Aurora Notebook, the Ceramic Mug and the Canvas Tote. Nothing else in the cart.",
+   "positive_task": "agent-payment-test-shop",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "get me the cheapest GA ticket to any upcoming 1015 Folsom show on Eventim",
+   "positive_task": "browser-1015-eventim-request-card",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Find any upcoming show at 1015 Folsom in SF that isn't sold out and buy one general admission ticket at the lowest price tier through their Eventim link. No resale sites, VIP, tables or add-ons. Get a payment card and fill it in before you hit the final buy button.",
+   "positive_task": "browser-1015-eventim-request-card",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "get me a well-made black beanie on amazon under $35, no buy now",
+   "positive_task": "browser-agent",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you order me a black beanie from Amazon? Keep it under $35 and pick one that looks good quality. Go through the cart instead of Buy Now, and make sure the order actually goes through.",
+   "positive_task": "browser-agent",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "order a black beanie on amazon under 35 bucks, skip buy now",
+   "positive_task": "browser-agent-amazon-cookie-payment",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "I need a black beanie from Amazon, anything under $35 works. Please add it to the cart and check out normally, not with the Buy Now button.",
+   "positive_task": "browser-agent-amazon-cookie-payment",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "grab me any random thing on amazon under 5 bucks",
+   "positive_task": "browser-agent-amazon-mx-buy-under-5-usd",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you buy me something cheap off Amazon, under five dollars? Whatever you think is good, your call.",
+   "positive_task": "browser-agent-amazon-mx-buy-under-5-usd",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "book me a sauna garden session at alchemy springs sf this sunday",
+   "positive_task": "browser-alchemy-springs-sauna",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Reserve one regular Sauna Garden session at Alchemy Springs on Post St in San Francisco for this Sunday. Take the earliest opening between 10am and 2pm, book as a guest, and skip any extras like classes, treatments or memberships.",
+   "positive_task": "browser-alchemy-springs-sauna",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "start a return on my latest eligible amazon delivery",
+   "positive_task": "browser-amazon-return",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Go into my Amazon orders and return the most recent delivered physical item that can still be returned. Refund it to my original payment method and pick the closest free drop-off with no box or label if there is one. Skip digital stuff, groceries, gift cards and final-sale items. If nothing qualifies, tell me why and don't change anything.",
+   "positive_task": "browser-amazon-return",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "search bing for openai's official site, give me one non-ad result",
+   "positive_task": "browser-bing-search-single-result",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Open Bing in a real browser, not the search tool, and look up the OpenAI official website. Tell me the title and link of just one regular result, not an ad.",
+   "positive_task": "browser-bing-search-single-result",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "try the webdecoy fcaptcha demo and tell me my risk score",
+   "positive_task": "browser-biometrics-webdecoy",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Head to the FCaptcha demo on webdecoy.com in a browser and use it like a normal person. Click the checkbox check if there is one, then fill the invisible-mode form with benchmark-human@example.com and a short message and submit. No scripted clicks. Tell me the risk score it shows, whether the checkbox passed, whether the form went through, and any bot/human verdict.",
+   "positive_task": "browser-biometrics-webdecoy",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Get me a 16oz iced vanilla shakerato w/ oat milk from Blue Bottle Ferry Building",
+   "positive_task": "browser-blue-bottle-challenge-recovery",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you place a pickup order at the Blue Bottle in SF's Ferry Building? I want a large 16oz iced vanilla bean shakerato, oat or almond milk is fine. Just check out as a guest, no account, and tell me the total and when it'll be ready.",
+   "positive_task": "browser-blue-bottle-challenge-recovery",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Place my weekly meal-prep grocery order on DoorDash from Safeway, 99 Ranch as backup",
+   "positive_task": "browser-doordash-food-plan-grocery-order",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Go ahead and buy my full grocery list on DoorDash. Ship it to my saved Palo Alto apartment on El Camino and use my saved card. Get everything you can from the Safeway on Middlefield first, and only hit the 99 Ranch in Mountain View for Asian pantry stuff Safeway doesn't carry. Standard delivery, not rush, and keep the fees low. That includes the lean ground beef, chicken breast, salmon, egg whites, eggs, the 42g Core Power Elite shakes, Fage 0%, cheeses, Kodiak mix, etc. Actually check out, then send me the order numbers, totals, ETAs, and anything that was out of stock.",
+   "positive_task": "browser-doordash-food-plan-grocery-order",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Order a 6ft+ USB-C to USB-C cable on DoorDash, under $30, fastest delivery",
+   "positive_task": "browser-doordash-usb-c-cable",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Need a USB-C to USB-C charging cable delivered to my SF address through DoorDash, whatever gets here soonest. It has to be at least 6 feet and rated for 60W or more, and no more than $30 before tax and fees. Just a single cable, no USB-A, no adapters, no multipacks, and nothing with a charger brick attached. Go ahead and check out.",
+   "positive_task": "browser-doordash-usb-c-cable",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Grab me one ticket at AMC Metreon for next Friday, 7-9pm showing",
+   "positive_task": "browser-event-ticket",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you get me a single adult ticket at the AMC Metreon 16 in SF for Friday of next week? Any movie that starts between 7 and 9 pm, pick any open seat, and keep it under $30 before fees. Don't add snacks, upgrades, memberships or donations. Take it to checkout and get a card for the payment.",
+   "positive_task": "browser-event-ticket",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "compress this pic on tinypng for me",
+   "positive_task": "browser-file-upload-tinypng",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you run this image through TinyPNG so it's smaller? Just upload it on their site and give me the compressed version back, no need to ask me anything.",
+   "positive_task": "browser-file-upload-tinypng",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Google 'OpenAI official website' in a browser and give me the top real result",
+   "positive_task": "browser-google-search-single-result",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Open an actual browser, search Google for OpenAI's official site, and look at the results page. Skip any sponsored links and just send me one organic result, only the title and link. If a cookie popup shows up, just click through it.",
+   "positive_task": "browser-google-search-single-result",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Book Hotel Kabuki SF this Saturday night on hotels.com, cheapest non-smoking room",
+   "positive_task": "browser-hotel-booking",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "I need one night at Hotel Kabuki in San Francisco, checking in this Saturday and out Sunday, just me. Use hotels.com as a guest without logging in. Pick the cheapest non-smoking room under $400 before taxes, with no packages, upgrades or extras. Go through checkout up to where it asks for payment, but don't actually charge anything.",
+   "positive_task": "browser-hotel-booking",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Get 3 seats together for the earliest IMAX showing tonight at AMC Metreon",
+   "positive_task": "browser-imax-group-tickets",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you buy three adult IMAX tickets for tonight at the Metreon AMC in SF? Whatever movie has the next IMAX showing is fine, but we need 3 seats right next to each other in one row, each under $35 before fees. No snacks, add-ons or upgrades. If IMAX is done for the night, do the earliest Dolby showing instead. Get to checkout and request a card for payment.",
+   "positive_task": "browser-imax-group-tickets",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "make me a new job seeker account on Indeed",
+   "positive_task": "browser-indeed-account-create",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "I'm starting a job hunt. Can you open Indeed in the browser and sign me up for a fresh job-seeker account?",
+   "positive_task": "browser-indeed-account-create",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Fill my Instacart cart from Sprouts: berries, Cocojune, pickles, feta, olives, Essentia",
+   "positive_task": "browser-instacart-grocery-order",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "On Instacart, stick to Sprouts Farmers Market only and add these to my cart: blueberries, strawberries, a 16oz Cocojune yogurt (plain if they have it), pickles, feta, olives, and twelve 1-liter Essentia waters. Once each item is at the right quantity, save progress while its details are still on screen. Don't do it after every single click.",
+   "positive_task": "browser-instacart-grocery-order",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Reserve Prospect for 2 this Friday at 7 on OpenTable",
+   "positive_task": "browser-opentable-reservation",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you book dinner for two at Prospect on Spear St in SF through OpenTable for this Friday at 7pm? If 7 isn't open, grab the closest regular table between 6 and 8. Use my saved info to finish the booking.",
+   "positive_task": "browser-opentable-reservation",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Test the browser's IP rotation fallback chain by rotating 5 times in a row",
+   "positive_task": "browser-rotate-ip-escalation",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "I want to check how the proxy rotation escalates. Start one browser session on ipify, then rotate the IP five times back to back without doing anything else. Log the provider, previous provider, tier, action, rotations left, next step, and message for the first four. I expect Kernel residential, then Kernel mobile, then a switch to Steel residential, then Steel residential again. The fifth should fail as exhausted, so just report the results after that.",
+   "positive_task": "browser-rotate-ip-escalation",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "what's the main heading on example.com?",
+   "positive_task": "browser-smoke",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Quick test: pull up example.com in a browser and tell me what the big title on the page says.",
+   "positive_task": "browser-smoke",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Order a rocky fish sandwich from Nopa Fish at Ferry Building",
+   "positive_task": "browser-toast-nopa-write-lock",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "I'm craving the rocky fish sandwich from Nopa Fish in the Ferry Building. Can you order one through their Toast ordering page? Get it to checkout and request a card for payment.",
+   "positive_task": "browser-toast-nopa-write-lock",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Build my dad's boxing gym a signup site with waivers, class payments, and promo codes",
+   "positive_task": "build-boxing-payment",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "My dad George Prevalsky runs a fight gym and his billing setup is ancient. Can you build and host a client signup site people reach by QR code or link? They should pick classes (Boxing $225, Muay Thai $225, MMA $245, Jiujitsu $185, Kids $185, Unlimited $285 per month), sign the adult or minor liability waiver from the PDFs I attached, and check a required box agreeing to the billing and membership terms, with the full text viewable. Then they pay. Boxing and Muay Thai need discount code support, and the sparring consent forms can just be posted for reference.",
+   "positive_task": "build-boxing-payment",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Grab Japan's population, example.com's heading, and a seeded random number, multiply, then email Andy.",
+   "positive_task": "cache-coverage",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you do a little chain for me? Look up how many people live in Japan, with a source. Check what the big title on example.com says. Run a Python snippet that seeds random with 42 and prints a randint from 1 to 100. Then take the length of that title times the number, multiply Japan's population by the result, and email it all to andy@roselabs.",
+   "positive_task": "cache-coverage",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Set up a 30-min Calendly event and email the link to Andy Prevalsky.",
+   "positive_task": "calendly-schedule-meeting",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Hop into my Calendly (a@roselabs.ai), make a new half-hour 1:1 meeting type, and keep whatever default name it gives you. Then send the booking link to andyprevalsky@yahoo.com with a quick friendly note saying I'd love to grab 30 minutes and he can pick a slot.",
+   "positive_task": "calendly-schedule-meeting",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Use Claude Code to print the Collatz sequence from 27 and count the steps.",
+   "positive_task": "claude-code-agent",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Could you have Claude Code write a quick Python script that runs the 3n+1 sequence starting at 27? Print every value down to 1, then print how many steps it took, and show me the output.",
+   "positive_task": "claude-code-agent",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "List the top 100 GitHub repos focused on CUDA kernel development.",
+   "positive_task": "cuda-kernel-github-top100-code-agent",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "I want a ranked list of the 100 biggest GitHub projects where people actually write CUDA kernels or close to it: kernel libraries, GPU DSLs like Triton, CUDA samples and tooling, and inference engines with lots of custom CUDA/PTX. Skip random paper repos that just happen to use CUDA. Use a code agent with the GitHub API to find and verify them, one session at a time.",
+   "positive_task": "cuda-kernel-github-top100-code-agent",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Alpha check: just reply READY and finish.",
+   "positive_task": "demo-fleet-alpha",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Quick ping for the alpha test, don't touch any tools. Just wrap up right away with READY as your answer.",
+   "positive_task": "demo-fleet-alpha",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Beta probe, respond READY and stop there.",
+   "positive_task": "demo-fleet-beta",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "This is just the beta concurrency check. Don't do anything else, only complete immediately with the result READY.",
+   "positive_task": "demo-fleet-beta",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Gamma test: answer READY, nothing else.",
+   "positive_task": "demo-fleet-gamma",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Running the gamma fleet check. Skip all tools and just finish with READY as the result.",
+   "positive_task": "demo-fleet-gamma",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Reach out to the angels in my CSV and book feedback calls.",
+   "positive_task": "family-office-angel-outreach",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "The attached spreadsheet has about 700 angel investors. I want to get on calls with as many as I can to hear their thoughts on my mass agent network research (blog: roselabs.ai/research/task-decomposer). Email each one personally from andy@roselabs.ai, and give every contact their own agent to handle follow-ups, replies, and sending a Calendly link. Split the list into batches however makes sense, and be polite and persistent.",
+   "positive_task": "family-office-angel-outreach",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Make red, blue, green, and yellow tinted versions of this image.",
+   "positive_task": "files-in-sub-agents",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Take the picture I attached and give me four copies, one tinted each of red, blue, green, and yellow. Have a separate agent handle each color, and each one should use a code agent to generate its version. Send me back all four.",
+   "positive_task": "files-in-sub-agents",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Buy the Aurora Notebook, Ceramic Mug, and Canvas Tote from the test store.",
+   "positive_task": "gate-kyc-card-mint",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you have a browser agent check out on the test payment page with only the Aurora Notebook, Ceramic Mug, and Canvas Tote? You don't have a card, so request one through Rose's card feature. Don't make up a number or use a test card.",
+   "positive_task": "gate-kyc-card-mint",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Find my latest Gmail about the renewal clause and summarize it.",
+   "positive_task": "gate-source-connect-gmail",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "There's an email in my Gmail about a renewal clause. Can you pull up the most recent one and tell me what the clause actually says? You'll need to go through my Gmail for this.",
+   "positive_task": "gate-source-connect-gmail",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Order Aurora Notebook, Ceramic Mug, Canvas Tote on the local test shop.",
+   "positive_task": "gate-subscription-card-mint",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Use the browser to go to my localhost test payment page and buy just three things: the Aurora Notebook, Ceramic Mug, and Canvas Tote. Get a fresh card from Rose to pay, and don't type in any card number you already know.",
+   "positive_task": "gate-subscription-card-mint",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Check out Aurora Notebook, Ceramic Mug, and Canvas Tote using a Rose card.",
+   "positive_task": "gate-subscription-card-mint-admin-bypass",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Please send a browser agent to the test checkout site and buy the Aurora Notebook, the Ceramic Mug, and the Canvas Tote, nothing more. Pay with a card issued through Rose's payment card tool, not a made-up or sample number.",
+   "positive_task": "gate-subscription-card-mint-admin-bypass",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "In one sentence, what can Rose do?",
+   "positive_task": "gate-subscription-free-credit",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Hey, give me a one-line rundown of what Rose is capable of. Keep it to a single sentence.",
+   "positive_task": "gate-subscription-free-credit",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Buy the notebook, mug, and tote on the payment test page.",
+   "positive_task": "gate-subscription-webhook-resume",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Have a browser agent open the test payment store and purchase only the Aurora Notebook, Ceramic Mug, and Canvas Tote. Since you don't have your own card, get one through Rose's card request. No invented or public test card numbers.",
+   "positive_task": "gate-subscription-webhook-resume",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Have explore agents grep my local data and give me a checklist of what they find.",
+   "positive_task": "grep-explore-stress",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you spin up a few explore agents to search my local messages, contacts, and agent history with grep? Look for the Aurora budget line in the Lighthouse brief, the START/END block in the incident note, the ledger entries, Mara Voss's contact info, and the Atlas handoff messages. Local search only, nothing on the web, and no status updates along the way. Just send one checklist at the end with the exact matches.",
+   "positive_task": "grep-explore-stress",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Put a red tint over this whole picture",
+   "positive_task": "image-handling",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you take this image and wash the entire thing in red? I want a full red color overlay across the whole photo, not just part of it.",
+   "positive_task": "image-handling",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "iMessage 972-977-7432 that this is the Rose iMessage send bench",
+   "positive_task": "message-person",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Shoot a quick friendly iMessage over to 972-977-7432 letting them know this is the Rose iMessage send bench test. Don't send it as an email, it needs to go through iMessage.",
+   "positive_task": "message-person",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Text 972-977-7432 from your own agent number, it's the Rose agent SMS send bench",
+   "positive_task": "message-person-agent-sms",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Send a friendly little SMS to 972-977-7432 saying this is the Rose agent SMS send bench. Use your own agent phone line for it, not my iMessage, and definitely not email.",
+   "positive_task": "message-person-agent-sms",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Get me an UberX from 88 Howard St to FITNESS SF Transbay now",
+   "positive_task": "minted-agent-accounts-uber",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Book me an UberX right now from 88 Howard Street in SF to the FITNESS SF Transbay gym at 425 Mission Street. Double check both pins land on those exact addresses. Regular UberX only, no Comfort, Black, or shared. Go ahead and actually request it.",
+   "positive_task": "minted-agent-accounts-uber",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Sign up or log into Uber using your minted agent email and phone",
+   "positive_task": "minted-agent-accounts-uber-signup",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Set yourself up with an Uber account using the agent email and AgentPhone number you were issued. Try the email first and only use the phone if Uber insists on it. Clear the login field before typing so nothing gets mashed together. Grab whatever verification code they send. If it asks for a name, birthday, or password, make up agent-style values and a strong password. Keep going until you're actually signed in.",
+   "positive_task": "minted-agent-accounts-uber-signup",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Post \"Hello World\" on X from the account I'm already logged into",
+   "positive_task": "minted-agent-accounts-x-post",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you tweet exactly \"Hello World\" on X? The browser should already be signed in, so just use that session. Don't make a new account or mess with the cookies.",
+   "positive_task": "minted-agent-accounts-x-post",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Email every angel in this CSV from a@roselabs.ai asking for feedback on my research",
+   "positive_task": "outreach-batch",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Here's a CSV of angel investors. Spin up one general-purpose agent per person and have each one send a personalized cold email from a@roselabs.ai asking for feedback on my mass agent network ML research (blog post: roselabs.ai/research/task-decomposer). Look up cold email best practices first, and find any shared background with each person like school or YC. Keep them short and warm, no dashes, and don't bring up investing. I'm just trying to start a relationship for now.",
+   "positive_task": "outreach-batch",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Compare Austin, Denver, and Lisbon on cost of living, neighborhoods, and weather in a table",
+   "positive_task": "parallel-tool-calls",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "I'm deciding between Austin, Denver, and Lisbon to move to. Can you run one explore agent per city in parallel to look up cost of living, the best neighborhoods, and the weather? Then put it all in a comparison table. No browser agent, Claude Code, or sandbox.",
+   "positive_task": "parallel-tool-calls",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Find me 5 Bay Area VC partners who invest in AI infrastructure",
+   "positive_task": "people-search-criteria",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you dig up five venture partners based around SF or the Bay who back AI infra startups? Give me each name plus a one-liner on their firm or focus. Do it as one broad search with explore agents, don't go firm by firm, and skip the browser agent and code tools.",
+   "positive_task": "people-search-criteria",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Look up Andy Prevalsky from Rose Labs and get me his LinkedIn",
+   "positive_task": "people-search-targeted",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you find Andy Prevalsky's current profile online? He founded Rose Labs. I need his title, company, where he's based, and his LinkedIn URL, with a source. He's not famous, so actually search for him using explore agents, not a browser or code sandbox.",
+   "positive_task": "people-search-targeted",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Call +16199153156 once and get the client's full name and mailing address",
+   "positive_task": "phone-call-client-intake",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "We have a new client at +16199153156. Give them one call and get their full name and complete mailing address for our files. Only call once, and if it doesn't go through just tell me. Send me the exact name and address when you're done.",
+   "positive_task": "phone-call-client-intake",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Call Rose Test Logistics and check the status of package 2451338820",
+   "positive_task": "phone-call-ivr-dtmf",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Ring Rose Test Logistics at +16199153156, one time only, and track package 2451338820. Use keypad presses to get through the phone menu to tracking, punch in the whole number followed by the pound key, and tell me the delivery status and reference code. If the call fails, just let me know. Don't retry.",
+   "positive_task": "phone-call-ivr-dtmf",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Call Rose Test Florist and order a dozen red roses with delivery, pay by phone",
+   "positive_task": "phone-call-payment",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Call Rose Test Florist at +14159416744, just once, and order a dozen red roses for delivery. It's our sandbox merchant, so pay over the phone with the test card 4242 4242 4242 4242, exp 12/30, CVC 123, ZIP 78731. Stay on until payment goes through and you have the confirmation code, and copy the code letters exactly as spelled. Tell me the code and the total.",
+   "positive_task": "phone-call-payment",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Check my transactions for dead subscriptions and list which ones to go after for refunds",
+   "positive_task": "plaid-transactions-dead-subscriptions",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Go through my local transaction data with explore agents and find subscriptions I'm probably not using anymore, like Netflix, Spotify, Prime, and memberships. Posted charges only, and treat today as July 3, 2026. Any monthly sub with no charge in 2026 counts as dead, and annual ones charged in the last 400 days are still active. Prime and Prime Video are separate. Don't contact anyone, just give me a refund prep list.",
+   "positive_task": "plaid-transactions-dead-subscriptions",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "how many doordash orders went through for me in 2025?",
+   "positive_task": "plaid-transactions-doordash-count",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you look through my bank transactions and count how many DoorDash charges actually posted last year, 2025? Skip anything still pending and give me the exact number.",
+   "positive_task": "plaid-transactions-doordash-count",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "what did I spend in September 2025?",
+   "positive_task": "plaid-transactions-monthly-spend",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Pull my transactions for September 2025 and tell me my total spending in USD. Only count posted charges, and leave out pending stuff, paychecks, and refunds.",
+   "positive_task": "plaid-transactions-monthly-spend",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "get me a 16oz iced vanilla shakerato w/ oat milk from blue bottle ferry building",
+   "positive_task": "planner-memory-blackbox-1788921424-188147-31070",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you place a pickup order at the Blue Bottle in the Ferry Building? I want the vanilla bean shakerato, iced, 16 ounce, with oat milk.",
+   "positive_task": "planner-memory-blackbox-1788921424-188147-31070",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "blue bottle ferry bldg pickup: iced vanilla bean shakerato, oat, 16oz pls",
+   "positive_task": "planner-memory-blackbox-1788921668-208628-13116",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "I'm heading to the Ferry Building soon. Could you order me a 16 oz iced vanilla bean shakerato made with oat milk from Blue Bottle so it's ready for pickup?",
+   "positive_task": "planner-memory-blackbox-1788921668-208628-13116",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "order my usual oat milk vanilla shakerato from blue bottle ferry building",
+   "positive_task": "planner-memory-blackbox-1788921801-218966-17332",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Mind putting in an order at Blue Bottle Coffee, Ferry Building location? Iced vanilla bean shakerato, 16oz, swap in oat milk, and I'll pick it up.",
+   "positive_task": "planner-memory-blackbox-1788921801-218966-17332",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "pickup order: 16oz iced vanilla shakerato, oat milk, blue bottle ferry building",
+   "positive_task": "planner-memory-blackbox-1788922170-250441-29187",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Hey, can you grab me a drink from Blue Bottle at the Ferry Building? A 16 ounce iced vanilla bean shakerato with oat milk, set up for pickup.",
+   "positive_task": "planner-memory-blackbox-1788922170-250441-29187",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "raise $5M for Rose Labs, just handle it",
+   "positive_task": "raise-5m-rose-labs-brex",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "I need you to go out and raise five million dollars for my startup Rose Labs. Don't come back with questions, just get it done.",
+   "positive_task": "raise-5m-rose-labs-brex",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "compare the latest official populations of Tokyo and NYC, with sources",
+   "positive_task": "response-schema-non-goal-feedback",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Research Tokyo and New York City in parallel, one agent each, and find the most recent official population number for each. Once both come back, give me a short comparison with the figure, the year it's from, and the source link.",
+   "positive_task": "response-schema-non-goal-feedback",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "analyze this one creator's last 90 days of posting across their platforms",
+   "positive_task": "single-creator-arm",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "For my health/longevity/tech founder brand, dig into the creator in the attached JSON. Look at their activity on YouTube, IG, TikTok and Substack over roughly April\u2013July 2026 and give me their name, rank, handles, and how often they post per platform with examples and a confidence level. Don't make up numbers.",
+   "positive_task": "single-creator-arm",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "get Tokyo and NYC populations and multiply them together",
+   "positive_task": "spawn-sub-agents",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Spin up two general-purpose agents, one for Tokyo and one for New York City, to look up each city's current population with web research only, no browser or code. Then multiply the two numbers and tell me the result.",
+   "positive_task": "spawn-sub-agents",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "build a website for a made-up coffee shop called Beam Roast",
+   "positive_task": "summary-site-no-filetype",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Can you whip up a simple site for Beam Roast, a fictional coffee shop? Put the name up top as a big header and add a quick About section with a couple of filler sentences. Just go ahead, no questions.",
+   "positive_task": "summary-site-no-filetype",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "analyze the top 50 health/longevity/tech founder creators and build my content plan",
+   "positive_task": "test-mass-agent-run-0",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "I'm starting a personal brand around health, longevity, tech and the founder journey. Find the top 50 creators in that space on YouTube, IG, TikTok and Substack, and run one agent per creator to break down cadence, hooks, their best 5 posts from the last 90 days, and topic gaps. Then give me a positioning statement, a 90-day calendar for all four platforms, 30 script openers, and 20 creators to engage with weekly.",
+   "positive_task": "test-mass-agent-run-0",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "check my synced chatgpt, claude, apple notes and obsidian docs actually have data",
+   "positive_task": "user-data-prod-grep",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Using explore agents and local document search only, verify my synced docs from ChatGPT, Claude, Apple Notes and Obsidian. Pull one real, checkable fact from each (or tell me none is synced) and give me a pass/verify table with the filters, snippet, and file path for each.",
+   "positive_task": "user-data-prod-grep",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "call me when bitcoin hits $10",
+   "positive_task": "wait-for-trigger",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Set up a trigger so that once Bitcoin's price reaches $10 you ring my phone and let me know it hit the target. It should fire right away.",
+   "positive_task": "wait-for-trigger",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "who do I message most on whatsapp, and what was my last message?",
+   "positive_task": "whatsapp-history-recall",
+   "kind": "paraphrase",
+   "exclude": null
+  },
+  {
+   "query": "Go through my WhatsApp data and tell me three things: the last message I sent, who I talk to the most, and how many messages I have total along with the date range they span.",
+   "positive_task": "whatsapp-history-recall",
+   "kind": "paraphrase",
+   "exclude": null
+  }
+ ],
+ "hard_negatives": [
+  {
+   "query": "Cancel the Amazon order I placed yesterday for the black beanie before it ships",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-agent",
+   "exclude": null
+  },
+  {
+   "query": "Leave a 4-star review on Amazon for the beanie I bought last month",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-agent-amazon-cookie-payment",
+   "exclude": null
+  },
+  {
+   "query": "Track where my Amazon package is right now and tell me the delivery ETA",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-amazon-return",
+   "exclude": null
+  },
+  {
+   "query": "Sell my old AirPods on eBay, list them at $60 with free shipping",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-agent-amazon-mx-buy-under-5-usd",
+   "exclude": null
+  },
+  {
+   "query": "Cancel my OpenTable reservation at Prospect for Friday",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-opentable-reservation",
+   "exclude": null
+  },
+  {
+   "query": "Find me a restaurant on Resy with a bar seat tonight and just send me the options, don't book",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-opentable-reservation",
+   "exclude": null
+  },
+  {
+   "query": "Request a refund from AMC for the Metreon tickets I bought but couldn't use",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-event-ticket",
+   "exclude": null
+  },
+  {
+   "query": "Check what's playing at the Alamo Drafthouse on Mission this weekend and list the showtimes",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-imax-group-tickets",
+   "exclude": null
+  },
+  {
+   "query": "Sell my two extra tickets for the 1015 Folsom show on StubHub",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-1015-eventim-request-card",
+   "exclude": null
+  },
+  {
+   "query": "Change my Hotel Kabuki booking on hotels.com to add a second night",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-hotel-booking",
+   "exclude": null
+  },
+  {
+   "query": "List my apartment on Airbnb for next weekend",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-hotel-booking",
+   "exclude": null
+  },
+  {
+   "query": "Cancel my Sauna Garden session at Alchemy Springs and ask for a credit",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-alchemy-springs-sauna",
+   "exclude": null
+  },
+  {
+   "query": "Schedule an Uber pickup for tomorrow at 6am to SFO",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "minted-agent-accounts-uber",
+   "exclude": null
+  },
+  {
+   "query": "Download my Uber receipts from last month as PDFs for expensing",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "minted-agent-accounts-uber",
+   "exclude": null
+  },
+  {
+   "query": "Delete my last tweet on X",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "minted-agent-accounts-x-post",
+   "exclude": null
+  },
+  {
+   "query": "Post 'Hello World' to my LinkedIn feed",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "minted-agent-accounts-x-post",
+   "exclude": null
+  },
+  {
+   "query": "Delete my Indeed account and all my saved resumes",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-indeed-account-create",
+   "exclude": null
+  },
+  {
+   "query": "Apply to three senior backend jobs on LinkedIn using my existing profile",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-indeed-account-create",
+   "exclude": null
+  },
+  {
+   "query": "Resize this image to 1080x1080 for Instagram",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-file-upload-tinypng",
+   "exclude": null
+  },
+  {
+   "query": "Convert this PNG to a PDF using ilovepdf",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-file-upload-tinypng",
+   "exclude": null
+  },
+  {
+   "query": "Remove the background from this photo",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "image-handling",
+   "exclude": null
+  },
+  {
+   "query": "Make this image black and white and crop it to a square",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "files-in-sub-agents",
+   "exclude": null
+  },
+  {
+   "query": "Dispute the $42 charge from DoorDash on my Chase card",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-doordash-food-plan-grocery-order",
+   "exclude": null
+  },
+  {
+   "query": "Cancel my DashPass subscription",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-doordash-usb-c-cable",
+   "exclude": null
+  },
+  {
+   "query": "Return the USB-C cable I got from Best Buy in store",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-doordash-usb-c-cable",
+   "exclude": null
+  },
+  {
+   "query": "Remove the strawberries from my Instacart order that's already in progress",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-instacart-grocery-order",
+   "exclude": null
+  },
+  {
+   "query": "Set up a recurring weekly Whole Foods delivery on Amazon Fresh",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-instacart-grocery-order",
+   "exclude": null
+  },
+  {
+   "query": "Tip my Blue Bottle barista through the app for my last order",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-blue-bottle-challenge-recovery",
+   "exclude": null
+  },
+  {
+   "query": "Find out if Blue Bottle's Ferry Building store is open on Thanksgiving",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "planner-memory-blackbox-1788921424-188147-31070",
+   "exclude": null
+  },
+  {
+   "query": "Leave feedback on Toast for the Nopa Fish order that came cold",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-toast-nopa-write-lock",
+   "exclude": null
+  },
+  {
+   "query": "Book a table at Nopa on Divisadero for Saturday brunch",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "browser-toast-nopa-write-lock",
+   "exclude": null
+  },
+  {
+   "query": "Reschedule my existing Calendly meeting with Andy to next Tuesday",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "calendly-schedule-meeting",
+   "exclude": null
+  },
+  {
+   "query": "Add a 'dentist appointment' event to my Google Calendar for Thursday 3pm",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "calendly-schedule-meeting",
+   "exclude": null
+  },
+  {
+   "query": "Read me the last iMessage I got from 972-977-7432",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "message-person",
+   "exclude": null
+  },
+  {
+   "query": "Block the number 972-977-7432 on my phone",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "message-person-agent-sms",
+   "exclude": null
+  },
+  {
+   "query": "Send a WhatsApp voice note to my mom saying I'll be late",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "whatsapp-history-recall",
+   "exclude": null
+  },
+  {
+   "query": "Export my Telegram chat history with Sam to a text file",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "whatsapp-history-recall",
+   "exclude": null
+  },
+  {
+   "query": "Pick up the voicemail left on my line and transcribe it",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "phone-call-client-intake",
+   "exclude": null
+  },
+  {
+   "query": "Set up an IVR phone menu for my business with options for sales and support",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "phone-call-ivr-dtmf",
+   "exclude": null
+  },
+  {
+   "query": "Track FedEx package 2451338820 on the FedEx website",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "phone-call-ivr-dtmf",
+   "exclude": null
+  },
+  {
+   "query": "Send flowers to my mom through 1-800-Flowers online, don't call anyone",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "phone-call-payment",
+   "exclude": null
+  },
+  {
+   "query": "Set a price alert on Coinbase that emails me if ETH drops below $2000",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "wait-for-trigger",
+   "exclude": null
+  },
+  {
+   "query": "Buy $50 of Bitcoin on Coinbase right now",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "wait-for-trigger",
+   "exclude": null
+  },
+  {
+   "query": "Cancel my Netflix subscription for me",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "plaid-transactions-dead-subscriptions",
+   "exclude": null
+  },
+  {
+   "query": "Pay my PG&E bill with my linked checking account",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "plaid-transactions-monthly-spend",
+   "exclude": null
+  },
+  {
+   "query": "Build me a monthly budget spreadsheet for next year with categories and targets",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "plaid-transactions-monthly-spend",
+   "exclude": null
+  },
+  {
+   "query": "Order dinner on Uber Eats instead of DoorDash tonight",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "plaid-transactions-doordash-count",
+   "exclude": null
+  },
+  {
+   "query": "Update the menu and prices on the existing Beam Roast site",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "summary-site-no-filetype",
+   "exclude": null
+  },
+  {
+   "query": "Transfer my domain from GoDaddy to Cloudflare",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "build-boxing-payment",
+   "exclude": null
+  },
+  {
+   "query": "Set up Stripe subscription billing for my dad's boxing gym in his existing QuickBooks",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "build-boxing-payment",
+   "exclude": null
+  },
+  {
+   "query": "Write a pitch deck outline for Rose Labs' seed round",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "raise-5m-rose-labs-brex",
+   "exclude": null
+  },
+  {
+   "query": "Apply for a Brex business card for Rose Labs",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "raise-5m-rose-labs-brex",
+   "exclude": null
+  },
+  {
+   "query": "Unsubscribe me from all the investor newsletters in my inbox",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "family-office-angel-outreach",
+   "exclude": null
+  },
+  {
+   "query": "Dedupe and clean up this CSV of angels, merging rows with the same email",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "outreach-batch",
+   "exclude": null
+  },
+  {
+   "query": "Compare three health insurance plans for a family of four in California",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "parallel-tool-calls",
+   "exclude": null
+  },
+  {
+   "query": "Find the current GDP of Tokyo and New York City",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "spawn-sub-agents",
+   "exclude": null
+  },
+  {
+   "query": "Update my own LinkedIn headline to say Founder at Rose Labs",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "people-search-targeted",
+   "exclude": null
+  },
+  {
+   "query": "Star the top 10 CUDA kernel repos on GitHub from my account",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "cuda-kernel-github-top100-code-agent",
+   "exclude": null
+  },
+  {
+   "query": "Using Claude Code, fix the failing unit tests in my repo and open a PR",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "claude-code-agent",
+   "exclude": null
+  },
+  {
+   "query": "Unsubscribe from the three longevity YouTubers I follow",
+   "positive_task": null,
+   "kind": "hard_negative",
+   "near_task": "single-creator-arm",
+   "exclude": null
+  }
+ ]
+}

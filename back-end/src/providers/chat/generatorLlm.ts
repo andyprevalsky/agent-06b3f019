@@ -79,7 +79,6 @@ export function requireGeneratorParsedJson(fullJson: string): {
 
 const log = createLogger('GeneratorLLM');
 
-// FilePointer interface for type safety when processing
 interface ChatMessage {
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
   text: string;
@@ -439,7 +438,7 @@ async function callGeneratorLlmCore(
           if (!isClaude && actualModel?.endsWith('-claude')) {
             isClaude = true;
           }
-          if (!isGpt && actualModel?.endsWith('-gpt')) {
+          if (!isGpt && (actualModel?.endsWith('-gpt') || actualModel?.endsWith('-foundry'))) {
             isGpt = true;
           }
 

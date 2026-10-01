@@ -136,9 +136,30 @@ function assertNumber(value: unknown, fieldName: string): number {
   return value;
 }
 
-function approvalId(record: Record<string, unknown>): string | undefined {
-  if (record.approval_required !== true) return undefined;
-  return assertString(field(record, ['approval_id', 'approvalId']), 'approval_id');
+function throwIfApprovalNeeded(record: Record<string, unknown>): void {
+  const status = optionalString(record, ['status']);
+  if (
+    status !== 'approval_required' &&
+    status !== 'approval_pending' &&
+    record.approval_required !== true
+  )
+    return;
+  throw new AgentCardProviderError(
+    'AgentCard requires the cardholder to approve this action',
+    409,
+    undefined,
+    'agentcard_setup_required',
+    {
+      agentcardStatus: status ?? 'approval_required',
+      setupAction: 'approve_agentcard_request',
+      ...(optionalString(record, ['approvalUrl', 'approval_url']) !== undefined
+        ? { setupUrl: optionalString(record, ['approvalUrl', 'approval_url']) }
+        : {}),
+      ...(optionalString(record, ['approvalId', 'approval_id']) !== undefined
+        ? { approvalId: optionalString(record, ['approvalId', 'approval_id']) }
+        : {}),
+    }
+  );
 }
 
 function failureMessage(result: unknown): string {
@@ -160,11 +181,21 @@ function setupActionForCode(code: string): string {
       return 'complete_agentcard_kyc';
     case 'wallet_funding_required':
     case 'wallet_balance_unavailable':
+    case 'issuing_balance_insufficient':
       return 'fund_agentcard_wallet';
     case 'org_wallet_funding_required':
+    case 'org_wallet_unavailable':
       return 'fund_agentcard_company_wallet';
     case 'payment_method_required':
       return 'add_agentcard_payment_method';
+    case 'vault_started':
+    case 'attach_started':
+    case 'attach_pending':
+      return 'complete_agentcard_card_setup';
+    case 'vault_ready':
+      return 'use_agentcard_buy';
+    case 'user_info_required':
+      return 'complete_agentcard_user_info';
     default:
       return 'connect_agentcard';
   }
@@ -175,7 +206,8 @@ function setupToolForCode(code: string): string | undefined {
     case 'kyc_required':
       return 'start_kyc';
     case 'wallet_funding_required':
-      return 'fund_wallet';
+    case 'issuing_balance_insufficient':
+      return 'add_funds';
     default:
       return undefined;
   }
@@ -187,10 +219,17 @@ function preconditionCode(record: Record<string, unknown>): string | undefined {
     [
       'kyc_required',
       'wallet_funding_required',
+      'issuing_balance_insufficient',
       'org_wallet_funding_required',
+      'org_wallet_unavailable',
       'wallet_balance_unavailable',
       'payment_method_required',
       'connect_required',
+      'vault_started',
+      'vault_ready',
+      'attach_started',
+      'attach_pending',
+      'user_info_required',
     ].includes(raw)
     ? raw
     : undefined;
@@ -267,12 +306,11 @@ async function maybeStartSetup(
   const setupTool = setupToolForCode(agentcardStatus);
   if (setupTool === undefined) return {};
 
-  if (setupTool === 'fund_wallet') {
-    await toolCaller(userId, 'get_wallet', {});
+  if (setupTool === 'add_funds' && (!Number.isSafeInteger(amountCents) || amountCents <= 0)) {
+    return { setupTool };
   }
 
-  const setupArgs =
-    setupTool === 'fund_wallet' ? { amount_cents: amountCents, payment_method: 'apple_pay' } : {};
+  const setupArgs = setupTool === 'add_funds' ? { amount_cents: amountCents } : {};
   const setupResult = await toolCaller(userId, setupTool, setupArgs);
   let setupRecord: Record<string, unknown>;
   try {
@@ -305,6 +343,7 @@ async function throwIfSetupRequired(
   if (agentcardStatus === undefined) return;
   const connectUrl = connectUrlForUser(userId);
   const setupDetails = await maybeStartSetup(userId, toolCaller, agentcardStatus, amountCents);
+  const setupUrl = optionalString(record, ['vaultUrl', 'attachUrl', 'approvalUrl']);
   throw new AgentCardProviderError(
     `AgentCard setup required: ${agentcardStatus}`,
     409,
@@ -315,6 +354,7 @@ async function throwIfSetupRequired(
       setupAction: setupActionForCode(agentcardStatus),
       connectUrl,
       ...setupDetails,
+      ...(setupUrl === undefined ? {} : { setupUrl }),
     }
   );
 }
@@ -371,16 +411,10 @@ export class AgentCardUserMcpProvider implements CardProvider {
     });
 
     const result = await this.callTool('create_card', createArgs);
-    let record = firstRecord(result);
+    const record = firstRecord(result);
     throwIfCompanyFundingInProgress(record);
     await throwIfSetupRequired(this.userId, this.toolCaller, record, request.amountCents);
-    const createApprovalId = approvalId(record);
-    if (createApprovalId !== undefined) {
-      await this.callTool('approve_request', { approval_id: createApprovalId });
-      record = firstRecord(await this.callTool('create_card', createArgs));
-      throwIfCompanyFundingInProgress(record);
-      await throwIfSetupRequired(this.userId, this.toolCaller, record, request.amountCents);
-    }
+    throwIfApprovalNeeded(record);
 
     const cardId = assertString(field(record, ['card_id', 'cardId', 'id']), 'card_id');
     const details =
@@ -450,18 +484,12 @@ export class AgentCardUserMcpProvider implements CardProvider {
       user_id: maskId(this.userId),
       card_id: maskId(cardId),
     });
-    let result = await this.callTool('get_card_details', { card_id: cardId });
-    let record = firstRecord(result);
+    const result = await this.callTool('get_card_details', { card_id: cardId });
+    const record = firstRecord(result);
     await throwIfSetupRequired(this.userId, this.toolCaller, record, 0);
-    const detailsApprovalId = approvalId(record);
-    if (detailsApprovalId !== undefined) {
-      await this.callTool('approve_request', { approval_id: detailsApprovalId });
-      result = await this.callTool('get_card_details', { card_id: cardId });
-      record = firstRecord(result);
-      await throwIfSetupRequired(this.userId, this.toolCaller, record, 0);
-    }
+    throwIfApprovalNeeded(record);
     const detailsText =
-      resultText(result) || optionalString(record, ['message', 'text', 'description']) || '';
+      optionalString(record, ['message', 'text', 'description']) ?? resultText(result);
     const pan =
       optionalString(record, ['pan', 'card_number', 'cardNumber', 'number']) ??
       labeledTextValue(detailsText, 'PAN')?.replace(/\s+/g, '');
@@ -511,7 +539,8 @@ export class AgentCardUserMcpProvider implements CardProvider {
       const result = await this.toolCaller(this.userId, name, args);
       if (typeof result === 'object' && result !== null && (result as McpResult).isError === true) {
         const record = firstRecord(result);
-        await throwIfSetupRequired(this.userId, this.toolCaller, record, 0);
+        const amountCents = typeof args.amount_cents === 'number' ? args.amount_cents : 0;
+        await throwIfSetupRequired(this.userId, this.toolCaller, record, amountCents);
         throw new AgentCardProviderError(`AgentCard MCP ${name} failed: ${failureMessage(result)}`);
       }
       return result;

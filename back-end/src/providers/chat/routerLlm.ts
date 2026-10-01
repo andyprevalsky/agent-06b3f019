@@ -421,7 +421,7 @@ export async function callRouterLlm(params: {
             isClaude = true;
             log.info('[RouterLLM] User Claude token detected', { actualModel });
           }
-          if (!isGpt && actualModel?.endsWith('-gpt')) {
+          if (!isGpt && (actualModel?.endsWith('-gpt') || actualModel?.endsWith('-foundry'))) {
             isGpt = true;
             log.info('[RouterLLM] User GPT token detected', { actualModel });
           }

@@ -77,6 +77,29 @@ async function main(): Promise<void> {
 
   {
     const store = fakeStore();
+    const calls: string[] = [];
+    const result = await monitorAgentCardOrgWallet({
+      thresholdCents: 10_000,
+      alertPhone: '+15555550100',
+      reloadUrl: 'https://app.agentcard.sh/org/org-1',
+      callOrgTool: async (name) => {
+        calls.push(name);
+        if (name === 'get_company_wallet') {
+          const wallet = { ...walletResult(5_000).structuredContent.wallet };
+          delete (wallet as { livemode?: boolean }).livemode;
+          return { structuredContent: { wallet } };
+        }
+        return { structuredContent: { mode: 'production' } };
+      },
+      sendSms: async () => ({ success: true }),
+      store,
+    });
+    assert.equal(result.status, 'alerted', 'documented wallet shape must not appear sandbox');
+    assert.deepEqual(calls, ['get_company_wallet', 'whoami']);
+  }
+
+  {
+    const store = fakeStore();
     const messages: string[] = [];
     const result = await monitorAgentCardOrgWallet({
       thresholdCents: 10_000,

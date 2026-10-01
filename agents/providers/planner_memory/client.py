@@ -35,10 +35,13 @@ async def search_memories(
     exclude_root_agent_id: Optional[str],
     limit: int = 20,
     passed_only: bool = False,
+    min_similarity: Optional[float] = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
 ) -> list[dict[str, Any]]:
     base, headers = _base()
     body: dict[str, Any] = {"goal": goal, "limit": limit, "passed_only": passed_only}
+    if min_similarity is not None:
+        body["min_similarity"] = min_similarity
     if user_id:
         body["user_id"] = user_id
     if exclude_root_agent_id:
@@ -134,6 +137,16 @@ async def memory_stats(*, timeout_s: float = DEFAULT_TIMEOUT_S) -> dict[str, Any
     base, headers = _base()
     async with httpx.AsyncClient(timeout=timeout_s) as client:
         response = await client.get(f"{base}/api/planner-memory/stats", headers=headers)
+    response.raise_for_status()
+    data = response.json()
+    return data if isinstance(data, dict) else {}
+
+
+async def embed_pending(*, limit: int = 50, timeout_s: float = 600.0) -> dict[str, Any]:
+    """Internal: embed rows lacking a current-model embedding (backfill / repair)."""
+    base, headers = _base()
+    async with httpx.AsyncClient(timeout=timeout_s) as client:
+        response = await client.post(f"{base}/api/planner-memory/embed-pending", headers=headers, json={"limit": limit})
     response.raise_for_status()
     data = response.json()
     return data if isinstance(data, dict) else {}

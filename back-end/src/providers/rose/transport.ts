@@ -270,6 +270,38 @@ export async function postOpenAIResponsesStream(
   };
 }
 
+/** Microsoft Foundry's Responses endpoint uses the same SSE contract as OpenAI. */
+export async function postFoundryResponsesStream(
+  options: PostOptions & { endpoint: string; apiKey: string; abortSignal?: AbortSignal }
+): Promise<StreamResponse> {
+  const timeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+  const upstream = options.abortSignal ?? new AbortController().signal;
+  const root = options.endpoint.replace(/\/+$/, '').replace(/\/openai\/v1$/, '');
+  if (!root.startsWith('https://')) throw new Error('AZURE_FOUNDRY_ENDPOINT must be HTTPS');
+  const { response, cleanup } = await withStreamingConnectTimeout(upstream, timeoutMs, (signal) =>
+    fetch(`${root}/openai/v1/responses`, {
+      method: 'POST',
+      headers: { 'api-key': options.apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(options.body),
+      redirect: 'manual',
+      signal,
+    })
+  );
+  let errorBody: string | undefined;
+  if (!response.ok) {
+    try {
+      errorBody = await response.text();
+    } finally {
+      cleanup();
+    }
+    log.warn('foundry.error', { request_id: options.requestId, status: response.status });
+  }
+  const body =
+    response.ok && response.body ? keepAbortConnectedToBody(response.body, cleanup) : null;
+  if (!body) cleanup();
+  return { status: response.status, ok: response.ok, headers: response.headers, body, errorBody };
+}
+
 export async function postCerebrasStream(
   options: PostOptions & { cerebrasKey: string; abortSignal?: AbortSignal }
 ): Promise<StreamResponse> {

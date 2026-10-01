@@ -106,6 +106,7 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   options: CompletionOptions;
   requestId: string;
   callSite?: string;
+  hedgeDelayMs?: number;
 }): AsyncIterable<RoseStreamChunk> {
   const openrouterKey = process.env.OPENROUTER_API_KEY;
   if (!openrouterKey) {
@@ -136,9 +137,9 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
           callSite: params.callSite,
         }),
     },
-    // Both branches are already delayed behind the outer Cerebras hedge. Start
-    // them together so neither provider's long tail becomes the chat deadline.
-    hedgeAfter: () => Promise.resolve(),
+    // The silent-stream path starts both together. A fast direct 429 uses a
+    // short delay so the same-model spill can win without an extra request.
+    hedgeAfter: () => (params.hedgeDelayMs ? sleep(params.hedgeDelayMs) : Promise.resolve()),
     isContent: (chunk) => clearsChatStallGuard(chunk.kind),
     onWinner: (name) => {
       winnerName = name;
@@ -296,14 +297,10 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
     }
   }
 
-  // Same-model fallover for a rate cap: the Cerebras chat model is capped hard
-  // at the org level (5 req/min), so a burst trips a 402 `quota` / 429. Before
-  // the generic waterfall (different models), keep the chat on the same model
-  // by reaching it via OpenRouter with the provider UNPINNED — OpenRouter still
-  // PREFERS Cerebras but may spill to another host of that model past the cap.
-  // This is NOT a same-provider retry (a different host serves it), so it can't
-  // re-hit the cap. Only for quota/rate causes; stalls, 5xx, and empty streams
-  // go straight to the generic waterfall below.
+  // A direct 402/429 first tries the same model via OpenRouter. If that host
+  // remains silent, start the measured fast model too. A fast quota error can
+  // otherwise bypass the outer hedge and serialize an unbounded OpenRouter
+  // wait (55.8s in production) before the chat has shown any answer.
   const openrouterKey = process.env.OPENROUTER_API_KEY;
   if (
     openrouterKey &&
@@ -314,30 +311,30 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
     try {
       yield* runWithFallThrough({
         produce: () =>
-          exclusiveOpenRouterCerebrasCompletion({
+          raceDirectCerebrasOpenRouterFallbacks({
+            poolSpec: params.poolSpec,
             options: params.options,
-            openrouterKey,
             requestId: params.requestId,
             callSite: params.callSite,
-            allowProviderFallback: true,
+            hedgeDelayMs: 500,
           }),
         emit,
       });
       if (emittedAny) {
-        log.info('cerebras_chat.openrouter_glm_fallover_done', {
+        log.info('cerebras_chat.rate_cap_fallback_done', {
           request_id: params.requestId,
           pool: params.pool,
           elapsed_ms: Date.now() - params.startedAt,
         });
         return;
       }
-      log.warn('cerebras_chat.openrouter_glm_fallover_empty', {
+      log.warn('cerebras_chat.openrouter_rate_fallover_empty', {
         request_id: params.requestId,
         pool: params.pool,
       });
     } catch (openRouterError) {
       if (!(openRouterError instanceof PreContentFallThroughError)) throw openRouterError;
-      log.warn('cerebras_chat.openrouter_glm_fallover_failed', {
+      log.warn('cerebras_chat.openrouter_rate_fallover_failed', {
         request_id: params.requestId,
         pool: params.pool,
         error_name: openRouterError.cause.name,

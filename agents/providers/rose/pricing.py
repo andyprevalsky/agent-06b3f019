@@ -163,8 +163,9 @@ def get_pool_pricing(pool_name: str) -> Optional[Dict[str, float]]:
     return _average_pool_pricing(pool_name)
 
 
-# $0 direct-auth pricing (user's own provider subscription pays for inference).
-_FREE_DIRECT_PRICING: Dict[str, float] = {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0}
+# Zero user-facing token cost. OAuth uses the user's subscription; Foundry
+# remains an Azure expense paid by Rose and must be tracked in Azure billing.
+_ZERO_USER_PRICING: Dict[str, float] = {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0}
 
 
 def get_anthropic_pricing(model: str) -> Optional[Dict[str, float]]:
@@ -174,13 +175,13 @@ def get_anthropic_pricing(model: str) -> Optional[Dict[str, float]]:
         # An empty/whitespace model id must not fuzzy-match a substring below.
         return None
     normalized_dashed = normalized.replace(".", "-")
-    # Any `-claude`/`-gpt` suffix is a direct-auth path (claudeAuth / gptAuth): the
-    # user's own subscription pays, so it costs $0 to us. Enforce that invariant for
-    # EVERY direct model — the explicit `_DIRECT_TOKEN_PRICING` list is incomplete
+    # `-claude`/`-gpt` are user-subscription paths; `-foundry` is funded by Rose
+    # but has the same zero user-facing cost. Enforce this for every such model:
+    # the explicit `_DIRECT_TOKEN_PRICING` list is incomplete
     # (e.g. haiku-claude is absent), and without this guard a missing entry would
     # fall through to the paid fuzzy match below and wrongly bill a $0 call.
-    if normalized_dashed.endswith("-claude") or normalized_dashed.endswith("-gpt"):
-        return dict(_FREE_DIRECT_PRICING)
+    if normalized_dashed.endswith(("-claude", "-gpt", "-foundry")):
+        return dict(_ZERO_USER_PRICING)
     if normalized in _DIRECT_TOKEN_PRICING:
         return _DIRECT_TOKEN_PRICING[normalized]
     if normalized_dashed in _DIRECT_TOKEN_PRICING:

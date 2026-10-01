@@ -340,7 +340,10 @@ const IDEMPOTENT_READ_TOOLS = new Set([
   'get_cardholder_kyc_status',
   'get_company_wallet',
   'get_onboarding_session',
+  'whoami',
   'list_cards',
+  'list_cardholders',
+  'list_recoveries',
   'list_transfers',
 ]);
 

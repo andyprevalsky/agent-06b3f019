@@ -20,7 +20,9 @@ set -uo pipefail
 
 REPO_DIR="/data/repo"
 APP_USER="rose"
-FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-/data/cloudbench-fetch-ref.sh}"
+CONTROL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+[ -d "$CONTROL_DIR/lib" ] && CONTROL_LIB_DIR="$CONTROL_DIR/lib" || CONTROL_LIB_DIR="$CONTROL_DIR"
+FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$CONTROL_DIR/cloudbench-fetch-ref.sh}"
 log() { echo "[cloudbench-worker] $*"; }
 
 cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
@@ -32,9 +34,6 @@ cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
 # /data/worker.log and the pool just stays one worker short).
 if [ -n "${REF:-}" ]; then
     log "git-syncing → $REF"
-    if [ ! -x "$FETCH_REF_SCRIPT" ]; then
-        FETCH_REF_SCRIPT="$REPO_DIR/scripts/cloudbench-fetch-ref.sh"
-    fi
     if [ ! -x "$FETCH_REF_SCRIPT" ]; then
         log "FATAL: missing executable cloudbench-fetch-ref helper"
         exit 1
@@ -78,7 +77,7 @@ fi
 # Every autoscaled worker clone starts from a volume snapshot that may predate
 # the current run. Refresh from the app-level blobs and verify exact bytes before
 # joining the benchmark queue.
-ENV_HELPER="$REPO_DIR/scripts/lib/cloudbench-env.sh"
+ENV_HELPER="${CLOUDBENCH_ENV_HELPER:-$CONTROL_LIB_DIR/cloudbench-env.sh}"
 [ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; exit 1; }
 # shellcheck source=lib/cloudbench-env.sh
 source "$ENV_HELPER"

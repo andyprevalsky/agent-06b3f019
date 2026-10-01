@@ -20,6 +20,7 @@ import { DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS } from '../../providers/ro
 import {
   parsePartialRouterDecisionJson,
   parseRouterDecisionAfterDeadline,
+  parseRouterDecisionJson,
 } from '../../providers/chat/routerDecision';
 
 async function run(): Promise<void> {
@@ -44,6 +45,31 @@ async function run(): Promise<void> {
   assert.equal(options.effort, 'minimal');
   assert.equal(options.response_format?.json_schema.name, 'router_decision');
   assert.equal(options.response_format?.json_schema.strict, true);
+
+  const providerAction =
+    'start_superintelligence(goal="Inspect the \\"workspace\\" file list, once", mode="execute")';
+  assert.deepEqual(parseRouterDecisionJson(providerAction), {
+    action: 'start_superintelligence',
+    goal: 'Inspect the "workspace" file list, once',
+    mode: 'execute',
+    reasoning: 'Route selected from a provider action response.',
+  });
+  assert.deepEqual(
+    parseRouterDecisionAfterDeadline(providerAction, providerAction),
+    parseRouterDecisionJson(providerAction)
+  );
+  assert.throws(() =>
+    parseRouterDecisionJson('start_superintelligence(goal="ok", mode="invalid")')
+  );
+  assert.throws(() =>
+    parseRouterDecisionJson('start_superintelligence(goal="ok", mode="plan");do_bad()')
+  );
+
+  assert.equal(
+    parseRouterDecisionAfterDeadline('', ''),
+    null,
+    'a silent provider must surface the router deadline rather than inventing a decision'
+  );
 
   assert.equal(CHAT_TIMEOUT_MS, 15_000, 'chat gets 15s from the start of each request');
   assert.equal(DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS, CHAT_TIMEOUT_MS);

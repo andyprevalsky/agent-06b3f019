@@ -1365,6 +1365,74 @@ async def test_run_agent_refusal_retry_excludes_anthropic_without_backoff():
     assert result["status"] in {"max_iterations", "error"}
 
 
+async def test_run_agent_refusal_reroute_crosses_the_temporal_activity_boundary():
+    """A refusal reroute must survive the workflow -> activity hop.
+
+    REGRESSION (2026-08-22): the reroute only ever worked in-process. Workflow context
+    dispatches through `call_llm_activity`, whose signature had no exclusion parameter, so
+    the flag was silently dropped at the boundary and every retry went back to the model
+    that had just refused. One transient refusal therefore became a guaranteed
+    3-consecutive-failure kill. The sibling test above passes `is_inside_temporal_activity=True`
+    and so covered only the path that already worked; this one covers the production path.
+
+    Asserted on the ACTIVITY ARGS rather than on a provider mock, because the defect was the
+    argument never being sent -- an assertion further downstream would have stayed green.
+    """
+    from loop.run_agent import run_agent
+    from providers.rose.errors import RoseRefusalError
+
+    activity_calls: list[list] = []
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def mock_execute_activity(activity, **kwargs):
+        args = kwargs.get("args") or []
+        name = getattr(activity, "__name__", str(activity))
+        if "call_llm" not in name:
+            return {}
+        activity_calls.append(args)
+        if len(activity_calls) == 1:
+            raise RoseRefusalError("Anthropic stream ended with refusal (request_id=r-boundary)")
+        return {"response": "", "tool_calls": [], "usage": {}, "detected_tools_ordered": []}
+
+    with (
+        patch("loop.run_agent.workflow.execute_activity", new=AsyncMock(side_effect=mock_execute_activity)),
+        patch("loop.run_agent.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_agent(
+            agent_id="agent-boundary",
+            user_id="user-boundary",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-lite",
+            tools=["attempt_completion"],
+            initial_context=[{"role": "USER", "text": "Go", "timestamp": "2024-01-01T00:00:00Z"}],
+            is_inside_temporal_activity=False,
+            post_message=AsyncMock(),
+            execute_tool=AsyncMock(),
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=2,
+            skip_verification=True,
+            skip_status_updates=True,
+        )
+
+    assert len(activity_calls) >= 2, "expected the refused call to be retried through the activity"
+    # The exclusion rides in the LAST positional slot; a new arg may only be appended there so an
+    # older replayed Temporal history still resolves to the default. Check the slot actually holds
+    # the flag before reading it, so the original defect (the argument never being sent at all)
+    # reports as itself rather than as a confusing value mismatch.
+    assert isinstance(activity_calls[0][-1], bool), (
+        "call_llm_activity is not receiving the anthropic-exclusion flag at all; last positional "
+        f"arg was {activity_calls[0][-1]!r}. The reroute dies at the workflow->activity boundary."
+    )
+    assert activity_calls[0][-1] is False, "first attempt must not pre-emptively exclude Anthropic"
+    assert activity_calls[1][-1] is True, "the retry after a refusal must reroute off Anthropic"
+
+
 def test_is_refusal_error_detects_type_message_and_cause_chain():
     """_is_refusal_error matches by type, by message, and through the cause chain."""
     from loop.run_agent import _is_refusal_error
@@ -2482,6 +2550,10 @@ async def run_all_tests():
     await r.record_async(
         "run_agent_refusal_retry_excludes_anthropic_without_backoff",
         test_run_agent_refusal_retry_excludes_anthropic_without_backoff,
+    )
+    await r.record_async(
+        "run_agent_refusal_reroute_crosses_the_temporal_activity_boundary",
+        test_run_agent_refusal_reroute_crosses_the_temporal_activity_boundary,
     )
     r.record("is_refusal_error_type_message_cause_chain", test_is_refusal_error_detects_type_message_and_cause_chain)
     r.record(
