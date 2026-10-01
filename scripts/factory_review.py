@@ -11,11 +11,12 @@ import sqlite3
 import statistics
 import webbrowser
 from collections import defaultdict
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
-
+from typing import Any
 
 DEFAULT_DB = Path.home() / "Library/Application Support/com.conductor.app/conductor.db"
 DEFAULT_REPO = "navi-whisper-lux-v2"
@@ -308,7 +309,7 @@ class Turn:
     # Resolved waits proven to have been consumed by this completed /deploy.
     consumed_approval_durations: tuple[float, ...] = ()
     lifecycle_duration: float | None = None
-    approval_events: tuple["ApprovalLifecycle", ...] = ()
+    approval_events: tuple[ApprovalLifecycle, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -592,6 +593,23 @@ def find_approval_lifecycles(
     return lifecycles
 
 
+def consumes_decision(turn: Turn, lifecycle: ApprovalLifecycle) -> bool:
+    approval_commands = [
+        shell_command(invocation)
+        for invocation in turn.invocations
+        if classify_deploy_gates(invocation) & APPROVAL_GATES
+    ]
+    if lifecycle.decision == "rejected":
+        return bool(approval_commands)
+    return any(
+        re.search(
+            r"(?:--)?mandatory-human-approval-retrieved=true",
+            command,
+        )
+        for command in approval_commands
+    )
+
+
 def attach_approval_lifecycles(
     turns: Sequence[Turn], lifecycles: Sequence[ApprovalLifecycle]
 ) -> list[Turn]:
@@ -603,22 +621,6 @@ def attach_approval_lifecycles(
             lifecycle
         )
 
-        def consumes_decision(turn: Turn) -> bool:
-            approval_commands = [
-                shell_command(invocation)
-                for invocation in turn.invocations
-                if classify_deploy_gates(invocation) & APPROVAL_GATES
-            ]
-            if lifecycle.decision == "rejected":
-                return bool(approval_commands)
-            return any(
-                re.search(
-                    r"(?:--)?mandatory-human-approval-retrieved=true",
-                    command,
-                )
-                for command in approval_commands
-            )
-
         same_turn = next(
             (
                 turn
@@ -627,7 +629,7 @@ def attach_approval_lifecycles(
                 and turn.status == "completed"
                 and turn.turn_id == lifecycle.request_turn_id
                 and turn.session_id == lifecycle.session_id
-                and consumes_decision(turn)
+                and consumes_decision(turn, lifecycle)
                 and parse_time(lifecycle.decided_at)
                 <= parse_time(turn.started_at) + timedelta(seconds=turn.duration)
             ),
@@ -644,7 +646,7 @@ def attach_approval_lifecycles(
                 parse_time(turn.started_at) - parse_time(lifecycle.decided_at)
             ).total_seconds()
             <= MAX_APPROVAL_RESUME_SECONDS
-            and consumes_decision(turn)
+            and consumes_decision(turn, lifecycle)
         ]
         target = same_turn or min(
             candidates, key=lambda turn: parse_time(turn.started_at), default=None
@@ -1735,7 +1737,7 @@ def rca_measurement_mode(turn: Turn) -> str:
     }
     transitions_are_valid = all(
         stage_ranks[current] - stage_ranks[previous] <= 1
-        for previous, current in zip(stage_values, stage_values[1:])
+        for previous, current in pairwise(stage_values)
     )
     if (
         stage_values
@@ -2001,11 +2003,12 @@ def load_descend_factory_events(path: Path) -> list[dict[str, Any]]:
         if record.get("record_type") != "factory_event":
             continue
         identifier = record.get("record_id")
-        if not isinstance(identifier, str):
-            raise ValueError(
-                f"missing descend factory-event record_id at {path}:{line_number}"
-            )
-        records.setdefault(identifier, record)
+        if isinstance(identifier, str):
+            records.setdefault(identifier, record)
+            continue
+        raise ValueError(
+            f"missing descend factory-event record_id at {path}:{line_number}"
+        )
     return sorted(
         records.values(),
         key=lambda record: (

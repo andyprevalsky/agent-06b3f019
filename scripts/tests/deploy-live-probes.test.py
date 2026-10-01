@@ -8,7 +8,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts" / "run_deploy_live_probes.py"
 
@@ -96,9 +95,11 @@ class DeployLiveProbeTests(unittest.TestCase):
                     (
                         sys.executable,
                         "-c",
-                        "import time; time.sleep(.15); "
-                        f"open({str(finished)!r}, 'w').write(repr(time.time())); "
-                        "raise SystemExit(7)",
+                        (
+                            "import time; time.sleep(.15); "
+                            f"open({str(finished)!r}, 'w').write(repr(time.time())); "
+                            "raise SystemExit(7)"
+                        ),
                     ),
                     ROOT,
                 ),
