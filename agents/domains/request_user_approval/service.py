@@ -293,95 +293,111 @@ async def request_user_approval_direct(
         status=MessageStatus.IN_PROGRESS,
         metadata=event_metadata,
     )
-    await workflow_instance._handle_tool_event(pre_event, tool_call_id, TOOL_NAME)
-
-    # Snapshot context length before waiting
-    context_len_before_wait = len(workflow_instance.context)
-
-    # Wait indefinitely for this specific request's response
+    completion_event: Optional[ToolEvent] = None
+    # Delivery may persist before its await acknowledges the opened chip.
     try:
-        await wait_condition_or_generation_handoff(
-            lambda: request_id in workflow_instance._signal_responses,
-            workflow_instance,
-            workflow_mod=workflow,
-        )
-    except asyncio.CancelledError:
-        if close_on_cancel:
+        await workflow_instance._handle_tool_event(pre_event, tool_call_id, TOOL_NAME)
+
+        # Snapshot context length before waiting
+        context_len_before_wait = len(workflow_instance.context)
+
+        # Wait indefinitely for this specific request's response
+        try:
+            await wait_condition_or_generation_handoff(
+                lambda: request_id in workflow_instance._signal_responses,
+                workflow_instance,
+                workflow_mod=workflow,
+            )
+        except GenerationHandoffRequested:
             interrupt_event = ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="Approval interrupted",
-                message="Approval wait interrupted.",
+                title="🔐 Requesting user approval",
+                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
                 status=MessageStatus.FINISHED,
-                metadata={**event_metadata, "excludeFromModel": True},
+                metadata=event_metadata,
             )
+            completion_event = interrupt_event
             await workflow_instance._handle_tool_event(interrupt_event, tool_call_id, TOOL_NAME)
-        raise
-    except GenerationHandoffRequested:
-        interrupt_event = ToolEvent(
+            raise
+
+        signal_response = workflow_instance._signal_responses.pop(request_id)
+
+        if signal_response and signal_response.strip() == REJECTION_SENTINEL:
+            logger.info("User rejected approval request (via signal)", request_id=request_id)
+
+            reject_event = ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="✗ User rejected action",
+                message="",
+                status=MessageStatus.FINISHED,
+                metadata=event_metadata,
+            )
+            completion_event = reject_event
+
+            # Poll messages to get the user's rejection feedback text from DB
+            await workflow_instance._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
+
+            # Extract rejection message only from messages added during this approval window
+            rejection_text = ""
+            for i in range(len(workflow_instance.context) - 1, context_len_before_wait - 1, -1):
+                if workflow_instance.context[i].get("role") == "USER":
+                    rejection_text = workflow_instance.context[i].get("text", "")
+                    break
+
+            if rejection_text:
+                logger.info("User rejection message", request_id=request_id, rejection_text=rejection_text[:100])
+
+            # Post FINISHED to close the approval chip cleanly
+            reject_event.message = rejection_text
+            await workflow_instance._handle_tool_event(reject_event, tool_call_id, TOOL_NAME)
+
+            raise UserRejectedError("User rejected the approval request", rejection_message=rejection_text)
+
+        # Every deployment replaces old workflow histories before candidate workers
+        # activate, so fresh histories always consume request-scoped signal data.
+        response_text = signal_response.strip() if signal_response else ""
+
+        logger.info(
+            "User approval response received",
+            request_id=request_id,
+            response_length=len(response_text),
+            response_preview=response_text[:50] if response_text else "",
+        )
+
+        post_event = ToolEvent(
             type=EventType.POST_MESSAGE,
-            title="🔐 Requesting user approval",
-            message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+            title="✓ User approval received",
+            message=_build_approval_completion_message(question, response_text),
             status=MessageStatus.FINISHED,
             metadata=event_metadata,
         )
-        await workflow_instance._handle_tool_event(interrupt_event, tool_call_id, TOOL_NAME)
+        completion_event = post_event
+        await workflow_instance._handle_tool_event(post_event, tool_call_id, TOOL_NAME)
+
+        return {
+            "response": response_text,
+            "question": question,
+            "attention_request_id": metadata_payload.get("attentionRequestId") if metadata_payload else None,
+        }
+
+    except asyncio.CancelledError:
+        if close_on_cancel:
+            if completion_event is None:
+                completion_event = ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Approval interrupted",
+                    message="Approval wait interrupted.",
+                    status=MessageStatus.FINISHED,
+                    metadata={**event_metadata, "excludeFromModel": True},
+                )
+            elif completion_event.title == "✗ User rejected action":
+                # A poll may publish feedback before its await acknowledges it.
+                for i in range(len(workflow_instance.context) - 1, context_len_before_wait - 1, -1):
+                    if workflow_instance.context[i].get("role") == "USER":
+                        completion_event.message = workflow_instance.context[i].get("text", "")
+                        break
+            await workflow_instance._handle_tool_event(completion_event, tool_call_id, TOOL_NAME)
         raise
-
-    signal_response = workflow_instance._signal_responses.pop(request_id)
-
-    if signal_response and signal_response.strip() == REJECTION_SENTINEL:
-        logger.info("User rejected approval request (via signal)", request_id=request_id)
-
-        # Poll messages to get the user's rejection feedback text from DB
-        await workflow_instance._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
-
-        # Extract rejection message only from messages added during this approval window
-        rejection_text = ""
-        for i in range(len(workflow_instance.context) - 1, context_len_before_wait - 1, -1):
-            if workflow_instance.context[i].get("role") == "USER":
-                rejection_text = workflow_instance.context[i].get("text", "")
-                break
-
-        if rejection_text:
-            logger.info("User rejection message", request_id=request_id, rejection_text=rejection_text[:100])
-
-        # Post FINISHED to close the approval chip cleanly
-        reject_event = ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="✗ User rejected action",
-            message=rejection_text,
-            status=MessageStatus.FINISHED,
-            metadata=event_metadata,
-        )
-        await workflow_instance._handle_tool_event(reject_event, tool_call_id, TOOL_NAME)
-
-        raise UserRejectedError("User rejected the approval request", rejection_message=rejection_text)
-
-    # Every deployment replaces old workflow histories before candidate workers
-    # activate, so fresh histories always consume request-scoped signal data.
-    response_text = signal_response.strip() if signal_response else ""
-
-    logger.info(
-        "User approval response received",
-        request_id=request_id,
-        response_length=len(response_text),
-        response_preview=response_text[:50] if response_text else "",
-    )
-
-    post_event = ToolEvent(
-        type=EventType.POST_MESSAGE,
-        title="✓ User approval received",
-        message=_build_approval_completion_message(question, response_text),
-        status=MessageStatus.FINISHED,
-        metadata=event_metadata,
-    )
-    await workflow_instance._handle_tool_event(post_event, tool_call_id, TOOL_NAME)
-
-    return {
-        "response": response_text,
-        "question": question,
-        "attention_request_id": metadata_payload.get("attentionRequestId") if metadata_payload else None,
-    }
 
 
 async def request_user_attention_direct(

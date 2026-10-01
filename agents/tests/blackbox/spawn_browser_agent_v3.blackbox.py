@@ -20924,7 +20924,14 @@ async def test_manager_terminal_scope_and_pending_resumes():
 
 
 async def _drive_browser_write_pause_archive_boundary(
-    *, pause: bool, concurrent_approval=False, cancel=False, handoff=False, pause_on_grant=False
+    *,
+    pause: bool,
+    concurrent_approval=False,
+    cancel=False,
+    handoff=False,
+    pause_on_grant=False,
+    pause_on_open=False,
+    reply_phase=None,
 ):
     import copy
     import httpx
@@ -20933,6 +20940,7 @@ async def _drive_browser_write_pause_archive_boundary(
     from domains.spawn_browser_agent_v3.repo import save_browser_action_message
     from helpers.messages import post_agent_message
     from helpers.generation_handoff import GenerationHandoffRequested
+    from domains.request_user_approval.config import REJECTION_SENTINEL
     from tools.base import MessageStatus
     from workflows.agent_workflow import AgentWorkflow
 
@@ -20940,6 +20948,9 @@ async def _drive_browser_write_pause_archive_boundary(
     task_id = browser._stable_browser_task_id(root, tool)
     rows, starts, paused_starts = [], [], []
     parked, changed = asyncio.Event(), asyncio.Event()
+    opening_persisted = asyncio.Event()
+    reply_pending = asyncio.Event()
+    reply_blocked = False
     wf = SimpleNamespace(
         user_id="fixture-user",
         agent_id=root,
@@ -20956,6 +20967,14 @@ async def _drive_browser_write_pause_archive_boundary(
     config = SimpleNamespace(backend=SimpleNamespace(api_url="http://fixture.invalid", api_key="fixture-key"))
     real_client = httpx.AsyncClient
 
+    async def poll_messages(_timestamp):
+        wf.context.append({"role": "USER", "text": "Specific fixture rejection feedback"})
+        if reply_phase == "rejection-poll":
+            reply_pending.set()
+            await asyncio.Event().wait()
+
+    wf._poll_messages = poll_messages
+
     def persisted(request):
         assert request.method == "POST" and request.url.path == f"/api/agents/{root}/messages"
         payload = json.loads(request.content)
@@ -20968,10 +20987,28 @@ async def _drive_browser_write_pause_archive_boundary(
         return real_client(*args, **{**kwargs, "transport": httpx.MockTransport(persisted)})
 
     async def execute_activity(function, *, args, **_kwargs):
+        nonlocal reply_blocked
         if function is post_agent_message:
+            expected_title = "✓ User approval received" if reply_phase == "approved" else "✗ User rejected action"
+            if (
+                reply_phase in ("approved", "rejected")
+                and not reply_blocked
+                and (args[3] or {}).get("title") == expected_title
+            ):
+                reply_blocked = True
+                reply_pending.set()
+                await asyncio.Event().wait()
             if pause_on_grant and (args[3] or {}).get("action_type") == "write_lock_granted":
                 await AgentWorkflow.pause(wf)
-            return await function(*args)
+            result = await function(*args)
+            if (
+                pause_on_open
+                and (args[3] or {}).get("toolName") == "request_user_approval"
+                and (args[3] or {}).get("toolStatus") == "IN_PROGRESS"
+            ):
+                opening_persisted.set()
+                await asyncio.Event().wait()
+            return result
         if function.__name__ == "create_approval_request_activity":
             assert args[0:2] == [wf.user_id, root]
             return "owned-approval"
@@ -21064,7 +21101,7 @@ async def _drive_browser_write_pause_archive_boundary(
         previous_tasks = asyncio.all_tasks()
         owned = asyncio.create_task(browser.spawn_browser_agent(wf, {"goal": "Fixture write"}, tool))
         try:
-            await asyncio.wait_for(parked.wait(), 1)
+            await asyncio.wait_for(opening_persisted.wait() if pause_on_open else parked.wait(), 1)
             assert await save_browser_action_message(
                 root,
                 "Recording saved",
@@ -21122,6 +21159,11 @@ async def _drive_browser_write_pause_archive_boundary(
                         "excludeFromModel": True,
                     }
                 return
+            if reply_phase:
+                wf._signal_responses["owned-approval"] = "approved" if reply_phase == "approved" else REJECTION_SENTINEL
+                changed.set()
+                await asyncio.wait_for(reply_pending.wait(), 1)
+                assert "owned-approval" not in wf._signal_responses, "specific decision was not consumed"
             if pause:
                 await AgentWorkflow.pause(wf)
                 wf._update_tree_state.assert_awaited_once_with(status="PAUSED")
@@ -21139,7 +21181,10 @@ async def _drive_browser_write_pause_archive_boundary(
             terminals = [row for row in rows if row.get("metadata", {}).get("action_type") == "task_complete"]
             assert len(terminals) == 1 and terminals[0]["metadata"]["task_id"] == task_id
             assert len(starts) == (1 if pause or pause_on_grant else 2)
-            if pause and not concurrent_approval:
+            if pause and not concurrent_approval and not reply_phase:
+                assert any(row.get("metadata", {}).get("title") == "Approval interrupted" for row in rows), (
+                    "PAUSE after durable approval opening left its exact chip IN_PROGRESS"
+                )
                 opened = next(
                     row["metadata"]
                     for row in rows
@@ -21155,6 +21200,27 @@ async def _drive_browser_write_pause_archive_boundary(
                     "excludeFromModel": True,
                 }
                 assert closed["requestUserApproval"]["attentionRequestId"] == "owned-approval"
+            if reply_phase:
+                opened = next(
+                    row["metadata"]
+                    for row in rows
+                    if row.get("metadata", {}).get("toolName") == "request_user_approval"
+                )
+                replies = [
+                    row
+                    for row in rows
+                    if row.get("metadata", {}).get("toolName") == "request_user_approval"
+                    and row["metadata"].get("toolStatus") == "FINISHED"
+                ]
+                assert len(replies) == 1, "PAUSE after a real decision left its exact approval chip IN_PROGRESS"
+                expected_title = "✓ User approval received" if reply_phase == "approved" else "✗ User rejected action"
+                assert replies[0]["metadata"] == {**opened, "title": expected_title, "toolStatus": "FINISHED"}, (
+                    "cancellation replaced the actual decision"
+                )
+                expected_text = (
+                    "User response:\napproved" if reply_phase == "approved" else "Specific fixture rejection feedback"
+                )
+                assert expected_text in replies[0]["message"], "cancellation discarded the actual response feedback"
             await archive()
             foreign = copy.deepcopy(rows)
             for row in foreign:
@@ -21183,6 +21249,9 @@ async def test_manager_write_pause_seals_persisted_browser_for_archive():
     await _drive_browser_write_pause_archive_boundary(pause=True)
     await _drive_browser_write_pause_archive_boundary(pause=True, concurrent_approval=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, pause_on_grant=True)
+    await _drive_browser_write_pause_archive_boundary(pause=True, pause_on_open=True)
+    for phase in ("approved", "rejection-poll", "rejected"):
+        await _drive_browser_write_pause_archive_boundary(pause=True, reply_phase=phase)
     await _drive_browser_write_pause_archive_boundary(pause=False, cancel=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, handoff=True)
     from domains.spawn_browser_agent_v3.handler import _request_browser_write_approval_until_paused

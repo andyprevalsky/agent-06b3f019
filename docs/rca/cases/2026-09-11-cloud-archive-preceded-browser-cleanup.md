@@ -807,3 +807,42 @@ nine sealed tasks and one interrupted task. Recovery returned all ten exact pool
 Machines stopped with their expected volumes, zero claims and no owner registry;
 its processes retired. Recovery and fixture success award zero acceptance credit.
 The source repair requires a fresh task pool and ten consecutive live slices.
+
+### 2026-10-01 review recurrence: cancellation during approval persistence
+
+Independent PR review of `07983702` identified another await outside the direct
+approval helper's cancellation handler. The opening message could already be
+persisted as IN_PROGRESS when PAUSE cancelled its acknowledgement wait. The real
+manager then emitted its same-task browser terminal while that approval chip
+remained open. The unchanged owning reproduction failed in 1.228 seconds on
+`07983702` and passed in 1.058 seconds with the repair. Cancellation before an
+opening exists is distinct: unanswered attention rows retain exact-root DELETE
+ownership and are not evidence of this persisted-chip defect.
+
+The same lifecycle gap existed after a genuine response: during approved-event
+persistence, rejection-message polling and rejected-event persistence. All three
+phases failed together in 1.158 seconds on the opening-only draft, whose original
+post-response tail remained byte-identical to `07983702`. That execution is not
+represented as an unchanged whole-commit run. The identical three-phase fixture
+passed in 0.767 seconds on the final candidate.
+
+Cancellation ownership now spans opening delivery through final persistence for
+the existing browser opt-in. Before a decision it persists the original neutral
+interruption event; after a decision it finishes the actual approval, rejection
+or handoff event. Rejection feedback already captured in the scoped workflow
+context survives cancelled polling acknowledgement. Completion persistence may
+resend its known event. This adds no feedback fetch, retry policy, model call,
+timeout or change to generic callers' default cancellation.
+
+The existing owning case contains these four bounded phase arms; all 628 unrelated
+test bodies and its original assertions remain intact. The owning case and ten
+existing approval/browser controls passed in 0.838 seconds, including the owning
+case's 0.340 seconds. Independent review verified both unchanged RED/GREEN fixture
+hashes, final source bindings and retired exact child processes. Archive searches,
+original review finding `4156453115`, causal fixtures and receipts are retained
+privately under `.context/acceptance/proof89-approval-opening-rca/`; final candidate
+review SHA256 is
+`877bf8c02f545f7bc3e826e0c90c58dd5b456ae4363983633f1ef4b0a5b4e5bf`.
+The prepared campaign on `07983702` was held before any allocation. These local
+proofs award no fleet credit; the canonical gate and fresh live campaign remain
+separate requirements.
