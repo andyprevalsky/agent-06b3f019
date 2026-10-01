@@ -77,10 +77,38 @@ def list_domains() -> None:
         print(f"  {d}")
 
 
+# Imported modules stay cached across domains, so an env default a module sets
+# while it is being imported (spawn_browser_agent_v3.config's browser-use event
+# timeouts) must survive the per-domain restore, as it would in a fresh process
+# that imported the same module. Writes made by test code are still reverted.
+_IMPORT_TIME_ENV: dict[str, tuple[str, str]] = {}
+
+
+def _record_import_time_env(event: str, args: tuple) -> None:
+    if event != "os.putenv":
+        return
+    frame = sys._getframe(1)
+    while frame is not None and frame.f_code.co_name != "<module>":
+        frame = frame.f_back
+    if frame is None or frame.f_back is None:
+        return
+    if not frame.f_back.f_code.co_filename.startswith("<frozen importlib"):
+        return
+    key, value = (os.fsdecode(arg) for arg in args)
+    _IMPORT_TIME_ENV[key] = (frame.f_globals.get("__name__", ""), value)
+
+
+sys.addaudithook(_record_import_time_env)
+
+
 def _restore_environ(snapshot: dict[str, str]) -> None:
-    for key in set(os.environ) - snapshot.keys():
+    target = dict(snapshot)
+    for key, (module_name, value) in _IMPORT_TIME_ENV.items():
+        if module_name in sys.modules:
+            target[key] = value
+    for key in set(os.environ) - target.keys():
         del os.environ[key]
-    for key, value in snapshot.items():
+    for key, value in target.items():
         if os.environ.get(key) != value:
             os.environ[key] = value
 

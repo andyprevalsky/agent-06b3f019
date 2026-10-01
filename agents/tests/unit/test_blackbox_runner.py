@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import os
+import sys
 from pathlib import Path
 
 import structlog.contextvars
@@ -61,3 +62,39 @@ def test_sequential_domains_do_not_share_environment(tmp_path: Path, monkeypatch
     assert asyncio.run(runner.run_single_domain(observing_domain, "observing"))[1]
     assert "BLACKBOX_RUNNER_LEAKED" not in os.environ
     assert os.environ["BLACKBOX_RUNNER_KEPT"] == "original"
+
+
+def test_import_time_env_defaults_survive_domain_restore(tmp_path: Path, monkeypatch):
+    """A cached module's import-time env default must outlive the domain that first imported it."""
+    runner = load_runner()
+    default_key = "BLACKBOX_RUNNER_IMPORT_DEFAULT"
+    module_name = "blackbox_runner_env_default_mod"
+    for key in (default_key, "BLACKBOX_RUNNER_TEST_WRITE", "BLACKBOX_RUNNER_DOMAIN_MODULE_WRITE"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (tmp_path / f"{module_name}.py").write_text(f"import os\nos.environ.setdefault('{default_key}', '300')\n")
+    importing_domain = tmp_path / "importing.blackbox.py"
+    importing_domain.write_text(
+        "import os\n"
+        "os.environ['BLACKBOX_RUNNER_DOMAIN_MODULE_WRITE'] = '1'\n"
+        "async def run_all_tests():\n"
+        f"    import {module_name}\n"
+        "    os.environ['BLACKBOX_RUNNER_TEST_WRITE'] = '1'\n"
+        f"    return os.environ.get('{default_key}') == '300'\n"
+    )
+    observing_domain = tmp_path / "observing.blackbox.py"
+    observing_domain.write_text(
+        "import os\n"
+        "async def run_all_tests():\n"
+        f"    import {module_name}\n"
+        f"    return os.environ.get('{default_key}') == '300'"
+        " and 'BLACKBOX_RUNNER_TEST_WRITE' not in os.environ"
+        " and 'BLACKBOX_RUNNER_DOMAIN_MODULE_WRITE' not in os.environ\n"
+    )
+
+    try:
+        assert asyncio.run(runner.run_single_domain(importing_domain, "importing"))[1]
+        assert asyncio.run(runner.run_single_domain(observing_domain, "observing"))[1]
+    finally:
+        sys.modules.pop(module_name, None)
+        os.environ.pop(default_key, None)
