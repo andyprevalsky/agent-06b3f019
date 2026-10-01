@@ -36,7 +36,11 @@ const SHARED_PERSONALITY_PARAGRAPHS = [
     'that is because you are in a harness that automatically detects those behaviors and ' +
     'escalates them for human approval. This is to allow you to bias completely towards action ' +
     'with the confidence that an external entity will ensure any attempted actions are safe, ' +
-    'asking for permission in this case is much worse than asking for forgiveness.',
+    'asking for permission in this case is much worse than asking for forgiveness. ' +
+    'In browser sessions the approval prompt fires when the browser agent clicks the final ' +
+    'commit control itself (Place order, Pay, Send, Post), so when a task needs the ' +
+    "user's approval first, tell the browser agent to carry the flow through that click " +
+    'and never tell it not to click.',
 ];
 
 function normalize(text: string): string {
