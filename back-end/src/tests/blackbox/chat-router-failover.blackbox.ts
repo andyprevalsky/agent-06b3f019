@@ -20,8 +20,8 @@
  * Every case drives the production entrypoint (`postMessage`) against the
  * local database, seeded with the agent's stored transcript. Its chat-model
  * projection is the 30-message router request prod logged; prod does not log
- * content, so the 88,440 chars are this projection of the stored rows
- * (fixtures/chat-router-failover-prod-e8f2279b.json; PII, including the
+ * content, so the 82,649 transcript chars are this projection of the stored
+ * rows (fixtures/chat-router-failover-prod-e8f2279b.json; PII, including the
  * delivery street, replaced with same-length stand-ins). It replays provider
  * streams recorded on that request with their real timing
  * (fixtures/chat-router-failover-prod-e8f2279b-streams.json). Only the
@@ -33,8 +33,11 @@
  * CHAT_ROUTER_FAILOVER_LIVE=1 adds the live probe: same seeded agent, a
  * Cerebras-wide outage (direct Cerebras and every other OpenRouter route
  * stalled), and the real OpenRouter GLM failover as the only path that can
- * serve. It must serve inside the first router attempt and reports which
- * OpenRouter host did. /deploy runs it in scripts/run_deploy_live_probes.py.
+ * serve. It runs on the OpenRouter account back-end/.env configures, must
+ * serve inside the first router attempt with the corrected address in the
+ * re-plan goal, and reports which host served. A miss OpenRouter caused is
+ * re-probed once a minute later; any other failure, or a second miss, fails.
+ * /deploy runs it in scripts/run_deploy_live_probes.py.
  */
 
 import 'dotenv/config';
@@ -50,10 +53,19 @@ import { postMessage } from '../../domains/agents/agentMessageService';
 import { CHAT_HANDLER_FAILURE_NOTICE } from '../../providers/chat/chatHandlerFailure';
 import { CLOUD_AGENT_TOOL_NAME } from '../../providers/chat/cloudAgentLifecycleTool';
 import { DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
+import { DEFAULT_CEREBRAS_CHAT_HEDGE_MS } from '../../providers/rose/exclusiveCerebrasChatRoute';
 import { OPENROUTER_CEREBRAS_MODEL } from '../../providers/rose/openrouterCerebrasRoute';
 import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
-import { type LiveObservation, observedLiveFetch } from './chat-router-failover.live.support';
+import {
+  assertProbesConfiguredOpenRouterAccount,
+  describeLiveRequests,
+  type LiveObservation,
+  type LiveSample,
+  observedLiveFetch,
+  probeLiveFailover,
+  startedWorkflowGoal,
+} from './chat-router-failover.live.support';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.CHAT_ROUTER_FAILOVER_LIVE === '1';
@@ -96,9 +108,18 @@ const streams = JSON.parse(
 
 const FOLLOW_UP = context.messages[context.messages.length - 1];
 const PRIOR_MESSAGES = context.messages.slice(0, -1);
-/** Router input the prod request carried: system prompt + 29 transcript turns. */
+/**
+ * Router input the prod request carried: system prompt + 29 transcript turns.
+ * Only the transcript is pinned by size; the router system prompt is code and
+ * changes with prompt edits.
+ */
 const PROD_ROUTER_MESSAGE_COUNT = 30;
-const PROD_ROUTER_CONTENT_CHARS = 88_440;
+const PROD_ROUTER_TRANSCRIPT_CHARS = 82_649;
+/** A failover request must reach first content within the router stall bound minus the hedge delay. */
+const FAILOVER_PRE_CONTENT_BUDGET_MS =
+  DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS - DEFAULT_CEREBRAS_CHAT_HEDGE_MS;
+/** OpenRouter-side misses on the e8f2279b profile came in a window of about a minute. */
+const LIVE_REPROBE_DELAY_MS = 60_000;
 
 // ── network boundary ─────────────────────────────────────────────────────────
 
@@ -110,7 +131,7 @@ interface ProviderRequest extends LiveObservation {
   model: string;
   schema: string;
   messageCount: number;
-  contentChars: number;
+  transcriptChars: number;
   sessionId?: string;
   atMs: number;
 }
@@ -164,8 +185,9 @@ function replayResponse(
   return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 }
 
-function contentChars(messages: Array<{ content?: unknown }>): number {
+function transcriptChars(messages: Array<{ role?: string; content?: unknown }>): number {
   return messages.reduce((total, message) => {
+    if (message.role === 'system') return total;
     if (typeof message.content === 'string') return total + message.content.length;
     if (Array.isArray(message.content)) {
       return (
@@ -206,7 +228,7 @@ function installNetwork(scenario: Scenario, startedAt: number) {
     }
     const body = JSON.parse(String(init?.body)) as {
       model: string;
-      messages: Array<{ content?: unknown }>;
+      messages: Array<{ role?: string; content?: unknown }>;
       response_format?: { json_schema?: { name?: string } };
       session_id?: string;
     };
@@ -217,7 +239,7 @@ function installNetwork(scenario: Scenario, startedAt: number) {
       model: body.model,
       schema,
       messageCount: body.messages.length,
-      contentChars: contentChars(body.messages),
+      transcriptChars: transcriptChars(body.messages),
       sessionId: body.session_id,
       atMs: Date.now() - startedAt,
     };
@@ -350,6 +372,7 @@ async function sendFollowUp(
   network: ReturnType<typeof installNetwork>;
   seeded: SeededAgent;
   agent: { status: string; temporalWorkflowId: string | null };
+  goal?: string;
 }> {
   const seeded = await seedProdAgent();
   const since = new Date();
@@ -370,7 +393,9 @@ async function sendFollowUp(
       where: { id: seeded.agentId },
       select: { status: true, temporalWorkflowId: true },
     });
-    return { outcome, network, seeded, agent };
+    const goal =
+      outcome.kind === 'escalated' ? await startedWorkflowGoal(seeded.agentId) : undefined;
+    return { outcome, network, seeded, agent, goal };
   } finally {
     network.restore();
   }
@@ -381,9 +406,9 @@ function assertExactProdRouterContext(network: ReturnType<typeof installNetwork>
   assert.ok(first, 'router must try direct Cerebras first');
   assert.equal(first.messageCount, PROD_ROUTER_MESSAGE_COUNT, 'router message count drifted');
   assert.equal(
-    first.contentChars,
-    PROD_ROUTER_CONTENT_CHARS,
-    'router context must be the exact prod request (same-length PII scrub)'
+    first.transcriptChars,
+    PROD_ROUTER_TRANSCRIPT_CHARS,
+    'router transcript must be the exact prod conversation (same-length PII scrub)'
   );
 }
 
@@ -403,7 +428,7 @@ async function testExactProdFollowUpEscalatesThroughFailover(): Promise<void> {
     streams.openrouterGlm.events[0].dt > 2_000,
     'the recorded GLM failover must keep its >2s long-context first-event latency'
   );
-  const { outcome, network, seeded, agent } = await sendFollowUp(
+  const { outcome, network, seeded, agent, goal } = await sendFollowUp(
     { cerebras: () => 'stall', glm: () => 'glm-recorded', openrouterOther: 'stall' },
     40_000
   );
@@ -431,6 +456,7 @@ async function testExactProdFollowUpEscalatesThroughFailover(): Promise<void> {
       /88 Harlow/,
       'router reasoning must carry the corrected address'
     );
+    assert.match(goal ?? '', /88 Harlow/, 'the re-plan goal must carry the corrected address');
     assert.equal(agent.status, 'ACTIVE');
     assert.equal(agent.temporalWorkflowId, seeded.agentId, 'Temporal accepted the re-plan');
     process.stdout.write(
@@ -539,48 +565,41 @@ async function testExhaustedBudgetSurfacesOneNotice(): Promise<void> {
   }
 }
 
-async function testLiveFailoverEscalates(): Promise<void> {
-  assert.ok(process.env.OPENROUTER_API_KEY, 'live probe requires OPENROUTER_API_KEY');
-  const { outcome, network, seeded } = await sendFollowUp(
+async function runLiveSample(label: string): Promise<LiveSample> {
+  const { outcome, network, seeded, goal } = await sendFollowUp(
     { cerebras: () => 'stall', glm: () => 'live', openrouterOther: 'stall' },
     45_000
   );
   try {
     assertExactProdRouterContext(network);
-    const attempts = network.routerRequests('cerebras').length;
-    const glm = network.routerRequests('openrouter', OPENROUTER_FAST_CHAT_MODEL);
-    const served = glm
-      .map(
-        (request, index) =>
-          `attempt ${index + 1}: ${request.upstreamProvider ?? 'no host'}, HTTP ` +
-          `${request.status ?? '-'} at ${request.headersMs ?? '-'}ms, first event ` +
-          `${request.firstEventMs ?? '-'}ms, first content ${request.firstContentMs ?? '-'}ms`
-      )
-      .join('; ');
-    process.stdout.write(`  live GLM failover: ${served}\n`);
-    assert.equal(
-      outcome.kind,
-      'escalated',
-      `live GLM failover must escalate the exact prod follow-up, got ${outcome.kind} after ` +
-        `${outcome.atMs}ms over ${attempts} router attempt(s)`
-    );
-    assertHealthyTurn(network);
+    assertNoStrayOutbound(network);
     assert.ok(
       network.routerRequests('openrouter', OPENROUTER_CEREBRAS_MODEL).length > 0,
       'the OpenRouter race must still start its Qwen branch (stalled here)'
     );
+    const attempts = network.routerRequests('cerebras').length;
+    const glm = network.routerRequests('openrouter', OPENROUTER_FAST_CHAT_MODEL);
     assert.equal(glm.length, attempts, 'every router attempt must reach the real GLM failover');
-    assert.equal(
-      attempts,
-      1,
-      `the live GLM failover must serve inside the first router attempt's bounds (${served})`
-    );
     process.stdout.write(
-      `  live GLM failover escalated at ${outcome.atMs}ms via ${glm[0].upstreamProvider}\n`
+      `  live GLM failover (${label}): ${outcome.kind} at ${outcome.atMs}ms; ` +
+        `${describeLiveRequests(glm)}\n`
     );
+    if (goal !== undefined) process.stdout.write(`  escalation goal: ${goal}\n`);
+    return { outcome, attempts, glm, alerts: network.alerts, goal };
   } finally {
     await cleanup(seeded);
   }
+}
+
+async function testLiveFailoverEscalates(): Promise<void> {
+  const account = assertProbesConfiguredOpenRouterAccount(join(here, '../../../.env'));
+  process.stdout.write(`  OpenRouter key ${account} (the account back-end/.env configures)\n`);
+  await probeLiveFailover({
+    runSample: runLiveSample,
+    budgetMs: FAILOVER_PRE_CONTENT_BUDGET_MS,
+    reprobeDelayMs: LIVE_REPROBE_DELAY_MS,
+    correctedAddress: /88 harlow/i,
+  });
 }
 
 // ── runner ───────────────────────────────────────────────────────────────────
