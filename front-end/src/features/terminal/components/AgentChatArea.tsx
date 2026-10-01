@@ -15,15 +15,11 @@
  *   terminal-input-area[data-chat-mode] mirrors the rendered chat/agent mode
  *   transition without changing interaction or visual behavior.
  *
- * MOBILE CHROME:
- *   Legal links sit below the mobile visual viewport so Safari's bottom URL bar
- *   occludes them, while desktop keeps the links visible above the bottom edge.
- *   The input stack hugs the mobile visual viewport bottom; desktop keeps the
- *   roomier bottom padding.
+ * LEGAL LINKS:
+ *   About, Privacy, and Terms remain available while chatting.
  */
 
 import { useRef, Suspense, type ComponentType } from 'react';
-import { Link } from 'react-router-dom';
 import * as analytics from '@/lib/analytics';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
@@ -48,6 +44,7 @@ import { ChatScrollArea } from './ChatScrollArea';
 import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
 import { PopularGoalsCarousel } from './PopularGoalsCarousel';
+import { TerminalLegalFooter } from './TerminalLegalFooter';
 
 interface AgentChatAreaProps {
   agents: AgentSlice;
@@ -134,18 +131,7 @@ export function AgentChatArea({
         />
       )}
 
-      <div
-        data-testid="terminal-legal-links"
-        className="absolute -bottom-8 left-0 right-0 z-10 flex justify-center gap-2 text-[11px] text-muted-foreground/50 md:bottom-1"
-      >
-        <Link to="/privacy" className="hover:text-muted-foreground transition-colors">
-          Privacy
-        </Link>
-        <span>&middot;</span>
-        <Link to="/terms" className="hover:text-muted-foreground transition-colors">
-          Terms
-        </Link>
-      </div>
+      <TerminalLegalFooter />
     </>
   );
 }

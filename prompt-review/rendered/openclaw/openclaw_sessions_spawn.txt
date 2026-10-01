@@ -1,70 +1,200 @@
 {
   "name": "sessions_spawn",
-  "description": "Spawn a clean isolated session by default with runtime=subagent or runtime=acp. mode=run is one-shot and mode=session is persistent/thread-bound where supported. Subagents inherit the parent workspace directory automatically. Use this when the work should happen in a fresh child session instead of the current one.",
+  "description": "Spawn child session; default `runtime=\"subagent\"`. `mode=\"run\"` one-shot background. `agentId` targets a configured agent; `model` overrides its model; `cleanup` delete|keep hidden child session; `sandbox` inherit|require. Default to a hidden subagent for internal QA, research, coding, review, tests, and parallel work supporting the current task. This includes substantial, bounded API/service investigations that can be handed off with the needed context and capabilities. Omit `visible` or set it false, and report results through the parent. `visible=true`: durable visible session. Use only when the user requests a separate session or needs to revisit and steer the work independently. Shows in web UI sidebar; works without UI: announcing runs report back, progress checkable. `group` places it in a custom sidebar group (a new name creates the group); omission or an empty string leaves it ungrouped. Subagent only; omit `mode` (`mode=\"run\"` is also accepted), `thread`, `thinking`, and `lightContext`; `attachments=[]` and omitted/blank `attachAs.mountPath` are accepted, but nonempty attachment staging is unsupported; inherits the caller tool-policy ceiling; select a registered project with `projectId` or a managed GitHub clone with `projectGitUrl` (mutually exclusive with each other and `cwd`); may check out a git worktree via `worktree`/`worktreeName`/`worktreeBaseRef`. When its accepted result includes `sessionUrl`, channel acknowledgements put the session URL on the first line and `Owner: <label>` on the second line. Omit `placement` or use `{kind:\"local\"}` for local execution. `{kind:\"profile\",profileId,os?,machineClass?}` selects a configured cloud profile and requires `visible=true` and `worktree=true`. Cloud placement creates first, dispatches, then starts the task; failures retain the child for inspection, never fall back locally. Session listing/addressing obeys `tools.sessions.visibility` (all: all sessions, cross-agent per tools.agentToAgent).  Inherits parent workspace. Native task arrives in the child's initial `[Subagent Task]` message. Native: explicit context=\"isolated\" starts clean; context=\"fork\" copies requester transcript and requires the same agent. Omitted context is isolated. A PR/report, long runtime, or isolated worktree alone does not justify a sidebar session. A request for a subagent does not request a separate session. No spawn for quick lookup/single read. After spawn, do non-overlap work; follow the receipt's completion mode.",
   "parameters": {
     "type": "object",
+    "required": [
+      "task"
+    ],
     "properties": {
       "task": {
+        "type": "string"
+      },
+      "user": {
         "type": "string",
-        "description": "Task prompt for the child session."
+        "description": "The person's requester_profile.id, required when several people have steered this turn."
+      },
+      "taskName": {
+        "type": "string",
+        "description": "Stable later-target alias; starts lowercase letter; then lowercase/digit/_/-."
       },
       "label": {
         "type": "string",
-        "description": "Optional session label."
+        "description": "Short task title shown in UI lists; name the work, not the agent."
       },
       "runtime": {
-        "type": "string",
         "enum": [
-          "subagent",
-          "acp"
+          "subagent"
         ],
-        "description": "Spawn runtime."
+        "type": "string",
+        "description": "Runtime; visible=true requires \"subagent\"."
+      },
+      "agentId": {
+        "type": "string"
+      },
+      "model": {
+        "type": "string"
+      },
+      "runTimeoutSeconds": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Child run timeout in seconds; overrides the configured subagent default and is preserved on native continuations. Zero disables the timeout; requester wake turns use their own budget."
+      },
+      "thinking": {
+        "type": "string",
+        "description": "Thinking override; unavailable with visible=true."
+      },
+      "cwd": {
+        "type": "string",
+        "description": "Child working directory. Visible paths outside configured agent workspaces require operator.admin. Mutually exclusive with projectId/projectGitUrl. With no source selector and worktree=true: inherit the same-agent parent managed repository; otherwise use the target agent workspace."
       },
       "mode": {
-        "type": "string",
         "enum": [
-          "run",
-          "session"
+          "run"
         ],
-        "description": "Run once or persistent session."
+        "type": "string",
+        "description": "\"run\" one-shot. Visible sessions accept omitted/default \"run\" and remain persistent."
       },
-      "thread": {
+      "cleanup": {
+        "enum": [
+          "delete",
+          "keep"
+        ],
+        "type": "string",
+        "description": "Hidden session cleanup; visible=true always keeps the session."
+      },
+      "expectsCompletionMessage": {
         "type": "boolean",
-        "description": "Bind spawned session to a thread where supported."
+        "description": "false: fire-and-forget; requester gets no completion handoff when the child finishes."
+      },
+      "completionTarget": {
+        "enum": [
+          "parent"
+        ],
+        "type": "string",
+        "description": "parent: return results in a private requester turn; no automatic channel delivery. Native hidden run only; unavailable with ACP, collect, visible, thread, session mode, or expectsCompletionMessage=false."
+      },
+      "sandbox": {
+        "enum": [
+          "inherit",
+          "require"
+        ],
+        "type": "string",
+        "description": "\"inherit\" parent sandbox policy; \"require\" fails unless child is sandboxed."
       },
       "context": {
-        "type": "string",
         "enum": [
           "isolated",
           "fork"
         ],
-        "description": "Context inheritance mode (subagent runtime)."
+        "type": "string",
+        "description": "Native: explicit context=\"isolated\" starts clean; context=\"fork\" copies requester transcript and requires the same agent. Omitted context is isolated."
       },
       "lightContext": {
         "type": "boolean",
-        "description": "Use lightweight bootstrap context for subagent runtime."
+        "description": "Light bootstrap; subagent only; unavailable with visible=true."
       },
-      "model": {
+      "fastMode": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "string",
+            "const": "auto"
+          },
+          {
+            "type": "string",
+            "const": "ultrafast"
+          }
+        ]
+      },
+      "placement": {
+        "anyOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "local"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "profileId"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "profile"
+              },
+              "profileId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^\\S(?:.*\\S)?$"
+              },
+              "machineClass": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "os": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            },
+            "additionalProperties": false
+          }
+        ],
+        "description": "Execution placement: omitted or {kind: \"local\"} uses local execution for native and ACP runs. {kind: \"profile\", profileId, os?, machineClass?} selects a configured cloud profile and requires visible=true and worktree=true. Never supply placeholder selectors. Omitted cloud selectors use profile defaults; the first task starts only after cloud dispatch.",
+        "~optional": true
+      },
+      "visible": {
+        "type": "boolean",
+        "description": "Persistent sidebar session only when the user requests a separate session or needs to revisit and steer it independently. Internal QA/coding/review/test workers: omit or false. Subagent runtime only; default run mode and empty attachments accepted; no thread/thinking/lightContext or attachment staging."
+      },
+      "group": {
         "type": "string",
-        "description": "Optional model override."
+        "description": "Custom sidebar group for a visible session; a new name creates the group. Omit or pass an empty string to leave it ungrouped."
       },
-      "thinking": {
+      "projectId": {
         "type": "string",
-        "description": "Optional thinking/reasoning effort override."
+        "description": "Registered project for a visible session; mutually exclusive with projectGitUrl and cwd."
       },
-      "cwd": {
+      "projectGitUrl": {
         "type": "string",
-        "description": "Optional working directory override."
+        "description": "GitHub HTTPS or git@github.com repository URL for a visible session's managed clone; mutually exclusive with projectId and cwd. Local paths and file URLs are not accepted.",
+        "maxLength": 2048
       },
-      "runTimeoutSeconds": {
-        "type": "number",
-        "description": "Optional run timeout in seconds."
+      "worktree": {
+        "type": "boolean",
+        "description": "Visible session worktree"
+      },
+      "worktreeName": {
+        "type": "string",
+        "description": "Worktree name"
+      },
+      "worktreeBaseRef": {
+        "type": "string",
+        "description": "Worktree base ref"
       },
       "attachments": {
         "type": "array",
-        "description": "Optional inline attachment payloads for child context.",
         "items": {
           "type": "object",
+          "required": [
+            "name",
+            "content"
+          ],
           "properties": {
             "name": {
               "type": "string"
@@ -73,25 +203,29 @@
               "type": "string"
             },
             "encoding": {
-              "type": "string",
               "enum": [
                 "utf8",
                 "base64"
-              ]
+              ],
+              "type": "string"
             },
             "mimeType": {
               "type": "string"
             }
-          },
-          "required": [
-            "name",
-            "content"
-          ]
-        }
+          }
+        },
+        "maxItems": 50,
+        "description": "Inline snapshots; visible=true accepts only an empty array."
+      },
+      "attachAs": {
+        "type": "object",
+        "properties": {
+          "mountPath": {
+            "type": "string"
+          }
+        },
+        "description": "Attachment mount hint; visible=true accepts only an omitted or blank mountPath."
       }
-    },
-    "required": [
-      "task"
-    ]
+    }
   }
 }

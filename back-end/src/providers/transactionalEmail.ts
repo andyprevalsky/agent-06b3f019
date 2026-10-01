@@ -69,6 +69,7 @@ async function findTransactionalEmailCredential(input: {
       accessToken: true,
       refreshToken: true,
       expiresAt: true,
+      scopes: true,
     },
   });
 }
@@ -156,26 +157,17 @@ export async function sendTransactionalEmail(
       throw error;
     }
     if (!response.ok) {
-      const providerMessage =
-        typeof data.error?.message === 'string'
-          ? data.error.message
-          : `Gmail HTTP ${response.status}`;
       log.error('Transactional email send failed', {
-        sender: input.from,
-        recipientDomain: input.to.split('@').at(-1) ?? 'unknown',
         status: response.status,
-        error: providerMessage,
       });
-      throw new TransactionalEmailDefinitiveError(providerMessage);
+      throw new TransactionalEmailDefinitiveError(`Gmail HTTP ${response.status}`);
     }
     if (typeof data.id !== 'string') {
       throw new TransactionalEmailError('Gmail accepted the request without a message id');
     }
 
     log.info('Transactional email accepted', {
-      messageId: data.id,
-      sender: input.from,
-      recipientDomain: input.to.split('@').at(-1) ?? 'unknown',
+      provider: 'gmail',
     });
     return { id: data.id };
   } catch (error) {

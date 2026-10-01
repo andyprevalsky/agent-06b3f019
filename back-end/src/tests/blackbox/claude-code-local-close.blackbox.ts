@@ -15,6 +15,7 @@ import {
   rmSync,
   symlinkSync,
   truncateSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -272,7 +273,7 @@ test('an intermediate-directory symlink cannot escape the session', async () => 
     /escaped its session directory through a symlink/
   );
   assert.equal(uploadCalls, 0, 'an intermediate symlink target must never be uploaded');
-  rmSync(linkedDir);
+  unlinkSync(linkedDir);
   await closeLocalClaudeCodeSession(taskId, 'user-local-close');
 });
 

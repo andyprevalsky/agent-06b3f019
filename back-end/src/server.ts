@@ -194,10 +194,6 @@ const UUID_RE =
 app.use((req, res, next) => {
   const start = Date.now();
   const { method, path: urlPath } = req;
-  const body =
-    req.body && Object.keys(req.body).length > 0
-      ? JSON.stringify(req.body).substring(0, 200)
-      : undefined;
 
   res.on('finish', () => {
     const duration_ms = Date.now() - start;
@@ -208,7 +204,6 @@ app.use((req, res, next) => {
       status: res.statusCode,
       duration_ms,
     };
-    if (body) extra.body = body;
     if (uuidMatch) extra.agent_id = uuidMatch[1];
     httpLog.info(`${method} ${urlPath} -> ${res.statusCode}`, extra);
   });

@@ -17,6 +17,7 @@ import {
 } from './providers/smsSupervisor';
 import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
 import { runGmailSyncJob } from './services/integrations/gmailSync';
+import { runGoogleDataPurgeJob } from './services/integrations/googleDataPurge';
 import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconciler';
 import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
 import { runTerminalAgentBrowserReleaseReconcileWithLease } from './providers/agentCleanup';
@@ -198,6 +199,26 @@ function scheduleGmailSync(): void {
   cronLog.info('Gmail sync scheduled (every 5 minutes)');
 }
 
+function scheduleGoogleDataPurge(): void {
+  const cronLog = createLogger('Cron');
+  let running = false;
+  const run = () => {
+    if (running) return;
+    running = true;
+    runGoogleDataPurgeJob()
+      .catch((error: unknown) => {
+        cronLog.error('Google data purge job failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = false;
+      });
+  };
+  run();
+  cron.schedule('* * * * *', run);
+}
+
 function schedulePlaidSync(): void {
   if (process.env.DISABLE_PLAID_SYNC === '1') {
     createLogger('Cron').info('Plaid sync disabled by DISABLE_PLAID_SYNC');
@@ -352,6 +373,7 @@ export function registerCronJobs(isProduction: boolean): void {
   scheduleWorkflowLivenessReconcile(isProduction);
   scheduleTerminalBrowserReleaseReconcile(isProduction);
   scheduleGmailSync();
+  scheduleGoogleDataPurge();
   schedulePlaidSync();
   schedulePurchaseHoldReconcile();
   scheduleAgentCardOrgWalletMonitor();

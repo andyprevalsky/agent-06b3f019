@@ -1,4 +1,4 @@
-/** Runtime-validated file pointer supplied by chat message JSON. */
+/** Runtime validation for file pointers stored as database JSON. */
 export interface FilePointer {
   id: string;
   storage_path: string;

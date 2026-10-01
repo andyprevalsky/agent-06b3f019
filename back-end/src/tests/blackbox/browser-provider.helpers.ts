@@ -24,6 +24,10 @@ export function isTransientKernelConnectionError(error: unknown): boolean {
     // Steel create/replace flakes under parallel coverage load (SDK "Connection error").
     message.includes('Failed to create Steel replacement') ||
     message.includes('Connection error') ||
+    // Coverage blackbox shares a 4-connection Prisma pool; live rotate-proxy
+    // can 500 with P2024 while another domain holds the pool.
+    message.includes('Timed out fetching a new connection from the connection pool') ||
+    message.includes('P2024') ||
     transportError.includes('fetch failed') ||
     transportError.includes('other side closed') ||
     transportError.includes('socket hang up') ||

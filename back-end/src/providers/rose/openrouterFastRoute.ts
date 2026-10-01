@@ -58,8 +58,8 @@ export function buildOpenRouterFastChatBody(options: CompletionOptions): Record<
   };
 }
 
-function openRouterHttpError(status: number, body: string, requestId: string): Error {
-  const message = `OpenRouter fast chat ${status} (request_id=${requestId}): ${body.substring(0, 500)}`;
+function openRouterHttpError(status: number, requestId: string): Error {
+  const message = `OpenRouter fast chat ${status} (request_id=${requestId})`;
   if (status === 400 || status === 404 || status === 422) return new RoseInvalidRequest(message);
   if (status === 401 || status === 403) return new RoseAuthError(message);
   if (status === 402) return new RosePaymentRequiredError(message);
@@ -97,7 +97,7 @@ export async function* exclusiveOpenRouterFastChatCompletion(params: {
       connectTimeoutMs: preTokenTimeoutMs,
     });
     if (!response.ok) {
-      throw openRouterHttpError(response.status, response.errorBody ?? '', params.requestId);
+      throw openRouterHttpError(response.status, params.requestId);
     }
     if (!response.body) {
       throw new RoseStallError(

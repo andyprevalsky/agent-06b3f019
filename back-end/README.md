@@ -2,8 +2,8 @@
 
 TypeScript backend API for managing AI agents with Prisma ORM and PostgreSQL.
 
-**🚀 Production URL**: https://navi-j9a9.onrender.com  
-**📡 API Base**: https://navi-j9a9.onrender.com/api
+**🚀 Production URL**: https://api.roselabs.ai
+**📡 API Base**: https://api.roselabs.ai/api
 
 ## Features
 
@@ -68,6 +68,12 @@ NODE_ENV="development"
 
 # CORS (comma-separated allowed origins)
 ALLOWED_ORIGINS="http://localhost:8080,https://your-frontend.com"
+
+# Create a separate Google OAuth web client for local development.
+# Authorize http://localhost:3001/api/integrations/email/gmail/callback there.
+# Production uses the rose-labs client and https://api.roselabs.ai callback.
+GOOGLE_CLIENT_ID="your-development-web-client-id.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET="your-development-web-client-secret"
 ```
 
 ### Database Setup

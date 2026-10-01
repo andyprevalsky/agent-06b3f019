@@ -326,7 +326,7 @@ export function App() {
       '    19. Greg Katz, MD | Substack | gregorykatz.substack.com | ~20K subscribers (est.) [35] | cardiology & practical longevity for patients',
       '',
       '```',
-      'curl -sS https://api.roselabs.ai/v1/agents/ac267c32-470f-41da-8343-091b8965c410/messages?include=metadata,tool_calls,step_history&format=jsonl&page_size=200 -H "Authorization: Bearer AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag="',
+      'curl -sS https://api.roselabs.ai/v1/agents/ac267c32-470f-41da-8343-091b8965c410/messages?include=metadata,tool_calls,step_history&format=jsonl&page_size=200 -H "Authorization: Bearer <YOUR_API_KEY>"',
       '```',
       '',
       '| Creator | Platform | Handle | Followers | Niche focus and detailed positioning notes for the longevity and health-tech founder audience |',

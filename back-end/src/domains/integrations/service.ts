@@ -255,7 +255,6 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
         if (accessToken === null || accessToken === undefined || accessToken === '') {
           log.warn('Failed to get access token', {
             credentialId: credential.id,
-            email: credential.email,
           });
           return [];
         }
@@ -265,10 +264,9 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
           credentialId: credential.id,
           credentialEmail: credential.email,
         }));
-      } catch (err: unknown) {
+      } catch {
         log.warn('Failed to fetch from Gmail', {
-          email: credential.email,
-          error: err instanceof Error ? err.message : String(err),
+          credentialId: credential.id,
         });
         return [];
       }
@@ -342,10 +340,9 @@ export async function sendEmail(
       success: false,
       context: archiveContext,
     });
-    log.error('Send email failed', { error: JSON.stringify(gmailResult.data) });
+    log.error('Send email failed', { status: gmailResult.status });
     if (gmailResult.status === 401) throw new GmailAuthFailedError();
-    const errMsg = (gmailResult.data.error as Record<string, unknown> | undefined)?.message;
-    throw new Error(typeof errMsg === 'string' ? errMsg : 'Unknown Gmail API error');
+    throw new Error(`Gmail API error: ${gmailResult.status}`);
   }
 
   const result = gmailResult.data as { id: string; threadId: string };
@@ -365,7 +362,7 @@ export async function sendEmail(
       thread_id: result.threadId,
     },
   });
-  log.info('Email sent', { userId, messageId: result.id });
+  log.info('Email sent', { userId });
   return result;
 }
 /* c8 ignore stop */
@@ -441,10 +438,9 @@ async function archiveEmailBoundary(rootAgentId: string, value: unknown): Promis
       objectPath: `provider/email/gmail/${suffix}.json.gz.enc`,
       value,
     });
-  } catch (error) {
+  } catch {
     log.warn('Email provider archive failed', {
       rootAgentId,
-      error: error instanceof Error ? error.message : String(error),
     });
   }
 }
