@@ -1863,6 +1863,23 @@ class DOMService:
             logger.warning(f"Failed to read current URL: {error}")
             return fallback
 
+    async def get_page_identity(self) -> Dict[str, Any]:
+        """Return ``{url, title}`` of the focused tab from one renderer round trip.
+
+        Unlike ``get_browser_state`` this builds no DOM/AX/snapshot trees, and
+        unlike the cached target info it executes in the page, so a frozen
+        renderer still hangs here (callers rely on that to trigger recovery).
+        The result deliberately has no ``dom_tree`` key.
+        """
+        if not self._session:
+            raise RuntimeError("Not connected. Call connect() first.")
+        page = await self._session.get_current_page()
+        if page is None:
+            raise RuntimeError("No focused page")
+        raw = await page.evaluate("() => [location.href, document.title]")
+        url, title = json.loads(raw) if isinstance(raw, str) else raw
+        return {"url": str(url or ""), "title": str(title or "")}
+
     async def get_browser_state(self, include_screenshot: bool = True) -> Dict[str, Any]:
         """Get current browser state with full context like browser-use provides.
 

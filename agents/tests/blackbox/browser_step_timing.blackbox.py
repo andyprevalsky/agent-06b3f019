@@ -110,6 +110,7 @@ def test_browser_loop_marks_every_core_phase():
         "thinking_stream_start",
         "llm_decision",
         "thinking_stream_finish",
+        "evidence_join",
         "pre_action_bookkeeping",
         "execute_action",
         "post_action_bookkeeping",
@@ -273,6 +274,129 @@ async def test_otp_sources_fetched_concurrently():
     assert peak == 3
 
 
+def test_step_observe_builds_dom_only_for_dom_consumers():
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3.handler import _step_observe_needs_dom
+
+    kernel = SimpleNamespace(uses_kernel_replay=True)
+    file_recorder = SimpleNamespace(uses_kernel_replay=False)
+    assert _step_observe_needs_dom(fast_mode_replay=False, browser_recorder=None) is False
+    assert _step_observe_needs_dom(fast_mode_replay=False, browser_recorder=kernel) is False
+    assert _step_observe_needs_dom(fast_mode_replay=False, browser_recorder=file_recorder) is True
+    assert _step_observe_needs_dom(fast_mode_replay=True, browser_recorder=kernel) is True
+
+
+class _CountingDom:
+    def __init__(self):
+        self.full_builds = 0
+        self.identity_reads = 0
+
+    async def get_browser_state(self, include_screenshot=False):
+        self.full_builds += 1
+        return {"url": "https://shop.example/", "title": "Shop", "dom_tree": "[7]<a>Deals</a>"}
+
+    async def get_page_identity(self):
+        self.identity_reads += 1
+        return {"url": "https://shop.example/", "title": "Shop"}
+
+
+async def test_light_step_observe_skips_dom_and_read_browser_state_builds_it():
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3.handler import _observe_step_page
+    from domains.spawn_browser_agent_v3.service_actions import _execute_read_browser_state
+
+    dom = _CountingDom()
+    light = await _observe_step_page(dom, needs_dom=False)
+    assert light == {"url": "https://shop.example/", "title": "Shop"}
+    assert (dom.full_builds, dom.identity_reads) == (0, 1)
+
+    recorded = []
+
+    async def record_action(**kwargs):
+        recorded.append(kwargs["action"])
+
+    context = SimpleNamespace(
+        dom_service=dom,
+        action_history=SimpleNamespace(record_action=record_action),
+        thinking="",
+        prefetched_browser_state=light,
+    )
+    result = await _execute_read_browser_state(context)
+    assert dom.full_builds == 1, "a URL/title-only observe must not be served as the page state"
+    assert "Deals" in result["formatted_state"]
+
+    full = await _observe_step_page(dom, needs_dom=True)
+    context.prefetched_browser_state = full
+    await _execute_read_browser_state(context)
+    assert dom.full_builds == 2, "a full observe is reused without a second DOM walk"
+    assert recorded == ["read_browser_state", "read_browser_state"]
+
+
+async def test_page_identity_is_one_page_evaluate():
+    from types import SimpleNamespace
+
+    from browser_tools.dom_service import DOMService
+
+    calls = []
+
+    class _Page:
+        async def evaluate(self, fn):
+            calls.append(fn)
+            return '["https://shop.example/cart", "Cart"]'
+
+    async def get_current_page():
+        return _Page()
+
+    service = DOMService.__new__(DOMService)
+    service._session = SimpleNamespace(get_current_page=get_current_page)
+    assert await service.get_page_identity() == {"url": "https://shop.example/cart", "title": "Cart"}
+    assert len(calls) == 1
+
+
+async def test_evidence_capture_join_returns_state_and_swallows_failures():
+    from domains.spawn_browser_agent_v3.handler import _join_evidence_capture
+
+    async def captured():
+        await asyncio.sleep(0.01)
+        return {"url": "https://shop.example/", "dom_tree": "[1]<b>$9</b>"}
+
+    async def broken():
+        raise RuntimeError("renderer frozen")
+
+    assert await _join_evidence_capture(None) is None
+    assert (await _join_evidence_capture(asyncio.create_task(captured())))["dom_tree"] == "[1]<b>$9</b>"
+    assert await _join_evidence_capture(asyncio.create_task(broken())) is None
+
+
+def test_deferred_evaluate_evidence_joined_before_any_consumer():
+    """Post-evaluate DOM capture overlaps the next LLM call but must land in
+    verifier_checkpoints before the next action, verifier, or resume payload."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
+
+    source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
+    loop = source[source.index("while iteration < MAX_ITERATIONS:") :]
+    created = loop.index("evidence_capture_task = asyncio.create_task(")
+    join_after_llm = loop.index('step_timer.mark("evidence_join")')
+    first_action_use = loop.index("# 4. Extract action from response")
+    assert join_after_llm < first_action_use
+    for consumer in ("verifier_checkpoints=verifier_checkpoints", "browser_checkpoints=verifier_checkpoints"):
+        position = loop.find(consumer)
+        while position != -1:
+            assert position > join_after_llm, f"{consumer} read before the evidence join"
+            position = loop.find(consumer, position + 1)
+    pending_write = loop.index("if pending_write_lock_action:")
+    assert "await _join_evidence_capture(evidence_capture_task)" in loop[pending_write : pending_write + 200]
+    after_loop = loop[loop.index('step_timer.mark("post_action_bookkeeping")') :]
+    assert after_loop.index("await _join_evidence_capture(evidence_capture_task)") < after_loop.index(
+        "step_timer.finish()"
+    )
+    assert created > join_after_llm
+
+
 async def test_browser_use_pending_request_probe_disabled():
     from browser_use.browser.watchdogs.dom_watchdog import DOMWatchdog
 
@@ -303,6 +427,14 @@ async def run_all_tests():
     await r.record_async("otp_fetch_failure_never_fails_step", test_otp_fetch_failure_never_fails_step)
     await r.record_async("otp_sources_fetched_concurrently", test_otp_sources_fetched_concurrently)
     await r.record_async("pending_request_probe_disabled", test_browser_use_pending_request_probe_disabled)
+    r.record("step_observe_dom_only_for_consumers", test_step_observe_builds_dom_only_for_dom_consumers)
+    await r.record_async(
+        "light_observe_read_browser_state_builds_dom",
+        test_light_step_observe_skips_dom_and_read_browser_state_builds_it,
+    )
+    await r.record_async("page_identity_one_evaluate", test_page_identity_is_one_page_evaluate)
+    await r.record_async("evidence_join_semantics", test_evidence_capture_join_returns_state_and_swallows_failures)
+    r.record("evidence_joined_before_consumers", test_deferred_evaluate_evidence_joined_before_any_consumer)
     teardown_mock()
     return r.all_passed
 

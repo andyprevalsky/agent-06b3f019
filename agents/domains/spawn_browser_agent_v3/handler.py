@@ -1856,6 +1856,40 @@ async def _settle_otp_fetch(task: "asyncio.Task[int]") -> int:
         return 0
 
 
+def _step_observe_needs_dom(*, fast_mode_replay: bool, browser_recorder: Any) -> bool:
+    """Whether the per-step observe must build the full DOM.
+
+    The browser LLM never receives page state implicitly (it calls
+    read_browser_state, which builds its own DOM), so the step-start observe
+    only needs URL/title. Two consumers still need the full tree every step:
+    Fast Mode replay remaps cached targets against the live selector map, and
+    file-based recorders persist per-iteration DOM observations for the world
+    model corpus (Kernel replay recorders ignore observations).
+    """
+    if fast_mode_replay:
+        return True
+    return browser_recorder is not None and not getattr(browser_recorder, "uses_kernel_replay", False)
+
+
+async def _observe_step_page(dom_service: Any, *, needs_dom: bool) -> Dict[str, Any]:
+    if needs_dom:
+        return await dom_service.get_browser_state(include_screenshot=False)
+    return await dom_service.get_page_identity()
+
+
+async def _join_evidence_capture(
+    task: Optional["asyncio.Task[Optional[Dict[str, Any]]]"],
+) -> Optional[Dict[str, Any]]:
+    """Wait for a deferred post-evaluate DOM capture; its checkpoint is appended by then."""
+    if task is None:
+        return None
+    try:
+        return await task
+    except Exception as e:
+        logger.warning("Preserved evaluate evidence capture failed", error=str(e)[:200])
+        return None
+
+
 async def _take_prefetched_observe_state(
     dom_service: Any,
     state: Optional[Dict[str, Any]],
@@ -6143,6 +6177,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # ``finally`` teardown, but must NOT emit task_complete — the browser task
     # resumes in a later activity call and the FE chip must stay open.
     browser_task_paused_for_resume = False
+    evidence_capture_task: Optional["asyncio.Task[Optional[Dict[str, Any]]]"] = None
 
     try:
         # ===== SETUP TIMING TRACKER =====
@@ -7241,7 +7276,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             return True
 
         observe_page_state: Dict[str, Any] = {}
-        prefetched_observe_state: Optional[Dict[str, Any]] = None
         consecutive_budget_free = 0
         consecutive_keystroke_free = 0
         step_timer = StepPhaseTimer(agent_id=agent_id, task_id=task_id)
@@ -7251,7 +7285,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             step_timer.start_step(iteration)
             activity.heartbeat(f"Step {iteration}")
             if await _wait_for_browser_user_control(config, task_id):
-                prefetched_observe_state = None
+                await _join_evidence_capture(evidence_capture_task)
+                evidence_capture_task = None
                 tab_focus_cache.foreground = None
             step_timer.mark("user_control_wait")
 
@@ -7274,7 +7309,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
             # Handle pending write lock action
             if pending_write_lock_action:
-                prefetched_observe_state = None
+                await _join_evidence_capture(evidence_capture_task)
+                evidence_capture_task = None
                 if await _wait_for_browser_user_control(config, task_id):
                     # The approved target may have changed under user control;
                     # retain it and re-resolve against a fresh DOM next step.
@@ -7383,17 +7419,25 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         timeout=BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
                     )
                 step_timer.mark("overlay_suppress")
-                reused_observe_state = await _take_prefetched_observe_state(
-                    dom_service, prefetched_observe_state
+                observe_needs_dom = _step_observe_needs_dom(
+                    fast_mode_replay=bool(fast_mode_cache_enabled),
+                    browser_recorder=browser_recorder,
                 )
+                reused_observe_state = None
+                if observe_needs_dom and evidence_capture_task is not None:
+                    reused_observe_state = await _take_prefetched_observe_state(
+                        dom_service, await _join_evidence_capture(evidence_capture_task)
+                    )
+                    evidence_capture_task = None
                 if reused_observe_state is not None:
                     observe_page_state = reused_observe_state
                     step_timer.annotate(observe_reused=True)
                 else:
                     observe_page_state = await asyncio.wait_for(
-                        dom_service.get_browser_state(include_screenshot=False),
+                        _observe_step_page(dom_service, needs_dom=observe_needs_dom),
                         timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                     )
+                    step_timer.annotate(observe_dom=observe_needs_dom)
                 current_url = str(observe_page_state.get("url") or current_url)
                 step_timer.mark("observe_state")
             except asyncio.TimeoutError:
@@ -7413,7 +7457,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     continue
                 raise
             finally:
-                prefetched_observe_state = None
                 new_otp_count = await _settle_otp_fetch(otp_fetch_task)
             if new_otp_count:
                 logger.info("Appended OTP user messages", count=new_otp_count)
@@ -7899,6 +7942,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             consecutive_api_failures = 0
 
             _rose_request_id = llm_result.get("request_id", "unknown")
+            await _join_evidence_capture(evidence_capture_task)
+            evidence_capture_task = None
+            step_timer.mark("evidence_join")
 
             if await _wait_for_browser_user_control(config, task_id):
                 # Never execute an action planned against the pre-handoff DOM.
@@ -9768,15 +9814,16 @@ Based on this feedback, I need to continue working on the task and address the i
                     task_id=task_id,
                 )
                 if action_name == "evaluate":
-                    preserved_state = await _capture_preserved_evidence_after_evaluate(
-                        dom_service=dom_service,
-                        verifier_checkpoints=verifier_checkpoints,
-                        current_url=current_url,
+                    # The DOM build runs behind the next observe + LLM decision;
+                    # it is joined before anything acts on or reads checkpoints.
+                    await _join_evidence_capture(evidence_capture_task)
+                    evidence_capture_task = asyncio.create_task(
+                        _capture_preserved_evidence_after_evaluate(
+                            dom_service=dom_service,
+                            verifier_checkpoints=verifier_checkpoints,
+                            current_url=current_url,
+                        )
                     )
-                    if preserved_state:
-                        browser_state = preserved_state
-                        current_url = str(preserved_state.get("url") or current_url or "")
-                        prefetched_observe_state = preserved_state
                 if input_page and _botsigged_diagnostics_enabled(start_url):
                     with contextlib.suppress(Exception):
                         await _capture_botsigged_diagnostics(
@@ -9886,6 +9933,8 @@ Based on this feedback, I need to continue working on the task and address the i
 
             step_timer.mark("post_action_bookkeeping")
 
+        await _join_evidence_capture(evidence_capture_task)
+        evidence_capture_task = None
         step_timer.finish()
         # Max iterations reached
         logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")
@@ -10173,6 +10222,8 @@ Based on this feedback, I need to continue working on the task and address the i
         raise
     finally:
         stop_browser_activity_heartbeat(_heartbeat_token)
+        if evidence_capture_task is not None and not evidence_capture_task.done():
+            evidence_capture_task.cancel()
         diagnostics_finalized = False
         if browser_network_recorder is None and network_recorder_task is not None:
             try:

@@ -1289,7 +1289,7 @@ def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state
     # Keep a tight window around the fetch so a distant unused assignment cannot
     # satisfy the positive asserts while a nearby UnboundLocalError regresses.
     start = src.index(marker)
-    block = src[start : start + 1200]
+    block = src[start : start + 2000]
     assert (
         "auth_runtime_state.observe_page_text(observe_page_state.get(\"title\")"
         in block
@@ -7628,7 +7628,7 @@ def test_passkeys_rearmed_before_each_step_state_observe():
     window = source[start : observe + 120]
     assert "ensure_browser_overlays_suppressed()" in window
     assert window.index("ensure_browser_overlays_suppressed()") < window.index(
-        "get_browser_state("
+        "_observe_step_page("
     )
 
 async def test_provider_handoff_replaces_humanizer_without_leaking_idle_work():
@@ -19048,6 +19048,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
 
         async def get_browser_state(self, include_screenshot=False):
             return {"url": "https://example.com/login", "screenshot": None}
+
+        async def get_page_identity(self):
+            return {"url": "https://example.com/login", "title": ""}
 
         async def get_current_url(self, *, fallback: str = ""):
             return fallback or "https://example.com/login"
