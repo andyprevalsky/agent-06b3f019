@@ -23,6 +23,7 @@ tags:
   - retry
   - deadline
   - openrouter
+  - provider-routing
   - recurrence
 sources:
   - agent 6e645c29-4b6f-4d87-9478-22ecb28ebba5
@@ -126,7 +127,7 @@ the real failover provider.
 
 ## Reusable lesson
 
-Regenerate a transient empty, unparseable, or deadline-expired structured LLM stream in place, and size each per-attempt bound from the measured latency of the slowest path allowed to serve (the failover), never from the healthy primary.
+Regenerate a transient empty, unparseable, or deadline-expired structured LLM stream in place, and size each per-attempt bound from the measured latency of the slowest path allowed to serve (the failover) under the provider routing prod actually gets, never from the healthy primary.
 
 Do not fail the agent, do not substitute a keyword shortcut for the model's
 decision, and do not apologize until the bounded regenerate budget is
@@ -199,6 +200,25 @@ alone, the log reads `branch=openrouter-fast-chat ... OpenRouter fast chat
 produced no model output within 2000ms` and the exact follow-up apologizes
 at about 10s.
 
+**Third rung: which GLM host serves.** The fast-chat body sent no provider
+preferences. OpenRouter's default routing is price-weighted, so it favors the
+cheapest of GLM's 33 hosts, and those are also the slowest. After a cached
+response, it also keeps each conversation (keyed on the first system and
+first non-system message) on that host for 10 minutes; `sort` does not
+override that, and only an explicit `order` does. Every router turn of an
+agent therefore lands on whichever host served its first failover.
+
+The n=24 profile below happened to stick to Together. A later live probe on
+the full fix stuck to InferenceNet:
+
+- Attempt 1 waited 3.9s for response headers and hit the 5s stall bound.
+- Attempt 2 was at 1,361 of about 1,450 decision chars when the 15s cap fired.
+- Apology at 20,077ms.
+
+The fast-chat body also omitted `require_parameters`, so OpenRouter could
+route to hosts that ignore `response_format` (Relace and AtlasCloud do not
+list it).
+
 **Evidence.**
 
 - Prod proves direct Cerebras produced no content within 1.2s and did not
@@ -217,7 +237,24 @@ at about 10s.
   - Router fix alone (5s stall, 15s cap): 19 of 24.
   - Router fix plus a 5s GLM guard: 22 of 24.
 
-  With one regenerate, the per-turn miss rate is roughly 1%.
+  These runs all shared one sticky host (Together), so the roughly 1%
+  per-turn miss rate first estimated from them held only for that host.
+- GLM routing profile on the exact captured router request, sent straight to
+  OpenRouter, timed from the GLM request (attempt 1 serves if the request
+  completes within 14.2s, since it starts 0.8s into the 15s cap):
+  - Sticky InferenceNet (the conversation's existing host), n=16 per
+    routing variant: default routing served 12 of 16 (p50 12.2s, p90
+    16.6s); `sort: throughput` served 14 of 16; `sort: latency` served 12 of
+    16. Stickiness overrode both sorts.
+  - Fresh conversations (unique `session_id`), n=12 each:
+    - Default routing: 11 of 12, p50 8.4s, p90 11.9s (Together 5,
+      InferenceNet 7).
+    - `sort: throughput`: 12 of 12, p50 2.9s, p90 3.9s (CoreWeave 8,
+      Parasail 2, BaseTen 2).
+    - Explicit `order` of four fast hosts: 12 of 12, p50 2.2s, p90 3.1s.
+  - Pinned hosts (n=6 each) ranged from Parasail at p50 1.9s to Modal at
+    p50 49s, and Modal had measured 8.5s an hour earlier. BaseTen returned
+    429s (rate-limited upstream).
 - Evidence integrity: the first post-fix runs inherited
   `OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS=20000` from the Cloud VM environment
   (Render does not set it), so they proved a 20s GLM guard that prod never
@@ -246,6 +283,13 @@ at about 10s.
   `cerebras_chat.hedge_branch_failed` (race, branch, error) unless the
   caller aborted. The Qwen spill branch is renamed from `openrouter-glm` to
   `openrouter-cerebras-spill`.
+- `openrouterFastRoute.ts`: GLM requests carry
+  `provider: { sort: 'throughput', require_parameters: true }`, so each
+  conversation's first (and therefore sticky) host is a fast one that
+  honors `response_format`. A hard-coded `order` measured slightly faster,
+  but it would pin every Cerebras-stall turn onto one host and go stale as
+  hosts drift. The route also logs `openrouter_fast_chat.upstream_provider`
+  once per stream, from OpenRouter's `provider` field.
 - The healthy Cerebras path never arms the hedge and is unchanged. The worst
   case before the apology is 2 × 15s = 30s (previously 3s).
 
@@ -272,8 +316,11 @@ the Cerebras stall, healthy Cerebras, and the GLM failover.
   that can serve.
   - `origin/main`: apology after 3066ms. The 3s router bound is tighter than
     either GLM guard.
-  - Full fix, through the canonical runner: 3 of 3 escalated on router
-    attempt 1, at 4979ms, 11093ms, and 7412ms.
+  - Bounds fixed, default routing: 3 of 3 escalated on router attempt 1, at
+    4979ms, 11093ms, and 7412ms. A fourth run, stuck on InferenceNet, got
+    the apology after 20,077ms over 2 attempts.
+  - Full fix with throughput routing: 5 of 5 escalated on router attempt 1,
+    at 3254–3842ms, served by CoreWeave (first event 515–797ms).
 
 **Cemented in `/deploy`.**
 
@@ -284,6 +331,8 @@ the Cerebras stall, healthy Cerebras, and the GLM failover.
   longer serve this exact context inside the bounds.
 - `chat-router-options.test.ts` pins the bounds and the GLM-guard invariant.
   `hedged-stream.test.ts` pins branch-failure reporting.
+- `rose.blackbox.ts` pins throughput routing with `require_parameters` and no
+  single-host pin, plus once-per-stream reporting of the upstream host.
 
 **10k agents.** No shared state, lock, or channel is added; all cost is per
 turn on the agent being served. During a Cerebras-wide stall each turn holds:
@@ -299,16 +348,26 @@ There is no stall stickiness, so prompt tokens roughly double on a miss. The
 shared fan-in point is the OpenRouter account rate limit, which this raises
 in stream-seconds, not in request count.
 
+Throughput routing keeps OpenRouter's per-conversation stickiness, so 10k
+agents spread across whichever hosts lead on throughput when each
+conversation first fails over. It does not funnel them onto one host the way
+an explicit `order` would. Those hosts list $0.15/M prompt tokens against
+$0.07/M for InferenceNet, so a 24k-token failover call costs about $0.004
+instead of $0.002, and only while Cerebras stalls.
+
 **Deeper cause, not fixed (needs schema/prompt approval).** GLM's 1447-char
 decision spends 660 chars on `query`, which the schema says should be an
 empty string for this action. `goal` is emitted after `query`, and partial
 recovery needs a complete `goal`, so the unused field sits on the critical
-path: about 2s at the measured rate. Reordering the fields or enforcing an
-empty `query` could bring the failover under the 5s lifecycle ratchet.
+path: about 2s on the slow hosts and well under 1s on the throughput-sorted
+ones. Reordering the fields or enforcing an empty `query` would shorten
+every failover decision.
 
 **Known consequence.** `front-end/tests-e2e/chat-lifecycle-latency.spec.ts`
-(5s ratchet) measures the healthy path. While Cerebras is stalled it will now
-fail honestly, at about 5–11s. Previously the keyword fallback masked that.
+(5s ratchet) measures the healthy path. While Cerebras is stalled, it now
+measures the real failover. That was 3.3–3.8s in the live probe on
+throughput-sorted hosts, and it fails honestly when a turn lands on a slow
+host or regenerates. Previously the keyword fallback masked that.
 
 **Environment footgun.** The Cloud VM injects
 `OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS=20000`, which is not in any repo file
