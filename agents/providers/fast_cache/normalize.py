@@ -1101,6 +1101,18 @@ OAI_DEMO_ROOT_GOAL_HASH = "4ae3193053ac1d8f"
 # ---------------------------------------------------------------------------
 
 _DEMO_TAG = "DEMO"
+GOOGLE_OAUTH_DEMO_PROMPT_PREFIX = (
+    "DEMO FIXTURE ONLY. Produce the Rose agent segment for a Google OAuth review video."
+)
+
+
+@functools.lru_cache(maxsize=1)
+def google_oauth_demo_goal_hash() -> str:
+    """Exact namespace that may be cold-seeded for the Google OAuth DEMO task."""
+    tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
+    tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
+    prompt = next(task["prompt"] for task in tasks if task["name"] == "google-oauth")
+    return goal_hash(prompt)
 
 
 def _task_has_demo_tag(task: dict) -> bool:
