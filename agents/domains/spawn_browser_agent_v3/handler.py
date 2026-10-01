@@ -69,7 +69,6 @@ from .activity_heartbeat import (
     start_browser_activity_heartbeat,
     stop_browser_activity_heartbeat,
 )
-from .browser_use_patches import apply_browser_use_navigate_timeout_patch
 from .cdp_urls import steel_cdp_connection_url
 from .challenge_recovery import (
     commit_cookie_removals,
