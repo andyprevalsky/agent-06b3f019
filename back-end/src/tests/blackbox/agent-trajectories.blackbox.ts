@@ -472,6 +472,28 @@ async function run(): Promise<void> {
       }),
       1
     );
+    const [userMessage] = requireResult(
+      await grep(ownerId, {
+        source: 'agent_trajectories',
+        pattern: 'dispatch at noon',
+        filters: { path: sms.id, role: 'user', record_kind: 'MESSAGE', surface: 'sms' },
+      }),
+      1
+    );
+    if (userMessage.role !== 'USER' || !String(userMessage.path).includes(sms.id)) {
+      throw new Error(
+        `Trajectory role/root filters lost the user's message: ${JSON.stringify(userMessage)}`
+      );
+    }
+    const metadataPattern = await grep(ownerId, {
+      source: 'agent_trajectories',
+      pattern: 'message_role: USER',
+      filters: { path: sms.id },
+    });
+    requireResult(metadataPattern, 0);
+    if (!String((metadataPattern.data as { message?: string }).message).includes('filters.role')) {
+      throw new Error('An empty trajectory search did not explain how to filter metadata');
+    }
     requireResult(await grep(otherId, { source: 'agent_trajectories', pattern: 'maple-73' }), 0);
     const forbidden = await grep(ownerId, {
       source: 'agent_trajectories',

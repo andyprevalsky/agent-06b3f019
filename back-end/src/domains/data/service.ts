@@ -251,7 +251,11 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
     ...(Object.keys(summaries).length > 0 ? { summaries } : {}),
     ...(matches.length === 0
       ? {
-          message: `No matches for '${params.pattern}' in ${input.sources.join(', ')}.`,
+          message: `No matches for '${params.pattern}' in ${input.sources.join(', ')}.${
+            input.sources.includes('agent_trajectories')
+              ? ' Trajectory patterns search message text, not metadata labels. Use filters.role, filters.record_kind, filters.surface, or filters.path to narrow records.'
+              : ''
+          }`,
         }
       : {}),
   };

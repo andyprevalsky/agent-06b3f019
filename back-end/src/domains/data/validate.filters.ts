@@ -191,14 +191,21 @@ export function parseAgentTrajectoryFilters(
   if (Object.keys(raw).length === 0) return undefined;
   rejectUnsupportedFilters('agent_trajectories', raw);
   const rawPath = parseFilterString(raw, 'path');
-  const parsed = rawPath === undefined ? undefined : parseGrepPath(rawPath);
+  const parsed =
+    rawPath === undefined
+      ? undefined
+      : parseGrepPath(
+          /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(rawPath)
+            ? `agent_trajectories/${rawPath}`
+            : rawPath
+        );
   if (rawPath !== undefined && parsed?.source !== 'agent_trajectories') {
     throw new InvalidGrepParamError('filters.path');
   }
   const path = parsed?.source === 'agent_trajectories' ? parsed : undefined;
-  const role = parseFilterString(raw, 'role');
-  const surface = parseFilterString(raw, 'surface');
-  const recordKind = parseFilterString(raw, 'record_kind');
+  const role = parseFilterString(raw, 'role')?.toUpperCase();
+  const surface = parseFilterString(raw, 'surface')?.toUpperCase();
+  const recordKind = parseFilterString(raw, 'record_kind')?.toLowerCase();
   if (role !== undefined && !['USER', 'ASSISTANT', 'TOOL'].includes(role)) {
     throw new InvalidGrepParamError('filters.role');
   }
