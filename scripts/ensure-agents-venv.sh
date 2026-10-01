@@ -32,8 +32,12 @@ base_python() {
     fi
     local version candidate
     version="$(cat "$ROOT/agents/.python-version" 2>/dev/null || echo "3.11")"
-    candidate="$(asdf where python "$version" 2>/dev/null)/bin/python3" || true
-    if [ -x "$candidate" ]; then
+    if candidate="$(asdf where python "$version" 2>/dev/null)"; then
+        candidate="$candidate/bin/python3"
+    else
+        candidate=""
+    fi
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
         printf '%s\n' "$candidate"
     else
         command -v python3

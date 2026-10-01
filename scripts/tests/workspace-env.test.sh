@@ -269,6 +269,32 @@ expect_eq "$(test -e "$venv_root/agents/venv/.requirements.sha256" && echo stamp
 run_venv_sync
 expect_eq "$(pip_install_count)" "4" "venv sync retries after a failed install"
 
+# The base interpreter comes from `asdf where python` when that lookup works and
+# from PATH's python3 otherwise. A failed lookup used to leave "/bin/python3" as
+# the candidate and build the venv on the system interpreter.
+asdf_root="$TMP_ROOT/venv-asdf"
+mkdir -p "$asdf_root/agents" "$asdf_root/bin" "$asdf_root/asdf-python/bin"
+printf 'browser-use>=0.13.10,<0.14\n' >"$asdf_root/agents/requirements.txt"
+printf '3.11\n' >"$asdf_root/agents/.python-version"
+printf '#!/usr/bin/env bash\n[ "${ASDF_PYTHON_ROOT:-}" ] || exit 1\nprintf "%%s\\n" "$ASDF_PYTHON_ROOT"\n' \
+  >"$asdf_root/bin/asdf"
+printf '#!/usr/bin/env bash\necho "$0 $*" >>"$BASE_PYTHON_CALLS"\nexec "%s" "$@"\n' "$venv_root/bin/base-python" \
+  | tee "$asdf_root/bin/python3" >"$asdf_root/asdf-python/bin/python3"
+chmod +x "$asdf_root/bin/asdf" "$asdf_root/bin/python3" "$asdf_root/asdf-python/bin/python3"
+run_asdf_venv_sync() { # run_asdf_venv_sync [asdf python root]
+  rm -rf "$asdf_root/agents/venv"
+  : >"$asdf_root/base-calls"
+  env -u AGENTS_VENV_PYTHON PATH="$asdf_root/bin:$PATH" AGENTS_VENV_ROOT="$asdf_root" \
+    ASDF_PYTHON_ROOT="${1:-}" PIP_NO_INDEX=1 BASE_PYTHON_CALLS="$asdf_root/base-calls" \
+    VENV_SYNC_CALLS="$asdf_root/pip-calls" bash "$ROOT_DIR/scripts/ensure-agents-venv.sh" >/dev/null 2>&1
+}
+run_asdf_venv_sync || { echo "FAIL: failed asdf lookup must fall back to PATH python3" >&2; exit 1; }
+expect_eq "$(cut -d' ' -f1 "$asdf_root/base-calls" | sort -u)" "$asdf_root/bin/python3" \
+  "failed asdf lookup builds the venv with PATH python3"
+run_asdf_venv_sync "$asdf_root/asdf-python" || { echo "FAIL: asdf python must build the venv" >&2; exit 1; }
+expect_eq "$(cut -d' ' -f1 "$asdf_root/base-calls" | sort -u)" "$asdf_root/asdf-python/bin/python3" \
+  "a working asdf lookup selects its python"
+
 for provisioner in scripts/cloud-build.sh scripts/run.sh; do
   if ! grep -q 'ensure-agents-venv\.sh' "$ROOT_DIR/$provisioner"; then
     echo "FAIL: $provisioner must provision agents/venv via ensure-agents-venv.sh" >&2
