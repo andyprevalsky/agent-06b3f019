@@ -21,6 +21,7 @@ from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_DRAIN_YIELD_STATUS,
 )
 from domains.spawn_claude_code_agent.service import (
+    close_detached_code_session_activity,
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
 )
@@ -396,6 +397,16 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     # worker of this queue, or from the live generation after
                     # continue_as_new carries this tool call.
                     code_session = _drained_code_session(result, code_session)
+                    if workflow_instance.is_paused:
+                        # Paused while detached: no attempt will reattach, so the
+                        # cancel path below closes the sandbox.
+                        was_cancelled = True
+                        result = {
+                            "status": "cancelled",
+                            "message": "Claude Code agent cancelled by user",
+                            "code_provider": code_session.get("code_provider"),
+                        }
+                        break
                     handoff_queue = await live_handoff_queue(workflow_instance)
                     if handoff_queue:
                         parked_session = {k: v for k, v in code_session.items() if k != "generation_yield"}
@@ -421,6 +432,21 @@ class SpawnClaudeCodeAgentManager(ToolManager):
 
             if was_cancelled or (result and result.get("status") == "cancelled"):
                 logger.info("[ClaudeCode] Agent cancelled", agent_id=agent_id)
+                if code_session is not None and not (result or {}).get("task_id"):
+                    # An activity that held the sandbox returns its task_id after
+                    # closing it. Without one, the cancel landed before a
+                    # reattaching attempt took over, so the sandbox is still open.
+                    await workflow.execute_activity(
+                        close_detached_code_session_activity,
+                        args=[agent_id, code_session],
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                    result = {
+                        **(result or {}),
+                        "task_id": code_session.get("task_id"),
+                        "code_provider": (result or {}).get("code_provider") or code_session.get("code_provider"),
+                    }
                 # Chip terminality requires action_type=task_complete + task_id.
                 # session_cancelled without task_id leaves ClaudeCodeChip stuck on
                 # "Spinning up..." after pause (hub agent 182cf2ab / task 45ce853d).
@@ -636,7 +662,7 @@ _manager: Optional[SpawnClaudeCodeAgentManager] = None
 
 
 def get_manager() -> SpawnClaudeCodeAgentManager:
-    global _manager  # noqa: PLW0603
+    global _manager
     if _manager is None:
         _manager = SpawnClaudeCodeAgentManager()
     return _manager

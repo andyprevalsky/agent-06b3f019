@@ -2841,7 +2841,9 @@ async def test_spawn_activity_codex_double_exhaustion_is_terminal_and_persisted(
 
 
 async def test_spawn_activity_cancelled_cleanup():
-    """CancelledError triggers cleanup path and returns 'cancelled' status."""
+    """A requested cancel triggers the cleanup path and returns 'cancelled' status."""
+    from temporalio.testing import ActivityEnvironment
+
     from domains.spawn_claude_code_agent import service
 
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
@@ -2849,6 +2851,7 @@ async def test_spawn_activity_cancelled_cleanup():
     fake_collector = AsyncMock()
     fake_collector.start = AsyncMock()
     fake_collector.stop = AsyncMock()
+    env = ActivityEnvironment()
 
     async def fake_create_session(**kwargs):
         return {
@@ -2860,33 +2863,37 @@ async def test_spawn_activity_cancelled_cleanup():
         }
 
     async def fake_loop(**kwargs):
-        raise asyncio.CancelledError()
+        env.cancel()
+        await asyncio.sleep(30)
 
-    async def fake_close(**kwargs):
-        return {}
+    close_session = AsyncMock(return_value={})
 
     with (
         patch.object(service, "SandboxLogCollector", lambda *a, **kw: fake_collector),
         patch.object(service, "create_e2b_session", side_effect=fake_create_session),
         patch.object(service, "_run_agentic_loop", side_effect=fake_loop),
-        patch.object(service, "close_e2b_session", side_effect=fake_close),
+        patch.object(service, "close_e2b_session", close_session),
         patch.object(service, "persist_terminal_output", AsyncMock()),
         patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
         patch(
             "helpers.model_pricing.get_model_pricing_with_fallback",
             AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
         ),
-        patch("temporalio.activity.heartbeat"),
     ):
-        result = await service.spawn_claude_code_activity(
-            user_id="u",
-            agent_id="a",
-            goal="g",
-            tool_call_id="tc",
-            output_schema={"fields": []},
+        result = await asyncio.wait_for(
+            env.run(
+                service.spawn_claude_code_activity,
+                user_id="u",
+                agent_id="a",
+                goal="g",
+                tool_call_id="tc",
+                output_schema={"fields": []},
+            ),
+            timeout=10,
         )
     assert result["status"] == "cancelled"
     assert result["task_id"] == "t"
+    close_session.assert_awaited_once()
     fake_collector.stop.assert_awaited()
 
 
@@ -3756,6 +3763,18 @@ async def _run_all_tests():
         test_claude_code_unreachable_session_is_closed_before_a_fresh_start,
     )
     await r.record_async(
+        "cc_reattach_survives_transient_probe_failure",
+        test_claude_code_reattach_survives_a_transient_probe_failure,
+    )
+    await r.record_async(
+        "cc_cancel_during_drain_detach_closes_sandbox",
+        test_claude_code_cancel_during_drain_detach_still_closes_the_sandbox,
+    )
+    await r.record_async(
+        "cc_llm_heartbeats_keep_code_session",
+        test_llm_heartbeats_inside_a_code_session_keep_the_session,
+    )
+    await r.record_async(
         "cc_reconnect_replay_does_not_duplicate_events",
         test_run_agentic_loop_reconnect_replay_does_not_duplicate_events,
     )
@@ -3778,6 +3797,18 @@ async def _run_all_tests():
     await r.record_async(
         "cc_manager_parked_reentry_reattaches_without_a_new_chip",
         test_cc_manager_parked_reentry_reattaches_without_a_new_chip,
+    )
+    await r.record_async(
+        "cc_manager_pause_after_drain_closes_detached_sandbox",
+        test_cc_manager_pause_after_drain_closes_the_detached_sandbox,
+    )
+    await r.record_async(
+        "cc_manager_cancel_before_reattach_closes_detached_sandbox",
+        test_cc_manager_cancel_before_reattach_closes_the_detached_sandbox,
+    )
+    await r.record_async(
+        "cc_manager_leaves_cleanup_to_attached_activity",
+        test_cc_manager_leaves_cleanup_to_an_activity_that_held_the_sandbox,
     )
     teardown_mock()
     return r.all_passed
@@ -4028,6 +4059,8 @@ class _CCBoundaryRecorder:
         self.titles: list[str] = []
         self.persisted: list[str] = []
         self.verified_events: list[list[dict]] = []
+        self.logged: list[dict] = []
+        self.collector = AsyncMock()
 
     async def create_session(self, **kwargs):
         self.created.append(kwargs)
@@ -4055,7 +4088,6 @@ class _CCBoundaryRecorder:
         from domains.spawn_claude_code_agent import service
         from helpers.activity_generation_drain import reset_live_queue_cache
 
-        collector = AsyncMock()
         reset_live_queue_cache()
         with (
             patch.object(service, "create_e2b_session", side_effect=self.create_session),
@@ -4063,7 +4095,9 @@ class _CCBoundaryRecorder:
             patch.object(service, "save_claude_code_message", side_effect=self.save_message),
             patch.object(service, "persist_terminal_output", side_effect=self.persist_output),
             patch.object(service, "_run_verifier", side_effect=self.verifier),
-            patch.object(service, "SandboxLogCollector", lambda *a, **kw: collector),
+            patch.object(service, "_log_code_agent_event", side_effect=lambda event, **kw: self.logged.append(event)),
+            patch.object(service, "REATTACH_PROBE_BACKOFF_S", 0.05),
+            patch.object(service, "SandboxLogCollector", lambda *a, **kw: self.collector),
             patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
             patch(
                 "helpers.model_pricing.get_model_pricing_with_fallback",
@@ -4178,6 +4212,11 @@ async def test_claude_code_detaches_on_worker_drain_and_reattaches_same_sandbox(
         assert outcome["structured_response"] == {"answer": "42"}, outcome
         assert len(recorder.verified_events) == 1
         _assert_full_run_seen_once(recorder.verified_events[0])
+        # Events produced while nothing was attached reach the worker only in the
+        # reattach replay; they must still land in retained logs, once.
+        assert recorder.logged == recorder.verified_events[0], (
+            f"every sandbox event must be logged exactly once, logged={[e.get('type') for e in recorder.logged]}"
+        )
         assert recorder.titles.count("Claude Code Started") == 1, recorder.titles
         assert [call["task_id"] for call in recorder.closed] == ["cc-task-1"], recorder.closed
         assert recorder.persisted and all(text in recorder.persisted[-1] for text in _CC_STEP_TEXTS), recorder.persisted
@@ -4185,23 +4224,36 @@ async def test_claude_code_detaches_on_worker_drain_and_reattaches_same_sandbox(
         sandbox.stop()
 
 
+def _carries_session(beat: tuple, task_id: str = "cc-task-1") -> bool:
+    return any(
+        isinstance(detail, dict)
+        and any(isinstance(value, dict) and value.get("task_id") == task_id for value in detail.values())
+        for detail in beat[1:]
+    )
+
+
 async def test_claude_code_retry_after_worker_crash_reattaches_from_heartbeat():
     """A Temporal retry after a dead worker resumes the sandbox it was attached to.
 
     SIGKILL/OOM gives the activity no chance to yield. Temporal retries after
     the heartbeat timeout, and the retry used to call create_e2b_session again:
-    Claude Code restarted from scratch and the first sandbox leaked. The last
-    heartbeat must carry the session so the retry reattaches instead.
+    Claude Code restarted from scratch and the first sandbox leaked. Every
+    heartbeat must carry the session so the retry reattaches instead; the
+    timed-out attempt must not close the sandbox the retry is reattaching to;
+    and the retry must prefer that heartbeat session over the scheduled
+    resume_session, whose sandbox the first attempt had already replaced.
     """
+    from temporalio.activity import ActivityCancellationDetails
     from temporalio.testing import ActivityEnvironment
 
     from domains.spawn_claude_code_agent import service
 
-    def carries_session(detail) -> bool:
-        return isinstance(detail, dict) and any(
-            isinstance(value, dict) and value.get("task_id") == "cc-task-1" for value in detail.values()
-        )
-
+    stale = {
+        "task_id": "cc-task-old",
+        "sandbox_id": "sb-old",
+        "ws_url": f"ws://127.0.0.1:{_free_port()}",
+        "code_provider": "claude",
+    }
     sandbox = _LocalCodeSandbox()
     await sandbox.start()
     recorder = _CCBoundaryRecorder(sandbox.ws_url)
@@ -4210,16 +4262,25 @@ async def test_claude_code_retry_after_worker_crash_reattaches_from_heartbeat():
             beats: list = []
             crashing = ActivityEnvironment()
             crashing.on_heartbeat = lambda *details: beats.append(details)
-            first = asyncio.create_task(crashing.run(service.spawn_claude_code_activity, *_cc_activity_args()))
+            first = asyncio.create_task(crashing.run(service.spawn_claude_code_activity, *_cc_activity_args(stale)))
             await _wait_for_heartbeat(beats, lambda b: b[0] == "Processing Claude Code output", "a sandbox message")
-            last_beat = beats[-1]
-            assert any(carries_session(detail) for detail in last_beat[1:]), (
-                f"heartbeats must carry the attached session for a retry, got {last_beat}"
+            # The first beat of an attempt is sent at once and later ones are
+            # throttled, so a beat without the session can be the last one the
+            # server holds when the worker dies.
+            assert beats and all(_carries_session(beat) for beat in beats), (
+                f"every heartbeat must carry the attached session, got {[b[0] for b in beats if not _carries_session(b)]}"
             )
-            first.cancel()
+            last_beat = beats[-1]
+
+            crashing.cancel(cancellation_details=ActivityCancellationDetails(timed_out=True))
+            first_outcome = None
             with contextlib.suppress(asyncio.CancelledError):
-                await first
-            recorder.closed.clear()
+                first_outcome = await first
+            assert first_outcome is None, f"a timed-out attempt must not report the run cancelled: {first_outcome}"
+            assert [call["task_id"] for call in recorder.closed] == ["cc-task-old"], (
+                f"a timed-out attempt must leave its sandbox for the retry, closed={recorder.closed}"
+            )
+            assert "Session Cancelled" not in recorder.titles, recorder.titles
 
             sandbox.release("continue")
             sandbox.release("exit")
@@ -4228,14 +4289,138 @@ async def test_claude_code_retry_after_worker_crash_reattaches_from_heartbeat():
             retry = ActivityEnvironment()
             retry.info = dataclasses.replace(retry.info, attempt=2, heartbeat_details=list(last_beat))
             outcome = await asyncio.wait_for(
-                retry.run(service.spawn_claude_code_activity, *_cc_activity_args()), timeout=30
+                retry.run(service.spawn_claude_code_activity, *_cc_activity_args(stale)), timeout=30
             )
         assert len(recorder.created) == 1, f"retry must reattach, not create a sandbox: {recorder.created}"
         assert outcome["status"] == "completed" and outcome["task_id"] == "cc-task-1", outcome
         _assert_full_run_seen_once(recorder.verified_events[-1])
-        assert [call["task_id"] for call in recorder.closed] == ["cc-task-1"], recorder.closed
+        assert [call["task_id"] for call in recorder.closed] == ["cc-task-old", "cc-task-1"], recorder.closed
     finally:
         sandbox.stop()
+
+
+async def test_claude_code_reattach_survives_a_transient_probe_failure():
+    """One failed handshake must not discard a live sandbox and rerun the task."""
+    from aiohttp import web
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    requests = 0
+
+    async def flaky(request):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            return web.Response(status=503, text="proxy warming up")
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.close()
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/", flaky)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = _free_port()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    live = {
+        "task_id": "cc-task-live",
+        "sandbox_id": "sb-live",
+        "ws_url": f"ws://127.0.0.1:{port}/",
+        "code_provider": "claude",
+    }
+
+    async def attached_loop(**kwargs):
+        assert kwargs["task_id"] == "cc-task-live", kwargs["task_id"]
+        return (0, False, [], 0, 0, [{"type": "result", "status": "completed", "text": "answer is 42"}])
+
+    recorder = _CCBoundaryRecorder(ws_url="ws://unused")
+    try:
+        with recorder.patched(), patch.object(service, "_run_agentic_loop", side_effect=attached_loop):
+            outcome = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_cc_activity_args(live)), timeout=30
+            )
+    finally:
+        await runner.cleanup()
+    assert requests >= 2, requests
+    assert recorder.created == [], f"a reachable sandbox must be reattached, created={recorder.created}"
+    assert [call["task_id"] for call in recorder.closed] == ["cc-task-live"], recorder.closed
+    assert outcome["status"] == "completed" and outcome["task_id"] == "cc-task-live", outcome
+
+
+async def test_claude_code_cancel_during_drain_detach_still_closes_the_sandbox():
+    """A pause that lands while the activity is detaching still cleans up.
+
+    The drain return used to sit in a sibling ``except`` of the cancel handler,
+    so a cancel raised while it stopped the log collector escaped every
+    cleanup: the sandbox stayed open and no task_id reached the chip.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    sandbox = _LocalCodeSandbox()
+    await sandbox.start()
+    recorder = _CCBoundaryRecorder(sandbox.ws_url)
+    try:
+        with recorder.patched():
+            beats: list = []
+            env = ActivityEnvironment()
+            env.on_heartbeat = lambda *details: beats.append(details)
+            running = asyncio.create_task(env.run(service.spawn_claude_code_activity, *_cc_activity_args()))
+            await _wait_for_heartbeat(beats, lambda b: b[0] == "Processing Claude Code output", "a sandbox message")
+
+            async def stop_then_get_paused():
+                env.cancel()
+                await asyncio.sleep(5)
+
+            recorder.collector.stop.side_effect = stop_then_get_paused
+            env.worker_shutdown()
+            try:
+                outcome = await asyncio.wait_for(running, timeout=15)
+            except asyncio.CancelledError:
+                raise AssertionError(
+                    f"the cancel escaped the drain detach with no cleanup; closed={recorder.closed}"
+                ) from None
+        assert outcome["status"] == "cancelled" and outcome["task_id"] == "cc-task-1", outcome
+        assert [call["task_id"] for call in recorder.closed] == ["cc-task-1"], recorder.closed
+        assert "Session Cancelled" in recorder.titles, recorder.titles
+    finally:
+        sandbox.stop()
+
+
+async def test_llm_heartbeats_inside_a_code_session_keep_the_session():
+    """Heartbeats from LLM helpers the activity calls must not wipe its session.
+
+    Each heartbeat replaces the details the retry reads. The parent-LLM call
+    inside the Claude Code loop heartbeats through the Rose client and
+    helpers.llm, which used to send no details at all.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from helpers.activity_heartbeat import heartbeat_resume_details
+    from helpers.llm import _safe_heartbeat as llm_heartbeat
+    from providers.rose.client import _safe_heartbeat as rose_heartbeat
+
+    session = {"code_session": {"task_id": "cc-task-1"}}
+    beats: list = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+
+    async def beat_from_listener_task():
+        rose_heartbeat("child task beat")
+
+    async def body():
+        with heartbeat_resume_details(session):
+            rose_heartbeat("OpenRouter streaming chunk 3")
+            llm_heartbeat("LLM streaming... 120 chars")
+            await asyncio.create_task(beat_from_listener_task())
+        llm_heartbeat("after the session closed")
+
+    await env.run(body)
+    assert [beat[1:] for beat in beats[:3]] == [(session,)] * 3, beats
+    assert beats[3] == ("after the session closed",), beats[3]
 
 
 async def test_claude_code_unreachable_session_is_closed_before_a_fresh_start():
@@ -4385,13 +4570,20 @@ class _SequencedCCWorkflow(_FakeCCWorkflow):
         self._results = list(results)
         self.started: list[list] = []
         self.provider_resolutions = 0
+        self.closed_sessions: list[dict] = []
 
     def start_activity(self, fn, args=None, **kwargs):
         assert self._results, f"unexpected activity start #{len(self.started) + 1}"
         self.started.append(list(args))
-        return _FakeActivityHandle(result=self._results.pop(0))
+        result = self._results.pop(0)
+        if isinstance(result, BaseException):
+            return _FakeActivityHandle(raise_exc=result)
+        return _FakeActivityHandle(result=result)
 
     async def execute_activity(self, fn, args=None, **kwargs):
+        if fn.__name__ == "close_detached_code_session_activity":
+            self.closed_sessions.append(args[1])
+            return True
         self.provider_resolutions += 1
         return await super().execute_activity(fn, args=args, **kwargs)
 
@@ -4509,6 +4701,93 @@ async def test_cc_manager_parked_reentry_reattaches_without_a_new_chip():
     titles = _cc_titles(events)
     assert "Starting Claude Code sandbox" not in titles, titles
     assert titles.count("\u2713 Task Completed") == 1, titles
+
+
+def _cancelled_before_start():
+    from temporalio.exceptions import ActivityError
+    from temporalio.exceptions import CancelledError as TemporalCancelledError
+
+    error = ActivityError(
+        message="Activity cancelled",
+        scheduled_event_id=1,
+        started_event_id=0,
+        identity="",
+        activity_type="spawn_claude_code_activity",
+        activity_id="2",
+        retry_state=None,
+    )
+    error.__cause__ = TemporalCancelledError("Cancelled")
+    return error
+
+
+def _cancel_chip(events):
+    return next(e for e in events if getattr(e, "title", None) == "Claude Code Session Cancelled")
+
+
+async def test_cc_manager_pause_after_drain_closes_the_detached_sandbox():
+    """Pausing while the run is detached for a deploy closes its sandbox.
+
+    No activity is attached between the drain-yield and the reattach, so no
+    activity cancel can close it: the sandbox kept running (and billing) until
+    the E2B timeout, and the chip ended without its task_id.
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    fake = _SequencedCCWorkflow(_drain_yield(WORKER_SHUTDOWN))
+    wf = _HandoffCCWorkflowInstance()
+    wf.is_paused = True
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-pause"))
+    finally:
+        restore()
+
+    assert len(fake.started) == 1, f"a paused run must not reattach, started={len(fake.started)}"
+    assert fake.closed_sessions == [_DRAINED_SESSION], fake.closed_sessions
+    chip = _cancel_chip(events)
+    assert chip.metadata["task_id"] == "cc-task-1" and chip.metadata["action_type"] == "task_complete", chip.metadata
+    assert "\u2713 Task Completed" not in _cc_titles(events), _cc_titles(events)
+
+
+async def test_cc_manager_cancel_before_reattach_closes_the_detached_sandbox():
+    """A pause that cancels a reattaching activity before it runs still closes the sandbox."""
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    fake = _SequencedCCWorkflow(_cancelled_before_start())
+    wf = _HandoffCCWorkflowInstance(resume={"code_session": dict(_DRAINED_SESSION)})
+    wf.is_paused = True
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-park"))
+    finally:
+        restore()
+
+    assert fake.closed_sessions == [_DRAINED_SESSION], fake.closed_sessions
+    assert _cancel_chip(events).metadata["task_id"] == "cc-task-1", _cancel_chip(events).metadata
+
+
+async def test_cc_manager_leaves_cleanup_to_an_activity_that_held_the_sandbox():
+    """An activity that was attached closes the sandbox itself; the workflow must not close it again."""
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    cancelled = {
+        "status": "cancelled",
+        "task_id": "cc-task-1",
+        "message": "Claude Code agent cancelled by user",
+        "code_provider": "claude",
+    }
+    fake = _SequencedCCWorkflow(cancelled)
+    wf = _HandoffCCWorkflowInstance(resume={"code_session": dict(_DRAINED_SESSION)})
+    wf.is_paused = True
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-park"))
+    finally:
+        restore()
+
+    assert fake.closed_sessions == [], fake.closed_sessions
+    assert _cancel_chip(events).metadata["task_id"] == "cc-task-1", _cancel_chip(events).metadata
 
 
 if __name__ == "__main__":

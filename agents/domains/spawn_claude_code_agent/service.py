@@ -27,6 +27,8 @@ from domains.spawn_claude_code_agent.config import (
     FATAL_ERROR_PATTERNS,
     MAX_RUNTIME_S,
     MAX_UNCHANGED_OUTPUTS,
+    REATTACH_PROBE_ATTEMPTS,
+    REATTACH_PROBE_BACKOFF_S,
     SDK_IDLE_TIMEOUT_S,
     SDK_POST_RESULT_EXIT_GRACE_S,
     SDK_POST_RESULT_STRETCH_TOOL_NAMES,
@@ -44,10 +46,10 @@ from domains.spawn_claude_code_agent.repo import (
 )
 from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
 from helpers.activity_generation_drain import activity_drain_reason
+from helpers.activity_heartbeat import heartbeat_resume_details, safe_heartbeat
 from helpers.claude_code_ws_client import ClaudeCodeWsClient, ws_endpoint_reachable
 from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
-from helpers.llm import _safe_heartbeat
 from helpers.tracing import traced
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
@@ -649,6 +651,9 @@ _CODE_SESSION_FIELDS = (
     "github_repo_url",
     "started_at",
     "loop_started_at",
+    # Sandbox events already logged by an earlier attachment; the reattached
+    # attempt logs only the ones that arrived while nobody was attached.
+    "logged_events",
 )
 
 
@@ -659,6 +664,25 @@ def code_session_record(raw: Any) -> Optional[Dict[str, Any]]:
     if not all(isinstance(raw.get(key), str) and raw[key] for key in ("task_id", "sandbox_id", "ws_url")):
         return None
     return {key: raw[key] for key in _CODE_SESSION_FIELDS if raw.get(key) is not None}
+
+
+@activity.defn
+async def close_detached_code_session_activity(agent_id: str, code_session: Dict[str, Any]) -> bool:
+    """Close a sandbox a drained attempt left running when no attempt will reattach to it.
+
+    Idempotent: closing an already-closed session is a no-op on the backend.
+    """
+    session = code_session_record(code_session)
+    if session is None:
+        return False
+    logger.info(
+        "[ClaudeCode] Closing detached sandbox",
+        agent_id=agent_id,
+        task_id=session["task_id"],
+        sandbox_id=session["sandbox_id"],
+    )
+    await close_e2b_session(task_id=session["task_id"], code_provider=session.get("code_provider", "claude"))
+    return True
 
 
 def _code_session_from_heartbeat() -> Optional[Dict[str, Any]]:
@@ -676,7 +700,7 @@ def _code_session_from_heartbeat() -> Optional[Dict[str, Any]]:
     return None
 
 
-async def _run_agentic_loop(  # noqa: C901
+async def _run_agentic_loop(
     *,
     agent_id: str,
     task_id: str,
@@ -698,7 +722,7 @@ async def _run_agentic_loop(  # noqa: C901
     terminal_output_persisted: Optional[list[bool]] = None,
     loop_started_at: Optional[float] = None,
     generation_yield: bool = True,
-    heartbeat_details: Optional[Dict[str, Any]] = None,
+    code_session: Optional[Dict[str, Any]] = None,
 ) -> tuple[int, bool, list[Dict[str, str]], int, int, list[Dict[str, Any]]]:
     """Run the WebSocket-based agentic loop monitoring Claude Code output.
 
@@ -711,8 +735,9 @@ async def _run_agentic_loop(  # noqa: C901
 
     Raises ``CodeSessionDrained`` when the worker drains (or, with
     ``generation_yield``, its generation is superseded) before Claude Code
-    exits. ``loop_started_at`` keeps MAX_RUNTIME_S cumulative across reattaches;
-    ``heartbeat_details`` rides on every heartbeat for a retry to reattach.
+    exits. ``loop_started_at`` keeps MAX_RUNTIME_S cumulative across reattaches.
+    ``code_session["logged_events"]`` is kept current so each sandbox event is
+    logged once across every attachment to the session.
     """
     last_output_time = safe_time()
     exit_code: Optional[int] = None
@@ -737,16 +762,11 @@ async def _run_agentic_loop(  # noqa: C901
     # Wall-clock of first SDK type=result. Stretch must not re-arm after this;
     # grace backstop ends the monitor if the CLI never exits.
     sdk_result_at: float | None = None
+    logged_events = int((code_session or {}).get("logged_events") or 0)
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
             terminal_output_persisted[0] = True
-
-    def heartbeat(message: str) -> None:
-        if heartbeat_details:
-            _safe_heartbeat(message, heartbeat_details)
-        else:
-            _safe_heartbeat(message)
 
     async def on_output(data: str, is_buffer: bool) -> None:
         nonlocal last_output_time, pending_output
@@ -795,17 +815,14 @@ async def _run_agentic_loop(  # noqa: C901
         wait_tool_armed = False
         effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         for event in events:
-            await apply_event(event, replayed=True)
+            await on_event(event)
         logger.info(
             "[ClaudeCode] Replayed sandbox event history", agent_id=agent_id, task_id=task_id, events=len(events)
         )
 
     async def on_event(event: dict[str, Any]) -> None:
-        await apply_event(event, replayed=False)
-
-    async def apply_event(event: dict[str, Any], *, replayed: bool) -> None:
         nonlocal completed_codex_turns, last_output_time, effective_idle_timeout_s
-        nonlocal wait_tool_armed, in_flight_tool_count, sdk_result_at
+        nonlocal wait_tool_armed, in_flight_tool_count, sdk_result_at, logged_events
         last_output_time = safe_time()
         code_events.append(event)
         if is_codex_completed_turn_event(event):
@@ -898,8 +915,13 @@ async def _run_agentic_loop(  # noqa: C901
                     status=event.get("status"),
                 )
             effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
-        if replayed:
+        # code_events mirrors the sandbox's append-only event history, so an
+        # event's index identifies it across reconnect replays and reattaches.
+        if len(code_events) <= logged_events:
             return
+        logged_events = len(code_events)
+        if code_session is not None:
+            code_session["logged_events"] = logged_events
         _log_code_agent_event(event, agent_id=agent_id, task_id=task_id, sandbox_id=sandbox_id)
         logger.debug(
             "[ClaudeCode] Received code-agent event",
@@ -916,7 +938,7 @@ async def _run_agentic_loop(  # noqa: C901
         on_connection_change=on_connection_change,
         on_stdin_error=on_stdin_error,
         on_event=on_event,
-        heartbeat_fn=heartbeat,
+        heartbeat_fn=safe_heartbeat,
         on_events_replay=on_events_replay,
     )
 
@@ -936,7 +958,7 @@ async def _run_agentic_loop(  # noqa: C901
     try:
         while exit_code is None and not attempt_completion:
             elapsed = safe_time() - loop_start
-            heartbeat(f"Monitoring Claude Code ({int(elapsed)}s)")
+            safe_heartbeat(f"Monitoring Claude Code ({int(elapsed)}s)")
 
             if safe_time() - last_drain_check >= DRAIN_CHECK_INTERVAL_S:
                 last_drain_check = safe_time()
@@ -2101,7 +2123,7 @@ async def _resolve_claude_token_for_activity(user_id: str, code_provider: str) -
 
 @activity.defn
 @traced("spawn_claude_code_activity")
-async def spawn_claude_code_activity(  # noqa: C901
+async def spawn_claude_code_activity(
     user_id: str,
     agent_id: str,
     goal: str,
@@ -2130,8 +2152,9 @@ async def spawn_claude_code_activity(  # noqa: C901
 
     A worker drain detaches instead: the sandbox keeps running and the activity
     returns ``CODE_AGENT_DRAIN_YIELD_STATUS`` with the ``code_session`` to pass
-    back as ``resume_session``. A retry after a crashed worker reattaches to the
-    session carried on the previous attempt's heartbeats.
+    back as ``resume_session``. A retry after a crashed or timed-out attempt
+    reattaches to the session carried on the previous attempt's heartbeats; only
+    a cancel the workflow requested closes the sandbox.
 
     Args:
         output_schema: Response schema from parent agent's tool call (required for structured responses)
@@ -2154,8 +2177,11 @@ async def spawn_claude_code_activity(  # noqa: C901
     start_time = safe_time()
     log_collector: Optional[SandboxLogCollector] = None
     session_record: Optional[Dict[str, Any]] = None
+    session_heartbeats = contextlib.ExitStack()
     generation_yield = not (isinstance(resume_session, dict) and resume_session.get("generation_yield") is False)
-    attached = code_session_record(resume_session) or _code_session_from_heartbeat()
+    # A retry's heartbeat session is newer than the scheduled resume_session: the
+    # earlier attempt may have replaced an unreachable sandbox with a fresh one.
+    attached = _code_session_from_heartbeat() or code_session_record(resume_session)
 
     total_input_tokens = 0
     total_output_tokens = 0
@@ -2177,7 +2203,9 @@ async def spawn_claude_code_activity(  # noqa: C901
     terminal = TerminalFilter(cols=200, rows=500)
 
     try:
-        if attached is not None and not await ws_endpoint_reachable(attached["ws_url"]):
+        if attached is not None and not await ws_endpoint_reachable(
+            attached["ws_url"], attempts=REATTACH_PROBE_ATTEMPTS, backoff_s=REATTACH_PROBE_BACKOFF_S
+        ):
             logger.warning(
                 "[ClaudeCode] Previous sandbox unreachable; closing it before a fresh start",
                 agent_id=agent_id,
@@ -2220,8 +2248,6 @@ async def spawn_claude_code_activity(  # noqa: C901
         claude_token = await _resolve_claude_token_for_activity(user_id, code_provider)
 
         if attached is None:
-            _safe_heartbeat("Creating E2B sandbox with Claude Code")
-
             # 1. Create E2B session via back-end API
             logger.info(
                 "[ClaudeCode] Creating E2B session",
@@ -2290,9 +2316,6 @@ async def spawn_claude_code_activity(  # noqa: C901
             action_summary.append(f"Started task: {goal[:100]}")
 
         # 3. WebSocket-based agentic loop
-        _safe_heartbeat("Connecting to Claude Code WebSocket")
-
-        model_pricing = await get_model_pricing_with_fallback(model)
         if loop_started_at is None:
             loop_started_at = safe_time()
         session_record = {
@@ -2303,38 +2326,60 @@ async def spawn_claude_code_activity(  # noqa: C901
             "github_repo_url": actual_github_repo_url,
             "started_at": start_time,
             "loop_started_at": loop_started_at,
+            "logged_events": int((attached or {}).get("logged_events") or 0),
         }
+        # An attempt's first heartbeat goes out at once and later ones only every
+        # throttle interval, so nothing may heartbeat before the session rides
+        # along: a crash inside that interval would hide the sandbox from the retry.
+        session_heartbeats.enter_context(heartbeat_resume_details({CODE_SESSION_HEARTBEAT_KEY: session_record}))
+        safe_heartbeat("Connecting to Claude Code WebSocket")
 
-        (
-            exit_code,
-            attempt_completion,
-            conversation_history,
-            loop_input_tokens,
-            loop_output_tokens,
-            code_events,
-        ) = await _run_agentic_loop(
-            agent_id=agent_id,
-            task_id=task_id,
-            sandbox_id=sandbox_id,
-            goal=goal,
-            ws_url=ws_url,
-            terminal=terminal,
-            model=model,
-            claude_token=claude_token,
-            gpt_token=gpt_token,
-            gpt_account_id=gpt_account_id,
-            gpt_token_source=gpt_token_source,
-            gpt_token_pool_id=gpt_token_pool_id,
-            gpt_token_user_id=user_id if gpt_token else None,
-            code_provider=code_provider,
-            action_summary=action_summary,
-            tool_call_id=tool_call_id,
-            code_events=code_events,
-            terminal_output_persisted=terminal_output_persisted_box,
-            loop_started_at=loop_started_at,
-            generation_yield=generation_yield,
-            heartbeat_details={CODE_SESSION_HEARTBEAT_KEY: session_record},
-        )
+        model_pricing = await get_model_pricing_with_fallback(model)
+
+        try:
+            (
+                exit_code,
+                attempt_completion,
+                conversation_history,
+                loop_input_tokens,
+                loop_output_tokens,
+                code_events,
+            ) = await _run_agentic_loop(
+                agent_id=agent_id,
+                task_id=task_id,
+                sandbox_id=sandbox_id,
+                goal=goal,
+                ws_url=ws_url,
+                terminal=terminal,
+                model=model,
+                claude_token=claude_token,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                gpt_token_source=gpt_token_source,
+                gpt_token_pool_id=gpt_token_pool_id,
+                gpt_token_user_id=user_id if gpt_token else None,
+                code_provider=code_provider,
+                action_summary=action_summary,
+                tool_call_id=tool_call_id,
+                code_events=code_events,
+                terminal_output_persisted=terminal_output_persisted_box,
+                loop_started_at=loop_started_at,
+                generation_yield=generation_yield,
+                code_session=session_record,
+            )
+        except CodeSessionDrained as drained:
+            # Cleared before awaiting so a cancel landing in stop() reaches the
+            # cancel handler below without stopping the collector twice.
+            collector, log_collector = log_collector, None
+            if collector:
+                await collector.stop()
+            return {
+                "status": CODE_AGENT_DRAIN_YIELD_STATUS,
+                "yield_reason": drained.reason,
+                "code_session": session_record,
+                "task_id": task_id,
+                "code_provider": code_provider,
+            }
         total_input_tokens += loop_input_tokens
         total_output_tokens += loop_output_tokens
 
@@ -2395,7 +2440,8 @@ async def spawn_claude_code_activity(  # noqa: C901
         )
         output_files = close_data.get("output_files", [])
         claude_code_usage = close_data.get("usage")
-        _safe_heartbeat("Verifying Claude Code result")
+        session_heartbeats.close()
+        safe_heartbeat("Verifying Claude Code result")
 
         logger.info(
             "[ClaudeCode] Session closed",
@@ -2507,22 +2553,23 @@ async def spawn_claude_code_activity(  # noqa: C901
         }
         return result
 
-    except CodeSessionDrained as drained:
-        if log_collector:
-            await log_collector.stop()
-        return {
-            "status": CODE_AGENT_DRAIN_YIELD_STATUS,
-            "yield_reason": drained.reason,
-            "code_session": session_record,
-            "task_id": task_id,
-            "code_provider": code_provider,
-        }
-
     except asyncio.CancelledError:
-        logger.info("[ClaudeCode] Activity cancelled", agent_id=agent_id, task_id=task_id)
+        cancellation = activity.cancellation_details()
+        logger.info(
+            "[ClaudeCode] Activity cancelled",
+            agent_id=agent_id,
+            task_id=task_id,
+            cancellation=repr(cancellation),
+        )
 
         if log_collector:
             await log_collector.stop()
+
+        if cancellation is not None and not cancellation.cancel_requested:
+            # A timeout, worker shutdown or activity pause: the next attempt
+            # reattaches to the sandbox from this attempt's heartbeats, so it
+            # must stay open and the run is not reported as cancelled.
+            raise
 
         if task_id:
             try:
@@ -2648,3 +2695,6 @@ async def spawn_claude_code_activity(  # noqa: C901
                 )
 
         raise
+
+    finally:
+        session_heartbeats.close()

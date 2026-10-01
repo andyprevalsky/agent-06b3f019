@@ -81,6 +81,10 @@ DRAIN_CHECK_INTERVAL_S: Final[float] = 1.0
 # The retry after a dead worker starts once this passes without a heartbeat, so
 # the sandbox ws-servers' REATTACH_LINGER_MS must outlast it.
 CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S: Final[int] = 300
+# A reattaching attempt closes the previous sandbox and starts over only after
+# this many failed handshakes, so one network blip does not discard a live run.
+REATTACH_PROBE_ATTEMPTS: Final[int] = 3
+REATTACH_PROBE_BACKOFF_S: Final[float] = 2.0
 
 # Fatal error patterns in Claude Code output that should immediately abort the session.
 # These are unrecoverable inside a headless sandbox (e.g., OAuth login can't be completed).

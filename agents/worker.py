@@ -76,6 +76,7 @@ from domains.spawn_browser_agent_v3.handler import (
     spawn_browser_agent_activity_v3,
 )
 from domains.spawn_claude_code_agent.service import (
+    close_detached_code_session_activity,
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
 )
@@ -1109,6 +1110,7 @@ async def main():
         spawn_browser_agent_activity_v3,
         resolve_code_agent_provider_activity,
         spawn_claude_code_activity,
+        close_detached_code_session_activity,
         web_search_activity,
         people_search_activity,
         web_fetch_activity,
