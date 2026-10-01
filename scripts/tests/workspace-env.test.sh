@@ -222,4 +222,46 @@ if ! grep -q '^# rose-cloud-env$' <(sed -n '/cat > \.cloud-env <<EOF/,/^EOF$/p' 
 fi
 echo "PASS: cloud-build.sh writes # rose-cloud-env into .cloud-env"
 
+# Every agents/venv provisioner reinstalls when requirements.txt is no longer
+# satisfied. Gating on `import temporalio` alone kept browser-use 0.11 in a
+# provisioned Cloud venv after the pin moved to >=0.13.10, and the agents
+# coverage gate failed on the stale release.
+VENV_CHECKER="$ROOT_DIR/scripts/lib/agents_venv_satisfied.py"
+VENV_PYTHON="$ROOT_DIR/agents/venv/bin/python"
+[ -x "$VENV_PYTHON" ] || VENV_PYTHON="$(command -v python3)"
+
+expect_venv_check() {
+  local expected="$1" label="$2" requirements="$3"
+  printf '%s\n' "$requirements" >"$TMP_ROOT/requirements.txt"
+  local rc=0
+  "$VENV_PYTHON" "$VENV_CHECKER" "$TMP_ROOT/requirements.txt" >"$TMP_ROOT/venv-check.out" 2>&1 || rc=$?
+  if [ "$rc" -ne "$expected" ]; then
+    echo "FAIL: $label (expected rc=$expected, got rc=$rc)" >&2
+    cat "$TMP_ROOT/venv-check.out" >&2
+    exit 1
+  fi
+  echo "PASS: $label"
+}
+
+expect_venv_check 0 "venv check: installed requirement within its specifier is satisfied" "pip>=1"
+expect_venv_check 0 "venv check: comments and blank lines are ignored" "# header
+
+pip>=1  # pinned for a reason"
+expect_venv_check 1 "venv check: installed release older than the pin is unsatisfied" "pip>=9999"
+expect_venv_check 1 "venv check: installed release above an upper bound is unsatisfied" "pip<1"
+expect_venv_check 1 "venv check: missing distribution is unsatisfied" "rose-not-a-real-distribution>=1"
+expect_venv_check 0 "venv check: a marker that excludes this interpreter is skipped" \
+  'rose-not-a-real-distribution>=1; python_version < "3"'
+expect_venv_check 0 "venv check: a direct URL requirement is satisfied by the installed distribution" \
+  "pip @ git+https://example.invalid/pip.git@0000000000000000000000000000000000000000"
+expect_venv_check 1 "venv check: pip option lines are never treated as satisfied" "-e ./somewhere"
+
+for venv_provisioner in scripts/cloud-build.sh scripts/run.sh scripts/prepare-deploy-worktree.sh; do
+  if ! grep -q 'scripts/lib/agents_venv_satisfied.py agents/requirements.txt' "$ROOT_DIR/$venv_provisioner"; then
+    echo "FAIL: $venv_provisioner must reinstall agents/venv when requirements.txt is unsatisfied" >&2
+    exit 1
+  fi
+done
+echo "PASS: every agents venv provisioner checks requirements.txt satisfaction"
+
 echo "All workspace env tests passed."

@@ -172,7 +172,8 @@ trap 'rm -f "$JS_LOG" "$PY_LOG"' EXIT
 JS_PID=$!
 
 (
-    if [ ! -f agents/venv/bin/activate ] || ! agents/venv/bin/python -c "import temporalio" 2>/dev/null; then
+    if [ ! -f agents/venv/bin/activate ] \
+        || ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
         echo "🐍 Setting up agents venv..."
         PYTHON_BIN="$(command -v python3)"
         [ -f agents/venv/bin/activate ] || (cd agents && "$PYTHON_BIN" -m venv venv)

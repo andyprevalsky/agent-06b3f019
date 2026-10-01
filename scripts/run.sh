@@ -1273,7 +1273,8 @@ fi
 bash "$SCRIPT_DIR/ensure-workspace-dependencies.sh" "${JS_SVC_DIRS[@]}"
 
 # ── Pre-flight: ensure agents venv exists with deps installed ──
-if [ ! -f agents/venv/bin/activate ] || ! agents/venv/bin/python -c "import temporalio" 2>/dev/null; then
+if [ ! -f agents/venv/bin/activate ] \
+    || ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
     echo "🐍 Setting up agents virtualenv..."
     PYTHON_VERSION=$(cat agents/.python-version 2>/dev/null || echo "3.11")
     # Try asdf python first, then system python3
