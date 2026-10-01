@@ -1503,6 +1503,76 @@ async def test_pending_write_lock_action_rehydrates_url_and_remaps_dom_target():
     assert action["index"] == 7
     assert action["params"]["index"] == 7
 
+async def test_browser_agent_recording_marks_do_not_block_on_slow_screenshots():
+    """Action bookkeeping advances while a diagnostic screenshot would hang."""
+    import tempfile
+
+    from domains.spawn_browser_agent_v3 import recording
+
+    class FakePage:
+        url = "https://shop.example.test/checkout"
+
+        def __init__(self):
+            self.screenshot_calls = 0
+            self.block_screenshots = True
+
+        async def screenshot(self, **_kwargs):
+            self.screenshot_calls += 1
+            if self.block_screenshots:
+                await asyncio.Event().wait()
+            return b"recording-frame"
+
+        async def content(self):
+            return "<html><body>Order complete</body></html>"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(recording, "_recording_root", return_value=Path(tmp)):
+            page = FakePage()
+            recorder = recording.BrowserAgentRecorder(
+                page=page,
+                agent_id="agent-recorder",
+                task_id="task-recorder",
+                session_id="steel-session",
+                browser_url=page.url,
+                session_metadata={"provider": "steel"},
+            )
+            recorder.frames_dir.mkdir(parents=True)
+            recorder._loop_task = asyncio.create_task(asyncio.sleep(60))
+            await asyncio.wait_for(
+                recorder.mark("Submit started", action="click", metadata={"step": 1, "phase": "start"}),
+                timeout=0.5,
+            )
+            await asyncio.wait_for(
+                recorder.mark("Submit finished", action="click", metadata={"step": 1, "phase": "finish"}),
+                timeout=0.5,
+            )
+            assert page.screenshot_calls == 2
+            assert recorder.frames == []
+            await recorder.record_observation(
+                iteration=1,
+                browser_state={"url": page.url, "dom_tree": "Order complete"},
+                action_entries=[
+                    {"step": 1, "action": "click", "phase": "start"},
+                    {"step": 1, "action": "click", "phase": "finish"},
+                ],
+            )
+            page.block_screenshots = False
+            await recorder.capture("Periodic frame", action="idle")
+            html_path = await recorder.close(include_steel_media=False, archive_artifacts=False)
+            assert html_path is not None and html_path.exists()
+            manifest = json.loads((html_path.parent / "manifest.json").read_text())
+            assert manifest["source_frame_count"] == 2
+            assert recorder.frames[-1]["metadata"]["phase"] == "finish"
+            assert "Submit finished" in html_path.read_text()
+            observation = json.loads(
+                (html_path.parent / "observations" / "iteration_0001.json").read_text()
+            )
+            assert [entry["phase"] for entry in observation["action_entries"]] == [
+                "start",
+                "finish",
+            ]
+
+
 async def test_browser_agent_recording_writes_local_html_replay():
     import tempfile
 
@@ -22880,6 +22950,10 @@ async def run_all_tests():
     )
 
     await r.record_async("move_visual_cursor_success", test_move_visual_cursor_success)
+    await r.record_async(
+        "browser_agent_recording_marks_do_not_block_on_slow_screenshots",
+        test_browser_agent_recording_marks_do_not_block_on_slow_screenshots,
+    )
     await r.record_async(
         "browser_agent_recording_writes_html",
         test_browser_agent_recording_writes_local_html_replay,
