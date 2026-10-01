@@ -24,6 +24,7 @@ FIRECRAWL_RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 FIRECRAWL_NON_RETRYABLE_STATUSES = {400, 401, 402, 403, 404, 409, 413}
 PARALLEL_RETRYABLE_STATUSES = {408, 429, 500, 502, 503}
 PARALLEL_NON_RETRYABLE_STATUSES = {400, 401, 402, 403, 404, 422}
+FIRECRAWL_MAX_AGE_MS = 5 * 60 * 1000
 
 
 _MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
@@ -100,6 +101,9 @@ async def fetch_firecrawl_scrape(url: str) -> Dict[str, Any]:
         "url": url,
         "formats": ["markdown", "links"],
         "onlyMainContent": True,
+        # The provider's two-day default served an outdated page after a new
+        # release. Reuse recent scrapes while limiting stale reads.
+        "maxAge": FIRECRAWL_MAX_AGE_MS,
     }
 
     response = await get_http_client().post(

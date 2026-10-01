@@ -15,6 +15,7 @@ from pydantic import (
     WithJsonSchema,
     create_model,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -27,6 +28,10 @@ from utils.prompts import (
     PLANNER_TASK_IDX_DESCRIPTION,
     PLANNER_TASK_TOOL_NAME_DESCRIPTION,
     SELF_CONTAINED_GOAL_RULE,
+)
+from utils.response_schema_constraints import (
+    bounds_from_entries,
+    coerce_direct_bounds_to_entries,
 )
 from utils.user_facing_writing_prompt import user_facing_text_description
 
@@ -143,12 +148,39 @@ ResponseSchemaPrimitiveType = Literal[
 ]
 
 
+class ResponseSchemaBound(BaseModel):
+    kind: Literal["minItems", "maxItems", "minLength", "maxLength"] = Field(
+        description="minItems/maxItems bound lists; minLength/maxLength bound strings."
+    )
+    value: int = Field(ge=0, description="Nonnegative bound value.")
+
+
 class ResponseSchemaNestedFieldConfig(BaseModel):
     """Configuration for a nested field in an object output."""
 
     name: str = Field(description="Field name in snake_case.")
     type: ResponseSchemaPrimitiveType = Field(description="Nested field type.")
     description: str = Field(default="", description="Optional semantic description; not used for object shape.")
+    required: bool = Field(default=True, description="False when this property may be omitted entirely.")
+    constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Declared bounds; empty when none.")
+    nullable: bool = Field(default=False, description="Whether null is a valid value; the field remains required.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_bounds(cls, value: Any) -> Any:
+        return coerce_direct_bounds_to_entries(value)
+
+    @model_validator(mode="after")
+    def _validate_constraints(self):
+        bounds_from_entries(self.type, self.constraints)
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        data.pop("constraints", None)
+        data.update(bounds_from_entries(self.type, self.constraints))
+        return data
 
 
 class ResponseSchemaFieldConfig(BaseModel):
@@ -177,6 +209,13 @@ class ResponseSchemaFieldConfig(BaseModel):
         default_factory=list,
         description="Explicit subfields for object/list[object] outputs. Required when type is object or list[object].",
     )
+    constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Declared bounds; empty when none.")
+    nullable: bool = Field(default=False, description="Whether null is a valid value; the field remains required.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_bounds(cls, value: Any) -> Any:
+        return coerce_direct_bounds_to_entries(value)
 
     @field_validator("properties", mode="before")
     @classmethod
@@ -187,14 +226,25 @@ class ResponseSchemaFieldConfig(BaseModel):
     def _object_fields_require_properties(self):
         if self.type in ("object", "list[object]") and not self.properties:
             raise ValueError("object and list[object] output_schema fields require explicit properties")
+        bounds_from_entries(self.type, self.constraints)
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        data.pop("constraints", None)
+        data.update(bounds_from_entries(self.type, self.constraints))
+        return data
 
 
 class ResponseSchemaConfig(BaseModel):
     """Structured output schema defining what data the agent must return when complete."""
 
     fields: List[ResponseSchemaFieldConfig] = Field(
-        description="List of output fields that the agent must return when complete."
+        description=(
+            "Output fields. Use file_pointer for open-ended multi-attribute collections; keep small results inline. "
+            "constraints set size bounds; required=false permits omission."
+        )
     )
 
     @model_validator(mode="before")

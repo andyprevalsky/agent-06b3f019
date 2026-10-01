@@ -18,8 +18,6 @@ from temporalio import activity
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 
-from helpers.llm import _safe_heartbeat
-
 from domains.spawn_claude_code_agent.config import (
     E2B_COST_CENTS_PER_SECOND,
     ECHO_SUPPRESS_S,
@@ -45,10 +43,12 @@ from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
 from helpers.claude_code_ws_client import ClaudeCodeWsClient
 from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
+from helpers.llm import _safe_heartbeat
 from helpers.tracing import traced
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
 from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
+from utils.response_schema_constraints import explicitly_allows_empty_value, value_satisfies_output_field_constraints
 from utils.terminal_filter import TerminalFilter
 
 logger = structlog.get_logger()
@@ -1328,22 +1328,31 @@ def _synthesize_codex_structured_response(
         if "file_pointer" in field_type:
             path = script_paths[0] if script_paths else (paths[0] if paths else None)
             if not path:
-                return None
+                if field.get("required", True):
+                    return None
+                continue
             structured[name] = {"path": path}
         elif field_type.startswith("list") and "sequence" in descriptor:
             if not numbers:
-                return None
+                if field.get("required", True):
+                    return None
+                continue
             if "collatz" in descriptor and not _is_valid_collatz_sequence(numbers, total_steps):
-                return None
+                if field.get("required", True):
+                    return None
+                continue
             structured[name] = numbers
         elif field_type in {"integer", "int", "number"} and "step" in descriptor:
             if total_steps is None:
-                return None
+                if field.get("required", True):
+                    return None
+                continue
             structured[name] = total_steps
         elif "path" in descriptor and paths:
             structured[name] = script_paths[0] if script_paths else paths[0]
         else:
-            return None
+            if field.get("required", True):
+                return None
 
     return structured or None
 
@@ -1386,7 +1395,7 @@ def _structured_response_satisfies_declared_schema(
     output_schema: Optional[Dict[str, Any]],
     structured_response: Optional[Dict[str, Any]],
 ) -> bool:
-    """Return true only when every declared field has a non-empty value."""
+    """Return true only when every declared field satisfies its output contract."""
     fields = output_schema.get("fields", []) if isinstance(output_schema, dict) else []
     if not fields:
         return True
@@ -1396,10 +1405,18 @@ def _structured_response_satisfies_declared_schema(
         if not isinstance(field, dict):
             return False
         name = field.get("name")
-        if not name or name not in structured_response:
+        if not name:
+            return False
+        if name not in structured_response:
+            if field.get("required", True) is False:
+                continue
             return False
         value = structured_response[name]
-        if value is None or value == "" or value == [] or value == {}:
+        if value is None and field.get("nullable") is True:
+            continue
+        if (value is None or value == "" or value == [] or value == {}) and not explicitly_allows_empty_value(value, field):
+            return False
+        if not value_satisfies_output_field_constraints(value, field):
             return False
     return True
 

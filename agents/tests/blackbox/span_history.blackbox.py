@@ -89,6 +89,78 @@ def test_default_span_history_rolls_over_before_git_blob_limit():
                 os.environ["SPAN_HISTORY_FILE"] = old_env
 
 
+def test_one_batch_cannot_overfill_a_span_history_segment():
+    import benchmarks.span_history as history
+
+    observations = [
+        {
+            "benchmark": "chat-mode",
+            "environment": "local",
+            "agent_id": "agent-rollover",
+            "span_key": "call_llm",
+            "duration_ms": 1000 + index,
+        }
+        for index in range(5)
+    ]
+    line_bytes = len((json.dumps(observations[0], sort_keys=True) + "\n").encode("utf-8"))
+    with tempfile.TemporaryDirectory() as tmp:
+        original_dir = history.HISTORY_DIR
+        original_file = history.HISTORY_FILE
+        original_limit = history.MAX_HISTORY_FILE_BYTES
+        old_env = os.environ.pop("SPAN_HISTORY_FILE", None)
+        try:
+            history.HISTORY_DIR = tmp
+            history.HISTORY_FILE = str(Path(tmp) / "span_durations.jsonl")
+            history.MAX_HISTORY_FILE_BYTES = line_bytes * 2
+            assert history.record_span_observations(observations) == 5
+            paths = [Path(history.HISTORY_FILE), *sorted(Path(tmp).glob("span_durations.*.jsonl"))]
+            assert len(paths) == 3
+            assert all(path.stat().st_size <= history.MAX_HISTORY_FILE_BYTES for path in paths)
+            assert history.load_records() == observations
+        finally:
+            history.HISTORY_DIR = original_dir
+            history.HISTORY_FILE = original_file
+            history.MAX_HISTORY_FILE_BYTES = original_limit
+            if old_env is not None:
+                os.environ["SPAN_HISTORY_FILE"] = old_env
+
+
+def test_span_history_appends_to_latest_existing_segment():
+    import benchmarks.span_history as history
+
+    date_key = datetime.now(timezone.utc).strftime("%Y%m%d")
+    observations = [
+        {"benchmark": "chat-mode", "span_key": "call_llm", "duration_ms": 1000 + index}
+        for index in range(3)
+    ]
+    line_bytes = len((json.dumps(observations[0], sort_keys=True) + "\n").encode("utf-8"))
+    with tempfile.TemporaryDirectory() as tmp:
+        original_dir = history.HISTORY_DIR
+        original_file = history.HISTORY_FILE
+        original_limit = history.MAX_HISTORY_FILE_BYTES
+        old_env = os.environ.pop("SPAN_HISTORY_FILE", None)
+        try:
+            history.HISTORY_DIR = tmp
+            history.HISTORY_FILE = str(Path(tmp) / "span_durations.jsonl")
+            history.MAX_HISTORY_FILE_BYTES = line_bytes * 2
+            Path(history.HISTORY_FILE).write_text("already-full\n" * (line_bytes * 2))
+            first = Path(tmp) / f"span_durations.{date_key}.jsonl"
+            second = Path(tmp) / f"span_durations.{date_key}.02.jsonl"
+            first.write_text(json.dumps(observations[0], sort_keys=True) + "\n")
+            second.write_text(json.dumps(observations[1], sort_keys=True) + "\n")
+
+            assert history.record_span_observations([observations[2]]) == 1
+            assert first.read_text().count("\n") == 1
+            assert second.read_text().count("\n") == 2
+            assert history.load_records() == observations
+        finally:
+            history.HISTORY_DIR = original_dir
+            history.HISTORY_FILE = original_file
+            history.MAX_HISTORY_FILE_BYTES = original_limit
+            if old_env is not None:
+                os.environ["SPAN_HISTORY_FILE"] = old_env
+
+
 def test_compare_observations_marks_regression():
     from benchmarks.span_history import compare_observations, record_span_observations
 
@@ -366,6 +438,8 @@ async def run_all_tests():
     r = BlackboxResult()
     r.record("record_and_summarize", test_record_and_summarize_span_history)
     r.record("default_history_rollover", test_default_span_history_rolls_over_before_git_blob_limit)
+    r.record("batch_history_rollover", test_one_batch_cannot_overfill_a_span_history_segment)
+    r.record("latest_segment_append", test_span_history_appends_to_latest_existing_segment)
     r.record("compare_marks_regression", test_compare_observations_marks_regression)
     r.record("record_from_embedded_logs", test_agent_latency_records_span_history_from_embedded_logs)
     r.record("parse_nested_fly_clickhouse_json", test_agent_latency_parses_nested_fly_clickhouse_json)

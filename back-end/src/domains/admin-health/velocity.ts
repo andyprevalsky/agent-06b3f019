@@ -33,6 +33,7 @@ interface PageInfo {
 }
 
 const GITHUB_MAX_COMMIT_PAGES = 500;
+const GITHUB_FETCH_BUDGET_MS = 60_000;
 const GITHUB_AUTH_FAILURE = /^GitHub (401|403)$/;
 
 function unavailableSeries(label: string, detail: string, count: number): MetricSeries {
@@ -141,7 +142,8 @@ async function fetchGithubItemsWithToken(
   owner: string,
   repoName: string,
   start: Date,
-  end: Date
+  end: Date,
+  signal: AbortSignal
 ): Promise<DatedValue[]> {
   const items: DatedValue[] = [];
   for (let page = 1; page <= GITHUB_MAX_COMMIT_PAGES; page += 1) {
@@ -151,6 +153,7 @@ async function fetchGithubItemsWithToken(
     url.searchParams.set('per_page', '100');
     url.searchParams.set('page', String(page));
     const response = await fetch(url, {
+      signal,
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: 'application/vnd.github+json',
@@ -187,10 +190,11 @@ async function fetchGithubItems(start: Date, end: Date): Promise<DatedValue[]> {
     throw new Error('GITHUB_TOKEN / GITHUB_DISPATCH_TOKEN is not configured.');
   }
   let lastAuthError: Error | null = null;
+  const signal = AbortSignal.timeout(GITHUB_FETCH_BUDGET_MS);
   for (let index = 0; index < candidates.length; index += 1) {
     const token = candidates[index];
     try {
-      return await fetchGithubItemsWithToken(token, owner, repoName, start, end);
+      return await fetchGithubItemsWithToken(token, owner, repoName, start, end, signal);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!GITHUB_AUTH_FAILURE.test(message)) throw error;

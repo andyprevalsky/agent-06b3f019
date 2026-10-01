@@ -589,6 +589,35 @@ def test_structured_response_from_output_files_keeps_mixed_schema_file_fields():
     }
 
 
+def test_declared_schema_fast_path_enforces_bounds_and_nullable_fields():
+    """Code child fast paths must honor the same contract as the verifier."""
+    from domains.spawn_claude_code_agent.service import _structured_response_satisfies_declared_schema
+
+    schema = {"fields": [
+        {"name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
+         "properties": [{"name": "title", "type": "str", "minLength": 3}]},
+        {"name": "note", "type": "str", "nullable": True},
+    ]}
+    valid = {"items": [{"title": "Desk"}, {"title": "Lamp"}], "note": None}
+    assert _structured_response_satisfies_declared_schema(schema, valid)
+    assert not _structured_response_satisfies_declared_schema(schema, {**valid, "items": valid["items"][:1]})
+    assert not _structured_response_satisfies_declared_schema(schema, {**valid, "items": valid["items"] * 2})
+    assert not _structured_response_satisfies_declared_schema(
+        schema, {**valid, "items": [{"title": "No"}, valid["items"][1]]}
+    )
+    assert not _structured_response_satisfies_declared_schema(schema, {"items": valid["items"]})
+    optional_integer = {"fields": [
+        {"name": "items", "type": "list[str]", "required": True},
+        {"name": "steps", "type": "int", "required": False},
+    ]}
+    assert _structured_response_satisfies_declared_schema(optional_integer, {"items": ["done"]})
+    assert not _structured_response_satisfies_declared_schema(optional_integer, {"items": ["done"], "steps": None})
+    assert not _structured_response_satisfies_declared_schema(optional_integer, {"items": ["done"], "steps": "three"})
+    zero = {"fields": [{"name": "items", "type": "list[str]", "maxItems": 0}]}
+    assert _structured_response_satisfies_declared_schema(zero, {"items": []})
+    assert not _structured_response_satisfies_declared_schema(zero, {"items": ["extra"]})
+
+
 def test_build_code_event_context_uses_json_and_extracted_files():
     """Verifier evidence is built from normalized SDK events plus extracted files."""
     from domains.spawn_claude_code_agent.service import _build_code_event_context
@@ -3545,6 +3574,7 @@ async def _run_all_tests():
         "structured_from_output_mixed_schema",
         test_structured_response_from_output_files_keeps_mixed_schema_file_fields,
     )
+    r.record("declared_schema_fast_path_bounds", test_declared_schema_fast_path_enforces_bounds_and_nullable_fields)
     r.record("code_event_context_json", test_build_code_event_context_uses_json_and_extracted_files)
     # build_usage_items
     r.record("usage_items_both", test_build_usage_items_both_llm_and_service)

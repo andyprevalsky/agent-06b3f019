@@ -27,6 +27,7 @@
 import { z } from 'zod';
 import { prisma } from './database';
 import { createLogger } from './logger';
+import { boundsFromEntries, type FieldConstraints } from './responseSchemaBounds';
 import { retryWithBackoff } from './retry';
 import { createStreamingCompletion, RoseAuthError, RoseInvalidRequest } from './rose';
 import { StructuredOutputAccumulator } from './rose/structuredOutput';
@@ -79,25 +80,48 @@ const FieldTypeSchema = z.enum([
   'list[session_file_pointer]',
 ]);
 
-const NestedSchemaFieldSchema = z.object({
-  name: z.string().describe('Nested field name in snake_case'),
-  type: z
-    .enum([
-      'str',
-      'int',
-      'float',
-      'bool',
-      'list[str]',
-      'list[int]',
-      'file_pointer',
-      'list[file_pointer]',
-      'session_file_pointer',
-      'list[session_file_pointer]',
-    ])
-    .describe('Nested field type'),
+const GeneratedBoundSchema = z.object({
+  kind: z.enum(['minItems', 'maxItems', 'minLength', 'maxLength']),
+  value: z.number().int().min(0),
 });
 
-// Individual field definition (no 'required' - we hardcode it to true)
+const NestedSchemaFieldSchema = z
+  .object({
+    name: z.string().describe('Nested field name in snake_case'),
+    type: z
+      .enum([
+        'str',
+        'int',
+        'float',
+        'bool',
+        'list[str]',
+        'list[int]',
+        'file_pointer',
+        'list[file_pointer]',
+        'session_file_pointer',
+        'list[session_file_pointer]',
+      ])
+      .describe('Nested field type'),
+    constraints: z.array(GeneratedBoundSchema).optional(),
+    required: z.boolean().default(true),
+  })
+  .superRefine((field, ctx) => validateFieldConstraints(field, ctx));
+
+function validateFieldConstraints(
+  field: { type: string; constraints?: z.infer<typeof GeneratedBoundSchema>[] },
+  ctx: z.RefinementCtx
+): void {
+  try {
+    boundsFromEntries(field.type, field.constraints);
+  } catch (error) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+// Individual field definition. `required: false` means the agent may omit it.
 const SchemaFieldSchema = z
   .object({
     name: z.string().describe('Field name in snake_case'),
@@ -108,8 +132,11 @@ const SchemaFieldSchema = z
       .describe(
         'Required for object/list[object]. Explicit nested fields; do not encode subfields in prose.'
       ),
+    constraints: z.array(GeneratedBoundSchema).optional(),
+    required: z.boolean().default(true),
   })
   .superRefine((field, ctx) => {
+    validateFieldConstraints(field, ctx);
     if (
       (field.type === 'object' || field.type === 'list[object]') &&
       (!field.properties || field.properties.length === 0)
@@ -130,16 +157,21 @@ const SchemaFieldSchema = z
 // message on `.min(1)` mirrors the prompt directive ("Return AT LEAST ONE
 // field. A schema with zero fields is invalid...") so a Zod failure here
 // surfaces a clear, prompt-aligned diagnostic to logs and downstream retry.
-const ResponseSchemaSchema = z.object({
-  reasoning: z.string().describe('Your analysis of what outputs this goal requires'),
-  fields: z
-    .array(SchemaFieldSchema)
-    .min(1, {
-      message:
-        'fields must contain at least one field — a schema with zero fields is invalid. Every goal that warrants a verifier must produce at least one verifiable output.',
-    })
-    .describe('List of MUST-HAVE output fields (at least one required)'),
-});
+export const ResponseSchemaSchema = z
+  .object({
+    reasoning: z.string().describe('Your analysis of what outputs this goal requires'),
+    fields: z
+      .array(SchemaFieldSchema)
+      .min(1, {
+        message:
+          'fields must contain at least one field — a schema with zero fields is invalid. Every goal that warrants a verifier must produce at least one verifiable output.',
+      })
+      .describe('List of output fields; at least one must be required'),
+  })
+  .refine((schema) => schema.fields.some((field) => field.required), {
+    message: 'generated output schema must contain at least one required field',
+    path: ['fields'],
+  });
 
 export function parseGeneratedResponseSchemaJson(
   content: string
@@ -165,23 +197,8 @@ export function parseGeneratedResponseSchemaJson(
 }
 
 export type ResponseSchema = {
-  fields: Array<{
-    name: string;
-    type:
-      | 'str'
-      | 'int'
-      | 'float'
-      | 'bool'
-      | 'list[str]'
-      | 'list[int]'
-      | 'object'
-      | 'list[object]'
-      | 'file_pointer'
-      | 'list[file_pointer]'
-      | 'session_file_pointer'
-      | 'list[session_file_pointer]';
-    required: boolean;
-    properties?: Array<{
+  fields: Array<
+    FieldConstraints & {
       name: string;
       type:
         | 'str'
@@ -190,12 +207,31 @@ export type ResponseSchema = {
         | 'bool'
         | 'list[str]'
         | 'list[int]'
+        | 'object'
+        | 'list[object]'
         | 'file_pointer'
         | 'list[file_pointer]'
         | 'session_file_pointer'
         | 'list[session_file_pointer]';
-    }>;
-  }>;
+      required: boolean;
+      properties?: Array<
+        FieldConstraints & {
+          name: string;
+          type:
+            | 'str'
+            | 'int'
+            | 'float'
+            | 'bool'
+            | 'list[str]'
+            | 'list[int]'
+            | 'file_pointer'
+            | 'list[file_pointer]'
+            | 'session_file_pointer'
+            | 'list[session_file_pointer]';
+        }
+      >;
+    }
+  >;
 };
 
 type GenerateResult = {
@@ -205,8 +241,25 @@ type GenerateResult = {
 };
 
 // JSON Schema for structured output mode
-// Note: 'required' field is NOT in schema - we hardcode it to true for all fields
-const RESPONSE_SCHEMA_JSON_SCHEMA = {
+// A field's `required` flag controls whether its key may be omitted in the final output.
+const CONSTRAINT_PROPERTIES = {
+  constraints: {
+    type: 'array',
+    description: 'Bounds: minItems/maxItems for lists; minLength/maxLength for strings.',
+    items: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['minItems', 'maxItems', 'minLength', 'maxLength'] },
+        value: { type: 'integer', minimum: 0 },
+      },
+      required: ['kind', 'value'],
+      additionalProperties: false,
+    },
+  },
+  required: { type: 'boolean', description: 'Defaults to true; false allows omission.' },
+};
+
+export const RESPONSE_SCHEMA_JSON_SCHEMA = {
   type: 'object',
   properties: {
     reasoning: {
@@ -216,7 +269,7 @@ const RESPONSE_SCHEMA_JSON_SCHEMA = {
     fields: {
       type: 'array',
       description:
-        'List of MUST-HAVE output fields. MINIMUM 1 field required — a schema with zero fields is invalid. Typically 1-5 fields total. Include ONLY fields strictly required to fully answer the goal, but ALWAYS include at least one.',
+        'List of output fields. MINIMUM 1 required field; zero fields is invalid. Typically 1-5 fields total. Optional fields may be omitted from the final output.',
       minItems: 1,
       items: {
         type: 'object',
@@ -271,13 +324,15 @@ const RESPONSE_SCHEMA_JSON_SCHEMA = {
                   ],
                   description: 'Nested field type.',
                 },
+                ...CONSTRAINT_PROPERTIES,
               },
-              required: ['name', 'type'],
+              required: ['name', 'type', 'constraints', 'required'],
               additionalProperties: false,
             },
           },
+          ...CONSTRAINT_PROPERTIES,
         },
-        required: ['name', 'type'],
+        required: ['name', 'type', 'properties', 'constraints', 'required'],
         additionalProperties: false,
       },
     },
@@ -303,15 +358,14 @@ const RESPONSE_SCHEMA_JSON_SCHEMA = {
  */
 const SYSTEM_PROMPT = `You are an expert at analyzing agent goals and producing the MINIMAL output schema needed to verify the goal was completed.
 
-Your output is consumed by an automated verifier that scores 1.0 IFF every field in the schema can be populated accurately from tool-result evidence. Therefore:
-  - EVERY field you add must be populatable for the goal to count as done.
-  - Adding optional / nice-to-have fields PENALIZES the agent — keep it strict.
+Your output is consumed by an automated verifier that scores 1.0 when every required field can be populated accurately from tool-result evidence. Therefore:
+  - Required defaults to true; \`required: false\` lets the agent omit a field.
   - Field names must be SPECIFIC to the goal, not generic catch-alls.
   - You MUST return AT LEAST ONE field. A schema with zero fields is invalid — every goal that warrants a verifier must produce at least one verifiable output.
 
 # CORE PRINCIPLES
 
-1. MUST-HAVE ONLY, AT LEAST ONE. Generate ONLY the fields strictly required to fully answer the user's goal — but ALWAYS at least one field. Skip nice-to-haves. Do NOT add fields like 'reasoning', 'sources', 'confidence', 'notes', or other meta-fields unless the goal explicitly asks for them. The minimum is 1 field; the maximum should still be tight (typically 1-5).
+1. AT LEAST ONE REQUIRED FIELD. Generate the fields needed to answer the user's goal, with at least one required field. Do NOT add fields like 'reasoning', 'sources', 'confidence', or 'notes' unless the goal asks for them. Keep the schema tight (typically 1-5 fields).
 
 2. SPECIFIC NAMES. Field names must be anchored in the goal. If the goal asks for Tokyo's population, the field is \`population\` or \`tokyo_population\` — not \`result\`. If the goal asks for an email + LinkedIn URL, the fields are \`email\` and \`linkedin_url\` — not \`output\`.
 
@@ -319,7 +373,9 @@ Your output is consumed by an automated verifier that scores 1.0 IFF every field
 
 4. CONCRETE TYPES. Pick the most precise type the goal allows. \`int\` beats \`str\` for a population. \`list[object]\` beats \`str\` for a comparison table.
 
-5. EXPLICIT OBJECT PROPERTIES. Never encode object subfields in prose. For \`object\` and \`list[object]\`, put every required nested field in \`properties\`. The verifier enforces those properties as the object shape.
+5. EXPLICIT OBJECT PROPERTIES. Never encode object subfields in prose. For \`object\` and \`list[object]\`, put nested fields in \`properties\`.
+
+6. RIGHT OUTPUT MEDIUM. Use \`file_pointer\` for open-ended collections of multi-attribute records, without duplicating rows in \`list[object]\`. Keep small results inline.
 
 # BANNED FIELD NAMES
 
@@ -420,11 +476,21 @@ GOOD:
     { name: "logo", type: "file_pointer" }
   ]
 
+## Example 6 — large downloadable inventory
+
+Goal: "List every record from my history with its link, image, and price so I can reuse the details later."
+
+GOOD:
+  fields: [{ name: "inventory_file", type: "file_pointer" }]
+
+BAD:
+  fields: [{ name: "items", type: "list[object]", properties: [{ name: "product_url", type: "str" }, { name: "price", type: "float" }] }]
+
 # YOUR JOB
 
 Given a goal, return JSON with:
   - reasoning: 1-3 sentences on what concrete outputs the goal requires.
-  - fields: the minimal MUST-HAVE list, with AT LEAST ONE field. Specific names and concrete types. For object/list[object], include explicit \`properties\`; never put subfields in prose. A zero-length \`fields\` array is invalid and will be rejected.
+  - fields: a compact list with at least one required field, specific names and concrete types. For object/list[object], include explicit \`properties\`. A zero-length \`fields\` array is invalid.
 
 Output JSON only. Do not include prose outside the JSON envelope.`;
 
@@ -620,14 +686,21 @@ export async function generateResponseSchema(
         attempt,
       });
 
-      // Hardcode required: true for all fields.
-      // The schema-gen prompt explicitly tells the LLM to emit MUST-HAVE
-      // fields only, so every emitted field is required by construction.
       const fieldsWithRequired = result.parsed.fields.map((f) => ({
         name: f.name,
         type: f.type,
-        required: true as const,
-        ...(f.properties ? { properties: f.properties } : {}),
+        required: f.required,
+        ...boundsFromEntries(f.type, f.constraints),
+        ...((f.type === 'object' || f.type === 'list[object]') && f.properties
+          ? {
+              properties: f.properties.map((p) => ({
+                name: p.name,
+                type: p.type,
+                required: p.required,
+                ...boundsFromEntries(p.type, p.constraints),
+              })),
+            }
+          : {}),
       }));
 
       return {

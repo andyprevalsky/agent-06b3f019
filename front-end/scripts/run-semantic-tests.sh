@@ -26,7 +26,25 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FRONTEND_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_DIR="$(dirname "$FRONTEND_DIR")"
 
+resolve_local_semantic_db_port() {
+  node - "$REPO_DIR/.context/services.json" "$REPO_DIR" "$BACKEND_PORT" "$FRONTEND_PORT" <<'NODE'
+const fs = require('node:fs');
+const [manifestPath, worktree, backendPort, frontendPort] = process.argv.slice(2);
+const stack = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const port = stack.database?.runtime_port;
+if (stack.status === 'running' && stack.worktree === worktree &&
+    stack.ports?.backend === Number(backendPort) &&
+    stack.ports?.frontend === Number(frontendPort) &&
+    Number.isInteger(port) && port > 0) {
+  process.stdout.write(String(port));
+  }
+NODE
+}
+
 apply_local_semantic_db_urls() {
+  if [[ -z "${LOCAL_DB_PORT:-}" && -f "$REPO_DIR/.context/services.json" ]]; then
+    LOCAL_DB_PORT=$(resolve_local_semantic_db_port)
+  fi
   if [[ -n "${LOCAL_DB_PORT:-}" ]]; then
     if [[ -z "${SEMANTIC_DATABASE_URL:-}" ]]; then
       export SEMANTIC_DATABASE_URL="postgresql://postgres:postgres@localhost:${LOCAL_DB_PORT}/victoria?connection_limit=50&pool_timeout=30"

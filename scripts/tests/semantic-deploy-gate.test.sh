@@ -325,6 +325,18 @@ bash "$AUTO_RCA_WORKFLOW_TEST"
 node --test "$PROD_SESSION_TEST"
 
 # LOCAL_DB_PORT + unset DATABASE + set DIRECT must not clobber the caller URL.
+eval "$(sed -n '/^resolve_local_semantic_db_port() {/,/^}/p' "$RUNNER")"
+SEMANTIC_FIXTURE_DIR=$(mktemp -d)
+mkdir -p "$SEMANTIC_FIXTURE_DIR/.context"
+REPO_DIR="$SEMANTIC_FIXTURE_DIR"
+BACKEND_PORT=4200
+FRONTEND_PORT=4201
+printf '{"status":"running","worktree":"%s","ports":{"backend":4200,"frontend":4201},"database":{"runtime_port":4205}}\n' \
+  "$SEMANTIC_FIXTURE_DIR" > "$SEMANTIC_FIXTURE_DIR/.context/services.json"
+[ "$(resolve_local_semantic_db_port)" = '4205' ] || fail "semantic runner must use the active stack database port"
+BACKEND_PORT=4202
+[ -z "$(resolve_local_semantic_db_port)" ] || fail "semantic runner must reject another stack's database port"
+rm -rf "$SEMANTIC_FIXTURE_DIR"
 eval "$(sed -n '/^apply_local_semantic_db_urls() {/,/^}/p' "$RUNNER")"
 LOCAL_DB_PORT=4205
 unset SEMANTIC_DATABASE_URL

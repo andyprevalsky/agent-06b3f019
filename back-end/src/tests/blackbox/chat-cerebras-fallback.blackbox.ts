@@ -30,6 +30,7 @@ import assert from 'node:assert/strict';
 
 import { createStreamingCompletion, type CompletionChunk } from '../../providers/rose';
 import { OPENROUTER_CEREBRAS_MODEL } from '../../providers/rose/openrouterCerebrasRoute';
+import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 
 /** A successful OpenRouter SSE stream carrying real content from a fallback model. */
@@ -256,8 +257,119 @@ async function runEmptyCerebrasStream(): Promise<void> {
   process.stdout.write('PASS chat falls through when Cerebras ends cleanly with no output\n');
 }
 
+async function runRateLimitedCerebrasWithSlowSpill(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const oldOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  const oldCerebrasKey = process.env.CEREBRAS_API_KEY;
+  const oldHedgeMs = process.env.CEREBRAS_CHAT_HEDGE_MS;
+  process.env.OPENROUTER_API_KEY = 'blackbox-openrouter-key';
+  process.env.CEREBRAS_API_KEY = 'blackbox-cerebras-key';
+  process.env.CEREBRAS_CHAT_HEDGE_MS = '0';
+
+  const requestedModels: string[] = [];
+  let slowSpillAborted = false;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url === CEREBRAS_API_URL) {
+      return new Response('rate limited', { status: 429 });
+    }
+    if (url === OPENROUTER_API_URL) {
+      const model = requestedModel(init);
+      requestedModels.push(model);
+      if (model === OPENROUTER_CEREBRAS_MODEL) {
+        init?.signal?.addEventListener('abort', () => {
+          slowSpillAborted = true;
+        });
+        return stallingCerebrasResponse(init?.signal);
+      }
+      if (model === OPENROUTER_FAST_CHAT_MODEL) return sseResponse(FALLBACK_SSE);
+      return new Response(`Unexpected fallback model: ${model}`, { status: 503 });
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+
+  const content: string[] = [];
+  let sawStop = false;
+  let winningModel = '';
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-flash',
+      messages: [
+        { role: 'system', content: 'You are Rose.' },
+        { role: 'user', content: 'latest news?' },
+      ],
+      provider_route: 'direct-cerebras',
+      abort_signal: AbortSignal.timeout(1_500),
+    });
+    for await (const chunk of stream) {
+      if (chunk.choices[0]?.delta?.content) content.push(chunk.choices[0].delta.content);
+      if (chunk.choices[0]?.finish_reason === 'stop') sawStop = true;
+      if (chunk.actual_model) winningModel = chunk.actual_model;
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (oldOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = oldOpenRouterKey;
+    if (oldCerebrasKey === undefined) delete process.env.CEREBRAS_API_KEY;
+    else process.env.CEREBRAS_API_KEY = oldCerebrasKey;
+    if (oldHedgeMs === undefined) delete process.env.CEREBRAS_CHAT_HEDGE_MS;
+    else process.env.CEREBRAS_CHAT_HEDGE_MS = oldHedgeMs;
+  }
+
+  assert.ok(requestedModels.includes(OPENROUTER_CEREBRAS_MODEL));
+  assert.ok(requestedModels.includes(OPENROUTER_FAST_CHAT_MODEL));
+  assert.ok(slowSpillAborted, 'the slower same-model spill should be cancelled');
+  assert.ok(content.join('').trim(), 'the fast fallback should complete the chat response');
+  assert.equal(winningModel, OPENROUTER_FAST_CHAT_MODEL);
+  assert.ok(sawStop, 'the winning stream should reach its terminal chunk');
+  process.stdout.write('PASS rate-limited Cerebras races slow spill with fast fallback\n');
+}
+
+async function runHealthyCerebrasWithoutRacing(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const oldOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  const oldCerebrasKey = process.env.CEREBRAS_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'blackbox-openrouter-key';
+  process.env.CEREBRAS_API_KEY = 'blackbox-cerebras-key';
+
+  let openRouterRequests = 0;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url === CEREBRAS_API_URL) return sseResponse(FALLBACK_SSE);
+    if (url === OPENROUTER_API_URL) {
+      openRouterRequests += 1;
+      return new Response('unexpected fallback', { status: 503 });
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+
+  const content: string[] = [];
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-flash',
+      messages: [{ role: 'user', content: 'hello' }],
+      provider_route: 'direct-cerebras',
+    });
+    for await (const chunk of stream) {
+      if (chunk.choices[0]?.delta?.content) content.push(chunk.choices[0].delta.content);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (oldOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = oldOpenRouterKey;
+    if (oldCerebrasKey === undefined) delete process.env.CEREBRAS_API_KEY;
+    else process.env.CEREBRAS_API_KEY = oldCerebrasKey;
+  }
+
+  assert.ok(content.join('').trim());
+  assert.equal(openRouterRequests, 0);
+  process.stdout.write('PASS healthy Cerebras completes without fallback requests\n');
+}
+
 void run()
   .then(runEmptyCerebrasStream)
+  .then(runRateLimitedCerebrasWithSlowSpill)
+  .then(runHealthyCerebrasWithoutRacing)
   .catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
     process.exit(1);

@@ -591,6 +591,25 @@ def test_identical_verifier_reject_circuit_soft_accepts_complete_output():
         {"main_heading": "x"}, {"fields": {"name": "main_heading"}}
     )
     assert not structured_response_covers_schema({"main_heading": "x"}, {"fields": []})
+    bounded = {"fields": [{"name": "items", "type": "list[str]", "required": True,
+                           "minItems": 2, "maxItems": 2}]}
+    assert structured_response_covers_schema({"items": ["a", "b"]}, bounded)
+    assert not structured_response_covers_schema({"items": ["a"]}, bounded)
+    assert not structured_response_covers_schema({"items": ["a", "b", "c"]}, bounded)
+    optional_integer = {"fields": [
+        {"name": "title", "type": "str", "required": True},
+        {"name": "rank", "type": "int", "required": False},
+    ]}
+    assert structured_response_covers_schema({"title": "Done"}, optional_integer)
+    assert structured_response_covers_schema({"title": "Done", "rank": 3}, optional_integer)
+    assert not structured_response_covers_schema({"title": "Done", "rank": None}, optional_integer)
+    assert not structured_response_covers_schema({"title": "Done", "rank": "three"}, optional_integer)
+    nullable = {"fields": [{"name": "note", "type": "str", "required": True, "nullable": True}]}
+    assert structured_response_covers_schema({"note": None}, nullable)
+    assert not structured_response_covers_schema({}, nullable)
+    zero = {"fields": [{"name": "items", "type": "list[str]", "required": True, "maxItems": 0}]}
+    assert structured_response_covers_schema({"items": []}, zero)
+    assert not structured_response_covers_schema({"items": ["extra"]}, zero)
     # Score changes reset the streak even when reasoning matches.
     fingerprint, streak = next_identical_reject_streak(
         previous_fingerprint=fingerprint,
@@ -16561,6 +16580,73 @@ async def test_live_tab_looks_challenged_helpers():
         assert await live_tab_looks_challenged(_ChallengedPage()) is True
 
 
+async def test_live_tab_recovery_keeps_failed_cited_request():
+    """A healthy document cannot clear a still-failing first-party API request."""
+    import inspect
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.challenge_recovery import live_tab_looks_challenged
+
+    handler_source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    handler_ast = ast.parse(textwrap.dedent(handler_source))
+    clean_page_calls = [
+        node
+        for node in ast.walk(handler_ast)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "live_tab_looks_challenged"
+    ]
+    assert len(clean_page_calls) == 1
+    passed_inputs = {keyword.arg: keyword.value for keyword in clean_page_calls[0].keywords}
+    for keyword, expected_name in (
+        ("network_recorder", "browser_network_recorder"),
+        ("recovery_reason", "recovery_reason"),
+    ):
+        assert isinstance(passed_inputs.get(keyword), ast.Name)
+        assert passed_inputs[keyword].id == expected_name
+
+    url = "https://checkout.example.com/api/orders/confirm"
+
+    class _Page:
+        url = "https://checkout.example.com/cart"
+
+    class _Recorder:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def query_requests(self, **_kwargs):
+            return self.rows
+
+    failed = {
+        "url": url,
+        "method": "POST",
+        "status": None,
+        "failed": True,
+        "failure": "net::ERR_TUNNEL_CONNECTION_FAILED",
+    }
+    reason = f"POST {url} failed with net::ERR_TUNNEL_CONNECTION_FAILED"
+    classifier = AsyncMock(return_value={"clean": True})
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        classifier,
+    ):
+        assert await live_tab_looks_challenged(
+            _Page(), network_recorder=_Recorder([failed]), recovery_reason=reason
+        ) is True
+        assert await live_tab_looks_challenged(
+            _Page(),
+            network_recorder=_Recorder([
+                {"url": url, "method": "POST", "status": 200},
+                failed,
+            ]),
+            recovery_reason=reason,
+        ) is False
+        assert await live_tab_looks_challenged(
+            _Page(), network_recorder=_Recorder([failed]), recovery_reason="unrelated challenge"
+        ) is False
+
+
 def test_url_looks_like_api_surface_guard():
     """Shape-only API refuse remains; host pinning is gone (Blue Bottle → order.online)."""
     from domains.spawn_browser_agent_v3.service_actions import (
@@ -22903,6 +22989,10 @@ async def run_all_tests():
         test_goto_err_aborted_persists_download_to_session,
     )
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
+    await r.record_async(
+        "live_tab_recovery_keeps_failed_cited_request",
+        test_live_tab_recovery_keeps_failed_cited_request,
+    )
     r.record("api_surface_guard", test_url_looks_like_api_surface_guard)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
     await r.record_async("cross_origin_nav_allowed", test_execute_allows_cross_origin_navigation)

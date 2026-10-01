@@ -80,7 +80,14 @@ from providers.rose.schema import (
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import reconstruct_agent_response
 from utils.error_utils import extract_error_message
+from utils.response_schema_constraints import (
+    bounds_from_entries,
+    coerce_direct_bounds_to_entries,
+    explicitly_allows_empty_value,
+    value_satisfies_output_field_constraints,
+)
 from utils.tool_schemas import (
+    ResponseSchemaBound,
     create_agent_action_model,
 )
 
@@ -260,15 +267,14 @@ T = TypeVar("T", bound=BaseModel)
 
 _RESPONSE_SCHEMA_SYSTEM_PROMPT = """You are an expert at analyzing agent goals and producing the MINIMAL output schema needed to verify the goal was completed.
 
-Your output is consumed by an automated verifier that scores 1.0 IFF every field in the schema can be populated accurately from tool-result evidence. Therefore:
-  - EVERY field you add must be populatable for the goal to count as done.
-  - Adding optional / nice-to-have fields PENALIZES the agent — keep it strict.
+Your output is consumed by an automated verifier that scores 1.0 when every required field can be populated accurately from tool-result evidence. Therefore:
+  - Required defaults to true; `required: false` lets the agent omit a field.
   - Field names must be SPECIFIC to the goal, not generic catch-alls.
   - You MUST return AT LEAST ONE field. A schema with zero fields is invalid — every goal that warrants a verifier must produce at least one verifiable output.
 
 # CORE PRINCIPLES
 
-1. MUST-HAVE ONLY, AT LEAST ONE. Generate ONLY the fields strictly required to fully answer the user's goal — but ALWAYS at least one field. Skip nice-to-haves. Do NOT add fields like 'reasoning', 'sources', 'confidence', 'notes', or other meta-fields unless the goal explicitly asks for them. The minimum is 1 field; the maximum should still be tight (typically 1-5).
+1. AT LEAST ONE REQUIRED FIELD. Generate the fields needed to answer the user's goal, with at least one required field. Do NOT add fields like 'reasoning', 'sources', 'confidence', or 'notes' unless the goal asks for them. Keep the schema tight (typically 1-5 fields).
 
 2. SPECIFIC NAMES. Field names must be anchored in the goal. If the goal asks for Tokyo's population, the field is `population` or `tokyo_population` — not `result`. If the goal asks for an email + LinkedIn URL, the fields are `email` and `linkedin_url` — not `output`.
 
@@ -276,7 +282,9 @@ Your output is consumed by an automated verifier that scores 1.0 IFF every field
 
 4. CONCRETE TYPES. Pick the most precise type the goal allows. `int` beats `str` for a population. `list[object]` beats `str` for a comparison table.
 
-5. EXPLICIT OBJECT PROPERTIES. Never encode object subfields in prose. For `object` and `list[object]`, put every required nested field in `properties`. The verifier enforces those properties as the object shape.
+5. EXPLICIT OBJECT PROPERTIES. Never encode object subfields in prose. For `object` and `list[object]`, put nested fields in `properties`.
+
+6. RIGHT OUTPUT MEDIUM. Use `file_pointer` for open-ended collections of multi-attribute records, without duplicating rows in `list[object]`. Keep small results inline.
 
 # BANNED FIELD NAMES
 
@@ -321,6 +329,10 @@ GOOD fields: [{ "name": "cities", "type": "list[object]", "properties": [{ "name
 Goal: "Generate a logo as a PNG."
 GOOD fields: [{ "name": "logo", "type": "file_pointer" }]
 
+Goal: "List every record from my history with its link, image, and price so I can reuse the details later."
+GOOD fields: [{ "name": "inventory_file", "type": "file_pointer" }]
+BAD fields: [{ "name": "items", "type": "list[object]", "properties": [{ "name": "product_url", "type": "str" }, { "name": "price", "type": "float" }] }]
+
 Goal: "Buy me a black beanie on Amazon that costs less than $35 and looks well-made."
 GOOD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "order_confirmation_id", "type": "str" }]
 BAD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }]
@@ -336,7 +348,7 @@ Selecting a product URL, adding an item to cart, or reaching checkout is not eno
 
 Given a goal, return JSON with:
   - reasoning: 1-3 sentences on what concrete outputs the goal requires.
-  - fields: the minimal MUST-HAVE list, with AT LEAST ONE field. Specific names and concrete types. For object/list[object], include explicit `properties`; never put subfields in prose. A zero-length `fields` array is invalid and will be rejected.
+  - fields: a compact list with at least one required field, specific names and concrete types. For object/list[object], include explicit `properties`. A zero-length `fields` array is invalid.
 
 Output JSON only. Do not include prose outside the JSON envelope."""
 
@@ -392,6 +404,18 @@ _SchemaNestedFieldType = Literal[
 class _GeneratedResponseSchemaNestedField(BaseModel):
     name: str = Field(description="Nested field name in snake_case.")
     type: _SchemaNestedFieldType = Field(description="Nested field type.")
+    constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings.")
+    required: bool = Field(default=True, description="Defaults to true; false allows omission.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_bounds(cls, value: Any) -> Any:
+        return coerce_direct_bounds_to_entries(value)
+
+    @model_validator(mode="after")
+    def _validate_constraints(self):
+        bounds_from_entries(self.type, self.constraints)
+        return self
 
 
 class _GeneratedResponseSchemaField(BaseModel):
@@ -401,11 +425,19 @@ class _GeneratedResponseSchemaField(BaseModel):
         default=None,
         description="Required for object/list[object]. Explicit nested fields; do not encode subfields in prose.",
     )
+    constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings.")
+    required: bool = Field(default=True, description="Defaults to true; false allows omission.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_bounds(cls, value: Any) -> Any:
+        return coerce_direct_bounds_to_entries(value)
 
     @model_validator(mode="after")
     def _object_fields_require_properties(self):
         if self.type in ("object", "list[object]") and not self.properties:
             raise ValueError("object and list[object] schema fields require explicit properties")
+        bounds_from_entries(self.type, self.constraints)
         return self
 
 
@@ -413,8 +445,14 @@ class _GeneratedResponseSchema(BaseModel):
     reasoning: str = Field(description="Analysis of what concrete outputs the goal requires.")
     fields: List[_GeneratedResponseSchemaField] = Field(
         min_length=1,
-        description="List of MUST-HAVE output fields. At least one field is required.",
+        description="Output fields with at least one required key; optional keys may be omitted.",
     )
+
+    @model_validator(mode="after")
+    def _at_least_one_required_field(self):
+        if not any(field.required for field in self.fields):
+            raise ValueError("generated output schema must contain at least one required field")
+        return self
 
 
 class _GeneratedResponseSchemaWithTitle(_GeneratedResponseSchema):
@@ -643,10 +681,19 @@ def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[st
         item: Dict[str, Any] = {
             "name": field.name,
             "type": field.type,
-            "required": True,
+            "required": field.required,
         }
-        if field.properties:
-            item["properties"] = [prop.model_dump() for prop in field.properties]
+        item.update(bounds_from_entries(field.type, field.constraints))
+        if field.type in ("object", "list[object]") and field.properties:
+            item["properties"] = [
+                {
+                    "name": prop.name,
+                    "type": prop.type,
+                    "required": prop.required,
+                    **bounds_from_entries(prop.type, prop.constraints),
+                }
+                for prop in field.properties
+            ]
         fields.append(item)
     return {"fields": fields}
 
@@ -4456,7 +4503,7 @@ async def _call_llm_verifier(
         response_schema,
         messages,
     )
-    parsed = response_model.model_validate(parsed_json).model_dump()
+    parsed = response_model.model_validate(parsed_json).model_dump(exclude_unset=True)
 
     usage = {
         "prompt_tokens": prompt_toks,
@@ -4805,7 +4852,7 @@ def _fill_missing_verifier_output_from_messages(
     required_names = [
         field.get("name")
         for field in response_schema.get("fields", [])
-        if isinstance(field, dict) and isinstance(field.get("name"), str)
+        if isinstance(field, dict) and isinstance(field.get("name"), str) and field.get("required", True)
     ]
     if not required_names:
         return parsed_json
@@ -4946,6 +4993,10 @@ def _structured_response_ready_for_infra_soft_accept(
         return True
     if not _structured_response_satisfies_schema(structured_response, response_schema):
         return False
+    if not any(field.get("required", True) for field in fields) and not any(
+        isinstance(field, dict) and field.get("name") in structured_response for field in fields
+    ):
+        return False
     # Require non-empty lists so an empty repos=[] extraction cannot soft-complete.
     for field in fields:
         if not isinstance(field, dict):
@@ -4954,8 +5005,12 @@ def _structured_response_ready_for_infra_soft_accept(
         field_type = _normalize_schema_field_type(field.get("type"))
         if not isinstance(name, str) or not field_type or not field_type.startswith("list["):
             continue
+        if name not in structured_response and field.get("required", True) is False:
+            continue
         value = structured_response.get(name)
-        if not isinstance(value, list) or len(value) == 0:
+        if value is None and field.get("nullable") is True and name in structured_response:
+            continue
+        if not isinstance(value, list) or (len(value) == 0 and not explicitly_allows_empty_value(value, field)):
             return False
     return True
 
@@ -4984,13 +5039,7 @@ def _nested_fields_for_object_field(field: Dict[str, Any]) -> List[Dict[str, Any
             name = item.get("name")
             field_type = _normalize_schema_field_type(item.get("type"))
             if isinstance(name, str) and name and field_type:
-                fields.append(
-                    {
-                        "name": name,
-                        "type": field_type,
-                        "description": item.get("description", ""),
-                    }
-                )
+                fields.append({**item, "name": name, "type": field_type})
         if fields:
             return fields
     if isinstance(explicit, dict):
@@ -4998,12 +5047,12 @@ def _nested_fields_for_object_field(field: Dict[str, Any]) -> List[Dict[str, Any
         for name, spec in explicit.items():
             if isinstance(spec, dict):
                 field_type = _normalize_schema_field_type(spec.get("type"))
-                description = spec.get("description", "")
+                details = spec
             else:
                 field_type = _normalize_schema_field_type(spec)
-                description = ""
+                details = {}
             if isinstance(name, str) and name and field_type:
-                fields.append({"name": name, "type": field_type, "description": description})
+                fields.append({**details, "name": name, "type": field_type})
         if fields:
             return fields
     return []
@@ -5022,9 +5071,18 @@ def _structured_response_satisfies_schema(
         if not isinstance(field, dict):
             return False
         name = field.get("name")
-        if not isinstance(name, str) or name not in structured_response:
+        if not isinstance(name, str):
             return False
-        if not _has_schema_value(structured_response.get(name), field.get("type")):
+        if name not in structured_response:
+            if field.get("required", True) is False:
+                continue
+            return False
+        value = structured_response[name]
+        if value is None and field.get("nullable") is True:
+            continue
+        if not _has_schema_value(value, field.get("type")) and not explicitly_allows_empty_value(value, field):
+            return False
+        if not value_satisfies_output_field_constraints(value, field):
             return False
     return True
 
@@ -5152,12 +5210,15 @@ def _build_verifier_response_model(
     if response_schema and response_schema.get("fields"):
         output_fields: Dict[str, Any] = {}
         for field in response_schema["fields"]:
-            if field.get("type") in ("object", "list[object]") and not _nested_fields_for_object_field(field):
+            if field.get("required", True) is False or any(
+                nested.get("required", True) is False for nested in _nested_fields_for_object_field(field)
+            ) or (field.get("type") in ("object", "list[object]") and not _nested_fields_for_object_field(field)):
                 openai_strict = False
             annotation = _verifier_field_annotation_for_field(field)
             output_fields[field["name"]] = (
                 annotation,
-                Field(..., description=field.get("description", "")),
+                Field(... if field.get("required", True) else None,
+                      description=field.get("description", ""), **_pydantic_field_bounds(field)),
             )
         output_model = create_model("VerifierOutput", **output_fields)
         fields["output"] = (output_model, ...)
@@ -5187,10 +5248,22 @@ def _verifier_field_annotation_for_field(field: Dict[str, Any]) -> Any:
     field_type = field.get("type")
     nested_fields = _nested_fields_for_object_field(field)
     if field_type == "object" and nested_fields:
-        return _build_nested_verifier_model(field.get("name") or "object", nested_fields)
-    if field_type == "list[object]" and nested_fields:
-        return List[_build_nested_verifier_model(field.get("name") or "item", nested_fields)]
-    return _verifier_field_annotation(field_type)
+        annotation = _build_nested_verifier_model(field.get("name") or "object", nested_fields)
+    elif field_type == "list[object]" and nested_fields:
+        annotation = List[_build_nested_verifier_model(field.get("name") or "item", nested_fields)]
+    else:
+        annotation = _verifier_field_annotation(field_type)
+    return Optional[annotation] if field.get("nullable") is True else annotation
+
+
+def _pydantic_field_bounds(field: Dict[str, Any]) -> Dict[str, int]:
+    if field.get("type") == "str":
+        keys = (("minLength", "min_length"), ("maxLength", "max_length"))
+    elif str(field.get("type", "")).startswith("list["):
+        keys = (("minItems", "min_length"), ("maxItems", "max_length"))
+    else:
+        return {}
+    return {pydantic_key: field[key] for key, pydantic_key in keys if isinstance(field.get(key), int)}
 
 
 def _build_nested_verifier_model(name: str, nested_fields: List[Dict[str, Any]]) -> Type[BaseModel]:
@@ -5201,8 +5274,9 @@ def _build_nested_verifier_model(name: str, nested_fields: List[Dict[str, Any]])
         if not isinstance(nested_name, str) or not nested_name:
             continue
         model_fields[nested_name] = (
-            _verifier_field_annotation(nested.get("type")),
-            Field(..., description=nested.get("description", "")),
+            _verifier_field_annotation_for_field(nested),
+            Field(... if nested.get("required", True) else None,
+                  description=nested.get("description", ""), **_pydantic_field_bounds(nested)),
         )
     return create_model(f"Verifier{safe_name.title().replace('_', '')}", **model_fields)
 
@@ -5212,17 +5286,18 @@ def _json_schema_for_response_field(field: Dict[str, Any]) -> tuple[Dict[str, An
     field_type = field.get("type")
 
     if field_type == "str":
-        return {"type": "string"}, False
+        schema, is_open = {"type": "string"}, False
+        return _apply_response_field_constraints(schema, field), is_open
     if field_type == "int":
-        return {"type": "integer"}, False
+        return _apply_response_field_constraints({"type": "integer"}, field), False
     if field_type == "float":
-        return {"type": "number"}, False
+        return _apply_response_field_constraints({"type": "number"}, field), False
     if field_type == "bool":
-        return {"type": "boolean"}, False
+        return _apply_response_field_constraints({"type": "boolean"}, field), False
     if field_type == "list[str]":
-        return {"type": "array", "items": {"type": "string"}}, False
+        return _apply_response_field_constraints({"type": "array", "items": {"type": "string"}}, field), False
     if field_type == "list[int]":
-        return {"type": "array", "items": {"type": "integer"}}, False
+        return _apply_response_field_constraints({"type": "array", "items": {"type": "integer"}}, field), False
     if field_type in ("object", "list[object]"):
         nested_fields = _nested_fields_for_object_field(field)
         if nested_fields:
@@ -5235,7 +5310,8 @@ def _json_schema_for_response_field(field: Dict[str, Any]) -> tuple[Dict[str, An
                     continue
                 nested_schema, is_open = _json_schema_for_response_field(nested)
                 nested_properties[nested_name] = nested_schema
-                nested_required.append(nested_name)
+                if nested.get("required", True):
+                    nested_required.append(nested_name)
                 nested_open = nested_open or is_open
             object_schema = {
                 "type": "object",
@@ -5244,8 +5320,8 @@ def _json_schema_for_response_field(field: Dict[str, Any]) -> tuple[Dict[str, An
                 "additionalProperties": False,
             }
             if field_type == "object":
-                return object_schema, nested_open
-            return {"type": "array", "items": object_schema}, nested_open
+                return _apply_response_field_constraints(object_schema, field), nested_open
+            return _apply_response_field_constraints({"type": "array", "items": object_schema}, field), nested_open
 
         # Legacy stored schemas may predate explicit object properties. New
         # schemas are validated at generation/API boundaries, but old rows
@@ -5257,11 +5333,11 @@ def _json_schema_for_response_field(field: Dict[str, Any]) -> tuple[Dict[str, An
         if field.get("description"):
             open_schema["description"] = field["description"]
         if field_type == "object":
-            return open_schema, True
+            return _apply_response_field_constraints(open_schema, field), True
         array_schema = {"type": "array", "items": open_schema}
         if field.get("description"):
             array_schema["description"] = field["description"]
-        return array_schema, True
+        return _apply_response_field_constraints(array_schema, field), True
     if field_type == "file_pointer":
         file_pointer_schema = {
             "type": "object",
@@ -5294,10 +5370,10 @@ def _json_schema_for_response_field(field: Dict[str, Any]) -> tuple[Dict[str, An
             "required": ["id", "storage_path", "original_filename", "mime_type", "size_bytes", "created_at"],
             "additionalProperties": False,
         }
-        return file_pointer_schema, False
+        return _apply_response_field_constraints(file_pointer_schema, field), False
     if field_type == "list[file_pointer]":
         item_schema, _ = _json_schema_for_response_field({"type": "file_pointer"})
-        return {"type": "array", "items": item_schema}, False
+        return _apply_response_field_constraints({"type": "array", "items": item_schema}, field), False
     if field_type == "session_file_pointer":
         session_file_pointer_schema = {
             "type": "object",
@@ -5310,11 +5386,25 @@ def _json_schema_for_response_field(field: Dict[str, Any]) -> tuple[Dict[str, An
             "required": ["path"],
             "additionalProperties": False,
         }
-        return session_file_pointer_schema, False
+        return _apply_response_field_constraints(session_file_pointer_schema, field), False
     if field_type == "list[session_file_pointer]":
         item_schema, _ = _json_schema_for_response_field({"type": "session_file_pointer"})
-        return {"type": "array", "items": item_schema}, False
-    return {"type": "string"}, False
+        return _apply_response_field_constraints({"type": "array", "items": item_schema}, field), False
+    return _apply_response_field_constraints({"type": "string"}, field), False
+
+
+def _apply_response_field_constraints(schema: Dict[str, Any], field: Dict[str, Any]) -> Dict[str, Any]:
+    if schema["type"] == "array":
+        for key in ("minItems", "maxItems"):
+            if key in field:
+                schema[key] = field[key]
+    if schema["type"] == "string":
+        for key in ("minLength", "maxLength"):
+            if key in field:
+                schema[key] = field[key]
+    if field.get("nullable") is True:
+        schema["type"] = [schema["type"], "null"]
+    return schema
 
 
 def _verifier_field_annotation(field_type: Optional[str]) -> Any:
@@ -5361,7 +5451,7 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
         1. ``reasoning`` — analysis of whether the goal is accomplished.
         2. ``score``     — final numeric commitment (0.0–1.0).
 
-    The rubric: score = 1.0 iff every field in ``output`` can be accurately
+    The rubric: score = 1.0 iff every required field in ``output`` can be accurately
     populated from real, extracted tool-result evidence. Without a response
     schema, score = 1.0 iff the goal is accomplished by visible tool results.
 
@@ -5394,8 +5484,8 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 
             output_properties[field_name] = json_type
 
-            # All fields are required in the output for strict mode
-            output_required.append(field_name)
+            if field.get("required", True):
+                output_required.append(field_name)
 
         properties["output"] = {
             "type": "object",
@@ -5432,7 +5522,11 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
             # schema contains an open-object field (`object` / `list[object]`),
             # we drop strict so the open shape is accepted. Anthropic +
             # claudeAuth paths are unaffected (they always accept open shapes).
-            "strict": not has_open_object,
+            "strict": not has_open_object and all(
+                field.get("required", True) and all(
+                    nested.get("required", True) for nested in _nested_fields_for_object_field(field)
+                ) for field in response_schema.get("fields", [])
+            ) if response_schema else not has_open_object,
         },
     }
 

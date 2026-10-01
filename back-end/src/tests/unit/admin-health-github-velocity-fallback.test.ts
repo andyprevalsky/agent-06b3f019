@@ -14,6 +14,7 @@ process.env.ADMIN_HEALTH_GITHUB_REPO = 'Rose-Ai-Labs/rose';
 delete process.env.LINEAR_API_KEY;
 
 const originalFetch = globalThis.fetch;
+const originalTimeout = AbortSignal.timeout;
 const authHeaders: string[] = [];
 let commitFetches = 0;
 
@@ -89,6 +90,23 @@ async function main(): Promise<void> {
   assert.strictEqual(staleOnly.current.dev.githubCommitsLanded.detail, 'GitHub 401');
   assert.ok(staleOnly.buckets.every((bucket) => bucket.githubCommits === null));
 
+  // A stalled page must end the whole GitHub metric, leaving other admin-health metrics available.
+  process.env.GITHUB_TOKEN = 'working_dispatch_token';
+  AbortSignal.timeout = () => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new Error('GitHub deadline exceeded')), 20);
+    return controller.signal;
+  };
+  globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) => {
+    assert.ok(init?.signal, 'GitHub pagination must receive the shared deadline');
+    return new Promise<Response>((_resolve, reject) => {
+      init.signal!.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+    });
+  }) as typeof fetch;
+  const stalled = await fetchVelocityByPeriod(periods);
+  assert.strictEqual(stalled.current.dev.githubCommitsLanded.status, 'error');
+  assert.ok(stalled.buckets.every((bucket) => bucket.githubCommits === null));
+
   process.stdout.write('admin-health-github-velocity-fallback: ok\n');
 }
 
@@ -99,4 +117,5 @@ main()
   })
   .finally(() => {
     globalThis.fetch = originalFetch;
+    AbortSignal.timeout = originalTimeout;
   });

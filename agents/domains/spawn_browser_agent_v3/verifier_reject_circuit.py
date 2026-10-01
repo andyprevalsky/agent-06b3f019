@@ -22,6 +22,9 @@ import os
 import re
 from typing import Any, Mapping, Optional
 
+from utils.response_schema_constraints import explicitly_allows_empty_value, value_satisfies_output_field_constraints
+
+
 def _read_max_identical_verifier_rejections() -> int:
     try:
         return int(os.getenv("BROWSER_MAX_IDENTICAL_VERIFIER_REJECTIONS", "3"))
@@ -90,14 +93,20 @@ def structured_response_covers_schema(
             return False
         required = field.get("required", True)
         if required is False:
+            if name in structured_response and not value_satisfies_output_field_constraints(structured_response[name], field):
+                return False
             continue
         saw_required = True
         value = structured_response.get(name)
         if value is None:
+            if field.get("nullable") is True and name in structured_response:
+                continue
             return False
-        if isinstance(value, str) and not value.strip():
+        if not value_satisfies_output_field_constraints(value, field):
             return False
-        if isinstance(value, (list, dict)) and len(value) == 0:
+        if isinstance(value, str) and not value.strip() and not explicitly_allows_empty_value(value, field):
+            return False
+        if isinstance(value, (list, dict)) and len(value) == 0 and not explicitly_allows_empty_value(value, field):
             return False
     if not saw_required:
         # Optional-only schema: require at least one named optional field
@@ -109,9 +118,11 @@ def structured_response_covers_schema(
             value = structured_response.get(name)
             if value is None:
                 continue
-            if isinstance(value, str) and not value.strip():
+            if not value_satisfies_output_field_constraints(value, field):
                 continue
-            if isinstance(value, (list, dict)) and len(value) == 0:
+            if isinstance(value, str) and not value.strip() and not explicitly_allows_empty_value(value, field):
+                continue
+            if isinstance(value, (list, dict)) and len(value) == 0 and not explicitly_allows_empty_value(value, field):
                 continue
             return True
         return False

@@ -8243,7 +8243,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 if (
                     not provider_exit_rejected
                     and input_page is not None
-                    and not await live_tab_looks_challenged(input_page)
+                    and not await live_tab_looks_challenged(
+                        input_page,
+                        network_recorder=browser_network_recorder,
+                        recovery_reason=recovery_reason,
+                    )
                 ):
                     skip_message = (
                         "Current page does not look challenged"
