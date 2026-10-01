@@ -105,6 +105,25 @@ headers TTFT` and `buffered tool arguments idle disabled deadline`. This is a
 recurrence of the cooldown ownership boundary, with constant per-stream state,
 one existing bounded POST, zero live test requests and zero benchmark credit.
 
+### 2026-10-01 main integration: new Foundry stream owner
+
+The merged Foundry route introduced another source generator beneath the public
+Rose stream. Public close returned while its HTTP response and client remained
+open because the new call site lacked the source's explicit closing boundary.
+The existing Rose blackbox now drives the actual public client, Foundry parser
+and HTTP client through an offline MockTransport. Its unchanged three-path
+fixture fails on public close before the fix, with cancellation and normal
+completion as controls; it passes after enclosing the source in the same
+`aclosing` contract already used for Cerebras (0.251 to 0.249 seconds).
+
+Assertions run before fixture cleanup and require closed response, closed HTTP
+client, propagated cancellation and exactly one provider request. The existing
+Rose registration owns this regression. No route order, payload, model, budget,
+fallback criterion or live provider state changes. Private RED/GREEN receipts
+bind identical final fixture bytes under
+`.context/acceptance/proof84-main-integration/foundry-integration/`; network
+connections were forbidden, and these checks earn no benchmark credit.
+
 ## Human feedback
 
 Use the existing waterfall to preemptively avoid rate-limited providers. Fix

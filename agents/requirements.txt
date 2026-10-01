@@ -53,4 +53,5 @@ tenacity>=8.2.3
 
 # Test runner + coverage
 pytest>=7.0
+pytest-asyncio>=1.0.0
 coverage>=7.6.0

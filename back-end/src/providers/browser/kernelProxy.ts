@@ -1,4 +1,5 @@
 import Kernel, { APIConnectionTimeoutError } from '@onkernel/sdk';
+import type { ProxyListResponse } from '@onkernel/sdk/resources/proxies';
 import { prisma } from '../database';
 import type { ProxyGeoLocation } from '../geoip';
 
@@ -38,37 +39,6 @@ export interface ResolvedKernelProxy {
   proxyType: KernelProxyType;
   source: KernelProxyCandidate['source'];
   location: ProxyGeoLocation;
-}
-
-interface ListedKernelProxy {
-  id?: string;
-  name?: string;
-  type: string;
-  config?: unknown;
-}
-
-export function reusableKernelProxyId(
-  candidate: KernelProxyCandidate,
-  listings: ListedKernelProxy[]
-): string | null {
-  const expected = candidate.config as Record<string, string>;
-  for (const proxy of listings) {
-    if (!proxy.id || proxy.name !== candidate.name || proxy.type !== candidate.type) continue;
-    if (proxy.config === null || typeof proxy.config !== 'object' || Array.isArray(proxy.config)) {
-      continue;
-    }
-    const config = proxy.config as Record<string, unknown>;
-    if (Object.keys(config).length !== Object.keys(expected).length) continue;
-    if (
-      Object.entries(expected).every(
-        ([key, value]) =>
-          typeof config[key] === 'string' && config[key].toLowerCase() === value.toLowerCase()
-      )
-    ) {
-      return proxy.id;
-    }
-  }
-  return null;
 }
 
 export function resolveKernelProxyMode(
@@ -143,10 +113,27 @@ export function kernelProxyCandidates(
   return candidates;
 }
 
+export function selectReusableKernelProxy(
+  proxies: ProxyListResponse[],
+  candidate: KernelProxyCandidate
+): string | undefined {
+  return proxies.find((proxy) => {
+    if (!proxy.id || proxy.name !== candidate.name || proxy.type !== candidate.type) return false;
+    if (proxy.status !== 'available') return false;
+    if (proxy.bypass_hosts?.length) return false;
+    const config = proxy.config as Record<string, unknown> | undefined;
+    if (!config || Object.keys(config).length !== Object.keys(candidate.config).length)
+      return false;
+    return Object.entries(candidate.config).every(
+      ([key, value]) =>
+        typeof config[key] === 'string' && config[key].toLowerCase() === value.toLowerCase()
+    );
+  })?.id;
+}
+
 export async function getOrCreateKernelProxy(
   client: Kernel,
-  candidate: KernelProxyCandidate,
-  options: { reuseExisting?: boolean } = {}
+  candidate: KernelProxyCandidate
 ): Promise<ResolvedKernelProxy> {
   const existing = await prisma.browserProviderProxy.findUnique({
     where: { provider_proxyKey: { provider: 'kernel', proxyKey: candidate.proxyKey } },
@@ -161,35 +148,30 @@ export async function getOrCreateKernelProxy(
     };
   }
 
-  // Isolated benchmark databases are restored from the same seed on every
-  // guest. Reuse an active, identically configured org proxy instead of
-  // creating another duplicate for each run. A short failed lookup falls back
-  // to the existing create path and does not delay ordinary browser startup.
-  let reusedId: string | null = null;
-  if (options.reuseExisting) {
-    try {
-      const page = await client.proxies.list(
-        { query: candidate.name, limit: 20 },
-        { timeout: 5_000, maxRetries: 0 }
-      );
-      reusedId = reusableKernelProxyId(candidate, page.getPaginatedItems());
-    } catch {
-      // The provider's list endpoint is advisory; create remains authoritative.
-    }
+  // Isolated benchmark databases and restored snapshots can lose the local row
+  // while the project still owns this proxy. Reuse it instead of provisioning
+  // another identical proxy (which can exceed browser-session init deadlines).
+  let projectProxies = await client.proxies.list(
+    { query: candidate.name, limit: 100 },
+    { timeout: 10_000, maxRetries: 0 }
+  );
+  let reusableId: string | undefined;
+  while (true) {
+    reusableId = selectReusableKernelProxy(projectProxies.items, candidate);
+    if (reusableId !== undefined || !projectProxies.hasNextPage()) break;
+    projectProxies = await projectProxies.getNextPage();
   }
-  const created = reusedId === null;
-  const remoteId =
-    reusedId ??
-    (
-      await client.proxies.create(
+  const remote = reusableId
+    ? null
+    : await client.proxies.create(
         {
           type: candidate.type,
           name: candidate.name,
           config: candidate.config,
         },
         KERNEL_CREATE_REQUEST_OPTIONS
-      )
-    ).id;
+      );
+  const remoteId = reusableId ?? remote?.id;
   if (remoteId === undefined || remoteId === '') {
     throw new Error(`Kernel proxy creation returned no ID for ${candidate.proxyKey}`);
   }
@@ -216,7 +198,6 @@ export async function getOrCreateKernelProxy(
       where: { provider_proxyKey: { provider: 'kernel', proxyKey: candidate.proxyKey } },
     });
     if (winner !== null) {
-      if (created) await client.proxies.delete(remoteId).catch(() => {});
       return {
         proxyId: winner.proxyId,
         proxyKey: winner.proxyKey,
@@ -225,7 +206,8 @@ export async function getOrCreateKernelProxy(
         location: candidate.location,
       };
     }
-    if (created) await client.proxies.delete(remoteId).catch(() => {});
+    // Another caller may have listed this remote proxy and be about to save it.
+    // Retain it for a later lookup rather than deleting a possibly referenced ID.
     throw error;
   }
 }

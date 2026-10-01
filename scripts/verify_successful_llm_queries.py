@@ -20,6 +20,7 @@ ROSE_DONE_EVENTS = frozenset({
     'rose.complete.direct_auth.done',
     'rose.complete.openai_apikey.done',
     'rose.complete.anthropic_apikey.done',
+    'rose.complete.foundry.done',
     'rose.complete.cerebras.done',
     'rose.complete.waterfall.done',
 })

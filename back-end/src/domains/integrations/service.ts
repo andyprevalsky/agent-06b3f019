@@ -10,6 +10,7 @@ import {
   getAdminPhone,
   isAnthropicApiKeyConfigured,
   isEmailProviderSlug,
+  isGptApiKeyConfigured,
   isOpenRouterApiKeyConfigured,
 } from './config';
 import {
@@ -24,8 +25,10 @@ import {
   getCerebrasApiKeyCooldown,
   heartbeatComputeTokenLineage,
   isAnthropicApiKeyOnCooldown,
+  isGptApiKeyOnCooldown,
   markAnthropicApiKeyOnCooldown,
   markCerebrasApiKeyOnCooldown,
+  markGptApiKeyOnCooldown,
   releaseComputeTokenLineage,
 } from '../../providers/computeCredentials';
 import {
@@ -787,7 +790,20 @@ export async function markComputeTokenRateLimited(
     );
     return { ok: true, type, rateLimitedUntil: params.rateLimitedUntil };
   }
-  throw new Error('Invalid type. Must be "claude", "gpt", "anthropic", or "cerebras".');
+  if (type === 'gpt_api_key') {
+    await markGptApiKeyOnCooldown(params.failureReason ?? 'out_of_credits');
+    return { ok: true, type, rateLimitedUntil: null };
+  }
+  throw new Error(
+    'Invalid type. Must be "claude", "gpt", "anthropic", "cerebras", or "gpt_api_key".'
+  );
+}
+
+export async function getGptApiKeyCooldown() {
+  return {
+    configured: isGptApiKeyConfigured(),
+    onCooldown: await isGptApiKeyOnCooldown(),
+  };
 }
 
 export { getCerebrasApiKeyCooldown };

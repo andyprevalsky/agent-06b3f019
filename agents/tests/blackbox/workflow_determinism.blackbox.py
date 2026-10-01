@@ -8,10 +8,9 @@ replay diverges from the one minted after — which is exactly how a single
 forever, never receiving a matching FINISHED). Workflow code MUST use the
 replay-stable equivalents: `workflow.uuid4()` and `workflow.now()`.
 
-These modules run inside the workflow sandbox (awaited directly from
-AgentWorkflow.run — no @activity boundary), so the ban applies to them. Activity
-modules (activities/, helpers/, tools/ invoked via execute_activity) run outside
-the sandbox and are intentionally NOT covered here.
+The three core modules and direct ToolManager method bodies run in workflow
+scope. This guard checks those bodies; helpers called by a manager still need
+review when they are added. Activity functions run outside workflow replay.
 """
 
 import ast
@@ -43,17 +42,51 @@ BANNED = {
 }
 
 
-def _find_banned_calls(path: Path) -> list[str]:
+def _find_banned_calls(path: Path, *, tool_managers_only: bool = False) -> list[str]:
     """Return 'module.method @ LN -> use REPLACEMENT' for each banned call in the file."""
     tree = ast.parse(path.read_text(), filename=str(path))
+    aliases: dict[str, str] = {}
+    imported_calls: dict[str, tuple[str, str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                aliases[imported.asname or imported.name] = imported.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for imported in node.names:
+                name = imported.asname or imported.name
+                key = (node.module, imported.name)
+                if key in BANNED:
+                    imported_calls[name] = key
+                elif node.module == "datetime" and imported.name == "datetime":
+                    aliases[name] = "datetime"
+    if tool_managers_only:
+        roots = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and any(isinstance(base, ast.Name) and base.id == "ToolManager" for base in node.bases)
+        ]
+    else:
+        roots = [tree]
     hits: list[str] = []
-    for node in ast.walk(tree):
+    for node in (descendant for root in roots for descendant in ast.walk(root)):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+        if isinstance(func, ast.Name):
+            key = imported_calls.get(func.id)
+        elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            key = (aliases.get(func.value.id, func.value.id), func.attr)
+        elif (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Attribute)
+            and isinstance(func.value.value, ast.Name)
+            and aliases.get(func.value.value.id, func.value.value.id) == "datetime"
+            and func.value.attr == "datetime"
+        ):
+            key = ("datetime", func.attr)
+        else:
             continue
-        key = (func.value.id, func.attr)
         if key in BANNED:
             hits.append(f"{key[0]}.{key[1]}() @ line {node.lineno} -> use {BANNED[key]}")
     return hits
@@ -81,17 +114,32 @@ def test_dag_executor_deterministic():
     _assert_module_clean("loop/dag_executor.py")
 
 
+def test_tool_manager_workflow_paths_deterministic():
+    """Check direct ToolManager bodies, including handlers that also define activities."""
+    hits = [
+        f"{path.relative_to(AGENTS_ROOT)}: {hit}"
+        for root in (AGENTS_ROOT / "domains", AGENTS_ROOT / "tools")
+        for path in root.rglob("*.py")
+        for hit in _find_banned_calls(path, tool_managers_only=True)
+    ]
+    assert not hits, "ToolManager workflow path has replay-unsafe calls:\n  " + "\n  ".join(hits)
+
+
 def test_scanner_detects_a_planted_violation():
     """Self-check: the AST scanner actually catches a banned call."""
     import tempfile
 
-    src = "import uuid\ndef f():\n    return uuid.uuid4()\n"
+    src = (
+        "import uuid as uuid_module\nfrom uuid import uuid4 as new_id\n"
+        "class Example(ToolManager):\n    def f(self):\n"
+        "        return uuid_module.uuid4(), new_id()\n"
+    )
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
         fh.write(src)
         tmp = Path(fh.name)
     try:
-        hits = _find_banned_calls(tmp)
-        assert any("uuid.uuid4()" in h for h in hits), f"scanner missed planted violation: {hits}"
+        hits = _find_banned_calls(tmp, tool_managers_only=True)
+        assert len(hits) == 2, f"scanner missed an aliased UUID call: {hits}"
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -102,5 +150,6 @@ async def run_all_tests():
     r.record("agent_workflow_deterministic", test_agent_workflow_deterministic)
     r.record("run_agent_deterministic", test_run_agent_deterministic)
     r.record("dag_executor_deterministic", test_dag_executor_deterministic)
+    r.record("tool_manager_workflow_paths_deterministic", test_tool_manager_workflow_paths_deterministic)
     r.record("scanner_detects_planted_violation", test_scanner_detects_a_planted_violation)
     return r.summary() if hasattr(r, "summary") else r.all_passed

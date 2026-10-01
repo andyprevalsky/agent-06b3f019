@@ -435,7 +435,7 @@ async function callGeneratorLlmCore(
           if (!isClaude && actualModel?.endsWith('-claude')) {
             isClaude = true;
           }
-          if (!isGpt && actualModel?.endsWith('-gpt')) {
+          if (!isGpt && (actualModel?.endsWith('-gpt') || actualModel?.endsWith('-foundry'))) {
             isGpt = true;
           }
 

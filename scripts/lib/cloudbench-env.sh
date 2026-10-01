@@ -302,7 +302,9 @@ try:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(0.2)
         result = probe.connect_ex(("127.0.0.1", port))
-        if result == 0:
+        if result in (0, errno.EAGAIN, errno.EWOULDBLOCK):
+            # A full accept backlog can return EAGAIN on macOS; the port is
+            # still occupied and must not be selected for another hub.
             raise SystemExit(0)
         if result == errno.ECONNREFUSED:
             raise SystemExit(1)

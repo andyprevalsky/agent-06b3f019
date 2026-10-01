@@ -1118,8 +1118,9 @@ def _submit_archive_job(
                 compress=compress,
             )
             if result is not None and drain_backend_outbox_after_success:
-                # The current backend may belong to an isolated run. Retrying a
-                # retired root here adopts its finalization locks and backlog.
+                # Drain only this root: the backend may belong to an isolated
+                # run, and retired roots retain finalization locks or permanent
+                # errors that turn cross-root retries into a backlog storm.
                 _drain_backend_outbox(root_agent_id=safe_root)
         except Exception as exc:
             logger.warning(

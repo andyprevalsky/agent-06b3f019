@@ -38,6 +38,7 @@ import structlog
 from providers.rose.errors import (
     RoseAuthError,
     RoseInvalidRequest,
+    RosePaymentRequiredError,
     RoseRateLimitError,
     RoseRefusalError,
     RoseServerError,
@@ -71,12 +72,22 @@ def _note_tool_argument(fragment: Any) -> None:
 def _responses_error_to_exception(error_payload: Any, request_id: str):
     if isinstance(error_payload, dict):
         code = str(error_payload.get("code") or error_payload.get("type") or "").lower()
+        error_type = str(error_payload.get("type") or "").lower()
         message = str(error_payload.get("message") or error_payload)
     else:
         code = ""
+        error_type = ""
         message = str(error_payload or "Responses stream failed")
 
     details = f"Responses stream failed (request_id={request_id}, code={code or 'unknown'}): {message[:1000]}"
+    if code in {
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "organization_usage_limit_exceeded",
+        "organization_spend_limit_exceeded",
+        "project_spend_limit_exceeded",
+    } or error_type == "insufficient_quota":
+        return RosePaymentRequiredError(details)
     if code in {"invalid_request_error", "context_length_exceeded", "bad_request"}:
         return RoseInvalidRequest(details)
     if code in {"refusal", "safety_refusal", "content_policy_violation", "policy_violation"}:

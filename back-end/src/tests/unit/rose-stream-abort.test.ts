@@ -55,6 +55,10 @@ async function testCompletionAbortReachesPriorityOpenAiBody(): Promise<void> {
   const oldKey = process.env.GPT_API_KEY;
   const upstream = new AbortController();
   let providerSignal: AbortSignal | null = null;
+  let resolveProviderStarted!: () => void;
+  const providerStarted = new Promise<void>((resolve) => {
+    resolveProviderStarted = resolve;
+  });
   process.env.GPT_API_KEY = 'sk-test';
 
   globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
@@ -68,6 +72,7 @@ async function testCompletionAbortReachesPriorityOpenAiBody(): Promise<void> {
         );
       },
     });
+    resolveProviderStarted();
     return new Response(body, { status: 200 });
   }) as typeof fetch;
 
@@ -79,7 +84,15 @@ async function testCompletionAbortReachesPriorityOpenAiBody(): Promise<void> {
       abort_signal: upstream.signal,
     });
     const next = stream[Symbol.asyncIterator]().next();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The shared-key cooldown lookup may cross the database before fetch starts.
+    // Abort only after the provider has received the signal being tested.
+    await Promise.race([
+      providerStarted,
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error('priority provider did not start')), 2_000)
+      ),
+    ]);
+    assert(providerSignal, 'provider fetch started');
     upstream.abort(new Error('cache won completion hedge'));
 
     await assert.rejects(next, /cache won completion hedge/);

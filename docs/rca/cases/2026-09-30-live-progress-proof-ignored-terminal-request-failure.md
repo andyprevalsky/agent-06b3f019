@@ -105,6 +105,23 @@ progress is still needed to distinguish silent transport from buffered tool
 deltas. The live rejection proves the acceptance guard works; it does not prove
 the underlying runtime fault is fixed.
 
+### 2026-10-01 main integration: Foundry completion evidence
+
+Integrating main's new Foundry route exposed an omitted completion event in the
+observer's route enumeration. The actual client emits `rose.complete.foundry.done`,
+but the verifier did not recognize it. Three otherwise complete, correlated live
+Foundry lifecycles therefore earned zero queries. No live request was necessary:
+the existing evidence suite's new owning case failed before the enum addition
+and passed unchanged afterward (0.064 to 0.050 seconds for the full suite).
+
+Add only that route event to the existing completion set. Ownership, timing,
+positive usage, normal finish, duplicate/conflict checks and terminal-failure
+rejection remain shared with every other route. All original eleven cases are
+unchanged; the existing registered suite now has twelve cases. This does not
+accept replay, partial output or a failed request, and grants no fleet credit.
+Private source-bound evidence is under
+`.context/acceptance/proof84-main-integration/foundry-integration/`.
+
 ## Human feedback
 
 Require ten consecutive mixed slices of ten distinct benchmarks, with at least

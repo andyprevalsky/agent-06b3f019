@@ -58,6 +58,7 @@ from providers.rose.errors import (
     RoseServerError,
     RoseStallError,
 )
+from providers.rose.foundry import foundry_complete, foundry_configured
 from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
@@ -209,6 +210,63 @@ async def _mark_anthropic_api_key_cooldown(reason: str) -> None:
             )
     except Exception:
         logger.warning("rose.anthropic_apikey.cooldown_mark_failed", reason=reason)
+
+
+# The shared GPT_API_KEY uses the same cross-worker DB cooldown as Anthropic,
+# with its own row so one provider cannot suppress the other.
+_gpt_api_key_cooldown_skip_until = 0.0
+_gpt_api_key_cooldown_last_check = 0.0
+
+
+def _reset_gpt_api_key_cooldown_cache() -> None:
+    global _gpt_api_key_cooldown_skip_until, _gpt_api_key_cooldown_last_check
+    _gpt_api_key_cooldown_skip_until = 0.0
+    _gpt_api_key_cooldown_last_check = 0.0
+
+
+async def _gpt_api_key_on_cooldown() -> bool:
+    global _gpt_api_key_cooldown_skip_until, _gpt_api_key_cooldown_last_check
+    now = time.monotonic()
+    if now < _gpt_api_key_cooldown_skip_until:
+        return True
+    if now - _gpt_api_key_cooldown_last_check < _ANTHROPIC_COOLDOWN_RECHECK_S:
+        return False
+    _gpt_api_key_cooldown_last_check = now
+    cfg = load_config()
+    base = (cfg.backend.api_url or "").rstrip("/")
+    if not base:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{base}/api/integrations/compute-code/gpt-key/cooldown",
+                headers={"X-API-Key": cfg.backend.api_key or ""},
+            )
+            if resp.status_code == 200 and resp.json().get("onCooldown") is True:
+                _gpt_api_key_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
+                return True
+    except Exception:
+        return False
+    return False
+
+
+async def _mark_gpt_api_key_cooldown(reason: str) -> None:
+    global _gpt_api_key_cooldown_skip_until
+    _gpt_api_key_cooldown_skip_until = time.monotonic() + _ANTHROPIC_COOLDOWN_RECHECK_S
+    cfg = load_config()
+    base = (cfg.backend.api_url or "").rstrip("/")
+    if not base:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                f"{base}/api/integrations/compute-code/token/rate-limited",
+                headers={"X-API-Key": cfg.backend.api_key or "", "Content-Type": "application/json"},
+                json={"type": "gpt_api_key", "source": "pool", "failureReason": reason},
+            )
+            resp.raise_for_status()
+    except Exception:
+        logger.warning("rose.gpt_apikey.cooldown_mark_failed", reason=reason)
 
 
 def _single_attempt_auth(auth: ComputeAuthContext) -> ComputeAuthContext:
@@ -410,6 +468,8 @@ def _dump_display_model(actual_model: str) -> str:
         return actual_model[: -len("-gpt")]
     if actual_model.endswith("-openai"):
         return actual_model[: -len("-openai")]
+    if actual_model.endswith("-foundry"):
+        return actual_model[: -len("-foundry")]
     return actual_model
 
 
@@ -853,6 +913,8 @@ class RoseClient:
         _exclude_anthropic_family = anthropic_family_excluded(_exclude_anthropic_family)
         pool_spec = get_pool(pool)
         rid = request_id or uuid.uuid4().hex[:12]
+        auth_identity = claude_auth or gpt_auth
+        foundry_route_key = agent_id or (auth_identity.user_id if auth_identity else rid)
         started = time.monotonic()
         first_contentful_at: Optional[float] = None
 
@@ -1331,7 +1393,7 @@ class RoseClient:
                 agent_id=agent_id,
                 actual_model=_seen_actual_model,
                 is_claude=_seen_actual_model.endswith("-claude"),
-                is_gpt=_seen_actual_model.endswith(("-gpt", "-openai")),
+                is_gpt=_seen_actual_model.endswith(("-gpt", "-openai", "-foundry")),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cache_read=cache_read,
@@ -1568,7 +1630,7 @@ class RoseClient:
             # API keys either -- gating only the OAuth routes left this hole,
             # through which a pinned run could still be served by gpt_auth_model.
             openai_api_key = _openai_api_key() if pool_spec.direct_auth_enabled else ""
-            if openai_api_key:
+            if openai_api_key and not await _gpt_api_key_on_cooldown():
                 active_route = "openai_apikey"
                 openai_yielded_any = False
                 try:
@@ -1627,6 +1689,8 @@ class RoseClient:
                     if openai_yielded_any:
                         raise
                     cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                    if isinstance(cause, (RosePaymentRequiredError, RoseAuthError)):
+                        await _mark_gpt_api_key_cooldown(type(cause).__name__)
                     logger.info(
                         "rose.complete.openai_apikey.fall_through",
                         request_id=rid,
@@ -1711,6 +1775,68 @@ class RoseClient:
                         await _mark_anthropic_api_key_cooldown(type(cause).__name__)
                     logger.info(
                         "rose.complete.anthropic_apikey.fall_through",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        reason=type(cause).__name__ if cause else "unknown",
+                    )
+
+            # Funded Azure fallback for the same GPT model and Responses shape
+            # as the compute-token route. A pre-content failure continues to
+            # OpenRouter; an interrupted visible response remains an error.
+            if foundry_configured(pool_spec):
+                active_route = "foundry"
+                foundry_yielded_any = False
+                try:
+                    async with aclosing(
+                        foundry_complete(
+                            pool_spec=pool_spec,
+                            messages=messages,
+                            response_format=None if gpt_api_key_tools else openrouter_response_format,
+                            tools=gpt_api_key_tools,
+                            context_tools=context_tools,
+                            tool_choice=gpt_api_key_tool_choice,
+                            temperature=temperature,
+                            effort=effort,
+                            provider_fast_mode=provider_fast_mode,
+                            request_id=rid,
+                            route_key=foundry_route_key,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            cache_namespace=cache_namespace,
+                            ttft_timeout_s=ttft_timeout_s,
+                            idle_timeout_s=idle_timeout_s,
+                        )
+                    ) as foundry_source:
+                        async for chunk in _guarded(foundry_source):
+                            chunk = _with_timing_if_done(chunk)
+                            foundry_yielded_any = True
+                            if chunk.kind == "metadata":
+                                metadata = dict(chunk.data)
+                                if claude_token_error is not None:
+                                    metadata["claude_token_error"] = claude_token_error
+                                if gpt_token_error is not None:
+                                    metadata["gpt_token_error"] = gpt_token_error
+                                chunk = StreamChunk(kind="metadata", data=metadata)
+                                if chunk.data.get("actual_model"):
+                                    _seen_actual_model = chunk.data["actual_model"]
+                            elif chunk.kind == "usage":
+                                _emit_llm_cache(chunk.data)
+                                chunk = StreamChunk(
+                                    kind="usage", data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data)
+                                )
+                            chunk = _with_cache_sequence(chunk)
+                            _record_dump_chunk(chunk)
+                            yield chunk
+                    logger.info("rose.complete.foundry.done", request_id=rid, agent_id=agent_id, call_site=call_site)
+                    _finalize_dump()
+                    return
+                except (_FallThrough, RoseStallError, RoseError) as exc:
+                    if foundry_yielded_any:
+                        raise
+                    cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                    logger.info(
+                        "rose.complete.foundry.fall_through",
                         request_id=rid,
                         agent_id=agent_id,
                         call_site=call_site,

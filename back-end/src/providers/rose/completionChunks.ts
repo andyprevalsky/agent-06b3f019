@@ -10,6 +10,7 @@ export function dumpDisplayModel(actualModel: string): string {
   if (actualModel.endsWith('-claude')) return actualModel.slice(0, -'-claude'.length);
   if (actualModel.endsWith('-gpt')) return actualModel.slice(0, -'-gpt'.length);
   if (actualModel.endsWith('-openai')) return actualModel.slice(0, -'-openai'.length);
+  if (actualModel.endsWith('-foundry')) return actualModel.slice(0, -'-foundry'.length);
   return actualModel;
 }
 

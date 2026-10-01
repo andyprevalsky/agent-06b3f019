@@ -2,9 +2,9 @@
  * Live-view display contract (geometry / chrome crop helpers).
  *
  * Filename is intentionally `liveViewDisplay.ts`, not `liveViewFrame.ts`:
- * macOS CI is case-insensitive and would collide with `LiveViewFrame.tsx`,
- * so Rollup resolves `import { LiveViewFrame } from './LiveViewFrame'` to
- * the wrong module and the Electron release build fails.
+ * macOS CI is case-insensitive and the old `liveViewFrame.ts` collided with
+ * the component's former `LiveViewFrame.tsx` name. The distinct names also
+ * keep the Electron release build's imports unambiguous.
  *
  * User FE pane (arbitrary leftover size)
  *   -> letterbox the CONTENT viewport (1280x800)

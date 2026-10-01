@@ -14,9 +14,10 @@
  *      using the same pre-content fall-through contract.
  *   5. Tries the shared OpenAI API key path when configured.
  *   6. Tries the shared Anthropic API key path when configured.
- *   7. Falls through to the pool's OpenRouter waterfall on any typed
+ *   7. Tries GPT-6 Sol through Microsoft Foundry for ultra when configured.
+ *   8. Falls through to the pool's OpenRouter waterfall on any typed
  *      RoseError before first content.
- *   8. Wraps the normalized RoseStreamChunk stream into the OpenAI-shaped
+ *   9. Wraps the normalized RoseStreamChunk stream into the OpenAI-shaped
  *      CompletionChunk DTO chat callers iterate.
  *
  * No top-level deadline / heartbeat — those are agent-side concerns
@@ -29,7 +30,12 @@ import { randomUUID } from 'node:crypto';
 import { createLogger } from '../logger';
 import { logJson } from '../../utils/log';
 import { claudeAuthComplete } from './claudeAuth';
-import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
+import {
+  isAnthropicApiKeyOnCooldown,
+  isGptApiKeyOnCooldown,
+  markAnthropicApiKeyOnCooldown,
+  markGptApiKeyOnCooldown,
+} from '../computeCredentials';
 import { RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
 import { attemptClaudeAuthWithRecovery } from './claudeAuthAttempt';
 import { gptAuthComplete, openAiApiKeyComplete } from './gptAuth';
@@ -46,6 +52,7 @@ import {
   selectExclusiveCerebrasChatRoute,
 } from './exclusiveCerebrasChatRoute';
 import { createStreamAccumulator, dumpDisplayModel, emitRoseChunk } from './completionChunks';
+import { foundryComplete, foundryConfigured } from './foundry';
 
 const log = createLogger('Rose');
 
@@ -61,6 +68,7 @@ const ANTHROPIC_API_KEY_ENV = 'ANTHROPIC_API_KEY';
 // computeCredentials) so every backend instance and Fly worker respects one
 // backoff — no cross-workflow hammering when the key is out of credits.
 export { __resetAnthropicApiKeyCooldown } from '../computeCredentials';
+export { __resetGptApiKeyCooldown } from '../computeCredentials';
 
 function requiredEnv(name: string): string {
   const v = process.env[name];
@@ -301,6 +309,11 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         finalizeDump(error);
         throw error;
       }
+      if (await isGptApiKeyOnCooldown()) {
+        const error = new Error('Rose shared-openai-priority route is on GPT_API_KEY cooldown');
+        finalizeDump(error);
+        throw error;
+      }
 
       try {
         yield* runWithFallThrough({
@@ -324,6 +337,12 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         });
       } catch (error) {
         const cause = error instanceof PreContentFallThroughError ? error.cause : error;
+        if (
+          error instanceof PreContentFallThroughError &&
+          (cause instanceof RosePaymentRequiredError || cause instanceof RoseAuthError)
+        ) {
+          await markGptApiKeyOnCooldown(cause.name);
+        }
         finalizeDump(cause);
         throw cause;
       }
@@ -414,7 +433,11 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     // when no compute token served (or it fell through), before Anthropic and
     // OpenRouter. Force provider fast mode for this funded route.
     const sharedOpenAiKey = allowDirectAuth ? openAiApiKey() : undefined;
-    if (sharedOpenAiKey) {
+    const gptKeyOnCooldown = sharedOpenAiKey ? await isGptApiKeyOnCooldown() : false;
+    if (sharedOpenAiKey && gptKeyOnCooldown) {
+      log.info('openai_apikey.skipped_cooldown', { request_id: opts.requestId });
+    }
+    if (sharedOpenAiKey && !gptKeyOnCooldown) {
       try {
         yield* runWithFallThrough({
           produce: () =>
@@ -446,6 +469,9 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       } catch (err) {
         if (err instanceof PreContentFallThroughError) {
           openAiApiKeyFailed = err.cause;
+          if (err.cause instanceof RosePaymentRequiredError || err.cause instanceof RoseAuthError) {
+            await markGptApiKeyOnCooldown(err.cause.name);
+          }
           log.info('fall_through_from_openai_apikey', {
             request_id: opts.requestId,
             reason: err.cause.name,
@@ -521,6 +547,51 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       }
     }
 
+    // Microsoft Foundry serves the same GPT model and Responses shape as the
+    // compute-token path. Its shared deployment is funded, so it follows the
+    // user/pool tokens and API keys, before OpenRouter.
+    let foundryFailed: RoseError | null = null;
+    if (allowDirectAuth && foundryConfigured(poolSpec)) {
+      try {
+        yield* runWithFallThrough({
+          produce: () =>
+            foundryComplete({
+              poolSpec,
+              messages: opts.options.messages,
+              responseFormat: opts.options.response_format,
+              tools: opts.options.tools,
+              toolChoice: opts.options.tool_choice,
+              temperature: opts.options.temperature,
+              effort: opts.options.effort,
+              providerFastMode: opts.options.provider_fast_mode,
+              requestId: opts.requestId,
+              routeKey:
+                opts.options.route_key ??
+                opts.options.dump_context?.agent_id ??
+                opts.options.compute_grant?.userId ??
+                opts.requestId,
+              callSite: opts.callSite,
+              abortSignal: opts.options.abort_signal,
+            }),
+          emit: emitChunk,
+        });
+        log.info('foundry.done', { request_id: opts.requestId, pool: opts.pool });
+        finalizeDump();
+        return;
+      } catch (err) {
+        if (err instanceof PreContentFallThroughError) {
+          foundryFailed = err.cause;
+          log.info('fall_through_from_foundry', {
+            request_id: opts.requestId,
+            reason: err.cause.name,
+          });
+        } else {
+          finalizeDump(err);
+          throw err;
+        }
+      }
+    }
+
     // 3. Waterfall — this is the terminal pipeline; unwrap the internal
     // fall-through sentinel so callers continue to see typed RoseError
     // subclasses (their `instanceof RoseError` checks depend on it).
@@ -565,6 +636,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     if (opts.options.disable_waterfall) {
       const error =
         anthropicApiKeyFailed ??
+        foundryFailed ??
         openAiApiKeyFailed ??
         gptAuthFailed ??
         claudeAuthFailed ??
@@ -606,6 +678,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       gpt_auth_failed: gptAuthFailed?.name ?? null,
       openai_apikey_failed: openAiApiKeyFailed?.name ?? null,
       anthropic_apikey_failed: anthropicApiKeyFailed?.name ?? null,
+      foundry_failed: foundryFailed?.name ?? null,
     });
     finalizeDump();
   } catch (error) {

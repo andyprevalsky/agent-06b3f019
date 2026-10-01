@@ -2656,6 +2656,29 @@ async def test_parse_responses_sse_failed_context_length_is_invalid_request():
     assert raised
 
 
+async def test_parse_responses_sse_in_band_credit_exhaustion_is_payment_required():
+    from providers.rose.errors import RosePaymentRequiredError
+
+    lines = [
+        "event: error",
+        'data: {"type":"error","error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"You have no credits remaining"}}',
+        "",
+        "data: [DONE]",
+    ]
+    try:
+        await _drain(
+            parse_responses_sse(
+                _FakeStream(lines),
+                actual_model="gpt-6-sol-openai",
+                pool_name="openai-api-key",
+                request_id="r-credit-event",
+            )
+        )
+    except RosePaymentRequiredError:
+        return
+    assert False, "in-band credit exhaustion must trigger the shared API-key cooldown"
+
+
 def test_build_codex_responses_body_contract():
     pool = get_pool("rose-1-flash")
     body = build_codex_responses_body(
@@ -3626,6 +3649,27 @@ def test_build_anthropic_body_defaults_provider_fast_mode_on_for_opus():
     assert body["speed"] == "fast"
 
 
+def test_haiku_body_omits_unsupported_effort():
+    """The web_fetch mini summarizer must not send effort to Claude Haiku 4.5.
+
+    Anthropic rejected the captured smoke request with HTTP 400:
+    "This model does not support the effort parameter."
+    """
+    pool = get_pool("rose-1-mini")
+    for effort in (None, "low"):
+        body = build_anthropic_body(
+            pool_spec=pool,
+            messages=[{"role": "user", "content": "Summarize the population estimate."}],
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            max_tokens=128,
+            effort=effort,
+        )
+        assert body["model"] == "claude-haiku-4-5"
+        assert "effort" not in body.get("output_config", {})
+
+
 def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
     """Every Rose provider body must carry effort; default is xhigh.
 
@@ -4261,6 +4305,79 @@ async def test_anthropic_api_key_cooldown_mark_then_on_cooldown():
     rc._reset_anthropic_api_key_cooldown_cache()
 
 
+async def test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundry():
+    """An in-band credit error is tried once, then Foundry serves later calls."""
+    import providers.rose.client as rc
+
+    rc._reset_gpt_api_key_cooldown_cache()
+    seen = {"openai": 0, "foundry": 0, "cooldown_post": 0, "openrouter": 0}
+    shared_cooldown = {"active": False}
+    foundry_sse = "\n".join(
+        [
+            "event: response.output_text.delta",
+            'data: {"type":"response.output_text.delta","delta":"Foundry works"}',
+            "",
+            "event: response.completed",
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":2,"total_tokens":4}}}',
+            "",
+            "data: [DONE]",
+        ]
+    )
+    exhausted_sse = "\n".join(
+        [
+            "event: error",
+            'data: {"type":"error","error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"You have no credits remaining"}}',
+            "",
+            "data: [DONE]",
+        ]
+    )
+
+    def handler(req):
+        if str(req.url) == OPENAI_RESPONSES_API_URL:
+            seen["openai"] += 1
+            return httpx.Response(200, text=exhausted_sse)
+        if req.url.host == "a-4989-resource.openai.azure.com":
+            seen["foundry"] += 1
+            return httpx.Response(200, text=foundry_sse)
+        if req.url.path.endswith("/gpt-key/cooldown"):
+            return httpx.Response(200, json={"onCooldown": shared_cooldown["active"]})
+        if req.url.path.endswith("/token/rate-limited"):
+            assert json.loads(req.content)["type"] == "gpt_api_key"
+            seen["cooldown_post"] += 1
+            shared_cooldown["active"] = True
+            return httpx.Response(200, json={"ok": True})
+        if req.url.host == "openrouter.ai":
+            seen["openrouter"] += 1
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    with patch.dict(
+        os.environ,
+        {
+            "GPT_API_KEY": "sk-proj-test",
+            "ANTHROPIC_API_KEY": "",
+            "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+            "AZURE_FOUNDRY_API_KEY": "foundry-test-key",
+            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        },
+    ):
+        try:
+            for attempt in range(2):
+                if attempt == 1:
+                    # Simulate a different Fly worker with a cold process cache.
+                    rc._reset_gpt_api_key_cooldown_cache()
+                chunks = await _drain(
+                    RoseClient(openrouter_key="ork-x").complete(
+                        pool="rose-1-ultra",
+                        messages=[{"role": "user", "content": "hi"}],
+                    )
+                )
+                assert any(c.kind == "content" for c in chunks)
+        finally:
+            rc._reset_gpt_api_key_cooldown_cache()
+    assert seen == {"openai": 1, "foundry": 2, "cooldown_post": 1, "openrouter": 0}
+
+
 async def test_client_openai_api_key_serves_before_anthropic_and_openrouter():
     lines = [
         "event: response.output_text.delta",
@@ -4375,6 +4492,9 @@ async def test_client_openai_api_key_preserves_tools_without_gpt_auth():
 
 
 async def test_client_openai_api_key_failure_falls_through_to_anthropic_before_openrouter():
+    import providers.rose.client as rc
+
+    rc._reset_gpt_api_key_cooldown_cache()
     lines = [
         "event: content_block_delta",
         'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"anthropic"}}',
@@ -4424,6 +4544,7 @@ async def test_client_openai_api_key_failure_falls_through_to_anthropic_before_o
             os.environ.pop("ANTHROPIC_API_KEY", None)
         else:
             os.environ["ANTHROPIC_API_KEY"] = prev_anthropic
+        rc._reset_gpt_api_key_cooldown_cache()
 
     assert seen == {"openai": 1, "anthropic": 1, "openrouter": 0}
     meta = next((c for c in chunks if c.kind == "metadata"), None)
@@ -5349,6 +5470,159 @@ async def test_client_falls_through_from_claude_auth_to_waterfall():
         chunks.append(chunk)
     metadata = next(c for c in chunks if c.kind == "metadata")
     assert metadata.data.get("claude_token_error") == "auth_error"
+
+
+async def test_client_foundry_stream_exit_closes_http_owner():
+    """Public close/cancellation joins the real Foundry HTTP context before returning."""
+    from types import SimpleNamespace
+
+    from helpers import httpx_capture
+    import providers.rose.foundry as foundry
+
+    failures = []
+    for finish in ("close", "cancel", "complete"):
+        waiting = asyncio.Event()
+        release = asyncio.Event()
+        closed = asyncio.Event()
+        responses = []
+        clients = []
+        requests = []
+
+        class Body(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"ready"}\n\n'
+                waiting.set()
+                await release.wait()
+                yield (
+                    b'data: {"type":"response.completed","response":{"usage":'
+                    b'{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+                    b"data: [DONE]\n\n"
+                )
+
+            async def aclose(self):
+                closed.set()
+
+        def handler(request):
+            assert request.url.host == "foundry.invalid", "unexpected model route"
+            requests.append(request)
+            response = httpx.Response(200, stream=Body(), headers={"content-type": "text/event-stream"})
+            responses.append(response)
+            return response
+
+        real_client = httpx.AsyncClient
+
+        def offline_client(*args, **kwargs):
+            client = real_client(transport=httpx.MockTransport(handler), trust_env=False)
+            clients.append(client)
+            return client
+
+        with (
+            patch.object(real_client, "__init__", httpx_capture._original_init or real_client.__init__),
+            patch("providers.rose.foundry.httpx.AsyncClient", offline_client),
+            patch("providers.rose.client._openai_api_key", return_value=""),
+            patch("providers.rose.client._cerebras_api_key", return_value=""),
+            patch("providers.rose.client.load_config", lambda: SimpleNamespace(anthropic=SimpleNamespace(api_key=""))),
+            patch.object(foundry, "_auth_cooldown_until", 0.0),
+            patch.object(foundry, "_cooldown_until", {}),
+            patch.dict(
+                os.environ,
+                {
+                    "AZURE_FOUNDRY_ENDPOINT": "https://foundry.invalid",
+                    "AZURE_FOUNDRY_API_KEY": "offline-fake",
+                    "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+                },
+            ),
+        ):
+            source = RoseClient(openrouter_key="offline-fake").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "unchanged request"}],
+                request_id=f"offline-foundry-{finish}",
+                dump_context=False,
+            )
+            consumer = None
+            try:
+                while (chunk := await anext(source)).kind != "content":
+                    pass
+                assert chunk.data["text"] == "ready"
+                assert len(requests) == 1 and not closed.is_set()
+                if finish == "close":
+                    await source.aclose()
+                else:
+                    consumer = asyncio.create_task(_drain(source))
+                    await asyncio.wait_for(waiting.wait(), timeout=1.0)
+                    if finish == "cancel":
+                        consumer.cancel()
+                        await asyncio.gather(consumer, return_exceptions=True)
+                        assert consumer.cancelled(), "consumer cancellation was swallowed"
+                    else:
+                        release.set()
+                        await asyncio.wait_for(consumer, timeout=1.0)
+                assert closed.is_set(), f"{finish} returned before closing Foundry response"
+                assert all(response.is_closed for response in responses)
+                assert all(client.is_closed for client in clients), f"{finish} abandoned Foundry HTTP client"
+                assert len(requests) == 1, "stream exit must not fall through to another model"
+            except AssertionError as error:
+                failures.append(str(error))
+            finally:
+                release.set()
+                if consumer is not None:
+                    if not consumer.done():
+                        consumer.cancel()
+                    await asyncio.gather(consumer, return_exceptions=True)
+                await source.aclose()
+                for response in responses:
+                    await response.aclose()
+                for client in clients:
+                    await client.aclose()
+                await asyncio.sleep(0)
+    assert not failures, "; ".join(failures)
+
+
+async def test_client_foundry_server_error_falls_through_to_openrouter():
+    """A Foundry failure before output must preserve the Ultra waterfall."""
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "openrouter ok"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    attempted = []
+
+    def handler(req):
+        url = str(req.url)
+        if "a-4989-resource.openai.azure.com" in url:
+            attempted.append("foundry")
+            return httpx.Response(500, text="upstream unavailable")
+        if "openrouter.ai" in url:
+            attempted.append("openrouter")
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected route")
+
+    set_mock_handler(handler)
+    with patch.dict(
+        os.environ,
+        {
+            "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+            "AZURE_FOUNDRY_API_KEY": "test-key",
+            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+            "GPT_API_KEY": "",
+            "ANTHROPIC_API_KEY": "",
+        },
+    ):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                _exclude_anthropic_family=True,
+                call_site="test-foundry-server-fallthrough",
+            )
+        )
+
+    assert attempted == ["foundry", "openrouter"]
+    assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "openai/gpt-6-sol"
+    assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
 
 
 async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
@@ -7408,6 +7682,10 @@ async def run_all_tests():
         "responses_sse_failed_context_length",
         test_parse_responses_sse_failed_context_length_is_invalid_request,
     )
+    await r.record_async(
+        "responses_sse_in_band_credit_exhaustion",
+        test_parse_responses_sse_in_band_credit_exhaustion_is_payment_required,
+    )
     r.record("codex_responses_body_contract", test_build_codex_responses_body_contract)
     r.record("codex_cache_scope_session_headers", test_codex_cache_scope_uses_canonical_session_headers)
     await r.record_async(
@@ -7470,6 +7748,7 @@ async def run_all_tests():
         test_build_openrouter_body_defaults_provider_fast_mode_on,
     )
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
+    r.record("haiku_body_omits_unsupported_effort", test_haiku_body_omits_unsupported_effort)
     r.record(
         "waterfall_body_builders_always_stamp_effort_xhigh",
         test_waterfall_body_builders_always_stamp_effort_xhigh_by_default,
@@ -7517,6 +7796,10 @@ async def run_all_tests():
     )
     await r.record_async("anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix)
     await r.record_async("anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown)
+    await r.record_async(
+        "gpt_apikey_credit_cooldown_to_foundry",
+        test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundry,
+    )
     await r.record_async(
         "openai_apikey_before_anthropic_openrouter",
         test_client_openai_api_key_serves_before_anthropic_and_openrouter,
@@ -7581,6 +7864,14 @@ async def run_all_tests():
     )
     await r.record_async("client_collect_common_timing_logs", test_client_collect_emits_common_rose_timing_logs)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
+    await r.record_async(
+        "client_foundry_stream_exit_closes_http_owner",
+        test_client_foundry_stream_exit_closes_http_owner,
+    )
+    await r.record_async(
+        "client_foundry_server_error_falls_through_to_openrouter",
+        test_client_foundry_server_error_falls_through_to_openrouter,
+    )
     await r.record_async(
         "client_direct_auth_ttft_fallthrough",
         test_client_direct_auth_ttft_falls_through_before_first_chunk,

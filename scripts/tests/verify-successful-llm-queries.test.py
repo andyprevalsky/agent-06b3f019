@@ -109,6 +109,28 @@ def rose_fixture():
 
 
 class QueryEvidenceTest(unittest.TestCase):
+    def test_three_completed_foundry_queries_use_the_same_live_evidence_contract(self):
+        payload = rose_fixture()
+        for event in payload["tasks"][0]["logs"]["worker_logs"]:
+            if event["event"] == "rose.complete.waterfall.done":
+                event["event"] = "rose.complete.foundry.done"
+            elif event["event"] == "llm.cache":
+                event["actual_model"] = "gpt-6-sol-foundry"
+        result = module.verify(payload)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["successful_llm_queries"], 3)
+        self.assertEqual(
+            {row["request_id"] for row in result["queries"]},
+            {"request-0", "request-1", "request-2"},
+        )
+        self.assertTrue(
+            all(
+                row["route_done_event"] == "rose.complete.foundry.done"
+                and row["evidence_kind"] == "rose_live_completion"
+                for row in result["queries"]
+            )
+        )
+
     def test_three_live_rose_continuations_pass_without_provider_read_spans(self):
         payload = rose_fixture()
         lines = payload["tasks"][0]["logs"]["worker_logs"]
