@@ -123,8 +123,10 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
         }),
     },
     // The silent-stream path starts both together. A fast direct 429 uses a
-    // short delay so a prompt fast reply wins without an extra request.
+    // short delay so a prompt fast reply wins without an extra request; a fast
+    // model that is itself capped hands off to the spill without that wait.
     hedgeAfter: () => (params.hedgeDelayMs ? sleep(params.hedgeDelayMs) : Promise.resolve()),
+    hedgeOnPrimaryFailure: true,
     isContent: (chunk) => clearsChatStallGuard(chunk.kind),
     onWinner: (name) => {
       winnerName = name;
