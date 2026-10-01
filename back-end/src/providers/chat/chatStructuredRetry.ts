@@ -7,8 +7,8 @@
  * Chat router/generator used to throw on the first miss, and create-agent
  * mapped that throw to FAILED.
  *
- * Each attempt keeps its own router stall/completion bounds; a miss starts
- * a new attempt, it does not stretch the first one.
+ * Each attempt keeps its own router deadline; a miss starts a new attempt,
+ * it does not stretch the first one.
  *
  * Deadline misses regenerate like every other miss. Prod agent e8f2279b
  * (2026-10-01): the Cerebras router stalled, the first attempt's deadline

@@ -7,6 +7,8 @@
 
 import assert from 'node:assert/strict';
 
+import { DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
+import { DEFAULT_CEREBRAS_CHAT_HEDGE_MS } from '../../providers/rose/exclusiveCerebrasChatRoute';
 import {
   type GoalAnchor,
   goalAnchorFailure,
@@ -15,7 +17,7 @@ import {
   probeLiveFailover,
 } from '../blackbox/chat-router-failover.live.support';
 
-const BUDGET_MS = 4_200;
+const BUDGET_MS = DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS - DEFAULT_CEREBRAS_CHAT_HEDGE_MS;
 const GOAL = 'Find the best hot yoga class this weekend near 88 Harlow St';
 const GOAL_ANCHOR: GoalAnchor = {
   corrected: /88 Harlow\b/,
@@ -99,7 +101,7 @@ async function verdict(samples: LiveSample[]): Promise<{ error: unknown; runs: n
 }
 
 const apologyBothSilent = sample({
-  outcome: { kind: 'apology', atMs: 10_061 },
+  outcome: { kind: 'apology', atMs: 30_061 },
   attempts: 2,
   glm: [noHeaders, noHeaders],
   alerts: ['https://hooks.slack.com/x'],
@@ -130,7 +132,8 @@ async function run(): Promise<void> {
   assert.match(String(twice.error), /missed in two samples/);
   assert.equal(twice.runs, 2);
 
-  const slowFirstContent = { ...served, firstEventMs: 4_400, firstContentMs: 4_500 };
+  assert.equal(BUDGET_MS, 14_200);
+  const slowFirstContent = { ...served, firstEventMs: 14_400, firstContentMs: 14_500 };
   const late = await verdict([
     sample({ attempts: 2, glm: [slowFirstContent, served] }),
     sample({}),
@@ -145,7 +148,7 @@ async function run(): Promise<void> {
     ],
     [
       'content inside the budget without a decision is ours',
-      sample({ outcome: { kind: 'apology', atMs: 10_050 }, attempts: 2, glm: [served, served] }),
+      sample({ outcome: { kind: 'apology', atMs: 30_050 }, attempts: 2, glm: [served, served] }),
     ],
     ['a served turn with the wrong address is ours', sample({ goal: 'hot yoga near Irving, TX' })],
     ['a served turn that keeps the rejected anchor is ours', sample({ goal: WRONG_GOALS[0] })],

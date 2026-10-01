@@ -36,7 +36,7 @@ import type { ChatProviderRoute } from './phaseModels';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 import { ROUTER_JSON_SCHEMA } from './routerDecisionJsonSchema';
 import {
-  chatRouterCompletionBounds,
+  chatRouterCompletionTimeoutMs,
   createRouterCompletionDeadline,
   streamBeforeRouterCompletionDeadline,
 } from './routerCompletionDeadline';
@@ -282,7 +282,7 @@ export async function callRouterLlm(params: {
     };
   }
 
-  const completionBounds = chatRouterCompletionBounds();
+  const completionTimeoutMs = chatRouterCompletionTimeoutMs();
   let isClaude = false;
   let isGpt = false;
   let sequence = 1;
@@ -317,7 +317,7 @@ export async function callRouterLlm(params: {
           webSearchDetected = false;
         }
         const detectClosedAction = createClosedRouterActionDetector(params.onActionDetected);
-        const completionDeadline = createRouterCompletionDeadline(completionBounds);
+        const completionDeadline = createRouterCompletionDeadline(completionTimeoutMs);
         const createLiveStream = (abortSignal?: AbortSignal) =>
           createStreamingCompletion(
             buildRouterCompletionOptions({
@@ -436,7 +436,6 @@ export async function callRouterLlm(params: {
 
           // Handle JSON content (delta.content)
           const contentDelta = delta?.content || '';
-          if (reasoningDelta || contentDelta) completionDeadline.progress();
           if (contentDelta) {
             structuredOutput.addCompletionChunk(chunk);
             accumulatedJson = structuredOutput.currentText();
@@ -515,8 +514,7 @@ export async function callRouterLlm(params: {
           log.warn('[RouterLLM] Completion deadline expired without a decision', {
             agentId: params.agentId,
             attempt,
-            expiry: completionDeadline.expiry(),
-            ...completionBounds,
+            timeoutMs: completionTimeoutMs,
             elapsedMs: Date.now() - startTime,
             actualModel,
             chunksReceived: chunkCount,
@@ -555,8 +553,7 @@ export async function callRouterLlm(params: {
           log.warn('[RouterLLM] Completion deadline recovered a closed decision', {
             agentId: params.agentId,
             action: decision.action,
-            expiry: completionDeadline.expiry(),
-            ...completionBounds,
+            timeoutMs: completionTimeoutMs,
             chunksReceived: chunkCount,
             jsonLength: accumulatedJson.length,
           });

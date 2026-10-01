@@ -16,7 +16,7 @@ import {
   RoseServerError,
   RoseStallError,
 } from './errors';
-import { clearsChatStallGuard } from './cerebrasRoute';
+import { CHAT_TIMEOUT_MS, clearsChatStallGuard } from './cerebrasRoute';
 import { parseOpenAISSE } from './streaming';
 import { postOpenRouterStream } from './transport';
 import { normalizeOpenAiToolCalls } from './transforms';
@@ -28,14 +28,13 @@ export const OPENROUTER_FAST_CHAT_MODEL = 'z-ai/glm-5.3-flash';
 export const OPENROUTER_FAST_CHAT_POOL = 'openrouter-fast-chat';
 /**
  * Pre-token, connect, and SSE-idle bound for this branch. It runs only after
- * direct Cerebras stalled, when it is usually the one path that can serve, so
- * it must not give up before the chat router's own no-progress bound
- * (DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS) would. On the 24k-token e8f2279b
- * router context, GLM's first content came 0.5–1.7s after its request in
- * 19/23 runs, 2.0–3.1s in 3 and 7.7s in 1; the previous 2s bound (sized for
- * a Flash-Lite model) aborted those 3 responses that would have served.
+ * direct Cerebras stayed silent, when it is usually the one path that can
+ * serve, so it gets the full chat timeout. On real prod router contexts
+ * (1k–88k tokens, replayed live 2026-10-01) GLM's first content came 0.4–8.6s
+ * after its request; the previous 2s bound aborted responses that would have
+ * served.
  */
-export const DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS = 5_000;
+export const DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS = CHAT_TIMEOUT_MS;
 
 function chatIdleTimeoutMs(): number {
   const configured = Number(process.env.OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS);
@@ -57,7 +56,7 @@ function normalizeOpenRouterFastChatEffort(effort?: string): string {
  * request the cheap hosts it favors finished in p50 8.4s / p90 11.9s;
  * throughput sorting finished in p50 2.7s / p90 3.4s (62/62 inside the router
  * bounds). Load-balanced throughput floors spread hosts but still drew slow
- * ones (p90 13.0s; first content past the router's 4.2s pre-content budget).
+ * ones (p90 13.0s).
  * `sort` disables load balancing, so failover traffic goes to OpenRouter's
  * current throughput leader and moves on only when that host errors.
  * `require_parameters` keeps hosts that would ignore `response_format`.
@@ -103,9 +102,10 @@ export function buildOpenRouterFastChatBody(
 
 /**
  * One record per failover request, written when it ends for any reason,
- * including a caller abort. A router stall bound aborts the request before
- * this route's own guard fires and usually before any SSE event, so neither a
- * branch-failure log nor the host field can record that outcome.
+ * including a caller abort. The router deadline or a lost hedge race can
+ * abort the request before this route's own guard fires and before any SSE
+ * event, so neither a branch-failure log nor the host field can record that
+ * outcome.
  */
 interface FastChatTrace {
   status?: number;

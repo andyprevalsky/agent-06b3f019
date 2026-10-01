@@ -12,11 +12,12 @@ import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './type
 const log = createLogger('Rose');
 
 /**
- * How long the exclusive Cerebras stream may stay silent before the generic
- * waterfall starts IN PARALLEL as a hedge. Shorter than the 1.2s pre-content
- * stall guard, so a throttled/queued Cerebras stream no longer serializes
- * stall detection + waterfall TTFT (which breached the 5s chat lifecycle
- * ratchet). Non-positive values disable hedging (pure serial fallover).
+ * How long the exclusive Cerebras stream may stay silent before the OpenRouter
+ * fallbacks start IN PARALLEL as a hedge. Cerebras keeps racing them until the
+ * chat timeout, so a throttled/queued or long-prefill Cerebras stream neither
+ * serializes stall detection + fallback TTFT (which breached the 5s chat
+ * lifecycle ratchet) nor loses a response it was about to send.
+ * Non-positive values disable hedging (pure serial fallover).
  */
 export const DEFAULT_CEREBRAS_CHAT_HEDGE_MS = 800;
 

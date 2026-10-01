@@ -43,10 +43,7 @@ import {
   regenerateOnChatStructuredMiss,
 } from '../../providers/chat/chatStructuredRetry';
 import { requireGeneratorParsedJson } from '../../providers/chat/generatorLlm';
-import {
-  DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
-  DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS,
-} from '../../providers/chat/routerCompletionDeadline';
+import { DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
 import {
   accumulateChatLlmUsage,
   applyChunkUsage,
@@ -300,14 +297,11 @@ function testUsageAccumulatesAcrossAttempts(): void {
   assert.equal(usage.cache_read_input_tokens, 2);
 }
 
-function testPerAttemptBoundsAreProfiled(): void {
-  assert.deepEqual(
-    {
-      stall: DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS,
-      completion: DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
-    },
-    { stall: 5_000, completion: 15_000 },
-    'router bounds are sized from the e8f2279b failover profile; change them only with a new profile'
+function testPerAttemptBoundIsProfiled(): void {
+  assert.equal(
+    DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
+    15_000,
+    'the router attempt bound is sized from the long-context prod router profile; change it only with a new profile'
   );
   assert.equal(MAX_CHAT_STRUCTURED_ATTEMPTS, 2, 'one regenerate, not an unbounded loop');
 }
@@ -445,7 +439,7 @@ async function main(): Promise<void> {
   await testFirstMissRegeneratesInsteadOfApologizing();
   await testExhaustedMissesStayTypedAndDoNotFailAgent();
   await testNonTransientErrorsDoNotRetry();
-  testPerAttemptBoundsAreProfiled();
+  testPerAttemptBoundIsProfiled();
   testCallSitesUseSharedRegenerate();
   testRetryResetsPerAttemptStreamState();
   testUsageAccumulatesAcrossAttempts();

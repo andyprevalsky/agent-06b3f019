@@ -5,7 +5,7 @@
  *
  * The e8f2279b recurrence
  * (docs/rca/cases/2026-09-30-chat-router-finaltext-killed-create-on-empty-failover.md)
- * left a live miss with no record: the router's stall bound aborted the GLM
+ * left a live miss with no record: the router's attempt bound aborted the GLM
  * request before any SSE event, so no branch-failure log fired and no host was
  * reported. Every failover request now ends with one `openrouter_fast_chat.end`
  * record. These cases pin what that record says for each way a request ends,
@@ -18,6 +18,7 @@
 
 import assert from 'node:assert/strict';
 
+import { DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
 import {
   createStreamingCompletion,
   RoseStallError,
@@ -33,7 +34,7 @@ import { parseOpenAISSE } from '../../providers/rose/streaming';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 import type { CompletionOptions } from '../../providers/rose/types';
 
-const ROUTER_STALL_MESSAGE = 'Chat router stream made no progress for 5000ms';
+const ROUTER_DEADLINE_MESSAGE = `Chat router completion exceeded ${DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS}ms`;
 
 const ENV_KEYS = [
   'OPENROUTER_API_KEY',
@@ -180,7 +181,7 @@ async function runFastChat(requestId: string, abortAfterMs?: number): Promise<un
   const timer =
     abortAfterMs === undefined
       ? undefined
-      : setTimeout(() => caller.abort(new Error(ROUTER_STALL_MESSAGE)), abortAfterMs);
+      : setTimeout(() => caller.abort(new Error(ROUTER_DEADLINE_MESSAGE)), abortAfterMs);
   try {
     for await (const chunk of exclusiveOpenRouterFastChatCompletion({
       options: { ...ROUTER_OPTIONS, abort_signal: caller.signal },
@@ -268,7 +269,7 @@ async function testCallerAbortBeforeHeadersIsRecorded(): Promise<void> {
   assert.equal(end.headers_ms, undefined, 'no response headers arrived');
   assert.equal(end.first_event_ms, undefined);
   assert.ok(
-    String(end.abort_reason).includes(ROUTER_STALL_MESSAGE),
+    String(end.abort_reason).includes(ROUTER_DEADLINE_MESSAGE),
     `the record must name the bound that aborted it: ${JSON.stringify(end)}`
   );
 }
@@ -343,7 +344,7 @@ async function testOwnGuardRecordsNoOutputTimeout(): Promise<void> {
 
 /**
  * The 07:06 live-miss shape: direct Cerebras stalls, the Qwen spill and GLM
- * both answer 200 and then send nothing, and the router's stall bound aborts
+ * both answer 200 and then send nothing, and the router's attempt bound aborts
  * the turn. The route must stop there; the GLM end record must say why.
  */
 async function testCallerAbortStopsTheChatRouteBeforeTheWaterfall(): Promise<void> {
@@ -372,7 +373,7 @@ async function testCallerAbortStopsTheChatRouteBeforeTheWaterfall(): Promise<voi
         startedAt = Date.now();
         const timer = setTimeout(() => {
           abortedAtMs = Date.now() - startedAt;
-          caller.abort(new Error(ROUTER_STALL_MESSAGE));
+          caller.abort(new Error(ROUTER_DEADLINE_MESSAGE));
         }, abortAfterMs);
         try {
           const stream = await createStreamingCompletion({
@@ -415,7 +416,7 @@ async function testCallerAbortStopsTheChatRouteBeforeTheWaterfall(): Promise<voi
   assert.equal(glmEnds[0].end, 'caller_aborted');
   assert.equal(glmEnds[0].status, 200);
   assert.equal(glmEnds[0].first_event_ms, undefined);
-  assert.ok(String(glmEnds[0].abort_reason).includes(ROUTER_STALL_MESSAGE));
+  assert.ok(String(glmEnds[0].abort_reason).includes(ROUTER_DEADLINE_MESSAGE));
 }
 
 const CASES: Array<[string, () => Promise<void>]> = [
