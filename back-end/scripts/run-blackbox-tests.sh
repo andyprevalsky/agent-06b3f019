@@ -47,6 +47,7 @@ codex_funded_fallback_configured() {
 # Docker database and silently fall back to a shared system Postgres instance.
 cd "$ROOT_DIR"
 source scripts/lib/workspace-env.sh
+source scripts/lib/run-process-cleanup.sh
 normalize_conductor_workspace_env
 cd "$BACKEND_DIR"
 source "$SCRIPT_DIR/local-db-container.sh"
@@ -433,7 +434,9 @@ BACKEND_PID=$!
 
 cleanup() {
   if kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
-    kill "$BACKEND_PID" >/dev/null 2>&1 || true
+    # BACKEND_PID is the npx wrapper; signalling only it orphans the tsx
+    # launcher and the server, which keep their port and DB pool for good.
+    run_kill_tree "$BACKEND_PID"
     wait "$BACKEND_PID" 2>/dev/null || true
   fi
 
