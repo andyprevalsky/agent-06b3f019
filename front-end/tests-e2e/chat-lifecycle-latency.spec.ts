@@ -42,6 +42,13 @@ const PROVIDER_QUOTA_COOLDOWN_MS = 25_000;
 // its one real round trip. This does NOT touch FULL_LIFECYCLE_RATCHET_MS or the
 // timeout applied to any measured sample.
 const WARMUP_MILESTONE_TIMEOUT_MS = 90_000;
+// Five quota cooldowns alone consume 125s of Playwright's default 180s test
+// timeout. Leave enough time for the warmup, measured requests, and cleanup;
+// the five-second lifecycle ratchet below still applies to every sample.
+const PATH_TEST_TIMEOUT_MS =
+  WARMUP_MILESTONE_TIMEOUT_MS +
+  SAMPLE_COUNT * (PROVIDER_QUOTA_COOLDOWN_MS + MILESTONE_TIMEOUT_MS) +
+  90_000;
 const SMOOTHNESS_TARGETS_MS = {
   screen: 200,
   userMessage: 200,

@@ -138,11 +138,15 @@ export async function findPersonWithMessages(personId: string, messageLimit: num
 // Recent messages across all people
 // ---------------------------------------------------------------------------
 
-export async function findRecentMessages(userId: string, cutoffTime: Date, limit: number) {
+export async function findRecentMessages(
+  userId: string,
+  cutoffTime: Date | undefined,
+  limit: number
+) {
   return prisma.messageRecord.findMany({
     where: {
       person: { userId },
-      timestamp: { gte: cutoffTime },
+      ...(cutoffTime === undefined ? {} : { timestamp: { gte: cutoffTime } }),
     },
     orderBy: { timestamp: 'desc' },
     take: limit,

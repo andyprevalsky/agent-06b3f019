@@ -7105,6 +7105,9 @@ async def call_planner_llm_activity(
     # Build system prompt for planner
     prompt_start = time.perf_counter()
     system_prompt = build_planner_system_prompt(tools_description, user_context, response_schema=response_schema)
+    # Seeded or imported communications can be months old. Give the planner an
+    # explicit clock so "current" goals cannot inherit a message timestamp.
+    system_prompt += f"\n\nCurrent UTC date: {datetime.now(timezone.utc).date().isoformat()}."
     prompt_elapsed = time.perf_counter() - prompt_start
     logger.info(f"[TIMING] Planner system prompt build: {prompt_elapsed * 1000:.1f}ms")
 

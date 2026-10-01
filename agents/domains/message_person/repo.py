@@ -6,7 +6,6 @@ Activities that perform HTTP calls to the backend or LLM providers.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -18,12 +17,6 @@ from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 
 logger = structlog.get_logger()
 
-# Cache-stability bucket for voice-context fetches. Same bucket = byte-identical
-# voice-context payload across all message_person calls in the window =
-# prompt-prefix cache hit. Rolls forward at the next 15-min boundary; new
-# messages arriving inside the window are excluded from voice context until
-# the next bucket so the prompt bytes never shift mid-window.
-VOICE_CONTEXT_BUCKET_MINUTES = 15
 IMESSAGE_ACK_POLL_ATTEMPTS = 30
 IMESSAGE_ACK_POLL_INTERVAL_SECONDS = 2
 
@@ -393,9 +386,9 @@ async def _send_email_real(
 async def fetch_recent_messages_activity(
     user_id: str,
     limit: int = 100,
-    days: int = 30,
+    days: int | None = None,
 ) -> dict[str, Any]:
-    """Fetch recent messages across all contacts for a user to understand their writing style.
+    """Fetch the latest messages across all contacts without an age cutoff by default.
 
     Returns: {"messages": [...], "count": int}
     """
@@ -411,7 +404,7 @@ async def fetch_recent_messages_activity(
                 "X-API-Key": config.backend.api_key or "",
                 "X-User-Id": user_id,
             },
-            params={"limit": limit, "days": days},
+            params={"limit": limit, **({"days": days} if days is not None else {})},
         )
 
         if response.status_code != 200:
@@ -424,22 +417,10 @@ async def fetch_recent_messages_activity(
 
         data = response.json()
 
-        # Bucket the cutoff so voice-context bytes stay stable for
-        # VOICE_CONTEXT_BUCKET_MINUTES — every call in the same bucket
-        # produces the same filtered list, the same formatted text, the
-        # same prompt prefix, and a cache-read instead of cache-write.
-        now = datetime.now(timezone.utc)
-        bucket_minute = (now.minute // VOICE_CONTEXT_BUCKET_MINUTES) * VOICE_CONTEXT_BUCKET_MINUTES
-        bucket_now = now.replace(minute=bucket_minute, second=0, microsecond=0)
-        bucket_iso = bucket_now.isoformat().replace("+00:00", "Z")
-
         messages = data.get("messages", []) or []
-        filtered = [m for m in messages if (m.get("timestamp") or "") <= bucket_iso]
         return {
-            "messages": filtered,
-            "count": len(filtered),
-            "bucket_at": bucket_iso,
-            "bucket_minutes": VOICE_CONTEXT_BUCKET_MINUTES,
+            "messages": messages,
+            "count": len(messages),
         }
 
 
@@ -488,10 +469,9 @@ async def generate_message_activity(
     #      per-user content rules. Lives BELOW SYSTEM_PROMPT_DYNAMIC_BOUNDARY
     #      so it does not contaminate the global static prefix. Cacheable
     #      per-user via the second cache breakpoint.
-    #   3. voice_system   - `general_messages_context`, the user's recent
-    #      messages across all contacts (~30k tokens). Per-USER stable
-    #      within VOICE_CONTEXT_BUCKET_MINUTES (the fetch activity buckets
-    #      its cutoff timestamp). Refreshes once per bucket.
+    #   3. voice_system   - `general_messages_context`, the user's latest
+    #      messages across all contacts (~30k tokens). Each formatted message
+    #      includes its timestamp so the model can judge recency.
     #   4. user message   - channel + recipient + intent + per-call context.
     #      Per-CALL unique. Not cached.
     #
@@ -611,8 +591,7 @@ async def generate_message_activity(
         # escalated already; if we still see length, fail loudly so the tool
         # retries rather than asking the user to approve an incomplete email.
         raise ValueError(
-            "Message generation was truncated at the model output limit. "
-            "Retry so the approval shows the full draft."
+            "Message generation was truncated at the model output limit. Retry so the approval shows the full draft."
         )
 
     # Parse subject from email response
