@@ -19,7 +19,7 @@ const BUDGET_MS = 4_200;
 const GOAL = 'Find the best hot yoga class this weekend near 88 Harlow St';
 const GOAL_ANCHOR: GoalAnchor = {
   corrected: /88 Harlow\b/,
-  rejected: /(?:1000 )?Westward Oak|Irving|Las Colinas|\b750\d\d\b/,
+  rejected: /(?:1000 )?Westward Oak|Irving|Las Colinas|Dallas|DFW|Texas|\b750\d\d\b/,
 };
 
 /** Goals the live probe started with on 2026-10-01, and phrasings it must also accept. */
@@ -41,6 +41,8 @@ const CORRECT_GOALS = [
     'Irving, TX)',
   'The user is no longer in Irving; find hot yoga (Sat. Oct 3) within 2 miles from 88 Harlow St',
   "(don't book) Location: 88 Harlow St, San Francisco",
+  'Find the best hot yoga class this weekend, not too far from 88 Harlow St',
+  'Find hot yoga (e.g. Bikram or hot vinyasa) near 88 Harlow St, San Francisco',
 ];
 
 /** Goals that mention the corrected address but still send the run elsewhere. */
@@ -58,6 +60,7 @@ const WRONG_GOALS = [
   "Find hot yoga within 4 miles of Alex's home; ignore the delivery address at 88 Harlow St",
   'Find hot yoga near ZIP 75063; skip the studios at 88 Harlow St',
   'Search Irving, TX hot yoga studios and compare with ones near 88 Harlow St',
+  "Find hot yoga near Alex's home in Dallas, TX; 88 Harlow St is Ravi's",
 ];
 
 const served: LiveObservation = {

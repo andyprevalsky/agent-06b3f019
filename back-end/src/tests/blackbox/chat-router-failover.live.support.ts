@@ -203,9 +203,9 @@ export interface GoalAnchor {
 }
 
 const NEGATION =
-  /\b(?:not|never|no longer|avoid|ignore|skip|instead|rather|except|excluding)\b|n't\b/i;
-/** `.`, `!`, or `?` before a capitalized word or the end, unless it closes `Sat.` or `St.`. */
-const SENTENCE_END = /(?<!\b[A-Z][A-Za-z]{0,3})[.!?](?=\s+[A-Z]|\s*$)|\n/;
+  /\b(?:not|never|no longer|avoid|ignore|skip|instead|rather|except|excluding)\b(?!\s+(?:too\s+)?far\b)|n't\b/i;
+/** `.`, `!`, or `?` before a capitalized word or the end, unless it closes `Sat.`, `St.`, or `e.g.`. */
+const SENTENCE_END = /(?<!\b[A-Z][A-Za-z]{0,3}|\b[a-z]\.[a-z])[.!?](?=\s+[A-Z]|\s*$)|\n/;
 
 /** Whether a negation leads the clause up to `at` (its last six words). */
 function negatedAt(text: string, at: number): boolean {
