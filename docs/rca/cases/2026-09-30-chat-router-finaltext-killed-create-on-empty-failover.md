@@ -136,7 +136,8 @@ exhausted.
 ## Recurrence — 2026-10-01 (agent e8f2279b-3ec9-4bd8-bbb4-d659b2e9cdf6)
 
 **Symptom.** An agent had completed a hot-yoga run in Irving, TX. The user's
-follow-up "wrong address, its the 88 howard one" got `Sorry — I couldn't
+follow-up "wrong address, its the 88 harlow one" (the fixture's stand-in for
+the user's building) got `Sorry — I couldn't
 generate a response just now. Please try again.` The agent stayed ACTIVE and
 no workflow started. Render timeline:
 
@@ -169,7 +170,7 @@ This is a recurrence of this case. Relatives:
    place it added `deadlineRouterFallback`, a keyword regex
    (`EXPLICIT_AGENT_INTENT`) that escalated only prompts worded like the
    lifecycle-latency spec. A real follow-up such as "wrong address, its the 88
-   howard one" does not match, so it apologized. That string-matching
+   harlow one" does not match, so it apologized. That string-matching
    classifier kept the benchmark green while real turns failed.
 2. This case's own Stop ("do not raise the per-attempt 3s bound") was treated
    as a standing constraint. The data it was missing (would OpenRouter finish
@@ -369,8 +370,9 @@ healthy Cerebras, and the GLM failover.
   `every GLM failover must name its own OpenRouter session`, because both
   attempts' GLM requests shared the conversation-derived pin.
 - Full fix: `PASS chat-router-failover (4 cases)`.
-  - (a) escalates at 8.4–8.6s via `z-ai/glm-5.3-flash`, and the reasoning
-    cites the corrected address.
+  - (a) escalates at 8.4–8.6s via `z-ai/glm-5.3-flash`. The reasoning
+    cites the corrected address, and the re-plan goal anchors on it and not
+    on the rejected Irving home.
   - (b) attempt 1 expires on the router's 5s stall bound (`kind=deadline`).
     The regenerate's GLM request carries a different `session_id` and
     escalates.
@@ -406,6 +408,10 @@ healthy Cerebras, and the GLM failover.
       started about 07:07:32Z all served at 1.2–1.7s.
     - One further 08:07:52Z run is excluded: local Postgres stopped accepting
       connections before any provider request (see the runner leak below).
+  - Final probe code (connect timing, then the goal-anchor check): 08:35Z
+    and 09:21Z both escalated on router attempt 1 via CoreWeave (connected
+    in 46ms and 44ms; the 09:21Z run had first content at 2,713ms and
+    escalated at 5,640ms with a goal "near 88 Harlow St, … San Francisco").
 
 **Cemented in `/deploy`.**
 
@@ -424,7 +430,11 @@ healthy Cerebras, and the GLM failover.
     verdict on the recorded live shapes: served first, the 07:07:21Z shape
     (re-probe), two misses (fail), late first content (re-probe), and
     fail-at-once for HTTP 402, content without a decision, a wrong address,
-    events without a host, and a timeout.
+    a goal that keeps the rejected anchor, a connect that never completed,
+    events without a host, and a timeout. It also pins the goal-anchor check
+    on four accepted goals (two recorded live, plus "within 2 miles of" and
+    "not in Irving" phrasings) and five rejected ones, such as "near Irving,
+    TX 75063; do not anchor on 88 Harlow St".
 - Step 4p, `scripts/run_deploy_live_probes.py`: runs the live probe as
   `chat-router-failover-live`, after `amplitude-live` because both boot the
   runner's db push and trigger hooks.
@@ -434,12 +444,18 @@ healthy Cerebras, and the GLM failover.
   - It sends the exact e8f2279b follow-up with direct Cerebras and every
     other OpenRouter route stalled, so only the real GLM failover can serve.
   - It passes when the turn escalates on router attempt 1 with no error
-    alert and the re-plan goal carries the corrected address (`88 Harlow`,
-    the fixture's same-length stand-in for the user's street).
-  - An OpenRouter-side miss (no response headers, or HTTP 200 with no
-    first content inside the 4.2s budget) is re-probed once, 60s later. A
+    alert and the re-plan goal anchors on the corrected address (`88 Harlow`,
+    the fixture's same-length stand-in for the user's street) and not on the
+    rejected Irving home. Mentioning the address is not enough: the replayed
+    context still says "Do NOT anchor on 88 Harlow St" and names the Irving
+    home, so the check needs a locative phrase ("near", "within 2 miles
+    of", ...) on the corrected address that is not negated, and none on the
+    rejected one.
+  - An OpenRouter-side miss (the connection opened but no response headers
+    came, or HTTP 200 with no first content inside the 4.2s budget) is
+    re-probed once, 60s later. A connect that never completed is not one. A
     second miss, or any other failure, blocks the deploy.
-  - It prints the serving host and its header, first-event, and
+  - It prints the serving host and its connect, header, first-event, and
     first-content times for every attempt.
 - What the probe does not cover: this scenario escalates, so the speculative
   generator is discarded and the router is the only serving path. The probe
