@@ -22,6 +22,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from config import load_config
+from helpers.activity_heartbeat import safe_heartbeat
 from helpers.attachments import (
     FilePointer,
     build_attachment_metadata_text,
@@ -241,13 +242,9 @@ def _add_cache_breakpoint_before_extra_user_message(messages: List[Dict[str, Any
     return False
 
 
-def _safe_heartbeat(message: str, *details: Any) -> None:
-    """Call activity.heartbeat() if we're in an activity context, otherwise silently skip.
-
-    ``details`` ride along for the next attempt (``activity.info().heartbeat_details``).
-    """
-    with contextlib.suppress(Exception):
-        activity.heartbeat(message, *details)
+def _safe_heartbeat(message: str) -> None:
+    """Call activity.heartbeat() if we're in an activity context, otherwise silently skip."""
+    safe_heartbeat(message)
 
 
 def _safe_time() -> float:
