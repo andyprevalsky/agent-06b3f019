@@ -33,6 +33,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
 python3 "$ROOT_DIR/scripts/tests/cloudbench-hub-reaping.test.py" || exit 1
+python3 "$ROOT_DIR/scripts/tests/cloudbench-fake-volume-contract.test.py" || exit 1
 
 # Resolve the fleet APP from run-bench-fleet at runtime so fixtures stay in
 # sync without hardcoding the bench app name (secret-scanner sensitive).
@@ -732,7 +733,7 @@ reset_fake_state() {
      "config": {"mounts": [{"volume": "vol_aaaa0001", "size_gb": 40}]}}
   ],
   "volumes": [
-    {"id": "vol_aaaa0001", "name": "cloudbench_data", "state": "created"}
+    {"id": "vol_aaaa0001", "name": "cloudbench_data", "state": "created", "size_gb": 40}
   ],
   "snapshots": [
     {"id": "snap_0001", "status": "created",
@@ -1300,7 +1301,7 @@ elif args[:2] == ["machine", "clone"]:
                                  "memory_mb": vm_memory}},
         })
         state["volumes"].append(
-            {"id": volume_id, "name": "cloudbench_data_fork", "state": "created"})
+            {"id": volume_id, "name": "cloudbench_data_fork", "state": "created", "size_gb": 40})
     machine_dir(machine_id)
     if source_id != "aaaa0000000001":
         with open(os.path.join(MARKERS, "worker-clone-id"), "w") as fh:
@@ -2044,10 +2045,10 @@ state["machines"].append({
     "ignore_stop": os.environ["IGNORE_STOP"] == "1",
     "region": "iad",
     "private_ip": "fdaa::dead",
-    "config": {"mounts": [{"volume": volume_id}]},
+    "config": {"mounts": [{"volume": volume_id, "size_gb": 40}]},
 })
 state["volumes"].append(
-    {"id": volume_id, "name": "cloudbench_data_fork", "state": "created"}
+    {"id": volume_id, "name": "cloudbench_data_fork", "state": "created", "size_gb": 40}
 )
 with open(path, "w") as fh:
     json.dump(state, fh)

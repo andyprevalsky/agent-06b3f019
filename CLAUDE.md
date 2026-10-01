@@ -638,6 +638,9 @@ TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
   `bash scripts/tests/cloudbench-multi-workstream.test.sh` on Linux at the
   reviewed source: its fake guest executes the real Linux worker subreaper.
   Darwin rejection tests do not substitute for that mandatory lifecycle gate.
+  Its permanent `cloudbench-fake-volume-contract.test.py` runs the actual fake
+  provider writers through real snapshot admission; keep positive volume sizes
+  consistent with their Machine mounts before exercising ownership scenarios.
   Keep Linux `TMPDIR`
   outside the checkout (for example `/var/tmp`): production archive guards
   intentionally redirect paths under the repository.
