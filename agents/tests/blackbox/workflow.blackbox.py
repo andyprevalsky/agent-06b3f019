@@ -4970,6 +4970,8 @@ async def test_subscription_credit_recheck_preserves_concurrent_pause():
             return "https://roselabs.ai/s/free-credit"
         return None
 
+    fake.execute_activity = fake_exec
+
     async def fake_raise_gate(workflow_instance, gate, gate_key):
         return "resolved"
 
@@ -8555,6 +8557,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_check_credits_free_credit_subscription_gate",
         test_workflow_check_credits_free_credits_exhausted_raises_subscription_gate,
+    )
+    await r.record_async(
+        "wf_subscription_credit_recheck_preserves_concurrent_pause",
+        test_subscription_credit_recheck_preserves_concurrent_pause,
     )
     await r.record_async(
         "wf_check_credits_free_credit_checkout_failure_pauses",

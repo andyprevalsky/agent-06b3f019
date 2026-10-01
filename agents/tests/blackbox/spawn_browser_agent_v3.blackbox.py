@@ -9,6 +9,7 @@ import ast
 import asyncio
 import base64
 import contextlib
+import copy
 import json
 import os
 import sys
@@ -6163,13 +6164,13 @@ def test_payment_card_approval_finishes_original_browser_tool_result():
     assert not _resolve_payment_card_tool_result_for_resume(turns, refs, "1111")
 
 
-def test_large_payment_request_resumes_with_parseable_finished_tool_result():
+async def test_large_payment_request_resumes_with_parseable_finished_tool_result():
     from domains.spawn_browser_agent_v3.handler import (
         _append_browser_turn_messages,
-        _compact_browser_turn_messages_for_resume,
         _resolve_payment_card_tool_result_for_resume,
         _simulated_browser_resume_payload,
     )
+    from domains.spawn_browser_agent_v3.resume_store import hydrate_resume_context, persist_resume_context
 
     request = {
         "merchant": "Example Shop",
@@ -6184,7 +6185,10 @@ def test_large_payment_request_resumes_with_parseable_finished_tool_result():
         result={"success": True, "status": "awaiting_payment_card_approval", "payment_request": request},
         tool_call_id="payment-call-large",
     )
-    real_turns = _compact_browser_turn_messages_for_resume(turns)
+    persisted = await persist_resume_context(
+        agent_id="agent-1", task_id="task-1", state={"browser_turn_messages": copy.deepcopy(turns)}
+    )
+    real_turns = (await hydrate_resume_context(agent_id="agent-1", resume_state=persisted))["browser_turn_messages"]
     simulated_turns = _simulated_browser_resume_payload(
         browser_state={},
         action_entries=[],
@@ -23808,6 +23812,14 @@ async def run_all_tests():
     await r.record_async(
         "browser_resume_store_keeps_parked_snapshots_small",
         test_browser_resume_store_keeps_parked_snapshots_small_enough_to_carry,
+    )
+    await r.record_async(
+        "large_payment_request_resumes_with_parseable_tool_result",
+        test_large_payment_request_resumes_with_parseable_finished_tool_result,
+    )
+    await r.record_async(
+        "browser_agent_yields_when_ownership_is_already_user",
+        test_browser_agent_yields_when_ownership_is_already_user,
     )
     r.record(
         "final_screenshot_fetch_isolated_from_verifier_errors",

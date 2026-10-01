@@ -2626,6 +2626,10 @@ async def run_all_tests():
         "failed_tool_posts_no_duplicate_chip",
         test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context,
     )
+    await r.record_async(
+        "verifier_infra_soft_fail_trips_breaker_without_schema",
+        test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema,
+    )
     teardown_mock()
     return r.summary()
 
