@@ -332,6 +332,7 @@ export async function probeCandidateBrowser(
         recoveryReason,
         classifierReason: attempt.reason ?? '',
         targetUrl,
+        blockedResourceUrl: logContext.blockedResourceUrl,
         pageUrl: page.url(),
         documentUrl: response?.url() ?? '',
         documentStatus: response?.status() ?? null,

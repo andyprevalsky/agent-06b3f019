@@ -12,6 +12,7 @@ const evidence: TunnelCandidateEvidence = {
   classifierReason:
     'The old tunnel failure has no successful checkout POST in this candidate, despite a usable checkout page.',
   targetUrl,
+  blockedResourceUrl: 'https://js.stripe.com/v3/',
   pageUrl: targetUrl,
   documentUrl: targetUrl,
   documentStatus: 200,
@@ -49,6 +50,19 @@ assert.equal(
   'a current same-origin network failure cannot promote'
 );
 assert.equal(
+  restoredTunnelCandidate({ ...evidence, failedRequestUrls: ['https://js.stripe.com/v3/'] }),
+  false,
+  'a current failure of the blocked third-party resource cannot promote'
+);
+assert.equal(
+  restoredTunnelCandidate({
+    ...evidence,
+    failedRequestUrls: ['https://metrics.example.test/ping'],
+  }),
+  true,
+  'an unrelated third-party failure does not replay the historical tunnel error'
+);
+assert.equal(
   restoredTunnelCandidate({
     ...evidence,
     networkEntries: [
@@ -58,6 +72,14 @@ assert.equal(
   }),
   false,
   'a current same-origin HTTP block cannot promote'
+);
+assert.equal(
+  restoredTunnelCandidate({
+    ...evidence,
+    networkEntries: [...evidence.networkEntries, { url: 'https://js.stripe.com/v3/', status: 503 }],
+  }),
+  false,
+  'a current HTTP failure from the blocked third-party origin cannot promote'
 );
 assert.equal(
   restoredTunnelCandidate({ ...evidence, cleanedDom: 'Checking your browser' }),

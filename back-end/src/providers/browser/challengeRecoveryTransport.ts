@@ -5,6 +5,7 @@ export interface TunnelCandidateEvidence {
   recoveryReason?: string | null;
   classifierReason: string;
   targetUrl: string;
+  blockedResourceUrl?: string;
   pageUrl: string;
   documentUrl: string;
   documentStatus: number | null;
@@ -24,8 +25,9 @@ function originOf(value: string): string | null {
 
 /**
  * The old browser's CONNECT error is historical once this candidate fetched the
- * same origin through its own proxy. A candidate with a current network failure
- * or a visible challenge still fails. The real checkout POST is never replayed
+ * same origin through its own proxy. A candidate with a current failure on the
+ * page origin or the blocked resource origin, or a visible challenge, still fails.
+ * The real checkout POST is never replayed
  * by recovery; the browser agent must make it after promotion.
  */
 export function restoredTunnelCandidate(evidence: TunnelCandidateEvidence): boolean {
@@ -41,6 +43,7 @@ export function restoredTunnelCandidate(evidence: TunnelCandidateEvidence): bool
     return false;
   }
   const targetOrigin = originOf(evidence.targetUrl);
+  const blockedOrigin = originOf(evidence.blockedResourceUrl || '');
   if (
     !targetOrigin ||
     originOf(evidence.pageUrl) !== targetOrigin ||
@@ -51,11 +54,15 @@ export function restoredTunnelCandidate(evidence: TunnelCandidateEvidence): bool
   ) {
     return false;
   }
+  const isCriticalOrigin = (url: string): boolean => {
+    const origin = originOf(url);
+    return origin === targetOrigin || (blockedOrigin !== null && origin === blockedOrigin);
+  };
   if (
-    evidence.failedRequestUrls.some((url) => originOf(url) === targetOrigin) ||
+    evidence.failedRequestUrls.some(isCriticalOrigin) ||
     evidence.networkEntries.some(
       (entry) =>
-        originOf(String(entry.url || entry.name || '')) === targetOrigin &&
+        isCriticalOrigin(String(entry.url || entry.name || '')) &&
         (Number(entry.status) === 403 ||
           Number(entry.status) === 429 ||
           Number(entry.status) >= 500 ||
