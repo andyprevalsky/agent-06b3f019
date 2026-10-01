@@ -143,9 +143,14 @@ def validate_manifest(scenario: str, manifest: dict) -> None:
         if manifest.get("expectedSignInEmail") != minted:
             raise AuthTestSiteFixtureError("minted_otp must expect the agent to sign in with its minted email")
     if scenario in SIGNED_IN_SCENARIOS:
-        if not manifest.get("expectedSignInEmail") or not manifest.get("expectedMemberNumber"):
+        if not manifest.get("expectedMemberNumber"):
             raise AuthTestSiteFixtureError(f"{scenario} manifest has no reachable member account")
-    elif manifest.get("expectedSignInEmail") is not None:
+        if scenario == "password_retry" and manifest.get("expectedSignInEmail") is not None:
+            raise AuthTestSiteFixtureError(
+                "password_retry decides its member account at sign-in (the third distinct saved "
+                "login tried), so the manifest must not pin one"
+            )
+    elif manifest.get("expectedSignInEmail") is not None or manifest.get("expectedMemberNumber"):
         raise AuthTestSiteFixtureError(f"{scenario} must not have a reachable member account")
 
 
@@ -246,10 +251,14 @@ def evaluate_outcome(check: dict, evidence: Any, deliverable: str) -> tuple[bool
         if sessions:
             return False, f"Signed in as {sessions[0].get('email')} although no option should work ({trail})"
     elif expect == "signed_in":
-        expected_email = str(manifest.get("expectedSignInEmail") or "").casefold()
-        matching = [s for s in sessions if str(s.get("email") or "").casefold() == expected_email]
+        sign_in_email = str(report.get("signInEmail") or "")
+        if not sign_in_email:
+            return False, f"No member account was ever reachable on the site ({trail})"
+        matching = [
+            s for s in sessions if str(s.get("email") or "").casefold() == sign_in_email.casefold()
+        ]
         if not matching:
-            return False, f"Never signed in as {manifest.get('expectedSignInEmail')} ({trail})"
+            return False, f"Never signed in as {sign_in_email} ({trail})"
         method = check.get("signed_in_method")
         if method and not any(s.get("method") == method for s in matching):
             observed = sorted({str(s.get("method")) for s in matching})

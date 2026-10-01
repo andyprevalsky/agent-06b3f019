@@ -2750,7 +2750,7 @@
   {
     "name": "browser-auth-saved-password-retry",
     "title": "Hosted Sign-In: Retry Saved Passwords",
-    "description": "Three saved Larkspur Members logins where only the oldest works; the browser agent must keep trying saved logins until one signs in.",
+    "description": "Three saved Larkspur Members logins where the first two the agent tries fail and the third works; the browser agent must keep trying saved logins until one signs in.",
     "prompt": "Sign in to my Larkspur Members account at {auth_test_site_url} and tell me my member number.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -2784,7 +2784,7 @@
       "auth_test_site": {
         "scenario": "password_retry"
       },
-      "context_notes": "Larkspur Members is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. The fixture seeds three saved passwords for a per-run realm larkspur-<siteId>.test: the most recently used one has a stale password for a real member, the next is a login with no account, and the oldest is correct. The site records every sign-in attempt and session; auth_test_site_outcome grades those records."
+      "context_notes": "Larkspur Members is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. The fixture seeds three saved logins, named for the user, for a per-run realm larkspur-<siteId>.test. The site decides the working login at sign-in time: whichever two distinct saved logins the agent submits first fail (a stale password, then an unknown account) and the third signs in, so two failures precede success whatever order the agent picks. The site records every sign-in attempt and session; auth_test_site_outcome grades those records."
     },
     "evaluators": [
       {

@@ -47,6 +47,7 @@ interface Manifest {
 }
 
 interface Report {
+  signInEmail: string | null;
   attempts: Array<{ kind: string; email: string; outcome: string; reason: string | null }>;
   sessions: Array<{ email: string; method: string }>;
   savedPasswords: Array<{ username: string; matchesAccount: boolean }>;
@@ -227,7 +228,10 @@ test('password_retry seeds three realm-scoped saved passwords, freshest first, t
       `auth options must list every saved password freshest first: ${JSON.stringify(manifest.authOptionsPreview)}`
     );
     assert(manifest.authOptionsPreview.mintedEmail === null, 'passwords must suppress minted');
-    assert(manifest.expectedSignInEmail === manifest.savedPasswordUsernames[2], 'third must work');
+    assert(
+      manifest.expectedSignInEmail === null,
+      'the working login is whichever third saved login the agent tries, so none is pinned'
+    );
     assert(/^LM-\d{8}$/.test(manifest.expectedMemberNumber ?? ''), 'member number expected');
 
     const page = await fetch(`${BASE_URL}${AUTH_TEST_SITE_BASE_PATH}/${manifest.siteId}/login`, {
@@ -318,10 +322,7 @@ test('password_retry: the two stale saved passwords are rejected and the third s
         headers: { Cookie: cookie },
       });
       const html = await account.text();
-      assert(
-        html.includes(`Signed in as <strong>${manifest.expectedSignInEmail}`),
-        'wrong account'
-      );
+      assert(html.includes(`Signed in as <strong>${saved[2]?.username}`), 'wrong account');
       assert(html.includes(manifest.expectedMemberNumber ?? '?'), 'member number must be shown');
       assert(
         html.includes('<dd id="member-name">Avery Quinlan-Ross</dd>'),
@@ -338,6 +339,78 @@ test('password_retry: the two stale saved passwords are rejected and the third s
       assert(
         report.sessions.length === 1 && report.sessions[0]?.method === 'password',
         'one session'
+      );
+      assert(report.signInEmail === saved[2]?.username, `signInEmail ${report.signInEmail}`);
+    });
+  } finally {
+    await cleanup(userId);
+  }
+});
+
+test('password_retry: whichever two saved logins are tried first fail and the third works', async () => {
+  const userId = await createUser('Avery Quinlan-Ross');
+  try {
+    await withLocalSite(async ({ base }) => {
+      const created = await createFixture(base, {
+        userId,
+        scenario: 'password_retry',
+        publicBaseUrl: base,
+      });
+      const manifest = (await created.json()) as Manifest;
+      const [first, second, third] = await savedPasswordsInListedOrder(userId, manifest);
+      assert(first && second && third, 'three saved logins expected');
+      const submit = (credential: { username: string; password: string }) =>
+        postForm(base, pagePath(manifest, '/login'), {
+          email: credential.username,
+          password: credential.password,
+        });
+
+      assert((await submit(third)).status === 200, 'the first saved login tried must fail');
+      assert((await submit(third)).status === 200, 'resubmitting a failed login keeps failing');
+      assert(
+        (await submit({ username: second.username, password: 'guessed-password' })).status === 200,
+        'a password that is not saved never works'
+      );
+      assert((await submit(first)).status === 200, 'the second distinct saved login must fail');
+      const signedIn = await submit(second);
+      assert(
+        signedIn.status === 303,
+        `the third distinct saved login must work, got ${signedIn.status}`
+      );
+      const accountHtml = await (
+        await fetch(`${base}${pagePath(manifest, '/account')}`, {
+          headers: { Cookie: sessionCookie(signedIn) },
+        })
+      ).text();
+      assert(accountHtml.includes(`Signed in as <strong>${second.username}`), 'wrong account');
+      assert(accountHtml.includes(manifest.expectedMemberNumber ?? '?'), 'member number');
+
+      await postForm(base, pagePath(manifest, '/logout'), {}, sessionCookie(signedIn));
+      assert((await submit(second)).status === 303, 'the working login keeps working');
+      assert((await submit(third)).status === 200, 'logins that failed keep failing');
+
+      const report = await fetchReport(base, manifest.siteId);
+      assert(report.signInEmail === second.username, `signInEmail ${report.signInEmail}`);
+      const trail = report.attempts.map(
+        (a) =>
+          `${a.email === third.username ? 3 : a.email === first.username ? 1 : 2}:${a.outcome}:${a.reason}`
+      );
+      assert(
+        JSON.stringify(trail) ===
+          JSON.stringify([
+            '3:rejected:wrong_password',
+            '3:rejected:wrong_password',
+            '2:rejected:unknown_account',
+            '1:rejected:unknown_account',
+            '2:signed_in:null',
+            '2:signed_in:null',
+            '3:rejected:wrong_password',
+          ]),
+        `unexpected ladder ${JSON.stringify(trail)}`
+      );
+      assert(
+        report.savedPasswords.map((record) => record.matchesAccount).join() === 'false,true,false',
+        `only the resolved login matches: ${JSON.stringify(report.savedPasswords)}`
       );
     });
   } finally {
@@ -371,6 +444,7 @@ test('all_fail: every saved password is rejected and no minted account is offere
       assert(sentMail.length === 0, 'no mail may leave for addresses we cannot receive');
       const report = await fetchReport(base, manifest.siteId);
       assert(report.sessions.length === 0, 'no session may exist');
+      assert(report.signInEmail === null, 'no account may be reachable');
       assert(report.attempts.filter((a) => a.kind === 'password').length === 3, 'three attempts');
       assert(
         report.savedPasswords.every((record) => !record.matchesAccount),
@@ -436,6 +510,7 @@ test('minted_otp: the emailed code reaches the minted inbox and signs in', async
         'minted account page must name the member it was opened for'
       );
       const report = await fetchReport(base, manifest.siteId);
+      assert(report.signInEmail === mintedEmail, `signInEmail ${report.signInEmail}`);
       assert(
         report.sessions.length === 1 && report.sessions[0]?.method === 'email_code',
         `expected one email_code session, got ${JSON.stringify(report.sessions)}`

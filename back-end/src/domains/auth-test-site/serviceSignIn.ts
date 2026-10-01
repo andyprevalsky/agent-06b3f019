@@ -2,7 +2,8 @@
  * Sign-in behavior of the hosted site. Every attempt is appended to the site's
  * attempt log, which is what the benchmark evaluator reads back.
  *
- *   password ──► unknown account / passwordless account / wrong password ──► rejected
+ *   password ──► saved login on an unresolved ladder ──► rejections[n] | becomes the account
+ *            ├─► unknown account / passwordless account / wrong password ──► rejected
  *            └─► match ──────────────────────────────────────────────────► session
  *   code req ──► unknown account ──► withheld (page wording is identical)
  *            ├─► account outside our mail domain ──► withheld (nothing can receive it)
@@ -58,18 +59,51 @@ function startSession(site: AuthTestSite, email: string, method: SignInMethod): 
   return token;
 }
 
+/** The rejection a ladder serves for this submission, or null to use the account table. */
+function ladderRejection(
+  site: AuthTestSite,
+  email: string,
+  password: string
+): Exclude<RejectionReason, null> | null {
+  const ladder = site.ladder;
+  if (ladder === null) return null;
+  const served = ladder.served.find((entry) => entry.email === email);
+  if (served !== undefined) return served.reason;
+  if (site.signInEmail !== null) return null;
+  const login = ladder.logins.find(
+    (candidate) => candidate.email === email && secretsEqual(candidate.password, password)
+  );
+  if (login === undefined) return null;
+  const reason = ladder.rejections[ladder.served.length];
+  if (reason !== undefined) {
+    ladder.served.push({ email, reason });
+    return reason;
+  }
+  site.accounts.push({ email, password: login.password, memberNumber: ladder.memberNumber });
+  site.signInEmail = email;
+  for (const record of site.savedPasswords) record.matchesAccount = record.username === email;
+  return null;
+}
+
+function accountRejection(
+  site: AuthTestSite,
+  email: string,
+  password: string
+): Exclude<RejectionReason, null> | null {
+  const account = site.accounts.find((candidate) => candidate.email === email);
+  if (account === undefined) return 'unknown_account';
+  if (account.password === null) return 'no_password';
+  if (!secretsEqual(account.password, password)) return 'wrong_password';
+  return null;
+}
+
 export function signInWithPassword(
   site: AuthTestSite,
   rawEmail: string,
   password: string
 ): PasswordSignInResult {
   const email = normalizeEmail(rawEmail);
-  const account = site.accounts.find((candidate) => candidate.email === email);
-  let reason: Exclude<RejectionReason, null> | null = null;
-  if (account === undefined) reason = 'unknown_account';
-  else if (account.password === null) reason = 'no_password';
-  else if (!secretsEqual(account.password, password)) reason = 'wrong_password';
-
+  const reason = ladderRejection(site, email, password) ?? accountRejection(site, email, password);
   if (reason !== null) {
     recordAttempt(site, 'password', email, 'rejected', reason);
     return { ok: false, reason };

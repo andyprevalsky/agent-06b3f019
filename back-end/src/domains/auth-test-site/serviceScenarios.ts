@@ -6,9 +6,10 @@
  * address derived from the user's own name (Avery Ross → avery.ross, averyr,
  * a.ross), as a real person's keychain would hold.
  *
- *   password_retry  #1 stale password for a real account (1d ago)
- *                   #2 account that does not exist on this site (10d ago)
- *                   #3 correct password (30d ago)            -> sign in as #3
+ *   password_retry  three saved logins (1d, 10d, 30d ago); whichever two
+ *                   distinct ones the agent submits first fail (stale
+ *                   password, then unknown account) and the third signs in,
+ *                   so two failures precede success in any order
  *   all_fail        #1 stale password, #2 unknown account, #3 stale password
  *                   -> no saved credential works; no minted account is offered
  *   minted_otp      no saved passwords; the site account belongs to the agent's
@@ -16,11 +17,17 @@
  */
 
 import { randomBytes } from '../../providers/crypto';
-import type { AuthTestSiteScenario, SavedPasswordSeed, SiteAccount } from './types';
+import type {
+  AuthTestSiteScenario,
+  SavedLoginLadder,
+  SavedPasswordSeed,
+  SiteAccount,
+} from './types';
 
 export interface ScenarioPlan {
   accounts: SiteAccount[];
   savedPasswords: SavedPasswordSeed[];
+  ladder: Omit<SavedLoginLadder, 'served'> | null;
   usesMintedAccount: boolean;
   expectedSignInEmail: string | null;
   expectedMemberNumber: string | null;
@@ -60,23 +67,25 @@ function savedLoginEmails(holderName: string | null, siteId: string): [string, s
   return [a, b, c];
 }
 
+const SAVED_LOGIN_AGES_DAYS = [1, 10, 30];
+
 function passwordRetryPlan(siteId: string, holderName: string | null): ScenarioPlan {
-  const [primary, unknown, working] = savedLoginEmails(holderName, siteId);
-  const workingPassword = randomPassword();
-  const workingMember = randomMemberNumber();
+  const logins = savedLoginEmails(holderName, siteId).map((email) => ({
+    email,
+    password: randomPassword(),
+  }));
+  const memberNumber = randomMemberNumber();
   return {
-    accounts: [
-      { email: primary, password: randomPassword(), memberNumber: randomMemberNumber() },
-      { email: working, password: workingPassword, memberNumber: workingMember },
-    ],
-    savedPasswords: [
-      { username: primary, password: randomPassword(), lastUsedDaysAgo: 1 },
-      { username: unknown, password: randomPassword(), lastUsedDaysAgo: 10 },
-      { username: working, password: workingPassword, lastUsedDaysAgo: 30 },
-    ],
+    accounts: [],
+    savedPasswords: logins.map((login, index) => ({
+      username: login.email,
+      password: login.password,
+      lastUsedDaysAgo: SAVED_LOGIN_AGES_DAYS[index] ?? 30,
+    })),
+    ladder: { logins, rejections: ['wrong_password', 'unknown_account'], memberNumber },
     usesMintedAccount: false,
-    expectedSignInEmail: working,
-    expectedMemberNumber: workingMember,
+    expectedSignInEmail: null,
+    expectedMemberNumber: memberNumber,
   };
 }
 
@@ -92,6 +101,7 @@ function allFailPlan(siteId: string, holderName: string | null): ScenarioPlan {
       { username: unknown, password: randomPassword(), lastUsedDaysAgo: 10 },
       { username: secondary, password: randomPassword(), lastUsedDaysAgo: 30 },
     ],
+    ladder: null,
     usesMintedAccount: false,
     expectedSignInEmail: null,
     expectedMemberNumber: null,
@@ -102,6 +112,7 @@ function mintedOtpPlan(): ScenarioPlan {
   return {
     accounts: [],
     savedPasswords: [],
+    ladder: null,
     usesMintedAccount: true,
     expectedSignInEmail: null,
     expectedMemberNumber: randomMemberNumber(),

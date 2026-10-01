@@ -116,7 +116,9 @@ export async function createAuthTestSite(
     ? (accounts[0]?.email ?? null)
     : plan.expectedSignInEmail;
   const expectedMemberNumber =
-    accounts.find((account) => account.email === expectedSignInEmail)?.memberNumber ?? null;
+    plan.ladder?.memberNumber ??
+    accounts.find((account) => account.email === expectedSignInEmail)?.memberNumber ??
+    null;
 
   sites.putSite({
     siteId,
@@ -126,6 +128,8 @@ export async function createAuthTestSite(
     entryUrl,
     createdAtMs: nowMs,
     holderName,
+    signInEmail: expectedSignInEmail,
+    ladder: plan.ladder === null ? null : { ...plan.ladder, served: [] },
     accounts,
     savedPasswords,
     mintedEmail,
@@ -178,6 +182,7 @@ export async function buildReport(siteId: string): Promise<AuthTestSiteReport> {
     entryUrl: site.entryUrl,
     createdAt: new Date(site.createdAtMs).toISOString(),
     mintedEmail: site.mintedEmail,
+    signInEmail: site.signInEmail,
     savedPasswords: site.savedPasswords.map((record) => {
       const state = stateById.get(record.id);
       return {

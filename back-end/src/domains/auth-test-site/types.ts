@@ -82,6 +82,23 @@ export interface SiteSession {
   endedAt: string | null;
 }
 
+/**
+ * password_retry decides the working login at sign-in time, so the agent meets
+ * every scenario failure whichever saved login it tries first:
+ *
+ *   distinct saved login #1 tried ──► rejections[0]
+ *   distinct saved login #2 tried ──► rejections[1]
+ *   distinct saved login #3 tried ──► becomes the member account ──► signed in
+ *
+ * A login that was rejected keeps failing with the same reason.
+ */
+export interface SavedLoginLadder {
+  logins: Array<{ email: string; password: string }>;
+  rejections: Array<Exclude<RejectionReason, null>>;
+  memberNumber: string;
+  served: Array<{ email: string; reason: Exclude<RejectionReason, null> }>;
+}
+
 export interface AuthTestSite {
   siteId: string;
   scenario: AuthTestSiteScenario;
@@ -91,6 +108,9 @@ export interface AuthTestSite {
   createdAtMs: number;
   /** The benchmark user's name; every site account is theirs. */
   holderName: string | null;
+  /** The account the agent can reach; null until a ladder resolves, or when none can. */
+  signInEmail: string | null;
+  ladder: SavedLoginLadder | null;
   accounts: SiteAccount[];
   savedPasswords: SavedPasswordRecord[];
   mintedEmail: string | null;
@@ -112,7 +132,7 @@ export interface AuthTestSiteManifest {
   entryUrl: string;
   savedPasswordUsernames: string[];
   mintedEmail: string | null;
-  /** Account the scenario expects the agent to reach, or null when none can. */
+  /** Account fixed at creation for the agent to reach; null when none can or a ladder decides. */
   expectedSignInEmail: string | null;
   expectedMemberNumber: string | null;
   savedBrowserAuthHidden: boolean;
@@ -127,6 +147,7 @@ export interface AuthTestSiteReport {
   entryUrl: string;
   createdAt: string;
   mintedEmail: string | null;
+  signInEmail: string | null;
   savedPasswords: SavedPasswordReport[];
   attempts: SignInAttempt[];
   sessions: Array<{

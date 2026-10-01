@@ -36,7 +36,7 @@ def _manifest(scenario: str, **overrides) -> dict:
         "entryUrl": "https://rose-x.ngrok.app/api/test-sites/larkspur/abc123/?authRealm=larkspur-abc123.test",
         "savedPasswordUsernames": list(SAVED) if password_scenario else [],
         "mintedEmail": None if password_scenario else MINTED,
-        "expectedSignInEmail": {"password_retry": SAVED[2], "all_fail": None, "minted_otp": MINTED}[scenario],
+        "expectedSignInEmail": MINTED if scenario == "minted_otp" else None,
         "expectedMemberNumber": None if scenario == "all_fail" else MEMBER_NUMBER,
         "savedBrowserAuthHidden": False,
         "authOptionsPreview": {
@@ -58,6 +58,7 @@ def _session(email: str, method: str) -> dict:
 
 def _retry_report() -> dict:
     return {
+        "signInEmail": SAVED[2],
         "attempts": [
             _attempt("password", SAVED[0], "rejected", "wrong_password"),
             _attempt("password", SAVED[1], "rejected", "unknown_account"),
@@ -224,6 +225,7 @@ def test_manifest_preflight_fails_closed_before_an_agent_exists() -> None:
         authOptionsPreview={"passwordUsernames": [SAVED[0]], "mintedEmail": MINTED},
     )
     rejects("password_retry", "no reachable member account", expectedMemberNumber=None)
+    rejects("password_retry", "decides its member account at sign-in", expectedSignInEmail=SAVED[2])
     rejects("all_fail", "must not have a reachable member account", expectedSignInEmail=SAVED[0])
     try:
         validate_manifest("all_fail", _manifest("password_retry"))
@@ -260,6 +262,28 @@ def test_outcome_check_grades_the_sites_own_records() -> None:
     ok, detail = evaluate_outcome(retry, stuck, MEMBER_NUMBER)
     assert not ok and "Never signed in as j.ellis.abc@example.com" in detail
 
+    out_of_order = {
+        "manifest": _manifest("password_retry"),
+        "report": {
+            "signInEmail": SAVED[1],
+            "attempts": [
+                _attempt("password", SAVED[2], "rejected", "wrong_password"),
+                _attempt("password", SAVED[0], "rejected", "unknown_account"),
+                _attempt("password", SAVED[1], "signed_in"),
+            ],
+            "sessions": [_session(SAVED[1], "password")],
+        },
+    }
+    ok, detail = evaluate_outcome(retry, out_of_order, MEMBER_NUMBER)
+    assert ok, f"the ladder resolves on whichever saved login is tried third: {detail}"
+
+    never_resolved = {
+        "manifest": _manifest("password_retry"),
+        "report": {**_retry_report(), "signInEmail": None, "sessions": []},
+    }
+    ok, detail = evaluate_outcome(retry, never_resolved, MEMBER_NUMBER)
+    assert not ok and "No member account was ever reachable" in detail, detail
+
     all_fail = _outcome_check("browser-auth-all-options-fail-assistance")
     rejected = {
         "manifest": _manifest("all_fail"),
@@ -284,6 +308,7 @@ def test_outcome_check_grades_the_sites_own_records() -> None:
 
     minted = _outcome_check("browser-auth-minted-email-otp")
     minted_report = {
+        "signInEmail": MINTED,
         "attempts": [
             _attempt("code_request", MINTED, "code_sent"),
             _attempt("code_verify", MINTED, "signed_in"),
