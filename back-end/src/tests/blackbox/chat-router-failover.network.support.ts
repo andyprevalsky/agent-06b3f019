@@ -35,6 +35,7 @@ export type Behavior =
   | 'healthy-long-prefill'
   | 'glm-recorded'
   | 'glm-recorded-long-context'
+  | 'glm-recorded-slowest'
   | 'live';
 
 /**
@@ -45,6 +46,11 @@ export type Behavior =
  */
 export const LONG_PREFILL_CEREBRAS_DELAY_MS = 2_935 - 784;
 export const LONG_CONTEXT_GLM_DELAY_MS = 6_539 - 3_073;
+/**
+ * The slowest GLM first content in that replay: 8,583ms after the request
+ * (agent 26576873's 1.7k-token context, Cerebras-wide outage).
+ */
+export const SLOWEST_GLM_DELAY_MS = 8_583 - 3_073;
 
 /** Live requests also record the OpenRouter host that served, and when. */
 export interface ProviderRequest extends LiveObservation {
@@ -55,6 +61,9 @@ export interface ProviderRequest extends LiveObservation {
   transcriptChars: number;
   sessionId?: string;
   atMs: number;
+  /** When, and why, the chat turn aborted this request. */
+  abortedAtMs?: number;
+  abortReason?: string;
 }
 
 export interface Scenario {
@@ -166,6 +175,15 @@ export function installNetwork(scenario: Scenario, startedAt: number) {
       atMs: Date.now() - startedAt,
     };
     requests.push(request);
+    init?.signal?.addEventListener(
+      'abort',
+      () => {
+        const reason: unknown = init.signal?.reason;
+        request.abortedAtMs = Date.now() - startedAt;
+        request.abortReason = reason instanceof Error ? reason.message : String(reason);
+      },
+      { once: true }
+    );
     const isRouter = schema === 'router_decision';
     let behavior: Behavior;
     if (provider === 'cerebras') {
@@ -197,6 +215,8 @@ export function installNetwork(scenario: Scenario, startedAt: number) {
           false,
           LONG_CONTEXT_GLM_DELAY_MS
         );
+      case 'glm-recorded-slowest':
+        return replayResponse(streams.openrouterGlm.events, signal, false, SLOWEST_GLM_DELAY_MS);
       case 'stall':
         return replayResponse(provider === 'cerebras' ? streams.cerebrasStall : [], signal, true);
     }

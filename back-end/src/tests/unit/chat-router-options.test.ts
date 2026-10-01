@@ -75,8 +75,12 @@ async function run(): Promise<void> {
   assert.equal(DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS, CHAT_TIMEOUT_MS);
   assert.equal(
     DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS,
-    CHAT_TIMEOUT_MS,
-    'a long-prefill Cerebras response must keep racing the failover until the chat timeout'
+    8_000,
+    'direct Cerebras gets 8s from the start of its request'
+  );
+  assert.ok(
+    DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS < DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
+    'ending direct Cerebras must leave the failover racing inside the router attempt'
   );
   assert.equal(
     DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS,

@@ -18,12 +18,13 @@
  *       ─> deadline miss
  *     deadline misses were not regenerated ─> chat_handler_failure notice
  *
- * Every chat timeout on this path is now CHAT_TIMEOUT_MS (15s) from the start
- * of its request or router attempt; the 0.8s hedge only starts the failover
- * early. Time to first content grows with the context, so two cases replay
- * the recorded streams at the first-content times measured on the longest
- * prod router context: direct Cerebras past its old 1.2s guard, and GLM past
- * the old 3s router attempt by more than 4s.
+ * The router attempt and the GLM failover now get CHAT_TIMEOUT_MS (15s) from
+ * the start of their attempt or request, and direct Cerebras gets 8s; the
+ * 0.8s hedge only starts the failover early. Time to first content grows with
+ * the context, so three cases replay the recorded streams at first-content
+ * times measured on real prod router contexts: direct Cerebras past its old
+ * 1.2s guard, GLM past the old 3s router attempt by more than 4s, and GLM's
+ * slowest first content, which lands after the 8s guard has ended Cerebras.
  *
  * Every case drives the production entrypoint (`postMessage`) against the
  * local database, seeded with the agent's stored transcript. Its chat-model
@@ -62,6 +63,7 @@ import { postMessage } from '../../domains/agents/agentMessageService';
 import { CHAT_HANDLER_FAILURE_NOTICE } from '../../providers/chat/chatHandlerFailure';
 import { CLOUD_AGENT_TOOL_NAME } from '../../providers/chat/cloudAgentLifecycleTool';
 import { DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
+import { DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS } from '../../providers/rose/cerebrasRoute';
 import { DEFAULT_CEREBRAS_CHAT_HEDGE_MS } from '../../providers/rose/exclusiveCerebrasChatRoute';
 import { OPENROUTER_CEREBRAS_MODEL } from '../../providers/rose/openrouterCerebrasRoute';
 import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
@@ -81,6 +83,7 @@ import {
   LONG_CONTEXT_GLM_DELAY_MS,
   LONG_PREFILL_CEREBRAS_DELAY_MS,
   type Scenario,
+  SLOWEST_GLM_DELAY_MS,
   streams,
 } from './chat-router-failover.network.support';
 
@@ -357,6 +360,48 @@ async function testLongContextFailoverServesOnFirstAttempt(): Promise<void> {
   }
 }
 
+async function testCerebrasGuardLeavesFailoverRacing(): Promise<void> {
+  const firstContentAt =
+    DEFAULT_CEREBRAS_CHAT_HEDGE_MS +
+    SLOWEST_GLM_DELAY_MS +
+    firstContentDt(streams.openrouterGlm.events);
+  assert.ok(
+    firstContentAt > DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS,
+    `precondition: GLM's first content (${firstContentAt}ms) lands after the ${DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS}ms Cerebras guard`
+  );
+  const { outcome, network, seeded, goal } = await sendFollowUp(
+    { cerebras: () => 'stall', glm: () => 'glm-recorded-slowest', openrouterOther: 'stall' },
+    40_000
+  );
+  try {
+    assert.equal(
+      outcome.kind,
+      'escalated',
+      `the failover must outlive the Cerebras guard, got ${outcome.kind} after ${outcome.atMs}ms`
+    );
+    assertHealthyTurn(network);
+    const cerebras = network.routerRequests('cerebras');
+    assert.equal(cerebras.length, 1, 'the first router attempt must serve it: no regenerate');
+    assert.match(
+      cerebras[0].abortReason ?? '',
+      new RegExp(`no model output within ${DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS}ms`),
+      'direct Cerebras must be ended by its own guard'
+    );
+    assert.ok(
+      (cerebras[0].abortedAtMs ?? Infinity) < firstContentAt,
+      `Cerebras ended at ${cerebras[0].abortedAtMs}ms, before GLM's first content at ${firstContentAt}ms`
+    );
+    assert.ok(outcome.atMs < DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS);
+    assert.equal(goalAnchorFailure(goal, CORRECTED_GOAL), undefined);
+    process.stdout.write(
+      `  Cerebras ended at ${cerebras[0].abortedAtMs}ms; GLM first content at ${firstContentAt}ms; ` +
+        `escalated at ${outcome.atMs}ms on attempt 1\n`
+    );
+  } finally {
+    await cleanup(seeded);
+  }
+}
+
 async function testLongPrefillCerebrasKeepsRacing(): Promise<void> {
   const firstContentAt =
     LONG_PREFILL_CEREBRAS_DELAY_MS + firstContentDt(streams.cerebrasHealthy.events);
@@ -552,6 +597,10 @@ async function main(): Promise<void> {
         [
           'long-context GLM failover serves on the first router attempt',
           testLongContextFailoverServesOnFirstAttempt,
+        ],
+        [
+          'the GLM failover outlives the 8s direct-Cerebras guard',
+          testCerebrasGuardLeavesFailoverRacing,
         ],
         [
           'long-prefill Cerebras keeps racing past its old 1.2s guard',

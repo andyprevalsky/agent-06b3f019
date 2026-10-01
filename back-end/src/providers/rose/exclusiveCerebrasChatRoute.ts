@@ -13,8 +13,8 @@ const log = createLogger('Rose');
 
 /**
  * How long the exclusive Cerebras stream may stay silent before the OpenRouter
- * fallbacks start IN PARALLEL as a hedge. Cerebras keeps racing them until the
- * chat timeout, so a throttled/queued or long-prefill Cerebras stream neither
+ * fallbacks start IN PARALLEL as a hedge. Cerebras keeps racing them until its
+ * own guard, so a throttled/queued or long-prefill Cerebras stream neither
  * serializes stall detection + fallback TTFT (which breached the 5s chat
  * lifecycle ratchet) nor loses a response it was about to send.
  * Non-positive values disable hedging (pure serial fallover).

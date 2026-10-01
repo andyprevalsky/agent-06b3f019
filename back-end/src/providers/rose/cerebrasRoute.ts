@@ -3,8 +3,8 @@
  *
  *   explicit route -> direct Cerebras rose-fast Qwen stream -> normalized Rose chunks
  *
- * The chat timeout (CHAT_TIMEOUT_MS) bounds first content and SSE idle. This
- * route is exclusive and surfaces every failure to its caller.
+ * DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS bounds connect, first content and SSE
+ * idle. This route is exclusive and surfaces every failure to its caller.
  *
  * Model note (2026-09-29): Chat must stay on rose-fast inventory
  * (`qwen-3.8-27b`, same as `POOL_REGISTRY['rose-1-flash'].cerebrasModel`).
@@ -35,19 +35,24 @@ const log = createLogger('CerebrasRoute');
 export const CEREBRAS_CHAT_MODEL = 'qwen-3.8-27b';
 export const CEREBRAS_DIRECT_POOL = 'cerebras-direct';
 /**
- * Synchronous chat gives every provider request, and every router attempt,
- * this long from its own start before giving up on it. Hedges still start a
- * parallel request sooner (DEFAULT_CEREBRAS_CHAT_HEDGE_MS); they never end one.
- * Time to first content grows with the context. Replaying real prod router
- * contexts live (2026-10-01), direct Cerebras's first content took 0.3–0.7s
- * on most contexts up to 10k tokens, 1.3–1.9s at 8k–48k and 2.9s at 96k; GLM
- * failover decisions closed in up to 14.9s at 48k. With every provider up, the
- * previous 1.2s Cerebras guard and 3s router attempt served 11 of 20 of those
- * turns. An aborted Cerebras request still counts against its per-minute
- * token limit, so regenerating a long turn after an abort can get a 429.
+ * Synchronous chat gives every router attempt, and every OpenRouter failover
+ * request, this long from its own start before giving up on it. Hedges still
+ * start a parallel request sooner (DEFAULT_CEREBRAS_CHAT_HEDGE_MS); they never
+ * end one. Time to first content grows with the context. Replaying real prod
+ * router contexts live (2026-10-01), GLM failover decisions closed in up to
+ * 14.9s at 48k tokens. With every provider up, the previous 1.2s Cerebras
+ * guard and 3s router attempt served 11 of 20 of those turns.
  */
 export const CHAT_TIMEOUT_MS = 15_000;
-export const DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS = CHAT_TIMEOUT_MS;
+/**
+ * Direct Cerebras gets its own, shorter bound. In the same replay its first
+ * content took 0.3–0.7s on most contexts up to 10k tokens, 1.3–1.9s at
+ * 8k–48k and 2.9s at 96k. Ending it does not end the turn: the failover the
+ * hedge started keeps racing until the router attempt's bound. An aborted
+ * Cerebras request still counts against its per-minute token limit, so
+ * regenerating a long turn after an abort can get a 429.
+ */
+export const DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS = 8_000;
 /** Pool hop (rose-fast Qwen high; Cerebras max) — not the chat timeout. */
 export const POOL_CEREBRAS_IDLE_TIMEOUT_MS = 90_000;
 /** Archived Cerebras id — must never be reintroduced as the chat primary. */
