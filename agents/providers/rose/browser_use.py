@@ -217,6 +217,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "available, the minted agent account when it has an email, and guest/anonymous completion when the "
             "page offers it (for example Continue as guest, Checkout as guest, or I'll reserve). Cookie and "
             "Steel-session auth are applied automatically before you start. "
+            "Before calling, leave the site's sign-in form (username/password or code entry) open and "
+            "visible, so the user can sign in without navigating. "
             "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
             "unusual-traffic pages - those are not authentication blockers. Use recover_from_challenge for "
             "those instead of trying to solve them yourself."
@@ -731,6 +733,8 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
                 "account when it has an email, and guest/anonymous completion when the page "
                 "offers it (for example Continue as guest, Checkout as guest, or I'll reserve). "
                 "Cookie and Steel-session auth are applied automatically before you start. "
+                "Before calling, leave the site's sign-in form (username/password or code entry) "
+                "open and visible, so the user can sign in without navigating. "
                 "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, "
                 "access-denied interstitials, or unusual-traffic pages - those are not "
                 "authentication blockers. Wait briefly or try an alternate URL/path instead "
@@ -859,6 +863,7 @@ action envelope in text; use the provided tool call.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
 - Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 7 first.
 - When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
+- Before calling request_user_assistance_for_authentication, leave the site's sign-in form (username/password or code entry) open and visible, so the user can sign in without navigating.
 {challenge_rule}
 - Do not open webmail or inbox websites to retrieve OTP codes."""
 
