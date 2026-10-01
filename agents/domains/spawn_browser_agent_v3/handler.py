@@ -21,6 +21,7 @@ import re
 import time
 import traceback
 import uuid as uuid_module
+import weakref
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 
@@ -78,7 +79,6 @@ from .challenge_recovery import (
     verify_live_page_cleared_challenge,
 )
 from .config import (
-    ACTION_LOOP_DELAY_SECONDS,
     BROWSER_DISCONNECT_TIMEOUT_SECONDS,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_STATE_SOFT_ATTEMPTS,
@@ -1710,11 +1710,49 @@ async def _discard_replacement_browser_stack(
     )
 
 
+class TabFocusCache:
+    """Per-activity memo for tab focus sync.
+
+    A Playwright page keeps its CDP target id for its whole life, so resolving
+    it once per page replaces a per-step CDP session + Target.getTargetInfo
+    round trip for every open tab. ``foreground`` remembers the last
+    (target, tab count) brought to front: an unchanged pair means nothing could
+    have taken the foreground from the agent, while a new/closed tab forces
+    a fresh bring_to_front.
+    """
+
+    def __init__(self) -> None:
+        self.target_ids: "weakref.WeakKeyDictionary[Any, str]" = weakref.WeakKeyDictionary()
+        self.foreground: Optional[Tuple[str, int]] = None
+
+
+async def _page_target_id(context: Any, page: Any, cache: Optional[TabFocusCache]) -> Optional[str]:
+    if cache is not None:
+        with contextlib.suppress(TypeError):
+            cached = cache.target_ids.get(page)
+            if cached:
+                return cached
+    cdp_session = None
+    try:
+        cdp_session = await context.new_cdp_session(page)
+        target_info = await cdp_session.send("Target.getTargetInfo")
+        target_id = target_info.get("targetInfo", {}).get("targetId")
+    finally:
+        if cdp_session is not None:
+            with contextlib.suppress(Exception):
+                await cdp_session.detach()
+    if target_id and cache is not None:
+        with contextlib.suppress(TypeError):
+            cache.target_ids[page] = target_id
+    return target_id
+
+
 async def _synchronize_playwright_page_with_agent_focus(
     *,
     dom_service: Any,
     playwright_browser: Any,
     current_page: Any,
+    focus_cache: Optional[TabFocusCache] = None,
 ) -> Any:
     """Make Playwright input and the provider live view follow browser-use focus.
 
@@ -1731,25 +1769,22 @@ async def _synchronize_playwright_page_with_agent_focus(
         return current_page
 
     pages = getattr(contexts[0], "pages", None) or []
+    foreground_key = (focused_target_id, len(pages))
     for page in pages:
-        cdp_session = None
         try:
-            cdp_session = await contexts[0].new_cdp_session(page)
-            target_info = await cdp_session.send("Target.getTargetInfo")
-            target_id = target_info.get("targetInfo", {}).get("targetId")
+            target_id = await _page_target_id(contexts[0], page, focus_cache)
             if target_id != focused_target_id:
                 continue
-            await page.bring_to_front()
+            if focus_cache is None or focus_cache.foreground != foreground_key or page is not current_page:
+                await page.bring_to_front()
+                if focus_cache is not None:
+                    focus_cache.foreground = foreground_key
             return page
         except Exception as exc:
             logger.debug(
                 "Unable to compare Playwright page with browser-use focus",
                 error=str(exc),
             )
-        finally:
-            if cdp_session is not None:
-                with contextlib.suppress(Exception):
-                    await cdp_session.detach()
 
     return current_page
 
@@ -1764,12 +1799,14 @@ async def _rebind_browser_tab_runtime(
     browser_recorder: Any,
     cursor_observer: Any,
     humanizer_factory: Any = None,
+    focus_cache: Optional[TabFocusCache] = None,
 ) -> Tuple[Any, Any]:
     """Atomically move live view, recorder, and synthesized input to agent focus."""
     focused_page = await _synchronize_playwright_page_with_agent_focus(
         dom_service=dom_service,
         playwright_browser=playwright_browser,
         current_page=current_page,
+        focus_cache=focus_cache,
     )
     if focused_page is current_page:
         return current_page, humanizer
@@ -1808,6 +1845,35 @@ async def _replace_browser_humanizer(
     rebound_humanizer.set_cursor_observer(cursor_observer)
     rebound_humanizer.start_idle_movement()
     return rebound_humanizer
+
+
+async def _settle_otp_fetch(task: "asyncio.Task[int]") -> int:
+    """Await the step's concurrent OTP poll; a failed poll never fails the step."""
+    try:
+        return await task
+    except Exception as e:
+        logger.warning("Failed to fetch OTPs", error=str(e))
+        return 0
+
+
+async def _take_prefetched_observe_state(
+    dom_service: Any,
+    state: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Reuse a state captured right after the last action instead of re-extracting the DOM.
+
+    Only valid while the page is still on the captured URL; anything else
+    (navigation, errors) falls back to a fresh observe.
+    """
+    if not state or dom_service is None:
+        return None
+    try:
+        live_url = await dom_service.session.get_current_page_url()
+    except Exception:
+        return None
+    if not live_url or live_url != state.get("url"):
+        return None
+    return state
 
 
 async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
@@ -5623,8 +5689,6 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                 status=MessageStatus.FINISHED if transition.get("success", True) else MessageStatus.ERROR,
             )
             await browser_stream.finish_tools(status="FINISHED" if transition.get("success", True) else "ERROR")
-            if ACTION_LOOP_DELAY_SECONDS > 0:
-                await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)
 
         await finalize_recording()
         return {
@@ -7177,14 +7241,18 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             return True
 
         observe_page_state: Dict[str, Any] = {}
+        prefetched_observe_state: Optional[Dict[str, Any]] = None
         consecutive_budget_free = 0
         consecutive_keystroke_free = 0
         step_timer = StepPhaseTimer(agent_id=agent_id, task_id=task_id)
+        tab_focus_cache = TabFocusCache()
         while iteration < MAX_ITERATIONS:
             iteration += 1
             step_timer.start_step(iteration)
             activity.heartbeat(f"Step {iteration}")
-            await _wait_for_browser_user_control(config, task_id)
+            if await _wait_for_browser_user_control(config, task_id):
+                prefetched_observe_state = None
+                tab_focus_cache.foreground = None
             step_timer.mark("user_control_wait")
 
             # TAB/INPUT/LIVE-VIEW STATE MACHINE:
@@ -7200,14 +7268,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 humanizer=humanizer,
                 browser_recorder=browser_recorder,
                 cursor_observer=observe_cursor,
+                focus_cache=tab_focus_cache,
             )
             step_timer.mark("tab_rebind")
 
             # Handle pending write lock action
             if pending_write_lock_action:
+                prefetched_observe_state = None
                 if await _wait_for_browser_user_control(config, task_id):
                     # The approved target may have changed under user control;
                     # retain it and re-resolve against a fresh DOM next step.
+                    tab_focus_cache.foreground = None
                     continue
                 logger.info("Executing pending write lock action after approval")
                 unified_action, _, current_url = await _prepare_pending_write_lock_action(
@@ -7280,9 +7351,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
                 continue
 
-            # 0. Fetch recent OTPs and append unseen codes as USER messages.
-            try:
-                new_otp_count = await _fetch_and_append_recent_otp_user_messages(
+            # 0. Poll recent OTPs (backend HTTP) while the browser is observed;
+            # unseen codes are appended as USER messages once both finish.
+            otp_fetch_task = asyncio.create_task(
+                _fetch_and_append_recent_otp_user_messages(
                     user_id=user_id,
                     api_url=config.backend.api_url,
                     api_key=config.backend.api_key,
@@ -7292,14 +7364,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     agent_id=agent_id,
                     task_id=task_id,
                 )
-                if new_otp_count:
-                    logger.info("Appended OTP user messages", count=new_otp_count)
-                if len(otp_user_messages) > otp_history_count:
-                    browser_turn_messages.extend(otp_user_messages[otp_history_count:])
-                    otp_history_count = len(otp_user_messages)
-            except Exception as e:
-                logger.warning("Failed to fetch OTPs", error=str(e))
-            step_timer.mark("otp_fetch")
+            )
 
             # One guarded state fetch supplies URL + observe text (avoid double DOM).
             activity.heartbeat(f"Step {iteration} - resolving page state")
@@ -7318,11 +7383,19 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         timeout=BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
                     )
                 step_timer.mark("overlay_suppress")
-                observe_page_state = await asyncio.wait_for(
-                    dom_service.get_browser_state(include_screenshot=False),
-                    timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+                reused_observe_state = await _take_prefetched_observe_state(
+                    dom_service, prefetched_observe_state
                 )
+                if reused_observe_state is not None:
+                    observe_page_state = reused_observe_state
+                    step_timer.annotate(observe_reused=True)
+                else:
+                    observe_page_state = await asyncio.wait_for(
+                        dom_service.get_browser_state(include_screenshot=False),
+                        timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+                    )
                 current_url = str(observe_page_state.get("url") or current_url)
+                step_timer.mark("observe_state")
             except asyncio.TimeoutError:
                 recovered = await _recover_browser_step(
                     f"browser_url_timeout_{BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS}s",
@@ -7339,7 +7412,15 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 if recovered:
                     continue
                 raise
-            step_timer.mark("observe_state")
+            finally:
+                prefetched_observe_state = None
+                new_otp_count = await _settle_otp_fetch(otp_fetch_task)
+            if new_otp_count:
+                logger.info("Appended OTP user messages", count=new_otp_count)
+            if len(otp_user_messages) > otp_history_count:
+                browser_turn_messages.extend(otp_user_messages[otp_history_count:])
+                otp_history_count = len(otp_user_messages)
+            step_timer.mark("otp_wait")
             await record_passkey_usage_once()
             step_timer.mark("passkey_usage")
             auth_runtime_state.observe_page_text(observe_page_state.get("title") or "")
@@ -7821,6 +7902,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
             if await _wait_for_browser_user_control(config, task_id):
                 # Never execute an action planned against the pre-handoff DOM.
+                tab_focus_cache.foreground = None
                 await browser_stream.finish_tools(status="ERROR")
                 continue
 
@@ -9311,6 +9393,7 @@ Based on this feedback, I need to continue working on the task and address the i
                             humanizer=humanizer,
                             browser_recorder=browser_recorder,
                             cursor_observer=observe_cursor,
+                            focus_cache=tab_focus_cache,
                         )
                 result = {
                     "success": False,
@@ -9693,6 +9776,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     if preserved_state:
                         browser_state = preserved_state
                         current_url = str(preserved_state.get("url") or current_url or "")
+                        prefetched_observe_state = preserved_state
                 if input_page and _botsigged_diagnostics_enabled(start_url):
                     with contextlib.suppress(Exception):
                         await _capture_botsigged_diagnostics(
@@ -9801,8 +9885,6 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
 
             step_timer.mark("post_action_bookkeeping")
-            await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)
-            step_timer.mark("loop_delay")
 
         step_timer.finish()
         # Max iterations reached
