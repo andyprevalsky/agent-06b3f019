@@ -78,6 +78,7 @@ import { grep as userDataGrep } from './domains/data/service';
 import { registerUserDataGrep } from './providers/userDataSearch';
 import { registerCronJobs } from './serverCron';
 import { cleanupBenchmarkKernelProfiles } from './providers/browser/kernel';
+import { cleanupBenchmarkBrowserUseProfiles } from './providers/browser/browserUse';
 // x402 payment middleware
 import { paymentMiddleware } from 'x402-express';
 import { facilitator } from '@coinbase/x402';
@@ -646,6 +647,7 @@ const shutdown = async (signal: string) => {
     });
   });
   await cleanupBenchmarkKernelProfiles();
+  await cleanupBenchmarkBrowserUseProfiles();
   await prisma.$disconnect();
   process.exit(0);
 };

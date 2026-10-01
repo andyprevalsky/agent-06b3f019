@@ -2,7 +2,7 @@
 /**
  * Unit tests for the rotate_ip building blocks that need no DB or Kernel SDK:
  *  - the mobile proxy-candidate builder (geo relaxation + type-prefixed keys)
- *  - the deterministic Kernel residential → mobile → Steel ladder
+ *  - the deterministic Kernel residential → mobile → Steel → Browser Use ladder
  */
 import assert from 'node:assert';
 import type Kernel from '@onkernel/sdk';
@@ -183,16 +183,36 @@ function testRotationTierLadder(): void {
     recoveryAction: 'provider_switched',
   });
   assert.deepStrictEqual(selectRotationStep(4, 'steel'), {
-    provider: 'steel',
+    provider: 'browser-use',
     proxyType: 'residential',
-    recoveryAction: 'ip_rotated',
+    recoveryAction: 'provider_switched',
   });
 
-  // A run that starts on Steel stays on Steel; provider rotation is one-way.
+  // A run that starts on Steel retries there before switching infrastructure.
   assert.deepStrictEqual(selectRotationStep(1, 'steel'), {
     provider: 'steel',
     proxyType: 'residential',
     recoveryAction: 'ip_rotated',
+  });
+  assert.deepStrictEqual(selectRotationStep(3, 'steel'), {
+    provider: 'browser-use',
+    proxyType: 'residential',
+    recoveryAction: 'provider_switched',
+  });
+  assert.deepStrictEqual(selectRotationStep(1, 'browser-use'), {
+    provider: 'browser-use',
+    proxyType: 'residential',
+    recoveryAction: 'ip_rotated',
+  });
+  assert.deepStrictEqual(selectRotationStep(4, 'steel', false), {
+    provider: 'steel',
+    proxyType: 'residential',
+    recoveryAction: 'ip_rotated',
+  });
+  assert.deepStrictEqual(selectRotationStep(1, 'browser-use', false), {
+    provider: 'steel',
+    proxyType: 'residential',
+    recoveryAction: 'provider_switched',
   });
   assert.throws(() => selectRotationStep(0, 'kernel'), RangeError);
   assert.throws(() => selectRotationStep(ROTATION_CAP + 1, 'steel'), RangeError);

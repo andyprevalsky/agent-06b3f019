@@ -50,16 +50,35 @@ async function main(): Promise<void> {
 
   try {
     const kernelCalls: Array<{ sessionId: string; keys: string[] }> = [];
+    const browserUseCalls: Array<{ sessionId: string; keys: string[] }> = [];
     assert.deepStrictEqual(
       await pressSessionKeysUsingDependencies('kernel-session', ['Escape'], {
         providerForSession: async () => 'kernel',
         pressKernelKeys: async (sessionId, keys) => {
           kernelCalls.push({ sessionId, keys });
         },
+        pressBrowserUseKeys: async (sessionId, keys) => {
+          browserUseCalls.push({ sessionId, keys });
+        },
       }),
       { provider: 'kernel', supported: true, pressed: true }
     );
     assert.deepStrictEqual(kernelCalls, [{ sessionId: 'kernel-session', keys: ['Escape'] }]);
+    assert.deepStrictEqual(
+      await pressSessionKeysUsingDependencies('browser-use-session', ['Escape'], {
+        providerForSession: async () => 'browser-use',
+        pressKernelKeys: async () => {
+          throw new Error('Browser Use input must not dispatch to Kernel');
+        },
+        pressBrowserUseKeys: async (sessionId, keys) => {
+          browserUseCalls.push({ sessionId, keys });
+        },
+      }),
+      { provider: 'browser-use', supported: true, pressed: true }
+    );
+    assert.deepStrictEqual(browserUseCalls, [
+      { sessionId: 'browser-use-session', keys: ['Escape'] },
+    ]);
     assert.deepStrictEqual(await pressSessionKeys('steel-session', ['Escape']), {
       provider: 'steel',
       supported: false,

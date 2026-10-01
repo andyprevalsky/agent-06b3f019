@@ -12,6 +12,7 @@
  */
 
 import { createPrivateKey, createPublicKey } from 'node:crypto';
+import { browserUseEnabled } from '../../providers/browser/config';
 
 /**
  * Base64-encoded RSA private key PEM used for credential envelopes.
@@ -41,13 +42,18 @@ export function credentialPublicKeyPem(): string {
 /**
  * Which remote-browser provider the compute-grants domain uses.
  *
- * Kernel is the default; Steel stays reachable via
- * COMPUTE_GRANT_BROWSER_PROVIDER=steel so a provider outage cannot block account
+ * Kernel is the default; Steel and Browser Use remain selectable via
+ * COMPUTE_GRANT_BROWSER_PROVIDER so a provider outage cannot block account
  * connect or grant recovery -- the two paths whose failure silently pushes every
  * request onto paid models.
  */
-export function computeGrantBrowserProvider(): 'kernel' | 'steel' {
-  return process.env.COMPUTE_GRANT_BROWSER_PROVIDER?.trim() === 'steel' ? 'steel' : 'kernel';
+export function computeGrantBrowserProvider(): 'kernel' | 'steel' | 'browser-use' {
+  const selected = process.env.COMPUTE_GRANT_BROWSER_PROVIDER?.trim() || 'kernel';
+  if (selected === 'browser-use' && !browserUseEnabled()) {
+    return 'kernel';
+  }
+  if (selected === 'kernel' || selected === 'steel' || selected === 'browser-use') return selected;
+  throw new Error(`Unsupported COMPUTE_GRANT_BROWSER_PROVIDER=${selected}`);
 }
 
 /**

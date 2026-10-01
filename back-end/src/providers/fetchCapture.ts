@@ -254,6 +254,7 @@ export function shouldBypassOutboundReplay(url: string): boolean {
       hostname === 'e2b.app' ||
       hostname.endsWith('.e2b.app') ||
       hostname === 'api.onkernel.com' ||
+      hostname === 'api.browser-use.com' ||
       hostname === 'amplitude.com' ||
       hostname === 'analytics.eu.amplitude.com'
     );

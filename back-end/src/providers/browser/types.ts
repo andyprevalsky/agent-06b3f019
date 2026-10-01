@@ -1,9 +1,14 @@
 import type { Browser } from 'playwright';
 import type { ProxyGeoLocation } from '../geoip';
 
-export const BROWSER_PROVIDERS = ['steel', 'kernel'] as const;
+export const BROWSER_PROVIDERS = ['steel', 'kernel', 'browser-use'] as const;
 
 export type BrowserProviderName = (typeof BROWSER_PROVIDERS)[number];
+
+export function storedBrowserProvider(value: string): BrowserProviderName {
+  if (BROWSER_PROVIDERS.includes(value as BrowserProviderName)) return value as BrowserProviderName;
+  throw new Error(`Unsupported stored browser provider: ${value}`);
+}
 
 export interface BrowserProviderSession {
   provider: BrowserProviderName | 'local';

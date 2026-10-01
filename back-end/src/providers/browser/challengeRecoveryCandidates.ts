@@ -2,6 +2,7 @@ import type { ProxyGeoLocation } from '../geoip';
 import type { KernelRecoveryProxySpecificity } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
 import type { BrowserProviderName } from './types';
+import { browserUseEnabled } from './config';
 
 export interface BrowserRecoveryConfig {
   key: string;
@@ -158,6 +159,11 @@ export function browserRecoveryCandidates(
       steelProxyMode: 'managed',
     },
     {
+      key: 'browser_use_residential_country',
+      provider: 'browser-use',
+      proxyMode: 'residential_country',
+    },
+    {
       key: 'kernel_isp',
       provider: 'kernel',
       proxyMode: `isp_${fallbackSpecificity}`,
@@ -173,4 +179,15 @@ export function browserRecoveryCandidates(
   // recovery cycle and burned agent-payment-production-purchase's 900s budget.
   // Steel-only for these hosts (order preserved: fixed then managed).
   return candidates.filter((candidate) => candidate.provider === 'steel');
+}
+
+/** Do not spend a recovery lane on a provider that cannot be provisioned. */
+export function availableBrowserRecoveryCandidates(
+  location: ProxyGeoLocation,
+  options?: { preferSteel?: boolean }
+): BrowserRecoveryConfig[] {
+  const candidates = browserRecoveryCandidates(location, options);
+  return browserUseEnabled() && process.env.BROWSER_USE_API_KEY?.trim()
+    ? candidates
+    : candidates.filter((candidate) => candidate.provider !== 'browser-use');
 }

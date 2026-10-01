@@ -162,7 +162,10 @@ export async function completeAuthAssistanceForUser(
           };
         }
         liveViewSteelContextId = steelContextId;
-      } else if (liveViewSession.provider !== 'kernel') {
+      } else if (
+        liveViewSession.provider !== 'kernel' &&
+        liveViewSession.provider !== 'browser-use'
+      ) {
         return {
           status: 'missing_steel_context' as const,
           request,

@@ -27,6 +27,7 @@ interface BrowserProxyLocationChipProps {
 function humanizeProxySource(source: string | undefined): string {
   if (!source) return 'Unknown';
   if (source.toLowerCase() === 'byop') return 'BYOP';
+  if (source === 'browser_use_residential_country') return 'Browser Use residential (country)';
   return source.charAt(0).toUpperCase() + source.slice(1);
 }
 

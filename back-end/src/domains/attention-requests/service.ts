@@ -158,7 +158,7 @@ export async function respond(id: string, userId: string, data: RespondInput) {
     if (result.status === 'not_found') throw new NotFoundError('Attention request not found');
     if (result.status === 'forbidden') throw new ForbiddenError('Not authorized');
     if (result.status === 'missing_steel_context') {
-      throw new BadRequestError('Steel context is not available for this live_view request');
+      throw new BadRequestError('Browser context is not available for this live_view request');
     }
     return { success: true, request_id: id };
   }

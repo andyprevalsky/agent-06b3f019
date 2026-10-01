@@ -6,6 +6,7 @@ import {
 import { createLogger } from '../../providers/logger';
 import { canonicalAuthRealm } from '../../providers/authRealm';
 import { steelPublicCdpUrl } from '../../providers/steel/urls';
+import { storedBrowserProvider } from '../../providers/browser/types';
 import * as repo from './repo';
 import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
 
@@ -98,7 +99,7 @@ function buildTaskInfoResponse(
   authRealm: string,
   injection: Awaited<ReturnType<typeof collectUserInjectionData>>
 ): TaskInfoResponse {
-  const provider = session.provider === 'kernel' ? 'kernel' : 'steel';
+  const provider = storedBrowserProvider(session.provider);
   const profileId = resolveTaskInfoProfileId(session);
   return {
     task_id: session.id,
@@ -139,7 +140,7 @@ export function resolveTaskInfoProfileId(session: {
   if (session.providerProfileSource !== null || session.providerProfileId !== null) {
     return session.providerProfileId;
   }
-  const provider = session.provider === 'kernel' ? 'kernel' : 'steel';
+  const provider = storedBrowserProvider(session.provider);
   const providerProfile = session.context.providerProfiles.find(
     (profile) => profile.provider === provider
   );
@@ -150,7 +151,7 @@ async function applyLiveSessionAvailability(
   response: TaskInfoResponse,
   session: NonNullable<Awaited<ReturnType<typeof repo.findSessionByTaskId>>>
 ) {
-  const legacySteelResponse = session.provider !== 'kernel';
+  const legacySteelResponse = session.provider === 'steel';
   if (session.status !== 'ACTIVE') {
     response.same_session_available = false;
     response.same_session_unavailable_reason = `db_status_${session.status.toLowerCase()}`;

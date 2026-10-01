@@ -33,7 +33,7 @@ cd "$BACKEND_DIR"
 # like "browserbase" wins over back-end/.env ("kernel") and the live
 # browser-provider blackbox 500s on /init. Force a supported provider here.
 case "${BROWSER_PROVIDER:-}" in
-  kernel|steel) ;;
+  kernel|steel|browser-use) ;;
   *)
     echo "⚠️  BROWSER_PROVIDER='${BROWSER_PROVIDER:-}' is unsupported; forcing kernel for coverage."
     export BROWSER_PROVIDER=kernel

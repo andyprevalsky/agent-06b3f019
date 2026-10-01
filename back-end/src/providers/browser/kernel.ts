@@ -548,6 +548,17 @@ export async function closeKernelSession(
  * rotate_ip (swap the egress IP mid-run). `forceManagedProxyType` pins the new
  * session to a residential/mobile tier; `proxyTier` records that on the row.
  */
+function persistedKernelProxyOptions(proxyTier: string | null): KernelRemoteSessionOptions {
+  if (proxyTier === 'none') return { omitManagedProxy: true };
+  const match = /^(residential|mobile|isp)(?:_(city|state|country))?$/.exec(proxyTier ?? '');
+  if (match === null) return {};
+  const type = match[1] as KernelProxyType;
+  const specificity = match[2] as KernelRecoveryProxySpecificity | undefined;
+  return specificity === undefined
+    ? { forceManagedProxyType: type }
+    : { exactManagedProxy: { type, specificity } };
+}
+
 async function recreateKernelSession(
   taskId: string,
   opts: { forceManagedProxyType?: KernelProxyType; proxyTier?: string } = {}
@@ -577,7 +588,9 @@ async function recreateKernelSession(
     oldSession.agentId,
     proxyLocation,
     {
-      forceManagedProxyType: opts.forceManagedProxyType,
+      ...(opts.forceManagedProxyType === undefined
+        ? persistedKernelProxyOptions(oldSession.proxyTier)
+        : { forceManagedProxyType: opts.forceManagedProxyType }),
       boundProfile: recordedProviderProfileBinding(oldSession),
     }
   );

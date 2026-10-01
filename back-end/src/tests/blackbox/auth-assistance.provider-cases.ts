@@ -8,7 +8,7 @@ const RUN_ID =
   process.env.CONTRACT_TEST_RUN_ID ||
   `${Date.now()}-${randomUUID().slice(0, 8)}`;
 
-type Provider = 'kernel' | 'steel';
+type Provider = 'kernel' | 'steel' | 'browser-use';
 type TestCase = [string, () => Promise<void>];
 
 interface Fixture {
@@ -82,6 +82,8 @@ async function createFixture(label: string, provider: Provider): Promise<Fixture
       debugUrl:
         provider === 'kernel'
           ? 'https://proxy.example.onkernel.com/browser/live/auth'
+          : provider === 'browser-use'
+            ? 'https://live.browser-use.com/session/auth'
           : 'https://debug.steel.dev/session/auth',
     },
   });
@@ -130,7 +132,7 @@ async function createLiveViewRequest(fixture: Fixture, authRealm: string): Promi
 async function assertNoSteelCredential(fixture: Fixture): Promise<void> {
   assert(
     (await prisma.steelSessionAuth.count({ where: { userId: fixture.userId } })) === 0,
-    'Kernel completion should not create SteelSessionAuth'
+    'Non-Steel completion should not create SteelSessionAuth'
   );
   const message = await prisma.message.findFirst({
     where: {
@@ -138,7 +140,7 @@ async function assertNoSteelCredential(fixture: Fixture): Promise<void> {
       metadata: { path: ['credential_ref', 'kind'], equals: 'steel_session' },
     },
   });
-  assert(message === null, 'Kernel completion should not emit a Steel credential ref');
+  assert(message === null, 'Non-Steel completion should not emit a Steel credential ref');
 }
 
 async function completeAndAssertResumed(fixture: Fixture, requestId: string): Promise<void> {
@@ -156,6 +158,37 @@ async function testKernelCompletion(): Promise<void> {
     const requestId = await createLiveViewRequest(fixture, 'microsoftonline.com');
     await completeAndAssertResumed(fixture, requestId);
     await assertNoSteelCredential(fixture);
+  });
+}
+
+async function testBrowserUseCompletion(): Promise<void> {
+  await withFixture('browser-use', 'browser-use', async (fixture) => {
+    const requestId = await createLiveViewRequest(fixture, 'microsoftonline.com');
+    const requestRow = await prisma.userAuthAssistanceRequest.findUniqueOrThrow({
+      where: { id: requestId },
+    });
+    assert(
+      requestRow.browserSessionId === fixture.browserSessionId,
+      'Browser Use handoff must bind to the stable browser task ID'
+    );
+    const attention = await prisma.agentAttentionRequest.findUniqueOrThrow({
+      where: { id: requestId },
+    });
+    const metadata = asRecord(attention.metadata);
+    const auth = asRecord(metadata.authAssistance);
+    const liveUrl = new URL(String(auth.liveViewUrl));
+    assert(liveUrl.hostname === 'live.browser-use.com', 'Handoff must use the Browser Use viewer');
+    assert(liveUrl.searchParams.get('readOnly') === null, 'Handoff viewer must be interactive');
+
+    await completeAndAssertResumed(fixture, requestId);
+    await assertNoSteelCredential(fixture);
+    const session = await prisma.browserSession.findUniqueOrThrow({
+      where: { id: fixture.browserSessionId },
+    });
+    assert(
+      session.provider === 'browser-use' && session.providerProfilePersist,
+      'Completion must retain the persistent Browser Use profile'
+    );
   });
 }
 
@@ -232,7 +265,7 @@ async function testSteelWithoutProfileFailsClosed(): Promise<void> {
     const result = await request(`/api/auth-assistance/${requestId}/complete`, fixture.userId);
     assertStatus(result, 400);
     assert(
-      asRecord(result.data).error === 'Steel context is not available for this live_view request',
+      asRecord(result.data).error === 'Browser context is not available for this live_view request',
       'A Steel session without a bound profile should fail closed'
     );
     const incomplete = await prisma.userAuthAssistanceRequest.findUniqueOrThrow({
@@ -246,6 +279,7 @@ async function testSteelWithoutProfileFailsClosed(): Promise<void> {
 
 export const authAssistanceProviderCompletionTests: TestCase[] = [
   ['POST /api/auth-assistance/:id/complete resumes Kernel live_view', testKernelCompletion],
+  ['POST /api/auth-assistance/:id/complete resumes Browser Use live_view', testBrowserUseCompletion],
   [
     'POST /api/auth-assistance/:id/complete follows Steel-to-Kernel provider switch',
     testSteelToKernelSwitch,

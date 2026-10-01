@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import type { Browser } from 'playwright';
 import {
+  availableBrowserRecoveryCandidates,
   browserRecoveryCandidates,
   challengeDetectionReason,
   isUsableDocumentTitle,
@@ -44,9 +45,41 @@ function testCandidateMatrix(): void {
       'kernel_residential_city',
       'kernel_residential_state',
       'steel_managed',
+      'browser_use_residential_country',
       'kernel_isp',
     ]
   );
+  const previousKey = process.env.BROWSER_USE_API_KEY;
+  const previousFlag = process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
+  try {
+    process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
+    delete process.env.BROWSER_USE_API_KEY;
+    assert.ok(
+      availableBrowserRecoveryCandidates({ country: 'US' }).every(
+        (candidate) => candidate.provider !== 'browser-use'
+      ),
+      'unconfigured Browser Use must not consume challenge recovery budget'
+    );
+    process.env.BROWSER_USE_API_KEY = 'test-key';
+    assert.ok(
+      availableBrowserRecoveryCandidates({ country: 'US' }).some(
+        (candidate) => candidate.provider === 'browser-use'
+      ),
+      'configured Browser Use must join challenge recovery'
+    );
+    process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'false';
+    assert.ok(
+      availableBrowserRecoveryCandidates({ country: 'US' }).every(
+        (candidate) => candidate.provider !== 'browser-use'
+      ),
+      'disabled Browser Use must not consume challenge recovery budget'
+    );
+  } finally {
+    if (previousKey === undefined) delete process.env.BROWSER_USE_API_KEY;
+    else process.env.BROWSER_USE_API_KEY = previousKey;
+    if (previousFlag === undefined) delete process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
+    else process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = previousFlag;
+  }
   assert.deepStrictEqual(kernelCaptchaTelemetryConfig(), {
     enabled: true,
     browser: { captcha: { enabled: true } },
@@ -78,6 +111,7 @@ function testConfigSearchUsesHiddenRemoteSessionsOnly(): void {
   const searchSource = source.slice(searchStart);
   assert.match(searchSource, /dependencies\.createKernel/);
   assert.match(searchSource, /dependencies\.createSteel/);
+  assert.match(searchSource, /dependencies\.createBrowserUse/);
   assert.match(searchSource, /browserSession\.updateMany/);
   assert.doesNotMatch(
     searchSource,
@@ -454,6 +488,10 @@ function testRecoveryConfigKeyForSession(): void {
   assert.strictEqual(recoveryConfigKeyForSession('kernel', 'none'), 'kernel_direct');
   assert.strictEqual(recoveryConfigKeyForSession('steel', 'managed'), 'steel_managed');
   assert.strictEqual(recoveryConfigKeyForSession('steel', 'fixed'), 'steel_fixed');
+  assert.strictEqual(
+    recoveryConfigKeyForSession('browser-use', null),
+    'browser_use_residential_country'
+  );
   assert.strictEqual(recoveryConfigKeyForSession('kernel', 'mobile_city'), 'kernel_mobile');
 }
 

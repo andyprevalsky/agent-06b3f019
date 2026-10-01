@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 
-/** Live Kernel/Steel provider parity + rotate_ip ladder (split for max-lines). */
+/** Live Kernel/Steel/Browser Use provider parity + rotate_ip ladder (split for max-lines). */
 
 import { randomUUID } from 'node:crypto';
 import Kernel from '@onkernel/sdk';
@@ -27,9 +27,10 @@ export async function runLiveProviderParity(): Promise<void> {
   const apiKey = process.env.BACKEND_API_KEY?.trim();
   const kernelApiKey = process.env.KERNEL_API_KEY?.trim();
   const steelApiKey = process.env.STEEL_API_KEY?.trim();
-  if (!apiKey || !kernelApiKey || !steelApiKey) {
+  const browserUseApiKey = process.env.BROWSER_USE_API_KEY?.trim();
+  if (!apiKey || !kernelApiKey || !steelApiKey || !browserUseApiKey) {
     throw new Error(
-      'BACKEND_API_KEY, KERNEL_API_KEY, and STEEL_API_KEY are required for live provider parity'
+      'BACKEND_API_KEY, KERNEL_API_KEY, STEEL_API_KEY, and BROWSER_USE_API_KEY are required for live provider parity'
     );
   }
 
@@ -281,6 +282,14 @@ export async function runLiveProviderParity(): Promise<void> {
       'residential session was not evicted before the mobile-band rotation'
     );
     liveSessionId = String(mobileRotated.session_id);
+    const mobileRemote = await kernel.browsers.retrieve(liveSessionId, {
+      include_deleted: true,
+    });
+    const mobileProxyId = mobileRemote.proxy_id;
+    assert(
+      mobileProxyId !== undefined && mobileProxyId !== proxyId,
+      'mobile rotation did not select a distinct managed proxy tier'
+    );
     const mobileIp = await readDifferentExitIp(String(mobileRotated.ws_url), residentialIp);
     // Ground truth comes from ipify, not from response metadata alone.
     assert(
@@ -429,13 +438,17 @@ export async function runLiveProviderParity(): Promise<void> {
     assert(resumedMetadata.provider === 'kernel', 'resume changed providers');
     assert(resumedMetadata.profile_id === profileId, 'resume did not reuse the Kernel profile');
     assert(
-      resumedMetadata.proxy_source === metadata.proxy_source &&
-        JSON.stringify(resumedMetadata.proxy_location) === JSON.stringify(metadata.proxy_location),
-      'resume lost resolved proxy fallback metadata'
+      resumedMetadata.proxy_source === mobileRotated.browser_session_metadata?.proxy_source &&
+        JSON.stringify(resumedMetadata.proxy_location) ===
+          JSON.stringify(mobileRotated.browser_session_metadata?.proxy_location),
+      'resume did not preserve the current mobile proxy tier and location'
     );
 
     const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
-    assert(secondRemote.proxy_id === proxyId, 'resume did not reuse the managed proxy ID');
+    assert(
+      secondRemote.proxy_id === mobileProxyId,
+      'resume did not reuse the mobile managed proxy ID'
+    );
 
     // A Steel infra outage returns null (skips the Steel legs) while Kernel is
     // healthy; real rotation defects still throw. See the wrapper's doc comment.
@@ -447,16 +460,24 @@ export async function runLiveProviderParity(): Promise<void> {
       mobileIp,
       post,
       readDifferentExitIp,
+      readExitIp,
       retrieveKernelBrowser: (sessionId) =>
         kernel.browsers.retrieve(sessionId, { include_deleted: true }),
       retrieveSteelBrowser: (sessionId) => steel.sessions.retrieve(sessionId),
+      retrieveBrowserUseBrowser: async (sessionId) => {
+        const response = await fetch(`https://api.browser-use.com/api/v4/browsers/${sessionId}`, {
+          headers: { 'X-Browser-Use-API-Key': browserUseApiKey },
+        });
+        assert(response.ok, `Browser Use session retrieve failed: HTTP ${response.status}`);
+        return response.json() as Promise<{ status: string }>;
+      },
       allocatedSessionIds,
     });
     if (crossProvider === null) return;
     liveSessionId = crossProvider.finalSessionId;
 
     console.log(
-      `[rotate_ip repro] complete ladder: kernel baseline=${ipBefore} residential=${ipAfter} mobile=${mobileIp}; steel=${crossProvider.firstSteelIp}/${crossProvider.secondSteelIp}`
+      `[rotate_ip repro] complete ladder: kernel baseline=${ipBefore} residential=${ipAfter} mobile=${mobileIp}; steel=${crossProvider.firstSteelIp}; browser-use=${crossProvider.browserUseIp}`
     );
 
     await post('/close', { session_id: liveSessionId, pause: false });
@@ -476,6 +497,16 @@ export async function runLiveProviderParity(): Promise<void> {
     }
     if (profileId) await deleteKernelResource(`/profiles/${profileId}`).catch(() => {});
     if (proxyId) await deleteKernelResource(`/proxies/${proxyId}`).catch(() => {});
+    const browserUseProfiles = await prisma.browserProviderProfile.findMany({
+      where: { provider: 'browser-use', context: { userId } },
+      select: { profileId: true },
+    });
+    for (const profile of browserUseProfiles) {
+      await fetch(`https://api.browser-use.com/api/v4/profiles/${profile.profileId}`, {
+        method: 'DELETE',
+        headers: { 'X-Browser-Use-API-Key': browserUseApiKey },
+      }).catch(() => {});
+    }
     await prisma.browserSession.deleteMany({ where: { agentId } });
     if (proxyId) await prisma.browserProviderProxy.deleteMany({ where: { proxyId } });
     await prisma.browserContext.deleteMany({ where: { userId } });

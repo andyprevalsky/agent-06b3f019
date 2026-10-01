@@ -14,6 +14,7 @@ import json
 import re
 import socket
 import time as time_module
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from io import BytesIO
@@ -481,6 +482,7 @@ _BROWSER_PROVIDER_DOMAIN_SUFFIXES = (
     "onkernel.com",
     "kernel.sh",
     "steel.dev",
+    "browser-use.com",
     "browserbase.com",
     "hyperbrowser.ai",
 )
@@ -4074,8 +4076,13 @@ async def _execute_screenshot(
 
     saved_path = None
     if config:
+        upload_name = (
+            f"screenshot-{uuid.uuid4().hex}.png"
+            if screenshot_result.get("provider") == "browser-use"
+            else "screenshot.png"
+        )
         upload_result = await upload_file_to_session(
-            config, session_id, "screenshot.png", screenshot_bytes, "image/png"
+            config, session_id, upload_name, screenshot_bytes, "image/png"
         )
         if upload_result:
             saved_path = upload_result.get("path", "/tmp/screenshot.png")

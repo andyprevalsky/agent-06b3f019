@@ -53,14 +53,16 @@ def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
     """Return the CDP download directory for the active browser provider.
 
     ``Browser.setDownloadBehavior`` must write into a directory the provider's
-    session-file listing actually exposes. Using Steel's ``/files`` on Kernel
-    makes downloads invisible to ``session_files`` / attempt_completion.
+    session-file listing actually exposes. Kernel and Browser Use use
+    ``/tmp/downloads``; Steel uses ``/files``.
     """
     import os
 
     resolved = (provider if provider is not None else os.getenv("BROWSER_PROVIDER", "kernel")).strip().lower()
     if resolved == "steel":
         return STEEL_DOWNLOADS_PATH
+    if resolved == "browser-use":
+        return KERNEL_DOWNLOADS_PATH
     return KERNEL_DOWNLOADS_PATH
 
 
@@ -432,6 +434,14 @@ class ActionHistory:
                 tag = getattr(element, "tag_name", None) or getattr(element, "node_name", "unknown")
                 element_description = f"[{index}] {tag}"
                 text = getattr(element, "text_content", "") or ""
+                # Browser-use often stores a button's label in child text while
+                # text_content is empty. Preserve the visible label so the
+                # browser transcript can identify a Submit click reliably.
+                if not text and action == "click" and str(tag).lower() == "button":
+                    try:
+                        text = element.get_all_children_text() or ""
+                    except Exception:
+                        text = ""
                 if text:
                     element_description += f" '{text[:50]}'"
 
@@ -519,7 +529,7 @@ class DOMService:
             viewport_width: Browser viewport width (WXGA default)
             viewport_height: Browser viewport height (WXGA default)
             downloads_path: CDP download directory. Defaults to the path for
-                ``BROWSER_PROVIDER`` (Kernel ``/tmp/downloads``, Steel ``/files``).
+                ``BROWSER_PROVIDER`` (Kernel/Browser Use ``/tmp/downloads``, Steel ``/files``).
         """
         self.cdp_url = cdp_url
         self.viewport_width = viewport_width

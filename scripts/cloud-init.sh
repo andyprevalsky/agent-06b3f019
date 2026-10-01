@@ -152,6 +152,18 @@ if [ -n "${NGROK_API_KEY:-}" ]; then
             ;;
     esac
 fi
+if [ -n "${BROWSER_USE_API_KEY:-}" ]; then
+    for envf in agents/.env back-end/.env; do
+        upsert_env_key "$envf" BROWSER_USE_API_KEY "$BROWSER_USE_API_KEY"
+    done
+    log "synced BROWSER_USE_API_KEY into agents/.env and back-end/.env"
+fi
+if [ "${BROWSER_AGENT_BROWSER_USE_ENABLED+x}" = x ]; then
+    for envf in agents/.env back-end/.env; do
+        upsert_env_key "$envf" BROWSER_AGENT_BROWSER_USE_ENABLED "$BROWSER_AGENT_BROWSER_USE_ENABLED"
+    done
+    log "synced BROWSER_AGENT_BROWSER_USE_ENABLED into agents/.env and back-end/.env"
+fi
 # Injected Cursor GITHUB_TOKEN is often an invalid github_pat_ that `gh auth
 # token` still echoes back. Overwrite process env + local .env with the working
 # hosts.yml / insteadOf credential so children inherit a valid token.
@@ -217,7 +229,7 @@ fi
 # unsupported BROWSER_PROVIDER (e.g. browserbase) makes live /init 500. Force a
 # supported value into this shell AND rewrite .env so children agree.
 case "${BROWSER_PROVIDER:-}" in
-  kernel|steel) ;;
+  kernel|steel|browser-use) ;;
   *)
     log "WARN: BROWSER_PROVIDER='${BROWSER_PROVIDER:-}' unsupported — forcing kernel"
     export BROWSER_PROVIDER=kernel

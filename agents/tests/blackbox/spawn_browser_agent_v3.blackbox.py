@@ -33,6 +33,23 @@ from _test_utils import (
 
 AGENTS_ROOT = Path(__file__).resolve().parents[2]
 
+
+def test_browser_use_captcha_wait_does_not_rotate_before_solver_window():
+    from domains.spawn_browser_agent_v3.handler import _captcha_solver_wait_complete
+
+    common = {
+        "page_still_challenged": False,
+        "saw_active_solver": False,
+        "inactive_polls": 3,
+    }
+    assert not _captcha_solver_wait_complete(provider="browser-use", elapsed_seconds=6, **common)
+    assert _captcha_solver_wait_complete(provider="browser-use", elapsed_seconds=10, **common)
+    assert _captcha_solver_wait_complete(provider="kernel", elapsed_seconds=6, **common)
+    assert not _captcha_solver_wait_complete(
+        provider="browser-use", elapsed_seconds=45, page_still_challenged=True,
+        saw_active_solver=False, inactive_polls=20,
+    )
+
 # ========================================
 # Helpers: build a real encrypted envelope
 # ========================================
@@ -933,6 +950,34 @@ def test_visible_result_completion_rewrites_recovery_after_allowed_result():
     )
 
 
+def test_visible_result_completion_uses_current_observed_dom_after_submit():
+    """A live post-submit DOM result must end redundant screenshot/scroll turns."""
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    submit = {"action": "click", "element_description": "[2716] button 'Submit (Protected by Invisible CAPTCHA)'"}
+    result_dom = "0.00\nRisk Score (lower = human)\nForm submission allowed!"
+    assert should_force_visible_result_completion(
+        action_name="screenshot",
+        last_reasoning="Let me take a screenshot to see the full results card.",
+        action_entries=[{"action": "goto"}, submit],
+        observed_dom=result_dom,
+    )
+    assert not should_force_visible_result_completion(
+        action_name="screenshot",
+        last_reasoning="",
+        action_entries=[{"action": "goto"}, submit],
+        observed_dom="Risk Score (lower = human)\nthreshold 0.15\nForm submission allowed!",
+    )
+    assert not should_force_visible_result_completion(
+        action_name="screenshot",
+        last_reasoning="",
+        action_entries=[{"action": "goto"}, submit, {"action": "goto"}],
+        observed_dom=result_dom,
+    )
+
+
 def test_visible_result_completion_ignores_submit_words_inside_observation_dumps():
     """Page chrome saying 'click Submit' must not look like a later submit action."""
     from domains.spawn_browser_agent_v3.visible_result_completion import (
@@ -1151,7 +1196,7 @@ async def test_browser_verifier_context_grounds_in_final_state():
     assert "PRESERVED PAGE EVIDENCE" in ctx[0]["text"]
     assert "Six-foot cable; supports 100 watts" in ctx[0]["text"]
     assert "browser ground truth, not an agent claim" in ctx[0]["text"]
-    assert "after a successful evaluate" in ctx[0]["text"]
+    assert "during the run" in ctx[0]["text"]
     # Final-state screenshot rides through as a multimodal image reference.
     screenshot_msg = next(m for m in ctx if m.get("metadata", {}).get("toolName") == "final_screenshot")
     assert screenshot_msg["metadata"]["screenshot_b64"] == "ZmFrZS1iNjQ="
@@ -1200,6 +1245,46 @@ async def test_evaluate_always_preserves_browser_evidence_checkpoint():
     assert len(checkpoints) == VERIFIER_CHECKPOINT_MAX
     assert checkpoints[0]["dom_tree"] == f"<main>product-{5}</main>"
     assert checkpoints[-1]["dom_tree"] == f"<main>product-{VERIFIER_CHECKPOINT_MAX + 4}</main>"
+
+
+def test_observed_interaction_keeps_earlier_browser_result_for_verifier():
+    """A later final page must not erase proof visible after an earlier click."""
+    from domains.spawn_browser_agent_v3.handler import _preserve_observed_interaction_for_verifier
+
+    checkpoints: list = []
+    pending = _preserve_observed_interaction_for_verifier(
+        action_name="click",
+        succeeded=True,
+        awaiting_observation=False,
+        observed_state={"dom_tree": "<main>Before click</main>"},
+        current_url="https://example.com",
+        verifier_checkpoints=checkpoints,
+    )
+    assert pending and not checkpoints
+    pending = _preserve_observed_interaction_for_verifier(
+        action_name="wait",
+        succeeded=True,
+        awaiting_observation=pending,
+        observed_state={"dom_tree": "<main>Processing</main>"},
+        current_url="https://example.com",
+        verifier_checkpoints=checkpoints,
+    )
+    assert pending and not checkpoints
+    pending = _preserve_observed_interaction_for_verifier(
+        action_name="screenshot",
+        succeeded=True,
+        awaiting_observation=pending,
+        observed_state={"dom_tree": "<main>Verified</main>", "title": "Verification"},
+        current_url="https://example.com",
+        verifier_checkpoints=checkpoints,
+    )
+    assert not pending
+    assert checkpoints == [{
+        "url": "https://example.com",
+        "title": "Verification",
+        "dom_tree": "<main>Verified</main>",
+        "kind": "preserved_evidence",
+    }]
 
 
 def test_evaluate_tool_schema_has_no_preserve_evidence_flag():
@@ -1254,6 +1339,34 @@ def test_action_history_restores_across_activity_boundary():
             "result": {"success": True},
         }
     ]
+
+
+async def test_action_history_records_child_text_for_submit_button():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        history_has_submit_click,
+        should_force_visible_result_completion,
+    )
+
+    button = SimpleNamespace(
+        tag_name="button",
+        text_content="",
+        get_all_children_text=lambda: "Submit (Protected by Invisible CAPTCHA)",
+    )
+    dom = SimpleNamespace(
+        selector_map={2716: button},
+        get_element_coordinates=AsyncMock(return_value=(500, 300)),
+    )
+    history = ActionHistory()
+    await history.record_action(dom_service=dom, action="click", index=2716, result={"success": True})
+    entries = history.get_entries()
+    assert entries[0]["element_description"] == "[2716] button 'Submit (Protected by Invisible CAPTCHA)'"
+    assert history_has_submit_click(action_entries=entries)
+    assert should_force_visible_result_completion(
+        action_name="screenshot",
+        last_reasoning='I can see the risk score "0.07" is displayed',
+        action_entries=[{"action": "goto", "result": {"success": True}}, *entries],
+    )
 
 async def test_action_history_resume_preserves_monotonic_step_numbers():
     from browser_tools.dom_service import ActionHistory
@@ -7734,8 +7847,9 @@ async def test_provider_reconnect_cleans_partial_new_stack_on_focus_failure():
     class _NewDom:
         last_instance = None
 
-        def __init__(self, cdp_url):
+        def __init__(self, cdp_url, downloads_path=None):
             self.cdp_url = cdp_url
+            self.downloads_path = downloads_path
             self.connect = AsyncMock()
             self.disconnect = AsyncMock()
             self.session = SimpleNamespace(get_current_page=AsyncMock(return_value=SimpleNamespace()))
@@ -7769,6 +7883,7 @@ async def test_provider_reconnect_cleans_partial_new_stack_on_focus_failure():
                 old_driver_pid=11,
                 fingerprint_injection=None,
                 agent_id="agent-1",
+                provider="browser-use",
             )
         except RuntimeError as exc:
             assert "focus sync failed" in str(exc)
@@ -7776,6 +7891,7 @@ async def test_provider_reconnect_cleans_partial_new_stack_on_focus_failure():
             raise AssertionError("expected focus synchronization failure")
 
     old_dom.disconnect.assert_awaited_once()
+    assert _NewDom.last_instance.downloads_path == "/tmp/downloads"
     assert stop_mock.await_count == 2
     stop_mock.assert_any_await(old_browser, old_playwright, "agent-1", driver_pid=11)
     stop_mock.assert_any_await(
@@ -8384,6 +8500,14 @@ def test_build_usage_items():
     with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}):
         steel_items = build_usage_items(0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1)
     assert steel_items[1]["provider"] == "Steel.dev Browser"
+    # Rotation can switch providers mid-run; the session metadata overrides
+    # the deployment default when attributing browser time.
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):
+        browser_use_items = build_usage_items(
+            0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1,
+            provider="browser-use",
+        )
+    assert browser_use_items[1]["provider"] == "Browser Use Browser"
 
 
 def test_build_usage_items_zeros_kernel_under_fast_mode():
@@ -9639,6 +9763,10 @@ def test_site_write_lock_grant_prefers_merchant_url_over_kernel_proxy_current_ur
         time_module.time(),
     )
     assert SITE_WRITE_LOCK_APPROVAL_KEY not in kernel_sh_only
+    browser_use_only = grant_site_write_lock_approvals(
+        {}, "https://live.browser-use.com/session/abc", time_module.time()
+    )
+    assert SITE_WRITE_LOCK_APPROVAL_KEY not in browser_use_only
 
 def test_get_element_description_none():
     from domains.spawn_browser_agent_v3.service_actions import get_element_description
@@ -12890,6 +13018,48 @@ async def test_chrome_download_trusts_inline_disposition_png():
         assert uploads[0]["content"] == b"PNG!"
 
 
+async def test_browser_use_navigation_download_survives_missing_initial_chrome_event():
+    """A Browser Use attachment must become a native download when CDP misses it."""
+    from domains.spawn_browser_agent_v3.download_persist import (
+        persist_navigation_download_via_page_fetch,
+    )
+
+    expressions = []
+
+    async def evaluate(*, params, session_id):
+        expressions.append(params["expression"])
+        if len(expressions) == 1:
+            return {"result": {"value": {
+                "ok": True,
+                "base64": base64.b64encode(b"PDF!").decode(),
+                "filename": "report.pdf",
+                "contentType": "application/pdf",
+                "disposition": 'attachment; filename="report.pdf"',
+            }}}
+        return {"result": {"value": True}}
+
+    cdp = SimpleNamespace(
+        session_id="cdp",
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=evaluate))),
+    )
+    session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp))
+    native = {"path": "/tmp/downloads/report.pdf", "size": 4, "filename": "report.pdf"}
+    with patch(
+        "domains.spawn_browser_agent_v3.download_persist.wait_for_browser_use_download",
+        new=AsyncMock(side_effect=[None, native]),
+    ) as listing:
+        result = await persist_navigation_download_via_page_fetch(
+            session=session,
+            url="https://example.com/report.pdf",
+            session_id="browser-use-session",
+            config=_fake_config(),
+            provider="browser-use",
+        )
+    assert result is not None and result["path"] == native["path"]
+    assert len(expressions) == 2 and "link.click()" in expressions[1]
+    assert listing.await_count == 2
+
+
 async def test_materialize_prefers_provider_file_path_before_page_fetch():
     """CDP filePath should be read via provider Files API before page-fetch fallback."""
     from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
@@ -12965,6 +13135,33 @@ async def test_materialize_prefers_provider_file_path_before_page_fetch():
     assert page_fetch_calls == [], "provider filePath read must short-circuit page fetch"
 
 
+async def test_browser_use_download_persister_uses_native_file_listing():
+    """Browser Use publishes Chrome downloads directly; no upload API round trip is needed."""
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+
+    persister = BrowserDownloadPersister(
+        browser_session=SimpleNamespace(),
+        session_id="browser-use-session",
+        config=_fake_config(),
+        provider="browser-use",
+    )
+    listing = [{"path": "downloads/report.txt", "size": 3}]
+    with patch(
+        "domains.spawn_browser_agent_v3.repo.list_session_files",
+        new=AsyncMock(return_value=listing),
+    ):
+        result = await persister._materialize_chrome_download(
+            meta={
+                "guid": "download-guid",
+                "url": "data:text/plain,abc",
+                "suggested_filename": "report.txt",
+            }
+        )
+    assert result is not None
+    assert result["path"] == "downloads/report.txt"
+    assert result["size"] == 3
+
+
 async def test_browser_download_persister_ignores_network_fetch_heuristics():
     """Network.responseReceived must not be registered — no invented page-asset downloads."""
     from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
@@ -13019,7 +13216,7 @@ async def test_browser_download_persister_ignores_network_fetch_heuristics():
         async def get_or_create_cdp_session(self, *a, **kw):
             return cdp_session
 
-    for provider in ("kernel", "steel"):
+    for provider in ("kernel", "steel", "browser-use"):
         with patch.dict(os.environ, {"BROWSER_PROVIDER": provider}, clear=False):
             persister = await BrowserDownloadPersister.create(
                 browser_session=_BrowserSession(),
@@ -13044,6 +13241,8 @@ def test_dom_service_defaults_downloads_path_from_browser_provider_env():
         assert DOMService(cdp_url="wss://example").downloads_path == KERNEL_DOWNLOADS_PATH
     with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}, clear=False):
         assert DOMService(cdp_url="wss://example").downloads_path == STEEL_DOWNLOADS_PATH
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "browser-use"}, clear=False):
+        assert DOMService(cdp_url="wss://example").downloads_path == KERNEL_DOWNLOADS_PATH
     assert DOMService(cdp_url="wss://example", downloads_path="/custom").downloads_path == "/custom"
 
 
@@ -17315,6 +17514,38 @@ async def test_execute_screenshot_success():
     assert uploaded.size == (1283, 800)
     session.get_or_create_cdp_session.assert_not_called()
 
+
+async def test_browser_use_screenshots_get_distinct_remote_names():
+    """Repeated screenshots must not collide in Chrome's downloads directory."""
+    from domains.spawn_browser_agent_v3 import service_actions
+    from PIL import Image
+
+    image_buffer = BytesIO()
+    Image.new("RGB", (8, 8), color="white").save(image_buffer, format="PNG")
+    screenshot_b64 = base64.b64encode(image_buffer.getvalue()).decode()
+    upload_mock = AsyncMock(side_effect=lambda _config, _sid, name, *_args: {"path": f"/tmp/downloads/{name}"})
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot",
+            AsyncMock(return_value={"provider": "browser-use", "base64_image": screenshot_b64}),
+        ),
+        patch("domains.spawn_browser_agent_v3.repo.upload_file_to_session", upload_mock),
+    ):
+        paths = []
+        for _ in range(2):
+            result = await service_actions._execute_screenshot(
+                session=MagicMock(),
+                dom_service=MagicMock(),
+                action_history=MagicMock(record_action=AsyncMock()),
+                thinking=None,
+                session_id="sid",
+                config=_fake_config(),
+            )
+            paths.append(result["file_path"])
+    assert paths[0] != paths[1]
+    assert all(path.startswith("/tmp/downloads/screenshot-") and path.endswith(".png") for path in paths)
+
+
 async def test_execute_screenshot_requires_steel_image():
     """Missing provider screenshot data fails instead of falling back to CDP."""
     from domains.spawn_browser_agent_v3 import service_actions
@@ -18634,8 +18865,9 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refr
     fetch_mock = AsyncMock(return_value=session_info)
     connected_cdp_urls = []
 
-    def capture_refreshed_cdp(*, cdp_url):
+    def capture_refreshed_cdp(*, cdp_url, downloads_path):
         connected_cdp_urls.append(cdp_url)
+        assert downloads_path in ("/tmp/downloads", "/files")
         raise RuntimeError("stop-after-refreshed-cdp-selection")
 
     with (
@@ -19034,8 +19266,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
     class _FakeDomService:
         last_instance = None
 
-        def __init__(self, cdp_url):
+        def __init__(self, cdp_url, downloads_path="/tmp/downloads"):
             self.cdp_url = cdp_url
+            self.downloads_path = downloads_path
             self.session = _FakeDomSession()
             self._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(side_effect=RuntimeError("skip logo")))
             self.selector_map = {}
@@ -21479,6 +21712,10 @@ def test_browser_tool_events_declare_action_type():
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
+    r.record(
+        "browser_use_captcha_wait_does_not_rotate_before_solver_window",
+        test_browser_use_captcha_wait_does_not_rotate_before_solver_window,
+    )
 
     r.record(
         "payment_card_tool_args_raise_typed_validation_error",
@@ -21645,6 +21882,10 @@ async def run_all_tests():
         test_visible_result_completion_rewrites_recovery_after_allowed_result,
     )
     r.record(
+        "visible_result_completion_uses_current_observed_dom_after_submit",
+        test_visible_result_completion_uses_current_observed_dom_after_submit,
+    )
+    r.record(
         "visible_result_completion_ignores_post_submit_version_decimal_without_score",
         test_visible_result_completion_ignores_post_submit_version_decimal_without_score,
     )
@@ -21662,10 +21903,18 @@ async def run_all_tests():
         test_evaluate_always_preserves_browser_evidence_checkpoint,
     )
     r.record(
+        "observed_interaction_keeps_earlier_browser_result_for_verifier",
+        test_observed_interaction_keeps_earlier_browser_result_for_verifier,
+    )
+    r.record(
         "evaluate_tool_schema_has_no_preserve_evidence_flag",
         test_evaluate_tool_schema_has_no_preserve_evidence_flag,
     )
     r.record("action_history_restores_across_activity", test_action_history_restores_across_activity_boundary)
+    await r.record_async(
+        "action_history_records_child_text_for_submit_button",
+        test_action_history_records_child_text_for_submit_button,
+    )
     await r.record_async(
         "action_history_resume_monotonic_steps",
         test_action_history_resume_preserves_monotonic_step_numbers,
@@ -22634,6 +22883,10 @@ async def run_all_tests():
         test_browser_download_persister_materializes_despite_same_basename_upload,
     )
     await r.record_async(
+        "browser_use_download_persister_native_listing",
+        test_browser_use_download_persister_uses_native_file_listing,
+    )
+    await r.record_async(
         "browser_download_persister_ignores_network_fetch",
         test_browser_download_persister_ignores_network_fetch_heuristics,
     )
@@ -22644,6 +22897,10 @@ async def run_all_tests():
     await r.record_async(
         "chrome_download_trusts_inline_disposition_png",
         test_chrome_download_trusts_inline_disposition_png,
+    )
+    await r.record_async(
+        "browser_use_navigation_download_recovery",
+        test_browser_use_navigation_download_survives_missing_initial_chrome_event,
     )
     await r.record_async(
         "materialize_prefers_provider_file_path",
@@ -22951,6 +23208,10 @@ async def run_all_tests():
     await r.record_async("execute_close_tab_explicit_id", test_execute_close_tab_with_explicit_id)
 
     await r.record_async("execute_screenshot_success", test_execute_screenshot_success)
+    await r.record_async(
+        "browser_use_screenshots_get_distinct_remote_names",
+        test_browser_use_screenshots_get_distinct_remote_names,
+    )
     await r.record_async(
         "execute_screenshot_requires_steel_image",
         test_execute_screenshot_requires_steel_image,

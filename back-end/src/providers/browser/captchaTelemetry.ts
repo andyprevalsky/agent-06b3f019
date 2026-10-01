@@ -16,7 +16,7 @@ export interface CaptchaTerminalOutcome {
 
 export interface BrowserCaptchaTelemetry {
   provider: BrowserProviderName;
-  telemetryEnabled: true;
+  telemetryEnabled: boolean;
   isSolving: boolean | null;
   activeTaskCount: number | null;
   pages: Array<{
