@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import Kernel from '@onkernel/sdk';
 import jwt from 'jsonwebtoken';
 import { chromium } from 'playwright';
+import { kernelProxyCandidates } from '../../providers/browser/kernelProxy';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
 import { steel, steelCdpConnectionUrl } from '../../providers/steel/session';
@@ -435,7 +436,19 @@ export async function runLiveProviderParity(): Promise<void> {
     );
 
     const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
-    assert(secondRemote.proxy_id === proxyId, 'resume did not reuse the managed proxy ID');
+    const resumedCandidate = kernelProxyCandidates(
+      resumedMetadata.proxy_location ?? { country: 'US' }
+    ).find((candidate) => candidate.source === resumedMetadata.proxy_source);
+    if (resumedCandidate === undefined) throw new Error('resume lost its managed proxy candidate');
+    const managedProxy = await prisma.browserProviderProxy.findUnique({
+      where: {
+        provider_proxyKey: { provider: 'kernel', proxyKey: resumedCandidate.proxyKey },
+      },
+    });
+    assert(
+      secondRemote.proxy_id !== undefined && secondRemote.proxy_id === managedProxy?.proxyId,
+      'resume did not use the persisted managed proxy for its resolved location'
+    );
 
     // A Steel infra outage returns null (skips the Steel legs) while Kernel is
     // healthy; real rotation defects still throw. See the wrapper's doc comment.
