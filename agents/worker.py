@@ -19,7 +19,6 @@ from temporalio.worker import (
     Worker,
     WorkerTuner,
 )
-from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 # Load .env file — override=False ensures env vars inherited from run.sh
 # (e.g. TEMPORAL_TASK_QUEUE derived from CONDUCTOR_WORKSPACE_NAME) take
@@ -141,6 +140,7 @@ from helpers.summarize import summarize_and_filter_links
 from helpers.update_tokens import update_agent_tree_cost_activity
 from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.worker_generation import resolve_production_task_queue
+from helpers.workflow_sandbox import production_workflow_runner
 from helpers.world_model_runtime import world_model_step_activity
 from temporal_connection import temporal_connect_options
 from tools.people_search import people_search_activity  # not yet refactored into domains/
@@ -1037,26 +1037,6 @@ async def main():
     # Make client available to query_parent_state_activity
     set_temporal_client(client)
 
-    # Configure workflow sandbox to passthrough logging libraries
-    # These libraries use threading.local which isn't allowed in the sandbox,
-    # but they're only used in activities, not workflows
-    sandbox_restrictions = SandboxRestrictions.default.with_passthrough_modules(
-        "rich",
-        "rich.console",
-        "structlog.dev",
-        "markdown_it",
-        "markdown_it_py",
-        "pygments",
-        "httpx",
-        "sniffio",
-        # helpers.llm uses threading.Lock via OpenAI/instructor clients
-        # but workflow only calls activities via execute_activity, not directly
-        "helpers.llm",
-        # helpers.attachments downloads files from storage using httpx
-        # called from build_llm_messages when resolving file attachments
-        "helpers.attachments",
-    )
-
     activity_admission_snapshot = ActivityAdmissionSnapshot(
         maximum_slots=config.temporal.max_concurrent_activities,
         close_memory_percent=config.temporal.activity_admission_close_memory_percent,
@@ -1199,7 +1179,7 @@ async def main():
             task_queue=validation_task_queue,
             workflows=[AgentWorkflow],
             activities=registered_activities,
-            workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
+            workflow_runner=production_workflow_runner(),
         )
         set_worker_status(True, phase="standby", build_id=build_id)
         logger.info(
@@ -1276,7 +1256,7 @@ async def main():
         max_concurrent_activity_task_polls=config.temporal.max_concurrent_activity_task_polls,
         max_concurrent_workflow_task_polls=config.temporal.max_concurrent_workflow_task_polls,
         nonsticky_to_sticky_poll_ratio=config.temporal.nonsticky_to_sticky_poll_ratio,
-        workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
+        workflow_runner=production_workflow_runner(),
         # Stop polling on shutdown; let in-flight activities (incl. 30m browser) finish.
         graceful_shutdown_timeout=timedelta(seconds=shutdown_grace_seconds),
     )

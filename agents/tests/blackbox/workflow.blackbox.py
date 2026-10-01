@@ -1080,13 +1080,9 @@ from temporalio import workflow
 with workflow.unsafe.imports_passed_through():
     from workflows.agent_workflow import AgentWorkflow
 
-# Sandbox config: bypass all module restrictions so structlog/rich/etc. work.
-from temporalio.worker.workflow_sandbox import (
-    SandboxedWorkflowRunner,
-    SandboxRestrictions,
-)
+from helpers.workflow_sandbox import production_workflow_runner
 
-_WORKFLOW_RUNNER = SandboxedWorkflowRunner(restrictions=SandboxRestrictions.default.with_passthrough_all_modules())
+_WORKFLOW_RUNNER = production_workflow_runner()
 
 # Default workflow args matching AgentWorkflow.run() signature
 DEFAULT_WF_ARGS: list = [
