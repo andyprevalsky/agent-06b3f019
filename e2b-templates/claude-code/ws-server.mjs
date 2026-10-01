@@ -86,9 +86,6 @@ wss.on("listening", () => {
 });
 
 wss.on("connection", (ws) => {
-  log("info", "Client connected", { total: clients.size + 1 });
-  clients.add(ws);
-
   // Send full buffer to new client
   if (outputBuffer.length > 0) {
     ws.send(JSON.stringify({ type: "buffer", data: outputBuffer }));
@@ -97,10 +94,14 @@ wss.on("connection", (ws) => {
     ws.send(JSON.stringify({ type: "code_agent_events", data: eventBuffer }));
   }
   if (exitAnnounced) {
+    log("info", "Served final buffer to reattaching client");
     ws.send(exitMessage(finalExitCode));
     ws.close();
     return;
   }
+
+  clients.add(ws);
+  log("info", "Client connected", { total: clients.size });
 
   // Handle incoming messages (stdin from parent agent)
   ws.on("message", (data) => {
