@@ -50,7 +50,8 @@ else
     # synthetic cloud workspace name only when that marker is present, otherwise
     # it rewrites CONDUCTOR_WORKSPACE_NAME to the checkout basename (e.g.
     # `workspace`) and breaks ngrok domain reuse.
-    write_cloud_env .cloud-env "${CONDUCTOR_PORT:-3001}" "$(new_cloud_workspace_name)" "$ROOT" "$(cloud_env_boot_id)"
+    write_cloud_env .cloud-env "${CONDUCTOR_PORT:-3001}" "$(new_cloud_workspace_name)" "$ROOT" \
+        "$(cloud_env_boot_id)" "$(cloud_env_agent_id)"
     echo "✅ Wrote .cloud-env — CONDUCTOR_WORKSPACE_NAME=$(cloud_env_value .cloud-env CONDUCTOR_WORKSPACE_NAME)"
 fi
 if [ -f .cloud-env ]; then
