@@ -1,0 +1,924 @@
+{
+  "agentId": "e8f2279b-3ec9-4bd8-bbb4-d659b2e9cdf6",
+  "recordedAt": "2026-10-01",
+  "note": "Real provider SSE recorded on the exact router request built from chat-router-failover-prod-e8f2279b.json. dt is ms after the provider request started. The Cerebras stall is the live shape observed on 3/15 real-route runs: HTTP 200, one role-only delta, then no content.",
+  "cerebrasStall": [
+    {
+      "dt": 417,
+      "line": "data: {\"id\":\"chatcmpl-stall\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"index\":0}],\"created\":1790829012,\"model\":\"qwen-3.8-27b\",\"object\":\"chat.completion.chunk\"}"
+    }
+  ],
+  "cerebrasHealthy": {
+    "model": "qwen-3.8-27b",
+    "events": [
+      {
+        "dt": 384,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 457,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"The\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 463,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" user is correcting me - they're saying their location is\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 470,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" 88 Howard St, San Francisco, not the\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 474,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" Irving, TX\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 479,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" address. This means I\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 485,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" need to re-run the research anchored\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 490,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" to 88\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 494,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" Howard St, San Francisco, CA \"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 498,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"94105 for the weekend of October\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 505,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" 3-4, 2026.\\n\\nThis is\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 509,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" a multi-step research task: find\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 513,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" hot yoga studios near\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 520,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" 88 Howard St SF,\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 525,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" check their weekend schedules, compare options\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 530,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\", and recommend\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 535,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" the best one. This requires\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 538,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" agent action with\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 549,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" multiple steps (search for\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 550,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" studios, check schedules, compare quality).\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 554,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"\\n\\nMode selection\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 560,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\":\\n- Condition (1\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 564,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"): The user has now\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 569,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" provided the location (88 Howard St,\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 574,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" SF). The dates are\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 579,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" \\\"this weekend\\\" which I\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 585,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" can reasonably interpret as Oct \"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 589,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"3-4\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 594,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\", 2026. No further\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 598,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" clarification needed.\\n- Condition (2\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 604,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"): This requires multiple steps\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 610,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" - finding studios\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 615,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\", checking schedules, comparing quality, verifying\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 619,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" availability. It's\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 629,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" research + comparison +\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 630,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" verification. However,\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 634,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" it's not a case\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 638,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" where I need to\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 643,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" fan out into many coordinated sub-t\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 649,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"asks. A single agent can: search\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 655,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" for hot yoga near \"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 658,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"88 Howard SF, check\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 663,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" a few studio schedules, compare,\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 671,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" and recommend. That's do\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 674,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"able in execute mode with a\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 680,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" few focused sub-agents for\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 683,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" browsing.\\n\\n\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 689,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"Actually, let me reconsider. The previous run\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 694,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" showed this is\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 699,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" complex - multiple studios\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 703,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" to check, schedules to verify,\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 710,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" quality to compare. But the key question is\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 714,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\": can a single\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 719,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" agent carry this to completion with its\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 724,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" tools and a\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 728,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" few focused helper sub-agents?\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 735,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" Yes - it can search for studios, browse their\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 738,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" schedule pages, compare, and recommend\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 743,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\". It doesn't need to decompose into a structured\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 750,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" plan of multiple coordinated\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 754,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" parallel sub-tasks.\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 759,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"\\n\\nI'll go with execute\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 764,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" mode since the location is\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 769,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" now clear and a single\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 774,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" agent can handle the research + browsing +\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 780,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" recommendation.\\n\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 784,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\"\\n\\n{\\\"reasoning\\\":\\\"User corrected\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 789,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" the location to 88 Howard St, San\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 794,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" Francisco. Need to re-re\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 799,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\"search hot yoga options near that address\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 804,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" for this weekend\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 810,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\". Location is now\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 814,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" clear, dates are\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 818,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" interpretable (Oct \"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 824,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\"3-4, 2026), and a\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 828,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" single agent can search, browse schedules, compare,\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 834,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" and recommend without needing a structured multi\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 840,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\"-task plan.\\\", \\\"action\\\":\\\"start\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 844,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\"_superintelligence\\\", \\\"query\\\":\\\"\\\", \\\"\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 848,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\"goal\\\":\\\"Find the best hot yoga class Alex\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 855,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" can take this weekend (Saturday\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 862,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" Oct 3\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 865,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" or Sunday Oct \"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 870,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\"4, 2026) near 8\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 877,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\"8 Howard St, San Francisco, CA 94105. Search\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 878,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" for hot yoga\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 883,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" studios within ~2 miles of\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 890,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" that address, check their official schedule\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 893,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" pages for those specific\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 898,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" dates, verify class names\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 904,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\"/times/availability\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 908,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\", compare quality (reviews\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 914,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\", teaching, experience),\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 920,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" and recommend the single best option with studio\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 924,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" name, class name, date\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 929,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\", time, address, and direct booking URL\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 934,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\". Do not book anything.\\\", \\\"mode\\\":\\\"execute\\\"}\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+      },
+      {
+        "dt": 934,
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\",\"usage\":{\"total_tokens\":27448,\"completion_tokens\":606,\"completion_tokens_details\":{\"reasoning_tokens\":393},\"prompt_tokens\":26842,\"prompt_tokens_details\":{\"cached_tokens\":26624,\"image_tokens\":0}},\"time_info\":{\"created\":1790828971.136139,\"queue_time\":0.004289465,\"prompt_time\":0.07555374,\"completion_time\":0.476650291,\"total_time\":0.5605354309082031}}"
+      },
+      {
+        "dt": 934,
+        "line": "data: [DONE]"
+      }
+    ]
+  },
+  "openrouterGlm": {
+    "model": "z-ai/glm-5.3-flash",
+    "events": [
+      {
+        "dt": 2920,
+        "line": ": OPENROUTER PROCESSING"
+      },
+      {
+        "dt": 3069,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"role\":\"assistant\",\"reasoning\":\"User corrects: they're in SF, 88 Howard St. Need to redo research for SF hot yoga this weekend. Escalate to start_superintelligence again with corrected anchor.\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"User corrects: they're in SF, 88 Howard St. Need to redo research for SF hot yoga this weekend. Escalate to start_superintelligence again with corrected anchor.\",\"format\":\"unknown\",\"index\":0}]},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3073,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"{\\\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3182,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"reason\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3183,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ing\\\":\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3183,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" \\\"The\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3183,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" user corrected the location\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3280,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" anchor: they are\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3280,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" near\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3280,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 88 Howard St\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3280,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", Apt 100\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3376,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"0, San Francisco\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3376,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", CA 9\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3376,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"4105 this\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3376,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" weekend (Oct\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3472,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 3-\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3472,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"4, 202\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3472,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"6), not\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3473,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" Irving, TX.\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3573,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" All\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3573,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" prior research is invalid\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3573,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\". This\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3573,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" requires re\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3845,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"-running the\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3845,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" multi-step research (\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 3907,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"find hot\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4060,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" yoga studios near\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4114,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" downtown\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4215,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" SF, verify\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4215,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" weekend schedules, compare\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4215,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" quality, pick best\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4215,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\") —\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4503,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" route\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4503,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" to start_superintelligence\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4503,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" in plan mode.\\\",\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4503,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" \\\"action\\\": \\\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4603,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"start_superintelligence\\\",\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4603,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" \\\"query\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4603,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\\": \\\"Find the\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4603,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" best hot yoga class\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4696,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" the user can take\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4696,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" this weekend (Saturday\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4696,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" Oct 3 or\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4696,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" Sunday Oct 4\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4793,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", 2026\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4793,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", local Pacific\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4793,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" time) near\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 4793,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 88 Howard St\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5060,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", Apt 100\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5060,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"0, San Francisco\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5060,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", CA 9\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5060,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"4105. The\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5170,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" user explicitly\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5170,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" confirmed this\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5170,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" is\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5170,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" their\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5265,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" location ('\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5265,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"wrong\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5265,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" address, its the\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5265,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 88 howard\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5385,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" one')\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5385,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" — do NOT use\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5386,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" the\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5386,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" Irving, TX home\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5802,
+        "line": ": OPENROUTER PROCESSING"
+      },
+      {
+        "dt": 5831,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" address. Research hot\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5831,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" yoga studios within a\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5897,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" practical\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 5952,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" radius of\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6036,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" downtown SF (So\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6037,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Ma\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6037,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"/Financial\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6037,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" District),\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6137,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" verify official\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6137,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" weekend\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6137,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" schedules for Oct\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6137,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 3-4,\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6239,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 2026 (\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6239,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"class names, times\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6239,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", heated\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6239,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" room\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6480,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" evidence\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6480,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", drop-in prices\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6480,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", booking availability),\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6480,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" compare quality via\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6580,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" reviews, and recommend\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6581,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" one best class\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6581,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" with full\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6581,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" details\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6682,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" and official\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6682,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" booking\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6682,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" URL. Do not\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6682,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" book anything.\\\",\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6783,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" \\\"goal\\\": \\\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6783,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Find the best hot\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6783,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" yoga class this weekend\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6783,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" (\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6884,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Oct\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6885,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 3-4\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6885,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", 2026\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 6885,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\") near 88\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7129,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" Howard St, Apt\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7129,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 1000,\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7129,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" San Francisco, CA\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7129,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 94105\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7224,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" —\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7224,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" user\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7224,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"-confirmed\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7224,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" location. Research nearby\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7320,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" hot yoga\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7320,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" studios,\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7320,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" verify official weekend schedules\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7320,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" and booking\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7417,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" availability, compare quality\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7417,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", and recommend\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7417,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" one best class with\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7417,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" details and official URL\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7490,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\". Do not book\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7490,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\".\\\", \\\"mode\\\":\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7490,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" \\\"plan\\\"}\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+      },
+      {
+        "dt": 7494,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"role\":\"assistant\",\"reasoning\":null},\"finish_reason\":\"stop\",\"native_finish_reason\":\"stop\"}]}"
+      },
+      {
+        "dt": 7495,
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"service_tier\":null,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":\"stop\",\"native_finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":24382,\"completion_tokens\":385,\"total_tokens\":24767,\"cost\":0.00371156,\"is_byok\":false,\"prompt_tokens_details\":{\"cached_tokens\":1152,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"cost_details\":{\"upstream_inference_cost\":0.00371156,\"upstream_inference_prompt_cost\":0.00351906,\"upstream_inference_completions_cost\":0.0001925},\"completion_tokens_details\":{\"reasoning_tokens\":37,\"image_tokens\":0,\"audio_tokens\":0}}}"
+      },
+      {
+        "dt": 7495,
+        "line": "data: [DONE]"
+      }
+    ]
+  },
+  "failoverProfile": {
+    "runs": 24,
+    "routerFirstContentMs": [
+      1343, 1374, 1376, 1378, 1470, 1539, 1558, 1563, 1607, 1654, 1669, 1713, 1845, 1888, 2064,
+      2116, 2259, 2428, 2542, 2828, 3589, 3921, 4238, 8550
+    ],
+    "routerCompleteMs": [
+      4085, 4476, 4606, 4818, 4860, 5079, 5123, 5157, 5667, 5760, 5781, 5825, 6184, 6215, 6983,
+      7470, 7778, 7827, 8148, 8340, 10232, 10948, 12522, 19067
+    ],
+    "winners": {
+      "qwen/qwen3.8-27b": 1,
+      "z-ai/glm-5.3-flash": 23
+    }
+  }
+}
