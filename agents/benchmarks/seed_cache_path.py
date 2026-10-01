@@ -68,6 +68,11 @@ def main() -> int:
         help="print the immutable canonical base-image cache token",
     )
     parser.add_argument(
+        "--canonical-path",
+        action="store_true",
+        help="print the local cache path of the canonical base fixture",
+    )
+    parser.add_argument(
         "--pg-major",
         default=None,
         help="pg_dump major version the archive was written with",
@@ -81,6 +86,9 @@ def main() -> int:
         return 0
     if args.cache_root is None:
         parser.error("cache_root is required unless --cache-token is used")
+    if args.canonical_path:
+        print(canonical_base_dump_path(args.schema_path, args.cache_root))
+        return 0
     print(seed_dump_path(args.schema_path, args.cache_root, args.cache_day))
     return 0
 
