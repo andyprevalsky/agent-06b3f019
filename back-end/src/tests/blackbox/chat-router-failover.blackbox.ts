@@ -114,7 +114,7 @@ const PRIOR_MESSAGES = context.messages.slice(0, -1);
 /** The follow-up moves the run from the Irving, TX home anchor to 88 Harlow. */
 const CORRECTED_GOAL: GoalAnchor = {
   corrected: /88 Harlow\b/,
-  rejected: /(?:1000 )?Westward Oak|Irving|Las Colinas/,
+  rejected: /(?:1000 )?Westward Oak|Irving|Las Colinas|\b750\d\d\b/,
 };
 /**
  * Router input the prod request carried: system prompt + 29 transcript turns.

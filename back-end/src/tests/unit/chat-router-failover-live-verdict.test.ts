@@ -19,7 +19,7 @@ const BUDGET_MS = 4_200;
 const GOAL = 'Find the best hot yoga class this weekend near 88 Harlow St';
 const GOAL_ANCHOR: GoalAnchor = {
   corrected: /88 Harlow\b/,
-  rejected: /(?:1000 )?Westward Oak|Irving|Las Colinas/,
+  rejected: /(?:1000 )?Westward Oak|Irving|Las Colinas|\b750\d\d\b/,
 };
 
 /** Goals the live probe started with on 2026-10-01, and phrasings it must also accept. */
@@ -28,10 +28,19 @@ const CORRECT_GOALS = [
     'San Francisco, CA 94105 — user-confirmed location anchor. Research SF hot yoga studios ' +
     'nearby, verify weekend schedules and bookability from official sources, compare quality, ' +
     'and recommend one best class. Do not book.',
-  'Find the best hot yoga class this weekend (Sat Oct 3 / Sun Oct 4, 2026) near 88 Harlow St, ' +
-    'Apt 1000, San Francisco, CA 94105, with verified schedule and official URL; no booking.',
+  'Find the best hot yoga class this weekend (Sat Oct 3 / Sun Oct 4, 2026, Pacific time) near ' +
+    '88 Harlow St, Apt 1000, San Francisco, CA 94105. Steps: (1) identify hot yoga studios ' +
+    'within ~2 miles of the address; (2) research official schedules for Oct 3–4, 2026.',
   'Do not book anything; find hot yoga within 2 miles of 88 Harlow St, San Francisco',
   'Find hot yoga around 88 Harlow St in San Francisco (not in Irving, TX)',
+  'Find the best hot yoga class this weekend near the 88 Harlow St address in San Francisco',
+  "Find the best hot yoga class this weekend near Alex's SF address, 88 Harlow St",
+  'Redo the hot yoga search near 88 Harlow St, San Francisco; the previous run searched near ' +
+    'Irving, TX by mistake',
+  'Find hot yoga near 88 Harlow St, San Francisco (the earlier search wrongly anchored on ' +
+    'Irving, TX)',
+  'The user is no longer in Irving; find hot yoga (Sat. Oct 3) within 2 miles from 88 Harlow St',
+  "(don't book) Location: 88 Harlow St, San Francisco",
 ];
 
 /** Goals that mention the corrected address but still send the run elsewhere. */
@@ -41,6 +50,14 @@ const WRONG_GOALS = [
   'Find hot yoga near 1000 Westward Oak Circle; the user mentioned 88 Harlow St',
   'Find hot yoga near Irving, TX or at 88 Harlow St',
   'Find hot yoga in Las Colinas instead of near 88 Harlow St',
+  "Find the best hot yoga class this weekend near Alex's home. The only supplied address is a " +
+    'delivery address for Ravi Samplefamily at 88 Harlow St, Apt 1000, San Francisco, CA ' +
+    "94105; do not treat it as Alex's home.",
+  "Find the best hot yoga class this weekend near Alex's Irving, TX home; drop off is at 88 " +
+    "Harlow apt 1000 94105 (Ravi's address).",
+  "Find hot yoga within 4 miles of Alex's home; ignore the delivery address at 88 Harlow St",
+  'Find hot yoga near ZIP 75063; skip the studios at 88 Harlow St',
+  'Search Irving, TX hot yoga studios and compare with ones near 88 Harlow St',
 ];
 
 const served: LiveObservation = {

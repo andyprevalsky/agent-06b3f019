@@ -202,39 +202,48 @@ export interface GoalAnchor {
   rejected: RegExp;
 }
 
-const LOCATIVE = String.raw`\b(?:near|around|close to|in|at|by|of|anchor(?:ed)? on)\s+`;
-const NEGATION = /\b(?:not|never|avoid|instead|rather|except|excluding)\b|n't\b/i;
+const NEGATION =
+  /\b(?:not|never|no longer|avoid|ignore|skip|instead|rather|except|excluding)\b|n't\b/i;
+/** `.`, `!`, or `?` before a capitalized word or the end, unless it closes `Sat.` or `St.`. */
+const SENTENCE_END = /(?<!\b[A-Z][A-Za-z]{0,3})[.!?](?=\s+[A-Z]|\s*$)|\n/;
 
-/** Whether `goal` places the search at `place`, not negated in its clause. */
-function anchorsOn(goal: string, place: RegExp): boolean {
-  for (const match of goal.matchAll(new RegExp(LOCATIVE + `(?:${place.source})`, 'gi'))) {
-    const clause =
-      goal
-        .slice(0, match.index)
-        .split(/[.;:!?\n—]/)
-        .pop() ?? '';
-    const lead = clause.trim().split(/\s+/).slice(-4).join(' ');
-    if (!NEGATION.test(lead)) return true;
-  }
-  return false;
+/** Whether a negation leads the clause up to `at` (its last six words). */
+function negatedAt(text: string, at: number): boolean {
+  const clause =
+    text
+      .slice(0, at)
+      .split(/[,;:()[\]—]/)
+      .pop() ?? '';
+  return NEGATION.test(clause.trim().split(/\s+/).slice(-6).join(' '));
 }
 
 /**
  * Why `goal` does not send the re-planned run to the corrected address, or
- * undefined. The replayed context still says not to anchor on that address and
- * names the rejected one, so a goal that merely mentions it proves nothing.
+ * undefined. The replayed context says not to anchor on that address and names
+ * the rejected one, so a goal that only mentions it proves nothing: the first
+ * non-negated mention of either place in the goal's first sentence, which
+ * states what the run does, must be the corrected one. Later recaps of the
+ * earlier search do not count.
  */
 export function goalAnchorFailure(
   goal: string | undefined,
   anchor: GoalAnchor
 ): string | undefined {
   if (!goal) return 'no re-plan goal was started';
-  if (!anchorsOn(goal, anchor.corrected)) {
-    return `the re-plan goal does not anchor on ${anchor.corrected.source}: ${goal}`;
+  const end = SENTENCE_END.exec(goal);
+  const sentence = end ? goal.slice(0, end.index) : goal;
+  const mentionsOf = (place: RegExp, corrected: boolean) =>
+    [...sentence.matchAll(new RegExp(place.source, 'gi'))].map((match) => ({
+      at: match.index,
+      corrected,
+    }));
+  const first = [...mentionsOf(anchor.corrected, true), ...mentionsOf(anchor.rejected, false)]
+    .sort((a, b) => a.at - b.at)
+    .find((mention) => !negatedAt(sentence, mention.at));
+  if (!first) {
+    return `the re-plan goal's first sentence does not name ${anchor.corrected.source}: ${goal}`;
   }
-  if (anchorsOn(goal, anchor.rejected)) {
-    return `the re-plan goal still anchors on the rejected ${anchor.rejected.source}: ${goal}`;
-  }
+  if (!first.corrected) return `the re-plan goal anchors on the rejected address first: ${goal}`;
   return undefined;
 }
 
