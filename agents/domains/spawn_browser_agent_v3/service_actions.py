@@ -2787,126 +2787,6 @@ async def _fill_payment_ref_directly(
     return None
 
 
-async def _browser_click_write_lock_signal(session: Any, coords: Optional[Dict[str, Any]]) -> str:
-    """Collect text/attributes from the element hit by a click and its composed ancestor path."""
-    if not session or not coords:
-        return ""
-
-    try:
-        get_page = getattr(session, "get_page", None)
-        if not callable(get_page):
-            return ""
-
-        page = await _maybe_await(get_page())
-        if not page or not hasattr(page, "evaluate"):
-            return ""
-
-        signal = await _maybe_await(
-            page.evaluate(
-                """
-                    ({ x, y }) => {
-                        const parts = [];
-                        const seen = new Set();
-                        const maxDepth = 4;
-                        const maxTextLength = 500;
-                        const attrNames = [
-                            'value',
-                            'aria-label',
-                            'title',
-                            'alt',
-                            'name',
-                            'id',
-                            'role',
-                            'type',
-                        ];
-
-                        const add = (value) => {
-                            if (typeof value !== 'string') return;
-                            const trimmed = value.trim();
-                            if (trimmed) parts.push(trimmed);
-                        };
-
-                        const addText = (value) => {
-                            if (typeof value !== 'string') return;
-                            const trimmed = value.trim();
-                            if (!trimmed || trimmed.length > maxTextLength) return;
-                            parts.push(trimmed);
-                        };
-
-                        const isPageContainer = (el) => {
-                            if (!el || !el.tagName) return false;
-                            const tag = el.tagName.toLowerCase();
-                            return tag === 'html' || tag === 'body' || tag === 'main';
-                        };
-
-                        const addElement = (el, includeText) => {
-                            if (!el || seen.has(el)) return false;
-                            seen.add(el);
-                            let addedText = false;
-
-                            if (includeText && !isPageContainer(el)) {
-                                const before = parts.length;
-                                addText(el.innerText);
-                                if (el.textContent !== el.innerText) addText(el.textContent);
-                                addedText = parts.length > before;
-                            }
-
-                            for (const attrName of attrNames) {
-                                if (el.getAttribute) add(el.getAttribute(attrName));
-                            }
-
-                            if (el.labels) {
-                                for (const label of el.labels) {
-                                    const before = parts.length;
-                                    add(label.innerText);
-                                    add(label.textContent);
-                                    addedText = addedText || parts.length > before;
-                                }
-                            }
-                            return addedText;
-                        };
-
-                        const walkAncestors = (start, includeStartText) => {
-                            let current = start;
-                            let depth = 0;
-                            let seekNearestText = includeStartText;
-                            while (current && depth < maxDepth) {
-                                const addedText = addElement(current, seekNearestText);
-                                if (addedText) seekNearestText = false;
-                                if (isPageContainer(current)) break;
-                                if (current.assignedSlot) {
-                                    current = current.assignedSlot;
-                                } else if (current.parentElement) {
-                                    current = current.parentElement;
-                                } else {
-                                    const root = current.getRootNode && current.getRootNode();
-                                    current = root && root.host ? root.host : null;
-                                }
-                                depth += 1;
-                            }
-                        };
-
-                        const hit = document.elementFromPoint(Number(x), Number(y));
-                        const interactive = hit && hit.closest && hit.closest(
-                            'button,input,select,textarea,a,[role="button"],[role="link"],[onclick]'
-                        );
-                        walkAncestors(interactive || hit, true);
-                        if (hit && hit !== interactive) {
-                            addElement(hit, true);
-                        }
-
-                        return parts.join('\\n').slice(0, 20000);
-                    }
-                """,
-                {"x": int(coords["x"]), "y": int(coords["y"])},
-            )
-        )
-        return signal if isinstance(signal, str) else ""
-    except Exception as e:
-        logger.debug("Unable to collect browser click write-lock signal", error=str(e))
-        return ""
-
-
 async def _click_write_lock_result(
     *,
     session: Any,
@@ -2933,37 +2813,38 @@ async def _click_write_lock_result(
         )
         return None
 
+    from browser_tools.write_lock_probe import element_click_target, probe_click_target
+
     coordinate_click = element is None
-    if coordinate_click:
-        element_text = "\n".join(
-            part
-            for part in (
-                await _maybe_await(dom_service.get_text_at_coordinates(int(coords["x"]), int(coords["y"]))),
-                await _browser_click_write_lock_signal(session, coords),
-            )
-            if part
-        )
+    target = await probe_click_target(session, coords) if coordinate_click else element_click_target(element)
+    if target is not None and not target.commits:
         logger.info(
-            "Write lock coord click check",
-            element_text=element_text[:100] if element_text else "(empty)",
-            coords=coords,
-            url=current_url[:80] if current_url else None,
-        )
-    else:
-        element_text = "\n".join(
-            part
-            for part in (
-                _element_write_lock_signal(element),
-                await _browser_click_write_lock_signal(session, coords),
-            )
-            if part
-        )
-        logger.info(
-            "Write lock click check",
-            element_text=element_text[:100] if element_text else "(empty)",
+            "Write lock skipped: click target cannot commit",
+            reason=target.reason,
             index=index,
             url=current_url[:80] if current_url else None,
         )
+        return None
+
+    return_text = None
+    if target is not None:
+        element_text = target.label
+        return_text = target.return_signal
+    elif coordinate_click:
+        stack_text = await _maybe_await(dom_service.get_text_at_coordinates(int(coords["x"]), int(coords["y"])))
+        element_text = stack_text if isinstance(stack_text, str) else ""
+    else:
+        element_text = _element_write_lock_signal(element)
+    navigates = target is not None and target.navigates
+    logger.info(
+        "Write lock coord click check" if coordinate_click else "Write lock click check",
+        element_text=element_text[:100] if element_text else "(empty)",
+        resolved=target is not None,
+        navigates=navigates,
+        coords=coords if coordinate_click else None,
+        index=index,
+        url=current_url[:80] if current_url else None,
+    )
 
     return _evaluate_element_text_write_lock(
         element_text=element_text,
@@ -2974,6 +2855,8 @@ async def _click_write_lock_result(
         action_label="coordinate click" if coordinate_click else "click",
         element_text_for_question=element_text[:100],
         coords=coords if coordinate_click else None,
+        return_text=return_text,
+        navigates=navigates,
     )
 
 
@@ -3046,10 +2929,17 @@ async def _press_key_write_lock_result(
     system_name: str,
     secret_refs: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
-    element_text = await _active_element_write_lock_signal(session)
+    from browser_tools.write_lock_probe import probe_enter_target
+
+    target = await probe_enter_target(session)
+    if target is not None and not target.commits:
+        logger.info("Write lock skipped: submit key cannot commit", reason=target.reason, url=current_url[:80])
+        return None
+    element_text = target.label if target is not None else await _active_element_write_lock_signal(session)
     logger.info(
         "Write lock submit-key check",
         element_text=element_text[:100] if element_text else "(empty)",
+        resolved=target is not None,
         url=current_url[:80] if current_url else None,
     )
     return _evaluate_element_text_write_lock(
@@ -3060,6 +2950,49 @@ async def _press_key_write_lock_result(
         secret_refs=secret_refs,
         action_label="submit key",
         element_text_for_question=element_text[:100],
+        return_text=target.return_signal if target is not None else None,
+    )
+
+
+def _types_submit_key(text: Any) -> bool:
+    return isinstance(text, str) and ("\n" in text or "\r" in text)
+
+
+async def _typed_enter_write_lock_result(
+    *,
+    session: Any,
+    element: Any,
+    coords: Any,
+    write_lock_approvals: Optional[Dict],
+    current_url: str,
+    system_name: str,
+    secret_refs: Optional[Dict[str, str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Gate the Enter keypress a typed newline sends into a field (implicit form submit)."""
+    from browser_tools.write_lock_probe import probe_enter_target
+
+    target = await probe_enter_target(session, element=element, coords=coords, typed_newline=True)
+    if target is None or not target.commits:
+        logger.info(
+            "Write lock typed-newline check passed",
+            reason=target.reason if target is not None else "target unresolved",
+            url=current_url[:80] if current_url else None,
+        )
+        return None
+    logger.info(
+        "Write lock typed-newline check",
+        element_text=target.label[:100] if target.label else "(empty)",
+        url=current_url[:80] if current_url else None,
+    )
+    return _evaluate_element_text_write_lock(
+        element_text=target.label,
+        write_lock_approvals=write_lock_approvals,
+        current_url=current_url,
+        system_name=system_name,
+        secret_refs=secret_refs,
+        action_label="typed Enter",
+        element_text_for_question=target.label[:100],
+        return_text=target.return_signal,
     )
 
 
@@ -3073,7 +3006,10 @@ def _evaluate_element_text_write_lock(
     action_label: str,
     element_text_for_question: str,
     coords: Any = None,
+    return_text: Optional[str] = None,
+    navigates: bool = False,
 ) -> Optional[Dict[str, Any]]:
+    """``navigates``: the target is a hyperlink, whose "Post"/"Send" names a composer, not a submit."""
     from browser_tools.write_lock import (
         get_write_lock_approval_question,
         is_email_send_button,
@@ -3084,9 +3020,17 @@ def _evaluate_element_text_write_lock(
     )
 
     checks = (
-        ("social_post", is_social_domain(current_url) and is_submit_button(element_text), "social posting"),
-        ("email_send", is_email_send_button(element_text, current_url), "email send"),
-        ("return", is_return_button(element_text, current_url), "return confirmation"),
+        (
+            "social_post",
+            not navigates and is_social_domain(current_url) and is_submit_button(element_text),
+            "social posting",
+        ),
+        ("email_send", not navigates and is_email_send_button(element_text, current_url), "email send"),
+        (
+            "return",
+            is_return_button(element_text if return_text is None else return_text, current_url),
+            "return confirmation",
+        ),
         ("purchase", is_purchase_button(element_text), "purchase button"),
     )
     suffix = f" ({action_label})"
@@ -3690,6 +3634,19 @@ async def _execute_input_text(
     )
     if write_lock_error:
         return write_lock_error
+
+    if write_lock_enabled and _types_submit_key(text):
+        typed_enter_lock = await _typed_enter_write_lock_result(
+            session=session,
+            element=element,
+            coords=coords,
+            write_lock_approvals=write_lock_approvals,
+            current_url=current_url,
+            system_name=system_name,
+            secret_refs=secret_refs,
+        )
+        if typed_enter_lock:
+            return typed_enter_lock
 
     if is_payment_card_secret_ref and has_payment_card_secret_refs(secret_refs):
         direct_fill_result = await _try_direct_payment_ref_fill(

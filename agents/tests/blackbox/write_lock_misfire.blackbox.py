@@ -295,9 +295,54 @@ async def _run_case(browser: _Browser, server: _CorpusServer, case: dict) -> tup
     return _outcome(result), result, humanizer.calls
 
 
-async def test_corpus_cases_resolve_to_expected_write_lock():
-    """Every misfire case must produce exactly its expected gate verdict in Chromium."""
-    cases = _load_corpus()["cases"]
+# Real commits that sit next to the corpus exemptions (links, nameless
+# controls, Enter in a field). They locked before the fix and must still lock.
+_EXEMPTION_GUARD_CASES = [
+    {
+        "id": "guard-link-styled-purchase-commit",
+        "url": "https://www.example-shop.com/checkout/review",
+        "html": '<p>Total $18.40</p><a href="/checkout/complete" class="btn" data-wl-target>Place order</a>',
+        "action": {"action": "click", "target": "index"},
+        "expect": "purchase",
+    },
+    {
+        "id": "guard-link-styled-return-commit",
+        "url": "https://www.example-shop.com/account/returns/42",
+        "html": '<a href="/account/returns/42/submit" class="btn" data-wl-target>Submit return</a>',
+        "action": {"action": "click", "target": "index"},
+        "expect": "return",
+    },
+    {
+        "id": "guard-nameless-icon-commit-reads-own-id",
+        "url": "https://www.example-shop.com/checkout/review",
+        "html": (
+            '<button type="button" id="placeOrderBtn" data-wl-target>'
+            '<svg aria-hidden="true" width="16" height="16"><rect width="16" height="16"/></svg></button>'
+        ),
+        "action": {"action": "click", "target": "index"},
+        "expect": "purchase",
+    },
+    {
+        "id": "guard-enter-in-field-submits-default-button",
+        "url": "https://www.example-shop.com/checkout",
+        "html": (
+            '<form onsubmit="return false"><label for="pc">Promo code</label>'
+            '<input id="pc" name="promo" data-wl-target><button type="submit">Place order</button></form>'
+        ),
+        "action": {"action": "press_key", "params": {"key": "Enter"}, "focus_target": True},
+        "expect": "purchase",
+    },
+    {
+        "id": "guard-link-click-on-coordinates-still-gates-purchase",
+        "url": "https://www.example-shop.com/checkout/review",
+        "html": '<a href="/checkout/complete" class="btn" data-wl-target>Place order</a>',
+        "action": {"action": "click", "target": "coordinates"},
+        "expect": "purchase",
+    },
+]
+
+
+async def _resolve_cases(cases: list[dict]) -> list[str]:
     server = _CorpusServer(cases)
     browser = _Browser()
     failures: list[str] = []
@@ -323,7 +368,19 @@ async def test_corpus_cases_resolve_to_expected_write_lock():
     finally:
         await browser.close()
         server.close()
+    return failures
+
+
+async def test_corpus_cases_resolve_to_expected_write_lock():
+    """Every misfire case must produce exactly its expected gate verdict in Chromium."""
+    failures = await _resolve_cases(_load_corpus()["cases"])
     assert failures == [], f"{len(failures)} misfire(s):\n  " + "\n  ".join(failures)
+
+
+async def test_exemptions_keep_real_commits_locked():
+    """Link / nameless-control / Enter exemptions must not swallow real purchase or return commits."""
+    failures = await _resolve_cases(_EXEMPTION_GUARD_CASES)
+    assert failures == [], f"{len(failures)} guard regression(s):\n  " + "\n  ".join(failures)
 
 
 def test_held_out_registrable_domains_stay_separate():
@@ -367,8 +424,6 @@ def test_anti_reward_hack_corpus_not_embedded_in_production():
 
     embedded = []
     for source in CLASSIFIER_SOURCES:
-        if not source.exists():
-            continue
         raw = source.read_text(encoding="utf-8")
         assert "write_lock_misfire_corpus" not in raw, source
         no_docs = re.sub(r'"""[\s\S]*?"""', "", raw)
@@ -385,6 +440,7 @@ async def run_all_tests():
         "corpus_cases_resolve_to_expected_write_lock",
         test_corpus_cases_resolve_to_expected_write_lock,
     )
+    await r.record_async("exemptions_keep_real_commits_locked", test_exemptions_keep_real_commits_locked)
     r.record("held_out_registrable_domains_stay_separate", test_held_out_registrable_domains_stay_separate)
     r.record("held_out_word_boundary_grammar", test_held_out_word_boundary_grammar)
     r.record(

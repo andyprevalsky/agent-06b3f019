@@ -9381,9 +9381,6 @@ async def test_purchase_write_lock_bypassed_when_payment_card_secret_refs_presen
     secret_refs = {ref: f"val-{ref}" for ref in PAYMENT_CARD_SECRET_REFS}
 
     with patch(
-        "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
-        AsyncMock(return_value="Place order $1.00"),
-    ), patch(
         "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
         return_value="Place order $1.00",
     ):
@@ -14537,10 +14534,6 @@ async def test_click_write_lock_result_skips_plain_email_input():
         get_all_children_text=lambda: "Buy Now",
     )
     with (
-        patch(
-            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
-            AsyncMock(return_value="buynow-email-si\nBuy Now"),
-        ),
         patch("browser_tools.write_lock.is_purchase_button", return_value=True),
         patch("browser_tools.write_lock.is_email_send_button", return_value=True),
     ):
@@ -14569,15 +14562,9 @@ async def test_click_write_lock_result_still_locks_submit_input():
         parent_node=None,
         get_all_children_text=lambda: "Place Order",
     )
-    with (
-        patch(
-            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
-            AsyncMock(return_value="Place Order"),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
-            return_value="Place Order",
-        ),
+    with patch(
+        "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
+        return_value="Place Order",
     ):
         out = await _click_write_lock_result(
             session=MagicMock(),
