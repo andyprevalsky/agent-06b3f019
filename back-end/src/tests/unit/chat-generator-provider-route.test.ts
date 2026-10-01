@@ -430,6 +430,56 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
   }
 }
 
+async function testDirectRateCapDoesNotWaitOnSlowSameModelSpill(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const saved = {
+    cerebras: process.env.CEREBRAS_API_KEY,
+    openrouter: process.env.OPENROUTER_API_KEY,
+    hedgeMs: process.env.CEREBRAS_CHAT_HEDGE_MS,
+  };
+  process.env.CEREBRAS_API_KEY = 'direct-cerebras';
+  process.env.OPENROUTER_API_KEY = 'openrouter-fallback';
+  process.env.CEREBRAS_CHAT_HEDGE_MS = '50';
+  const openRouterModels: string[] = [];
+  let slowSignal: AbortSignal | null | undefined;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url === CEREBRAS_API_URL) return new Response('rate cap', { status: 429 });
+    if (url === OPENROUTER_API_URL) {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const model = String(body.model);
+      openRouterModels.push(model);
+      if (model === 'qwen/qwen3.8-27b') {
+        slowSignal = init?.signal;
+        return stallingResponse(init?.signal);
+      }
+      if (model === 'z-ai/glm-5.3-flash') return sseResponse(GENERATOR_SSE);
+      throw new Error(`Unexpected OpenRouter model ${model}`);
+    }
+    throw new Error(`Unexpected route ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const startedAt = Date.now();
+    const chunks = await collect(await createStreamingCompletion(directGeneratorOptions()));
+    assert.ok(chunks.length > 0, 'fast spill must answer after same-model host stalls');
+    assert.ok(Date.now() - startedAt < 2_000, 'rate-cap spill must remain latency bounded');
+    assert.deepEqual(openRouterModels, ['qwen/qwen3.8-27b', 'z-ai/glm-5.3-flash']);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(slowSignal?.aborted, true, 'slow same-model spill must be aborted');
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [name, value] of [
+      ['CEREBRAS_API_KEY', saved.cerebras],
+      ['OPENROUTER_API_KEY', saved.openrouter],
+      ['CEREBRAS_CHAT_HEDGE_MS', saved.hedgeMs],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
 async function run(): Promise<void> {
   await testPhaseUsesDirectCerebras();
   await testDirectFailureFallsThroughToWaterfall();
@@ -437,6 +487,7 @@ async function run(): Promise<void> {
   await testSilentDirectRouteRacesIndependentFallbacks();
   await testLosingFastFallbackIsAborted();
   await testDirectQuotaFallsOverToOpenRouterGlm();
+  await testDirectRateCapDoesNotWaitOnSlowSameModelSpill();
   process.stdout.write(
     'PASS Chat Generator provider routes fall through on Cerebras stalls and rate caps\n'
   );
