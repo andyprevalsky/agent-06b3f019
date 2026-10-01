@@ -8,23 +8,31 @@
  * one" and got "Sorry — I couldn't generate a response just now."
  *
  *   POST message ─> routeUserMessage ─> handleChatMessage ─> callRouterLlm
- *     Cerebras: HTTP 200, role-only delta, then silence (1.2s stall guard)
- *     0.8s hedge ─> OpenRouter GLM / Qwen race ─> decision streams 4–19s
- *     router bound fired at 3s with no closed decision ─> deadline miss
+ *     Cerebras: no content inside its 1.2s stall guard
+ *     0.8s hedge ─> OpenRouter GLM / Qwen race; on this 24k-token context GLM
+ *       needs up to ~3s (sometimes ~8s) before its first event, and the
+ *       decision completes 4–19s after the turn starts
+ *     GLM's 2s pre-token guard aborts it unless content arrives inside 2s, and
+ *       the router's 3s whole-completion bound fired before any decision
+ *       ─> deadline miss
  *     deadline misses were not regenerated ─> chat_handler_failure notice
  *
  * Every case drives the production entrypoint (`postMessage`) against the
- * local database with the exact 39-message chat context the prod router saw
- * (fixtures/chat-router-failover-prod-e8f2279b.json) and replays provider
+ * local database, seeded with the transcript whose chat-model projection is
+ * the exact 30-message, 88,440-char router request prod sent
+ * (fixtures/chat-router-failover-prod-e8f2279b.json; PII, including the
+ * delivery street, replaced with same-length stand-ins), and replays provider
  * streams recorded on that exact request with their real timing
  * (fixtures/chat-router-failover-prod-e8f2279b-streams.json). Only the
  * network boundary is replaced; the Rose hedge, race, stall guards, router
- * bound, regenerate, escalation, and Temporal acceptance all run for real
- * (Temporal through the in-memory blackbox client).
+ * bounds, regenerate, escalation, and Temporal acceptance all run for real
+ * (Temporal through the in-memory blackbox client), under the bound defaults
+ * prod runs with (inherited overrides are removed for the run).
  *
- * CHAT_ROUTER_FAILOVER_LIVE=1 adds the live probe: same seeded agent, Cerebras
- * stalled the same way, real OpenRouter. /deploy runs it in
- * scripts/run_deploy_live_probes.py.
+ * CHAT_ROUTER_FAILOVER_LIVE=1 adds the live probe: same seeded agent, a
+ * Cerebras-wide outage (direct Cerebras and every other OpenRouter route
+ * stalled), and the real OpenRouter GLM failover as the only path that can
+ * serve. /deploy runs it in scripts/run_deploy_live_probes.py.
  */
 
 import 'dotenv/config';
@@ -46,6 +54,19 @@ import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/trans
 
 const here = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.CHAT_ROUTER_FAILOVER_LIVE === '1';
+
+/**
+ * Every bound on this path that an env var can override. Render sets none of
+ * them, so the test must run on the code defaults; a value inherited from a dev
+ * or CI shell would prove a configuration prod does not run.
+ */
+const PROD_DEFAULT_BOUND_ENV = [
+  'CEREBRAS_CHAT_IDLE_TIMEOUT_MS',
+  'CEREBRAS_CHAT_HEDGE_MS',
+  'OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS',
+  'CHAT_ROUTER_STALL_TIMEOUT_MS',
+  'CHAT_ROUTER_COMPLETION_TIMEOUT_MS',
+] as const;
 
 interface FixtureMessage {
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
@@ -370,6 +391,10 @@ function assertHealthyTurn(network: ReturnType<typeof installNetwork>): void {
 // ── cases ────────────────────────────────────────────────────────────────────
 
 async function testExactProdFollowUpEscalatesThroughFailover(): Promise<void> {
+  assert.ok(
+    streams.openrouterGlm.events[0].dt > 2_000,
+    'the recorded GLM failover must keep its >2s long-context first-event latency'
+  );
   const { outcome, network, seeded, agent } = await sendFollowUp(
     { cerebras: () => 'stall', glm: () => 'glm-recorded', openrouterOther: 'stall' },
     40_000
@@ -395,7 +420,7 @@ async function testExactProdFollowUpEscalatesThroughFailover(): Promise<void> {
     );
     assert.match(
       (outcome as { reasoning: string }).reasoning,
-      /88 Howard/,
+      /88 Harlow/,
       'router reasoning must carry the corrected address'
     );
     assert.equal(agent.status, 'ACTIVE');
@@ -498,26 +523,31 @@ async function testExhaustedBudgetSurfacesOneNotice(): Promise<void> {
 async function testLiveFailoverEscalates(): Promise<void> {
   assert.ok(process.env.OPENROUTER_API_KEY, 'live probe requires OPENROUTER_API_KEY');
   const { outcome, network, seeded } = await sendFollowUp(
-    { cerebras: () => 'stall', glm: () => 'live', openrouterOther: 'live' },
+    { cerebras: () => 'stall', glm: () => 'live', openrouterOther: 'stall' },
     45_000
   );
   try {
     assertExactProdRouterContext(network);
+    const attempts = network.routerRequests('cerebras').length;
     assert.equal(
       outcome.kind,
       'escalated',
-      `live OpenRouter failover must escalate the exact prod follow-up, got ${outcome.kind} after ${outcome.atMs}ms`
+      `live GLM failover must escalate the exact prod follow-up, got ${outcome.kind} after ` +
+        `${outcome.atMs}ms over ${attempts} router attempt(s)`
     );
     assertHealthyTurn(network);
     assert.ok(
-      network
-        .routerRequests('openrouter')
-        .some((request) =>
-          [OPENROUTER_FAST_CHAT_MODEL, OPENROUTER_CEREBRAS_MODEL].includes(request.model)
-        ),
-      'the live decision must come from the OpenRouter failover'
+      network.routerRequests('openrouter', OPENROUTER_CEREBRAS_MODEL).length > 0,
+      'the OpenRouter race must still start its Qwen branch (stalled here)'
     );
-    process.stdout.write(`  live failover escalated at ${outcome.atMs}ms\n`);
+    assert.equal(
+      network.routerRequests('openrouter', OPENROUTER_FAST_CHAT_MODEL).length,
+      attempts,
+      'every router attempt must reach the real GLM failover, the only live path'
+    );
+    process.stdout.write(
+      `  live GLM failover escalated at ${outcome.atMs}ms on router attempt ${attempts}\n`
+    );
   } finally {
     await cleanup(seeded);
   }
@@ -527,7 +557,7 @@ async function testLiveFailoverEscalates(): Promise<void> {
 
 async function main(): Promise<void> {
   assert.equal(FOLLOW_UP.role, 'USER');
-  assert.equal(FOLLOW_UP.text, 'wrong address, its the 88 howard one');
+  assert.equal(FOLLOW_UP.text, 'wrong address, its the 88 harlow one');
   process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND = '1';
   process.env.BLACKBOX_TEST_FAKE_TEMPORAL = '1';
 
@@ -537,6 +567,12 @@ async function main(): Promise<void> {
   };
   process.env.CEREBRAS_API_KEY = 'blackbox-cerebras-key';
   if (!LIVE) process.env.OPENROUTER_API_KEY = 'blackbox-openrouter-key';
+  const savedBounds = PROD_DEFAULT_BOUND_ENV.map((key) => [key, process.env[key]] as const);
+  for (const [key, value] of savedBounds) {
+    if (value === undefined) continue;
+    process.stdout.write(`  ignoring inherited ${key}=${value}; prod runs the code default\n`);
+    delete process.env[key];
+  }
 
   const cases: Array<[string, () => Promise<void>]> = LIVE
     ? [
@@ -577,6 +613,9 @@ async function main(): Promise<void> {
     else process.env.CEREBRAS_API_KEY = savedKeys.cerebras;
     if (savedKeys.openrouter === undefined) delete process.env.OPENROUTER_API_KEY;
     else process.env.OPENROUTER_API_KEY = savedKeys.openrouter;
+    for (const [key, value] of savedBounds) {
+      if (value !== undefined) process.env[key] = value;
+    }
     await prisma.$disconnect();
   }
   if (failed > 0) {

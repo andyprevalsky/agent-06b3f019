@@ -25,7 +25,7 @@
       },
       {
         "dt": 470,
-        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" 88 Howard St, San Francisco, not the\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" 88 Harlow St, San Francisco, not the\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
       },
       {
         "dt": 474,
@@ -45,7 +45,7 @@
       },
       {
         "dt": 494,
-        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" Howard St, San Francisco, CA \"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" Harlow St, San Francisco, CA \"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
       },
       {
         "dt": 498,
@@ -65,7 +65,7 @@
       },
       {
         "dt": 520,
-        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" 88 Howard St SF,\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" 88 Harlow St SF,\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
       },
       {
         "dt": 525,
@@ -105,7 +105,7 @@
       },
       {
         "dt": 569,
-        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" provided the location (88 Howard St,\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\" provided the location (88 Harlow St,\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
       },
       {
         "dt": 574,
@@ -177,7 +177,7 @@
       },
       {
         "dt": 658,
-        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"88 Howard SF, check\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"reasoning\":\"88 Harlow SF, check\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
       },
       {
         "dt": 663,
@@ -281,7 +281,7 @@
       },
       {
         "dt": 789,
-        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" the location to 88 Howard St, San\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\" the location to 88 Harlow St, San\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
       },
       {
         "dt": 794,
@@ -349,7 +349,7 @@
       },
       {
         "dt": 877,
-        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\"8 Howard St, San Francisco, CA 94105. Search\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
+        "line": "data: {\"id\":\"chatcmpl-9093933d-a615-4f4e-bf8c-7ab068655cd3\",\"choices\":[{\"delta\":{\"content\":\"8 Harlow St, San Francisco, CA 94105. Search\"},\"index\":0}],\"created\":1790828971,\"model\":\"qwen-3.8-27b\",\"system_fingerprint\":\"fp_829e8c8e5020fd230ff0\",\"object\":\"chat.completion.chunk\"}"
       },
       {
         "dt": 878,
@@ -418,7 +418,7 @@
       },
       {
         "dt": 3069,
-        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"role\":\"assistant\",\"reasoning\":\"User corrects: they're in SF, 88 Howard St. Need to redo research for SF hot yoga this weekend. Escalate to start_superintelligence again with corrected anchor.\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"User corrects: they're in SF, 88 Howard St. Need to redo research for SF hot yoga this weekend. Escalate to start_superintelligence again with corrected anchor.\",\"format\":\"unknown\",\"index\":0}]},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"role\":\"assistant\",\"reasoning\":\"User corrects: they're in SF, 88 Harlow St. Need to redo research for SF hot yoga this weekend. Escalate to start_superintelligence again with corrected anchor.\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"User corrects: they're in SF, 88 Harlow St. Need to redo research for SF hot yoga this weekend. Escalate to start_superintelligence again with corrected anchor.\",\"format\":\"unknown\",\"index\":0}]},\"finish_reason\":null,\"native_finish_reason\":null}]}"
       },
       {
         "dt": 3073,
@@ -450,7 +450,7 @@
       },
       {
         "dt": 3280,
-        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 88 Howard St\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 88 Harlow St\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
       },
       {
         "dt": 3280,
@@ -602,7 +602,7 @@
       },
       {
         "dt": 4793,
-        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 88 Howard St\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 88 Harlow St\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
       },
       {
         "dt": 5060,
@@ -650,7 +650,7 @@
       },
       {
         "dt": 5265,
-        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 88 howard\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" 88 harlow\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
       },
       {
         "dt": 5385,
@@ -818,7 +818,7 @@
       },
       {
         "dt": 7129,
-        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" Howard St, Apt\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
+        "line": "data: {\"id\":\"gen-1790828394-DnM64U0qsHe6CYOdLWoX\",\"object\":\"chat.completion.chunk\",\"created\":1790828394,\"model\":\"z-ai/glm-5.3-flash\",\"provider\":\"Together\",\"system_fingerprint\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" Harlow St, Apt\",\"role\":\"assistant\"},\"finish_reason\":null,\"native_finish_reason\":null}]}"
       },
       {
         "dt": 7129,
