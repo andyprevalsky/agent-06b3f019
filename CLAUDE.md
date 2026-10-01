@@ -598,6 +598,10 @@ deployed backend configuration and Chromium installed for the backend's declared
 Playwright version. Preserve the existing key when synchronizing env files;
 never print it. The publisher verifies the signed link in a fresh browser;
 `--run-id <UUID>` identifies an existing Hub run when `--run-json` is unavailable.
+On Linux, install the host libraries with the declared backend Playwright CLI
+(`node back-end/node_modules/playwright/cli.js install-deps chromium`) as well as
+its Chromium binary. If a direct launch reports that the browser closed, inspect
+complete native stderr for missing libraries before changing launch timeouts.
 
 - Every time a benchmark task is run, include the valid FE link to view the run (for example, `http://localhost:5050/?agent-id=ac267c32-470f-41da-8343-091b8965c410`) and verify it actually displays the agent.
 
