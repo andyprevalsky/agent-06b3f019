@@ -76,26 +76,35 @@ AUTH_FLOW_URL_PATTERNS = [
 # Auth-flow markers are whole host labels / path words, never substrings of the
 # raw URL: "auth" inside r/AuthorsGuild or a ``redirect_after_login`` query
 # parameter on a composer URL must not switch the social write lock off.
-_AUTH_FLOW_URL_WORDS = frozenset({
-    *AUTH_FLOW_URL_PATTERNS,
-    "logon",
-    "signin",
-    "oauth",
-    "oauth2",
-    "authorize",
-    "authenticate",
-    "authentication",
-    "register",
-    "registration",
-    "sso",
-})
+_AUTH_FLOW_URL_WORDS = frozenset(
+    {
+        *AUTH_FLOW_URL_PATTERNS,
+        "logon",
+        "signin",
+        "oauth",
+        "oauth2",
+        "authorize",
+        "authenticate",
+        "authentication",
+        "register",
+        "registration",
+        "sso",
+    }
+)
 # Joined path words such as ``emailsignup`` or ``wplogin``.
 _AUTH_FLOW_URL_WORD_SUFFIXES = ("login", "signin", "signup")
 # A route segment that ends in one of these after at most one qualifier
 # (``ServiceLogin``, ``user-sign-in``) is an auth step; a longer slug such as
 # ``i_cant_log_in`` is a post title that only mentions one.
 _AUTH_FLOW_URL_TAIL_PHRASES = (
-    ("login",), ("signin",), ("signup",), ("log", "in"), ("log", "on"), ("sign", "in"), ("sign", "on"), ("sign", "up"),
+    ("login",),
+    ("signin",),
+    ("signup",),
+    ("log", "in"),
+    ("log", "on"),
+    ("sign", "in"),
+    ("sign", "on"),
+    ("sign", "up"),
 )
 _URL_FILE_EXTENSION_RE = re.compile(r"\.[a-z0-9]{1,5}$", re.IGNORECASE)
 
@@ -124,10 +133,24 @@ PAYMENT_FIELD_PATTERNS = [
 # code word, so "Gift message" / "Billing address" / "Passport expiration date"
 # stay open while "Name on card" / "Card number" / "CVV" lock.
 _CARD_CONTEXT_WORDS = frozenset({"card", "cc", "credit", "debit"})
-_CARD_DETAIL_WORDS = frozenset({
-    "number", "num", "no", "holder", "name", "owner", "exp", "expiry", "expiration",
-    "expires", "date", "code", "security", "verification",
-})
+_CARD_DETAIL_WORDS = frozenset(
+    {
+        "number",
+        "num",
+        "no",
+        "holder",
+        "name",
+        "owner",
+        "exp",
+        "expiry",
+        "expiration",
+        "expires",
+        "date",
+        "code",
+        "security",
+        "verification",
+    }
+)
 _CARD_SECURITY_CODE_WORDS = frozenset({"cvv", "cvv2", "cvc", "cvc2", "csc", "cvn"})
 _CARD_JOINED_WORDS = frozenset({"cardnumber", "ccnumber", "cardholder", "creditcard", "debitcard"})
 _EXPIRY_WORDS = frozenset({"exp", "expiry", "expiration", "expires", "expdate"})
@@ -159,6 +182,7 @@ def autocomplete_indicates_payment(autocomplete: str) -> bool:
     if not autocomplete:
         return False
     return any(token in PAYMENT_AUTOCOMPLETE_TOKENS for token in autocomplete.split())
+
 
 # Submit button verbs, matched as whole words of the label ("Posts", "12 Comments",
 # "Postal code" are not submits; "tweetButtonInline" splits to "tweet button inline").
@@ -274,13 +298,15 @@ AI_COMPOSER_SUBMIT_PHRASES = (
 
 # Generic composer labels that are email_send elsewhere ("Send", "Send
 # message") become composer submits only on known AI-assistant hosts.
-AI_COMPOSER_SUBMIT_EXACT = frozenset({
-    "send",
-    "send message",
-    "submit",
-    "send prompt",
-    "submit prompt",
-})
+AI_COMPOSER_SUBMIT_EXACT = frozenset(
+    {
+        "send",
+        "send message",
+        "submit",
+        "send prompt",
+        "submit prompt",
+    }
+)
 
 AI_ASSISTANT_COMPOSER_HOSTS = (
     "chatgpt.com",
@@ -339,11 +365,13 @@ RETURN_COMMIT_URL_PATH_PATTERNS = (
 
 # Exact (whitespace-stripped) labels that commit a return on RETURN_COMMIT URLs.
 # Do not use bare substring "return" — "Return to your orders" must stay open.
-RETURN_COMMIT_CONTINUE_LABELS = frozenset({
-    "continue",
-    "submit",
-    "confirm",
-})
+RETURN_COMMIT_CONTINUE_LABELS = frozenset(
+    {
+        "continue",
+        "submit",
+        "confirm",
+    }
+)
 
 # Wizard-step Continues that share `/spr/returns/contract` with the final commit.
 # Agent c1b33ca5 (2026-09-28 browser-amazon-return): clicked
@@ -437,9 +465,7 @@ _PURCHASE_PHRASE_PATTERNS = tuple((phrase, _purchase_phrase_pattern(phrase)) for
 # "Pay" followed by a currency amount is the hosted-checkout commit
 # ("Pay $42.10", "Pay €18,00", "Pay USD 12", "Pay 30 €").
 _CURRENCY = r"(?:[$€£¥₹]|us\$|a\$|c\$|usd|eur|gbp|cad|aud|inr|jpy|chf)"
-_PAY_AMOUNT_RE = re.compile(
-    rf"(?<![a-z0-9])pay\s+(?:{_CURRENCY}\s*\d|\d[\d.,]*\s*{_CURRENCY}(?![a-z]))"
-)
+_PAY_AMOUNT_RE = re.compile(rf"(?<![a-z0-9])pay\s+(?:{_CURRENCY}\s*\d|\d[\d.,]*\s*{_CURRENCY}(?![a-z]))")
 
 
 def _purchase_signal_word_forms(signal: str) -> list[str]:
@@ -484,6 +510,7 @@ def _is_purchase_informational_exclusion(normalized: str) -> bool:
         return False
     return any(pattern in alnum for pattern in PURCHASE_INFORMATIONAL_EXCLUSION_PATTERNS)
 
+
 _DOM_IDENTIFIER_SIGNAL = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 
@@ -517,9 +544,7 @@ def is_click_write_lock_eligible_control(element: Any) -> bool:
     if element is None:
         return True
 
-    tag = str(
-        getattr(element, "tag_name", "") or getattr(element, "node_name", "") or ""
-    ).strip().lower()
+    tag = str(getattr(element, "tag_name", "") or getattr(element, "node_name", "") or "").strip().lower()
     # Missing / mock tags are not form-field exclusions.
     if not tag or tag.startswith("<") or "magicmock" in tag:
         return True
@@ -545,7 +570,7 @@ def _is_auth_flow_segment(segment: str) -> bool:
     if len(tokens) == 1:
         return tokens[0].endswith(_AUTH_FLOW_URL_WORD_SUFFIXES)
     return any(
-        tuple(tokens[-len(phrase):]) == phrase and len(tokens) - len(phrase) <= 1
+        tuple(tokens[-len(phrase) :]) == phrase and len(tokens) - len(phrase) <= 1
         for phrase in _AUTH_FLOW_URL_TAIL_PHRASES
     )
 
@@ -681,10 +706,7 @@ def _is_email_otp_retry(normalized: str) -> bool:
     tests only made safe retry labels fail closed and hang the run on an approval
     that never arrives.
     """
-    return any(
-        normalized == prefix or normalized.startswith(f"{prefix} ")
-        for prefix in EMAIL_OTP_RETRY_PREFIXES
-    )
+    return any(normalized == prefix or normalized.startswith(f"{prefix} ") for prefix in EMAIL_OTP_RETRY_PREFIXES)
 
 
 def is_ai_assistant_composer_host(url: str) -> bool:
@@ -770,9 +792,7 @@ def is_purchase_button(element_text: str) -> bool:
     # "Terms of Service" in one signal cannot veto "Buy Now" in another.
     for signal in element_text.split("\n"):
         if is_dom_identifier_write_lock_signal(signal):
-            logger.debug(
-                f"Element signal '{signal[:80]}' skipped as DOM id/name, not a purchase label"
-            )
+            logger.debug(f"Element signal '{signal[:80]}' skipped as DOM id/name, not a purchase label")
             continue
         match_forms = _purchase_signal_match_forms(signal)
         if not match_forms:
@@ -783,14 +803,10 @@ def is_purchase_button(element_text: str) -> bool:
             for form in match_forms
             for pattern in PURCHASE_CONSENT_PROSE_PATTERNS
         ):
-            logger.debug(
-                f"Element signal '{signal[:80]}' matched purchase consent-prose exclusion"
-            )
+            logger.debug(f"Element signal '{signal[:80]}' matched purchase consent-prose exclusion")
             continue
         if any(_is_purchase_informational_exclusion(form) for form in match_forms):
-            logger.debug(
-                f"Element signal '{signal[:80]}' matched purchase informational exclusion"
-            )
+            logger.debug(f"Element signal '{signal[:80]}' matched purchase informational exclusion")
             continue
 
         phrase = _purchase_phrase_match(signal, match_forms)
@@ -898,11 +914,7 @@ def extract_amazon_return_approval_fields(page_text: str) -> dict[str, str]:
         # later option's [checked] cannot select an earlier one.
         drop_matches = list(_AMAZON_RETURN_SELECTED_DROPOFF_RE.finditer(text))
         for index, match in enumerate(drop_matches):
-            next_start = (
-                drop_matches[index + 1].start()
-                if index + 1 < len(drop_matches)
-                else len(text)
-            )
+            next_start = drop_matches[index + 1].start() if index + 1 < len(drop_matches) else len(text)
             option_end = min(next_start, match.end() + 40)
             window = text[match.start() : option_end].lower()
             # Reject negated markers (unchecked / aria-*-false / not selected).
@@ -916,11 +928,7 @@ def extract_amazon_return_approval_fields(page_text: str) -> dict[str, str]:
                 prefix = window[max(0, start - 12) : start]
                 suffix = window[start : start + 18]
                 negated_prefix = prefix.endswith("un") or prefix.rstrip().endswith("not")
-                false_attr = (
-                    f"{token}=false" in suffix
-                    or f'{token}="false"' in suffix
-                    or f"{token}='false'" in suffix
-                )
+                false_attr = f"{token}=false" in suffix or f'{token}="false"' in suffix or f"{token}='false'" in suffix
                 if negated_prefix or false_attr:
                     continue
                 has_selection = True
@@ -1060,9 +1068,7 @@ def is_return_button(element_text: str, url: str = "") -> bool:
 
     for signal in element_text.split("\n"):
         if is_dom_identifier_write_lock_signal(signal):
-            logger.debug(
-                f"Element signal '{signal[:80]}' skipped as DOM id/name, not a return label"
-            )
+            logger.debug(f"Element signal '{signal[:80]}' skipped as DOM id/name, not a return label")
             continue
         text_lower = normalize_write_lock_text(signal)
         if not text_lower:
@@ -1073,9 +1079,7 @@ def is_return_button(element_text: str, url: str = "") -> bool:
                 return True
 
     if on_return_commit_url and _is_return_commit_continue_signal(element_text):
-        logger.debug(
-            f"Element text '{element_text[:80]}' matched return-commit Continue on {url[:80]}"
-        )
+        logger.debug(f"Element text '{element_text[:80]}' matched return-commit Continue on {url[:80]}")
         return True
     return False
 
@@ -1206,8 +1210,4 @@ def get_write_lock_approval_question(
             f"**Page:** {url}"
         )
     else:
-        return (
-            f"**Write Action Detected**\n\n"
-            f"{system_name} wants to perform a write action.\n\n"
-            f"**Page:** {url}"
-        )
+        return f"**Write Action Detected**\n\n" f"{system_name} wants to perform a write action.\n\n" f"**Page:** {url}"

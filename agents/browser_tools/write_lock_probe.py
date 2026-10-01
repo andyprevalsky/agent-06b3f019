@@ -38,15 +38,39 @@ logger = logging.getLogger(__name__)
 
 _PAGE_CONTAINER_TAGS = frozenset({"html", "body", "main"})
 _CONTROL_TAGS = frozenset({"button", "input", "select", "textarea", "summary"})
-_CONTROL_ROLES = frozenset({
-    "button", "link", "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "checkbox",
-    "radio", "switch", "option", "textbox", "searchbox", "combobox",
-})
+_CONTROL_ROLES = frozenset(
+    {
+        "button",
+        "link",
+        "menuitem",
+        "menuitemcheckbox",
+        "menuitemradio",
+        "tab",
+        "checkbox",
+        "radio",
+        "switch",
+        "option",
+        "textbox",
+        "searchbox",
+        "combobox",
+    }
+)
 _EDITABLE_ROLES = frozenset({"textbox", "searchbox", "combobox"})
 _CONTENTEDITABLE_VALUES = frozenset({"", "true", "plaintext-only"})
-_NON_TEXT_INPUT_TYPES = frozenset({
-    "submit", "reset", "button", "image", "checkbox", "radio", "file", "range", "color", "hidden",
-})
+_NON_TEXT_INPUT_TYPES = frozenset(
+    {
+        "submit",
+        "reset",
+        "button",
+        "image",
+        "checkbox",
+        "radio",
+        "file",
+        "range",
+        "color",
+        "hidden",
+    }
+)
 _CONTEXT_ID_DEPTH = 6
 _WRAPPER_DEPTH = 3
 _WRAPPER_MAX_CHARS = 200
