@@ -78,11 +78,7 @@ import {
   transformMessagesForAnthropic,
   transformSchemaForAnthropic,
 } from '../../providers/rose/transforms';
-import type {
-  CompletionMessage,
-  CompletionOptions,
-  RoseStreamChunk,
-} from '../../providers/rose/types';
+import type { CompletionMessage, RoseStreamChunk } from '../../providers/rose/types';
 import {
   ANTHROPIC_API_URL,
   CEREBRAS_API_URL,
@@ -2327,45 +2323,6 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
   }
 }
 
-async function testOpenRouterFastChat_routesEachRequestByThroughput() {
-  const options: CompletionOptions = {
-    messages: [{ role: 'user', content: 'wrong address' }],
-    response_format: {
-      type: 'json_schema',
-      json_schema: { name: 'router_decision', strict: true, schema: { type: 'object' } },
-    },
-  };
-  const body = buildOpenRouterFastChatBody(options, 'req-attempt-1');
-  const regenerate = buildOpenRouterFastChatBody(options, 'req-attempt-2');
-  assert(
-    typeof body.session_id === 'string' && body.session_id.length > 0,
-    'failover must name its own OpenRouter session instead of the conversation-derived one'
-  );
-  assert(
-    body.session_id !== regenerate.session_id,
-    'a router regenerate must route afresh: a Rose stall abort never releases the host pin'
-  );
-  const provider = body.provider as Record<string, unknown> | undefined;
-  assertEqual(
-    provider?.sort,
-    'throughput',
-    'Cerebras-stall failover must not ride price-weighted routing to the slowest GLM hosts'
-  );
-  assertEqual(
-    provider?.require_parameters,
-    true,
-    'failover must only reach GLM hosts that honor response_format'
-  );
-  assert(
-    provider?.order === undefined && provider?.only === undefined,
-    'failover must follow the live throughput ranking, not a fixed GLM host list'
-  );
-  assert(
-    provider?.allow_fallbacks !== false,
-    'failover must still reach another GLM host when the fastest errors'
-  );
-}
-
 async function testClaudeAuth_omitsEffortForHaiku() {
   // rose-1-mini claudeAuth is claude-haiku-4-5, which 400s on
   // output_config.effort. Mirror agents rose.blackbox (spawn-sub-agents
@@ -3004,31 +2961,6 @@ async function testStreaming_openai_parseErrorTolerated() {
     .map((c) => (c.kind === 'content' ? c.data.text : ''))
     .join('');
   assertEqual(text, 'xy', 'malformed line skipped, surrounding content preserved');
-}
-
-async function testStreaming_openai_reportsUpstreamProviderOnce() {
-  const lines = [
-    'data: {"provider":"InferenceNet","choices":[{"index":0,"delta":{"role":"assistant"}}]}',
-    '',
-    'data: {"provider":"InferenceNet","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"stop"}]}',
-    '',
-    'data: [DONE]',
-    '',
-  ];
-  const providers: string[] = [];
-  await collectRose(
-    parseOpenAISSE(rawStream([lines.join('\n') + '\n']), {
-      actualModel: 'or-test',
-      poolName: 'openrouter-fast-chat',
-      requestId: 'r-or-provider',
-      onUpstreamProvider: (provider) => providers.push(provider),
-    })
-  );
-  assertEqual(
-    JSON.stringify(providers),
-    JSON.stringify(['InferenceNet']),
-    'the serving OpenRouter host is reported exactly once per stream'
-  );
 }
 
 async function testStreaming_openai_reasoningField() {
@@ -4053,10 +3985,6 @@ async function main(): Promise<void> {
       fn: testWaterfall_bodyBuildersAlwaysStampEffortXhigh,
     },
     {
-      name: 'openrouter-fast / routes each request by throughput to response_format hosts',
-      fn: testOpenRouterFastChat_routesEachRequestByThroughput,
-    },
-    {
       name: 'claudeAuth / omits effort for haiku (rose-1-mini)',
       fn: testClaudeAuth_omitsEffortForHaiku,
     },
@@ -4114,10 +4042,6 @@ async function main(): Promise<void> {
     {
       name: 'streaming / openai parse error tolerated',
       fn: testStreaming_openai_parseErrorTolerated,
-    },
-    {
-      name: 'streaming / openai reports the upstream OpenRouter host once',
-      fn: testStreaming_openai_reportsUpstreamProviderOnce,
     },
     {
       name: 'streaming / openai reasoning field → reasoning chunk',

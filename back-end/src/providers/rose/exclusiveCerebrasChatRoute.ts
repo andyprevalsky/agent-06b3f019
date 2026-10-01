@@ -258,7 +258,9 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
         pool: params.pool,
       });
     } catch (error) {
-      if (emittedAny) throw error; // post-content failures surface unchanged
+      // Post-content failures surface unchanged, and a caller that gave up
+      // (the router's deadline) must not start the waterfall it abandoned.
+      if (emittedAny || params.options.abort_signal?.aborted) throw error;
       cerebrasFailure = error;
       log.warn('cerebras_chat.pre_content_failover_to_waterfall', {
         request_id: params.requestId,
@@ -283,6 +285,7 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
       });
     } catch (error) {
       if (!(error instanceof PreContentFallThroughError)) throw error;
+      if (params.options.abort_signal?.aborted) throw error.cause;
       cerebrasFailure = error.cause;
       log.warn('cerebras_chat.pre_content_failover_to_waterfall', {
         request_id: params.requestId,

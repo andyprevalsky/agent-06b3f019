@@ -101,6 +101,30 @@ export function buildOpenRouterFastChatBody(
   };
 }
 
+/**
+ * One record per failover request, written when it ends for any reason,
+ * including a caller abort. A router stall bound aborts the request before
+ * this route's own guard fires and usually before any SSE event, so neither a
+ * branch-failure log nor the host field can record that outcome.
+ */
+interface FastChatTrace {
+  status?: number;
+  headers_ms?: number;
+  provider?: string;
+  first_event_ms?: number;
+  first_output_ms?: number;
+  first_content_ms?: number;
+  end?: 'completed' | 'caller_aborted' | 'consumer_closed' | 'no_output_timeout' | 'failed';
+  error_name?: string;
+  abort_reason?: string;
+}
+
+function abortReason(signal: AbortSignal | undefined): string | undefined {
+  if (!signal?.aborted) return undefined;
+  const reason: unknown = signal.reason;
+  return (reason instanceof Error ? reason.message : String(reason)).slice(0, 200);
+}
+
 function openRouterHttpError(status: number, requestId: string): Error {
   const message = `OpenRouter fast chat ${status} (request_id=${requestId})`;
   if (status === 400 || status === 404 || status === 422) return new RoseInvalidRequest(message);
@@ -130,6 +154,8 @@ export async function* exclusiveOpenRouterFastChatCompletion(params: {
   );
   let emittedMeaningfulChunk = false;
   const startedAt = Date.now();
+  const elapsed = (): number => Date.now() - startedAt;
+  const trace: FastChatTrace = {};
 
   try {
     const response = await postOpenRouterStream({
@@ -140,6 +166,8 @@ export async function* exclusiveOpenRouterFastChatCompletion(params: {
       abortSignal: requestSignal,
       connectTimeoutMs: preTokenTimeoutMs,
     });
+    trace.status = response.status;
+    trace.headers_ms = elapsed();
     if (!response.ok) {
       throw openRouterHttpError(response.status, params.requestId);
     }
@@ -154,15 +182,14 @@ export async function* exclusiveOpenRouterFastChatCompletion(params: {
       poolName: OPENROUTER_FAST_CHAT_POOL,
       requestId: params.requestId,
       idleTimeoutMs: preTokenTimeoutMs,
-      onUpstreamProvider: (provider) =>
-        log.info('openrouter_fast_chat.upstream_provider', {
-          request_id: params.requestId,
-          call_site: params.callSite,
-          provider,
-          first_event_ms: Date.now() - startedAt,
-        }),
+      onUpstreamProvider: (provider) => {
+        trace.provider = provider;
+        trace.first_event_ms = elapsed();
+      },
     })) {
+      if (chunk.kind !== 'metadata') trace.first_output_ms ??= elapsed();
       if (clearsChatStallGuard(chunk.kind)) {
+        trace.first_content_ms ??= elapsed();
         emittedMeaningfulChunk = true;
         clearTimeout(preTokenTimer);
       }
@@ -173,9 +200,18 @@ export async function* exclusiveOpenRouterFastChatCompletion(params: {
         `OpenRouter fast chat stream ended without model output (request_id=${params.requestId})`
       );
     }
+    trace.end = 'completed';
   } catch (error) {
-    if (params.options.abort_signal?.aborted) throw error;
-    if (preTokenController.signal.aborted && !emittedMeaningfulChunk) throw preTokenError;
+    trace.error_name = error instanceof Error ? error.name : 'unknown';
+    if (params.options.abort_signal?.aborted) {
+      trace.end = 'caller_aborted';
+      throw error;
+    }
+    if (preTokenController.signal.aborted && !emittedMeaningfulChunk) {
+      trace.end = 'no_output_timeout';
+      throw preTokenError;
+    }
+    trace.end = 'failed';
     if (!emittedMeaningfulChunk && !(error instanceof RoseError)) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new RoseStallError(
@@ -185,5 +221,16 @@ export async function* exclusiveOpenRouterFastChatCompletion(params: {
     throw error;
   } finally {
     clearTimeout(preTokenTimer);
+    // A consumer that stops iterating (a lost hedge race) ends the stream
+    // without an error reaching this generator.
+    trace.end ??= params.options.abort_signal?.aborted ? 'caller_aborted' : 'consumer_closed';
+    const reason = abortReason(params.options.abort_signal);
+    if (reason !== undefined) trace.abort_reason = reason;
+    log.info('openrouter_fast_chat.end', {
+      request_id: params.requestId,
+      call_site: params.callSite,
+      duration_ms: elapsed(),
+      ...trace,
+    });
   }
 }
