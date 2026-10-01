@@ -8320,7 +8320,7 @@ async def test_parallel_tasks_keep_their_own_run_user():
 
     assert sibling_result.status == "ERROR", sibling_result
     assert isinstance(payer_result, RuntimeError), payer_result
-    assert seen == {"sibling": bench.USER_ID, "payer": payer_user}, seen
+    assert seen == {"sibling": bench._default_benchmark_user_id, "payer": payer_user}, seen
     assert leaked_user is None
     assert user_after_run == bench.USER_ID
 
