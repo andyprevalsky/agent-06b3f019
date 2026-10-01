@@ -76,8 +76,13 @@ for (const [name, harness] of [
   ['blackbox', blackboxScript],
 ] as const) {
   assert.ok(
-    harness.indexOf('npx prisma generate') < harness.indexOf('npx prisma db push'),
-    `${name} launcher must regenerate Prisma before syncing or starting test children`
+    harness.includes('sync-prisma-client.sh') &&
+      harness.indexOf('sync-prisma-client.sh') < harness.indexOf('npx prisma db push'),
+    `${name} launcher must sync the Prisma client before syncing or starting test children`
+  );
+  assert.ok(
+    !harness.includes('npx prisma generate'),
+    `${name} launcher must not regenerate a fresh Prisma client under concurrent lint/type checks`
   );
 }
 

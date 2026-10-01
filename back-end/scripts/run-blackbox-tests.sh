@@ -275,7 +275,7 @@ END $$;
 SQL
     fi
     echo "Syncing Prisma schema to local test database..."
-    npx prisma generate >/dev/null
+    bash "$SCRIPT_DIR/sync-prisma-client.sh"
     npx prisma db push --skip-generate --accept-data-loss >/dev/null
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
     # Credential seeding and smoke execution are separate controls. A caller may
