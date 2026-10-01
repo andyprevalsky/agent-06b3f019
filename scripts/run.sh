@@ -1034,17 +1034,7 @@ _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum ba
 # of which then fails its restore and, under BENCHMARK_REQUIRE_SEED_DUMP=1,
 # refuses to boot at all. Keying by major lets mismatched clients coexist rather
 # than clobber each other.
-_SEED_DUMP_CLIENT_MAJOR="$(
-    if [ "${USE_SYSTEM_PG:-false}" = "true" ]; then
-        # Anchor at the first X.Y in the string. The Ubuntu package suffix
-        # (e.g. "16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)") contains a later
-        # "24.04" that a greedy "last X.Y" sed mistakenly treats as the major.
-        pg_dump --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/'
-    else
-        echo 16 # the pinned postgres:16-alpine container below writes the archive
-    fi
-)"
-[ -n "$_SEED_DUMP_CLIENT_MAJOR" ] || _SEED_DUMP_CLIENT_MAJOR=unknown
+_SEED_DUMP_CLIENT_MAJOR="$(benchmark_seed_client_major "${USE_SYSTEM_PG:-false}")"
 _SEED_CACHE_TOKEN="$(benchmark_base_cache_token back-end/prisma/schema.prisma "$_SEED_DUMP_CLIENT_MAJOR")"
 # R2 creds live in back-end/.env (run.sh does not export them to its shell), so
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.

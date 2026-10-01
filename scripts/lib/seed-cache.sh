@@ -67,6 +67,19 @@ benchmark_base_cache_token() {
     fi
 }
 
+# pg_dump major that writes (and must be able to read) this host's seed archive:
+# the host client under system Postgres, the pinned postgres:16 image otherwise.
+# Anchor at the first X.Y: Ubuntu's "16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)"
+# contains a later "24.04" that a greedy "last X.Y" match treats as the major.
+benchmark_seed_client_major() {
+    local use_system_pg="${1:-false}"
+    local major=16
+    if [ "$use_system_pg" = "true" ]; then
+        major="$(pg_dump --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/')"
+    fi
+    printf '%s\n' "${major:-unknown}"
+}
+
 # Producers and consumers hold the same per-dump directory lock across every
 # read/delete/restore or replacement of the dump + sidecar pair. The lock is
 # host-local: it coordinates sibling isolated stacks without creating a global
@@ -203,6 +216,48 @@ materialize_benchmark_seed_dump() (
     mv "$temp_hash" "${target_dump}.schemahash"
     release_benchmark_seed_lock "$target_dump"
     trap - EXIT INT TERM
+    printf '%s\n' "$target_dump"
+)
+
+# Pull the canonical base fixture from the shared R2 cache for consumers outside
+# run.sh (e.g. measure-seed-memory.sh on a host that never ran a benchmark).
+# Lands under local.py's canonical filename with run.sh's sidecars, so a later
+# isolated benchmark restores this pair instead of downloading it again.
+# fetch_canonical_seed_dump <schema_path> <cache_dir> <pg_major> <backend_dir>
+fetch_canonical_seed_dump() (
+    local schema_path="$1"
+    local cache_dir="$2"
+    local pg_major="$3"
+    local backend_dir="$4"
+    local token
+    local stem
+    local schema_hash
+    local target_dump
+    local temp_dump
+
+    token="$(benchmark_base_cache_token "$schema_path" "$pg_major")" || return 1
+    stem="$(benchmark_base_cache_token "$schema_path")" || return 1
+    schema_hash="${stem%%-*}"
+    mkdir -p "$cache_dir" || return 1
+    cache_dir="$(cd "$cache_dir" && pwd)"
+    target_dump="$cache_dir/$stem.dump"
+    temp_dump="${target_dump}.tmp.$$"
+    acquire_benchmark_seed_lock "$target_dump" || return 1
+    trap 'rm -f "$temp_dump" 2>/dev/null || true; release_benchmark_seed_lock "$target_dump"' EXIT INT TERM
+
+    if [ "$(seed_cache_decision "$target_dump" "$schema_hash" 1 "$token")" != "restore-local" ]; then
+        (cd "$backend_dir" && npx tsx scripts/seed-dump-cache.ts get "$token" "$temp_dump") >&2 || {
+            echo "shared seed cache has no canonical base fixture for $token" >&2
+            return 1
+        }
+        [ -s "$temp_dump" ] || {
+            echo "shared seed cache returned an empty dump for $token" >&2
+            return 1
+        }
+        mv "$temp_dump" "$target_dump"
+        printf '%s' "$schema_hash" > "${target_dump}.schemahash"
+        printf '%s' "$token" > "${target_dump}.cachetoken"
+    fi
     printf '%s\n' "$target_dump"
 )
 

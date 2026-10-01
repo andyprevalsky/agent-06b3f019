@@ -92,19 +92,23 @@ fi
 # Ubuntu's `pg_dump --version` ends with "...24.04.1)"; a greedy "last X.Y" sed
 # extracts 04 and looks up a nonexistent pg04 cache token. Anchor at the first
 # version number so system-PG hosts keep matching the pg16 (or real major) artifact.
-_PG_MAJOR_SED="$(printf '%s\n' 'pg_dump (PostgreSQL) 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)' \
-  | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/')"
-if [ "$_PG_MAJOR_SED" = "16" ] \
-  && grep -q "s/^\\[^0-9\\]*(\\([0-9]\\+\\))\\\\..*/\\\\1/" "$ROOT_DIR/scripts/run.sh"; then
-    PASS=$((PASS+1)); echo "  ✅ system pg_dump major parsing anchors at the first X.Y (not Ubuntu 24.04)"
+MAJOR_BIN="$TMP/major-bin"
+mkdir -p "$MAJOR_BIN"
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$FAKE_PG_DUMP_VERSION"' > "$MAJOR_BIN/pg_dump"
+chmod +x "$MAJOR_BIN/pg_dump"
+check "system pg_dump major anchors at the first X.Y (not Ubuntu 24.04)" "16" \
+    "$(FAKE_PG_DUMP_VERSION='pg_dump (PostgreSQL) 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)' \
+        PATH="$MAJOR_BIN:$PATH" benchmark_seed_client_major true)"
+check "system pg_dump major follows a newer host client" "18" \
+    "$(FAKE_PG_DUMP_VERSION='pg_dump (PostgreSQL) 18.1' PATH="$MAJOR_BIN:$PATH" benchmark_seed_client_major true)"
+check "Docker path keeps the pinned postgres:16 major" "16" \
+    "$(FAKE_PG_DUMP_VERSION='pg_dump (PostgreSQL) 18.1' PATH="$MAJOR_BIN:$PATH" benchmark_seed_client_major false)"
+check "unparseable host client yields an explicit unknown major" "unknown" \
+    "$(FAKE_PG_DUMP_VERSION='' PATH="$MAJOR_BIN:$PATH" benchmark_seed_client_major true)"
+if grep -q 'benchmark_seed_client_major "${USE_SYSTEM_PG:-false}"' "$ROOT_DIR/scripts/run.sh"; then
+    PASS=$((PASS+1)); echo "  ✅ run.sh derives the cache-token pg major from the shared helper"
 else
-    # Prefer the literal sed source form used in run.sh.
-    if [ "$_PG_MAJOR_SED" = "16" ] \
-      && grep -F "s/^[^0-9]*([0-9]+)\\..*/\\1/" "$ROOT_DIR/scripts/run.sh"; then
-      PASS=$((PASS+1)); echo "  ✅ system pg_dump major parsing anchors at the first X.Y (not Ubuntu 24.04)"
-    else
-      FAIL=$((FAIL+1)); echo "  ❌ system pg_dump major parsing still vulnerable to Ubuntu package suffix (got '${_PG_MAJOR_SED}')"
-    fi
+    FAIL=$((FAIL+1)); echo "  ❌ run.sh no longer derives the cache-token pg major from benchmark_seed_client_major"
 fi
 
 echo
@@ -335,6 +339,72 @@ if [ "$SYSTEM_MATERIALIZE_STATUS" -eq 0 ] \
     PASS=$((PASS+1)); echo "  ✅ system token materializes via host pg_dump (no Docker)"
 else
     FAIL=$((FAIL+1)); echo "  ❌ system materialize path failed: status=$SYSTEM_MATERIALIZE_STATUS path='$SYSTEM_MATERIALIZED_PATH'"
+fi
+
+echo
+echo "canonical fetch — consumers outside run.sh (the /deploy seed-memory ratchet)"
+echo "must pull the shared base fixture on a host that never ran a benchmark."
+FETCH_BIN="$TMP/fetch-bin"
+FETCH_CACHE="$TMP/fetch-cache"
+FETCH_BACKEND="$TMP/fetch-backend"
+FETCH_LOG="$TMP/fetch-npx.log"
+mkdir -p "$FETCH_BIN" "$FETCH_BACKEND"
+: > "$FETCH_LOG"
+printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "%s\n" "$*" >> "$FAKE_NPX_LOG"' \
+    '[ "$1 $2 $3" = "tsx scripts/seed-dump-cache.ts get" ] || exit 95' \
+    '[ "${FAKE_NPX_FAIL:-0}" = 0 ] || exit 1' \
+    'printf "canonical-dump-%s\n" "$4" > "$5"' \
+    > "$FETCH_BIN/npx"
+chmod +x "$FETCH_BIN/npx"
+fetch_canonical() {
+    FAKE_NPX_LOG="$FETCH_LOG" PATH="$FETCH_BIN:$PATH" \
+        bash "$SEED_CLI" fetch "$SCHEMA_FILE" "$FETCH_CACHE" 16 "$FETCH_BACKEND"
+}
+FETCH_TOKEN="$(benchmark_base_cache_token "$SCHEMA_FILE" 16)"
+FETCH_EXPECTED="$(
+    PYTHONPATH="$ROOT_DIR/agents" "$PYTHON_BIN" -c \
+        'import sys; from pathlib import Path; from benchmarks.local import local_seed_dump_path; print(local_seed_dump_path(Path(sys.argv[1]), Path(sys.argv[2])))' \
+        "$SCHEMA_FILE" "$FETCH_CACHE"
+)"
+FETCH_HASH="$( (shasum "$SCHEMA_FILE" 2>/dev/null || sha1sum "$SCHEMA_FILE") | awk '{print $1}')"
+
+set +e
+FETCHED_PATH="$(fetch_canonical)"
+FETCH_STATUS=$?
+set -e
+if [ "$FETCH_STATUS" -eq 0 ] \
+   && [ "$FETCHED_PATH" = "$FETCH_EXPECTED" ] \
+   && [ "$(cat "$FETCH_EXPECTED" 2>/dev/null)" = "canonical-dump-$FETCH_TOKEN" ] \
+   && [ "$(seed_cache_decision "$FETCH_EXPECTED" "$FETCH_HASH" 1 "$FETCH_TOKEN")" = "restore-local" ] \
+   && [ "$(wc -l < "$FETCH_LOG" | tr -d ' ')" = 1 ]; then
+    PASS=$((PASS+1)); echo "  ✅ empty cache pulls the pg-major token into local.py's canonical path with run.sh's sidecars"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ canonical fetch failed: status=$FETCH_STATUS path='$FETCHED_PATH' expected='$FETCH_EXPECTED'"
+fi
+
+FETCHED_AGAIN="$(fetch_canonical)"
+check "valid canonical pair is reused without another download" \
+    "$FETCH_EXPECTED:1" "$FETCHED_AGAIN:$(wc -l < "$FETCH_LOG" | tr -d ' ')"
+
+printf 'older-revision' > "${FETCH_EXPECTED}.cachetoken"
+FETCHED_STALE="$(fetch_canonical)"
+check "pair from another pg major/revision is replaced from the shared cache" \
+    "$FETCH_EXPECTED:2:$FETCH_TOKEN" \
+    "$FETCHED_STALE:$(wc -l < "$FETCH_LOG" | tr -d ' '):$(cat "${FETCH_EXPECTED}.cachetoken")"
+
+rm -rf "$FETCH_CACHE"
+set +e
+FAKE_NPX_FAIL=1 fetch_canonical >/dev/null 2>&1
+MISS_STATUS=$?
+set -e
+if [ "$MISS_STATUS" -ne 0 ] \
+   && ! find "$FETCH_CACHE" -name '*.dump*' -print -quit 2>/dev/null | grep -q . \
+   && [ ! -L "${FETCH_EXPECTED}.publish.lock" ]; then
+    PASS=$((PASS+1)); echo "  ✅ shared-cache miss fails closed without a partial dump or leaked lock"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ shared-cache miss left state behind or reported success (status=$MISS_STATUS)"
 fi
 
 # setup-db.sh must support ROSE_USE_SYSTEM_PG and pass "system" to materialize.
