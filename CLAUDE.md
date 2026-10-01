@@ -290,6 +290,9 @@ still satisfy an infrastructure proof; a missing result, missing successful
 model responses, stale/foreign evidence, or unverified teardown cannot. Stop
 only the exact controller PID/owner recorded for your run and let its traps
 recover resources; use its exact stale-owner recovery path if needed.
+For shell process ownership, capture births with `cloudbench_pid_start_time`;
+its reader uses the same whitespace normalization. Raw `ps lstart` pads
+single-digit days and can otherwise reject the live owner during cancellation.
 If archive finalization reports `TimeoutError`, inspect the last
 `browser_archive_observation`, exact `cloud_cleanup_evidence` session snapshots,
 and worker cancellation timestamps before blaming recording upload. The

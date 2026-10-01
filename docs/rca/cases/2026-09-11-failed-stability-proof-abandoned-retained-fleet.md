@@ -303,6 +303,49 @@ The original failed controller remains failed; the final whole controller on
 the next committed head and the 100-run proof remain pending. No production
 source, benchmark task, evaluator, model, prompt or timeout changes.
 
+### October 1 padded native birth recurrence
+
+The canonical 32-way structural gate on `442f4b18` failed both cancellation
+controls at their unchanged 15-second cleanup limits. Retained fixtures had a
+live-producer readiness record, pending cleanup, no recovery call, and no
+forwarded-signal event. Their waiter births contained BSD `ps`'s single-digit
+day padding (`Thu Oct  1`), while the existing birth-state reader canonicalized
+interior whitespace (`Thu Oct 1`). The proof's two owner-record producers only
+trimmed the edges. Consequently the exact live waiter was reported absent and
+cooperative cancellation never reached its owned fleet group.
+
+Archive searches used `PID birth timestamp whitespace single digit day
+cancellation` and `cloudbench_pid_start_time lstart normalization waiter`.
+The September 11 Hub birth-rejection case concerns a genuinely changed birth
+after host suspension; this recurrence changes only the formatting of the same
+native timestamp. A captured live child returned `absent` with its unnormalized
+birth and `live` with the canonical representation. Both original failing tests
+then reproduced unchanged in isolation in 31.360 seconds, excluding concurrent
+structural scheduling as a necessary trigger for this boundary.
+
+Both proof owner records now use the existing `cloudbench_pid_start_time`
+producer, matching the reader and detached session owner. The permanent owning
+fixture adds one cancellation variant that pads the day field without changing
+any native birth value, so double-digit dates still exercise the defect. Its
+failure cleanup compares the same canonical birth on both sides before signaling
+its exact fixture-owned process; it does not adopt an unknown or changed PID.
+The unchanged new case failed against the original runtime in 15.363 seconds;
+the same case and both original cancellation controls passed in 8.437 seconds.
+All producer-drain, exact recovery, unrelated-owner, failed-classification,
+zero-credit and timeout assertions remain intact. No live provider was called.
+
+Private evidence and immutable source/test hashes are in
+`.context/acceptance/proof85-structural-failure-rca/`, including the original
+structural output, retained native owner records, `single-digit-live-birth-boundary.private.json`,
+and `padded-owning-red.receipt.private.json` plus the final unchanged
+`padded-owning-final-green.receipt.private.json`. Independent parent review
+confirmed the producer/reader contract and the nonempty exact-identity guard
+before fixture cleanup signals. The final enclosing structural gate remains
+required. The two other structural
+readiness failures have separate unchanged passes and an unproven original
+trigger, documented in the related semantic-deploy evidence case; this repair
+does not claim to explain them or provide cloud acceptance credit.
+
 ## Verification limits
 
 The local owning-boundary before/after regression passes. The failed live

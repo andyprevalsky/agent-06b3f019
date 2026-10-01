@@ -467,7 +467,8 @@ exec "$FIXTURE_REAL_TEE" "$@"
                     fields = dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
                     pid = fields.get("pid", "")
                     birth = subprocess.run(["ps", "-p", pid, "-o", "lstart="], text=True, capture_output=True)
-                    if pid and birth.stdout.strip() == fields.get("pid_start"):
+                    expected_birth = " ".join(fields.get("pid_start", "").split())
+                    if pid and expected_birth and birth.returncode == 0 and " ".join(birth.stdout.split()) == expected_birth:
                         try:
                             os.killpg(int(fields["pgid"]), signal.SIGKILL)
                         except ProcessLookupError:
@@ -477,7 +478,8 @@ exec "$FIXTURE_REAL_TEE" "$@"
                     birth = subprocess.run(
                         ["ps", "-p", str(fields["pid"]), "-o", "lstart="], text=True, capture_output=True
                     )
-                    if birth.stdout.strip() == fields["birth"]:
+                    expected_birth = " ".join(fields["birth"].split())
+                    if expected_birth and birth.returncode == 0 and " ".join(birth.stdout.split()) == expected_birth:
                         try:
                             os.kill(fields["pid"], signal.SIGKILL)
                         except ProcessLookupError:
@@ -643,6 +645,26 @@ printf() {
 
     def test_signal_waits_for_owned_producer_before_recovery(self):
         self.run_case(cancel=True)
+
+    def test_cancellation_normalizes_padded_birth_identity(self):
+        # BSD ps pads single-digit days. Preserve every native birth field while
+        # exercising that whitespace on every date, including double-digit days.
+        with (self.root / "scripts/lib/cloudbench-env.sh").open("a") as handle:
+            handle.write(r'''
+ps() {
+  local observed
+  if [[ "$*" == *" lstart=" ]]; then
+    observed="$(command ps "$@")" || return $?
+    printf '%s\n' "$observed" | awk 'NF { printf "%s %s  %s %s %s\n", $1, $2, $3, $4, $5 }'
+  else
+    command ps "$@"
+  fi
+}
+''')
+        self.run_case(cancel=True)
+        owner = next((self.root / "proofs").glob("*/controller.owner"))
+        fields = dict(line.split("=", 1) for line in owner.read_text().splitlines())
+        self.assertEqual(fields["pid_start"], " ".join(fields["pid_start"].split()))
 
     def test_failed_slice_log_cannot_abandon_owned_cleanup(self):
         self.run_case(log_fault="slice")

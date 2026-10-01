@@ -587,7 +587,7 @@ run_owned_proof_slice() {
   trap ':' HUP INT TERM
   write_slice_cleanup pending || return 1
   printf 'pid=%s\npid_start=%s\n' "$self_pid" \
-    "$(ps -p "$self_pid" -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
+    "$(cloudbench_pid_start_time "$self_pid")" \
     > "$PROOF_DIR/active-waiter.owner"
   if [ -s "$PROOF_DIR/cancel.request" ]; then
     write_slice_cleanup verified
@@ -688,7 +688,7 @@ exec {proof_completion_reader}< <(
   trap '' PIPE
   body_self_pid="$BASHPID"
   printf 'pid=%s\npid_start=%s\n' "$body_self_pid" \
-    "$(ps -p "$body_self_pid" -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
+    "$(cloudbench_pid_start_time "$body_self_pid")" \
     > "$PROOF_DIR/controller.owner"
   set -e
   echo "proof_id=$PROOF_ID runs=$RUNS width=$WIDTH seed=$SEED" || true

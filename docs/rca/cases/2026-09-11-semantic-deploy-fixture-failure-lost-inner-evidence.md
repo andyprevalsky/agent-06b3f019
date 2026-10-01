@@ -115,6 +115,32 @@ cost. Evidence and independent review are under
 completion timeout remains open until captured evidence locates its first bad
 boundary; containment and retention tests supply no cloud acceptance credit.
 
+## October 1 concurrent readiness observations
+
+The canonical default 32-way structural run on `442f4b18` preserved 29 passes
+and three failed gates. The nested fleet cancellation failures have retained
+owner records and a reproduced native-birth formatting cause in the related
+`2026-09-11-failed-stability-proof-abandoned-retained-fleet` case. Two separate
+failures remain unclassified: the structural runner's five-second first-child
+readiness assertion and setup-db's seed-readiness loop. Setup A's retained
+output reaches the stubbed Prisma schema push; its temporary event ledger was
+deleted by the fixture. The runner assertion does not retain its child's output
+when readiness fails. Neither original capture locates the intervening delay.
+
+Archive searches used `first gate did not start seed invocation cleanup
+deadline` and `structural runner concurrency wall clock fixture readiness`.
+Identical isolated replays passed without source or limit changes: the runner
+signal control in 1.214 seconds and the complete setup concurrency fixture in
+16.362 seconds. High host load observed afterward and the original 32-way
+scheduling are leads, not causal proof. No source repair or timeout increase is
+justified for these two failures by the current evidence. The supported
+`--max-workers 4` setting can obtain an operational aggregate result with the
+same checks; a pass would not retroactively explain or erase these failures.
+
+Original logs, hashes, native owner metadata and replay receipts are retained
+under `.context/acceptance/proof85-structural-failure-rca/`. The original failed
+run stays failed, and these isolated checks supply no cloud proof credit.
+
 ## Human feedback
 
 The deploy instructions require preserving the existing acceptance criteria.
