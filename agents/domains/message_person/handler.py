@@ -452,7 +452,9 @@ class MessagePersonManager(ToolManager):
                     gpt_token_pool_id,
                     user_id,
                 ],
-                start_to_close_timeout=timedelta(seconds=120),
+                # Echo can consume 75s before fallback. Leave room for the
+                # inherited model to finish within this same activity attempt.
+                start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=RetryPolicy(
                     maximum_attempts=2,
                     backoff_coefficient=2.0,

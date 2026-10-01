@@ -2,10 +2,10 @@
 
 import asyncio
 import json
+import os
 from unittest.mock import AsyncMock, patch
 
 import httpx
-
 from _test_utils import (
     BlackboxResult,
     assert_captured_call,
@@ -468,6 +468,7 @@ async def test_agent_sms_generation_uses_text_prompt_without_subject_or_httpx():
     """agent_sms drafts a text, not an email, and generation makes no transport call."""
     _setup()
     with (
+        patch.dict(os.environ, {"ECHO_API_KEY": ""}),
         patch("temporalio.activity.heartbeat"),
         patch("helpers.llm.call_llm") as mock_llm,
     ):
@@ -505,6 +506,7 @@ async def test_generate_message_activity_forwards_compute_tokens_to_llm():
     """Nested message generation uses the workflow-selected direct compute token."""
     _setup()
     with (
+        patch.dict(os.environ, {"ECHO_API_KEY": ""}),
         patch("temporalio.activity.heartbeat"),
         patch("helpers.llm.call_llm") as mock_llm,
     ):
@@ -588,13 +590,13 @@ async def test_generate_message_activity_rejects_truncated_finish_reason():
     """Truncated drafts must not reach approval/SMS (finish_reason=length)."""
     _setup()
     with (
+        patch.dict(os.environ, {"ECHO_API_KEY": ""}),
         patch("temporalio.activity.heartbeat"),
         patch("helpers.llm.call_llm") as mock_llm,
     ):
         mock_llm.return_value = {
             "content": (
-                "Subject: LLM and Cloud Credit Amounts for Speedrun Marketplace\n"
-                "Hi Speedrun Team,\n\nPlease share the"
+                "Subject: LLM and Cloud Credit Amounts for Speedrun Marketplace\nHi Speedrun Team,\n\nPlease share the"
             ),
             "finish_reason": "length",
             "usage": {"prompt_tokens": 100, "completion_tokens": 1024, "finish_reason": "length"},
@@ -616,6 +618,232 @@ async def test_generate_message_activity_rejects_truncated_finish_reason():
             raise AssertionError("expected truncated generation to raise")
         except ValueError as exc:
             assert "truncated" in str(exc).lower()
+
+
+async def test_message_person_uses_echo_with_persona_and_real_context():
+    """A configured Echo key routes the draft through Echo before approval."""
+    _setup()
+    echo_reply = {
+        "choices": [{"message": {"content": "hey Alice, can we move this to Thursday?"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 210, "completion_tokens": 24},
+    }
+    with (
+        patch.dict(os.environ, {"ECHO_API_KEY": "test-echo-key"}),
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm.call_llm") as old_model,
+        patch("domains.message_person.repo.httpx.AsyncClient") as client_class,
+    ):
+        client = client_class.return_value.__aenter__.return_value
+        client.post = AsyncMock(
+            return_value=httpx.Response(
+                200, json=echo_reply, request=httpx.Request("POST", "https://echo.fulcrum.inc/api/v1/chat/completions")
+            )
+        )
+        from tools.message_person import generate_message_activity
+
+        result = await generate_message_activity(
+            model="rose-1-flash",
+            system_name="Andy Prevalsky",
+            conversation_context="User asked to move the meeting to Thursday",
+            person_name="Alice",
+            messages_context="[imessage] Andy → Alice: see you tomorrow",
+            exa_context="",
+            intent="Ask to move the meeting to Thursday",
+            channel="imessage",
+            general_messages_context=(
+                "[IMESSAGE] 2026-09-30T10:00:00Z | me → Bob: hey, running a few minutes late\n"
+                "[IMESSAGE] 2026-09-30T10:01:00Z | Bob → me: GADZOOKS is Bob's catchphrase"
+            ),
+        )
+
+    assert result["message"] == "hey Alice, can we move this to Thursday?"
+    assert result["usage"]["actual_model"] == "echo"
+    old_model.assert_not_called()
+    url = client.post.call_args.args[0]
+    payload = client.post.call_args.kwargs["json"]
+    assert url == "https://echo.fulcrum.inc/api/v1/chat/completions"
+    assert payload["model"] == "echo"
+    assert payload["persona"] == "Andy Prevalsky"
+    assert "running a few minutes late" in payload["messages"][-1]["content"]
+    assert "GADZOOKS" not in payload["messages"][-1]["content"]
+    assert "move the meeting to Thursday" in payload["messages"][-1]["content"]
+
+
+async def test_message_person_echo_email_keeps_subject_and_body():
+    """A valid Echo email uses the existing subject/body approval contract."""
+    _setup()
+    with (
+        patch.dict(os.environ, {"ECHO_API_KEY": "test-echo-key"}),
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm.call_llm") as old_model,
+        patch("domains.message_person.repo.httpx.AsyncClient") as client_class,
+    ):
+        client = client_class.return_value.__aenter__.return_value
+        client.post = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"content": "Subject: Friday review\nHi Jordan,\n\nFriday at 2 works.\n\nAndy"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 250, "completion_tokens": 30},
+                },
+                request=httpx.Request("POST", "https://echo.fulcrum.inc/api/v1/chat/completions"),
+            )
+        )
+        from tools.message_person import generate_message_activity
+
+        result = await generate_message_activity(
+            model="rose-1-flash",
+            system_name="Andy Prevalsky",
+            conversation_context="Arrange a review",
+            person_name="Jordan",
+            messages_context="No previous messages.",
+            exa_context="",
+            intent="Arrange a Friday review at 2",
+            channel="email",
+        )
+
+    assert result["subject"] == "Friday review"
+    assert result["message"] == "Hi Jordan,\n\nFriday at 2 works.\n\nAndy"
+    assert result["usage"]["actual_model"] == "echo"
+    old_model.assert_not_called()
+
+
+async def test_message_person_falls_back_when_echo_fails():
+    """An Echo outage keeps the existing model path and inherited compute token."""
+    _setup()
+    with (
+        patch.dict(os.environ, {"ECHO_API_KEY": "test-echo-key"}),
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm.call_llm", new_callable=AsyncMock) as old_model,
+        patch("domains.message_person.repo.httpx.AsyncClient") as client_class,
+    ):
+        client = client_class.return_value.__aenter__.return_value
+        client.post = AsyncMock(
+            return_value=httpx.Response(
+                503,
+                json={"error": "unavailable"},
+                request=httpx.Request("POST", "https://echo.fulcrum.inc/api/v1/chat/completions"),
+            )
+        )
+        old_model.return_value = {
+            "content": "Hey Alice, Thursday work instead?",
+            "usage": {"prompt_tokens": 100, "completion_tokens": 12},
+            "finish_reason": "stop",
+        }
+        from tools.message_person import generate_message_activity
+
+        result = await generate_message_activity(
+            model="rose-1-flash",
+            system_name="Andy Prevalsky",
+            conversation_context="Move meeting",
+            person_name="Alice",
+            messages_context="No previous messages.",
+            exa_context="",
+            intent="Move meeting to Thursday",
+            channel="imessage",
+            gpt_token="inherited-gpt-token",
+        )
+
+    assert result["message"] == "Hey Alice, Thursday work instead?"
+    assert old_model.call_args.kwargs["model"] == "rose-1-flash"
+    assert old_model.call_args.kwargs["gpt_token"] == "inherited-gpt-token"
+
+
+async def test_message_person_falls_back_on_invalid_echo_email():
+    """A malformed Echo draft never reaches email approval or delivery."""
+    _setup()
+    with (
+        patch.dict(os.environ, {"ECHO_API_KEY": "test-echo-key"}),
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm.call_llm", new_callable=AsyncMock) as old_model,
+        patch("domains.message_person.repo.httpx.AsyncClient") as client_class,
+    ):
+        client = client_class.return_value.__aenter__.return_value
+        client.post = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "Hi Alice, here's the update."}, "finish_reason": "stop"}]},
+                request=httpx.Request("POST", "https://echo.fulcrum.inc/api/v1/chat/completions"),
+            )
+        )
+        old_model.return_value = {
+            "content": "Subject: Update\nHi Alice, here's the update.",
+            "usage": {"prompt_tokens": 100, "completion_tokens": 12},
+            "finish_reason": "stop",
+        }
+        from tools.message_person import generate_message_activity
+
+        result = await generate_message_activity(
+            model="rose-1-flash",
+            system_name="Andy Prevalsky",
+            conversation_context="Send an update",
+            person_name="Alice",
+            messages_context="No previous messages.",
+            exa_context="",
+            intent="Send a brief update",
+            channel="email",
+        )
+
+    assert result["subject"] == "Update"
+    assert result["message"] == "Hi Alice, here's the update."
+    old_model.assert_awaited_once()
+
+
+async def test_message_person_falls_back_after_echo_deadline():
+    _setup()
+
+    async def slow_echo(*_args, **_kwargs):
+        await asyncio.sleep(0.05)
+
+    with (
+        patch.dict(os.environ, {"ECHO_API_KEY": "test-echo-key"}),
+        patch("domains.message_person.repo.ECHO_TIMEOUT_SECONDS", 0.001),
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm.call_llm", new_callable=AsyncMock) as old_model,
+        patch("domains.message_person.repo.httpx.AsyncClient") as client_class,
+    ):
+        client = client_class.return_value.__aenter__.return_value
+        client.post = AsyncMock(side_effect=slow_echo)
+        old_model.return_value = {
+            "content": "Hey Alice, Thursday work instead?",
+            "usage": {"prompt_tokens": 100, "completion_tokens": 12},
+            "finish_reason": "stop",
+        }
+        from tools.message_person import generate_message_activity
+
+        result = await generate_message_activity(
+            model="rose-1-flash",
+            system_name="Andy Prevalsky",
+            conversation_context="Move meeting",
+            person_name="Alice",
+            messages_context="No previous messages.",
+            exa_context="",
+            intent="Move meeting to Thursday",
+            channel="imessage",
+        )
+
+    assert result["message"] == "Hey Alice, Thursday work instead?"
+    old_model.assert_awaited_once()
+
+
+def test_echo_voice_samples_never_treat_incoming_as_writer_examples():
+    from domains.message_person.repo import _outbound_voice_samples
+
+    history = (
+        "[IMESSAGE] 2026-09-30T10:00:00Z | me → Bob: hey, I'll send it over\n"
+        "tomorrow morning\n"
+        "[IMESSAGE] 2026-09-30T10:01:00Z | Bob → me: GADZOOKS is Bob's catchphrase"
+    )
+    samples = _outbound_voice_samples(history, "Andy Prevalsky")
+    assert "tomorrow morning" in samples
+    assert "GADZOOKS" not in samples
+    incoming_only = "[IMESSAGE] 2026-09-30T10:01:00Z | Bob → me: GADZOOKS"
+    assert _outbound_voice_samples(incoming_only, "Andy Prevalsky") == ""
 
 
 # ── classify_person_id ──────────────────────────────────────────────
@@ -1798,6 +2026,16 @@ async def run_all_tests():
         "generate_message_rejects_truncated_finish_reason",
         test_generate_message_activity_rejects_truncated_finish_reason,
     )
+    await r.record_async(
+        "message_person_echo_persona_context", test_message_person_uses_echo_with_persona_and_real_context
+    )
+    await r.record_async("message_person_echo_email", test_message_person_echo_email_keeps_subject_and_body)
+    await r.record_async("message_person_echo_fallback", test_message_person_falls_back_when_echo_fails)
+    await r.record_async(
+        "message_person_echo_invalid_email_fallback", test_message_person_falls_back_on_invalid_echo_email
+    )
+    await r.record_async("message_person_echo_deadline_fallback", test_message_person_falls_back_after_echo_deadline)
+    r.record("message_person_echo_outbound_samples", test_echo_voice_samples_never_treat_incoming_as_writer_examples)
     # classify_person_id
     r.record("classify_phone_full", test_classify_person_id_phone_full)
     r.record("classify_phone_10digit", test_classify_person_id_phone_10_digit)
