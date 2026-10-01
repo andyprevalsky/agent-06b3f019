@@ -3518,14 +3518,15 @@ def test_mouse_input_synthesis_rejects_unrealistic_sample_jumps():
 
 def test_mouse_path_duration_tracks_request_within_velocity_cap():
     """A stroke takes about as long as its peak-velocity bound allows, not a
-    slow linear crawl (350px used to take ~1.85s at p50)."""
+    slow linear crawl, and long moves stay near human Fitts'-law times
+    (350px used to take ~1.85s at p50, 800px ~1.9s)."""
     import math
     import random
     import statistics
 
     from browser_tools.input_synthesis import MIMIC_MAX_VELOCITY_PX_PER_S, synthesize_mouse_path
 
-    for distance, p50_ceiling_s in ((60, 0.2), (350, 1.0), (800, 2.3)):
+    for distance, p50_ceiling_s in ((60, 0.2), (350, 0.55), (800, 1.1)):
         requested = max(0.08, min(0.95, 0.05 + distance / 1100))
         totals = []
         for seed in range(120):

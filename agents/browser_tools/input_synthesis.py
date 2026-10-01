@@ -31,7 +31,9 @@ CLICK_DURATION_SD_MS = 14.8148148
 CLICK_DURATION_LOWER_FENCE_MS = 55.0
 CLICK_DURATION_UPPER_FENCE_MS = 135.0
 MIMIC_MIN_VELOCITY_PX_PER_S = 300.0
-MIMIC_MAX_VELOCITY_PX_PER_S = 1500.0
+# Long human pointing flicks peak around 2-4k px/s. A 1500 cap forced 800px
+# moves to ~1.9s, roughly twice the Fitts'-law time for a human hand.
+MIMIC_MAX_VELOCITY_PX_PER_S = 3000.0
 IDLE_MOUSE_RADIUS_PX = 7.0
 HUMAN_STROKE_SIGMA_MIN = 0.18
 HUMAN_STROKE_SIGMA_MAX = 0.55
@@ -211,7 +213,11 @@ def _sigma_lognormal_segment(
         mu = sigma**2 / 2 + math.log(peak_scale / peak_velocity)
         duration_candidate = max(0.05, math.exp(mu + STROKE_COMPLETION_Z * sigma) + t0)
 
-        sample_count = max(5, int(duration_candidate * max(12, frequency_mean_hz)))
+        step_ceiling = max(28.0, min(58.0, distance * 0.075))
+        # Fast strokes need a denser report rate to keep each jump small; real
+        # mice poll at 125Hz or more, so stay under that.
+        sample_hz = min(125.0, max(12.0, frequency_mean_hz, peak_velocity / (0.85 * step_ceiling)))
+        sample_count = max(5, int(duration_candidate * sample_hz))
         times = np.linspace(0, duration_candidate, sample_count)
         raw_points: List[Tuple[float, float, float]] = []
         for raw_t in times:
@@ -225,7 +231,6 @@ def _sigma_lognormal_segment(
             continue
         raw_points = _link_segment_endpoints(raw_points, start, end)
         max_step, max_sampled_velocity = _sampled_motion_stats(raw_points)
-        step_ceiling = max(28.0, min(58.0, distance * 0.075))
         if max_sampled_velocity > MIMIC_MAX_VELOCITY_PX_PER_S or max_step > step_ceiling:
             continue
 
