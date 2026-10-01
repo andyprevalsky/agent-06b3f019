@@ -635,8 +635,7 @@ async def live_tab_looks_challenged(
 ) -> bool:
     """True when the live tab's current document still looks challenged (LLM).
 
-    Used by the auth-assistance guard so CAPTCHA walls are not misrouted into
-    request_user_assistance_for_authentication.
+    Used to skip recover_from_challenge when the live document is already clean.
     """
     from domains.spawn_browser_agent_v3.challenge_llm_classifier import classify_page_after_settle
 

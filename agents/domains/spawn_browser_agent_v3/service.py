@@ -247,16 +247,6 @@ class AuthRuntimeState:
             },
         }
 
-    def user_assistance_guard(self) -> tuple[bool, str, Dict[str, Any]]:
-        snapshot = self.snapshot()
-        blockers = []
-        for key in ("password", "email_otp", "minted", "guest"):
-            if not snapshot[key]["exhausted_or_unavailable"]:
-                blockers.append(key)
-        if blockers:
-            return False, "Automated authentication options remain: " + ", ".join(blockers), snapshot
-        return True, "All automated authentication options exhausted or unavailable.", snapshot
-
 
 # ========================================
 # SAFE TIME
