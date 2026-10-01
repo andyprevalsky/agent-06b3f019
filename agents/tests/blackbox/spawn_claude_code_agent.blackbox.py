@@ -3771,6 +3771,18 @@ async def _run_all_tests():
         test_claude_code_cancel_during_drain_detach_still_closes_the_sandbox,
     )
     await r.record_async(
+        "cc_closes_sandbox_when_no_attempt_will_reattach",
+        test_claude_code_closes_the_sandbox_when_no_attempt_will_reattach,
+    )
+    await r.record_async(
+        "cc_pause_during_reattach_probe_closes_sandbox",
+        test_claude_code_pause_during_reattach_probe_closes_the_sandbox,
+    )
+    await r.record_async(
+        "cc_new_sandbox_rides_heartbeat_before_first_write",
+        test_claude_code_new_sandbox_rides_the_heartbeat_before_anything_else_can_fail,
+    )
+    await r.record_async(
         "cc_llm_heartbeats_keep_code_session",
         test_llm_heartbeats_inside_a_code_session_keep_the_session,
     )
@@ -3809,6 +3821,10 @@ async def _run_all_tests():
     await r.record_async(
         "cc_manager_leaves_cleanup_to_attached_activity",
         test_cc_manager_leaves_cleanup_to_an_activity_that_held_the_sandbox,
+    )
+    await r.record_async(
+        "cc_manager_closes_sandbox_when_last_attempt_times_out",
+        test_cc_manager_closes_the_sandbox_when_the_last_attempt_times_out,
     )
     teardown_mock()
     return r.all_passed
@@ -4390,6 +4406,124 @@ async def test_claude_code_cancel_during_drain_detach_still_closes_the_sandbox()
         sandbox.stop()
 
 
+async def test_claude_code_closes_the_sandbox_when_no_attempt_will_reattach():
+    """A cancel that no retry follows must not leave the sandbox running.
+
+    Restart and deploy replacement terminate the workflow, which the attempt
+    sees as a ``not_found`` cancel. Leaving the sandbox open for a retry that
+    is never scheduled kept the old CLI working (and pushing to the same repo)
+    next to the replacement run until E2B's own timeout. The same holds for
+    the last attempt the retry policy allows. A paused activity or an attempt
+    with retries left must still keep it for the reattach.
+    """
+    from temporalio.activity import ActivityCancellationDetails
+    from temporalio.common import RetryPolicy
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    last_attempt = {"attempt": 5, "retry_policy": RetryPolicy(maximum_attempts=5)}
+    cases = [
+        ("workflow terminated", ActivityCancellationDetails(not_found=True), {}, True),
+        ("activity reset", ActivityCancellationDetails(reset=True), {}, True),
+        ("last attempt timed out", ActivityCancellationDetails(timed_out=True), last_attempt, True),
+        ("last attempt's worker shut down", ActivityCancellationDetails(worker_shutdown=True), last_attempt, True),
+        (
+            "timed out with attempts left",
+            ActivityCancellationDetails(timed_out=True),
+            {"attempt": 2, "retry_policy": RetryPolicy(maximum_attempts=5)},
+            False,
+        ),
+        ("paused on the last attempt", ActivityCancellationDetails(paused=True), last_attempt, False),
+    ]
+    for label, details, info_overrides, closes in cases:
+        env = ActivityEnvironment()
+        env.info = dataclasses.replace(env.info, **info_overrides)
+
+        async def cancelled_loop(_env=env, _details=details, **kwargs):
+            _env.cancel(cancellation_details=_details)
+            await asyncio.sleep(30)
+
+        recorder = _CCBoundaryRecorder(ws_url="ws://unused")
+        outcome = None
+        with recorder.patched(), patch.object(service, "_run_agentic_loop", side_effect=cancelled_loop):
+            with contextlib.suppress(asyncio.CancelledError):
+                outcome = await asyncio.wait_for(
+                    env.run(service.spawn_claude_code_activity, *_cc_activity_args()), timeout=10
+                )
+        assert outcome is None, f"{label}: a cancel the workflow did not request is not a user cancel: {outcome}"
+        assert "Session Cancelled" not in recorder.titles, (label, recorder.titles)
+        expected = ["cc-task-1"] if closes else []
+        assert [call["task_id"] for call in recorder.closed] == expected, (
+            f"{label}: expected the sandbox {'closed' if closes else 'kept for the reattach'}, closed={recorder.closed}"
+        )
+
+
+async def test_claude_code_pause_during_reattach_probe_closes_the_sandbox():
+    """A pause that lands while a retry probes its old sandbox still closes it.
+
+    The retry only learned the task_id after the probe, so the cancel handler
+    found nothing to close and the sandbox from the crashed attempt kept running.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    live = {"task_id": "cc-task-live", "sandbox_id": "sb-live", "ws_url": "ws://sb-live", "code_provider": "claude"}
+    env = ActivityEnvironment()
+
+    async def paused_during_probe(*args, **kwargs):
+        env.cancel()
+        await asyncio.sleep(30)
+
+    recorder = _CCBoundaryRecorder(ws_url="ws://unused")
+    with recorder.patched(), patch.object(service, "ws_endpoint_reachable", side_effect=paused_during_probe):
+        outcome = await asyncio.wait_for(
+            env.run(service.spawn_claude_code_activity, *_cc_activity_args(live)), timeout=10
+        )
+    assert outcome["status"] == "cancelled" and outcome["task_id"] == "cc-task-live", outcome
+    assert [call["task_id"] for call in recorder.closed] == ["cc-task-live"], recorder.closed
+    assert recorder.created == [], recorder.created
+
+
+async def test_claude_code_new_sandbox_rides_the_heartbeat_before_anything_else_can_fail():
+    """A crash right after the sandbox is created must not hide it from the retry.
+
+    Two backend writes sat between create_e2b_session and the first heartbeat
+    carrying the session; a worker that died inside them left the retry with
+    no record of the sandbox, so it created a second one and the first leaked.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    beats: list = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+    recorder = _CCBoundaryRecorder(ws_url="ws://unused")
+    seen_at_first_write: list[bool] = []
+    record_title = recorder.save_message
+
+    async def save_message(**kwargs):
+        if not seen_at_first_write:
+            seen_at_first_write.append(any(_carries_session(beat) for beat in beats))
+        await record_title(**kwargs)
+
+    async def finished_loop(**kwargs):
+        return (0, False, [], 0, 0, [{"type": "result", "status": "completed", "text": "answer is 42"}])
+
+    with (
+        recorder.patched(),
+        patch.object(service, "save_claude_code_message", side_effect=save_message),
+        patch.object(service, "_run_agentic_loop", side_effect=finished_loop),
+    ):
+        outcome = await asyncio.wait_for(env.run(service.spawn_claude_code_activity, *_cc_activity_args()), timeout=10)
+    assert outcome["status"] == "completed", outcome
+    assert seen_at_first_write == [True], (
+        f"the session must be heartbeated before the first backend write, beats={[b[0] for b in beats]}"
+    )
+
+
 async def test_llm_heartbeats_inside_a_code_session_keep_the_session():
     """Heartbeats from LLM helpers the activity calls must not wipe its session.
 
@@ -4788,6 +4922,57 @@ async def test_cc_manager_leaves_cleanup_to_an_activity_that_held_the_sandbox():
 
     assert fake.closed_sessions == [], fake.closed_sessions
     assert _cancel_chip(events).metadata["task_id"] == "cc-task-1", _cancel_chip(events).metadata
+
+
+def _timed_out_on_last_attempt(*heartbeat_details):
+    from temporalio.exceptions import ActivityError
+    from temporalio.exceptions import TimeoutError as TemporalTimeoutError
+    from temporalio.exceptions import TimeoutType
+
+    error = ActivityError(
+        message="Activity task timed out",
+        scheduled_event_id=1,
+        started_event_id=2,
+        identity="",
+        activity_type="spawn_claude_code_activity",
+        activity_id="2",
+        retry_state=None,
+    )
+    error.__cause__ = TemporalTimeoutError(
+        "activity Heartbeat timeout", type=TimeoutType.HEARTBEAT, last_heartbeat_details=heartbeat_details
+    )
+    return error
+
+
+async def test_cc_manager_closes_the_sandbox_when_the_last_attempt_times_out():
+    """Exhausted retries after a dead worker must not leave the sandbox running.
+
+    The last attempt died with its worker, so it never ran its own cleanup,
+    and no attempt will reattach. Its last heartbeat names the sandbox.
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    beat_session = {**_DRAINED_SESSION, "task_id": "cc-task-2", "sandbox_id": "sb-2", "ws_url": "wss://sb-2.e2b.app"}
+    cases = [
+        ("heartbeat names the sandbox", (None,), ("Processing", {"code_session": beat_session}), beat_session),
+        (
+            "no session heartbeat; the scheduled one is still open",
+            ({"code_session": dict(_DRAINED_SESSION)},),
+            ("Verifying",),
+            _DRAINED_SESSION,
+        ),
+        ("never attached", (None,), (), None),
+    ]
+    for label, resume, beat, expected in cases:
+        fake = _SequencedCCWorkflow(_timed_out_on_last_attempt(*beat))
+        wf = _HandoffCCWorkflowInstance(resume=resume[0])
+        restore = _patch_cc_workflow(fake)
+        try:
+            events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-to"))
+        finally:
+            restore()
+        assert fake.closed_sessions == ([expected] if expected else []), (label, fake.closed_sessions)
+        assert "Code session failed" in _cc_titles(events), (label, _cc_titles(events))
 
 
 if __name__ == "__main__":

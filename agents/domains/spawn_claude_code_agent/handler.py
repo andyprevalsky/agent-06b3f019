@@ -15,13 +15,16 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from domains.spawn_claude_code_agent.config import (
     CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S,
     CODE_AGENT_DRAIN_YIELD_STATUS,
+    CODE_SESSION_HEARTBEAT_KEY,
 )
 from domains.spawn_claude_code_agent.service import (
     close_detached_code_session_activity,
+    code_session_record,
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
 )
@@ -211,6 +214,25 @@ def _drained_code_session(
     return session
 
 
+def _timed_out_code_session(
+    error: ActivityError, scheduled_session: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Sandbox left running by a run whose last attempt timed out, if any.
+
+    The retries are exhausted, so nothing will reattach to it, and an attempt
+    on a dead worker never ran its own cleanup.
+    """
+    cause = error.cause
+    if not isinstance(cause, TemporalTimeoutError):
+        return None
+    for detail in cause.last_heartbeat_details or ():
+        if isinstance(detail, dict):
+            session = code_session_record(detail.get(CODE_SESSION_HEARTBEAT_KEY))
+            if session is not None:
+                return session
+    return code_session_record(scheduled_session)
+
+
 class SpawnClaudeCodeAgentManager(ToolManager):
     """Manager for spawn_claude_code_agent tool."""
 
@@ -369,6 +391,22 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         if isinstance(e, ActivityError) and not isinstance(
                             e.cause, (asyncio.CancelledError, TemporalCancelledError)
                         ):
+                            abandoned = _timed_out_code_session(e, code_session)
+                            if abandoned is not None:
+                                try:
+                                    await workflow.execute_activity(
+                                        close_detached_code_session_activity,
+                                        args=[agent_id, abandoned],
+                                        start_to_close_timeout=timedelta(seconds=60),
+                                        retry_policy=RetryPolicy(maximum_attempts=3),
+                                    )
+                                except ActivityError as close_error:
+                                    logger.warning(
+                                        "[ClaudeCode] Closing the timed-out run's sandbox failed",
+                                        agent_id=agent_id,
+                                        task_id=abandoned.get("task_id"),
+                                        error=extract_error_message(close_error),
+                                    )
                             soft = _maybe_soft_fail_session_create_result(
                                 code_provider=code_provider, error=e
                             )

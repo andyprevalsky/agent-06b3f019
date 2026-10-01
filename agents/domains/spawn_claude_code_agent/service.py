@@ -685,6 +685,22 @@ async def close_detached_code_session_activity(agent_id: str, code_session: Dict
     return True
 
 
+def _next_attempt_reattaches(cancellation: activity.ActivityCancellationDetails) -> bool:
+    """Whether Temporal will run another attempt of this activity that reattaches.
+
+    A terminated or reset workflow (``not_found`` / ``reset``) never schedules
+    one, and a timeout or worker shutdown leads to one only while the retry
+    policy has attempts left. A paused activity resumes with its heartbeats.
+    """
+    if cancellation.not_found or cancellation.reset:
+        return False
+    if cancellation.paused:
+        return True
+    info = activity.info()
+    max_attempts = info.retry_policy.maximum_attempts if info.retry_policy else 0
+    return max_attempts <= 0 or info.attempt < max_attempts
+
+
 def _code_session_from_heartbeat() -> Optional[Dict[str, Any]]:
     """Session the previous attempt of this activity was attached to, if any."""
     if not activity.in_activity():
@@ -2153,8 +2169,9 @@ async def spawn_claude_code_activity(
     A worker drain detaches instead: the sandbox keeps running and the activity
     returns ``CODE_AGENT_DRAIN_YIELD_STATUS`` with the ``code_session`` to pass
     back as ``resume_session``. A retry after a crashed or timed-out attempt
-    reattaches to the session carried on the previous attempt's heartbeats; only
-    a cancel the workflow requested closes the sandbox.
+    reattaches to the session carried on the previous attempt's heartbeats. The
+    sandbox is closed whenever no attempt will reattach: a requested cancel, a
+    terminated workflow, or the last attempt the retry policy allows.
 
     Args:
         output_schema: Response schema from parent agent's tool call (required for structured responses)
@@ -2203,6 +2220,9 @@ async def spawn_claude_code_activity(
     terminal = TerminalFilter(cols=200, rows=500)
 
     try:
+        if attached is not None:
+            # A pause landing during the reattach probe must still find the sandbox to close.
+            task_id = attached["task_id"]
         if attached is not None and not await ws_endpoint_reachable(
             attached["ws_url"], attempts=REATTACH_PROBE_ATTEMPTS, backoff_s=REATTACH_PROBE_BACKOFF_S
         ):
@@ -2234,6 +2254,7 @@ async def spawn_claude_code_activity(
             start_time = attached.get("started_at") or start_time
             actual_github_repo_url = attached.get("github_repo_url")
             loop_started_at = attached.get("loop_started_at")
+            uploaded_files = []
             logger.info(
                 "[ClaudeCode] Reattaching to running sandbox",
                 agent_id=agent_id,
@@ -2242,8 +2263,6 @@ async def spawn_claude_code_activity(
                 attempt=activity.info().attempt,
             )
             action_summary.append(f"Reattached to E2B sandbox: {sandbox_id}")
-            log_collector = SandboxLogCollector(sandbox_id, agent_id, task_id)
-            await log_collector.start()
 
         claude_token = await _resolve_claude_token_for_activity(user_id, code_provider)
 
@@ -2282,8 +2301,27 @@ async def spawn_claude_code_activity(
             )
             action_summary.append(f"Created E2B sandbox: {sandbox_id}")
 
-            log_collector = SandboxLogCollector(sandbox_id, agent_id, task_id)
-            await log_collector.start()
+        session_record = {
+            "task_id": task_id,
+            "sandbox_id": sandbox_id,
+            "ws_url": ws_url,
+            "code_provider": code_provider,
+            "github_repo_url": actual_github_repo_url,
+            "started_at": start_time,
+            "loop_started_at": loop_started_at,
+            "logged_events": int((attached or {}).get("logged_events") or 0),
+        }
+        # An attempt's first heartbeat goes out at once and later ones only every
+        # throttle interval, so nothing may heartbeat before the session rides
+        # along, and the session must ride along before anything else can fail:
+        # a crash in either window would hide the sandbox from the retry.
+        session_heartbeats.enter_context(heartbeat_resume_details({CODE_SESSION_HEARTBEAT_KEY: session_record}))
+        safe_heartbeat("Claude Code sandbox attached")
+
+        log_collector = SandboxLogCollector(sandbox_id, agent_id, task_id)
+        await log_collector.start()
+
+        if attached is None:
             if uploaded_files:
                 action_summary.append(f"Uploaded {len(uploaded_files)} files to /home/user/attachments/")
 
@@ -2318,20 +2356,7 @@ async def spawn_claude_code_activity(
         # 3. WebSocket-based agentic loop
         if loop_started_at is None:
             loop_started_at = safe_time()
-        session_record = {
-            "task_id": task_id,
-            "sandbox_id": sandbox_id,
-            "ws_url": ws_url,
-            "code_provider": code_provider,
-            "github_repo_url": actual_github_repo_url,
-            "started_at": start_time,
-            "loop_started_at": loop_started_at,
-            "logged_events": int((attached or {}).get("logged_events") or 0),
-        }
-        # An attempt's first heartbeat goes out at once and later ones only every
-        # throttle interval, so nothing may heartbeat before the session rides
-        # along: a crash inside that interval would hide the sandbox from the retry.
-        session_heartbeats.enter_context(heartbeat_resume_details({CODE_SESSION_HEARTBEAT_KEY: session_record}))
+            session_record["loop_started_at"] = loop_started_at
         safe_heartbeat("Connecting to Claude Code WebSocket")
 
         model_pricing = await get_model_pricing_with_fallback(model)
@@ -2566,9 +2591,25 @@ async def spawn_claude_code_activity(
             await log_collector.stop()
 
         if cancellation is not None and not cancellation.cancel_requested:
-            # A timeout, worker shutdown or activity pause: the next attempt
-            # reattaches to the sandbox from this attempt's heartbeats, so it
-            # must stay open and the run is not reported as cancelled.
+            # Not a cancel the workflow asked for, so the run is not reported as
+            # cancelled. The sandbox stays open only for an attempt that will
+            # reattach to it from this attempt's heartbeats.
+            if task_id and not _next_attempt_reattaches(cancellation):
+                logger.info(
+                    "[ClaudeCode] No attempt will reattach; closing the sandbox",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    cancellation=repr(cancellation),
+                )
+                try:
+                    await close_e2b_session(task_id=task_id, code_provider=code_provider)
+                except Exception as close_error:
+                    logger.warning(
+                        "[ClaudeCode] Closing the abandoned sandbox failed",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        error=str(close_error),
+                    )
             raise
 
         if task_id:
