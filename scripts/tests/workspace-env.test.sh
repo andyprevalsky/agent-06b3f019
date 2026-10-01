@@ -102,10 +102,7 @@ expect_eq "$isolated_benchmark_port" "56220" "isolated benchmark preserves its r
 
 cloud_workspace="$TMP_ROOT/cloud-checkout"
 mkdir -p "$cloud_workspace"
-cat >"$cloud_workspace/.cloud-env" <<'ENV'
-# rose-cloud-env
-export CONDUCTOR_WORKSPACE_NAME=cloud-generated
-ENV
+bash -c ". '$HELPER_SRC'; write_cloud_env '$cloud_workspace/.cloud-env' 3001 cloud-generated '$cloud_workspace' \"\$(cloud_env_boot_id)\""
 cloud_name="$(
   cd "$cloud_workspace"
   CONDUCTOR_WORKSPACE_NAME=cloud-generated \
@@ -113,6 +110,101 @@ cloud_name="$(
   bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
 )"
 expect_eq "$cloud_name" "cloud-generated" "cloud-generated workspace name remains authoritative"
+
+stale_shell_name="$(
+  cd "$cloud_workspace"
+  CONDUCTOR_WORKSPACE_NAME=cloud-from-before-rekey \
+  CONDUCTOR_WORKSPACE_PATH="$cloud_workspace" \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+)"
+expect_eq "$stale_shell_name" "cloud-generated" "a shell opened before a re-key adopts the current .cloud-env name"
+
+pinned_cloud_name="$(
+  cd "$cloud_workspace"
+  ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+  CONDUCTOR_WORKSPACE_NAME=cloud-generated-bench-run-1 \
+  CONDUCTOR_WORKSPACE_PATH="$cloud_workspace" \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+)"
+expect_eq "$pinned_cloud_name" "cloud-generated-bench-run-1" "a trusted cloud identity is not replaced by .cloud-env"
+
+isolated_cloud_name="$(
+  cd "$cloud_workspace"
+  BENCHMARK_ISOLATED_RUN=true \
+  CONDUCTOR_WORKSPACE_NAME=cloud-generated-lifecycle \
+  CONDUCTOR_WORKSPACE_PATH="$cloud_workspace" \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+)"
+expect_eq "$isolated_cloud_name" "cloud-generated-lifecycle" "an isolated benchmark cloud identity is not replaced by .cloud-env"
+
+# Every VM booted from one prebuilt snapshot inherits the snapshot's .cloud-env.
+# Each must mint its own workspace name, or they all publish the same reserved
+# ngrok domain and the second stack dies with ERR_NGROK_334.
+snapshot_env="$TMP_ROOT/snapshot.cloud-env"
+bash -c ". '$HELPER_SRC'; write_cloud_env '$snapshot_env' 3001 cloud-44cb5599 /workspace boot-snapshot"
+for vm in vm-a vm-b; do
+  mkdir -p "$TMP_ROOT/$vm"
+  cp "$snapshot_env" "$TMP_ROOT/$vm/.cloud-env"
+  bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$TMP_ROOT/$vm/.cloud-env' boot-$vm" 2>/dev/null
+done
+read_cloud_env() {
+  bash -c ". '$HELPER_SRC'; cloud_env_value '$1' '$2'"
+}
+vm_a_name="$(read_cloud_env "$TMP_ROOT/vm-a/.cloud-env" CONDUCTOR_WORKSPACE_NAME)"
+vm_b_name="$(read_cloud_env "$TMP_ROOT/vm-b/.cloud-env" CONDUCTOR_WORKSPACE_NAME)"
+[[ "$vm_a_name" =~ ^cloud-[0-9a-f]{8}$ ]] || { echo "FAIL: re-keyed name is not cloud-<8 hex>: '$vm_a_name'" >&2; exit 1; }
+[ "$vm_a_name" != "cloud-44cb5599" ] || { echo "FAIL: snapshot workspace name survived a boot change" >&2; exit 1; }
+[ "$vm_a_name" != "$vm_b_name" ] || { echo "FAIL: two VMs from one snapshot share workspace name $vm_a_name" >&2; exit 1; }
+echo "PASS: VMs booted from one snapshot mint distinct workspace names"
+expect_eq "$(read_cloud_env "$TMP_ROOT/vm-a/.cloud-env" CONDUCTOR_PORT)" "3001" "re-key keeps the snapshot port"
+expect_eq "$(read_cloud_env "$TMP_ROOT/vm-a/.cloud-env" CONDUCTOR_ROOT_PATH)" "/workspace" "re-key keeps the snapshot root path"
+grep -qx '# rose-cloud-env' "$TMP_ROOT/vm-a/.cloud-env" \
+  || { echo "FAIL: re-keyed .cloud-env lost the # rose-cloud-env trust marker" >&2; exit 1; }
+echo "PASS: re-keyed .cloud-env keeps the # rose-cloud-env trust marker"
+
+cp "$TMP_ROOT/vm-a/.cloud-env" "$TMP_ROOT/vm-a/before"
+bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$TMP_ROOT/vm-a/.cloud-env' boot-vm-a"
+cmp -s "$TMP_ROOT/vm-a/before" "$TMP_ROOT/vm-a/.cloud-env" \
+  || { echo "FAIL: refreshing on the same boot rewrote .cloud-env" >&2; exit 1; }
+echo "PASS: refreshing on the minting boot keeps the workspace name"
+
+mkdir -p "$TMP_ROOT/legacy"
+cat >"$TMP_ROOT/legacy/.cloud-env" <<'ENV'
+# rose-cloud-env
+export CONDUCTOR_PORT=3001
+export CONDUCTOR_WORKSPACE_NAME=cloud-44cb5599
+export CONDUCTOR_ROOT_PATH=/workspace
+ENV
+bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$TMP_ROOT/legacy/.cloud-env' boot-legacy" 2>/dev/null
+legacy_name="$(read_cloud_env "$TMP_ROOT/legacy/.cloud-env" CONDUCTOR_WORKSPACE_NAME)"
+[ "$legacy_name" != "cloud-44cb5599" ] || { echo "FAIL: a .cloud-env without a boot stamp was trusted as current" >&2; exit 1; }
+echo "PASS: a .cloud-env without a boot stamp is re-keyed"
+
+if command -v flock >/dev/null 2>&1; then
+  mkdir -p "$TMP_ROOT/race"
+  cp "$snapshot_env" "$TMP_ROOT/race/.cloud-env"
+  for _ in 1 2 3 4 5 6 7 8; do
+    bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$TMP_ROOT/race/.cloud-env' boot-race" 2>>"$TMP_ROOT/race/stderr" &
+  done
+  wait
+  expect_eq "$(grep -c '^Re-keyed ' "$TMP_ROOT/race/stderr")" "1" "parallel refreshes on one boot re-key exactly once"
+  expect_eq "$(grep -c '^# rose-cloud-boot-id boot-race$' "$TMP_ROOT/race/.cloud-env")" "1" "parallel refreshes leave one boot stamp"
+fi
+
+if [ -n "$(bash -c ". '$HELPER_SRC'; cloud_env_boot_id")" ]; then
+  mkdir -p "$TMP_ROOT/snapshot-vm"
+  cp "$snapshot_env" "$TMP_ROOT/snapshot-vm/.cloud-env"
+  booted_name="$(
+    cd "$TMP_ROOT/snapshot-vm"
+    CONDUCTOR_WORKSPACE_NAME=cloud-44cb5599 \
+    CONDUCTOR_WORKSPACE_PATH="$TMP_ROOT/snapshot-vm" \
+    bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env 2>/dev/null; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+  )"
+  expect_eq "$booted_name" "$(read_cloud_env "$TMP_ROOT/snapshot-vm/.cloud-env" CONDUCTOR_WORKSPACE_NAME)" \
+    "normalizing on a snapshot-booted VM adopts the re-keyed name"
+  [ "$booted_name" != "cloud-44cb5599" ] || { echo "FAIL: snapshot-booted VM kept the snapshot workspace name" >&2; exit 1; }
+  echo "PASS: snapshot-booted VM drops the snapshot workspace name"
+fi
 
 explicit_queue="$(
   TEMPORAL_TASK_QUEUE=semantic-sentinel \
@@ -214,12 +306,21 @@ expect_eq "$self_conflict" "" "the workspace's own container is never treated as
 # cloud-build.sh must write `# rose-cloud-env` into .cloud-env itself (not only
 # into shell rc files). Without that marker, normalize_conductor_workspace_env
 # rewrites the synthetic cloud name to the checkout basename and breaks ngrok
-# domain reuse on Cursor Cloud agents.
+# domain reuse on Cursor Cloud agents. It must also mint and re-key through the
+# shared helpers rather than keeping a snapshot-baked file or /etc/machine-id.
 cloud_build_script="$ROOT_DIR/scripts/cloud-build.sh"
-if ! grep -q '^# rose-cloud-env$' <(sed -n '/cat > \.cloud-env <<EOF/,/^EOF$/p' "$cloud_build_script"); then
-  echo "FAIL: cloud-build.sh .cloud-env template must include # rose-cloud-env marker" >&2
+fresh_env="$TMP_ROOT/fresh.cloud-env"
+bash -c ". '$HELPER_SRC'; write_cloud_env '$fresh_env' 3001 \"\$(new_cloud_workspace_name)\" /workspace boot-fresh"
+grep -qx '# rose-cloud-env' "$fresh_env" \
+  || { echo "FAIL: write_cloud_env must include the # rose-cloud-env marker" >&2; exit 1; }
+for required in 'refresh_cloud_env_identity .cloud-env' 'write_cloud_env .cloud-env'; do
+  grep -qF "$required" "$cloud_build_script" \
+    || { echo "FAIL: cloud-build.sh must call '$required'" >&2; exit 1; }
+done
+if grep -q 'machine-id' "$cloud_build_script"; then
+  echo "FAIL: cloud-build.sh must not derive the workspace id from /etc/machine-id (shared by every snapshot clone)" >&2
   exit 1
 fi
-echo "PASS: cloud-build.sh writes # rose-cloud-env into .cloud-env"
+echo "PASS: cloud-build.sh mints and re-keys .cloud-env through the shared helpers"
 
 echo "All workspace env tests passed."
