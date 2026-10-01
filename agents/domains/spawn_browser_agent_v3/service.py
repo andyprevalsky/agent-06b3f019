@@ -710,26 +710,12 @@ def get_browser_system_prompt(
     return static_prompt + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + dynamic_prompt
 
 
-WRITE_LOCK_DISABLED_SECTION = (
-    "# Write Lock Disabled\n\n"
-    "The write lock is off for this session, which overrides the write lock rules in Safety Rules: commit "
-    "controls (Place order, Pay, Send, Post) run as soon as they are clicked, and the user is not asked "
-    "first. If the goal requires the user's approval before a purchase, send, or post, do not click the "
-    "commit control. Stop at the final review page and report its state with attempt_completion."
-)
-
-
 def build_browser_dynamic_system_context(
     custom_instructions: str = "",
     available_files: Optional[List[str]] = None,
     response_schema: Optional[Dict[str, Any]] = None,
-    write_lock_enabled: bool = True,
 ) -> str:
-    """Build dynamic system context for one browser-agent task.
-
-    The static browser prompt describes the write lock as on; sessions that run
-    with it off say so here, because a commit click would then skip approval.
-    """
+    """Build dynamic system context for one browser-agent task."""
     files_section = ""
     if available_files:
         files_section = (
@@ -745,12 +731,7 @@ def build_browser_dynamic_system_context(
         custom_section = custom_instructions
 
     schema_section = format_required_output_schema_system_section(response_schema)
-    write_lock_section = "" if write_lock_enabled else WRITE_LOCK_DISABLED_SECTION
-    sections = [
-        section.strip()
-        for section in (custom_section, files_section, write_lock_section, schema_section)
-        if section.strip()
-    ]
+    sections = [section.strip() for section in (custom_section, files_section, schema_section) if section.strip()]
     return "\n\n".join(sections)
 
 

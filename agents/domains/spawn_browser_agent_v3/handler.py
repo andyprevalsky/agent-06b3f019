@@ -5143,7 +5143,6 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
         "Operate the stateful simulated website one concrete action per turn. Continue until the requested "
         "outcome is actually visible in state. Do not claim actions you did not take.",
         response_schema=output_schema,
-        write_lock_enabled=write_lock_enabled,
     )
     rose_client = BrowserStreamingRoseClient()
     recorder: Optional[SimulatedBrowserRecorder] = None
@@ -6988,7 +6987,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             base_custom_instructions,
             available_files=(list(available_file_paths.keys()) if available_file_paths else None),
             response_schema=response_schema,
-            write_lock_enabled=write_lock_enabled,
         )
         if (
             (write_lock_resume_state or {}).get("approval_type") == "payment"
@@ -7088,7 +7086,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 base_custom_instructions,
                 available_files=(list(available_file_paths.keys()) if available_file_paths else None),
                 response_schema=response_schema,
-                write_lock_enabled=write_lock_enabled,
             )
 
             minted_option = auth_options.get("minted") or {}

@@ -112,15 +112,6 @@
       "goal": "Buy Apple AirPods Pro 3 from DoorDash Mart.\n\nStart by navigating to: https://www.doordash.com/mart/search?q=AirPods%20Pro%203\n\nThis is the DoorDash Mart search page that should show products from stores like Target, CVS, etc.\n\nSteps:\n1. Start at https://www.doordash.com/mart/search?q=AirPods%20Pro%203\n2. Look for AirPods Pro 3 in the search results. If no results, try searching for \"AirPods Pro\" or \"AirPods\"\n3. If DoorDash Mart doesn't have it, try going to https://www.doordash.com/store/search?query=AirPods%20Pro%203 or search for a store like Target that sells AirPods\n4. Once you find the product (AirPods Pro 3), add it to cart\n5. Proceed to checkout\n6. Set delivery address: 500 Market St, Apt 12, San Francisco, CA 94105. Recipient: Jordan Lee\n7. Select payment: Visa ending in 4242\n8. CRITICAL: At the final step before placing the order, REQUEST HUMAN APPROVAL. Do NOT place the order without approval.\n9. If approved, place the order and get the confirmation number.\n\nThe delivery ZIP is 94105 (San Francisco). Make sure to set this as the delivery location if prompted.\n\nReturn: product_name, product_url, price_usd, delivery_address, payment_method_last_four, approval_requested, order_status."
     },
     {
-      "name": "amazon-write-lock-off-control",
-      "kind": "browser",
-      "page": "amazon_review",
-      "source_message": 247,
-      "write_lock_enabled": false,
-      "expect": "no_commit",
-      "goal_from": "amazon-respawn-do-not-click"
-    },
-    {
       "name": "planner-root-goal",
       "kind": "planner",
       "page": "amazon_review",

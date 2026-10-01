@@ -19,15 +19,13 @@ rose-1-browser-use pool) and lets the real model act:
     ``kind: execute`` scenarios first run the real EXECUTE main-loop call after a
     failed browser task; the browser goal that parent writes is then replayed
     at the checkout page
-  * ``expect: no_commit`` scenarios are controls (write lock off): a commit click
-    fails them, because nothing would ask the user before the order is placed
 
 The browser pool samples at temperature 1.0 and its providers drift, so
 per-scenario rates swing by 20+ points between 10-trial runs. The run passes
 when the pooled pass rate over every trial is at least ``--min-pass-rate`` and
 no scenario falls below ``--scenario-floor``. Pre- and post-fix prompts run
-concurrently (10 trials per scenario): 14/60 pooled before the write-lock
-prompts, 47/60 after; other post-fix runs pooled 0.78 to 0.87.
+concurrently (10 trials per scenario): 7/50 pooled before the write-lock
+prompts, 39/50 after.
 
 Usage:
     cd agents && python benchmarks/run_write_lock_approval_scenarios.py [--only name,name] [--trials 10]
@@ -74,12 +72,7 @@ PAGE_STATE_KEYS = ("url", "title", "timestamp", "viewport", "scroll_position", "
 
 
 def load_fixture() -> dict[str, Any]:
-    data = json.loads(SCENARIOS_PATH.read_text(encoding="utf-8"))
-    by_name = {scenario["name"]: scenario for scenario in data["scenarios"]}
-    for scenario in data["scenarios"]:
-        if "goal_from" in scenario:
-            scenario["goal"] = by_name[scenario["goal_from"]]["goal"]
-    return data
+    return json.loads(SCENARIOS_PATH.read_text(encoding="utf-8"))
 
 
 def check_fixture(data: dict[str, Any]) -> list[str]:
@@ -143,7 +136,6 @@ async def replay_browser(
     *,
     custom_instructions: str,
     response_schema: dict[str, Any],
-    write_lock_enabled: bool = True,
 ) -> dict[str, Any]:
     """Run the browser model from the checkout page until its first state-changing action."""
     from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
@@ -164,9 +156,7 @@ async def replay_browser(
         result={"success": True, "message": "Browser state captured.", "formatted_state": formatted_state},
         tool_call_id=f"call_{uuid.uuid4().hex[:12]}",
     )
-    dynamic_context = build_browser_dynamic_system_context(
-        custom_instructions, response_schema=response_schema, write_lock_enabled=write_lock_enabled
-    )
+    dynamic_context = build_browser_dynamic_system_context(custom_instructions, response_schema=response_schema)
     task = build_browser_task_prompt(goal)
     client = RoseClient()
     commit_indexes = set(page["commit_indexes"])
@@ -276,7 +266,6 @@ async def respawn_browser_goal(context: list[dict[str, Any]], response_schema: d
 
 async def run_trial(scenario: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
     page = data["pages"][scenario["page"]]
-    expect = scenario.get("expect", "commit")
     started = time.perf_counter()
     trial: dict[str, Any] = {}
     try:
@@ -306,11 +295,9 @@ async def run_trial(scenario: dict[str, Any], data: dict[str, Any]) -> dict[str,
             page,
             custom_instructions=data["custom_instructions"],
             response_schema=data["response_schema"],
-            write_lock_enabled=scenario.get("write_lock_enabled", True),
         )
         trial.update(replay)
-        committed = replay["verdict"] == "commit_click"
-        trial["passed"] = committed if expect == "commit" else not committed
+        trial["passed"] = replay["verdict"] == "commit_click"
     except Exception as exc:
         trial.update(verdict="error", passed=False, error=f"{type(exc).__name__}: {str(exc)[:300]}")
     finally:
@@ -335,16 +322,13 @@ async def run_scenario(
     passed = passes >= scenario_floor * len(results)
     verdicts = [r.get("verdict") for r in results]
     print(
-        f"  {'✅' if passed else '❌'} {scenario['name']:34} {passes}/{len(results)} "
-        f"expect={scenario.get('expect', 'commit')} verdicts={verdicts}",
+        f"  {'✅' if passed else '❌'} {scenario['name']:34} {passes}/{len(results)} verdicts={verdicts}",
         flush=True,
     )
     return {
         "name": scenario["name"],
         "kind": scenario["kind"],
         "page": scenario["page"],
-        "expect": scenario.get("expect", "commit"),
-        "write_lock_enabled": scenario.get("write_lock_enabled", True),
         "passed": passed,
         "passes": passes,
         "trials": results,
