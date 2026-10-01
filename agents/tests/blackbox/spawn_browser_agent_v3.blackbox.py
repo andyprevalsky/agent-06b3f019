@@ -10750,6 +10750,113 @@ async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear(
     recorder.query_requests(clear=True)
     assert recorder._ignored_request_ids == set()
 
+
+def test_repeated_first_party_tunnel_failure_rotates_browser_exit():
+    """A broken checkout exit should recover before repeated manual waits and reloads."""
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _FIRST_PARTY_TUNNEL_FAILURE_REASON,
+    )
+
+    recorder = BrowserNetworkRecorder(
+        browser_session=MagicMock(),
+        agent_id="agent",
+        task_id="task",
+        session_id="session",
+        output_dir=Path("/tmp/browser-tunnel-test"),
+    )
+    recorder._network_generation = 1
+    checkout_url = "https://shop.example.test/test_payment"
+    confirm_url = "https://shop.example.test/api/test-payment/confirm"
+
+    def fail(request_id, url, *, resource_type="Fetch", document_url=checkout_url):
+        generation = recorder._network_generation
+        recorder._on_request_will_be_sent(
+            {
+                "requestId": request_id,
+                "type": resource_type,
+                "documentURL": document_url,
+                "request": {"url": url, "method": "GET" if resource_type == "Document" else "POST"},
+            },
+            None,
+            generation,
+        )
+        recorder._on_loading_failed(
+            {"requestId": request_id, "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+            None,
+            generation,
+        )
+
+    # A third-party analytics failure cannot declare the checkout exit broken.
+    fail("analytics-1", "https://api2.amplitude.com/2/httpapi")
+    fail("analytics-2", "https://api2.amplitude.com/2/httpapi")
+    assert recorder.pop_provider_exit_rejection() is None
+
+    fail("confirm-1", confirm_url)
+    assert recorder.pop_provider_exit_rejection() is None
+    fail("confirm-2", confirm_url)
+    rejection = recorder.pop_provider_exit_rejection()
+    assert rejection is not None
+    assert rejection["reason"] == _FIRST_PARTY_TUNNEL_FAILURE_REASON
+    assert rejection["url"] == confirm_url
+    assert rejection["browser_generation"] == 1
+
+    # The one-exit cap prevents loops even if the replacement also fails.
+    recorder._network_generation = 2
+    fail("document-1", checkout_url, resource_type="Document", document_url="")
+    fail("document-2", checkout_url, resource_type="Document", document_url="")
+    assert recorder.pop_provider_exit_rejection() is None
+
+
+def test_retried_document_tunnel_failure_clears_after_success():
+    """A successful retry cancels a queued rotation; unrelated 2xx does not."""
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder(
+        browser_session=MagicMock(),
+        agent_id="agent",
+        task_id="task",
+        session_id="session",
+        output_dir=Path("/tmp/browser-tunnel-test"),
+    )
+    recorder._network_generation = 1
+    page_url = "https://shop.example.test/test_payment"
+
+    def request(request_id, url):
+        recorder._on_request_will_be_sent(
+            {"requestId": request_id, "type": "Document", "request": {"url": url, "method": "GET"}},
+            None,
+            1,
+        )
+
+    for request_id in ("failed-1", "failed-2"):
+        request(request_id, page_url)
+        recorder._on_loading_failed(
+            {"requestId": request_id, "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+            None,
+            1,
+        )
+    assert len(recorder._provider_exit_rejections) == 1
+    recorder._provider_exit_rejections[0]["failure_ts_ms"] = -1
+
+    request("other-ok", "https://shop.example.test/other")
+    recorder._on_response_received(
+        {"requestId": "other-ok", "type": "Document", "response": {"url": "https://shop.example.test/other", "status": 200}},
+        None,
+        1,
+    )
+    assert len(recorder._provider_exit_rejections) == 1
+
+    request("retry-ok", page_url)
+    recorder._on_response_received(
+        {"requestId": "retry-ok", "type": "Document", "response": {"url": page_url, "status": 200}},
+        None,
+        1,
+    )
+    assert recorder.pop_provider_exit_rejection() is None
+    assert recorder._rejected_network_generations == set()
+    assert recorder._first_party_tunnel_provider_exits == 0
+
 async def test_execute_action_read_network_requests():
     """execute_action forwards every filter/detail flag to the recorder and errors
     only when no recorder is attached (never a silent success)."""
@@ -22442,6 +22549,8 @@ async def run_all_tests():
         "network_recorder_terminal_requests_bounded",
         test_network_recorder_terminal_requests_do_not_accumulate_after_clear,
     )
+    r.record("repeated_first_party_tunnel_failure", test_repeated_first_party_tunnel_failure_rotates_browser_exit)
+    r.record("retried_document_tunnel_failure", test_retried_document_tunnel_failure_clears_after_success)
     await r.record_async(
         "api_challenge_html_provider_exit",
         test_api_challenge_html_triggers_provider_exit_rejection,
