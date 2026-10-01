@@ -104,9 +104,7 @@ function archivedMessageRows(fixture: ScopedDbFixture): ArchivedTrajectoryRow[] 
 }
 
 function contentDigest(rootAgentId: string, agentId: string, role: string, text: string): string {
-  return createHash('sha256')
-    .update(`${rootAgentId}\0${agentId}\0${role}\0${text}`)
-    .digest('hex');
+  return createHash('sha256').update(`${rootAgentId}\0${agentId}\0${role}\0${text}`).digest('hex');
 }
 
 function llmRows(

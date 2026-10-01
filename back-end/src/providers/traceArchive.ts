@@ -16,7 +16,7 @@ import {
   validateEncryptedArtifactEnvelope as validateEncryptedEnvelope,
 } from './traceArchiveEnvelope';
 import { createLogger } from './logger';
-import { withTraceArchiveRequestTimeout } from './traceArchiveRequest';
+import { retryDelayMs, sleep, withTraceArchiveRequestTimeout } from './traceArchiveRequest';
 import { redactGmailArchive } from './traceArchiveGmailRedaction';
 
 const log = createLogger('TraceArchive');
@@ -112,10 +112,6 @@ function encryptionKey(): Buffer | null {
 
 function safeSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 96) || 'unbound';
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function safeArchivePath(input: string): string {
@@ -241,10 +237,6 @@ function shouldResetS3ClientAfterError(errorMessage: string): boolean {
     normalized.includes('network') ||
     normalized.includes('connection')
   );
-}
-
-function retryDelayMs(attempt: number): number {
-  return 250 * attempt * attempt;
 }
 
 export function isMissingObjectError(error: unknown): boolean {
