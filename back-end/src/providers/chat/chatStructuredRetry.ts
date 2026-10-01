@@ -7,15 +7,14 @@
  * Chat router/generator used to throw on the first miss, and create-agent
  * mapped that throw to FAILED.
  *
- * Each attempt keeps its own 3s router completion bound. This is not a
- * bound relaxation: a miss starts a new attempt, it does not stretch the
- * first one.
+ * Each attempt keeps its own router stall/completion bounds; a miss starts
+ * a new attempt, it does not stretch the first one.
  *
- * Deadline misses do not regenerate. The 3s bound already aborted the
- * provider; a second identical bound cannot recover a slow model and
- * doubles past the 5s chat-lifecycle SLA (observed: two
- * `Chat router completion expired` attempts → chat_handler_failure,
- * Temporal never starts).
+ * Deadline misses regenerate like every other miss. Prod agent e8f2279b
+ * (2026-10-01): the Cerebras router stalled, the first attempt's deadline
+ * fired, and answering it with an apology instead of a second attempt
+ * (which re-races Cerebras and the OpenRouter failover) gave up on a
+ * recoverable turn.
  */
 
 import { createLogger } from '../logger';
@@ -63,25 +62,21 @@ export async function regenerateOnChatStructuredMiss<T>(params: {
       const miss = asChatStructuredMiss(error);
       if (!miss) throw error;
       lastMiss = miss;
-      if (miss.kind === 'deadline') {
-        log.warn('[ChatStructuredRetry] Deadline miss is not regenerated', {
+      const exhausted = attempt === MAX_CHAT_STRUCTURED_ATTEMPTS;
+      log.warn(
+        exhausted
+          ? '[ChatStructuredRetry] Transient structured-output miss; regenerate budget exhausted'
+          : '[ChatStructuredRetry] Transient structured-output miss; regenerating',
+        {
           callSite: params.callSite,
           agentId: params.agentId,
           kind: miss.kind,
           attempt,
+          attempts: MAX_CHAT_STRUCTURED_ATTEMPTS,
           error: miss.message,
-        });
-        throw miss;
-      }
-      log.warn('[ChatStructuredRetry] Transient structured-output miss; regenerating', {
-        callSite: params.callSite,
-        agentId: params.agentId,
-        kind: miss.kind,
-        attempt,
-        attempts: MAX_CHAT_STRUCTURED_ATTEMPTS,
-        error: miss.message,
-      });
-      if (attempt === MAX_CHAT_STRUCTURED_ATTEMPTS) throw miss;
+        }
+      );
+      if (exhausted) throw miss;
     }
   }
   throw (

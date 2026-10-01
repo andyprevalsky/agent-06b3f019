@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 
 import { buildRouterCompletionOptions } from '../../providers/chat/routerLlm';
 import {
+  chatRouterCompletionBounds,
   createRouterCompletionDeadline,
   DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
+  DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS,
   streamBeforeRouterCompletionDeadline,
 } from '../../providers/chat/routerCompletionDeadline';
 import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
@@ -37,7 +39,34 @@ async function run(): Promise<void> {
   assert.equal(options.response_format?.json_schema.name, 'router_decision');
   assert.equal(options.response_format?.json_schema.strict, true);
 
-  assert.equal(DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS, 3_000);
+  assert.equal(DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS, 5_000);
+  assert.equal(DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS, 15_000);
+  const savedStall = process.env.CHAT_ROUTER_STALL_TIMEOUT_MS;
+  const savedCompletion = process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS;
+  delete process.env.CHAT_ROUTER_STALL_TIMEOUT_MS;
+  delete process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS;
+  assert.deepEqual(chatRouterCompletionBounds(), {
+    stallTimeoutMs: 5_000,
+    completionTimeoutMs: 15_000,
+  });
+  process.env.CHAT_ROUTER_STALL_TIMEOUT_MS = '900';
+  process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS = '400';
+  assert.deepEqual(
+    chatRouterCompletionBounds(),
+    { stallTimeoutMs: 400, completionTimeoutMs: 400 },
+    'the stall bound can never outlive the completion cap'
+  );
+  process.env.CHAT_ROUTER_STALL_TIMEOUT_MS = 'nope';
+  process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS = '-1';
+  assert.deepEqual(chatRouterCompletionBounds(), {
+    stallTimeoutMs: 5_000,
+    completionTimeoutMs: 15_000,
+  });
+  if (savedStall === undefined) delete process.env.CHAT_ROUTER_STALL_TIMEOUT_MS;
+  else process.env.CHAT_ROUTER_STALL_TIMEOUT_MS = savedStall;
+  if (savedCompletion === undefined) delete process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS;
+  else process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS = savedCompletion;
+
   assert.deepEqual(
     parsePartialRouterDecisionJson(
       '{"reasoning":"closed explanation","action":"direct_answer","query":"","goal":"","mode":"plan"'
@@ -93,10 +122,38 @@ async function run(): Promise<void> {
     'deadline recovery must fall back to complete fields from a partial response'
   );
 
-  const deadline = createRouterCompletionDeadline(5);
-  await new Promise<void>((resolve) => deadline.signal.addEventListener('abort', () => resolve()));
-  assert.equal(deadline.expired(), true, 'the completion deadline must abort a trickling stream');
-  deadline.dispose();
+  const stalled = createRouterCompletionDeadline({
+    stallTimeoutMs: 20,
+    completionTimeoutMs: 1_000,
+  });
+  await new Promise<void>((resolve) => stalled.signal.addEventListener('abort', () => resolve()));
+  assert.equal(stalled.expired(), true, 'a stream with no progress must hit the stall bound');
+  assert.equal(stalled.expiry(), 'stall');
+  stalled.dispose();
+
+  const progressing = createRouterCompletionDeadline({
+    stallTimeoutMs: 100,
+    completionTimeoutMs: 2_000,
+  });
+  const progressStartedAt = Date.now();
+  const ticks = setInterval(() => progressing.progress(), 20);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  clearInterval(ticks);
+  assert.ok(Date.now() - progressStartedAt > 100, 'precondition: elapsed exceeds the stall bound');
+  assert.equal(progressing.expired(), false, 'progress must re-arm the stall bound');
+  progressing.dispose();
+
+  const trickling = createRouterCompletionDeadline({
+    stallTimeoutMs: 100,
+    completionTimeoutMs: 150,
+  });
+  const trickle = setInterval(() => trickling.progress(), 10);
+  await new Promise<void>((resolve) => trickling.signal.addEventListener('abort', () => resolve()));
+  clearInterval(trickle);
+  assert.equal(trickling.expiry(), 'completion', 'the cap must end a stream that keeps trickling');
+  trickling.progress();
+  assert.equal(trickling.expiry(), 'completion', 'progress after expiry must not re-arm');
+  trickling.dispose();
 
   let iteratorClosed = false;
   const uncooperativeStream: AsyncIterable<string> = {
@@ -110,7 +167,10 @@ async function run(): Promise<void> {
       };
     },
   };
-  const hardDeadline = createRouterCompletionDeadline(5);
+  const hardDeadline = createRouterCompletionDeadline({
+    stallTimeoutMs: 5,
+    completionTimeoutMs: 50,
+  });
   const deadlineResult = await streamBeforeRouterCompletionDeadline(
     uncooperativeStream,
     hardDeadline
@@ -123,7 +183,7 @@ async function run(): Promise<void> {
   assert.equal(iteratorClosed, true, 'deadline expiry must close an uncooperative iterator');
   hardDeadline.dispose();
 
-  process.stdout.write('PASS chat Router fallback is reasoning- and completion-bounded\n');
+  process.stdout.write('PASS chat Router fallback is reasoning-, stall-, and completion-bounded\n');
 }
 
 void run().catch((error: unknown) => {

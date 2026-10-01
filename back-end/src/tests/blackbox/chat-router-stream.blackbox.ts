@@ -16,7 +16,8 @@
  * July 19 SMS already settled the class: empty / reasoning-only / unparseable
  * streams regenerate in place. An immediate apology or FAILED is giving up on
  * the first miss. Chat router, generator, and speculative commit must use the
- * same regenerate contract. The 3s per-attempt bound must not change.
+ * same regenerate contract — deadline misses included (prod agent e8f2279b,
+ * 2026-10-01; the end-to-end replay lives in chat-router-failover.blackbox.ts).
  *
  * No live server required.
  */
@@ -42,7 +43,10 @@ import {
   regenerateOnChatStructuredMiss,
 } from '../../providers/chat/chatStructuredRetry';
 import { requireGeneratorParsedJson } from '../../providers/chat/generatorLlm';
-import { DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
+import {
+  DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
+  DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS,
+} from '../../providers/chat/routerCompletionDeadline';
 import {
   accumulateChatLlmUsage,
   applyChunkUsage,
@@ -226,7 +230,11 @@ async function testExhaustedMissesStayTypedAndDoNotFailAgent(): Promise<void> {
     }),
     (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'deadline'
   );
-  assert.equal(deadlineAttempts, 1, 'deadline misses must not consume a second 3s bound');
+  assert.equal(
+    deadlineAttempts,
+    MAX_CHAT_STRUCTURED_ATTEMPTS,
+    'deadline misses regenerate like every other miss before any notice'
+  );
 
   const events: string[] = [];
   await recoverChatHandlerFailure({
@@ -292,11 +300,14 @@ function testUsageAccumulatesAcrossAttempts(): void {
   assert.equal(usage.cache_read_input_tokens, 2);
 }
 
-function testPerAttemptBoundUnchanged(): void {
-  assert.equal(
-    DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
-    3_000,
-    'retry must not raise the per-attempt 3s router bound'
+function testPerAttemptBoundsAreProfiled(): void {
+  assert.deepEqual(
+    {
+      stall: DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS,
+      completion: DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
+    },
+    { stall: 5_000, completion: 15_000 },
+    'router bounds are sized from the e8f2279b failover profile; change them only with a new profile'
   );
   assert.equal(MAX_CHAT_STRUCTURED_ATTEMPTS, 2, 'one regenerate, not an unbounded loop');
 }
@@ -410,21 +421,16 @@ function testCallSitesUseSharedRegenerate(): void {
     'speculative commit must not kill the turn on a typed miss'
   );
   const handler = readFileSync(join(here, '../../providers/chat/chatHandler.ts'), 'utf8');
-  assert.match(
-    handler,
-    /deadlineRouterFallback/,
-    'router deadline must escalate execute/plan turns instead of leaving a null workflow'
+  assert.equal(
+    handler.includes('deadlineRouterFallback') || speculation.includes('EXPLICIT_AGENT_INTENT'),
+    false,
+    'a keyword regex must not stand in for the router decision (CLAUDE.md 25b; e8f2279b)'
   );
   const retry = readFileSync(join(here, '../../providers/chat/chatStructuredRetry.ts'), 'utf8');
-  assert.match(
-    retry,
-    /miss\.kind === 'deadline'/,
-    'deadline misses must not start a second 3s router bound'
-  );
-  assert.match(
-    speculation,
-    /EXPLICIT_AGENT_INTENT/,
-    'deadline fallback must match only explicit agent/plan/execute wording'
+  assert.equal(
+    retry.includes("kind === 'deadline'"),
+    false,
+    'deadline misses must not be carved out of the regenerate budget (e8f2279b)'
   );
   const requireDecision = router.indexOf('requireRouterDecision({ finalized, deadlineExpired })');
   const deadlineClose = router.indexOf('!finalized.decision && deadlineExpired');
@@ -451,7 +457,7 @@ async function main(): Promise<void> {
   await testFirstMissRegeneratesInsteadOfApologizing();
   await testExhaustedMissesStayTypedAndDoNotFailAgent();
   await testNonTransientErrorsDoNotRetry();
-  testPerAttemptBoundUnchanged();
+  testPerAttemptBoundsAreProfiled();
   testCallSitesUseSharedRegenerate();
   testRetryResetsPerAttemptStreamState();
   testUsageAccumulatesAcrossAttempts();
