@@ -301,13 +301,13 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
         });
         return;
       }
-      log.warn('cerebras_chat.openrouter_glm_fallover_empty', {
+      log.warn('cerebras_chat.openrouter_rate_fallover_empty', {
         request_id: params.requestId,
         pool: params.pool,
       });
     } catch (openRouterError) {
       if (!(openRouterError instanceof PreContentFallThroughError)) throw openRouterError;
-      log.warn('cerebras_chat.openrouter_glm_fallover_failed', {
+      log.warn('cerebras_chat.openrouter_rate_fallover_failed', {
         request_id: params.requestId,
         pool: params.pool,
         error_name: openRouterError.cause.name,

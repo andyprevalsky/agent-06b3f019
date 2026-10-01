@@ -3239,6 +3239,11 @@
       ]
     },
     "expected_payment_lifecycle": {
+      "integrity": {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "cardCount": 1
+      },
       "purchase": {
         "status": "CLEARED",
         "merchant": "Rose Labs Test Payment",

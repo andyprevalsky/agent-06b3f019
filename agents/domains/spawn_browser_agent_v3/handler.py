@@ -8335,6 +8335,10 @@ async def _spawn_browser_agent_activity_v3_real(
 
                     config_result = recovery.config_result
                     if config_result is not None:
+                        if config_result.get("success") is False:
+                            raise RuntimeError(
+                                str(config_result.get("error") or "No viable browser recovery configuration")
+                            )
                         new_cdp_url = config_result.get("ws_url")
                         if not isinstance(new_cdp_url, str) or not new_cdp_url:
                             raise RuntimeError("Challenge recovery selected a browser without a CDP URL")

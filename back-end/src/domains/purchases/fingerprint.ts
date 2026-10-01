@@ -17,6 +17,12 @@ function canonicalizeReviewCount(value: unknown): unknown {
   return typeof value === 'string' ? value.replace(/(\p{Nd}),(?=\p{Nd})/gu, '$1') : value;
 }
 
+function canonicalizeImageUrl(value: unknown): unknown {
+  return typeof value === 'string'
+    ? value.replace(/^http:\/\/placehold\.co(?=\/|$)/i, 'https://placehold.co')
+    : value;
+}
+
 function asPositiveInt(value: unknown): number {
   if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
     return value;
@@ -29,19 +35,56 @@ function asPositiveInt(value: unknown): number {
 }
 
 /**
- * Strip a trailing ` x{quantity}` echo of the quantity field so order-summary
- * prose ("Aurora Notebook x1") fingerprints the same as the product title.
+ * Strip a trailing ` x{quantity}` or ` - x{quantity}` echo of the quantity field
+ * so order-summary prose fingerprints the same as the product title.
  */
-function canonicalizeLineItemName(name: unknown, quantity: unknown): unknown {
+function canonicalizeLineItemName(
+  name: unknown,
+  quantity: unknown,
+  unitPriceCents: unknown,
+  merchant: string
+): unknown {
   if (typeof name !== 'string') return name;
-  const match = /\s+x(\d+)\s*$/i.exec(name);
-  if (match === null) return name;
   const qty = asPositiveInt(quantity);
+  const merchantEcho = /\s+(?:-\s*)?x(\d+)\s+\(([^()]*)\)\s*$/i.exec(name);
+  if (
+    merchantEcho !== null &&
+    Number.parseInt(merchantEcho[1], 10) === qty &&
+    merchantEcho[2].trim().toLowerCase() === merchant.trim().toLowerCase()
+  ) {
+    return name.slice(0, merchantEcho.index).trimEnd();
+  }
+  const cartSummary = /\s+-\s+x(\d+)\s+-\s+\$(\d+)\.(\d{2})(?:\s+\(([^()]*)\))?\s*$/i.exec(name);
+  if (cartSummary !== null) {
+    const echoedPrice =
+      Number.parseInt(cartSummary[2], 10) * 100 + Number.parseInt(cartSummary[3], 10);
+    const merchantLabel = merchant.trim().toLowerCase();
+    const sourceLabel = (cartSummary[4] ?? '').trim().toLowerCase();
+    if (
+      Number.parseInt(cartSummary[1], 10) === qty &&
+      echoedPrice === unitPriceCents &&
+      (sourceLabel === '' ||
+        sourceLabel === merchantLabel ||
+        sourceLabel === `${merchantLabel} checkout`)
+    ) {
+      return name.slice(0, cartSummary.index).trimEnd();
+    }
+  }
+  const priced = /\s+-\s+(\d+)\s+x\s+\$(\d+)\.(\d{2})\s*$/i.exec(name);
+  if (
+    priced !== null &&
+    Number.parseInt(priced[1], 10) === qty &&
+    Number.parseInt(priced[2], 10) * 100 + Number.parseInt(priced[3], 10) === unitPriceCents
+  ) {
+    return name.slice(0, priced.index).trimEnd();
+  }
+  const match = /\s+(?:-\s*)?x(\d+)\s*$/i.exec(name);
+  if (match === null) return name;
   if (Number.parseInt(match[1], 10) !== qty) return name;
   return name.slice(0, match.index).trimEnd();
 }
 
-function canonicalizeLineItems(value: unknown): unknown[] | null {
+function canonicalizeLineItems(value: unknown, merchant: string): unknown[] | null {
   if (!Array.isArray(value)) return null;
   return value.map((rawItem) => {
     const item = asRecord(rawItem);
@@ -49,7 +92,8 @@ function canonicalizeLineItems(value: unknown): unknown[] | null {
       ? rawItem
       : {
           ...item,
-          name: canonicalizeLineItemName(item.name, item.quantity),
+          name: canonicalizeLineItemName(item.name, item.quantity, item.unitPriceCents, merchant),
+          imageUrl: canonicalizeImageUrl(item.imageUrl),
           reviewCount: canonicalizeReviewCount(item.reviewCount),
         };
   });
@@ -85,7 +129,7 @@ function pythonAsciiJson(value: unknown): string {
 export function canonicalStoredPurchaseFingerprint(input: StoredPurchaseIdentity): string | null {
   const receipt = asRecord(input.lineItemsJson);
   if (receipt === null) return null;
-  const lineItems = canonicalizeLineItems(receipt.lineItems);
+  const lineItems = canonicalizeLineItems(receipt.lineItems, input.merchant);
   if (lineItems === null) return null;
 
   const identity = {

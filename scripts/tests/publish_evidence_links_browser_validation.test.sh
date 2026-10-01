@@ -10,6 +10,11 @@ python3 - <<'PY'
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -19,9 +24,37 @@ mod = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(mod)
 
+# Run the real verifier with only the declared backend package available.
+# Stop at launch so this control cannot allocate a browser or reach the network.
+with tempfile.TemporaryDirectory(prefix="benchmark-share-import-") as temporary:
+    fixture = Path(temporary)
+    script = fixture / "scripts" / "verify_benchmark_share_link.cjs"
+    script.parent.mkdir()
+    shutil.copy2(Path("scripts/verify_benchmark_share_link.cjs"), script)
+    backend = fixture / "back-end"
+    package = backend / "node_modules" / "playwright"
+    package.mkdir(parents=True)
+    (backend / "package.json").write_text("{}")
+    (package / "index.js").write_text(
+        "exports.chromium = {launch: async () => {"
+        "process.stdout.write('backend-playwright-imported\\n');"
+        "throw new Error('STOP-before-browser-allocation');}};"
+    )
+    environment = dict(os.environ)
+    environment.pop("NODE_PATH", None)
+    result = subprocess.run(
+        ["node", str(script)], input=json.dumps({
+            "url": "https://example.invalid/", "agentId": "import-control",
+            "snippets": {"user": [], "assistant": []},
+        }), text=True, capture_output=True, env=environment, timeout=5,
+    )
+    assert result.returncode == 1, result.returncode
+    assert result.stdout == "backend-playwright-imported\n", result.stderr
+    assert result.stderr.strip() == "STOP-before-browser-allocation", result.stderr
+
 # Avoid network probes in unit checks: stub URL/pointer reachability.
-mod._probe_recording_view_url = lambda url, timeout=20.0: url.startswith("https://ok/")  # type: ignore[assignment]
-mod._probe_recording_file_pointer = (  # type: ignore[assignment]
+mod._probe_recording_view_url = lambda url, timeout=20.0: url.startswith("https://ok/")
+mod._probe_recording_file_pointer = (
     lambda agent_id, pointer, timeout=30.0: isinstance(pointer, dict)
     and pointer.get("id") == "fp-ok"
 )
@@ -32,6 +65,46 @@ def msg(**meta: Any) -> dict:
 
 
 agent = "00000000-0000-4000-8000-000000000001"
+
+# The browser verifier checks both rendered roles. Markdown progress headings
+# become plain text in the page, and hidden messages must not count.
+snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "Raise the round for Rose Labs"},
+        {"role": "ASSISTANT", "text": "**Setting the plan**\n\n"},
+        {"role": "ASSISTANT", "text": "private hidden reply", "metadata": {"hidden": True}},
+    ]
+)
+assert snippets == {
+    "user": ["Raise the round for Rose Labs"],
+    "assistant": ["Setting the plan"],
+}, snippets
+
+literal_snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "Investigate foo_bar failure"},
+        {"role": "ASSISTANT", "text": "**Inspect `foo_bar` before retrying**"},
+    ]
+)
+assert literal_snippets == {
+    "user": ["Investigate foo_bar failure"],
+    "assistant": ["Inspect foo_bar before retrying"],
+}, literal_snippets
+
+fe_url = mod.durable_fe_url(agent, agent, "run.signature")
+assert "?agent-id=" in fe_url and "#benchmark-share=run.signature" in fe_url, fe_url
+assert "benchmark-share=" not in fe_url.split("#", 1)[0], fe_url
+
+list_snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "1. Open the benchmark link"},
+        {"role": "ASSISTANT", "text": "- [Inspect the run](https://example.com/run) before retrying"},
+    ]
+)
+assert list_snippets == {
+    "user": ["Open the benchmark link"],
+    "assistant": ["Inspect the run before retrying"],
+}, list_snippets
 
 # No browser tasks → pass
 assert mod.validate_browser_agents_terminated_with_recording(agent, []) == []
@@ -203,7 +276,7 @@ failures = mod.validate_browser_agents_terminated_with_recording(
 assert failures == [], failures
 
 # Dead view URL → fail recording
-mod._probe_recording_view_url = lambda url, timeout=20.0: False  # type: ignore[assignment]
+mod._probe_recording_view_url = lambda url, timeout=20.0: False
 failures = mod.validate_browser_agents_terminated_with_recording(
     agent,
     [

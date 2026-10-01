@@ -1381,6 +1381,7 @@ def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
 
 async def test_browser_navigation_uses_event_timeout_without_global_patch():
     """The actual CDP navigation receives the event budget without global mutation."""
+    import inspect
     import browser_use.browser.session as browser_session_mod
     from browser_use.browser.events import NavigateToUrlEvent
     from types import MethodType
@@ -1422,8 +1423,16 @@ async def test_browser_navigation_uses_event_timeout_without_global_patch():
         params={"url": event.url, "transitionType": "address_bar"}, session_id="offline-session"
     )
     assert asyncio.wait_for is original_wait_for
+    upstream_source = Path(browser_session_mod.__file__).read_text(encoding="utf-8")
     handler_source = Path(handler_mod.__file__).read_text(encoding="utf-8")
     assert "apply_browser_use_navigate_timeout_patch" not in handler_source
+
+    if "nav_timeout" in inspect.signature(browser_session_mod.BrowserSession._navigate_and_wait).parameters:
+        assert "nav_timeout=event.event_timeout" in upstream_source
+    else:
+        assert "nav_timeout = 20.0" in upstream_source
+        assert "start_url_nav_error = nav_exc" in handler_source
+        assert "Start URL navigation failed (continuing into agent loop)" in handler_source
 
 
 def test_browser_task_prompt_does_not_duplicate_system_prompt():

@@ -426,6 +426,26 @@ def test_fingerprint_ignores_display_only_review_formatting():
     )
 
 
+def test_placeholder_image_scheme_is_canonical_for_receipt_and_fingerprint():
+    """An agent's HTTP spelling of the same placeholder image stays one cart."""
+    from domains.request_payment_card.service import normalize_payment_payload
+
+    secure = _sample_tool_call()
+    secure["line_items"][0]["image_url"] = "https://placehold.co/320x220/png?text=Desk+Lamp"
+    insecure = _sample_tool_call()
+    insecure["line_items"][0]["image_url"] = "http://placehold.co/320x220/png?text=Desk+Lamp"
+    secure_payload = normalize_payment_payload(secure, "user-123")
+    insecure_payload = normalize_payment_payload(insecure, "user-123")
+    assert insecure_payload["lineItems"][0]["imageUrl"] == secure_payload["lineItems"][0]["imageUrl"]
+    assert insecure_payload["fingerprint"] == secure_payload["fingerprint"]
+
+    other_host = _sample_tool_call()
+    other_host["line_items"][0]["image_url"] = "http://other.example/320x220/png?text=Desk+Lamp"
+    assert normalize_payment_payload(other_host, "user-123")["fingerprint"] != secure_payload[
+        "fingerprint"
+    ]
+
+
 def test_fingerprint_ignores_trailing_quantity_echo_on_item_name():
     """Order-summary names like 'Aurora Notebook x1' must reuse the bare-title card."""
     from domains.request_payment_card.service import normalize_payment_payload
@@ -444,12 +464,140 @@ def test_fingerprint_ignores_trailing_quantity_echo_on_item_name():
     assert echoed_payload["lineItems"][0]["name"] == "Aurora Notebook x1"
     assert bare_payload["fingerprint"] == echoed_payload["fingerprint"]
 
+    hyphen_echo = _sample_tool_call()
+    hyphen_echo["line_items"][0]["name"] = "Aurora Notebook - x1"
+    hyphen_echo["line_items"][0]["quantity"] = 1
+    assert (
+        normalize_payment_payload(hyphen_echo, "user-123")["fingerprint"]
+        == bare_payload["fingerprint"]
+    )
+
+    merchant_echo = _sample_tool_call()
+    merchant_echo["line_items"][0]["name"] = "Aurora Notebook x1 (Example Shop)"
+    merchant_echo["line_items"][0]["quantity"] = 1
+    assert (
+        normalize_payment_payload(merchant_echo, "user-123")["fingerprint"]
+        == bare_payload["fingerprint"]
+    )
+
+    other_merchant_echo = _sample_tool_call()
+    other_merchant_echo["line_items"][0]["name"] = "Aurora Notebook x1 (Different Shop)"
+    other_merchant_echo["line_items"][0]["quantity"] = 1
+    assert (
+        normalize_payment_payload(other_merchant_echo, "user-123")["fingerprint"]
+        != bare_payload["fingerprint"]
+    )
+
     mismatched = _sample_tool_call()
     mismatched["line_items"][0]["name"] = "Aurora Notebook x2"
     mismatched["line_items"][0]["quantity"] = 1
     assert (
         normalize_payment_payload(mismatched, "user-123")["fingerprint"]
         != bare_payload["fingerprint"]
+    )
+
+    mismatched_hyphen = _sample_tool_call()
+    mismatched_hyphen["line_items"][0]["name"] = "Aurora Notebook - x2"
+    mismatched_hyphen["line_items"][0]["quantity"] = 1
+    assert (
+        normalize_payment_payload(mismatched_hyphen, "user-123")["fingerprint"]
+        != bare_payload["fingerprint"]
+    )
+
+    priced_echo = _sample_tool_call()
+    priced_echo["line_items"][0]["name"] = "Aurora Notebook - 1 x $12.00"
+    priced_echo["line_items"][0]["unit_price_cents"] = 1200
+    priced_echo["line_items"][0]["quantity"] = 1
+    priced_echo["line_items"][0]["line_total_cents"] = 1200
+    bare_priced = _sample_tool_call()
+    bare_priced["line_items"][0]["name"] = "Aurora Notebook"
+    bare_priced["line_items"][0]["unit_price_cents"] = 1200
+    bare_priced["line_items"][0]["quantity"] = 1
+    bare_priced["line_items"][0]["line_total_cents"] = 1200
+    assert (
+        normalize_payment_payload(priced_echo, "user-123")["fingerprint"]
+        == normalize_payment_payload(bare_priced, "user-123")["fingerprint"]
+    )
+
+    wrong_price = _sample_tool_call()
+    wrong_price["line_items"][0]["name"] = "Aurora Notebook - 1 x $13.00"
+    wrong_price["line_items"][0]["unit_price_cents"] = 1200
+    wrong_price["line_items"][0]["quantity"] = 1
+    wrong_price["line_items"][0]["line_total_cents"] = 1200
+    assert (
+        normalize_payment_payload(wrong_price, "user-123")["fingerprint"]
+        != normalize_payment_payload(bare_priced, "user-123")["fingerprint"]
+    )
+
+
+def test_fingerprint_ignores_verified_checkout_summary_annotations():
+    """Two browser runs of the same cart may copy different visible title prose."""
+    from domains.request_payment_card.service import normalize_payment_payload
+
+    bare = _sample_tool_call()
+    bare["merchant"] = "Rose Labs Test Payment"
+    bare["line_items"][0]["name"] = "Aurora Notebook"
+    bare["line_items"][0]["unit_price_cents"] = 1200
+    bare["line_items"][0]["quantity"] = 1
+    bare["line_items"][0]["line_total_cents"] = 1200
+    first_browser = _sample_tool_call()
+    first_browser["merchant"] = bare["merchant"]
+    first_browser["line_items"][0].update(bare["line_items"][0])
+    first_browser["line_items"][0]["name"] = (
+        "Aurora Notebook - x1 - $12.00 (Rose Labs Test Payment checkout)"
+    )
+
+    first = normalize_payment_payload(first_browser, "user-123")
+    second = normalize_payment_payload(bare, "user-123")
+    assert first["fingerprint"] == second["fingerprint"], (
+        "the same product URL, quantity, price, and merchant must reuse its card"
+    )
+
+    mismatched = _sample_tool_call()
+    mismatched["merchant"] = bare["merchant"]
+    mismatched["line_items"][0].update(bare["line_items"][0])
+    mismatched["line_items"][0]["name"] = (
+        "Aurora Notebook - x2 - $12.00 (Rose Labs Test Payment checkout)"
+    )
+    assert normalize_payment_payload(mismatched, "user-123")["fingerprint"] != second[
+        "fingerprint"
+    ]
+    mismatched["line_items"][0]["name"] = (
+        "Aurora Notebook - x1 - $13.00 (Rose Labs Test Payment checkout)"
+    )
+    assert normalize_payment_payload(mismatched, "user-123")["fingerprint"] != second[
+        "fingerprint"
+    ]
+    mismatched["line_items"][0]["name"] = (
+        "Aurora Notebook - x1 - $12.00 (Different Merchant checkout)"
+    )
+    assert normalize_payment_payload(mismatched, "user-123")["fingerprint"] != second[
+        "fingerprint"
+    ]
+
+
+def test_fingerprint_preserves_non_ascii_suffixes_and_distinct_merchant_echo():
+    """Only the ASCII suffixes the backend recognizes may be removed."""
+    from domains.request_payment_card.service import normalize_payment_payload
+
+    bare = _sample_tool_call()
+    bare["line_items"][0]["name"] = "Aurora Notebook"
+
+    for suffix in (" x١", " x١ (Example Shop)", " - ١ x $12.00"):
+        echoed = _sample_tool_call()
+        echoed["line_items"][0]["name"] = f"Aurora Notebook{suffix}"
+        assert (
+            normalize_payment_payload(echoed, "user-123")["fingerprint"]
+            != normalize_payment_payload(bare, "user-123")["fingerprint"]
+        )
+
+    bare["merchant"] = "Straße"
+    echoed = _sample_tool_call()
+    echoed["merchant"] = "Straße"
+    echoed["line_items"][0]["name"] = "Aurora Notebook x1 (STRASSE)"
+    assert (
+        normalize_payment_payload(echoed, "user-123")["fingerprint"]
+        != normalize_payment_payload(bare, "user-123")["fingerprint"]
     )
 
 
@@ -886,8 +1034,20 @@ async def run_all_tests():
         test_fingerprint_ignores_display_only_review_formatting,
     )
     result.record(
+        "placeholder_image_scheme_stability",
+        test_placeholder_image_scheme_is_canonical_for_receipt_and_fingerprint,
+    )
+    result.record(
         "fingerprint_quantity_echo_stability",
         test_fingerprint_ignores_trailing_quantity_echo_on_item_name,
+    )
+    result.record(
+        "fingerprint_checkout_summary_stability",
+        test_fingerprint_ignores_verified_checkout_summary_annotations,
+    )
+    result.record(
+        "fingerprint_non_ascii_suffix_distinct",
+        test_fingerprint_preserves_non_ascii_suffixes_and_distinct_merchant_echo,
     )
     result.record(
         "fingerprint_material_changes_distinct",

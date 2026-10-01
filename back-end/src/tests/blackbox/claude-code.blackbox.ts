@@ -75,6 +75,7 @@ import {
   resolveClaudeCodeTokenSource,
 } from '../../providers/e2b';
 import { AgentOwnerMismatchError, resolveAgentContext } from '../../domains/claude-code/service';
+import { fetchClaudeCodeCredentialsWithMeta } from '../../providers/claudeCredentials';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
 config();
 
@@ -309,12 +310,12 @@ function encryptClaudeEnvelope(plaintext: string): string {
   return Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
 }
 
-function buildCredentialPayload(accessToken: string): string {
+function buildCredentialPayload(accessToken: string, refreshToken = 'test-refresh'): string {
   return encryptClaudeEnvelope(
     JSON.stringify({
       claudeAiOauth: {
         accessToken,
-        refreshToken: 'test-refresh',
+        refreshToken,
         expiresAt: Date.now() + 60 * 60 * 1000,
       },
     })
@@ -394,9 +395,22 @@ async function smokeUserHasResolvableClaudeToken(): Promise<boolean> {
       'X-User-Id': DEV_USER_ID,
     },
   });
-  if (res.status !== 200) return false;
-  const body = res.data as { accessToken?: unknown };
-  return typeof body.accessToken === 'string' && body.accessToken.startsWith('sk-ant-');
+  if (res.status === 200) {
+    const body = res.data as { accessToken?: unknown };
+    if (typeof body.accessToken === 'string' && body.accessToken.startsWith('sk-ant-')) {
+      return true;
+    }
+  }
+  // The token-only route deliberately excludes EXPIRED auth_error rows. Claude
+  // Code can still refresh Andy's full OAuth envelope in the real E2B path.
+  const credential = await fetchClaudeCodeCredentialsWithMeta(DEV_USER_ID);
+  return (
+    credential?.source === 'user' &&
+    credential.userId === DEV_USER_ID &&
+    credential.credentialMode === 'oauth_envelope' &&
+    typeof credential.credentials === 'string' &&
+    credential.credentials.length > 0
+  );
 }
 
 async function syncAndyProdClaudeTokensForSmoke(reason: string): Promise<void> {
@@ -678,6 +692,40 @@ function testEligibleAndyClaudeSmokeCredential_rejectsEmptyOrRevoked() {
     ),
     'EXPIRED without auth_error must not be seeded into the local pool'
   );
+}
+
+async function testExpiredClaudeCredentialSelectsRefreshableAccount() {
+  const userId = crypto.randomUUID();
+  try {
+    for (const [index, refreshToken] of ['', 'test-refresh'].entries()) {
+      await prisma.integration.create({
+        data: {
+          userId,
+          accountId: `smoke-refresh-${index}`,
+          name: 'claude_code',
+          type: 'TOOL_SETUP',
+          status: 'EXPIRED',
+          isActive: false,
+          failureReason: 'auth_error',
+          poolingEnabled: false,
+          createdAt: new Date(`2026-01-0${index + 1}T00:00:00Z`),
+          config: {
+            encryptedCredentials: buildCredentialPayload(`sk-ant-oat-test-${index}`, refreshToken),
+          },
+        },
+      });
+    }
+    const credential = await fetchClaudeCodeCredentialsWithMeta(userId);
+    assert(credential?.source === 'user', 'must use this user’s own Claude credential');
+    assert(credential.credentialMode === 'oauth_envelope', 'must skip token-only expired row');
+    const parsed = JSON.parse(credential.credentials ?? '{}') as {
+      claudeAiOauth?: { refreshToken?: string; expiresAt?: number };
+    };
+    assert(parsed.claudeAiOauth?.refreshToken === 'test-refresh', 'refresh token must be retained');
+    assert(parsed.claudeAiOauth?.expiresAt === 0, 'sandbox copy must force refresh');
+  } finally {
+    await prisma.integration.deleteMany({ where: { userId, name: 'claude_code' } });
+  }
 }
 
 function testResolveAuthEnvs_noCredsNoKeyThrows() {
@@ -1655,6 +1703,10 @@ async function runAll() {
     {
       name: 'andy smoke sync -- rejects empty or revoked envelopes',
       fn: async () => testEligibleAndyClaudeSmokeCredential_rejectsEmptyOrRevoked(),
+    },
+    {
+      name: 'claude credentials -- expired account scan uses refreshable envelope',
+      fn: testExpiredClaudeCredentialSelectsRefreshableAccount,
     },
     {
       name: 'sandbox retry -- transient transport errors retry, rejections do not',

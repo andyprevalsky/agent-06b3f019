@@ -593,6 +593,12 @@ check candidate allocation/probe errors separately. The existing
 `challenge_recovery` agent blackbox domain covers failed-search decoding,
 successful winners, and preservation of the caller's malformed-winner guard.
 
+Durable evidence publishing requires `BENCHMARK_SHARE_SECRET` to match the
+deployed backend configuration and Chromium installed for the backend's declared
+Playwright version. Preserve the existing key when synchronizing env files;
+never print it. The publisher verifies the signed link in a fresh browser;
+`--run-id <UUID>` identifies an existing Hub run when `--run-json` is unavailable.
+
 - Every time a benchmark task is run, include the valid FE link to view the run (for example, `http://localhost:5050/?agent-id=ac267c32-470f-41da-8343-091b8965c410`) and verify it actually displays the agent.
 
 ## Cursor Cloud / Linux dev environment

@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 python3 - <<'PY'
 import importlib.util
 from pathlib import Path
+from uuid import UUID
 
 spec = importlib.util.spec_from_file_location(
     "publish_evidence_links", Path("scripts/publish_evidence_links.py")
@@ -32,7 +33,11 @@ bundle = {
 }
 for root, label, prompt in ((gate, "gate", "gate prompt"), (post, "post", "post prompt")):
     projected = mod.evidence_bundle_for_agent(bundle, root)
-    assert projected["run_id"] == f"run-1.evidence.{root}"
+    projected_id = UUID(projected["run_id"])
+    assert projected_id.version == 5, projected_id
+    assert str(projected_id) == projected["run_id"]
+    assert mod.evidence_bundle_for_agent(bundle, root)["run_id"] == projected["run_id"]
+    assert mod.evidence_bundle_for_agent({**bundle, "run_id": "run-2"}, root)["run_id"] != projected["run_id"]
     assert projected["source"] == "durable-evidence-projection"
     assert projected["source_run_id"] == "run-1"
     assert len(projected["tasks"]) == 1
@@ -42,6 +47,8 @@ for root, label, prompt in ((gate, "gate", "gate prompt"), (post, "post", "post 
     assert task["passed"] is False
     assert task["logs"]["messages"][0]["message"] == prompt
     assert task["message_count"] == task["tree_agent_count"] == 1
+assert mod.evidence_bundle_for_agent(bundle, gate)["run_id"] != mod.evidence_bundle_for_agent(bundle, post)["run_id"]
+assert bundle["run_id"] == "run-1"
 assert bundle["tasks"][0]["agent_id"] == gate + "," + post
 
 direct = {"run_id": "direct", "tasks": [{"agent_id": gate, "logs": {"messages": []}}]}
