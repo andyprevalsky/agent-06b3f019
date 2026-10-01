@@ -1367,89 +1367,25 @@ def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
     assert BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS > NAVIGATE_TO_URL_TIMEOUT_SECONDS
 
 
-def test_browser_use_upstream_still_hardcodes_page_navigate_20s():
-    """Canary: browser-use still hardcodes Page.navigate wait at 20s.
-
-    When upstream honors TIMEOUT_NavigateToUrlEvent, delete
-    ``browser_use_patches.apply_browser_use_navigate_timeout_patch``.
-    """
+def test_browser_navigation_handles_installed_timeout_without_global_patch():
+    """Older browser-use releases need start-url recovery for their fixed CDP wait."""
+    import inspect
     import browser_use.browser.session as browser_session_mod
+    from browser_use.browser.events import NavigateToUrlEvent
 
-    source = Path(browser_session_mod.__file__).read_text(encoding="utf-8")
-    assert "nav_timeout = 20.0" in source, (
-        "browser-use no longer hardcodes nav_timeout=20.0; remove the Rose "
-        "navigate-timeout patch if TIMEOUT_NavigateToUrlEvent is honored"
-    )
-
-
-@pytest.mark.asyncio
-async def test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config():
-    """Owning boundary for browser-event-ticket AMC start_url tool ERROR.
-
-    browser-use ``_navigate_and_wait`` passes ``timeout=20.0`` to
-    ``asyncio.wait_for`` around CDP ``Page.navigate``. Our config sets
-    ``TIMEOUT_NavigateToUrlEvent=300``, but that env never reaches this wait.
-    Without the Rose patch the wait budget stays 20.0s — heavy AMC showtimes
-    pages time out, spawn_browser returns tool ERROR, and the root agent
-    re-spawns on Fandango (merchant mismatch).
-    """
-    from browser_use.browser.session import BrowserSession
-
-    from domains.spawn_browser_agent_v3 import browser_use_patches as patches
+    from domains.spawn_browser_agent_v3 import handler as handler_mod
     from domains.spawn_browser_agent_v3.config import NAVIGATE_TO_URL_TIMEOUT_SECONDS
 
-    assert NAVIGATE_TO_URL_TIMEOUT_SECONDS > patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS
-    assert patches.page_navigate_timeout_seconds() == float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)
-
-    seen_timeouts: list[float | None] = []
-    true_wait_for = asyncio.wait_for
-
-    async def recording_wait_for(awaitable, timeout=None, **kwargs):
-        seen_timeouts.append(timeout)
-        if asyncio.iscoroutine(awaitable):
-            awaitable.close()
-        return {"ok": True}
-
-    async def upstream_like_navigate(self, *args, **kwargs):
-        async def page_navigate_rpc():
-            return {"frameId": "1"}
-
-        # Exact upstream hardcode shape (session.py: nav_timeout = 20.0).
-        return await asyncio.wait_for(
-            page_navigate_rpc(),
-            timeout=patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS,
-        )
-
-    previous_navigate = BrowserSession._navigate_and_wait
-    previous_patched = getattr(BrowserSession, patches._PATCHED_ATTR, False)
-    setattr(BrowserSession, patches._PATCHED_ATTR, False)
-    BrowserSession._navigate_and_wait = upstream_like_navigate
-
-    # Pre-fix (unpatched): wait_for must still see the hardcoded 20.0s budget.
-    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
-    try:
-        await upstream_like_navigate(MagicMock())
-        assert seen_timeouts == [patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS], (
-            "unpatched Page.navigate wait_for budget must be upstream 20.0s; "
-            f"got {seen_timeouts}"
-        )
-    finally:
-        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
-
-    seen_timeouts.clear()
-    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
-    try:
-        assert patches.apply_browser_use_navigate_timeout_patch() is True
-        await BrowserSession._navigate_and_wait(MagicMock())
-        assert seen_timeouts == [float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)], (
-            "patched Page.navigate wait_for budget must equal "
-            f"NAVIGATE_TO_URL_TIMEOUT_SECONDS={NAVIGATE_TO_URL_TIMEOUT_SECONDS}; "
-            f"got {seen_timeouts}"
-        )
-    finally:
-        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
-        BrowserSession._navigate_and_wait = previous_navigate
-        setattr(BrowserSession, patches._PATCHED_ATTR, previous_patched)
+    upstream_source = Path(browser_session_mod.__file__).read_text(encoding="utf-8")
+    handler_source = Path(handler_mod.__file__).read_text(encoding="utf-8")
+    assert NavigateToUrlEvent(url="https://example.com").event_timeout == NAVIGATE_TO_URL_TIMEOUT_SECONDS
+    assert "apply_browser_use_navigate_timeout_patch" not in handler_source
+    if "nav_timeout" in inspect.signature(browser_session_mod.BrowserSession._navigate_and_wait).parameters:
+        assert "nav_timeout=event.event_timeout" in upstream_source
+    else:
+        assert "nav_timeout = 20.0" in upstream_source
+        assert "start_url_nav_error = nav_exc" in handler_source
+        assert "Start URL navigation failed (continuing into agent loop)" in handler_source
 
 
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
@@ -3210,7 +3146,10 @@ def test_browser_activity_finally_skips_terminal_on_pause_for_resume():
             idx = real.find(f'"status": "{status}"', idx)
             if idx < 0:
                 break
-            window = real[max(0, idx - 200) : idx]
+            return_idx = real.find("return resume_result", idx)
+            assert return_idx > idx, status
+            window = real[idx:return_idx]
+            assert "persist_resume_context(" in window, status
             assert "browser_task_paused_for_resume = True" in window, status
             found = True
             idx += 1
@@ -20156,6 +20095,39 @@ def test_payment_card_verifier_evidence_exposes_only_valid_last_four():
     assert _build_payment_card_verifier_evidence("42x2") is None
     assert _build_payment_card_verifier_evidence(None) is None
 
+async def test_recorded_payment_request_survives_verifier_action_window():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.service import build_browser_verifier_context
+
+    action_history = ActionHistory()
+    action_history.restore_entries([
+        {"step": 1, "action": "request_payment_card", "result": {
+            "status": "approved", "payment_request": {
+                "merchant": "Rose Labs Test Payment", "total_cents": 4396,
+                "line_items": [{"name": "Aurora Notebook", "quantity": 1}],
+            }, "card_last4": "4242", "card_secret_refs": ["card_number", "card_name", "card_expiry", "card_cvv"]
+        }},
+        *({"step": step, "action": "input_text", "result": {"success": True}}
+          for step in range(2, 37)),
+    ])
+    with patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])):
+        context = await build_browser_verifier_context(
+            goal="Request a card and leave checkout unsubmitted",
+            current_url="https://example.com/checkout",
+            browser_state={"dom_tree": "Pay $43.96", "page_stats": {}, "scroll_position": {}},
+            action_history=action_history,
+            config=SimpleNamespace(),
+            session_id="session-1",
+        )
+    action_evidence = next(
+        entry for entry in context if entry.get("metadata", {}).get("toolName") == "action_history"
+    )
+    assert "request_payment_card" in action_evidence["text"]
+    assert "30 actions shown" in action_evidence["text"]
+    assert "Rose Labs Test Payment" in action_evidence["text"]
+    assert "4396" in action_evidence["text"]
+    assert "4242" in action_evidence["text"]
+
 async def test_payment_lookup_reuses_backend_matched_legacy_fingerprint():
     from domains.spawn_browser_agent_v3.handler import _lookup_payment_purchase
 
@@ -20887,11 +20859,11 @@ async def test_browser_tool_validation_error_feeds_back_through_normal_path():
     save_mock.assert_awaited_once()
     assert save_mock.await_args.kwargs["action_type"] == "request_payment_card"
 
-def test_compact_browser_turn_messages_drops_leading_orphan_tool():
-    """Resume compaction must not start on a tool row (OpenAI pairing)."""
+def test_browser_resume_preserves_full_provider_transcript():
+    """Pause state keeps all paired turns, including those before step 40."""
     from domains.spawn_browser_agent_v3.handler import (
         _browser_resume_continuity_state,
-        _compact_browser_turn_messages_for_resume,
+        _browser_turn_messages_for_resume,
     )
 
     class _History:
@@ -20924,24 +20896,70 @@ def test_compact_browser_turn_messages_drops_leading_orphan_tool():
         if i % 5 == 0:
             long_turns.append({"role": "user", "content": f"nudge-{i}"})
 
-    compact = _compact_browser_turn_messages_for_resume(long_turns, limit=40)
-    assert compact, "expected non-empty compact transcript"
-    assert compact[0].get("role") != "tool"
-    assert len(compact) <= 40
+    assert _browser_turn_messages_for_resume(long_turns) == long_turns
 
     state = _browser_resume_continuity_state(
         action_history=_History(),
-        visited_urls=[],
+        visited_urls=[f"https://shop.example/page/{i}" for i in range(45)],
         verifier_checkpoints=[],
         browser_turn_messages=long_turns,
     )
-    assert state["browser_turn_messages"][0].get("role") != "tool"
+    assert state["browser_turn_messages"] == long_turns
+    assert len(state["visited_urls"]) == 45
 
 
-def test_compact_browser_turn_messages_strips_embedded_screenshots():
-    """Resume compaction must strip base64 screenshot media from turn payloads."""
+def test_browser_resume_keeps_auth_attempts_and_task_summary():
     from domains.spawn_browser_agent_v3.handler import (
-        _compact_browser_turn_messages_for_resume,
+        _browser_resume_continuity_state,
+        _copy_browser_resume_continuity_fields,
+        _restore_browser_auth_attempts,
+    )
+    from domains.spawn_browser_agent_v3.service import AuthRuntimeState
+
+    class _History:
+        def get_entries(self):
+            return [{"step": 3, "action": "request_payment_card", "result": {"success": True}}]
+
+    before = AuthRuntimeState.from_auth_options(
+        {
+            "passwords": [{"id": "password-1"}, {"id": "password-2"}],
+            "email_otp": {"available": True, "attemptable": True},
+        }
+    )
+    before.mark_credential_ref({"kind": "password", "id": "password-1"})
+    before.mark_credential_ref({"kind": "email_otp"})
+    before.observe_clicked_element_text("Continue as guest")
+    saved = _browser_resume_continuity_state(
+        action_history=_History(),
+        visited_urls=["https://shop.example/checkout"],
+        verifier_checkpoints=[],
+        browser_turn_messages=[{"role": "assistant", "content": "I requested the card."}],
+        reasoning_messages=["I saw the approved order."],
+        action_summary=["requested the one-time payment card"],
+        auth_runtime_state=before,
+    )
+    resumed = {"approval_type": "payment"}
+    _copy_browser_resume_continuity_fields(saved, resumed)
+    assert resumed["reasoning_messages"] == ["I saw the approved order."]
+    assert resumed["action_summary"] == ["requested the one-time payment card"]
+    assert resumed["auth_attempts"]["password"]["attempted_ids"] == ["password-1"]
+    after = AuthRuntimeState.from_auth_options(
+        {
+            "passwords": [{"id": "password-1"}, {"id": "password-3"}],
+            "email_otp": {"available": True, "attemptable": True},
+        }
+    )
+    _restore_browser_auth_attempts(after, resumed["auth_attempts"])
+    assert after.passwords_attempted == {"password-1"}
+    assert after.email_otp_attempted is True
+    assert after.guest_option_seen is True
+    assert after.guest_attempted is True
+
+
+def test_browser_resume_keeps_embedded_screenshots():
+    """Resume must keep every provider-visible screenshot byte in position."""
+    from domains.spawn_browser_agent_v3.handler import (
+        _browser_turn_messages_for_resume,
     )
 
     turns = [
@@ -20975,13 +20993,152 @@ def test_compact_browser_turn_messages_strips_embedded_screenshots():
             ],
         },
     ]
-    compact = _compact_browser_turn_messages_for_resume(turns, limit=40)
-    blob = str(compact)
-    assert "data:image/png;base64," not in blob
-    assert "AAAA" not in blob
-    assert '"type": "image_url"' not in blob and "'type': 'image_url'" not in blob
-    assert any(message.get("role") == "user" for message in compact)
-    assert "[image omitted from Temporal resume]" in blob
+    resumed = _browser_turn_messages_for_resume(turns)
+    assert resumed == turns
+    assert resumed[2]["content"][1]["image_url"]["url"] == "data:image/png;base64," + ("A" * 1200)
+
+
+def test_browser_payment_resume_keeps_cached_prompt_prefix():
+    from copy import deepcopy
+
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.handler import _complete_pending_payment_card_result
+    from providers.rose.browser_use import build_browser_use_messages
+
+    goal = "Complete the approved checkout"
+    dynamic_context = "Original browser context"
+    prior_turns = [
+        {"role": "assistant", "content": "I requested the card.", "tool_calls": [{"id": "call-payment", "type": "function", "function": {"name": "request_payment_card", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call-payment", "name": "request_payment_card", "content": '{"status":"awaiting_payment_card_approval","payment_request":{"merchant":"Test Shop"}}'},
+    ]
+    action_history = ActionHistory()
+    action_history.restore_entries([{"step": 1, "action": "request_payment_card", "result": {
+        "status": "awaiting_payment_card_approval", "payment_request": {"merchant": "Test Shop"}
+    }}])
+    original = build_browser_use_messages(
+        task=goal,
+        browser_state={},
+        action_history=[],
+        available_actions=["request_payment_card"],
+        dynamic_system_context=dynamic_context,
+        turn_messages=prior_turns,
+    )
+    resumed_turns = deepcopy(prior_turns)
+    assert _complete_pending_payment_card_result(
+        resumed_turns,
+        action_history,
+        last4="7406",
+        card_refs={"card_number": "PAN-secret", "card_name": "Name-secret", "card_expiry": "Expiry-secret", "card_cvv": "CVV-secret"},
+    )
+    resumed = build_browser_use_messages(
+        task=goal,
+        browser_state={},
+        action_history=[],
+        available_actions=["request_payment_card"],
+        dynamic_system_context=dynamic_context,
+        turn_messages=resumed_turns,
+    )
+    assert resumed[:-1] == original[:-1]
+    assert len(resumed) == len(original)
+    result = json.loads(resumed[-1]["content"])
+    assert result["status"] == "approved"
+    assert result["card_last4"] == "7406"
+    assert result["card_secret_refs"] == ["card_number", "card_name", "card_expiry", "card_cvv"]
+    assert result["payment_request"] == {"merchant": "Test Shop"}
+    assert action_history.get_entries()[0]["result"] == result
+    assert "PAN-secret" not in resumed[-1]["content"]
+    assert sum("request_payment_card" in str(msg.get("tool_calls")) for msg in resumed) == 1
+    legacy_history = ActionHistory()
+    legacy_turns = deepcopy(prior_turns)
+    assert _complete_pending_payment_card_result(
+        legacy_turns, legacy_history, last4="7406",
+        card_refs={"card_number": "PAN", "card_name": "N", "card_expiry": "E", "card_cvv": "C"},
+    )
+    assert len(legacy_history.get_entries()) == 1
+    assert legacy_history.get_entries()[0]["result"]["status"] == "approved"
+    assert not _complete_pending_payment_card_result(
+        [], action_history, last4="7406", card_refs={"card_number": "PAN", "card_name": "N", "card_expiry": "E", "card_cvv": "C"}
+    )
+
+
+def test_browser_payment_resume_accepts_already_finalized_mint_result():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.handler import _complete_pending_payment_card_result
+    from domains.spawn_browser_agent_v3.service_crypto import finalize_parked_payment_card_approval_history
+
+    parked = {
+        "action_history": [{"step": 1, "action": "request_payment_card", "result": {
+            "status": "awaiting_payment_card_approval",
+        }}],
+        "browser_turn_messages": [{
+            "role": "tool", "name": "request_payment_card", "tool_call_id": "call-payment",
+            "content": '{"status":"awaiting_payment_card_approval"}',
+        }],
+    }
+    finalize_parked_payment_card_approval_history(parked, last4="7406")
+    history = ActionHistory()
+    history.restore_entries(parked["action_history"])
+    turns = parked["browser_turn_messages"]
+    finalized = turns[0]["content"]
+
+    assert _complete_pending_payment_card_result(
+        turns, history, last4="7406",
+        card_refs={"card_number": "PAN", "card_name": "N", "card_expiry": "E", "card_cvv": "C"},
+    )
+    assert turns[0]["content"] == finalized
+    assert history.get_entries()[0]["result"]["status"] == "payment_card_ready"
+    assert len(history.get_entries()) == 1
+    assert not _complete_pending_payment_card_result(
+        [{"role": "tool", "name": "request_payment_card", "content": '{"status":"payment_card_ready","last4":"1234"}'}],
+        history, last4="7406",
+        card_refs={"card_number": "PAN", "card_name": "N", "card_expiry": "E", "card_cvv": "C"},
+    )
+    assert not _complete_pending_payment_card_result(
+        [{"role": "tool", "name": "request_payment_card", "content": '{"status":"payment_card_ready"}'}],
+        history, last4="7406",
+        card_refs={"card_number": "PAN", "card_name": "N", "card_expiry": "E", "card_cvv": "C"},
+    )
+
+
+async def test_browser_resume_store_preserves_inline_and_external_snapshots():
+    from tempfile import TemporaryDirectory
+
+    from domains.spawn_browser_agent_v3 import resume_store
+
+    inline = {"browser_turn_messages": [{"role": "user", "content": "Hello"}]}
+    assert await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=inline) == inline
+
+    parts = {}
+
+    def store_part(agent_id, path, body):
+        parts[(agent_id, path)] = body
+
+    def load_part(agent_id, path):
+        return parts[(agent_id, path)]
+
+    large = {"browser_turn_messages": [{"role": "user", "content": "x" * 1_500_000}]}
+    with patch.object(resume_store, "_store_part", side_effect=store_part), patch.object(
+        resume_store, "_load_part", side_effect=load_part
+    ):
+        pointer = await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=large)
+        assert "browser_turn_messages" not in pointer
+        assert await resume_store.hydrate_resume_context(agent_id="agent", resume_state=pointer) == large | pointer
+        first_path = pointer["browser_resume_context_ref"]["paths"][0]
+        parts[("agent", first_path)] += b"!"
+        with pytest.raises(resume_store.BrowserResumeStoreError, match="checksum mismatch"):
+            await resume_store.hydrate_resume_context(agent_id="agent", resume_state=pointer)
+
+    # Exercise the actual local archive encryption and read-after-write path.
+    with TemporaryDirectory() as archive_root, patch.dict(
+        os.environ,
+        {
+            "TRACE_ARCHIVE_LOCAL_ROOT": archive_root,
+            "TRACE_ARCHIVE_BACKEND": "local",
+            "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": base64.b64encode(b"0" * 32).decode(),
+        },
+    ):
+        pointer = await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=large)
+        assert await resume_store.hydrate_resume_context(agent_id="agent", resume_state=pointer) == large | pointer
 
 
 def test_final_screenshot_fetch_isolated_from_verifier_errors():
@@ -21120,6 +21277,14 @@ async def run_all_tests():
     r.record(
         "payment_card_verifier_evidence_only_last_four",
         test_payment_card_verifier_evidence_exposes_only_valid_last_four,
+    )
+    r.record(
+        "browser_resume_keeps_auth_attempts_and_task_summary",
+        test_browser_resume_keeps_auth_attempts_and_task_summary,
+    )
+    await r.record_async(
+        "recorded_payment_request_survives_verifier_window",
+        test_recorded_payment_request_survives_verifier_action_window,
     )
     await r.record_async(
         "payment_lookup_backend_matched_legacy_fingerprint",
@@ -21302,12 +21467,8 @@ async def run_all_tests():
         test_browser_supervisor_does_not_preempt_browser_use_event_timeouts,
     )
     r.record(
-        "browser_use_upstream_still_hardcodes_page_navigate_20s",
-        test_browser_use_upstream_still_hardcodes_page_navigate_20s,
-    )
-    await r.record_async(
-        "browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config",
-        test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config,
+        "browser_navigation_handles_installed_timeout_without_global_patch",
+        test_browser_navigation_handles_installed_timeout_without_global_patch,
     )
     r.record(
         "browser_task_prompt_no_system_duplication",
@@ -23080,12 +23241,24 @@ async def run_all_tests():
         test_goto_action_returns_current_url_for_recovery_fallback,
     )
     r.record(
-        "compact_browser_turn_messages_drops_leading_orphan_tool",
-        test_compact_browser_turn_messages_drops_leading_orphan_tool,
+        "browser_resume_preserves_full_provider_transcript",
+        test_browser_resume_preserves_full_provider_transcript,
     )
     r.record(
-        "compact_browser_turn_messages_strips_embedded_screenshots",
-        test_compact_browser_turn_messages_strips_embedded_screenshots,
+        "browser_resume_keeps_embedded_screenshots",
+        test_browser_resume_keeps_embedded_screenshots,
+    )
+    r.record(
+        "browser_payment_resume_keeps_cached_prompt_prefix",
+        test_browser_payment_resume_keeps_cached_prompt_prefix,
+    )
+    r.record(
+        "browser_payment_resume_accepts_already_finalized_mint_result",
+        test_browser_payment_resume_accepts_already_finalized_mint_result,
+    )
+    await r.record_async(
+        "browser_resume_store_preserves_inline_and_external_snapshots",
+        test_browser_resume_store_preserves_inline_and_external_snapshots,
     )
     r.record(
         "final_screenshot_fetch_isolated_from_verifier_errors",

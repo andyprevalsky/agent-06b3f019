@@ -188,3 +188,41 @@ affected tasks. Setup/resume completed onboarding and checkout; idempotency's
 second browser returned `reusable: true` for fingerprint `9b7392f8…` and the
 same card ID `card_3f56552739e49626483f0248`. Its terminal lifecycle had one
 purchase, one funding, and one card. The four-task deploy gate remains pending.
+
+## 2026-10-01 recurrence: verified cart-summary text changed the purchase key
+
+The four-task local deploy gate failed `agent-payment-idempotent-abandonment`
+for agent `847cc7c7-ffe9-4ced-aecd-44bfe6d49998` at the 900-second cap.
+Its first browser submitted item names such as
+`Aurora Notebook - x1 - $12.00 (Rose Labs Test Payment checkout)`, while its
+second browser submitted the bare product titles. Product URLs, structured
+quantities, unit prices, fees, merchant, and total were unchanged. The agents
+fingerprinted these as `8fb86c27…` and `8bd7b485…`; the second lookup returned
+`reusable: false` and minted purchase `5d2cbd4b…` after the first had minted
+`b9bdc4f5…`. The second browser then called `request_payment_card` four more
+times, each rejected with `Payment approval is already complete. Do not call
+request_payment_card again`, and spent 622 seconds in that browser activity.
+
+The first bad boundary was both sides of purchase fingerprint canonicalization:
+they recognized some repeated quantity/price display forms but not the combined
+cart-summary form above. The new blackboxes
+`agents/tests/blackbox/request_payment_card.blackbox.py` and
+`back-end/src/tests/blackbox/purchases-fingerprint.blackbox.ts` capture the
+form and assert reuse only when the echoed quantity, price, and merchant match
+the structured receipt. Before the fix,
+`agents/venv/bin/python agents/tests/blackbox/request_payment_card.blackbox.py`
+failed with `the same product URL, quantity, price, and merchant must reuse its
+card`; `cd back-end && npx tsx
+src/tests/blackbox/purchases-fingerprint.blackbox.ts` failed with `the captured
+first-browser name must resolve to the same held card as the bare title`. After
+the Python and TypeScript canonicalizers were updated, those identical commands
+passed; conflicting quantity, price, and merchant annotations remain distinct.
+The exact unchanged paid benchmark still requires a post-fix local pass before
+this recurrence can be called fixed.
+
+Archive searches: `Timeout after 900s browser_activity_wait payment AgentCard`
+and `browser agent spent long time repeated navigation payments idempotent
+abandonment`. This is a recurrence of the receipt fingerprint drift already
+recorded above, not another sandbox cardholder closure. Human feedback for this
+recurrence: the operator directed the agent to fix the runtime issue without
+raising timeouts, weakening tests, or touching the separate Explore issue.

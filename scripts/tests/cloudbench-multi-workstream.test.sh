@@ -106,7 +106,15 @@ fail() {
         echo "── $log (tail) ──" >&2
         # Bound each dump: a wedged filesystem or special file must not
         # prevent EXIT cleanup from reaping hubs and releasing ports.
-        timeout 5 tail -30 "$log" >&2 || true
+        python3 - "$log" <<'PY' >&2 || true
+import subprocess
+import sys
+
+try:
+    subprocess.run(["tail", "-30", sys.argv[1]], timeout=5, check=False)
+except subprocess.TimeoutExpired:
+    print("(log tail timed out)")
+PY
     done
     exit 1
 }
@@ -474,7 +482,13 @@ def run_fake_driver(mdir):
         os.path.exists(os.path.join(FAKE_DIR, "oscillate-worker-desired"))
         or os.path.exists(os.path.join(FAKE_DIR, "concurrent-ready-scale-down"))
     ):
-        deadline = time.time() + 30
+        # These fixtures wait for real fake-provider launch and teardown work.
+        # The oscillation case retries a failed stage twice; concurrent-ready
+        # launches two workers before scaling one down. Both can finish after
+        # 30 seconds on a loaded host despite correct fleet behavior.
+        deadline = time.time() + (
+            90 if os.path.exists(os.path.join(FAKE_DIR, "oscillate-worker-desired")) else 120
+        )
         scaled_down = os.path.join(MARKERS, "worker-scale-down-complete")
         while not os.path.exists(scaled_down):
             if time.time() >= deadline:
@@ -510,7 +524,9 @@ def run_fake_driver(mdir):
         os.path.join(FAKE_DIR, "worker-ready-before-child-no-terminal")
     ):
         controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]
-        deadline = time.time() + 30
+        # Worker cloning and staging precede this readiness marker. Allow the
+        # fixture to observe that work within the controller's 240s bound.
+        deadline = time.time() + 120
         held = False
         while time.time() < deadline:
             hold_files = glob.glob(

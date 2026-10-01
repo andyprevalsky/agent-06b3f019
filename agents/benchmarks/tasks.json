@@ -2814,7 +2814,7 @@
   {
     "name": "browser-smoke",
     "title": "Browser Agent Page Read",
-    "prompt": "Use a browser agent to go to https://example.com and tell me what the document title is (the browser tab / <title> text).",
+    "prompt": "Use a browser agent to visit https://www.roselabs.ai and report the main color palette visible on the page. Name at least three prominent colors.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -2830,7 +2830,28 @@
     "start_phase": "execute",
     "bench": "pipeline-e2e",
     "group": "pre-deploy",
-    "deploy_category": "harness"
+    "deploy_category": "harness",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["roselabs.ai"],
+      "secrets": [],
+      "live_targets": ["https://www.roselabs.ai"],
+      "context_notes": "Live first-party website. Judge the palette from browser-visible page evidence, allowing visual descriptions rather than requiring exact CSS values."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "visible-color-palette",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The browser agent visits roselabs.ai and inspects the visible page",
+          "The root answer reports at least three distinct prominent colors in the site's palette"
+        ],
+        "judge_prompt": "Pass only if browser evidence shows the agent inspected roselabs.ai and the root answer names at least three distinct, plausible colors in the page's main palette. Accept ordinary color names or approximate shades; do not require exact hex codes or locations. Fail if the answer only says 'a color palette' without naming colors, or if it is ungrounded in the browser visit."
+      }
+    ]
   },
   {
     "name": "browser-google-search-single-result",

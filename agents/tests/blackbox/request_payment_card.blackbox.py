@@ -530,6 +530,52 @@ def test_fingerprint_ignores_trailing_quantity_echo_on_item_name():
     )
 
 
+def test_fingerprint_ignores_verified_checkout_summary_annotations():
+    """Two browser runs of the same cart may copy different visible title prose."""
+    from domains.request_payment_card.service import normalize_payment_payload
+
+    bare = _sample_tool_call()
+    bare["merchant"] = "Rose Labs Test Payment"
+    bare["line_items"][0]["name"] = "Aurora Notebook"
+    bare["line_items"][0]["unit_price_cents"] = 1200
+    bare["line_items"][0]["quantity"] = 1
+    bare["line_items"][0]["line_total_cents"] = 1200
+    first_browser = _sample_tool_call()
+    first_browser["merchant"] = bare["merchant"]
+    first_browser["line_items"][0].update(bare["line_items"][0])
+    first_browser["line_items"][0]["name"] = (
+        "Aurora Notebook - x1 - $12.00 (Rose Labs Test Payment checkout)"
+    )
+
+    first = normalize_payment_payload(first_browser, "user-123")
+    second = normalize_payment_payload(bare, "user-123")
+    assert first["fingerprint"] == second["fingerprint"], (
+        "the same product URL, quantity, price, and merchant must reuse its card"
+    )
+
+    mismatched = _sample_tool_call()
+    mismatched["merchant"] = bare["merchant"]
+    mismatched["line_items"][0].update(bare["line_items"][0])
+    mismatched["line_items"][0]["name"] = (
+        "Aurora Notebook - x2 - $12.00 (Rose Labs Test Payment checkout)"
+    )
+    assert normalize_payment_payload(mismatched, "user-123")["fingerprint"] != second[
+        "fingerprint"
+    ]
+    mismatched["line_items"][0]["name"] = (
+        "Aurora Notebook - x1 - $13.00 (Rose Labs Test Payment checkout)"
+    )
+    assert normalize_payment_payload(mismatched, "user-123")["fingerprint"] != second[
+        "fingerprint"
+    ]
+    mismatched["line_items"][0]["name"] = (
+        "Aurora Notebook - x1 - $12.00 (Different Merchant checkout)"
+    )
+    assert normalize_payment_payload(mismatched, "user-123")["fingerprint"] != second[
+        "fingerprint"
+    ]
+
+
 def test_fingerprint_preserves_non_ascii_suffixes_and_distinct_merchant_echo():
     """Only the ASCII suffixes the backend recognizes may be removed."""
     from domains.request_payment_card.service import normalize_payment_payload
@@ -994,6 +1040,10 @@ async def run_all_tests():
     result.record(
         "fingerprint_quantity_echo_stability",
         test_fingerprint_ignores_trailing_quantity_echo_on_item_name,
+    )
+    result.record(
+        "fingerprint_checkout_summary_stability",
+        test_fingerprint_ignores_verified_checkout_summary_annotations,
     )
     result.record(
         "fingerprint_non_ascii_suffix_distinct",

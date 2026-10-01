@@ -24,7 +24,7 @@ vi.mock('@/features/terminal-component-group/components/BrowserCursorOverlay', (
 import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
 import { BrowserIframe } from '@/features/terminal-component-group/components/browser-view-panel/BrowserIframe';
 import { BrowserStatusBarExpanded } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarExpanded';
-import { LiveViewFrame } from '@/features/terminal-component-group/components/browser-status-bar/LiveViewFrame';
+import { LiveViewFrame } from '@/features/terminal-component-group/components/browser-status-bar/BrowserLiveViewFrame';
 import {
   LIVE_VIEW_CONTENT_VIEWPORT,
   STEEL_LIVE_VIEW_WINDOW,

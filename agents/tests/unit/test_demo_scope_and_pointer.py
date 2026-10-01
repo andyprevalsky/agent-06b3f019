@@ -837,7 +837,8 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
     assert compile_explore_wrap_up("real summary") == "real summary"
     assert "excerpt" in compile_explore_wrap_up("", ["prefix **Result:** excerpt"])
     assert compile_explore_wrap_up("", ["  raw-tool  "]) == "raw-tool"
-    assert "[truncated]" in compile_explore_wrap_up("", ["x" * 200], budget=20)
+    assert compile_explore_wrap_up("", ["x" * 200], budget=20) == "x" * 20
+    assert "[...truncated...]" in compile_explore_wrap_up("", ["x" * 200], budget=40)
     assert _has_usable_tool_evidence(None) is False
     assert _has_usable_tool_evidence("error: nope") is False
     assert _has_usable_tool_evidence("Huberman notes") is True

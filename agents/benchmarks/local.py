@@ -103,6 +103,7 @@ SERVICE_START_TIMEOUT_SECONDS = 600
 # manifest. Keep the normal bound for cached starts, but give that one-time
 # bootstrap enough room to finish cleanly.
 COLD_SEED_SERVICE_START_TIMEOUT_SECONDS = 1200
+DOCKER_CLEANUP_TIMEOUT_SECONDS = 5
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AGENT_PAYMENT_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
@@ -181,6 +182,7 @@ class ServiceStack:
     isolated: bool
     workspace_name: str | None = None
     base_port: int | None = None
+    use_system_postgres: bool = False
 
 
 def slugify(value: str) -> str:
@@ -369,6 +371,10 @@ def build_service_stack(args: argparse.Namespace) -> ServiceStack:
         isolated=True,
         workspace_name=workspace_name,
         base_port=allocate_port_range(preferred_base),
+        use_system_postgres=(
+            sys.platform.startswith("linux")
+            or os.environ.get("ROSE_USE_SYSTEM_PG", "").lower() in {"1", "true", "yes"}
+        ),
     )
 
 
@@ -661,9 +667,10 @@ def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
                 cwd=REPO_ROOT,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=DOCKER_CLEANUP_TIMEOUT_SECONDS,
             )
-        except FileNotFoundError:
-            return
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
     volume = database.get("volume")
     if not isinstance(volume, str) or not volume:
         if isinstance(container, str) and container.startswith("victoria-db-"):
@@ -675,14 +682,15 @@ def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
                 cwd=REPO_ROOT,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=DOCKER_CLEANUP_TIMEOUT_SECONDS,
             )
-        except FileNotFoundError:
-            return
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
 
 
 def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
     """Remove the exact isolated DB when startup failed before its manifest."""
-    if not stack.isolated or not stack.workspace_name:
+    if not stack.isolated or not stack.workspace_name or stack.use_system_postgres:
         return
     container = f"victoria-db-{stack.workspace_name}"
     volume = f"victoria-pgdata-{stack.workspace_name}"
@@ -693,16 +701,21 @@ def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            timeout=DOCKER_CLEANUP_TIMEOUT_SECONDS,
         )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    try:
         subprocess.run(
             ["docker", "volume", "rm", volume],
             cwd=REPO_ROOT,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            timeout=DOCKER_CLEANUP_TIMEOUT_SECONDS,
         )
-    except FileNotFoundError:
-        return
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
 
 def _descendant_pids(root: int) -> set[int]:
@@ -1402,11 +1415,7 @@ def start_services(
         env["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "true"
         # Cloud/Linux VMs often cannot create Docker overlay mounts; system Postgres is
         # the supported local benchmark path (see CLAUDE.md Cursor Cloud section).
-        if sys.platform.startswith("linux") and os.environ.get("ROSE_USE_SYSTEM_PG", "").lower() not in {
-            "1",
-            "true",
-            "yes",
-        }:
+        if stack.use_system_postgres:
             env["ROSE_USE_SYSTEM_PG"] = "true"
         # macOS distraction-blockers (e.g. Freedom) install a system HTTP(S) proxy
         # that silently intercepts Node/Prisma outbound and breaks the prod cold-sync

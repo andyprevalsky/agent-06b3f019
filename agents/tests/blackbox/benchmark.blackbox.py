@@ -13349,6 +13349,92 @@ def test_local_stop_services_removes_pre_manifest_owned_database():
     ] in commands
 
 
+def test_local_isolated_stack_uses_docker_on_mac_by_default():
+    """Mac benchmarks keep their DB connections in an isolated Docker container."""
+    from types import SimpleNamespace
+
+    from benchmarks import local as local_bench
+
+    args = SimpleNamespace(
+        use_existing=False,
+        shared_stack=False,
+        run_id="mac-docker-default",
+        base_port=55120,
+    )
+    with (
+        patch.dict(os.environ, {"ROSE_USE_SYSTEM_PG": ""}),
+        patch.object(local_bench.sys, "platform", "darwin"),
+        patch.object(local_bench, "allocate_port_range", return_value=55120),
+    ):
+        assert local_bench.build_service_stack(args).use_system_postgres is False
+
+    with (
+        patch.dict(os.environ, {"ROSE_USE_SYSTEM_PG": "true"}),
+        patch.object(local_bench.sys, "platform", "darwin"),
+        patch.object(local_bench, "allocate_port_range", return_value=55120),
+    ):
+        assert local_bench.build_service_stack(args).use_system_postgres is True
+
+    with (
+        patch.dict(os.environ, {"ROSE_USE_SYSTEM_PG": ""}),
+        patch.object(local_bench.sys, "platform", "linux"),
+        patch.object(local_bench, "allocate_port_range", return_value=55120),
+    ):
+        assert local_bench.build_service_stack(args).use_system_postgres is True
+
+
+def test_local_system_postgres_pre_manifest_cleanup_skips_docker():
+    """An isolated system-Postgres stack has no Docker DB to reap on abort."""
+    from types import SimpleNamespace
+
+    from benchmarks import local as local_bench
+
+    with tempfile.TemporaryDirectory() as tmp:
+        args = SimpleNamespace(
+            use_existing=False,
+            shared_stack=False,
+            run_id="cleanup-system-pg-unique",
+            base_port=55120,
+        )
+        with (
+            patch.dict(os.environ, {"ROSE_USE_SYSTEM_PG": "true"}),
+            patch.object(local_bench, "BENCHMARK_CONTEXT_ROOT", Path(tmp)),
+            patch.object(local_bench, "allocate_port_range", return_value=55120),
+            patch.object(local_bench, "_manifest_status", return_value=None),
+            patch.object(local_bench, "_manifest_run_sh_pid", return_value=None),
+            patch.object(local_bench, "_kill_scoped_processes_by_run_id"),
+            patch.object(local_bench.subprocess, "run") as run,
+        ):
+            stack = local_bench.build_service_stack(args)
+            local_bench.stop_services(stack=stack)
+        run.assert_not_called()
+
+
+def test_local_pre_manifest_docker_cleanup_has_timeout():
+    """A dead Docker daemon cannot hold benchmark teardown indefinitely."""
+    from benchmarks import local as local_bench
+
+    with tempfile.TemporaryDirectory() as tmp:
+        context_dir = Path(tmp)
+        stack = local_bench.ServiceStack(
+            run_id="cleanup-docker-timeout",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-cleanup-docker-timeout",
+            base_port=55120,
+        )
+        with patch.object(
+            local_bench.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd="docker", timeout=1),
+        ) as run:
+            local_bench._stop_owned_db_from_stack_identity(stack)
+        assert run.call_count == 2
+        assert all(call.kwargs.get("timeout", 0) > 0 for call in run.call_args_list)
+
+
 def test_local_port_range_allocation_is_reserved_across_processes():
     """Concurrent launchers must not select identical or overlapping ranges."""
     from benchmarks import local as local_bench
@@ -16040,13 +16126,15 @@ def test_browser_smoke_accepts_captured_single_step_trajectory():
     assert _validate_agent_class_min_steps(task.min_steps, counts) is None
 
 
-def test_browser_smoke_prompt_targets_document_title_not_h1():
-    """Live example.com dropped its H1; smoke must ask for the stable <title>."""
+def test_browser_smoke_prompt_targets_rose_palette():
+    """The approved smoke goal reads Rose Labs' visible color palette."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-smoke")
     prompt = (task.prompt or "").lower()
-    assert "document title" in prompt or "<title>" in prompt
+    assert "roselabs.ai" in prompt
+    assert "color palette" in prompt
+    assert "at least three" in prompt
     assert "main heading" not in prompt
     assert "h1" not in prompt
 
@@ -18561,6 +18649,18 @@ async def run_all_tests():
         test_local_stop_services_removes_pre_manifest_owned_database,
     )
     r.record(
+        "local_isolated_stack_uses_docker_on_mac_by_default",
+        test_local_isolated_stack_uses_docker_on_mac_by_default,
+    )
+    r.record(
+        "local_system_postgres_pre_manifest_cleanup_skips_docker",
+        test_local_system_postgres_pre_manifest_cleanup_skips_docker,
+    )
+    r.record(
+        "local_pre_manifest_docker_cleanup_has_timeout",
+        test_local_pre_manifest_docker_cleanup_has_timeout,
+    )
+    r.record(
         "local_port_range_cross_process_reservation",
         test_local_port_range_allocation_is_reserved_across_processes,
     )
@@ -19345,8 +19445,8 @@ async def run_all_tests():
         test_browser_smoke_accepts_captured_single_step_trajectory,
     )
     r.record(
-        "browser_smoke_prompt_targets_document_title",
-        test_browser_smoke_prompt_targets_document_title_not_h1,
+        "browser_smoke_prompt_targets_rose_palette",
+        test_browser_smoke_prompt_targets_rose_palette,
     )
     r.record(
         "cache_coverage_prompt_targets_document_title",

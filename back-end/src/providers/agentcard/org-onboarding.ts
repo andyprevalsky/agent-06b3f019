@@ -168,6 +168,8 @@ export async function refreshOrgCardholderStatus(
   if (onboarding === undefined) return { connected: false };
   let result: Record<string, unknown>;
   try {
+    // The MCP transport can return a structured error instead of throwing.
+    // Normalize it inside the same stale-session handling boundary.
     result = resultRecord(
       await deps.callOrgTool('get_onboarding_session', { session_id: onboarding.sessionId })
     );

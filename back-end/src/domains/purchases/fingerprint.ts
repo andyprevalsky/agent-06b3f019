@@ -54,6 +54,22 @@ function canonicalizeLineItemName(
   ) {
     return name.slice(0, merchantEcho.index).trimEnd();
   }
+  const cartSummary = /\s+-\s+x(\d+)\s+-\s+\$(\d+)\.(\d{2})(?:\s+\(([^()]*)\))?\s*$/i.exec(name);
+  if (cartSummary !== null) {
+    const echoedPrice =
+      Number.parseInt(cartSummary[2], 10) * 100 + Number.parseInt(cartSummary[3], 10);
+    const merchantLabel = merchant.trim().toLowerCase();
+    const sourceLabel = (cartSummary[4] ?? '').trim().toLowerCase();
+    if (
+      Number.parseInt(cartSummary[1], 10) === qty &&
+      echoedPrice === unitPriceCents &&
+      (sourceLabel === '' ||
+        sourceLabel === merchantLabel ||
+        sourceLabel === `${merchantLabel} checkout`)
+    ) {
+      return name.slice(0, cartSummary.index).trimEnd();
+    }
+  }
   const priced = /\s+-\s+(\d+)\s+x\s+\$(\d+)\.(\d{2})\s*$/i.exec(name);
   if (
     priced !== null &&

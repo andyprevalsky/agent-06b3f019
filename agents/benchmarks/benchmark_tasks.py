@@ -147,13 +147,16 @@ SMOKE_TIMEOUT_CAPS: dict[str, int] = {
     "parallel-tool-calls": 600,
     "message-person": 180,
     "claude-code-agent": 300,
-    "browser-smoke": 300,
+    "browser-smoke": 450,
     "browser-biometrics-webdecoy": 420,
     "test-mass-agent-run-0": 600,
 }
 
 
 TASK_TIMEOUT_FLOORS: dict[str, int] = {
+    # Live palette trials took 175-397s with browser recordings and verifier
+    # retries; old single-heading task history understates the needed time.
+    "browser-smoke": 450,
     # This batch intentionally does upfront outreach research before spawning
     # 40 row agents. Historical local passes are from older, narrower task
     # shapes, so do not let the dynamic cap collapse below this floor.

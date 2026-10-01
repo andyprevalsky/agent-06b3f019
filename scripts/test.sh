@@ -349,6 +349,9 @@ fi
 if auto_rca_changed '^(scripts/(run\.sh|setup-db|seed-|fast-mode)|back-end/)'; then
   run_suite "Fast-Mode Cache Schema Retry" bash scripts/tests/fast-mode-cache-schema-retry.test.sh
 fi
+if auto_rca_changed '^scripts/run\.sh$'; then
+  run_suite "System Postgres Pool Budget" bash scripts/tests/run-system-pg-pool-budget.test.sh
+fi
 run_suite "Workspace Dependency Preflight" bash scripts/tests/workspace-dependencies.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──

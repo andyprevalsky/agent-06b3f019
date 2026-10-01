@@ -56,7 +56,7 @@ function assert(condition: unknown, message: string): asserts condition {
 
 const payloadPath =
   process.env.IDB_UPLOAD_MEMORY_PAYLOAD_PATH ??
-  path.join(os.tmpdir(), 'idb-upload-memory-payload.json');
+  path.join(os.tmpdir(), `idb-upload-memory-payload-${process.pid}.json`);
 
 async function runChildIngest(): Promise<void> {
   let peakRssMb = 0;

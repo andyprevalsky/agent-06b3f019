@@ -121,6 +121,11 @@ _LINE_ITEM_QTY_MERCHANT_SUFFIX_RE = re.compile(
 _LINE_ITEM_PRICED_SUFFIX_RE = re.compile(
     r"\s+-\s+([0-9]+)\s+x\s+\$([0-9]+)\.([0-9]{2})\s*$", re.IGNORECASE
 )
+_LINE_ITEM_CART_SUMMARY_SUFFIX_RE = re.compile(
+    r"\s+-\s+x([0-9]+)\s+-\s+\$([0-9]+)\.([0-9]{2})"
+    r"(?:\s+\(([^()]*)\))?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _canonicalize_line_item_name(
@@ -144,6 +149,17 @@ def _canonicalize_line_item_name(
         and merchant_echo.group(2).strip().lower() == str(merchant or "").strip().lower()
     ):
         return name[: merchant_echo.start()].rstrip()
+    cart_summary = _LINE_ITEM_CART_SUMMARY_SUFFIX_RE.search(name)
+    if cart_summary is not None:
+        echoed_price = int(cart_summary.group(2)) * 100 + int(cart_summary.group(3))
+        merchant_label = str(merchant or "").strip().lower()
+        source_label = (cart_summary.group(4) or "").strip().lower()
+        if (
+            int(cart_summary.group(1)) == qty
+            and echoed_price == _to_int(unit_price_cents)
+            and (not source_label or source_label in {merchant_label, f"{merchant_label} checkout"})
+        ):
+            return name[: cart_summary.start()].rstrip()
     priced = _LINE_ITEM_PRICED_SUFFIX_RE.search(name)
     if priced is not None:
         echoed_price = int(priced.group(2)) * 100 + int(priced.group(3))

@@ -183,6 +183,33 @@ async function testQuantityEchoNameParity(): Promise<void> {
   );
 }
 
+async function testCheckoutSummaryNameParity(): Promise<void> {
+  const fingerprint = (name: string) =>
+    canonicalStoredPurchaseFingerprint({
+      userId: 'checkout-summary-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: fixtureReceipt(name, '1,284 reviews'),
+      totalCents: 1200,
+    });
+  const bare = fingerprint('Aurora Notebook');
+  assert(bare !== null, 'the purchase receipt must be fingerprintable');
+  assert(
+    fingerprint('Aurora Notebook - x1 - $12.00 (Rose Labs Test Payment checkout)') === bare,
+    'the captured first-browser name must resolve to the same held card as the bare title'
+  );
+  assert(
+    fingerprint('Aurora Notebook - x1 - $12.00') === bare,
+    'a matching quantity and price echo is display-only'
+  );
+  for (const conflictingName of [
+    'Aurora Notebook - x2 - $12.00 (Rose Labs Test Payment checkout)',
+    'Aurora Notebook - x1 - $13.00 (Rose Labs Test Payment checkout)',
+    'Aurora Notebook - x1 - $12.00 (Different Merchant checkout)',
+  ]) {
+    assert(fingerprint(conflictingName) !== bare, `${conflictingName} must remain distinct`);
+  }
+}
+
 async function testUnicodeParity(): Promise<void> {
   const unicodeReceipt = fixtureReceipt(
     'Lámpara 🪔',
@@ -433,6 +460,7 @@ async function testChargingMintGuard(): Promise<void> {
 async function main(): Promise<void> {
   try {
     await testQuantityEchoNameParity();
+    await testCheckoutSummaryNameParity();
     await testUnicodeParity();
     await testBackfillBeyondTwenty();
     await testChargingMintGuard();
