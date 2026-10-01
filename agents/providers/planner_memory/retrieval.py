@@ -46,7 +46,7 @@ JUDGE_PROMPT = """An AI assistant is about to plan this goal:
 Past runs the assistant completed (their goals):
 {candidates}
 
-A past run is a useful memory when its plan would help plan this goal: the planner reuses a memory's entry points and URLs, tool choices, task decomposition, session handling, and known pitfalls, but never copies names, prices, dates, quantities, or steps the goal does not call for. So a run is useful when it worked on the same site, service, integration, or data source, or used the same kind of task mechanics (e.g. a for-each over rows, explore-only local data lookup, exactly one phone call, a price trigger), even if the specific item, store, date, person, or wording differs. A run is NOT useful when it only shares topic or location words and none of its plan would carry over (e.g. booking a haircut near the Ferry Building vs. ordering coffee at the Ferry Building).
+A past run is a useful memory when its plan would help plan this goal: the planner reuses a memory's entry points and URLs, tool choices, task decomposition, session handling, and known pitfalls, but never copies names, prices, dates, quantities, or steps the goal does not call for. So a run is useful when it worked on the same site, service, integration, or data source, or used the same kind of task mechanics, even if the specific details or wording differ. A run is NOT useful when it only shares topic or location words and none of its plan would carry over.
 Pick the single most useful past run, or none.
 Reply with JSON only: {{"match": <number or null>}}"""
 

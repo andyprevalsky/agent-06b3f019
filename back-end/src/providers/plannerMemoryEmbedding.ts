@@ -122,25 +122,6 @@ async function upsertEmbedding(id: string, goalHash: string, vector: number[]): 
   `);
 }
 
-/** Identical goals (repeated benchmark runs) share one vector: copy it instead of embedding. */
-async function reuseEmbedding(id: string, goalHash: string): Promise<boolean> {
-  const reused = await prisma.$executeRaw(Prisma.sql`
-    INSERT INTO "PlannerMemoryEmbedding"
-      ("plannerMemoryId", "model", "goalHash", "goalVector", "updatedAt")
-    SELECT ${id}, e."model", e."goalHash", e."goalVector", NOW()
-    FROM "PlannerMemoryEmbedding" e
-    WHERE e."model" = ${PLANNER_MEMORY_INDEX_VERSION} AND e."goalHash" = ${goalHash}
-      AND e."plannerMemoryId" <> ${id}
-    LIMIT 1
-    ON CONFLICT ("plannerMemoryId") DO UPDATE SET
-      "model" = EXCLUDED."model",
-      "goalHash" = EXCLUDED."goalHash",
-      "goalVector" = EXCLUDED."goalVector",
-      "updatedAt" = NOW()
-  `);
-  return reused > 0;
-}
-
 export type PlannerMemoryEmbedOutcome = 'embedded' | 'current' | 'missing';
 
 /**
@@ -161,10 +142,8 @@ export async function embedPlannerMemory(id: string): Promise<PlannerMemoryEmbed
     return 'current';
   }
   const started = Date.now();
-  if (!(await reuseEmbedding(id, goalHash))) {
-    const [vector] = await embedTexts([row.goal]);
-    await upsertEmbedding(id, goalHash, vector);
-  }
+  const [vector] = await embedTexts([row.goal]);
+  await upsertEmbedding(id, goalHash, vector);
   log.info('planner memory embedded', { root_agent_id: id, duration_ms: Date.now() - started });
   return 'embedded';
 }

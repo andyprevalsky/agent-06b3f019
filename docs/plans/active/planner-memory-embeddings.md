@@ -16,12 +16,12 @@ WRITE (finalize, detached)                              READ (planner, call_plan
 finalizeAgent → upsertPlannerMemoryFromRun             goal
   → scheduleFinalizeEmbedding(id)  [backend, detached]   │ POST /api/planner-memory/search
       embedPlannerMemory(id)  (idempotent: model+goalHash)│   backend: voyage-4 embed(goal)
-        identical goal already embedded? copy it         │   pgvector: 1 - (goalVec <=> q)
-        else goalVec = voyage-4(goal)                     │   visible rows, >= min_similarity, ordered
+        goalVec = voyage-4(goal)                          │   pgvector: 1 - (goalVec <=> q)
+                                                         │   visible rows, >= min_similarity, ordered
                                                          ▼
-      + drain ≤2 pending rows (self-heal lost embeds)   shortlist: completed runs, dedupe goal, top 5
+      + drain ≤8 pending rows (self-heal lost embeds)   shortlist: completed runs, dedupe goal, top 5
 PUT /:id (fixtures/backfill) embeds synchronously        │ judge: rose-1-mini (gemini-3.5-flash-lite), JSON by prompt
-POST /embed-pending (backfill/repair, internal)          │   only relation == "same_task" → 1 memory
+POST /embed-pending (backfill/repair, internal)          │   useful past run (planner get_memories criteria) → 1 memory
                                                          │   timeout (5 s) / error / other relation → none
                                                          ▼
                                                         existing lazy compression + get_memories fork (unchanged)
@@ -46,7 +46,7 @@ POST /embed-pending (backfill/repair, internal)          │   only relation == 
 | Test | Asserts |
 |---|---|
 | `back-end/src/tests/blackbox/planner-memory.blackbox.ts` (13) | finalize embeds, paraphrase retrieval with no shared words, exact-first ordering + floor, idempotent / re-embed on goal change / cascade, embed-pending drain (internal only), visibility, passed_only, lease, stats |
-| `agents/tests/blackbox/planner_memory.blackbox.py` (36) | shortlist floor/dedupe/top_n, same_task-only verdicts, judge prompt, planner fork with judge, judge reject / timeout inject nothing quickly, compression timeout releases the lease |
+| `agents/tests/blackbox/planner_memory.blackbox.py` (36) | shortlist floor/dedupe/top_n, in-range verdicts only, judge prompt (no benchmark-specific examples), planner fork with judge, judge reject / timeout inject nothing quickly, compression timeout releases the lease |
 | `agents/tests/blackbox/memory_retrieval_bench.blackbox.py` | replays the frozen live snapshot: config pinned, 0 negative + 0 hard-negative FPs, recall floors |
 | `agents/tests/blackbox/rose.blackbox.py` | rose-1-mini pool shape |
 | `back-end/src/tests/structural/migration-drift.test.ts` | schema ↔ migration parity (now understands `Unsupported(...)`) |
@@ -77,7 +77,7 @@ Regression: `back-end/src/tests/unit/rose-stream-abort.test.ts` (fails on the ol
 
 1. Deploy (migration enables `vector`, creates the table; finalize starts embedding new runs).
 2. `python agents/scripts/backfill_planner_memory.py --backend https://navi-j9a9.onrender.com --embed-pending`
-   (about 20k rows; identical goals are copied rather than re-embedded).
+   (about 20k rows; batched 64 goals per embedding request).
 3. `GET /api/planner-memory/stats` → `embedded == total`.
 
 ## Judge criteria, model, and real-trajectory evaluation (2026-09-30, final)
