@@ -29,15 +29,25 @@ command -v psql >/dev/null 2>&1 || {
   exit 2
 }
 
+WORKFLOW_SQL="$(awk '
+  /^-- Protect the rolling-deploy window/ { starts++; if (starts == 1 && ends == 0) emit = 1 }
+  /^-- Prefer explicit logical-iteration checkpoints/ { ends++; emit = 0 }
+  emit { print }
+  END { if (starts != 1 || ends != 1) exit 3 }
+' "$MIGRATION_SQL")" || {
+  echo "Refusing local runtime SQL hooks: workflow markers must each appear exactly once in $MIGRATION_SQL" >&2
+  exit 2
+}
+if [ -z "$(printf '%s' "$WORKFLOW_SQL" | tr -d '[:space:]')" ]; then
+  echo "Refusing local runtime SQL hooks: no workflow SQL between the markers in $MIGRATION_SQL" >&2
+  exit 2
+fi
+
 # Concurrent black-box runners share one local database, and DROP/CREATE
 # TRIGGER pairs race each other ("already exists", "tuple concurrently
 # updated"). One transaction behind an advisory lock serializes them.
 {
   echo "SELECT pg_advisory_xact_lock(hashtext('rose-local-runtime-sql-hooks'));"
-  awk '
-    /^-- Protect the rolling-deploy window/ { emit = 1 }
-    /^-- Prefer explicit logical-iteration checkpoints/ { emit = 0 }
-    emit { print }
-  ' "$MIGRATION_SQL"
+  printf '%s\n' "$WORKFLOW_SQL"
   cat "$UTC_CLEANUP_MIGRATION_SQL"
 } | psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction
