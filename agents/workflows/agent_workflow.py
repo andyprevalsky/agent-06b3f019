@@ -755,8 +755,6 @@ class AgentWorkflow:
         self.pending_children: Set[str] = set()
         self.child_tool_ids: Dict[str, str] = {}
         self.child_last_tokens: Dict[str, Dict[str, int]] = {}
-        self._active_explore_tasks: Set[str] = set()
-        self._explore_progress: Dict[str, Dict[str, Any]] = {}
         self.child_tool_counts: Dict[str, int] = {}  # Aggregated tool counts from sub-agents
         self.child_results: Dict[str, Dict] = {}  # Store child results for file extraction after wait_condition
         self.depth: int = 0
@@ -1245,14 +1243,6 @@ class AgentWorkflow:
     # =========================================================================
     # SIGNALS
     # =========================================================================
-
-    @workflow.signal
-    def record_explore_progress(self, data: dict):
-        """Retain the latest evidence for each live explore during its parent wait."""
-        task_id = data.get("task_id") if isinstance(data, dict) else None
-        payload = data.get("payload") if isinstance(data, dict) else None
-        if task_id in self._active_explore_tasks and isinstance(payload, dict) and payload.get("result"):
-            self._explore_progress[task_id] = payload
 
     @workflow.signal
     async def pause(self):
@@ -2248,14 +2238,6 @@ class AgentWorkflow:
             get_children_tokens=self._get_children_tokens,
             on_tokens=self._on_tokens,  # Real-time cost tracking and limit checking
             max_context_tokens=self.max_context_tokens,
-            grounded_child_winddown_at=(
-                # The first Explore can consume its full 150-second parent wait.
-                # Arm before that return so the child gets a synthesis turn
-                # instead of starting another 150-second search.
-                self.start_time + timedelta(seconds=120)
-                if self.parent_agent_id and self.start_time and not self.fast_mode_cache_enabled
-                else None
-            ),
             reasoning_max_tokens=reasoning_max_tokens,
             skip_blueprint_query=True,
             response_schema=response_schema,
@@ -4695,7 +4677,6 @@ class AgentWorkflow:
                 verifier_progress=verifier_progress,
                 verifier_reasoning=verifier_reasoning,
                 partial_structured_response=result.get("partial_structured_response"),
-                best_effort_response=result.get("best_effort_response") or result.get("final_response"),
             )
             return {"status": "failed", "reason": "max_iterations", "goal": self.goal}
 
@@ -4822,7 +4803,6 @@ class AgentWorkflow:
         verifier_progress: float = 0.0,
         verifier_reasoning: str = "",
         partial_structured_response: Optional[Dict] = None,
-        best_effort_response: Optional[str] = None,
     ) -> None:
         """Mark task as failed and signal parent.
 
@@ -4856,7 +4836,6 @@ class AgentWorkflow:
             verifier_reasoning=verifier_reasoning,
             partial_structured_response=partial_structured_response,
         )
-        best_effort_response = str(best_effort_response or "").strip()[:1200]
 
         # Calculate duration
         duration_seconds = 0
@@ -4875,11 +4854,7 @@ class AgentWorkflow:
                     "isFinalSummary": True,
                     "title": f"❌ {message}",
                     "completionSummary": {
-                        "summary": (
-                            f"Agent failed: {message}\n\nBest-effort result:\n{best_effort_response}"
-                            if best_effort_response
-                            else f"Agent failed: {message}"
-                        ),
+                        "summary": f"Agent failed: {message}",
                         "outputs": [],
                         "toolUsage": [],
                         "totalToolCalls": failure_context["steps_taken"],
@@ -4954,7 +4929,6 @@ class AgentWorkflow:
                             "status": "failed",
                             "goal": self.goal,
                             "summary": f"Failed: {message}",
-                            "best_effort_response": best_effort_response,
                             "error_reason": reason,
                             "failure_context": failure_context,  # Full context for parent learning
                             "structured_response": partial_structured_response,

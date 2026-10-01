@@ -1011,8 +1011,7 @@ async def test_handler_explore_failed_result_forwards_error_reason():
         restore()
 
     error_event = next(event for event in events if event.status == MessageStatus.ERROR)
-    assert reason in error_event.message
-    assert "Web search was unavailable" in error_event.message
+    assert error_event.message == reason
     assert error_event.data["error_reason"] == reason
     assert error_event.metadata["error_reason"] == reason
 
@@ -1150,8 +1149,8 @@ async def test_handler_explore_timeout_finishes_with_heartbeat_wrap_up():
     assert fake.wait_condition_timeouts[0] is not None
 
 
-async def test_handler_explore_timeout_without_heartbeat_reports_error():
-    """A canceled explore cannot claim successful research without evidence."""
+async def test_handler_explore_timeout_without_heartbeat_still_finishes():
+    """Wait-budget cancel without heartbeat still FINISHES so the parent can continue."""
     from domains.spawn_agent.handler import SpawnAgentManager
     from tools.base import MessageStatus
 
@@ -1171,41 +1170,13 @@ async def test_handler_explore_timeout_without_heartbeat_reports_error():
     finally:
         restore()
 
-    failed = next(event for event in events if event.status == MessageStatus.ERROR)
-    assert "without evidence" in failed.message.lower()
+    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
+    assert "evidence gathered" in finished.message.lower()
+    assert not any(event.status == MessageStatus.ERROR for event in events)
 
 
-async def test_handler_explore_timeout_rejects_failed_tool_heartbeat():
-    """A failed search in heartbeat details is not usable research."""
-    from domains.spawn_agent.handler import SpawnAgentManager
-    from tools.base import MessageStatus
-
-    heartbeat = {
-        "result": "[web_search] search provider unavailable",
-        "tool_call_results": ["[web_search] search provider unavailable"],
-        "has_usable_evidence": False,
-    }
-    fake = _FakeSpawnWF(
-        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
-        start_activity_result=_Activity(exception=_explore_timeout_activity_error(heartbeat)),
-    )
-    restore = _patch_spawn_workflow(fake)
-    try:
-        events = await _collect(
-            SpawnAgentManager()._spawn_explore(
-                workflow_instance=_FakeWFInstance(),
-                tool_call={"type": "explore", "goal": "Research Tokyo"},
-                tool_call_id="tc-failed-search",
-            )
-        )
-    finally:
-        restore()
-    assert any(event.status == MessageStatus.ERROR for event in events)
-    assert not any(event.status == MessageStatus.FINISHED for event in events)
-
-
-async def test_handler_explore_cancel_grace_reports_error_without_evidence():
-    """Hung explore after parent wait + cancel grace returns without unbounded await.
+async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
+    """Hung explore after parent wait + cancel grace FINISHES without unbounded await.
 
     53831ac9 cancelled at the parent-wait budget then `await activity_handle`
     blocked until the 600s activity timeout, tying the 600s smoke cap.
@@ -1234,107 +1205,13 @@ async def test_handler_explore_cancel_grace_reports_error_without_evidence():
     finally:
         restore()
 
-    failed = next(event for event in events if event.status == MessageStatus.ERROR)
-    assert "without evidence" in failed.message.lower()
+    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
+    assert "evidence gathered" in finished.message.lower()
+    assert not any(event.status == MessageStatus.ERROR for event in events)
     assert handle._cancelled
     assert not handle._awaited
     assert fake.wait_condition_timeouts == [LIVE_EXPLORE_PARENT_WAIT, EXPLORE_CANCEL_GRACE]
     assert 3 * (LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE) <= timedelta(seconds=540)
-
-
-async def test_handler_explore_cancel_grace_uses_checkpoint():
-    """Both cancel paths deliver the last signaled evidence to the parent."""
-    from domains.spawn_agent.handler import SpawnAgentManager
-    from tools.base import MessageStatus
-
-    evidence = {
-        "result": "Tokyo population 14,000,000",
-        "tool_call_results": ["[web_search] Tokyo population 14,000,000"],
-    }
-    for handle, wait_raises in (
-        (_Activity(done=False, result={"result": "must not await"}), [True, True]),
-        (_Activity(cancel_on_await=True), []),
-    ):
-        wf = _FakeWFInstance()
-        wf._explore_progress = {"tokyo-task": evidence}
-        fake = _FakeSpawnWF(
-            activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
-            start_activity_result=handle,
-            wait_condition_raises=wait_raises,
-        )
-        restore = _patch_spawn_workflow(fake)
-        captured = []
-        try:
-            events = await _collect(
-                SpawnAgentManager()._spawn_explore(
-                    workflow_instance=wf,
-                    tool_call={"type": "explore", "goal": "Tokyo population"},
-                    tool_call_id="tc-tokyo",
-                    task_id="tokyo-task",
-                    capture_tool_results=captured,
-                )
-            )
-        finally:
-            restore()
-        finished = next(event for event in events if event.status == MessageStatus.FINISHED)
-        assert "14,000,000" in finished.message
-        assert captured == evidence["tool_call_results"]
-        assert wf._explore_progress == {}
-        assert wf._active_explore_tasks == set()
-
-    paused = _FakeWFInstance(paused=True)
-    paused._explore_progress = {"tokyo-task": evidence}
-    fake = _FakeSpawnWF(
-        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
-        start_activity_result=_Activity(cancel_on_await=True),
-    )
-    restore = _patch_spawn_workflow(fake)
-    try:
-        events = await _collect(
-            SpawnAgentManager()._spawn_explore(
-                workflow_instance=paused,
-                tool_call={"type": "explore", "goal": "Tokyo population"},
-                tool_call_id="tc-paused",
-                task_id="tokyo-task",
-            )
-        )
-    finally:
-        restore()
-    assert any(event.status == MessageStatus.ERROR for event in events)
-    assert not any(event.status == MessageStatus.FINISHED for event in events)
-
-
-async def test_explore_progress_signal_is_scoped_to_active_task():
-    """Activity checkpoints reach only their active parent task."""
-    from unittest.mock import patch
-
-    from helpers.explore_progress import send_explore_progress, set_temporal_client
-    from workflows.agent_workflow import AgentWorkflow
-
-    parent = AgentWorkflow()
-    parent._active_explore_tasks.add("task-tokyo")
-    calls = []
-
-    class Handle:
-        async def signal(self, name, data):
-            calls.append((name, data))
-            parent.record_explore_progress(data)
-
-    class Client:
-        def get_workflow_handle(self, workflow_id):
-            assert workflow_id == "wf-tokyo"
-            return Handle()
-
-    set_temporal_client(Client())
-    try:
-        with patch("helpers.explore_progress.activity.info", return_value=type("I", (), {"workflow_id": "wf-tokyo"})()):
-            await send_explore_progress("task-tokyo", {"result": "Tokyo 14m"})
-            await send_explore_progress("task-nyc", {"result": "NYC 8m"})
-    finally:
-        set_temporal_client(None)
-
-    assert len(calls) == 2
-    assert parent._explore_progress == {"task-tokyo": {"result": "Tokyo 14m"}}
 
 
 async def test_handler_explore_cancel_grace_awaits_when_handle_completes():
@@ -2993,230 +2870,6 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
     assert "42 messages" in user_msg["text"]
 
 
-async def test_spawn_explore_turn_limit_returns_parallel_evidence():
-    """Two explores retain their own grounded results at the graceful turn cap."""
-    from unittest.mock import AsyncMock, MagicMock, patch
-
-    from domains.spawn_agent.service import spawn_explore_agent_activity
-    checkpoints = []
-
-    async def checkpoint(task_id, payload):
-        checkpoints.append((task_id, payload))
-
-    async def search_result(**kwargs):
-        city = kwargs["tool_call"]["query"]
-        return {"result": f"{city} population evidence"}
-
-    fake_search = MagicMock()
-    fake_search.execute_tool = AsyncMock(side_effect=search_result)
-
-    async def fake_run_agent(**kwargs):
-        city = kwargs["agent_id"]
-        await kwargs["execute_tool"]("web_search", {"query": city}, f"tc-{city}")
-        await asyncio.sleep(0.03)
-        return {
-            "status": "max_iterations",
-            "final_response": f"{city} preliminary" if city == "denver" else "",
-        }
-
-    with (
-        patch("temporalio.activity.heartbeat"),
-        patch("loop.run_agent.run_agent", new=fake_run_agent),
-        patch("tools.web_search.WebSearchManager", return_value=fake_search),
-        patch("domains.spawn_agent.service.send_explore_progress", new=checkpoint),
-    ):
-        results = await asyncio.gather(
-            *(
-                spawn_explore_agent_activity(
-                    agent_id=city,
-                    user_id="u-7",
-                    goal=f"Research {city}",
-                    model="rose-1-flash",
-                    task_id=f"task-{city}",
-                )
-                for city in ("denver", "lisbon")
-            )
-        )
-
-    assert len(checkpoints) == 2
-    assert {task_id for task_id, _ in checkpoints} == {"task-denver", "task-lisbon"}
-    for city, result in zip(("denver", "lisbon"), results):
-        assert result["status"] == "completed"
-        assert f"{city} population evidence" in result["result"]
-        assert any(f"{city} population evidence" in entry for entry in result["tool_call_results"])
-        assert not any(other in result["result"] for other in ({"denver", "lisbon"} - {city}))
-    assert "Collected evidence:" in results[0]["result"]
-    for task_id, payload in checkpoints:
-        city = task_id.split("-", 1)[1]
-        assert f"{city} population evidence" in payload["result"]
-        assert any(f"{city} population evidence" in item for item in payload["tool_call_results"])
-
-
-async def test_spawn_explore_turn_limit_uses_recent_successes_only():
-    """A failed final search cannot enter the grounded partial answer."""
-    from unittest.mock import AsyncMock, MagicMock, patch
-
-    from domains.spawn_agent.service import spawn_explore_agent_activity
-
-    async def search_result(**kwargs):
-        query = kwargs["tool_call"]["query"]
-        return {"error": "search provider unavailable"} if query == "failed" else {"result": query}
-
-    search = MagicMock()
-    search.execute_tool = AsyncMock(side_effect=search_result)
-
-    async def fake_run_agent(**kwargs):
-        for query in ("stale source", "older source", "recent source", "Tokyo 14,303,513", "failed"):
-            await kwargs["execute_tool"]("web_search", {"query": query}, f"tc-{query}")
-        return {"status": "max_iterations", "final_response": "Tokyo preliminary"}
-
-    with (
-        patch("temporalio.activity.heartbeat"),
-        patch("loop.run_agent.run_agent", new=fake_run_agent),
-        patch("tools.web_search.WebSearchManager", return_value=search),
-    ):
-        result = await spawn_explore_agent_activity(
-            agent_id="tokyo-recent-sources",
-            user_id="u-7",
-            goal="Research Tokyo",
-            model="rose-1-flash",
-        )
-
-    assert result["status"] == "completed"
-    assert "Tokyo 14,303,513" in result["result"]
-    assert "recent source" in result["result"]
-    assert "stale source" not in result["result"]
-    assert "search provider unavailable" not in result["result"]
-    assert any("search provider unavailable" in item for item in result["tool_call_results"])
-
-
-async def test_spawn_explore_does_not_preempt_normal_winddown():
-    """A slow final turn can finish without an activity-side 135-second cutoff."""
-    from unittest.mock import AsyncMock, MagicMock, patch
-
-    from domains.spawn_agent.service import spawn_explore_agent_activity
-
-    real_timeout = asyncio.timeout
-    search = MagicMock()
-    search.execute_tool = AsyncMock(return_value={"result": "Tokyo population evidence"})
-
-    async def fake_run_agent(**kwargs):
-        await kwargs["execute_tool"]("web_search", {"query": "Tokyo"}, "tc-tokyo")
-        await asyncio.sleep(0.05)
-        return {"status": "completed", "final_response": "Tokyo finished after final turn"}
-
-    with (
-        patch("temporalio.activity.heartbeat"),
-        patch("loop.run_agent.run_agent", new=fake_run_agent),
-        patch("tools.web_search.WebSearchManager", return_value=search),
-        patch("domains.spawn_agent.service.asyncio.timeout", side_effect=lambda _: real_timeout(0.02)),
-    ):
-        result = await spawn_explore_agent_activity(
-            agent_id="tokyo-final-turn",
-            user_id="u-7",
-            goal="Research Tokyo",
-            model="rose-1-flash",
-            task_id="task-tokyo-final-turn",
-        )
-    assert result["status"] == "completed"
-    assert "finished after final turn" in result["result"]
-
-
-async def test_spawn_explore_checkpoint_keeps_recent_synthesis():
-    """Timeout checkpoints favor the leaf's last grounded synthesis and sources."""
-    from unittest.mock import AsyncMock, MagicMock, patch
-
-    from domains.spawn_agent.service import spawn_explore_agent_activity
-
-    checkpoints = []
-
-    async def checkpoint(task_id, payload):
-        checkpoints.append(payload)
-
-    async def search_result(**kwargs):
-        query = kwargs["tool_call"]["query"]
-        return {"result": query * 1000}
-
-    search = MagicMock()
-    search.execute_tool = AsyncMock(side_effect=search_result)
-
-    async def fake_run_agent(**kwargs):
-        for query in ("old irrelevant ", "official source "):
-            await kwargs["execute_tool"]("web_search", {"query": query}, "tc")
-        await kwargs["post_message"]("Official Tokyo total 14,303,513", "ASSISTANT")
-        await kwargs["execute_tool"]("web_search", {"query": "latest source "}, "tc")
-        return {"status": "completed", "final_response": "14,303,513"}
-
-    with (
-        patch("temporalio.activity.heartbeat"),
-        patch("loop.run_agent.run_agent", new=fake_run_agent),
-        patch("tools.web_search.WebSearchManager", return_value=search),
-        patch("domains.spawn_agent.service.send_explore_progress", new=checkpoint),
-    ):
-        await spawn_explore_agent_activity(
-            agent_id="tokyo-checkpoint",
-            user_id="u-7",
-            goal="Research Tokyo",
-            model="rose-1-flash",
-            task_id="task-tokyo-checkpoint",
-        )
-
-    latest = checkpoints[-1]
-    assert len(checkpoints) == 4
-    assert latest["result"].startswith("Official Tokyo total 14,303,513")
-    assert "latest source" in latest["result"]
-    assert "old irrelevant" not in latest["result"]
-    assert len(latest["tool_call_results"]) == 2
-    assert len(latest["result"]) <= 12_000
-
-
-async def test_spawn_explore_turn_limit_without_evidence_remains_error():
-    """A turn cap without evidence cannot become a successful exploration."""
-    from unittest.mock import patch
-
-    from domains.spawn_agent.service import spawn_explore_agent_activity
-
-    async def empty_run_agent(**kwargs):
-        return {"status": "max_iterations", "final_response": ""}
-
-    with (
-        patch("temporalio.activity.heartbeat"),
-        patch("loop.run_agent.run_agent", new=empty_run_agent),
-    ):
-        result = await spawn_explore_agent_activity(
-            agent_id="empty-research",
-            user_id="u-7",
-            goal="Research an answer",
-            model="rose-1-flash",
-        )
-
-    assert result["status"] == "error"
-    assert result["tool_call_results"] == []
-    assert result["error_reason"] == "max_iterations"
-
-
-async def test_spawn_explore_keeps_parent_cancelled():
-    """A real parent pause never becomes a partial successful result."""
-    from unittest.mock import patch
-
-    from domains.spawn_agent.service import spawn_explore_agent_activity
-
-    async def paused_run_agent(**kwargs):
-        raise asyncio.CancelledError()
-
-    with (
-        patch("temporalio.activity.heartbeat"),
-        patch("loop.run_agent.run_agent", new=paused_run_agent),
-        pytest.raises(asyncio.CancelledError),
-    ):
-        await spawn_explore_agent_activity(
-            agent_id="parent-paused",
-            user_id="u-7",
-            goal="Research an answer",
-            model="rose-1-flash",
-        )
-
-
 async def test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_evidence():
     """Soft-complete plumbing must not become the explore chip summary."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -4553,24 +4206,12 @@ async def run_all_tests():
         test_handler_explore_timeout_finishes_with_heartbeat_wrap_up,
     )
     await r.record_async(
-        "handler_explore_timeout_without_heartbeat_reports_error",
-        test_handler_explore_timeout_without_heartbeat_reports_error,
+        "handler_explore_timeout_without_heartbeat_still_finishes",
+        test_handler_explore_timeout_without_heartbeat_still_finishes,
     )
     await r.record_async(
-        "handler_explore_timeout_rejects_failed_tool_heartbeat",
-        test_handler_explore_timeout_rejects_failed_tool_heartbeat,
-    )
-    await r.record_async(
-        "handler_explore_cancel_grace_reports_error_without_evidence",
-        test_handler_explore_cancel_grace_reports_error_without_evidence,
-    )
-    await r.record_async(
-        "handler_explore_cancel_grace_uses_checkpoint",
-        test_handler_explore_cancel_grace_uses_checkpoint,
-    )
-    await r.record_async(
-        "explore_progress_signal_scoped_to_active_task",
-        test_explore_progress_signal_is_scoped_to_active_task,
+        "handler_explore_cancel_grace_wraps_up_without_awaiting_handle",
+        test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle,
     )
     await r.record_async(
         "handler_explore_cancel_grace_awaits_when_handle_completes",
@@ -4685,30 +4326,6 @@ async def run_all_tests():
     await r.record_async("network_metadata_empty", test_fetch_network_metadata_empty_people)
     # service.py
     await r.record_async("explore_activity_happy", test_spawn_explore_agent_activity_runs_run_agent_and_returns_result)
-    await r.record_async(
-        "explore_turn_limit_returns_parallel_evidence",
-        test_spawn_explore_turn_limit_returns_parallel_evidence,
-    )
-    await r.record_async(
-        "explore_turn_limit_recent_successes_only",
-        test_spawn_explore_turn_limit_uses_recent_successes_only,
-    )
-    await r.record_async(
-        "explore_does_not_preempt_normal_winddown",
-        test_spawn_explore_does_not_preempt_normal_winddown,
-    )
-    await r.record_async(
-        "explore_checkpoint_keeps_recent_synthesis",
-        test_spawn_explore_checkpoint_keeps_recent_synthesis,
-    )
-    await r.record_async(
-        "explore_turn_limit_without_evidence_remains_error",
-        test_spawn_explore_turn_limit_without_evidence_remains_error,
-    )
-    await r.record_async(
-        "explore_keeps_parent_cancelled",
-        test_spawn_explore_keeps_parent_cancelled,
-    )
     await r.record_async(
         "explore_activity_replaces_fast_mode_stub",
         test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_evidence,

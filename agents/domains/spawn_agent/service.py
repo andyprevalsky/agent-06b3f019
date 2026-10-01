@@ -32,7 +32,6 @@ from domains.spawn_agent.repo import (
     save_explore_message,
 )
 from domains.spawn_agent.types import VALID_AGENT_TYPES
-from helpers.explore_progress import send_explore_progress
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
@@ -416,13 +415,10 @@ async def spawn_explore_agent_activity(
 
     # Collect raw tool call results for callers that need evidence
     tool_call_results: List[str] = []
-    successful_tool_results: List[str] = []
-    latest_assistant_text = ""
     # The local summary is fetched by a trusted backend activity before this
     # leaf starts. Treat it as grounded evidence so an aggregate/latest-message
     # lookup can complete without a redundant grep solely to satisfy the guard.
     has_usable_tool_evidence = bool(local_data_summary.strip())
-    has_successful_tool_evidence = False
     completion_no_evidence_rejects = 0
 
     # Data sources the explore agent tried to grep but whose connector isn't
@@ -431,27 +427,11 @@ async def spawn_explore_agent_activity(
     unavailable_sources_collected: List[Dict] = []
 
     def _heartbeat_payload() -> Dict[str, Any]:
-        # Keep the leaf's own interpretation and the newest successful sources.
-        # The first 12 KB of raw search output often predates the decisive find.
-        recent = _recent_successful_evidence(2)
-        compiled = "\n\n".join(filter(None, (latest_assistant_text[:2000], *recent)))
+        compiled = compile_explore_wrap_up("", tool_call_results)
         return {
-            "result": compiled[:EXPLORE_FALLBACK_PAYLOAD_BUDGET],
-            "tool_call_results": recent,
-            "has_usable_evidence": has_successful_tool_evidence,
+            "result": compiled,
+            "tool_call_results": list(tool_call_results[-8:]),
         }
-
-    def _recent_successful_evidence(limit: int) -> List[str]:
-        return [
-            entry if len(entry) <= 2500 else f"{entry[:2100]}\n...\n{entry[-400:]}"
-            for entry in successful_tool_results[-limit:]
-        ]
-
-    async def _send_checkpoint(checkpoint: Dict[str, Any]) -> None:
-        if has_successful_tool_evidence and not _oai_demo:
-            # A TRY_CANCEL activity can lose heartbeat details before the parent
-            # sees them. The signal survives that cancellation in workflow history.
-            await send_explore_progress(task_id, checkpoint)
 
     async def _heartbeat_loop() -> None:
         """Keep the activity alive during wrap-up LLM calls; details hold evidence."""
@@ -613,7 +593,7 @@ async def spawn_explore_agent_activity(
 
     async def explore_execute_tool(tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:
         """Execute a tool inside the explore activity context."""
-        nonlocal has_usable_tool_evidence, has_successful_tool_evidence, completion_no_evidence_rejects
+        nonlocal has_usable_tool_evidence, completion_no_evidence_rejects
         activity.heartbeat(_heartbeat_payload())
 
         tool_call_dict = {"tool": tool_name, **tool_args}
@@ -741,10 +721,10 @@ async def spawn_explore_agent_activity(
         else:
             actual_result = result
 
-        current_tool_has_evidence = _has_usable_tool_evidence(actual_result)
-        if current_tool_has_evidence:
+        if _has_usable_tool_evidence(actual_result):
             has_usable_tool_evidence = True
-            has_successful_tool_evidence = True
+        activity.heartbeat(_heartbeat_payload())
+
         # Serialize the actual result into message so run_agent puts it in context.
         try:
             result_str = json.dumps(actual_result, default=str)
@@ -752,25 +732,12 @@ async def spawn_explore_agent_activity(
             result_str = str(actual_result)
 
         # Collect raw tool results for callers (e.g. wait_for condition evaluator)
-        raw_result = f"[{tool_name}] {result_str}"
-        tool_call_results.append(raw_result)
-        if current_tool_has_evidence:
-            successful_tool_results.append(raw_result)
-        checkpoint = _heartbeat_payload()
-        activity.heartbeat(checkpoint)
-        if current_tool_has_evidence:
-            await _send_checkpoint(checkpoint)
+        tool_call_results.append(f"[{tool_name}] {result_str}")
 
         return {"success": True, "message": result_str}
 
     async def explore_post_message(message: str, role: str, metadata: Optional[Dict] = None):
         """Post messages from the explore agent to DB."""
-        nonlocal latest_assistant_text
-        if role == "ASSISTANT" and has_successful_tool_evidence and (message or "").strip():
-            latest_assistant_text = message.strip()
-            checkpoint = _heartbeat_payload()
-            activity.heartbeat(checkpoint)
-            await _send_checkpoint(checkpoint)
         is_tool_error = role == "TOOL" and bool(metadata and metadata.get("error"))
         message_status = MessageStatus.ERROR if is_tool_error else MessageStatus.FINISHED
         title = str(metadata.get("title")) if metadata and metadata.get("title") else "Explore agent thinking"
@@ -823,7 +790,7 @@ async def spawn_explore_agent_activity(
             fast_mode_cache_enabled=_explore_fast_mode_enabled,
             oai_demo=_oai_demo,
         )
-    depth_cap, _ = explore_limits_for_depth(effective_depth)
+    depth_cap = explore_limits_for_depth(effective_depth)[0]
     if max_iterations is None:
         resolved_max_iterations = depth_cap
     else:
@@ -897,22 +864,10 @@ async def spawn_explore_agent_activity(
     # but leaves result empty, the parent receives no evidence. Synthesize a
     # payload from accumulated tool results so the parent always has grounded data
     # to act on instead of hallucinating or re-spawning sub-agents.
-    # At the turn cap, only successful recent tools can ground a partial answer.
-    # Raw results include failures and old searches that may precede the answer.
-    fallback_results = (
-        _recent_successful_evidence(3)
-        if result.get("status") == "max_iterations" and has_successful_tool_evidence
-        else tool_call_results
+    final_response = compile_explore_wrap_up(
+        result.get("final_response", "") or "",
+        tool_call_results,
     )
-    response_text = result.get("final_response", "") or ""
-    if result.get("status") == "max_iterations" and has_successful_tool_evidence:
-        response_text = response_text[:2000]
-    final_response = compile_explore_wrap_up(response_text, fallback_results)
-    if result.get("status") == "max_iterations" and has_successful_tool_evidence:
-        gathered = compile_explore_wrap_up("", fallback_results)
-        if gathered and gathered not in final_response:
-            final_response = f"{final_response}\n\nCollected evidence:\n{gathered}".strip()
-            final_response = final_response[:EXPLORE_FALLBACK_PAYLOAD_BUDGET]
 
     # Disconnected sources are a gap notice, not a hard explore failure. Grep
     # already skipped them and the parent still raises source_connect gates;
@@ -942,21 +897,7 @@ async def spawn_explore_agent_activity(
         and not attachment_texts
         and not local_data_summary
     )
-    # The final-turn nudge may still reach the turn cap without an explicit
-    # completion tool call. Preserve the model's best effort and grounded tool
-    # evidence instead of reporting only "Reached max iterations" upstream.
-    run_completed = (
-        result.get("status") == "completed" and not completed_without_tool_evidence
-    ) or (
-        result.get("status") == "max_iterations"
-        and (
-            has_successful_tool_evidence
-            or (
-                bool(local_data_summary.strip() or attachment_texts)
-                and bool(result.get("best_effort_response"))
-            )
-        )
-    )
+    run_completed = result.get("status") == "completed" and not completed_without_tool_evidence
     result_payload = {
         "status": "completed" if run_completed else "error",
         "result": final_response,

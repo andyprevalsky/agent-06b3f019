@@ -89,22 +89,6 @@ def _validate_required_turn_tool(result: Any, required_tool: Optional[str]) -> N
         raise RequiredTurnToolError(f"LLM must call exactly one tool, '{required_tool}'. Got: {tool_names}")
 
 
-def _has_returned_explore_evidence(context: List[Dict[str, Any]]) -> bool:
-    """A completed Explore chip is grounded research available to this child."""
-    return any(
-        message.get("role") == "TOOL"
-        and bool(str(message.get("text") or "").strip())
-        and (metadata := message.get("metadata") or {}).get("toolName") == "spawn_agent"
-        and metadata.get("agentType") == "explore"
-        and metadata.get("toolStatus") == "FINISHED"
-        # Only the handler's terminal chip carries fullGoal. Explore's own
-        # intermediate thinking posts can also be FINISHED spawn_agent rows.
-        and bool(metadata.get("fullGoal"))
-        for message in context
-        if isinstance(message, dict)
-    )
-
-
 # Check credits every N iterations
 CREDIT_CHECK_INTERVAL = 5
 
@@ -226,9 +210,6 @@ async def run_agent(
     # into the conversation tail this many turns before the cap, giving the model a
     # clean final turn instead of a hard cut. 0 = disabled (default). Explore opts in.
     winddown_window: int = 0,
-    # Only general-purpose children receive this absolute deadline. Once an
-    # Explore result has returned, ask them to finish at the next turn boundary.
-    grounded_child_winddown_at: Optional[datetime] = None,
     max_context_tokens: int = 200_000,
     reasoning_max_tokens: int = 256,
     # State tracking (for continue_as_new)
@@ -639,7 +620,6 @@ async def run_agent(
 
     # Graceful wind-down state: ensures the "final turn" nudge is injected once.
     winddown_injected = False
-    grounded_child_winddown_injected = False
 
     # Count of consecutive iterations spent paused. Reset the moment we run real
     # work. Bounds the paused-wait loop (see PAUSED_WAIT_FLOOR_SECONDS /
@@ -810,30 +790,6 @@ async def run_agent(
         if poll_messages:
             last_checked = await poll_and_update_context(poll_messages, context, last_checked)
 
-        # A child can spend minutes inside a handful of Explore calls without
-        # approaching its 25-turn cap. Nudge only after returned research is in
-        # context; never interrupt an in-flight tool or override pause handling.
-        if (
-            not is_plan_loop
-            and grounded_child_winddown_at is not None
-            and _safe_now() >= grounded_child_winddown_at
-            and _has_returned_explore_evidence(context)
-            and not grounded_child_winddown_injected
-        ):
-            context.append(
-                {
-                    "role": "SYSTEM",
-                    "text": (
-                        "You have already received grounded Explore research. Finish now from the evidence "
-                        "available, without starting another search. State uncertainty or gaps rather than "
-                        "claiming unsupported facts, and call attempt_completion."
-                    ),
-                    "timestamp": _safe_now().isoformat(),
-                }
-            )
-            grounded_child_winddown_injected = True
-            logger.info("run_agent.grounded_child_winddown", agent_id=agent_id, iteration=iteration)
-
         # A browser/code child has already run its own verifier before emitting
         # a terminal structured_response. When that response covers every
         # parent output field, the parent verifier has a deterministic fast
@@ -866,13 +822,6 @@ async def run_agent(
                 agent_id=agent_id,
                 iteration=iteration,
                 output_fields=sorted(completed_child_output),
-            )
-        elif grounded_child_winddown_injected and "attempt_completion" in tools:
-            required_turn_tool = "attempt_completion"
-            completion_instruction = (
-                "Use the grounded Explore result already returned. Do not search further. "
-                "Call attempt_completion now with the best answer supported by that evidence, "
-                "and state any unresolved uncertainty."
             )
 
         # 3. Query blueprints after first iteration (only in PLAN phase, not EXECUTE)
