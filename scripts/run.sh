@@ -2478,7 +2478,14 @@ launch_backend_service() {
                     # Launch the server process directly. `npx tsx` adds npm and
                     # tsx CLI parents; losing either parent ends this stack even
                     # while the actual backend is still serving requests.
-                    PORT="$BACKEND_PORT" node --import tsx src/bootstrap.ts > "$BACKEND_LOG_FILE" 2>&1
+                    # The tsx --import hook needs module.register (Node 18.19+
+                    # or 20.6+). Older supported Node versions use --loader.
+                    # Node 18.18 has --import but cannot load tsx through it.
+                    if node -e "process.exit(typeof require(\"node:module\").register === \"function\" ? 0 : 1)"; then
+                        PORT="$BACKEND_PORT" node --import tsx src/bootstrap.ts > "$BACKEND_LOG_FILE" 2>&1
+                    else
+                        PORT="$BACKEND_PORT" node --loader tsx src/bootstrap.ts > "$BACKEND_LOG_FILE" 2>&1
+                    fi
                     code=$?
                     if [ "$code" -ne 0 ]; then
                         printf "%s\n" back-end > "$FAIL_DIR/failed"
