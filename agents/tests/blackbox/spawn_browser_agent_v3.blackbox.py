@@ -21056,6 +21056,45 @@ def test_browser_payment_resume_keeps_cached_prompt_prefix():
     )
 
 
+def test_browser_payment_resume_accepts_already_finalized_mint_result():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.handler import _complete_pending_payment_card_result
+    from domains.spawn_browser_agent_v3.service_crypto import finalize_parked_payment_card_approval_history
+
+    parked = {
+        "action_history": [{"step": 1, "action": "request_payment_card", "result": {
+            "status": "awaiting_payment_card_approval",
+        }}],
+        "browser_turn_messages": [{
+            "role": "tool", "name": "request_payment_card", "tool_call_id": "call-payment",
+            "content": '{"status":"awaiting_payment_card_approval"}',
+        }],
+    }
+    finalize_parked_payment_card_approval_history(parked, last4="7406")
+    history = ActionHistory()
+    history.restore_entries(parked["action_history"])
+    turns = parked["browser_turn_messages"]
+    finalized = turns[0]["content"]
+
+    assert _complete_pending_payment_card_result(
+        turns, history, last4="7406",
+        card_refs={"card_number": "PAN", "card_name": "N", "card_expiry": "E", "card_cvv": "C"},
+    )
+    assert turns[0]["content"] == finalized
+    assert history.get_entries()[0]["result"]["status"] == "payment_card_ready"
+    assert len(history.get_entries()) == 1
+    assert not _complete_pending_payment_card_result(
+        [{"role": "tool", "name": "request_payment_card", "content": '{"status":"payment_card_ready","last4":"1234"}'}],
+        history, last4="7406",
+        card_refs={"card_number": "PAN", "card_name": "N", "card_expiry": "E", "card_cvv": "C"},
+    )
+    assert not _complete_pending_payment_card_result(
+        [{"role": "tool", "name": "request_payment_card", "content": '{"status":"payment_card_ready"}'}],
+        history, last4="7406",
+        card_refs={"card_number": "PAN", "card_name": "N", "card_expiry": "E", "card_cvv": "C"},
+    )
+
+
 async def test_browser_resume_store_preserves_inline_and_external_snapshots():
     from tempfile import TemporaryDirectory
 
@@ -23207,6 +23246,10 @@ async def run_all_tests():
     r.record(
         "browser_payment_resume_keeps_cached_prompt_prefix",
         test_browser_payment_resume_keeps_cached_prompt_prefix,
+    )
+    r.record(
+        "browser_payment_resume_accepts_already_finalized_mint_result",
+        test_browser_payment_resume_accepts_already_finalized_mint_result,
     )
     await r.record_async(
         "browser_resume_store_preserves_inline_and_external_snapshots",

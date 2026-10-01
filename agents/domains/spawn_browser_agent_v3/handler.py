@@ -827,7 +827,37 @@ def _complete_pending_payment_card_result(
             result = json.loads(message.get("content") or "")
         except (TypeError, ValueError):
             continue
-        if not isinstance(result, dict) or result.get("status") not in {
+        if not isinstance(result, dict):
+            continue
+        if result.get("status") in {"payment_card_ready", "approved"}:
+            # The outer approval+mint loop may already have finalized this
+            # persisted tool result before the browser activity resumes.
+            # Accept that completed outcome instead of treating it as a lost
+            # pending result and restarting the payment flow.
+            result_last4 = result.get("last4") or result.get("card_last4")
+            if last4 and result_last4 != last4:
+                continue
+            if pending_entry is not None:
+                pending_entry["result"] = dict(result)
+                action_history.restore_entries(entries)
+            elif not any(
+                entry.get("action") == "request_payment_card"
+                and (entry.get("result") or {}).get("status") in {"payment_card_ready", "approved"}
+                and (
+                    not last4
+                    or ((entry.get("result") or {}).get("last4") or (entry.get("result") or {}).get("card_last4"))
+                    == last4
+                )
+                for entry in entries
+            ):
+                entries.append({
+                    "step": max((entry.get("step", 0) for entry in entries), default=0) + 1,
+                    "action": "request_payment_card",
+                    "result": dict(result),
+                })
+                action_history.restore_entries(entries)
+            return True
+        if result.get("status") not in {
             "needs_payment_card_approval",
             "awaiting_payment_card_approval",
         }:
