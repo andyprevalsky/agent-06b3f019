@@ -15,10 +15,18 @@ if [ ! -x "$PYTHON_BIN" ]; then
   exit 1
 fi
 
+# Discovered by glob so a new suite cannot be left out of /deploy.
+shopt -s nullglob
+suites=(tests/structural/structural*.py)
+if [ "${#suites[@]}" -eq 0 ]; then
+  echo "FAIL: no agents/tests/structural/structural*.py suites found" >&2
+  exit 1
+fi
+
 status=0
-for suite in structural structural_imports structural_architecture structural_test_registration; do
-  if ! "$PYTHON_BIN" "tests/structural/$suite.py"; then
-    echo "FAIL: agents/tests/structural/$suite.py" >&2
+for suite in "${suites[@]}"; do
+  if ! "$PYTHON_BIN" "$suite"; then
+    echo "FAIL: agents/$suite" >&2
     status=1
   fi
 done
