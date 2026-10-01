@@ -1,11 +1,43 @@
-import { MessageChannel } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { MessageChannel, type Prisma } from '@prisma/client';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
 
 const log = createLogger('PersonMessageManager');
 
 const PERSON_CHUNK_SIZE = 50;
 const MESSAGE_BATCH_SIZE = 10000;
+
+class DisconnectedGoogleCredentialError extends Error {}
+
+async function createMessageBatch(
+  data: Prisma.MessageRecordCreateManyInput[],
+  userId: string,
+  googleAccountEmail?: string,
+  googleCredentialId?: string
+): Promise<void> {
+  if (googleAccountEmail === undefined) {
+    await prisma.messageRecord.createMany({ data, skipDuplicates: true });
+    return;
+  }
+  if (googleCredentialId === undefined) throw new DisconnectedGoogleCredentialError();
+
+  await runTransactionWithRetry(
+    async (tx) => {
+      // The matching lock in deleteEmailCredential serializes disconnect with
+      // the insert. A stale sync sees no credential after deletion and stops.
+      const active = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "EmailIntegrationCredential"
+        WHERE "id" = ${googleCredentialId} AND "userId" = ${userId}
+          AND "provider" = 'GMAIL'::"EmailProvider"
+          AND lower("email") = ${googleAccountEmail.toLowerCase()}
+          AND "accessToken" IS NOT NULL
+        FOR SHARE`;
+      if (active.length === 0) throw new DisconnectedGoogleCredentialError();
+      await tx.messageRecord.createMany({ data, skipDuplicates: true });
+    },
+    { timeout: 30_000 }
+  );
+}
 
 export interface ContactToUpsert {
   // Primary identifier (phone number, email, or LinkedIn URL)
@@ -98,7 +130,9 @@ function calculateCommunicationFrequency(messages: Array<{ timestamp: Date }>): 
 export async function upsertPersonAndMessageRecords(
   userId: string,
   contacts: ContactToUpsert[],
-  jobId: string
+  jobId: string,
+  googleAccountEmail?: string,
+  googleCredentialId?: string
 ): Promise<{ contacts: number; messages: number }> {
   const totalMessages = contacts.reduce((sum, c) => sum + c.messages.length, 0);
   log.info('Processing messages', {
@@ -178,7 +212,6 @@ export async function upsertPersonAndMessageRecords(
         if (!personId) {
           log.warn('Person not found for contact, skipping messages', {
             jobId,
-            identifier: contact.identifier,
           });
           continue;
         }
@@ -186,7 +219,6 @@ export async function upsertPersonAndMessageRecords(
         if (!contact.messages?.length) {
           log.warn('No messages for contact, skipping', {
             jobId,
-            identifier: contact.identifier,
           });
           continue;
         }
@@ -199,8 +231,8 @@ export async function upsertPersonAndMessageRecords(
         ) {
           const batch = contact.messages.slice(batchIndex, batchIndex + MESSAGE_BATCH_SIZE);
 
-          await prisma.messageRecord.createMany({
-            data: batch.map((msg) => ({
+          await createMessageBatch(
+            batch.map((msg) => ({
               personId,
               channel: msg.channel,
               from: msg.from,
@@ -208,9 +240,12 @@ export async function upsertPersonAndMessageRecords(
               timestamp: msg.timestamp,
               message: msg.message,
               externalId: msg.externalId,
+              googleAccountEmail: googleAccountEmail?.toLowerCase() ?? null,
             })),
-            skipDuplicates: true,
-          });
+            userId,
+            googleAccountEmail,
+            googleCredentialId
+          );
         }
 
         // Calculate communication frequency and update person stats
@@ -229,16 +264,14 @@ export async function upsertPersonAndMessageRecords(
 
         log.info('Processed contact', {
           jobId,
-          identifier: contact.identifier,
           messagesInContact: contact.messages.length,
           messagesProcessed,
           totalMessages,
         });
       } catch (error) {
+        if (error instanceof DisconnectedGoogleCredentialError) throw error;
         log.error('Error processing contact', {
           jobId,
-          identifier: contact.identifier,
-          error: error instanceof Error ? error.message : String(error),
         });
       }
     }

@@ -8,6 +8,7 @@ import { createLogger } from '../../providers/logger';
 import type { EmailProviderSlug, TokenExchangeResult, OAuthResponse } from './types';
 import { EMAIL_PROVIDER_CONFIG, BACKEND_BASE_URL, ALLOWED_REDIRECT_PATTERNS } from './config';
 import * as repo from './repo';
+import { readGoogleToken } from '../../providers/googleCredentials';
 
 const log = createLogger('Integrations');
 
@@ -92,10 +93,8 @@ async function fetchGmailUserEmail(accessToken: string): Promise<string | undefi
       const userinfo = (await userinfoResponse.json()) as { email?: string };
       return userinfo.email;
     }
-  } catch (err: unknown) {
-    log.error('Failed to fetch Gmail user info', {
-      error: err instanceof Error ? err.message : String(err),
-    });
+  } catch {
+    log.error('Failed to fetch Gmail user info');
   }
   return undefined;
 }
@@ -109,10 +108,8 @@ function decodeEmailFromIdToken(idToken: string): string | undefined {
       unknown
     >;
     return typeof payload.email === 'string' ? payload.email : undefined;
-  } catch (err: unknown) {
-    log.error('Failed to decode id_token', {
-      error: err instanceof Error ? err.message : String(err),
-    });
+  } catch {
+    log.error('Failed to decode id_token');
     return undefined;
   }
 }
@@ -167,7 +164,7 @@ export const exchangeProviderCode = async (
     ? (rawScope as string[])
     : typeof rawScope === 'string'
       ? rawScope.split(/[\s+,]/).filter((s: string) => s !== '')
-      : EMAIL_PROVIDER_CONFIG[provider].scopes;
+      : [];
 
   let userEmail: string | undefined;
   if (provider === 'gmail') {
@@ -294,7 +291,7 @@ export async function startEmailOAuth(
 
   const authUrl = buildAuthUrl(providerKey, { state, codeChallenge });
   const redirectUri = buildRedirectUri(providerKey);
-  log.info('OAuth redirect', { redirectUri, returnUrl: returnUrl ?? 'none' });
+  log.info('OAuth redirect', { redirectUri });
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
   return { authUrl, state, expiresAt, credentialId: credential.id };
 }
@@ -330,7 +327,7 @@ export async function refreshGmailToken(credential: {
   try {
     const body = new URLSearchParams({
       grant_type: 'refresh_token',
-      refresh_token: credential.refreshToken,
+      refresh_token: readGoogleToken(credential.refreshToken),
       client_id: config.clientId,
       client_secret: config.clientSecret,
     });
@@ -343,7 +340,7 @@ export async function refreshGmailToken(credential: {
 
     const json = (await response.json()) as Record<string, unknown>;
     if (!response.ok || typeof json.access_token !== 'string') {
-      log.error('Token refresh failed', { error: json.error_description ?? json.error });
+      log.error('Token refresh failed', { status: response.status });
       return null;
     }
 
@@ -357,10 +354,8 @@ export async function refreshGmailToken(credential: {
     });
 
     return json.access_token;
-  } catch (error: unknown) {
-    log.error('Error refreshing token', {
-      error: error instanceof Error ? error.message : String(error),
-    });
+  } catch {
+    log.error('Error refreshing token');
     return null;
   }
 }

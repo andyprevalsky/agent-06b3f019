@@ -8,7 +8,8 @@
  * dead refresh token flipped the whole row to SYNC_FAILED.
  */
 
-import { prisma } from '../../providers/database';
+import { EmailProvider } from '@prisma/client';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
 import { classifyComputeGrantFailure } from '../../providers/computeGrantFailure';
 
@@ -26,6 +27,7 @@ export type EmailCredentialState = 'connected' | 'needs_reconnect' | 'sync_faile
 export interface EmailAuthFailure {
   state: Exclude<EmailCredentialState, 'connected'>;
   reason: string;
+  revoked?: boolean;
 }
 
 /**
@@ -53,6 +55,7 @@ export function classifyEmailAuthFailure(input: {
     return {
       state: 'needs_reconnect',
       reason: 'Access was revoked or expired. Reconnect this account to restore it.',
+      revoked: true,
     };
   }
 
@@ -79,6 +82,42 @@ export async function markCredentialFailure(
   failure: EmailAuthFailure
 ): Promise<void> {
   log.info('Marking credential', { credentialId, state: failure.state, reason: failure.reason });
+  if (failure.revoked === true) {
+    await runTransactionWithRetry(async (tx) => {
+      const credential = await tx.emailIntegrationCredential.findUnique({
+        where: { id: credentialId },
+        select: {
+          userId: true,
+          provider: true,
+          email: true,
+          accessToken: true,
+          refreshToken: true,
+        },
+      });
+      if (credential === null) return;
+      const updated = await tx.emailIntegrationCredential.updateMany({
+        where: {
+          id: credentialId,
+          accessToken: credential.accessToken,
+          refreshToken: credential.refreshToken,
+        },
+        data: {
+          state: failure.state,
+          lastErrorReason: failure.reason,
+          lastFailedSyncAt: new Date(),
+          accessToken: null,
+          refreshToken: null,
+        },
+      });
+      if (updated.count !== 1 || credential.provider !== EmailProvider.GMAIL) return;
+      if (credential.email !== null) {
+        await tx.googleDataPurge.create({
+          data: { userId: credential.userId, email: credential.email.toLowerCase() },
+        });
+      }
+    });
+    return;
+  }
   await prisma.emailIntegrationCredential.update({
     where: { id: credentialId },
     data: {

@@ -450,11 +450,7 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
         );
         continue;
       }
-      throw new RoseRateLimitError(
-        `Anthropic 429: ${errorBody.substring(0, 200)}`,
-        status,
-        rateLimitedUntil
-      );
+      throw new RoseRateLimitError('Anthropic 429', status, rateLimitedUntil);
     }
 
     if (status === 401 || status === 403) {
@@ -464,35 +460,25 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
       // the re-mint that would fix it. The 429 branch above returns earlier, so a
       // throttle can never reach this and be mistaken for death.
       const failure = classifyComputeGrantFailure({ status, body: errorBody });
-      throw new RoseAuthError(
-        `Anthropic ${status}: ${errorBody.substring(0, 200)}`,
-        status,
-        failure.shouldRemint
-      );
+      throw new RoseAuthError(`Anthropic ${status}`, status, failure.shouldRemint);
     }
 
     // 402 = out of credits/quota. Terminal for this credential (a retry won't
     // help until it's topped up), so surface a distinct typed error the client
     // uses to back the API key off — see ANTHROPIC_API_KEY cooldown in client.ts.
     if (status === 402) {
-      throw new RosePaymentRequiredError(
-        `Anthropic 402 (out of credits): ${errorBody.substring(0, 200)}`,
-        status
-      );
+      throw new RosePaymentRequiredError('Anthropic 402 (out of credits)', status);
     }
 
     if (
       status === 400 &&
       /credit balance is too low|out of credits|purchase credits/i.test(errorBody)
     ) {
-      throw new RosePaymentRequiredError(
-        `Anthropic 400 (out of credits): ${errorBody.substring(0, 200)}`,
-        status
-      );
+      throw new RosePaymentRequiredError('Anthropic 400 (out of credits)', status);
     }
 
     if (status === 400) {
-      throw new RoseInvalidRequest(`Anthropic 400: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseInvalidRequest('Anthropic 400', status);
     }
 
     if (status >= 500) {
@@ -500,10 +486,10 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
         await sleep(Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS), opts.abortSignal);
         continue;
       }
-      throw new RoseServerError(`Anthropic ${status}: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseServerError(`Anthropic ${status}`, status);
     }
 
-    throw new RoseError(`Anthropic ${status}: ${errorBody.substring(0, 200)}`, status);
+    throw new RoseError(`Anthropic ${status}`, status);
   }
 
   // Unreachable in practice — loop body either yields, returns, or throws.

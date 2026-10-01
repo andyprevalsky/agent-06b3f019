@@ -15,8 +15,50 @@
 import NaviHeader from '@/components/NaviHeader';
 import NaviFooter from '@/components/NaviFooter';
 import ContactModal from '@/components/ContactModal';
+import { Link } from 'react-router-dom';
+import { GOOGLE_ACCESS_DESCRIPTION, ROSE_APP_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 import { useAboutSeo, useContactModal } from '../hooks';
+
+function Mission() {
+  return (
+    <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
+      <h1 className="text-3xl md:text-4xl font-semibold mb-4 text-foreground">Mission</h1>
+      <p className="text-muted-foreground leading-relaxed">
+        Our mission is to create Artificial Life that is the truest embodiment of light. Almost
+        everyone has the problem of only having one intelligent life form working around the clock
+        to make sure their dreams come true, and because of that, the vast majority of human
+        potential never sees the light of day. Rose Labs aims to give each individual a super
+        intelligent companion to help guide them along their unique personal journey.
+      </p>
+    </section>
+  );
+}
+
+function RoseDescription() {
+  return (
+    <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
+      <h2 className="text-2xl font-semibold mb-3 text-foreground">What Rose does</h2>
+      <p className="text-muted-foreground leading-relaxed">{ROSE_APP_DESCRIPTION}</p>
+      <p className="text-muted-foreground leading-relaxed mt-4">{GOOGLE_ACCESS_DESCRIPTION}</p>
+      <p className="text-muted-foreground leading-relaxed mt-4">
+        Read our{' '}
+        <Link to="/privacy" className="underline">
+          Privacy Policy
+        </Link>{' '}
+        and{' '}
+        <Link to="/terms" className="underline">
+          Terms of Service
+        </Link>
+        , or email{' '}
+        <a href="mailto:security@roselabs.ai" className="underline">
+          security@roselabs.ai
+        </a>
+        .
+      </p>
+    </section>
+  );
+}
 
 const About = () => {
   useAboutSeo();
@@ -27,17 +69,8 @@ const About = () => {
       <NaviHeader />
       <main className="pt-24 pb-20">
         <div className="container mx-auto px-6 max-w-4xl">
-          <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
-            <h1 className="text-3xl md:text-4xl font-semibold mb-4 text-foreground">Mission</h1>
-            <p className="text-muted-foreground leading-relaxed">
-              Our mission is to create Artificial Life that is the truest embodiment of light.
-              Almost everyone has the problem of only having one intelligent life form working
-              around the clock to make sure their dreams come true, and because of that, the vast
-              majority of human potential never sees the light of day. Rose Labs aims to give each
-              individual a super intelligent companion to help guide them along their unique
-              personal journey.
-            </p>
-          </section>
+          <Mission />
+          <RoseDescription />
 
           <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
             <h2 className="text-2xl font-semibold mb-3 text-foreground">Team</h2>

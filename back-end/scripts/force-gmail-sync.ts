@@ -6,9 +6,9 @@ if (process.env.DIRECT_URL) process.env.DATABASE_URL = process.env.DIRECT_URL;
 async function main() {
   const { prisma } = await import('../src/lib/prisma');
   const { EmailProvider } = await import('@prisma/client');
-  const { fetchGmailEmails, parseGmailOAuthEmails } = await import('../src/services/integrations/gmailParser');
-
-  const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+  const { fetchGmailEmails, parseGmailOAuthEmails } =
+    await import('../src/services/integrations/gmailParser');
+  const { getValidAccessToken } = await import('../src/services/integrations/gmailSync');
 
   // Parse CLI args
   const email = process.argv[2];
@@ -20,25 +20,6 @@ async function main() {
     process.exit(1);
   }
 
-  async function refreshAccessToken(refreshToken: string): Promise<string> {
-    const clientId = process.env.GMAIL_WEB_CLIENT_ID;
-    const clientSecret = process.env.GMAIL_WEB_CLIENT_SECRET;
-    const body = new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken,
-      client_id: clientId!,
-      ...(clientSecret && { client_secret: clientSecret }),
-    });
-    const response = await fetch(GOOGLE_TOKEN_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
-    });
-    const data = await response.json() as any;
-    if (!data.access_token) throw new Error('Failed to refresh: ' + JSON.stringify(data));
-    return data.access_token;
-  }
-
   const credential = await prisma.emailIntegrationCredential.findFirst({
     where: { provider: EmailProvider.GMAIL, email },
   });
@@ -48,13 +29,16 @@ async function main() {
   }
 
   const userId = credential.userId;
-  const accessToken = await refreshAccessToken(credential.refreshToken);
+  const accessToken = await getValidAccessToken(credential);
+  if (accessToken === null) throw new Error('Gmail token is unavailable; reconnect Google');
   const userEmail = credential.email || email;
 
   console.log(`User: ${userId}, Email: ${userEmail}`);
 
   if (forceFlag) {
-    const msgs = await prisma.messageRecord.deleteMany({ where: { person: { userId }, channel: 'EMAIL' } });
+    const msgs = await prisma.messageRecord.deleteMany({
+      where: { person: { userId }, channel: 'EMAIL' },
+    });
     const persons = await prisma.person.deleteMany({ where: { userId, email: { not: null } } });
     console.log(`Cleared: ${msgs.count} messages, ${persons.count} persons`);
   }
@@ -79,4 +63,7 @@ async function main() {
   await prisma.$disconnect();
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

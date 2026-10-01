@@ -618,28 +618,28 @@ async def anthropic_api_key_complete(
                 error_body = get_error_body(response)
                 if status == 402:
                     raise RosePaymentRequiredError(
-                        f"Anthropic 402 (out of credits): {error_body[:2000]}", status=status
+                        "Anthropic 402 (out of credits)", status=status
                     )
                 if status in (401, 403):
-                    raise RoseAuthError(f"Anthropic {status}: {error_body[:2000]}", status=status)
+                    raise RoseAuthError(f"Anthropic {status}", status=status)
                 if status == 429:
-                    raise RoseRateLimitError(f"Anthropic 429: {error_body[:2000]}", status=status)
+                    raise RoseRateLimitError("Anthropic 429", status=status)
                 if status == 400 and re.search(
                     r"credit balance is too low|out of credits|purchase credits",
                     error_body,
                     re.IGNORECASE,
                 ):
                     raise RosePaymentRequiredError(
-                        f"Anthropic 400 (out of credits): {error_body[:2000]}", status=status
+                        "Anthropic 400 (out of credits)", status=status
                     )
                 if status == 400:
-                    raise RoseInvalidRequest(f"Anthropic 400: {error_body[:2000]}", status=status)
+                    raise RoseInvalidRequest("Anthropic 400", status=status)
                 if status >= 500:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
                         await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                         continue
-                    raise RoseServerError(f"Anthropic {status}: {error_body[:2000]}", status=status)
-                raise RoseError(f"Anthropic {status}: {error_body[:2000]}", status=status)
+                    raise RoseServerError(f"Anthropic {status}", status=status)
+                raise RoseError(f"Anthropic {status}", status=status)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
                 await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
@@ -795,10 +795,10 @@ async def _attempt_with_token(
                         request_id=request_id,
                         agent_id=agent_id,
                         call_site=call_site,
-                        body=error_body[:2000],
+                        body_len=len(error_body),
                     )
                     raise RoseInvalidRequest(
-                        f"Anthropic 400: {error_body[:2000]}",
+                        "Anthropic 400",
                         status=status,
                     )
 
@@ -807,12 +807,12 @@ async def _attempt_with_token(
                         await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                         continue
                     raise RoseServerError(
-                        f"Anthropic {status}: {error_body[:2000]}",
+                        f"Anthropic {status}",
                         status=status,
                     )
 
                 raise RoseError(
-                    f"Anthropic {status}: {error_body[:2000]}",
+                    f"Anthropic {status}",
                     status=status,
                 )
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
