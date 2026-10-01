@@ -1,4 +1,4 @@
-"""Larkspur Members hosted sign-in site fixture for browser-auth benchmarks.
+"""Rose Shop hosted sign-in site fixture for browser-auth benchmarks.
 
 Live sites put CAPTCHAs in front of sign-in, so the auth ladder (saved
 passwords → email OTP → minted identity → request_user_assistance) is proven
@@ -8,7 +8,7 @@ against a members site the local backend serves itself
 per-run site in its prompt as ``{auth_test_site_url}``.
 
     run_single_task
-        │ create_site ──POST /api/test-sites/larkspur/fixtures──► backend
+        │ create_site ──POST /api/test-sites/rose-shop/fixtures──► backend
         │                 seeds BrowserPassword / MintedAccount rows for a
         │                 per-run realm, returns the manifest (entryUrl, ...)
         │ validate_manifest — the auth ladder the agent will see must match the
@@ -36,7 +36,7 @@ import httpx
 AUTH_TEST_SITE_SCENARIOS = ("password_retry", "all_fail", "minted_otp")
 AUTH_TEST_SITE_URL_PLACEHOLDER = "{auth_test_site_url}"
 AUTH_TEST_SITE_OUTCOME_CHECK = "auth_test_site_outcome"
-FIXTURES_PATH = "/api/test-sites/larkspur/fixtures"
+FIXTURES_PATH = "/api/test-sites/rose-shop/fixtures"
 SAVED_PASSWORD_SCENARIOS = ("password_retry", "all_fail")
 SIGNED_IN_SCENARIOS = ("password_retry", "minted_otp")
 EXPECTED_SAVED_PASSWORD_COUNT = 3
@@ -270,4 +270,4 @@ def evaluate_outcome(check: dict, evidence: Any, deliverable: str) -> tuple[bool
         member_number = str(manifest.get("expectedMemberNumber") or "")
         if not member_number or member_number not in deliverable:
             return False, f"Final answer did not report member number {member_number or '<unknown>'}"
-    return True, f"Larkspur Members {manifest.get('scenario')}: {trail}"
+    return True, f"Rose Shop {manifest.get('scenario')}: {trail}"

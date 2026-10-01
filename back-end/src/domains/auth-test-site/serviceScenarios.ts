@@ -35,7 +35,7 @@ export interface ScenarioPlan {
 
 export function randomMemberNumber(): string {
   const value = (randomBytes(4).readUInt32BE(0) % 90_000_000) + 10_000_000;
-  return `LM-${value}`;
+  return `RS-${value}`;
 }
 
 function randomPassword(): string {
@@ -55,7 +55,7 @@ function nameTokens(holderName: string | null): string[] {
 function savedLoginEmails(holderName: string | null, siteId: string): [string, string, string] {
   const tokens = nameTokens(holderName);
   const first = tokens[0] ?? 'member';
-  const last = tokens.length > 1 ? tokens[tokens.length - 1] : 'larkspur';
+  const last = tokens.length > 1 ? tokens[tokens.length - 1] : 'shopper';
   const candidates = [
     `${first}.${last}`,
     `${first}${last.charAt(0)}`,

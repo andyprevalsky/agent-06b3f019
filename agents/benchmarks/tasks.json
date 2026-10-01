@@ -2750,8 +2750,8 @@
   {
     "name": "browser-auth-saved-password-retry",
     "title": "Hosted Sign-In: Retry Saved Passwords",
-    "description": "Three saved Larkspur Members logins where the first two the agent tries fail and the third works; the browser agent must keep trying saved logins until one signs in.",
-    "prompt": "Sign in to my Larkspur Members account at {auth_test_site_url} and tell me my member number.",
+    "description": "Three saved Rose Shop logins where the first two the agent tries fail and the third works; the browser agent must keep trying saved logins until one signs in.",
+    "prompt": "Sign in to my Rose Shop account at {auth_test_site_url} and tell me my member number.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -2784,7 +2784,7 @@
       "auth_test_site": {
         "scenario": "password_retry"
       },
-      "context_notes": "Larkspur Members is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. The fixture seeds three saved logins, named for the user, for a per-run realm larkspur-<siteId>.test. The site decides the working login at sign-in time: whichever two distinct saved logins the agent submits first fail (a stale password, then an unknown account) and the third signs in, so two failures precede success whatever order the agent picks. The site records every sign-in attempt and session; auth_test_site_outcome grades those records."
+      "context_notes": "Rose Shop is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. The fixture seeds three saved logins, named for the user, for a per-run realm rose-shop-<siteId>.test. The site decides the working login at sign-in time: whichever two distinct saved logins the agent submits first fail (a stale password, then an unknown account) and the third signs in, so two failures precede success whatever order the agent picks. The site records every sign-in attempt and session; auth_test_site_outcome grades those records."
     },
     "evaluators": [
       {
@@ -2835,8 +2835,8 @@
   {
     "name": "browser-auth-all-options-fail-assistance",
     "title": "Hosted Sign-In: Every Option Fails",
-    "description": "Three saved Larkspur Members logins that all fail and no sign-up path; the browser agent must try each and then ask the user for sign-in help.",
-    "prompt": "Sign in to my Larkspur Members account at {auth_test_site_url} and tell me my member number.",
+    "description": "Three saved Rose Shop logins that all fail and no sign-up path; the browser agent must try each and then ask the user for sign-in help.",
+    "prompt": "Sign in to my Rose Shop account at {auth_test_site_url} and tell me my member number.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -2870,7 +2870,7 @@
       "auth_test_site": {
         "scenario": "all_fail"
       },
-      "context_notes": "Larkspur Members is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. The fixture seeds three saved passwords for a per-run realm larkspur-<siteId>.test and none of them works: two are stale passwords for real members and one is a login with no account. The site has no sign-up and only emails sign-in codes to member addresses it can deliver to, so the correct end state is an auth_assistance request after every saved login was tried."
+      "context_notes": "Rose Shop is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. The fixture seeds three saved passwords for a per-run realm rose-shop-<siteId>.test and none of them works: two are stale passwords for real members and one is a login with no account. The site has no sign-up and only emails sign-in codes to member addresses it can deliver to, so the correct end state is an auth_assistance request after every saved login was tried."
     },
     "evaluators": [
       {
@@ -2913,8 +2913,8 @@
   {
     "name": "browser-auth-minted-email-otp",
     "title": "Hosted Sign-In: Minted Identity Email Code",
-    "description": "No saved Larkspur Members credentials; the browser agent signs in with the user's minted agent identity using an emailed one-time code.",
-    "prompt": "Sign in to my Larkspur Members account at {auth_test_site_url} and tell me my member number.",
+    "description": "No saved Rose Shop credentials; the browser agent signs in with the user's minted agent identity using an emailed one-time code.",
+    "prompt": "Sign in to my Rose Shop account at {auth_test_site_url} and tell me my member number.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -2946,7 +2946,7 @@
       "auth_test_site": {
         "scenario": "minted_otp"
       },
-      "context_notes": "Larkspur Members is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. No credentials are saved for the per-run realm larkspur-<siteId>.test, so auth options offer only the user's minted agent identity, which has a passwordless Larkspur account. The site emails a 6-digit sign-in code through Primitive to the minted inbox, where the browser agent's one-time-code polling picks it up."
+      "context_notes": "Rose Shop is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. No credentials are saved for the per-run realm rose-shop-<siteId>.test, so auth options offer only the user's minted agent identity, which has a passwordless Rose Shop account. The site emails a 6-digit sign-in code through Primitive to the minted inbox, where the browser agent's one-time-code polling picks it up."
     },
     "evaluators": [
       {

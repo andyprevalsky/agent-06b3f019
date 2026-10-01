@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * Black-box tests for the dev-only Larkspur Members sign-in site that backs the
+ * Black-box tests for the dev-only Rose Shop sign-in site that backs the
  * daily browser-auth benchmarks (password retry, all-options-fail, minted OTP).
  *
  * Two surfaces:
@@ -12,7 +12,10 @@
  */
 
 import 'dotenv/config';
+import { parse as parseDotenv } from 'dotenv';
 import { createDecipheriv, privateDecrypt, constants, randomUUID } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
@@ -23,7 +26,7 @@ import { AUTH_TEST_SITE_BASE_PATH } from '../../domains/auth-test-site/config';
 
 const BASE_URL = process.env.TEST_BASE_URL ?? '';
 const API_KEY = process.env.BACKEND_API_KEY ?? '';
-const STUB_MAIL_DOMAIN = 'mail.larkspur-blackbox.test';
+const STUB_MAIL_DOMAIN = 'mail.rose-shop-blackbox.test';
 
 type TestFn = () => Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];
@@ -66,9 +69,21 @@ async function cleanup(userId: string) {
   await prisma.user.deleteMany({ where: { userId } });
 }
 
+/**
+ * The worker's private key. Cloud shells inject it; a local checkout keeps it
+ * only in agents/.env, the file the worker itself loads.
+ */
+function workerDecryptionKeyB64(): string {
+  const injected = process.env.PAYMENT_DECRYPTION_KEY ?? '';
+  if (injected !== '') return injected;
+  const agentsEnv = path.resolve(__dirname, '../../../../agents/.env');
+  if (!existsSync(agentsEnv)) return '';
+  return parseDotenv(readFileSync(agentsEnv)).PAYMENT_DECRYPTION_KEY ?? '';
+}
+
 /** Mirrors the agent worker's decrypt_password_with_key for the shared envelope. */
 function decryptEnvelope(encrypted: string): string {
-  const keyB64 = process.env.PAYMENT_DECRYPTION_KEY ?? '';
+  const keyB64 = workerDecryptionKeyB64();
   assert(keyB64 !== '', 'PAYMENT_DECRYPTION_KEY is required to emulate the agent worker');
   const envelope = JSON.parse(Buffer.from(encrypted, 'base64').toString('utf8')) as {
     encrypted_aes_key: string;
@@ -219,7 +234,7 @@ test('password_retry seeds three realm-scoped saved passwords, freshest first, t
       new Set(usernames).size === 3 && usernames.every((name) => /^(j|ng)[.a-z]*\./.test(name)),
       `saved logins must be three distinct addresses derived from the user's name: ${usernames}`
     );
-    assert(/^larkspur-[0-9a-f]{12}\.test$/.test(manifest.realm), `bad realm ${manifest.realm}`);
+    assert(/^rose-shop-[0-9a-f]{12}\.test$/.test(manifest.realm), `bad realm ${manifest.realm}`);
     assert(canonicalAuthRealm(manifest.entryUrl) === manifest.realm, 'entryUrl must carry realm');
     assert(manifest.savedBrowserAuthHidden === false, 'saved browser auth must be visible');
     assert(
@@ -232,7 +247,7 @@ test('password_retry seeds three realm-scoped saved passwords, freshest first, t
       manifest.expectedSignInEmail === null,
       'the working login is whichever third saved login the agent tries, so none is pinned'
     );
-    assert(/^LM-\d{8}$/.test(manifest.expectedMemberNumber ?? ''), 'member number expected');
+    assert(/^RS-\d{8}$/.test(manifest.expectedMemberNumber ?? ''), 'member number expected');
 
     const page = await fetch(`${BASE_URL}${AUTH_TEST_SITE_BASE_PATH}/${manifest.siteId}/login`, {
       redirect: 'manual',
@@ -280,8 +295,8 @@ test('fixture rejects a public host that cannot carry an authRealm override', as
 
 test('dev tunnel hosts honor authRealm overrides; ordinary hosts do not', async () => {
   for (const host of ['abc.trycloudflare.com', 'abc.ngrok-free.app', 'abc.ngrok-free.dev']) {
-    const realm = canonicalAuthRealm(`https://${host}/x/?authRealm=larkspur-1.test`);
-    assert(realm === 'larkspur-1.test', `${host} must honor override, got ${realm}`);
+    const realm = canonicalAuthRealm(`https://${host}/x/?authRealm=rose-shop-1.test`);
+    assert(realm === 'rose-shop-1.test', `${host} must honor override, got ${realm}`);
   }
   const spoofed = canonicalAuthRealm('https://shop.example.com/?authRealm=amazon.com');
   assert(spoofed === 'example.com', `public hosts must ignore override, got ${spoofed}`);

@@ -153,7 +153,7 @@ export function renderAccountPage(
       <dt>Member number</dt>
       <dd id="member-number">${escapeHtml(memberNumber ?? 'Unavailable')}</dd>
       <dt>Plan</dt>
-      <dd>Larkspur Annual</dd>
+      <dd>Rose Shop Annual</dd>
       <dt>Status</dt>
       <dd>Active</dd>
     </dl>

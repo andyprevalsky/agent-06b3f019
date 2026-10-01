@@ -7421,7 +7421,7 @@ async def _apply_memory_fixtures(task: "BenchmarkTask", base_url: str) -> list[d
 
 
 async def _apply_auth_test_site(task: "BenchmarkTask", base_url: str) -> Optional[dict]:
-    """Seed this run's Larkspur Members site when the task declares one.
+    """Seed this run's Rose Shop site when the task declares one.
 
     The site is served by the local backend and reached through the public
     frontend proxy, so it only exists on a local benchmark stack. The returned
@@ -7442,7 +7442,7 @@ async def _apply_auth_test_site(task: "BenchmarkTask", base_url: str) -> Optiona
     )
     auth_test_site.set_active_manifest(manifest)
     print(
-        f"    🔑 Larkspur Members site {manifest['siteId']} ({scenario}): "
+        f"    🔑 Rose Shop site {manifest['siteId']} ({scenario}): "
         f"{len(manifest.get('savedPasswordUsernames') or [])} saved password(s), "
         f"minted={manifest.get('mintedEmail') or 'none'}"
     )
@@ -7456,7 +7456,7 @@ async def _release_auth_test_site(base_url: str, manifest: Optional[dict]) -> No
     try:
         await auth_test_site.delete_site(base_url, await _api_headers(), str(manifest["siteId"]))
     except Exception as exc:
-        print(f"    ⚠ Failed to delete Larkspur Members site {manifest.get('siteId')}: {exc}")
+        print(f"    ⚠ Failed to delete Rose Shop site {manifest.get('siteId')}: {exc}")
 
 
 async def _hydrate_auth_test_site_evidence(data: dict, base_url: Optional[str]) -> None:

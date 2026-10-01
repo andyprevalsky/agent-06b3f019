@@ -1,4 +1,4 @@
-"""Black-box coverage for the hosted Larkspur Members auth benchmarks.
+"""Black-box coverage for the hosted Rose Shop auth benchmarks.
 
 The three daily tasks share one natural prompt; only the seeded fixture decides
 whether the correct end state is a password retry, an auth-assistance request,
@@ -24,7 +24,7 @@ TASK_SCENARIOS = {
 }
 SAVED = ["jordan.ellis.abc@example.com", "jordan.e.abc@example.com", "j.ellis.abc@example.com"]
 MINTED = "rose-agent-7@mail.example.test"
-MEMBER_NUMBER = "LM-12345678"
+MEMBER_NUMBER = "RS-12345678"
 
 
 def _manifest(scenario: str, **overrides) -> dict:
@@ -32,8 +32,8 @@ def _manifest(scenario: str, **overrides) -> dict:
     manifest = {
         "siteId": "abc123",
         "scenario": scenario,
-        "realm": "larkspur-abc123.test",
-        "entryUrl": "https://rose-x.ngrok.app/api/test-sites/larkspur/abc123/?authRealm=larkspur-abc123.test",
+        "realm": "rose-shop-abc123.test",
+        "entryUrl": "https://rose-x.ngrok.app/api/test-sites/rose-shop/abc123/?authRealm=rose-shop-abc123.test",
         "savedPasswordUsernames": list(SAVED) if password_scenario else [],
         "mintedEmail": None if password_scenario else MINTED,
         "expectedSignInEmail": MINTED if scenario == "minted_otp" else None,
@@ -160,7 +160,7 @@ def test_catalog_rejects_inconsistent_hosted_auth_contracts() -> None:
 
     rejects(lambda raw: raw["environment"].update(auth_test_site={"scenario": "sso"}), "scenario must be one of")
     rejects(lambda raw: raw["environment"].update(mode="live"), "synthetic")
-    rejects(lambda raw: raw.update(prompt="Sign in to Larkspur Members."), "{auth_test_site_url}")
+    rejects(lambda raw: raw.update(prompt="Sign in to Rose Shop."), "{auth_test_site_url}")
     rejects(lambda raw: raw.update(enforce_declared_evaluators=False), "enforced auth_test_site_outcome")
     rejects(
         lambda raw: raw.update(evaluators=[e for e in raw["evaluators"] if e["id"] != "saved-password-retry-outcome"]),
@@ -245,7 +245,7 @@ def test_outcome_check_grades_the_sites_own_records() -> None:
     assert ok, detail
     assert "password(j.ellis.abc@example.com)→signed_in" in detail
 
-    ok, detail = evaluate_outcome(retry, evidence, "You're signed in to Larkspur Members.")
+    ok, detail = evaluate_outcome(retry, evidence, "You're signed in to Rose Shop.")
     assert not ok and MEMBER_NUMBER in detail
 
     lucky = {
@@ -354,7 +354,7 @@ async def test_goal_placeholder_resolves_per_lane_and_fails_closed() -> None:
 
 
 class _FakeBackend:
-    """Stands in for the local backend's /api/test-sites/larkspur/fixtures routes."""
+    """Stands in for the local backend's /api/test-sites/rose-shop/fixtures routes."""
 
     def __init__(self, scenario: str, report: dict) -> None:
         self.requests: list[tuple[str, str, dict | None, dict]] = []
@@ -370,7 +370,9 @@ class _FakeBackend:
                 self.wfile.write(body)
 
             def _record(self, body: dict | None) -> None:
-                backend.requests.append((self.command, self.path, body, dict(self.headers)))
+                # HTTP header names are case-insensitive and clients differ in the casing they send.
+                headers = {name.lower(): value for name, value in self.headers.items()}
+                backend.requests.append((self.command, self.path, body, headers))
 
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -422,9 +424,9 @@ async def test_runner_seeds_grades_and_deletes_the_site() -> None:
             manifest = await rb._apply_auth_test_site(task, backend.base_url)
             assert manifest is not None and auth_test_site.active_manifest() == manifest
             method, path, body, sent_headers = backend.requests[0]
-            assert (method, path) == ("POST", "/api/test-sites/larkspur/fixtures")
+            assert (method, path) == ("POST", "/api/test-sites/rose-shop/fixtures")
             assert body == {"userId": "user-1", "scenario": "password_retry", "publicBaseUrl": "https://rose-x.ngrok.app"}
-            assert sent_headers.get("X-API-Key") == "fixture-key"
+            assert sent_headers.get("x-api-key") == "fixture-key"
             assert manifest["entryUrl"] in rb._benchmark_goal_for_task(task, backend.base_url)
 
             data = {
@@ -436,13 +438,13 @@ async def test_runner_seeds_grades_and_deletes_the_site() -> None:
                         "metadata": {
                             "toolName": "completion_summary",
                             "toolStatus": "FINISHED",
-                            "completionSummary": {"summary": f"Your Larkspur member number is {MEMBER_NUMBER}."},
+                            "completionSummary": {"summary": f"Your Rose Shop member number is {MEMBER_NUMBER}."},
                         },
                     }
                 ],
             }
             await rb._hydrate_auth_test_site_evidence(data, backend.base_url)
-            assert backend.requests[1][:2] == ("GET", "/api/test-sites/larkspur/fixtures/abc123/report")
+            assert backend.requests[1][:2] == ("GET", "/api/test-sites/rose-shop/fixtures/abc123/report")
             outcome_evaluator = next(e for e in task.evaluators if e["id"] == "saved-password-retry-outcome")
             ok, detail = rb._run_declared_static_check(task, outcome_evaluator, data)
             assert ok, detail
@@ -452,14 +454,14 @@ async def test_runner_seeds_grades_and_deletes_the_site() -> None:
             assert not ok and MEMBER_NUMBER in detail
 
             data["messages"][0]["metadata"]["completionSummary"] = {
-                "summary": "I signed in to your Larkspur Members account and verified your member number.",
+                "summary": "I signed in to your Rose Shop account and verified your member number.",
                 "outputs": [{"key": "member_number", "label": "Member Number", "value": MEMBER_NUMBER}],
             }
             ok, detail = rb._run_declared_static_check(task, outcome_evaluator, data)
             assert ok, f"the completion card's structured outputs are part of the final answer: {detail}"
 
             await rb._release_auth_test_site(backend.base_url, manifest)
-            assert backend.requests[2][:2] == ("DELETE", "/api/test-sites/larkspur/fixtures/abc123")
+            assert backend.requests[2][:2] == ("DELETE", "/api/test-sites/rose-shop/fixtures/abc123")
             assert auth_test_site.active_manifest() is None
 
         unrelated = get_task_by_name("whatsapp-history-recall")

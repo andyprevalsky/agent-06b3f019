@@ -1,5 +1,5 @@
 /**
- * Larkspur Members — a self-hosted sign-in site for browser-auth benchmarks.
+ * Rose Shop — a self-hosted sign-in site for browser-auth benchmarks.
  *
  * Live sites put CAPTCHAs and bot walls in front of sign-in, so they cannot
  * prove the auth ladder deterministically. This fixture is an ordinary
@@ -8,7 +8,7 @@
  *
  *   run_benchmark.py ──POST /fixtures {userId, scenario, publicBaseUrl}──► service
  *        │                 seeds BrowserPassword / MintedAccount rows for
- *        │                 realm larkspur-<siteId>.test, returns entryUrl
+ *        │                 realm rose-shop-<siteId>.test, returns entryUrl
  *        ▼
  *   browser agent ──GET <entryUrl>──► /login ──POST password──► /account
  *        │                       └──► /login/code ──POST email──► Primitive

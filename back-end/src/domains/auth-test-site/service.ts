@@ -98,7 +98,7 @@ export async function createAuthTestSite(
   const holderName = trimmedName === '' ? null : trimmedName;
   const nowMs = Date.now();
   const siteId = randomBytes(6).toString('hex');
-  const realm = `larkspur-${siteId}.test`;
+  const realm = `rose-shop-${siteId}.test`;
   const entryUrl = `${normalizePublicBaseUrl(input.publicBaseUrl)}${AUTH_TEST_SITE_BASE_PATH}/${siteId}/?authRealm=${realm}`;
   if (canonicalAuthRealm(entryUrl) !== realm) {
     throw new AuthTestSiteError(
