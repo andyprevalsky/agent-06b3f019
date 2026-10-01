@@ -55,6 +55,7 @@ import httpx
 
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from benchmarks import auth_test_site
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
@@ -2279,6 +2280,7 @@ def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
         or task.prompt
     )
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
+    goal = auth_test_site.resolve_goal(goal, auth_test_site.active_manifest())
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
     goal = _inject_benchmark_prompt_secrets(goal)
     if task.success_on_payment_card_request and PAYMENT_BOUNDARY_GOAL_MARKER not in goal:
@@ -7412,6 +7414,62 @@ async def _apply_memory_fixtures(task: "BenchmarkTask", base_url: str) -> list[d
     return applied
 
 
+async def _apply_auth_test_site(task: "BenchmarkTask", base_url: str) -> Optional[dict]:
+    """Seed this run's Larkspur Members site when the task declares one.
+
+    The site is served by the local backend and reached through the public
+    frontend proxy, so it only exists on a local benchmark stack. The returned
+    manifest is also activated for this lane so the goal resolves
+    {auth_test_site_url} and the evaluator can fetch the site's report.
+    """
+    scenario = auth_test_site.declared_scenario(task.environment)
+    if scenario is None:
+        return None
+    if not _is_local_base_url(base_url):
+        raise RuntimeError(f"{task.name}: the hosted auth test site only exists on a local benchmark stack")
+    manifest = await auth_test_site.create_site(
+        base_url,
+        await _api_headers(),
+        user_id=_current_benchmark_user_id(),
+        scenario=scenario,
+        public_base_url=_frontend_url_for_benchmark(base_url),
+    )
+    auth_test_site.set_active_manifest(manifest)
+    print(
+        f"    🔑 Larkspur Members site {manifest['siteId']} ({scenario}): "
+        f"{len(manifest.get('savedPasswordUsernames') or [])} saved password(s), "
+        f"minted={manifest.get('mintedEmail') or 'none'}"
+    )
+    return manifest
+
+
+async def _release_auth_test_site(base_url: str, manifest: Optional[dict]) -> None:
+    auth_test_site.set_active_manifest(None)
+    if not manifest:
+        return
+    try:
+        await auth_test_site.delete_site(base_url, await _api_headers(), str(manifest["siteId"]))
+    except Exception as exc:
+        print(f"    ⚠ Failed to delete Larkspur Members site {manifest.get('siteId')}: {exc}")
+
+
+async def _hydrate_auth_test_site_evidence(data: dict, base_url: Optional[str]) -> None:
+    manifest = auth_test_site.active_manifest()
+    evidence: dict = {"manifest": manifest, "report": None, "report_error": None}
+    if not manifest:
+        evidence["report_error"] = "no auth test site was created for this run"
+    elif not base_url:
+        evidence["report_error"] = "no backend base_url to fetch the site report from"
+    else:
+        try:
+            evidence["report"] = await auth_test_site.fetch_report(
+                base_url, await _api_headers(), str(manifest["siteId"])
+            )
+        except Exception as exc:
+            evidence["report_error"] = str(exc)
+    data.setdefault("_benchmark", {})["auth_test_site"] = evidence
+
+
 async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
     """Apply every live fixture the task's environment resolves to, in order.
 
@@ -11731,6 +11789,13 @@ def _run_declared_static_check(
             if not compact_tree:
                 return False, "T9: typed tree was empty"
             continue
+        if check_type == auth_test_site.AUTH_TEST_SITE_OUTCOME_CHECK:
+            ok, detail = auth_test_site.evaluate_outcome(
+                check, benchmark_state.get("auth_test_site"), _root_deliverable_blob(data)
+            )
+            if not ok:
+                return False, detail
+            continue
         if check_type == "root_deliverable_markers":
             blob = _root_deliverable_blob(data)
             minimum = int(check.get("min_chars", 4000))
@@ -11979,6 +12044,9 @@ async def _run_declared_evaluators(
         for check in evaluator.get("checks", [])
     ):
         await _hydrate_completion_sms_events(data)
+
+    if _task_declares_static_check(task, auth_test_site.AUTH_TEST_SITE_OUTCOME_CHECK):
+        await _hydrate_auth_test_site_evidence(data, base_url)
 
     from benchmarks.semantic_evaluator_evidence import messages_have_code_agent_grounding
 
@@ -12271,6 +12339,7 @@ async def run_single_task(
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None
     realtime_tree_task: Optional[asyncio.Task] = None
     live_fixture_manifests: list[dict] = []
+    auth_test_site_manifest: Optional[dict] = None
 
     temp_csv_paths: list = []  # track temp files for cleanup
 
@@ -12338,6 +12407,7 @@ async def run_single_task(
         memory_fixture_manifests = await _apply_memory_fixtures(task, base_url)
         if memory_fixture_manifests:
             live_fixture_manifests.append({"kind": "memory", "fixtures": memory_fixture_manifests})
+        auth_test_site_manifest = await _apply_auth_test_site(task, base_url)
         if task.browser_profile_mode == "fresh" and not _is_simulate_mode():
             if not _is_local_base_url(base_url):
                 raise RuntimeError(f"{task.name}: fresh browser state requires an isolated local benchmark stack")
@@ -12796,6 +12866,9 @@ async def run_single_task(
         )
         if session_evidence_error:
             logs["claude_code_session_evidence_error"] = session_evidence_error
+        auth_test_site_evidence = (data.get("_benchmark") or {}).get("auth_test_site")
+        if auth_test_site_evidence:
+            logs["auth_test_site"] = auth_test_site_evidence
         # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
         # the archive can render the fan-out, not just the root. Without this a
         # for_each/spawn benchmark opens to a lone root with no visible tree. Only
@@ -13063,6 +13136,7 @@ async def run_single_task(
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
         await _restore_live_fixture_scenarios_async(live_fixture_manifests)
+        await _release_auth_test_site(base_url, auth_test_site_manifest)
         if previous_active_task_name is None:
             os.environ.pop("BENCHMARK_ACTIVE_TASK_NAME", None)
         else:
