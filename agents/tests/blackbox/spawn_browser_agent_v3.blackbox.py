@@ -3515,6 +3515,37 @@ def test_mouse_input_synthesis_rejects_unrealistic_sample_jumps():
         assert max(steps) <= 62
         assert max(velocities) <= MIMIC_MAX_VELOCITY_PX_PER_S + 60
 
+
+def test_mouse_path_duration_tracks_request_within_velocity_cap():
+    """A stroke takes about as long as its peak-velocity bound allows, not a
+    slow linear crawl (350px used to take ~1.85s at p50)."""
+    import math
+    import random
+    import statistics
+
+    from browser_tools.input_synthesis import MIMIC_MAX_VELOCITY_PX_PER_S, synthesize_mouse_path
+
+    for distance, p50_ceiling_s in ((60, 0.2), (350, 1.0), (800, 2.3)):
+        requested = max(0.08, min(0.95, 0.05 + distance / 1100))
+        totals = []
+        for seed in range(120):
+            path = synthesize_mouse_path(
+                (100, 300),
+                (100 + distance, 300),
+                screen=(1280, 800),
+                frequency_hz=105,
+                duration_s=requested,
+                rng=random.Random(seed),
+            )
+            totals.append(sum(sample.delay_s for sample in path))
+            velocities = [
+                math.hypot(b.x - a.x, b.y - a.y) / b.delay_s for a, b in zip(path, path[1:])
+            ]
+            assert max(velocities) <= MIMIC_MAX_VELOCITY_PX_PER_S + 1e-6
+            halfway = next(i for i, s in enumerate(path) if s.x - 100 >= distance / 2)
+            assert sum(s.delay_s for s in path[: halfway + 1]) < 0.75 * totals[-1] or distance < 100
+        assert statistics.median(totals) <= p50_ceiling_s, (distance, statistics.median(totals))
+
 def test_idle_mouse_drift_stays_near_anchor_and_inside_viewport():
     import random
 
@@ -23099,6 +23130,7 @@ async def run_all_tests():
         "mouse_input_synthesis_velocity_guard",
         test_mouse_input_synthesis_rejects_unrealistic_sample_jumps,
     )
+    r.record("mouse_path_duration_tracks_request", test_mouse_path_duration_tracks_request_within_velocity_cap)
     r.record("idle_mouse_drift", test_idle_mouse_drift_stays_near_anchor_and_inside_viewport)
     r.record(
         "mouse_click_synthesis_duration",

@@ -33,6 +33,10 @@ CLICK_DURATION_UPPER_FENCE_MS = 135.0
 MIMIC_MIN_VELOCITY_PX_PER_S = 300.0
 MIMIC_MAX_VELOCITY_PX_PER_S = 1500.0
 IDLE_MOUSE_RADIUS_PX = 7.0
+HUMAN_STROKE_SIGMA_MIN = 0.18
+HUMAN_STROKE_SIGMA_MAX = 0.55
+# The stroke window ends once Eq. 1 has delivered ~99% of the travel.
+STROKE_COMPLETION_Z = 2.326
 
 
 @dataclass(frozen=True)
@@ -170,14 +174,12 @@ def _sigma_lognormal_segment(
 
     best: List[Tuple[float, float, float]] = []
     for _ in range(180):
-        sigma = rng.uniform(0.1, 3.0)
+        # Human Sigma-Lognormal strokes keep sigma well under 1. Wider shapes
+        # put most of the travel into a near-constant-velocity log-time tail,
+        # which the endpoint linkage turns into a slow linear crawl.
+        sigma = rng.uniform(HUMAN_STROKE_SIGMA_MIN, HUMAN_STROKE_SIGMA_MAX)
         t0 = -_normal_sample_above(rng, 0.05, 0.02, 0.001)
-        # Keep final angle convergence high enough to link the virtual target.
-        mu_upper = math.log(duration_s - t0) - 1.8 * sigma * math.sqrt(2)
-        mu = rng.uniform(-3.0, min(3.0, mu_upper))
-        k_final = 0.5 * (1 + math.erf((math.log(duration_s - t0) - mu) / (sigma * math.sqrt(2))))
-        if k_final <= 0.05:
-            continue
+        k_final = 0.5 * (1 + math.erf(STROKE_COMPLETION_Z / math.sqrt(2)))
 
         beta = rng.choice([-1, 1]) * rng.uniform(0.12, min(0.82, max(0.16, k_final * 1.25)))
         theta_delta = beta / k_final
@@ -196,15 +198,18 @@ def _sigma_lognormal_segment(
         if d_param <= 0:
             continue
 
-        peak_t = t0 + math.exp(-(sigma**2) + mu)
-        peak_velocity = d_param * _lognormal_lambda(peak_t, t0, mu, sigma)
-        if peak_velocity > MIMIC_MAX_VELOCITY_PX_PER_S:
-            scale = peak_velocity / rng.uniform(MIMIC_MIN_VELOCITY_PX_PER_S, MIMIC_MAX_VELOCITY_PX_PER_S)
-            duration_candidate = min(1.6, max(duration_s, duration_s * math.sqrt(scale)))
-        elif peak_velocity < MIMIC_MIN_VELOCITY_PX_PER_S:
-            duration_candidate = max(0.18, duration_s * rng.uniform(0.7, 0.9))
-        else:
-            duration_candidate = duration_s
+        # Pick mu from the stroke's peak velocity (Eq. 1 at its mode): the
+        # requested duration sets the peak, bounded to the human velocity band,
+        # so the stroke completes within its window instead of being stretched.
+        peak_scale = d_param / (sigma * math.sqrt(2 * math.pi))
+        requested_mu = math.log(max(1e-3, duration_s - t0)) - STROKE_COMPLETION_Z * sigma
+        requested_peak = peak_scale * math.exp(sigma**2 / 2 - requested_mu)
+        peak_velocity = min(
+            max(requested_peak, MIMIC_MIN_VELOCITY_PX_PER_S),
+            MIMIC_MAX_VELOCITY_PX_PER_S * rng.uniform(0.82, 0.96),
+        )
+        mu = sigma**2 / 2 + math.log(peak_scale / peak_velocity)
+        duration_candidate = max(0.05, math.exp(mu + STROKE_COMPLETION_Z * sigma) + t0)
 
         sample_count = max(5, int(duration_candidate * max(12, frequency_mean_hz)))
         times = np.linspace(0, duration_candidate, sample_count)
@@ -274,6 +279,11 @@ def _sigma_lognormal_segment(
             delay = max(0.001, rng.gauss(1 / frequency_mean_hz, 0.001))
         else:
             delay = max(0.001, t - best[index - 1][0])
+        if samples:
+            # Motor noise and pixel rounding can push a single sample past the
+            # human peak velocity; hold that sample slightly longer instead.
+            step = math.hypot(bounded_x - samples[-1].x, bounded_y - samples[-1].y)
+            delay = max(delay, step / MIMIC_MAX_VELOCITY_PX_PER_S)
         samples.append(MouseSample(bounded_x, bounded_y, delay))
 
     if not samples or (samples[-1].x, samples[-1].y) != (int(end[0]), int(end[1])):
