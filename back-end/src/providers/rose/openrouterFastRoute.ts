@@ -23,7 +23,16 @@ import type { CompletionOptions, RoseStreamChunk } from './types';
 
 export const OPENROUTER_FAST_CHAT_MODEL = 'z-ai/glm-5.3-flash';
 export const OPENROUTER_FAST_CHAT_POOL = 'openrouter-fast-chat';
-export const DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS = 2_000;
+/**
+ * Pre-token, connect, and SSE-idle bound for this branch. It runs only after
+ * direct Cerebras stalled, when it is usually the one path that can serve, so
+ * it must not give up before the chat router's own no-progress bound
+ * (DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS) would. On the 24k-token e8f2279b
+ * router context, GLM's first content came 0.5–1.7s after its request in
+ * 19/23 runs, 2.0–3.1s in 3 and 7.7s in 1; the previous 2s bound (sized for
+ * a Flash-Lite model) aborted those 3 responses that would have served.
+ */
+export const DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS = 5_000;
 
 function chatIdleTimeoutMs(): number {
   const configured = Number(process.env.OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS);

@@ -2,13 +2,15 @@
  * Router stream bounds.
  *
  * The router needs a complete decision, and its only serving path while the
- * Cerebras primary stalls is the Rose OpenRouter failover. On the 39-message
- * prod context from agent e8f2279b (2026-10-01, n=24) that failover emitted
- * first content at p50 1.7s / max 8.6s, never paused more than ~0.4s between
- * chunks, and closed the decision in 4.1–19.1s (p50 5.8s). A whole-completion
- * bound sized for the healthy primary (3s) killed every failover attempt.
+ * Cerebras primary stalls is the Rose OpenRouter failover. On the 30-message,
+ * 24k-token prod router request from agent e8f2279b (2026-10-01, n=24, timed
+ * from the turn start) that failover emitted first content at p50 1.8s / p90
+ * 3.8s / max 8.6s, never paused more than ~0.4s between chunks, and closed the
+ * decision in 4.1–19.1s (p50 6.0s, p90 10.7s). A whole-completion bound sized
+ * for the healthy primary (3s) killed every failover attempt.
  *
- * - stall: no content/reasoning progress for this long (hung provider)
+ * - stall: no content/reasoning progress for this long (hung provider).
+ *   Reasoning counts: the router streams it to the user as the thinking row.
  * - completion: hard cap on one attempt even while it keeps dribbling
  */
 

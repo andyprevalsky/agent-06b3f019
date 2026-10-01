@@ -11,6 +11,7 @@ import {
   streamBeforeRouterCompletionDeadline,
 } from '../../providers/chat/routerCompletionDeadline';
 import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
+import { DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS } from '../../providers/rose/openrouterFastRoute';
 import {
   parsePartialRouterDecisionJson,
   parseRouterDecisionAfterDeadline,
@@ -41,6 +42,10 @@ async function run(): Promise<void> {
 
   assert.equal(DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS, 5_000);
   assert.equal(DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS, 15_000);
+  assert.ok(
+    DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS >= DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS,
+    'the failover branch that serves a Cerebras stall must not give up before the router does'
+  );
   const savedStall = process.env.CHAT_ROUTER_STALL_TIMEOUT_MS;
   const savedCompletion = process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS;
   delete process.env.CHAT_ROUTER_STALL_TIMEOUT_MS;

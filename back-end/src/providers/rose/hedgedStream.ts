@@ -23,6 +23,12 @@ export interface HedgeParams<T> {
   /** First chunk for which this is true latches its branch as the winner. */
   isContent: (item: T) => boolean;
   onWinner?: (name: string) => void;
+  /**
+   * A branch failed before any branch latched (and not because the race
+   * aborted it). Pre-latch failures are otherwise swallowed, so this is the
+   * only record of which guard ended a branch.
+   */
+  onBranchFailure?: (name: string, error: unknown) => void;
 }
 
 interface BranchState<T> {
@@ -68,6 +74,9 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
       // Post-latch winner failures surface via state.failure in the consumer
       // loop; rethrowing here would be an unobserved promise rejection.
       state.failure = error ?? new Error(`${state.name} failed`);
+      if (winner === null && !state.controller.signal.aborted) {
+        params.onBranchFailure?.(state.name, state.failure);
+      }
     } finally {
       state.done = true;
       notify();
