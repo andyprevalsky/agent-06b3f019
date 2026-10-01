@@ -256,6 +256,46 @@ case "$native_out" in
   *) echo "FAIL: native Conductor env path not taken: $native_out" >&2; exit 1 ;;
 esac
 
+spaced_root="$TMP_ROOT/cloud env \$(touch pwned) root"
+spaced_home="$TMP_ROOT/spaced-home"
+mkdir -p "$spaced_root" "$spaced_home"
+: >"$spaced_home/.bashrc"
+HOME="$spaced_home" ROSE_CLOUD_BOOT_ID_FILE="$TMP_ROOT/boot-clone" \
+  env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
+  bash -c '. "$1"; ensure_cloud_env "$2" >/dev/null' _ "$CLOUD_ENV_SRC" "$spaced_root"
+spaced_env="$(
+  cd "$TMP_ROOT"
+  env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME -u CONDUCTOR_ROOT_PATH \
+    bash -c '. "$1"; printf "%s\n" "$CONDUCTOR_ROOT_PATH" "$CONDUCTOR_WORKSPACE_NAME" "$CONDUCTOR_PORT"' _ "$spaced_home/.bashrc"
+)"
+expect_eq "$(printf '%s\n' "$spaced_env" | sed -n '1p')" "$spaced_root" "a checkout path with spaces and shell syntax round-trips through the rc source line"
+expect_eq "$(printf '%s\n' "$spaced_env" | sed -n '2p')" "cloud-9f3e7a21" "the rc source line exports the generated workspace name"
+expect_eq "$(printf '%s\n' "$spaced_env" | sed -n '3p')" "3001" "the rc source line exports the default port"
+expect_eq "$([ -e "$TMP_ROOT/pwned" ] && echo executed || echo inert)" "inert" "shell syntax in the checkout path is never executed"
+
+moved_root="$TMP_ROOT/cloud-env-moved"
+mkdir -p "$moved_root"
+HOME="$cloud_env_home" ROSE_CLOUD_BOOT_ID_FILE="$TMP_ROOT/boot-clone" \
+  env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
+  bash -c ". '$CLOUD_ENV_SRC'; ensure_cloud_env '$moved_root' >/dev/null"
+expect_eq "$(grep -cxF "[ -f $moved_root/.cloud-env ] && . $moved_root/.cloud-env" "$cloud_env_home/.bashrc")" "1" "a checkout at a new path gets its own rc source line"
+
+bad_port_root="$TMP_ROOT/cloud-env-bad-port"
+mkdir -p "$bad_port_root"
+set +e
+bad_port_out="$(
+  HOME="$cloud_env_home" ROSE_CLOUD_BOOT_ID_FILE="$TMP_ROOT/boot-clone" CONDUCTOR_PORT='30$(id)' \
+    env -u CONDUCTOR_WORKSPACE_NAME \
+    bash -c ". '$CLOUD_ENV_SRC'; ensure_cloud_env '$bad_port_root'" 2>&1
+)"
+bad_port_status=$?
+set -e
+if [ "$bad_port_status" -eq 0 ] || [ -e "$bad_port_root/.cloud-env" ] || [[ "$bad_port_out" != *"CONDUCTOR_PORT must be a decimal integer"* ]]; then
+  echo "FAIL: a nonnumeric CONDUCTOR_PORT must be rejected without writing .cloud-env: status=$bad_port_status output='$bad_port_out'" >&2
+  exit 1
+fi
+echo "PASS: a nonnumeric CONDUCTOR_PORT is rejected without writing .cloud-env"
+
 # Every agents/venv provisioner reinstalls when requirements.txt is no longer
 # satisfied. Gating on `import temporalio` alone kept browser-use 0.11 in a
 # provisioned Cloud venv after the pin moved to >=0.13.10, and the agents
