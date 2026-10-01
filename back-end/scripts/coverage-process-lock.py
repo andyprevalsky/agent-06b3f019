@@ -68,10 +68,19 @@ def process_group_exists(pgid: int) -> bool:
 
 
 def process_group_identity_matches(group: RegisteredProcessGroup) -> bool:
-    return (
-        process_group_exists(group.pgid)
-        and process_start_identity(group.identity_pid) == group.start_identity
-    )
+    if not process_group_exists(group.pgid):
+        return False
+    # macOS reads the identity through `ps`, which can time out under the
+    # parallel coverage load. A single missed read must not abandon a live
+    # registered group and leave its descendants running after the test exits.
+    # A concrete mismatched identity still fails immediately to avoid PID reuse.
+    for attempt in range(3):
+        identity = process_start_identity(group.identity_pid)
+        if identity is not None:
+            return identity == group.start_identity
+        if attempt < 2:
+            time.sleep(0.05)
+    return False
 
 
 # A process that ignores SIGKILL is stuck in the kernel (uninterruptible I/O) or is

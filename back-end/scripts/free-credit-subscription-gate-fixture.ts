@@ -29,10 +29,12 @@ async function apply(): Promise<Manifest> {
       userId: USER_ID,
       isAnonymous: false,
       name: 'Free Credit Gate Benchmark',
+      usedInviteCode: null,
     },
     update: {
       isAnonymous: false,
       name: 'Free Credit Gate Benchmark',
+      usedInviteCode: null,
     },
   });
 

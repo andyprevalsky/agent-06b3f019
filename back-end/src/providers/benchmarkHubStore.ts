@@ -78,7 +78,21 @@ export { canonicalAgentTree, getRunAgent, subtreeAgentsForBus } from './benchmar
 const log = createLogger('BenchmarkHubStore');
 
 const KEY_PREFIX = 'benchmark-hub';
-const LOCAL_DIR = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
+const LOCAL_HUB_ROOT = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
+const isolatedRunId =
+  process.env.BENCHMARK_ISOLATED_RUN === 'true' ? process.env.BENCHMARK_RUN_ID : undefined;
+if (
+  process.env.BENCHMARK_ISOLATED_RUN === 'true' &&
+  !/^[A-Za-z0-9._-]+$/.test(isolatedRunId ?? '')
+) {
+  throw new Error('BENCHMARK_RUN_ID must be a safe, nonempty ID for an isolated Benchmark Hub');
+}
+// Each isolated stack has its own database. Keep its local Hub index in the
+// same isolation boundary so parallel stacks cannot overwrite one another's
+// run registrations before the terminal bundles are mirrored to the durable Hub.
+const LOCAL_DIR = isolatedRunId
+  ? path.join(LOCAL_HUB_ROOT, 'isolated-runs', isolatedRunId)
+  : LOCAL_HUB_ROOT;
 const AGENT_RUN_INDEX_KEY = 'agent-run-index.json';
 const AGENT_RUN_INDEX_REVISION_KEY = 'agent-run-index-revision.json';
 

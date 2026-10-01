@@ -60,6 +60,9 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "tree_agent_status",
     "expected_gate",
     "expected_payment_receipt",
+    "attention_kind_sequence",
+    "subscription_checkout_completed",
+    "expected_payment_lifecycle",
     "no_browser_agent_failures",
     "no_tool_failures",
     "claude_code_session_output",
@@ -309,6 +312,13 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     expected_attention_kinds = raw.get("expected_attention_kinds")
     if expected_attention_kinds is not None:
         _require_string_list(raw, "expected_attention_kinds", item_id)
+    if raw.get("require_attention_order") and not expected_attention_kinds:
+        raise ValueError(f"{item_id}: require_attention_order needs expected_attention_kinds")
+    if raw.get("complete_subscription_checkout") and (
+        raw.get("simulate_gate_webhook") or not isinstance(raw.get("expected_gate"), dict)
+        or raw["expected_gate"].get("type") != "subscription"
+    ):
+        raise ValueError(f"{item_id}: complete_subscription_checkout needs a subscription gate without a simulated webhook")
     expected_attention_kind_any_of = raw.get("expected_attention_kind_any_of")
     if expected_attention_kind_any_of is not None:
         _require_string_list(raw, "expected_attention_kind_any_of", item_id)

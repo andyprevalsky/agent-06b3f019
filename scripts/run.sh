@@ -745,6 +745,26 @@ if $DOCKER_OK && ! docker_can_create_container; then
     DOCKER_OK=false
 fi
 
+# A local benchmark must keep its own Postgres server. Under parallel deploy
+# load Docker Desktop can miss the short probe budget even while healthy; two
+# such fallbacks exhaust the shared system Postgres connection limit and make
+# independent benchmark agents fail. Cloud/Linux may explicitly choose system
+# Postgres, but on macOS retry Docker and fail clearly if it stays unavailable.
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ "$(uname -s)" = "Darwin" ] && \
+   [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && ! $DOCKER_OK; then
+    for attempt in 1 2 3 4 5 6; do
+        if docker_available_for_workspace_db "$DB_CONTAINER" true && docker_can_create_container; then
+            DOCKER_OK=true
+            break
+        fi
+        [ "$attempt" -eq 6 ] || sleep 1
+    done
+    if ! $DOCKER_OK; then
+        echo "❌ Isolated macOS benchmark requires Docker Postgres; Docker did not recover" >&2
+        exit 1
+    fi
+fi
+
 DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
 DB_OWNED_CONTAINER_ID=""
 USE_SYSTEM_PG=false

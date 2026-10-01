@@ -3,6 +3,7 @@
 import assert from 'node:assert';
 import {
   AgentCardOrgMcpProvider,
+  AgentCardProviderError,
   AgentCardRoutingProvider,
   type CardProvider,
 } from '../../providers/card-provider';
@@ -81,6 +82,70 @@ async function main(): Promise<void> {
   assert.strictEqual(minted.cvv, '123');
   assert.strictEqual(minted.balanceCents, 4396);
   assert.strictEqual(details.balanceCents, 4396);
+
+  // Current org MCP contract puts PAN/CVC in message and card state in get_card.
+  const documentedCalls: string[] = [];
+  const documentedProvider = new AgentCardOrgMcpProvider('cardholder-123', async (name) => {
+    documentedCalls.push(name);
+    if (name === 'get_card_details') {
+      return toolResult({
+        message: 'PAN: 4242424242424242\nCVC: 123\nExpiry: 12/30\nStatus: ok',
+        balanceCents: 4396,
+        expiry: '12/30',
+        status: 'details',
+      });
+    }
+    if (name === 'get_card') return toolResult({ card: { status: 'OPEN' } });
+    throw new Error(`unexpected documented tool ${name}`);
+  });
+  assert.deepStrictEqual(await documentedProvider.getDetails('card-documented'), {
+    pan: '4242424242424242',
+    cvv: '123',
+    expiry: '12/30',
+    balanceCents: 4396,
+    status: 'OPEN',
+  });
+  assert.deepStrictEqual(documentedCalls, ['get_card_details', 'get_card']);
+
+  const splitContentProvider = new AgentCardOrgMcpProvider('cardholder-123', async (name) => {
+    if (name === 'get_card_details') {
+      return {
+        structuredContent: {
+          message: 'Credentials returned in text content only',
+          cardId: 'card-split',
+          last4: '4242',
+          expiry: '12/30',
+          balanceCents: 4396,
+        },
+        content: [
+          { type: 'text', text: 'PAN: 4242424242424242\nCVV: 123\nExpiry: 12/30\nStatus: OPEN' },
+        ],
+      };
+    }
+    if (name === 'get_card') return toolResult({ card: { status: 'OPEN' } });
+    throw new Error(`unexpected split-content tool ${name}`);
+  });
+  assert.deepStrictEqual(await splitContentProvider.getDetails('card-split'), {
+    pan: '4242424242424242',
+    cvv: '123',
+    expiry: '12/30',
+    balanceCents: 4396,
+    status: 'OPEN',
+  });
+
+  const fundingProvider = new AgentCardOrgMcpProvider('cardholder-123', async () =>
+    toolResult({ status: 'org_funding_required', message: 'Company balance needs funding' })
+  );
+  await assert.rejects(
+    fundingProvider.mintCard({
+      amountCents: 100,
+      fundsSource: 'company_flow',
+      idempotencyKey: 'purchase:documented-funding-gate',
+    }),
+    (error: unknown) =>
+      error instanceof AgentCardProviderError &&
+      error.code === 'agentcard_org_wallet_funding_required'
+  );
 
   const instantCalls: ToolCall[] = [];
   let transferLookups = 0;

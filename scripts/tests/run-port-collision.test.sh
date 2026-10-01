@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Every worktree runs this gate against the same 61000-61999 host port range.
+# Hold one host-wide lock for the entire fixture, including listener cleanup,
+# so parallel deploys cannot claim or terminate each other's test listeners.
+if [ "${RUN_PORT_COLLISION_LOCKED:-}" != 1 ]; then
+    exec python3 - "$0" "$@" <<'PY'
+import fcntl
+import os
+import subprocess
+import sys
+import tempfile
+
+lock_path = os.path.join(tempfile.gettempdir(), "rose-run-port-collision-test.lock")
+with open(lock_path, "a+", encoding="utf-8") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    env = dict(os.environ, RUN_PORT_COLLISION_LOCKED="1")
+    raise SystemExit(subprocess.call(["bash", sys.argv[1], *sys.argv[2:]], env=env))
+PY
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
 PIDS=()
@@ -176,21 +195,6 @@ unset COLD_SEED_DOCKER_RETRY_DELAY_SECONDS
 unset -f sleep
 echo "PASS: cold isolated seed validates and caps retry delays"
 
-# Concurrent /deploy structural gates + aborted prior runs leave orphan
-# `python3 -m http.server` listeners in 61000-61999 (observed: 11 orphans
-# blocking find_free_port's lsof check-then-use window → "listener did not
-# start"). Reap only this gate's range before allocating.
-reap_orphan_http_servers() {
-    local pid cmd
-    for pid in $(lsof -tiTCP:61000-61999 -sTCP:LISTEN 2>/dev/null || true); do
-        cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-        case "$cmd" in
-            *'http.server'*) kill "$pid" 2>/dev/null || true ;;
-        esac
-    done
-}
-reap_orphan_http_servers
-
 find_free_port() {
     local port
     # 61000-61999 only. kill-services.test.sh scans 62000-63000 and this gate now
@@ -346,18 +350,35 @@ python3 -m http.server "$remote_port" --bind 127.0.0.1 >/dev/null 2>&1 &
 PIDS+=("$!")
 wait_for_port "$remote_port"
 
-outbound_port="$(find_free_port)"
-python3 - "$outbound_port" "$remote_port" <<'PY' &
+outbound_port_file="$TMP_ROOT/outbound-port"
+python3 - "$remote_port" "$outbound_port_file" <<'PY' &
 import socket
 import sys
 import time
 
 connection = socket.socket()
-connection.bind(("127.0.0.1", int(sys.argv[1])))
-connection.connect(("127.0.0.1", int(sys.argv[2])))
+connection.bind(("127.0.0.1", 0))
+connection.connect(("127.0.0.1", int(sys.argv[1])))
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write(str(connection.getsockname()[1]))
 time.sleep(30)
 PY
-PIDS+=("$!")
+outbound_pid=$!
+PIDS+=("$outbound_pid")
+for attempt in $(seq 1 50); do
+    [ -s "$outbound_port_file" ] && break
+    if ! kill -0 "$outbound_pid" 2>/dev/null; then
+        wait "$outbound_pid" || true
+        echo "FAIL: outbound fixture exited before publishing its source port" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+[ -s "$outbound_port_file" ] || {
+    echo "FAIL: outbound fixture did not publish its source port" >&2
+    exit 1
+}
+outbound_port="$(cat "$outbound_port_file")"
 wait_for_connection "$outbound_port"
 
 if port_requires_reassign "$outbound_port"; then

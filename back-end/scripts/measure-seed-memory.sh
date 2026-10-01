@@ -161,7 +161,9 @@ else
     [ -n "$SRC_PORT" ] || { echo "❌ could not resolve source postgres port" | tee -a "$SUMMARY"; exit 1; }
     SRC_READY=0
     for _ in $(seq 1 60); do
-        docker exec "$SRC_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && { SRC_READY=1; break; }
+        # The image's temporary init server accepts Unix sockets before it
+        # stops for the final launch. TCP is ready only for the final server.
+        docker exec "$SRC_CONTAINER" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && { SRC_READY=1; break; }
         sleep 1
     done
     # Falling through the timeout used to continue into pg_restore against a
@@ -338,7 +340,7 @@ for i in $(seq 1 "$RUNS"); do
 
         # Wait for readiness rather than sleeping a guess.
         for _ in $(seq 1 60); do
-            docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
+            docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break
             sleep 1
         done
 

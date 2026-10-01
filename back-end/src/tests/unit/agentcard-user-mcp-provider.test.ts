@@ -1,7 +1,13 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 
 import assert from 'node:assert';
+
+const report = (message: string): void => {
+  process.stdout.write(`${message}\n`);
+};
+const reportError = (message: string): void => {
+  process.stderr.write(`${message}\n`);
+};
 import { AgentCardUserMcpProvider } from '../../providers/card-provider';
 
 type Call = {
@@ -17,10 +23,10 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
     passed += 1;
-    console.log(`  ✅ ${name}`);
+    report(`  ✅ ${name}`);
   } catch (err) {
     failures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
-    console.log(`  ❌ ${name}`);
+    report(`  ❌ ${name}`);
   }
 }
 
@@ -34,19 +40,50 @@ function toolResult(payload: Record<string, unknown>): unknown {
 async function main(): Promise<void> {
   process.env.AGENTCARD_PUBLIC_URL = 'https://rose.test';
 
-  await test('mints through per-user MCP and resolves AgentCard approval gate', async () => {
+  await test('current approval_pending waits for user passkey without impersonating approval', async () => {
+    const calls: string[] = [];
+    const provider = new AgentCardUserMcpProvider('user-passkey', async (_userId, name) => {
+      calls.push(name);
+      return toolResult({
+        status: 'approval_pending',
+        approvalUrl: 'https://agentcard.sh/approve/example',
+        approvalId: 'approval-example',
+      });
+    });
+    await assert.rejects(
+      provider.mintCard({ amountCents: 2500 }),
+      (error: unknown) =>
+        error instanceof Error &&
+        'details' in error &&
+        (error as { details: Record<string, unknown> }).details.setupUrl ===
+          'https://agentcard.sh/approve/example'
+    );
+    assert.deepStrictEqual(calls, ['create_card']);
+  });
+
+  await test('current vault_started result returns the user link instead of claiming a card was minted', async () => {
+    const provider = new AgentCardUserMcpProvider('user-vault', async () =>
+      toolResult({
+        status: 'vault_started',
+        vaultUrl: 'https://agentcard.sh/vault/example',
+      })
+    );
+    await assert.rejects(
+      provider.mintCard({ amountCents: 2500 }),
+      (error: unknown) =>
+        error instanceof Error &&
+        'details' in error &&
+        (error as { details: Record<string, unknown> }).details.setupUrl ===
+          'https://agentcard.sh/vault/example'
+    );
+  });
+
+  await test('mints a ready card through per-user MCP', async () => {
     const calls: Call[] = [];
-    let approved = false;
     const provider = new AgentCardUserMcpProvider('user-123', async (userId, name, args) => {
       calls.push({ userId, name, args });
       if (name === 'create_card') {
-        return approved
-          ? toolResult({ card_id: 'card-123', status: 'ACTIVE' })
-          : toolResult({ approval_required: true, approval_id: 'approval-123' });
-      }
-      if (name === 'approve_request') {
-        approved = true;
-        return toolResult({ approved: true });
+        return toolResult({ card_id: 'card-123', status: 'created' });
       }
       if (name === 'get_card_details') {
         return toolResult({
@@ -75,8 +112,6 @@ async function main(): Promise<void> {
     assert.deepStrictEqual(
       calls.map((call) => [call.userId, call.name, call.args]),
       [
-        ['user-123', 'create_card', { amount_cents: 2500 }],
-        ['user-123', 'approve_request', { approval_id: 'approval-123' }],
         ['user-123', 'create_card', { amount_cents: 2500 }],
         ['user-123', 'get_card_details', { card_id: 'card-123' }],
       ]
@@ -113,43 +148,29 @@ async function main(): Promise<void> {
     );
   });
 
-  await test('resolves AgentCard approval gate before returning card details', async () => {
+  await test('card details approval stays with the user', async () => {
     const calls: Call[] = [];
-    let approved = false;
     const provider = new AgentCardUserMcpProvider(
       'user-details-approval',
       async (userId, name, args) => {
         calls.push({ userId, name, args });
         if (name === 'get_card_details') {
-          return approved
-            ? toolResult({
-                pan: '4111111111111111',
-                cvv: '456',
-                expiry: '02/32',
-                balance_cents: 4396,
-                status: 'ACTIVE',
-              })
-            : toolResult({ approval_required: true, approval_id: 'approval-details-1' });
-        }
-        if (name === 'approve_request') {
-          approved = true;
-          return toolResult({ approved: true });
+          return toolResult({ status: 'approval_required', approvalId: 'approval-details-1' });
         }
         throw new Error(`unexpected tool ${name}`);
       }
     );
 
-    const details = await provider.getDetails('card-needs-approval');
-
-    assert.strictEqual(details.pan, '4111111111111111');
-    assert.strictEqual(details.cvv, '456');
+    await assert.rejects(
+      provider.getDetails('card-needs-approval'),
+      (error: unknown) =>
+        error instanceof Error &&
+        'details' in error &&
+        (error as { details: Record<string, unknown> }).details.approvalId === 'approval-details-1'
+    );
     assert.deepStrictEqual(
       calls.map((call) => [call.userId, call.name, call.args]),
-      [
-        ['user-details-approval', 'get_card_details', { card_id: 'card-needs-approval' }],
-        ['user-details-approval', 'approve_request', { approval_id: 'approval-details-1' }],
-        ['user-details-approval', 'get_card_details', { card_id: 'card-needs-approval' }],
-      ]
+      [['user-details-approval', 'get_card_details', { card_id: 'card-needs-approval' }]]
     );
   });
 
@@ -243,13 +264,9 @@ async function main(): Promise<void> {
       if (name === 'create_card') {
         return toolResult({ error: 'wallet_funding_required', message: 'Fund wallet' });
       }
-      if (name === 'get_wallet') {
-        return toolResult({ wallet: { address: '0xabc', balanceUsdc: '0.00' } });
-      }
-      if (name === 'fund_wallet') {
+      if (name === 'add_funds') {
         return toolResult({
-          session: { id: 'onr-1', status: 'pending' },
-          payment: { checkoutUrl: 'https://pay.coinbase.test/onr-1' },
+          checkoutUrl: 'https://pay.coinbase.test/onr-1',
         });
       }
       throw new Error(`unexpected tool ${name}`);
@@ -260,16 +277,15 @@ async function main(): Promise<void> {
       (err: unknown) =>
         err instanceof Error &&
         'details' in err &&
-        (err as { details: Record<string, unknown> }).details.setupTool === 'fund_wallet' &&
-        (err as { details: Record<string, unknown> }).details.checkoutUrl ===
+        (err as { details: Record<string, unknown> }).details.setupTool === 'add_funds' &&
+        (err as { details: Record<string, unknown> }).details.setupUrl ===
           'https://pay.coinbase.test/onr-1'
     );
     assert.deepStrictEqual(
       calls.map((call) => [call.userId, call.name, call.args]),
       [
         ['user-wallet', 'create_card', { amount_cents: 4396 }],
-        ['user-wallet', 'get_wallet', {}],
-        ['user-wallet', 'fund_wallet', { amount_cents: 4396, payment_method: 'apple_pay' }],
+        ['user-wallet', 'add_funds', { amount_cents: 4396 }],
       ]
     );
   });
@@ -287,15 +303,12 @@ async function main(): Promise<void> {
                 type: 'text',
                 text:
                   'Your wallet needs $43.96 more USDC to create this card. ' +
-                  'Fund it with the fund_wallet tool (debit card or Apple Pay) or send USDC directly.',
+                  'Fund it with the add_funds tool (Apple Pay) or send USDC directly.',
               },
             ],
           };
         }
-        if (name === 'get_wallet') {
-          return toolResult({ wallet: { address: '0xabc', balanceUsdc: '0.00' } });
-        }
-        if (name === 'fund_wallet') {
+        if (name === 'add_funds') {
           return {
             content: [
               {
@@ -316,7 +329,7 @@ async function main(): Promise<void> {
         'details' in err &&
         (err as { details: Record<string, unknown> }).details.agentcardStatus ===
           'wallet_funding_required' &&
-        (err as { details: Record<string, unknown> }).details.setupTool === 'fund_wallet' &&
+        (err as { details: Record<string, unknown> }).details.setupTool === 'add_funds' &&
         String((err as { details: Record<string, unknown> }).details.setupMessage).includes(
           'Funding requires email verification'
         )
@@ -325,8 +338,7 @@ async function main(): Promise<void> {
       calls.map((call) => [call.userId, call.name, call.args]),
       [
         ['user-wallet-text', 'create_card', { amount_cents: 4396 }],
-        ['user-wallet-text', 'get_wallet', {}],
-        ['user-wallet-text', 'fund_wallet', { amount_cents: 4396, payment_method: 'apple_pay' }],
+        ['user-wallet-text', 'add_funds', { amount_cents: 4396 }],
       ]
     );
   });
@@ -355,11 +367,11 @@ async function main(): Promise<void> {
   });
 
   if (failures.length > 0) {
-    console.error(`\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`);
+    reportError(`\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`);
     process.exit(1);
   }
 
-  console.log(`\n✅ ${passed} AgentCard per-user MCP provider tests passed`);
+  report(`\n✅ ${passed} AgentCard per-user MCP provider tests passed`);
 }
 
 void main();
