@@ -133,6 +133,11 @@ chat timeout is now 15s from the start of its request or router attempt,
 proven on the longest real prod router contexts (see "Fifteen seconds from
 the start").
 
+On the 15s approval request (E8F2-2): "direct cerebras should have 8 s
+timeout". Direct Cerebras's connect, first-content, and SSE-idle guard is
+now 8s. The router attempt and the GLM failover keep 15s, so ending
+Cerebras does not end the turn (see "Eight seconds for direct Cerebras").
+
 ## Reusable lesson
 
 Regenerate a transient empty, unparseable, or deadline-expired structured LLM stream in place, and size each per-attempt bound from the measured latency of the slowest path allowed to serve (the failover) under the provider routing prod actually gets, on the longest real contexts prod sends, never from the healthy primary on a typical context. Time to first content grows with the context, so a bound that holds at the median context fails the long ones first.
@@ -311,17 +316,19 @@ are in the RCA evidence bundle
 
 **Fix (PR #1348).**
 
-- `cerebrasRoute.ts`: `CHAT_TIMEOUT_MS = 15_000` is the one synchronous chat
-  timeout. Every provider request and every router attempt gets it from its
-  own start, with no shorter bound inside it.
+- `cerebrasRoute.ts`: `CHAT_TIMEOUT_MS = 15_000` bounds every router
+  attempt and every OpenRouter failover request from its own start, with no
+  shorter bound inside it.
 - `routerCompletionDeadline.ts`: one deadline per router attempt,
   `CHAT_TIMEOUT_MS` from the attempt's start; progress does not extend it.
   `CHAT_ROUTER_COMPLETION_TIMEOUT_MS` overrides it (Render sets none).
-- The direct-Cerebras first-content and SSE-idle guard goes from 1.2s to
-  15s. The 0.8s hedge still starts the OpenRouter fallbacks in parallel, but
-  no longer ends a Cerebras stream that is still prefilling a long context,
-  so that turn is neither lost nor re-sent against Cerebras's per-minute
-  token limit.
+- The direct-Cerebras connect, first-content, and SSE-idle guard goes from
+  1.2s to 8s (`DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS = 8_000`). The 0.8s
+  hedge still starts the OpenRouter fallbacks in parallel, but no longer
+  ends a Cerebras stream that is still prefilling a long context, so that
+  turn is neither lost nor re-sent against Cerebras's per-minute token
+  limit. When the guard ends Cerebras, the hedged fallbacks keep racing
+  until the router attempt's 15s bound.
 
 - `chatStructuredRetry.ts`: deadline misses regenerate again under the same
   2-attempt budget as empty and parse misses.
@@ -425,6 +432,47 @@ The replay's per-run records are `/tmp/rca/longctx/replay-prod-bounds.jsonl`
 and `replay-after-15s.jsonl` (plus `replay-before-5s.jsonl` for the first
 fix, which served 16/20 and 15/20 on attempt 1).
 
+**Eight seconds for direct Cerebras (2026-10-01).** Review then set direct
+Cerebras's guard (connect, first content, SSE idle) to 8s from the start of
+its request. The router attempt and the GLM failover keep 15s. The hedge
+starts the OpenRouter fallbacks 800ms into the request, so when the 8s guard
+ends Cerebras, they keep racing until the router attempt's bound.
+
+The same harness replayed the 10 contexts above plus 10 more served prod
+router turns (1.8k–7.8k tokens), twice each, on the 8s code (15:38–16:10Z).
+A third scenario, "cerebras-only", stalls every OpenRouter route, so direct
+Cerebras is the only path.
+
+| Scenario | Served on attempt 1 | Served at all | Apologies |
+| --- | --- | --- | --- |
+| prod | 39/40 | 40/40 | 0 |
+| glm-only | 39/40 | 40/40 | 0 |
+| cerebras-only | 39/40 | 40/40 | 0 |
+
+- No direct-Cerebras request came near the 8s guard. First content after
+  the request was at most 5,650ms (95.7k tokens; 5,585ms in cerebras-only),
+  3.4s at 47.8k, and under 2.8s everywhere else. The same 95.7k context
+  measured 2.9s on the 15s code, so time to first content there varies by
+  about 2x between runs.
+- None of the three regenerates involves the 8s guard:
+  - prod, 95.7k context: Cerebras returned HTTP 429 `Tokens per minute
+    limit exceeded` at once. GLM's first content landed 14.1s into the
+    turn, the attempt expired, and the regenerate served via GLM at 25.7s.
+  - cerebras-only, 5.3k context: the same 429 with every other route
+    stalled. The regenerate served at 15.7s.
+  - glm-only, 3.9k context: no GLM decision inside 15s. The regenerate
+    served at 23.9s.
+- Both 429s came from the replay's own back-to-back long contexts on the
+  org's 150k tokens/minute.
+- Three glm-only runs closed at 15.0s on a decision recovered from the
+  partial stream at the deadline. GLM-only on the 88k-token context decided
+  at 14.0–15.0s, and at 10.7–14.9s on 47.8k.
+- On the 10 contexts shared with the 15s run: 19/20 and 20/20 served on
+  attempt 1 (prod, glm-only), against 20/20 and 19/20 on the 15s code. The
+  single prod miss is the 429 above.
+
+Per-run records: `/tmp/rca/longctx/replay-after-8s.jsonl`.
+
 **Repro (local, watched fail then pass, prod bound defaults).**
 `back-end/src/tests/blackbox/chat-router-failover.blackbox.ts` drives
 `postMessage` on a seeded completed agent. Its chat-model projection is the
@@ -445,7 +493,14 @@ healthy Cerebras, and the GLM failover.
   `every GLM failover must name its own OpenRouter session`, because both
   attempts' GLM requests shared the conversation-derived pin.
 - First fix (5s no-progress bound): `PASS chat-router-failover (4 cases)`.
-- Final fix (15s from the start): `PASS chat-router-failover (6 cases)`.
+- 15s fix: `PASS chat-router-failover (6 cases)`. With the 8s Cerebras
+  guard: `PASS chat-router-failover (7 cases)`, the six below plus (g).
+  - (g) Cerebras stalls and GLM's first content lands 8,583ms after its
+    request, the slowest measured in the replay (9,383ms into the turn).
+    The 8s guard ends Cerebras at 8,015ms with `Cerebras produced no model
+    output within 8000ms`, GLM keeps racing, and the turn escalates on
+    router attempt 1 at 13.8s. On the 15s Cerebras guard, (g) fails its
+    precondition, because GLM's first content would land inside the guard.
   - (a) escalates at 8.4–8.6s via `z-ai/glm-5.3-flash`. The reasoning
     cites the corrected address, and the re-plan goal anchors on it and not
     on the rejected Irving home.
@@ -514,9 +569,10 @@ healthy Cerebras, and the GLM failover.
 **Cemented in `/deploy`.**
 
 - Step 4a, backend coverage: auto-discovers the offline cases.
-  - `chat-router-failover.blackbox.ts` (6 offline cases above, including
+  - `chat-router-failover.blackbox.ts` (7 offline cases above, including
     the two long-context cases replayed at the first-content times measured
-    on the 95.7k-token prod context).
+    on the 95.7k-token prod context, and GLM's slowest measured first
+    content after the 8s Cerebras guard).
   - `openrouter-fast-chat.blackbox.ts`: throughput routing with
     `require_parameters`, no fixed host list, and a distinct session per
     request; the host is reported once; the `openrouter_fast_chat.end`
@@ -524,9 +580,10 @@ healthy Cerebras, and the GLM failover.
     event, a served stream, and the route's own guard; and a caller abort
     stops the direct-Cerebras route with no further OpenRouter request and
     no `pre_content_failover_to_waterfall` log.
-  - `chat-router-options.test.ts` pins every chat timeout (router attempt,
-    Cerebras guard, GLM guard) at `CHAT_TIMEOUT_MS = 15_000` and that
-    progress does not extend the router deadline; `chat-router-stream`
+  - `chat-router-options.test.ts` pins the router attempt and GLM guard at
+    `CHAT_TIMEOUT_MS = 15_000`, the direct-Cerebras guard at 8,000ms (inside
+    the router attempt), and that progress does not extend the router
+    deadline; `chat-router-stream`
     pins the 15s attempt bound and the 2-attempt budget;
     `hedged-stream.test.ts` pins branch-failure reporting.
   - `chat-router-failover-live-verdict.test.ts` pins the live probe's
@@ -573,7 +630,7 @@ cost is per turn on the agent being served. During a Cerebras-wide stall,
 each turn holds:
 
 - Two direct-Cerebras streams (router and speculative generator) for up to
-  15s each, previously 1.2s. On a stall they hold a connection, not tokens;
+  8s each, previously 1.2s. On a stall they hold a connection, not tokens;
   on a long prefill they now finish instead of being aborted and re-sent.
 - Up to four OpenRouter streams (Qwen spill and GLM, for router and
   generator) for up to 15s per router attempt, previously 3s, with at most
@@ -610,8 +667,13 @@ that lets a repeat turn read the prompt cache ($0.03/M on Parasail).
   samples. Under the 14.2s budget, 1 of 20 glm-only replays on real prod
   contexts (7.9k tokens) got no GLM content inside 15s, and its regenerate
   served at 20.7s.
+- Direct Cerebras on the longest contexts. Its first content reached 5.65s
+  at 95.7k tokens, against the 8s guard. A longer context, or a slower
+  Cerebras minute, could cross 8s; the guard then ends Cerebras and the turn
+  depends on GLM inside the router's 15s, which is the next risk.
 - Long contexts during a Cerebras outage sit close to the bound. GLM-only
-  decisions on the 47.8k-token context closed at 12.2–14.9s. A slower host
+  decisions on the 47.8k-token context closed at 10.7–14.9s, and at
+  14.0–15.0s on the 88k-token one. A slower host
   there costs a regenerate (up to 30s to the answer) or, if both attempts
   miss, the apology. With Cerebras up, the same context served in 2.4–2.8s.
   - The shape is decided after the request leaves. In the fresh-process
@@ -679,3 +741,9 @@ accepting the 08:07:52Z probe's connection.
   `kill $!` with tsx and its node child surviving, and passes on the fix.
 - The real runner left no backend after a normal exit, a group SIGTERM, or a
   group SIGKILL.
+- The same class in the `run-port-collision` structural gate: it killed the
+  subshell around each `http.server` fixture, so three listeners outlived
+  every run (eight had piled up on the VM). The fixtures now `exec` the
+  server, and the gate fails if a killed fixture's port still accepts
+  connections. It failed that check before the change and passes after,
+  with no listener left behind.
