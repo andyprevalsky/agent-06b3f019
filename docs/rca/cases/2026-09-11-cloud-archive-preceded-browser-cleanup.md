@@ -846,3 +846,35 @@ review SHA256 is
 The prepared campaign on `07983702` was held before any allocation. These local
 proofs award no fleet credit; the canonical gate and fresh live campaign remain
 separate requirements.
+
+### 2026-10-01 review recurrence: rejection replay changed delivered text
+
+Review finding `4156855737` identified a remaining producer race on `f898e32c`.
+After rejection polling returned and the FINISHED message was delivered, a later
+USER message could enter workflow context while the delivery acknowledgement was
+pending. PAUSE then entered the cancellation handler, which rescanned context and
+replayed that same rejection with the later text. The owning reproduction uses
+the real manager, serializer and HTTP POST, observes HTTP201 before withholding
+its acknowledgement, adds the later USER message, and invokes real PAUSE. It
+failed on unchanged source in 1.430 seconds and passed unchanged in 1.215 seconds.
+An earlier import-path setup failure is retained separately and is not causal
+evidence.
+
+The observed defect is two producer deliveries with different text and identical
+lifecycle metadata. The duplicate database-row consequence follows from the
+unchanged backend matcher's requirement for both text and full metadata equality;
+this fixture does not claim to execute SQL. The producer now records when
+rejection feedback has been resolved, including an empty string. Cancellation
+rescans feedback only when polling was interrupted before that resolution. Once
+delivery begins, it replays the already selected message unchanged. Backend
+matching and other tools' lifecycle semantics remain unchanged.
+
+The same registered browser case adds nonempty and empty-feedback delivery arms,
+requiring identical replay text and complete metadata after a later USER message.
+All 628 unrelated test bodies remain unchanged; no test or suite was added.
+The owning case and ten existing controls passed in 1.666 seconds, with the owning
+case taking 0.706 seconds. Private archive searches, the immutable fixture and
+RED/GREEN receipts are retained under
+`.context/acceptance/proof90-rejection-replay-rca/`. The prepared campaign remained
+unlaunched and earns zero credit. The standard gate and fresh fleet proof remain
+required.

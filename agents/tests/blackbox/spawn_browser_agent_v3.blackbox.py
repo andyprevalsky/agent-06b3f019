@@ -20932,6 +20932,7 @@ async def _drive_browser_write_pause_archive_boundary(
     pause_on_grant=False,
     pause_on_open=False,
     reply_phase=None,
+    rejection_feedback="Specific fixture rejection feedback",
 ):
     import copy
     import httpx
@@ -20968,7 +20969,7 @@ async def _drive_browser_write_pause_archive_boundary(
     real_client = httpx.AsyncClient
 
     async def poll_messages(_timestamp):
-        wf.context.append({"role": "USER", "text": "Specific fixture rejection feedback"})
+        wf.context.append({"role": "USER", "text": rejection_feedback})
         if reply_phase == "rejection-poll":
             reply_pending.set()
             await asyncio.Event().wait()
@@ -21001,6 +21002,15 @@ async def _drive_browser_write_pause_archive_boundary(
             if pause_on_grant and (args[3] or {}).get("action_type") == "write_lock_granted":
                 await AgentWorkflow.pause(wf)
             result = await function(*args)
+            if (
+                reply_phase == "rejected-persisted"
+                and not reply_blocked
+                and (args[3] or {}).get("title") == "✗ User rejected action"
+            ):
+                reply_blocked = True
+                wf.context.append({"role": "USER", "text": "Later unrelated user request"})
+                reply_pending.set()
+                await asyncio.Event().wait()
             if (
                 pause_on_open
                 and (args[3] or {}).get("toolName") == "request_user_approval"
@@ -21212,14 +21222,22 @@ async def _drive_browser_write_pause_archive_boundary(
                     if row.get("metadata", {}).get("toolName") == "request_user_approval"
                     and row["metadata"].get("toolStatus") == "FINISHED"
                 ]
+                if reply_phase == "rejected-persisted":
+                    assert len(replies) == 2, "fixture must observe persisted delivery and cancellation replay"
+                    assert replies[0]["message"] == rejection_feedback
+                    assert replies[1]["message"] == replies[0]["message"], (
+                        "cancellation rewrote an already-persisted rejection using later USER text"
+                    )
+                    assert replies[1]["metadata"] == replies[0]["metadata"], (
+                        "cancellation replay changed lifecycle metadata"
+                    )
+                    replies = replies[:1]
                 assert len(replies) == 1, "PAUSE after a real decision left its exact approval chip IN_PROGRESS"
                 expected_title = "✓ User approval received" if reply_phase == "approved" else "✗ User rejected action"
                 assert replies[0]["metadata"] == {**opened, "title": expected_title, "toolStatus": "FINISHED"}, (
                     "cancellation replaced the actual decision"
                 )
-                expected_text = (
-                    "User response:\napproved" if reply_phase == "approved" else "Specific fixture rejection feedback"
-                )
+                expected_text = "User response:\napproved" if reply_phase == "approved" else rejection_feedback
                 assert expected_text in replies[0]["message"], "cancellation discarded the actual response feedback"
             await archive()
             foreign = copy.deepcopy(rows)
@@ -21252,6 +21270,10 @@ async def test_manager_write_pause_seals_persisted_browser_for_archive():
     await _drive_browser_write_pause_archive_boundary(pause=True, pause_on_open=True)
     for phase in ("approved", "rejection-poll", "rejected"):
         await _drive_browser_write_pause_archive_boundary(pause=True, reply_phase=phase)
+    for feedback in ("Specific fixture rejection feedback", ""):
+        await _drive_browser_write_pause_archive_boundary(
+            pause=True, reply_phase="rejected-persisted", rejection_feedback=feedback
+        )
     await _drive_browser_write_pause_archive_boundary(pause=False, cancel=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, handoff=True)
     from domains.spawn_browser_agent_v3.handler import _request_browser_write_approval_until_paused

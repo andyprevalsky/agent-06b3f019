@@ -294,6 +294,7 @@ async def request_user_approval_direct(
         metadata=event_metadata,
     )
     completion_event: Optional[ToolEvent] = None
+    rejection_feedback_resolved = False
     # Delivery may persist before its await acknowledges the opened chip.
     try:
         await workflow_instance._handle_tool_event(pre_event, tool_call_id, TOOL_NAME)
@@ -349,6 +350,7 @@ async def request_user_approval_direct(
 
             # Post FINISHED to close the approval chip cleanly
             reject_event.message = rejection_text
+            rejection_feedback_resolved = True
             await workflow_instance._handle_tool_event(reject_event, tool_call_id, TOOL_NAME)
 
             raise UserRejectedError("User rejected the approval request", rejection_message=rejection_text)
@@ -390,7 +392,7 @@ async def request_user_approval_direct(
                     status=MessageStatus.FINISHED,
                     metadata={**event_metadata, "excludeFromModel": True},
                 )
-            elif completion_event.title == "✗ User rejected action":
+            elif completion_event.title == "✗ User rejected action" and not rejection_feedback_resolved:
                 # A poll may publish feedback before its await acknowledges it.
                 for i in range(len(workflow_instance.context) - 1, context_len_before_wait - 1, -1):
                     if workflow_instance.context[i].get("role") == "USER":
