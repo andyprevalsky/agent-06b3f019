@@ -2,20 +2,28 @@
 
 import 'dotenv/config';
 import { listArchiveBundleIdsStrict } from '../src/providers/traceArchiveAudit';
-import { indexArchivedTraceFromR2 } from '../src/providers/traceArchiveSearchIndex';
+import {
+  ArchivedTraceNotFoundError,
+  indexArchivedTraceFromR2,
+} from '../src/providers/traceArchiveSearchIndex';
 import { prisma } from '../src/providers/database';
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const usage =
-    'Usage: backfill-agent-trajectory-search.ts [--root-agent-id <id> | --user-id <id> | --all-users] [--scan-r2 with --user-id or --all-users]';
+    'Usage: backfill-agent-trajectory-search.ts [--root-agent-id <id> | --user-id <id> | --all-users] [--scan-r2 with --user-id or --all-users] [--concurrency 1..32]';
   const rootArg = args.indexOf('--root-agent-id');
   const userArg = args.indexOf('--user-id');
+  const concurrencyArg = args.indexOf('--concurrency');
   const allUsers = args.includes('--all-users');
   const scanR2 = args.includes('--scan-r2');
+  const concurrency = concurrencyArg >= 0 ? Number(args[concurrencyArg + 1]) : 4;
   const scopeCount = Number(rootArg >= 0) + Number(userArg >= 0) + Number(allUsers);
   if (
     scopeCount !== 1 ||
+    !Number.isInteger(concurrency) ||
+    concurrency < 1 ||
+    concurrency > 32 ||
     (scanR2 && rootArg >= 0) ||
     (rootArg >= 0 && !args[rootArg + 1]) ||
     (userArg >= 0 && !args[userArg + 1]) ||
@@ -26,8 +34,10 @@ async function main(): Promise<void> {
           '--user-id',
           '--all-users',
           '--scan-r2',
+          '--concurrency',
           rootArg >= 0 ? args[rootArg + 1] : '',
           userArg >= 0 ? args[userArg + 1] : '',
+          concurrencyArg >= 0 ? args[concurrencyArg + 1] : '',
         ].includes(arg)
     )
   ) {
@@ -56,10 +66,11 @@ async function main(): Promise<void> {
   let indexed = 0;
   let skipped = 0;
   let rows = 0;
+  let incompleteUnowned = 0;
   const expectedUserId = userArg >= 0 ? args[userArg + 1] : undefined;
   const failures: Array<{ root: string; error: string }> = [];
   await Promise.all(
-    Array.from({ length: Math.min(4, roots.length) }, async () => {
+    Array.from({ length: Math.min(concurrency, roots.length) }, async () => {
       while (cursor < roots.length) {
         const root = roots[cursor++];
         try {
@@ -74,7 +85,19 @@ async function main(): Promise<void> {
             }
           }
         } catch (error) {
-          failures.push({ root, error: error instanceof Error ? error.message : String(error) });
+          // R2 can contain an interrupted root with only LLM artifacts and no
+          // owner-bearing manifest or DB fixture. It cannot be safely assigned
+          // to a user, so report it separately from a failed owned archive.
+          if (
+            scanR2 &&
+            error instanceof ArchivedTraceNotFoundError &&
+            error.message.endsWith('/manifest.json.gz.enc')
+          ) {
+            skipped += 1;
+            incompleteUnowned += 1;
+          } else {
+            failures.push({ root, error: error instanceof Error ? error.message : String(error) });
+          }
         }
       }
     })
@@ -83,7 +106,7 @@ async function main(): Promise<void> {
     await prisma.$executeRaw`ANALYZE "AgentTrajectorySearch"`;
   }
   process.stdout.write(
-    JSON.stringify({ total: roots.length, indexed, skipped, rows, failures }) + '\n'
+    JSON.stringify({ total: roots.length, indexed, skipped, incompleteUnowned, rows, failures }) + '\n'
   );
   if (failures.length > 0) process.exitCode = 1;
 }
