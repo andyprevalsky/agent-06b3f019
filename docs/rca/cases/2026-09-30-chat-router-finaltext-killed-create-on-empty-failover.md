@@ -565,6 +565,9 @@ healthy Cerebras, and the GLM failover.
     request) with a goal near 88 Harlow St. On the same snapshot, setting
     the three defaults back to 1.2s / 2s / 3s makes the offline exact-prod
     case end in the apology after 6,051ms.
+  - 8s Cerebras guard (`102abb7bf`), 16:16Z: escalated on router attempt 1
+    at 4,972ms (Together, first content 1,648ms after the GLM request) with
+    a goal near 88 Harlow St.
 
 **Cemented in `/deploy`.**
 
