@@ -13,7 +13,7 @@ the agent must request user approval before proceeding.
 import logging
 import re
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,30 @@ AUTH_FLOW_URL_PATTERNS = [
     "onboarding",
 ]
 
-# Payment field patterns (case-insensitive, check name, id, autocomplete, placeholder)
+# Auth-flow markers are whole host labels / path words, never substrings of the
+# raw URL: "auth" inside r/AuthorsGuild or a ``redirect_after_login`` query
+# parameter on a composer URL must not switch the social write lock off.
+_AUTH_FLOW_URL_WORDS = frozenset({
+    *AUTH_FLOW_URL_PATTERNS,
+    "logon",
+    "signin",
+    "oauth",
+    "oauth2",
+    "authorize",
+    "authenticate",
+    "authentication",
+    "register",
+    "registration",
+    "sso",
+})
+# Joined path words such as ``emailsignup`` or ``wplogin``.
+_AUTH_FLOW_URL_WORD_SUFFIXES = ("login", "signin", "signup")
+_AUTH_FLOW_URL_BIGRAMS = re.compile(r"\b(?:log|sign) (?:in|on|up)\b")
+
+# Payment field patterns (case-insensitive, check name, id, autocomplete, placeholder).
+# Generic checkout words ("billing", "payment", "expir") are deliberately absent:
+# billing addresses, payment-amount inputs, and passport/ID expiry dates are not
+# card details, and blocking them demanded a virtual card for a ZIP code.
 PAYMENT_FIELD_PATTERNS = [
     "card",
     "cc-",
@@ -82,9 +105,6 @@ PAYMENT_FIELD_PATTERNS = [
     "cvv",
     "cvc",
     "csv",
-    "expir",
-    "payment",
-    "billing",
     "cardnumber",
     "card-number",
     "card_number",
@@ -92,6 +112,20 @@ PAYMENT_FIELD_PATTERNS = [
     "security-code",
     "security_code",
 ]
+
+# Visible-label test for card fields (the accessible name, which includes the
+# <label> text). Needs a card word next to a card detail, or a card security
+# code word, so "Gift message" / "Billing address" / "Passport expiration date"
+# stay open while "Name on card" / "Card number" / "CVV" lock.
+_CARD_CONTEXT_WORDS = frozenset({"card", "cc", "credit", "debit"})
+_CARD_DETAIL_WORDS = frozenset({
+    "number", "num", "no", "holder", "name", "owner", "exp", "expiry", "expiration",
+    "expires", "date", "code", "security", "verification",
+})
+_CARD_SECURITY_CODE_WORDS = frozenset({"cvv", "cvv2", "cvc", "cvc2", "csc", "cvn"})
+_CARD_JOINED_WORDS = frozenset({"cardnumber", "ccnumber", "cardholder", "creditcard", "debitcard"})
+_EXPIRY_WORDS = frozenset({"exp", "expiry", "expiration", "expires", "expdate"})
+_CARD_EXPIRY_PLACEHOLDER_RE = re.compile(r"^\s*mm\s*[/-]\s*yy(?:yy)?\s*$")
 
 # Payment autocomplete values (exact matches)
 PAYMENT_AUTOCOMPLETE_VALUES = [
@@ -120,7 +154,8 @@ def autocomplete_indicates_payment(autocomplete: str) -> bool:
         return False
     return any(token in PAYMENT_AUTOCOMPLETE_TOKENS for token in autocomplete.split())
 
-# Submit button text patterns (case-insensitive contains)
+# Submit button verbs, matched as whole words of the label ("Posts", "12 Comments",
+# "Postal code" are not submits; "tweetButtonInline" splits to "tweet button inline").
 SUBMIT_BUTTON_PATTERNS = [
     "post",
     "tweet",
@@ -130,6 +165,8 @@ SUBMIT_BUTTON_PATTERNS = [
     "publish",
     "share",
     "submit",
+    "repost",
+    "retweet",
 ]
 
 SUBMIT_BUTTON_EXCLUSION_PATTERNS = [
@@ -197,6 +234,13 @@ ACCOUNT_SELF_DELIVERY_PATTERNS = (
     "verification text",
     "verification link",
     "verification sms",
+)
+
+# Cancelling or undoing a send stops an outbound message instead of sending one
+# (scheduled-send cancel, Gmail's undo window). The phrase is removed before the
+# leftover-send test, like "send me", so a co-located real send still locks.
+_CANCELLED_SEND_RE = re.compile(
+    r"\b(?:cancel|undo|stop|abort|unschedule)(?:\s+(?:the|this|that|scheduled|my|your))*\s+send(?:ing)?\b"
 )
 
 # "Send me …" asks the site to send something to the shopper (receipts, order
@@ -375,6 +419,52 @@ def _purchase_signal_match_forms(signal: str) -> list[str]:
     return forms
 
 
+def _purchase_phrase_pattern(phrase: str) -> re.Pattern[str]:
+    body = r"\s*".join(re.escape(word) for word in phrase.split())
+    return re.compile(r"(?<![a-z0-9])" + body + r"s?(?![a-z0-9])")
+
+
+# Phrases match whole words of the word-split label (any spacing between the
+# words, optional plural), so "Marketplace orders" does not contain "place order".
+_PURCHASE_PHRASE_PATTERNS = tuple((phrase, _purchase_phrase_pattern(phrase)) for phrase in PURCHASE_BUTTON_PHRASES)
+
+# "Pay" followed by a currency amount is the hosted-checkout commit
+# ("Pay $42.10", "Pay €18,00", "Pay USD 12", "Pay 30 €").
+_CURRENCY = r"(?:[$€£¥₹]|us\$|a\$|c\$|usd|eur|gbp|cad|aud|inr|jpy|chf)"
+_PAY_AMOUNT_RE = re.compile(
+    rf"(?<![a-z0-9])pay\s+(?:{_CURRENCY}\s*\d|\d[\d.,]*\s*{_CURRENCY}(?![a-z]))"
+)
+
+
+def _purchase_signal_word_forms(signal: str) -> list[str]:
+    """Word-split forms of a signal: raw, and with fulfillment-mode words removed."""
+    words = _action_words((signal or "").replace("&", " and "))
+    if not words:
+        return []
+    forms = [words]
+    collapsed = " ".join(_PURCHASE_FULFILLMENT_TRANSPARENT_RE.sub(" ", words).split())
+    if collapsed and collapsed != words:
+        forms.append(collapsed)
+    return forms
+
+
+def _purchase_phrase_match(signal: str, match_forms: list[str]) -> Optional[str]:
+    """Return the purchase phrase a signal commits to, if any."""
+    if not any(ch.isspace() for ch in signal.strip()):
+        # Single joined token (``placeOrderBtn``, ``BUYNOW``): word boundaries
+        # are unknowable, so keep the whitespace-stripped substring test.
+        for phrase, _ in _PURCHASE_PHRASE_PATTERNS:
+            if any(normalize_write_lock_text(phrase) in form for form in match_forms):
+                return phrase
+    word_forms = _purchase_signal_word_forms(signal)
+    for phrase, pattern in _PURCHASE_PHRASE_PATTERNS:
+        if any(pattern.search(form) for form in word_forms):
+            return phrase
+    if _PAY_AMOUNT_RE.search(" ".join(signal.lower().split())):
+        return "pay <amount>"
+    return None
+
+
 def _is_purchase_informational_exclusion(normalized: str) -> bool:
     """True when the label is BNPL / learn-more chrome, not a charge commit.
 
@@ -440,6 +530,22 @@ def is_click_write_lock_eligible_control(element: Any) -> bool:
     return True
 
 
+def _is_auth_flow_url(url: str) -> bool:
+    """True when a host label or a path/fragment word marks a login/signup flow.
+
+    The query string is ignored: ``?redirect_after_login=/compose/post`` names
+    where to go after auth, not the page the agent is on.
+    """
+    parsed = urlparse(url)
+    host_labels = (parsed.hostname or "").lower().split(".")
+    route = unquote(f"{parsed.path} {parsed.fragment}")
+    words = _action_words(route).split()
+    for word in [*host_labels, *words]:
+        if word in _AUTH_FLOW_URL_WORDS or word.endswith(_AUTH_FLOW_URL_WORD_SUFFIXES):
+            return True
+    return _AUTH_FLOW_URL_BIGRAMS.search(" ".join(words)) is not None
+
+
 def is_social_domain(url: str) -> bool:
     """Check if URL is a social media or forum domain.
 
@@ -457,7 +563,7 @@ def is_social_domain(url: str) -> bool:
         domain = parsed.netloc
         full_url = url.lower()
 
-        if any(pattern in full_url for pattern in AUTH_FLOW_URL_PATTERNS):
+        if _is_auth_flow_url(url):
             logger.debug(f"URL {url} matched auth-flow pattern; skipping social write lock")
             return False
 
@@ -502,8 +608,9 @@ def is_submit_button(element_text: str) -> bool:
             logger.debug(f"Element text '{element_text}' matched submit exclusion pattern: {pattern}")
             return False
 
+    words = set(_action_words(element_text).split())
     for pattern in SUBMIT_BUTTON_PATTERNS:
-        if normalize_write_lock_text(pattern) in text_lower:
+        if pattern in words:
             logger.debug(f"Element text '{element_text}' matched submit pattern: {pattern}")
             return True
 
@@ -615,6 +722,9 @@ def is_email_send_button(element_text: str, url: str = "") -> bool:
         # label like "Send prompt and send email" cannot skip write-lock.
         # Do not hoist ``send message`` here — that is a composer submit on
         # ChatGPT/Claude/Gemini.
+        words = _CANCELLED_SEND_RE.sub(" ", words).strip()
+        if not words:
+            continue
         if _SPECIFIC_EMAIL_SEND_RE.search(words):
             return True
         if _is_ai_composer_submit(words, url):
@@ -664,11 +774,10 @@ def is_purchase_button(element_text: str) -> bool:
             )
             continue
 
-        for phrase in PURCHASE_BUTTON_PHRASES:
-            phrase_norm = normalize_write_lock_text(phrase)
-            if any(phrase_norm in form for form in match_forms):
-                logger.debug(f"Element text '{signal[:80]}' matched purchase pattern: {phrase}")
-                return True
+        phrase = _purchase_phrase_match(signal, match_forms)
+        if phrase:
+            logger.debug(f"Element text '{signal[:80]}' matched purchase pattern: {phrase}")
+            return True
 
     return False
 
@@ -952,19 +1061,30 @@ def is_return_button(element_text: str, url: str = "") -> bool:
     return False
 
 
+def _label_indicates_payment(label: str) -> bool:
+    """True when a field's name/label text describes card details."""
+    words = set(_action_words(label).split())
+    if words & (_CARD_SECURITY_CODE_WORDS | _CARD_JOINED_WORDS):
+        return True
+    return bool(words & _CARD_CONTEXT_WORDS and words & _CARD_DETAIL_WORDS)
+
+
 async def is_payment_field(
     session: Any,
     element: Any,
     element_index: int,
 ) -> bool:
-    """Check if element is a payment input field.
+    """Check if element is a payment (card details) input field.
 
-    Uses Playwright to get element attributes and check for payment patterns.
+    Reads the element's own attributes and its accessible name. The accessible
+    name is Chrome's computed label (``<label for>``, ``aria-labelledby``), so a
+    card field with generic ids such as ``field7`` is still recognized by the
+    "Name on card" label shown next to it.
 
     Args:
-        session: BrowserSession instance
+        session: BrowserSession instance (unused; kept for call-site compatibility)
         element: EnhancedDOMTreeNode element
-        element_index: Element's backend_node_id
+        element_index: Element's backend_node_id (unused)
 
     Returns:
         True if the element appears to be a payment field
@@ -975,88 +1095,34 @@ async def is_payment_field(
     try:
         element_attrs = getattr(element, "attributes", None) or {}
         if isinstance(element_attrs, dict):
-            attrs = {str(k).lower(): str(v).lower() for k, v in element_attrs.items() if v is not None}
+            attrs = {str(k).lower(): str(v) for k, v in element_attrs.items() if v is not None}
 
-            autocomplete = attrs.get("autocomplete", "")
+            autocomplete = attrs.get("autocomplete", "").lower()
             if autocomplete_indicates_payment(autocomplete):
                 logger.info(f"Payment field detected: autocomplete='{autocomplete}'")
                 return True
 
-            for attr_name in ["name", "id", "placeholder", "aria-label"]:
-                attr_value = attrs.get(attr_name, "")
+            values = {name: attrs.get(name, "") for name in ("name", "id", "placeholder", "aria-label")}
+            for attr_name, attr_value in values.items():
+                lowered = attr_value.lower()
                 for pattern in PAYMENT_FIELD_PATTERNS:
-                    if pattern in attr_value:
+                    if pattern in lowered:
                         logger.info(f"Payment field detected: {attr_name}='{attr_value}' matches '{pattern}'")
                         return True
-
-        if not session:
-            return False
-
-        # Get the Playwright page
-        get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
-        if not callable(get_page):
-            return False
-
-        page = await get_page()
-        if not page:
-            return False
-
-        # Get element attributes via CDP
-        # We need to resolve the backend_node_id to a selector or use CDP directly
-        try:
-            # Use CDP to get node info
-            result = await page.client.send("DOM.describeNode", {
-                "backendNodeId": element_index
-            })
-
-            node = result.get("node", {})
-            attributes = node.get("attributes", [])
-
-            # Parse attributes into a dict (attributes come as [name, value, name, value, ...])
-            attrs = {}
-            for i in range(0, len(attributes), 2):
-                if i + 1 < len(attributes):
-                    attrs[attributes[i].lower()] = attributes[i + 1].lower()
-
-            # Check autocomplete attribute (token-based match)
-            autocomplete = attrs.get("autocomplete", "")
-            if autocomplete_indicates_payment(autocomplete):
-                logger.info(f"Payment field detected: autocomplete='{autocomplete}'")
-                return True
-
-            # Check name, id, placeholder for payment patterns
-            for attr_name in ["name", "id", "placeholder", "aria-label"]:
-                attr_value = attrs.get(attr_name, "")
-                for pattern in PAYMENT_FIELD_PATTERNS:
-                    if pattern in attr_value:
-                        logger.info(f"Payment field detected: {attr_name}='{attr_value}' matches '{pattern}'")
-                        return True
-
-            # Check type="password" on payment domains (could be CVV)
-            if attrs.get("type") == "password":
-                # Check if we're on a payment-related domain
-                url = page.url.lower() if page.url else ""
-                payment_domains = ["stripe.com", "paypal.com", "checkout.", "payment.", "pay."]
-                for domain in payment_domains:
-                    if domain in url:
-                        logger.info(f"Password field on payment domain detected: {url}")
-                        return True
-
-            return False
-
-        except Exception as cdp_error:
-            logger.warning(f"CDP error getting element attributes: {cdp_error}")
-
-            # Fallback: check element text_content for payment hints
-            text_content = getattr(element, "text_content", "") or ""
-            text_lower = text_content.lower()
-            for pattern in PAYMENT_FIELD_PATTERNS:
-                if pattern in text_lower:
-                    logger.info(f"Payment field detected via text content: '{text_content}'")
+                if _label_indicates_payment(attr_value):
+                    logger.info(f"Payment field detected: {attr_name}='{attr_value}' names card details")
                     return True
 
-            return False
+            expiry_words = set(_action_words(" ".join(values.values())).split()) & _EXPIRY_WORDS
+            if expiry_words and _CARD_EXPIRY_PLACEHOLDER_RE.match(values["placeholder"].lower()):
+                logger.info(f"Payment field detected: card expiry placeholder '{values['placeholder']}'")
+                return True
 
+        ax_name = getattr(getattr(element, "ax_node", None), "name", None)
+        if isinstance(ax_name, str) and _label_indicates_payment(ax_name):
+            logger.info(f"Payment field detected: accessible name '{ax_name[:80]}' names card details")
+            return True
+        return False
     except Exception as e:
         logger.warning(f"Error checking payment field: {e}")
         return False
