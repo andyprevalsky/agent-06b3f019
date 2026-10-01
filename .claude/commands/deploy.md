@@ -663,9 +663,9 @@ router attempt 1, and start the workflow with a goal anchored on the corrected
 address and not on the rejected one. A miss OpenRouter caused (the connection
 opened but no response headers came, or no first content within the 4.2s
 pre-content budget) is re-probed once 60s later. A second miss, or any other
-failure, blocks the deploy. A block means the failover could not serve that turn at that moment:
-diagnose it from the printed host, connect, and response timings and the
-`openrouter_fast_chat.end` records before rerunning.
+failure, blocks the deploy. A block means the failover could not serve that
+turn at that moment: diagnose it from the printed host, connect, and response
+timings and the `openrouter_fast_chat.end` records before rerunning.
 
 ## Step 4r: Cold-seed memory ratchet (no skip)
 
