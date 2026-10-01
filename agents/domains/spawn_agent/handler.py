@@ -716,10 +716,11 @@ class SpawnAgentManager(ToolManager):
                 # Wait for activity completion or pause signal.
                 # Live trees cap the wait so a hung child cannot pin the parent
                 # past the smoke cap. Cancel + grace lets continue_as_new run
-                # (cutover-class: activity-bound) without awaiting the 600s
-                # activity timeout. Demo / Fast Mode keeps the full timeout.
+                # without awaiting the 600s activity timeout. Demo / Fast Mode
+                # keeps the full timeout.
                 was_cancelled = False
                 try:
+                    # cutover-class: activity-bound
                     await workflow.wait_condition(
                         lambda: activity_handle.done() or workflow_instance.is_paused,
                         timeout=parent_wait,
@@ -733,6 +734,7 @@ class SpawnAgentManager(ToolManager):
                         )
                         activity_handle.cancel()
                         try:
+                            # cutover-class: bounded
                             await workflow.wait_condition(
                                 lambda: activity_handle.done(),
                                 timeout=EXPLORE_CANCEL_GRACE,
