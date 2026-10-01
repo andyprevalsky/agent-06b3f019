@@ -362,7 +362,27 @@ BASE_PORT="${CONDUCTOR_PORT:-55000}"
 START_PORT="${BLACKBOX_TEST_BACKEND_START_PORT:-${CONTRACT_TEST_BACKEND_START_PORT:-$((BASE_PORT + 100))}}"
 PORT="${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-$START_PORT}}"
 PORT_LOCK_DIR=""
+BACKEND_PID=""
 
+cleanup() {
+  if [[ -n "$BACKEND_PID" ]] && kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
+    kill "$BACKEND_PID" >/dev/null 2>&1 || true
+    for _ in $(seq 1 100); do
+      kill -0 "$BACKEND_PID" >/dev/null 2>&1 || break
+      sleep 0.1
+    done
+    kill -KILL "$BACKEND_PID" >/dev/null 2>&1 || true
+    wait "$BACKEND_PID" 2>/dev/null || true
+  fi
+
+  if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
+    rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+# Sets PORT and PORT_LOCK_DIR in the caller's shell; running it in a command
+# substitution would drop PORT_LOCK_DIR and leave the lock behind forever.
 reserve_port() {
   local candidate="$1"
 
@@ -373,7 +393,7 @@ reserve_port() {
         rmdir "$lock_dir" >/dev/null 2>&1 || true
       else
         PORT_LOCK_DIR="$lock_dir"
-        echo "$candidate"
+        PORT="$candidate"
         return 0
       fi
     fi
@@ -382,13 +402,13 @@ reserve_port() {
 }
 
 if [[ -z "${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-}}" ]]; then
-  PORT="$(reserve_port "$START_PORT")"
+  reserve_port "$START_PORT"
 else
-  PORT_LOCK_DIR="$PORT_LOCK_ROOT/$PORT"
-  if ! mkdir "$PORT_LOCK_DIR" 2>/dev/null; then
+  if ! mkdir "$PORT_LOCK_ROOT/$PORT" 2>/dev/null; then
     echo "❌ Failed to reserve requested black-box test port $PORT"
     exit 1
   fi
+  PORT_LOCK_DIR="$PORT_LOCK_ROOT/$PORT"
 fi
 
 export TEST_BASE_URL="http://localhost:$PORT"
@@ -426,22 +446,12 @@ echo "Starting isolated backend for black-box tests on port $PORT"
 echo "Backend log: $BACKEND_LOG"
 echo "Artifacts: $ARTIFACT_DIR"
 
+# BACKEND_PID must be the server itself: npx does not forward SIGTERM to the
+# process it starts, so stopping an npx wrapper leaves the backend on this port.
 PORT="$PORT" \
 DISABLE_GMAIL_SYNC=1 \
-npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
+node --import tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
-
-cleanup() {
-  if kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
-    kill "$BACKEND_PID" >/dev/null 2>&1 || true
-    wait "$BACKEND_PID" 2>/dev/null || true
-  fi
-
-  if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
-    rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup EXIT INT TERM
 
 READY=0
 for _ in $(seq 1 120); do
