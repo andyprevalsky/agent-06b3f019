@@ -173,35 +173,63 @@ This is a recurrence of this case. Relatives:
    after 3s?) was never collected. The bound stayed sized for the healthy
    Cerebras primary (about 0.7–1.1s). During a Cerebras stall, though, the
    OpenRouter failover is the only path that can serve.
-3. `chat-router-stream.blackbox.ts` asserted source text (the
-   `kind === 'deadline'` carve-out and the fallback's presence). It never
-   checked an outcome on a real failover stream, so it locked the regression
-   in.
+3. `cb6c4d6b9` cemented the carve-out with a synthetic-miss attempt count
+   (`deadlineAttempts === 1`), two source-text matches (`deadlineRouterFallback`
+   in `chatHandler.ts`, `miss.kind === 'deadline'` in the retry module), and
+   unit tests of the keyword phrasing. None of them replayed a real failover
+   stream on a real-size context, so nothing measured whether a 3s attempt
+   could ever finish.
+
+**Second rung, one layer down.** GLM (`z-ai/glm-5.3-flash`, the
+`openrouter-fast-chat` branch) is what serves a Cerebras stall. It has its
+own 2s pre-token guard, which counts only content or tool-call chunks. That
+guard was sized in `5c90a29ea` for a Flash-Lite model. `8f3c22f31` swapped
+in GLM on the strength of a generic 0.48s TTFT figure and kept the 2s
+guard. On this 24k-token context, GLM's first content came this long after
+its request:
+
+- 0.5–1.7s in 19 of 23 runs.
+- 2.0–3.1s in 3 runs.
+- 7.7s in 1 run.
+
+The recorded failover (provider Together) sends its first event 2.92s after
+the request. Prod could not show this rung: `hedgeStreams` swallowed
+pre-latch branch failures. Locally, on prod defaults with the router fix
+alone, the log reads `branch=openrouter-fast-chat ... OpenRouter fast chat
+produced no model output within 2000ms` and the exact follow-up apologizes
+at about 10s.
 
 **Evidence.**
 
-- Live Cerebras, exact prod router context (30 messages / 88,440 chars):
-  3 of 15 calls returned HTTP 200, a role-only delta at about 417ms, then
-  silence. This is the stall that the 1.2s pre-content guard hands to the
-  hedge.
-- Failover latency profile, n=24, exact context, Cerebras stalled, real
-  OpenRouter:
-  - First content: p50 1.7s, p90 3.9s, max 8.55s.
-  - Completion: 4.1–19.1s (p50 5.8s, p90 10.9s). 0 of 24 completed within 3s.
-  - Max inter-chunk gap: about 416ms.
+- Prod proves direct Cerebras produced no content within 1.2s and did not
+  429: the primary error at 03:46:47.233Z is `RoseStallError`. Locally on the
+  exact context, the stall shape (HTTP 200, a role-only delta at about 417ms,
+  then silence) appears in 1 of the 8 saved direct-Cerebras probes
+  (`profile_results.json`).
+- Failover profile, n=24, exact context, Cerebras stalled, real OpenRouter,
+  timed from the turn start:
+  - First content: p50 1.8s, p90 3.8s, max 8.6s.
+  - Completion: 4.1–19.1s (p50 6.0s, p90 10.7s). 0 of 24 completed within 3s.
+  - Max inter-chunk gap: about 0.4s.
   - Winners: GLM 23, Qwen 1. All 24 chose `start_superintelligence`.
+- Re-scored on prod config (attempt 1 only):
+  - Old policy (3s bound, 2s GLM guard): 0 of 24 served.
+  - Router fix alone (5s stall, 15s cap): 19 of 24.
+  - Router fix plus a 5s GLM guard: 22 of 24.
 
-  The 3s whole-completion bound therefore killed every failover attempt.
-
-- Replaying that profile against the new policy (5s no-progress stall plus a
-  15s per-attempt cap) serves 22 of 24 on the first attempt. The other two
-  regenerate.
+  With one regenerate, the per-turn miss rate is roughly 1%.
+- Evidence integrity: the first post-fix runs inherited
+  `OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS=20000` from the Cloud VM environment
+  (Render does not set it), so they proved a 20s GLM guard that prod never
+  runs. The Step 7 adversarial review caught it. The test now removes every
+  inherited chat-path bound override before it runs.
 
 **Fix (PR #1348).**
 
 - `routerCompletionDeadline.ts`: the per-attempt bound is now two timers.
   - A no-progress stall timer (5s), re-armed by every reasoning or content
-    delta.
+    delta. Reasoning counts because the router streams it to the user as the
+    thinking row.
   - A hard completion cap (15s).
 
   `CHAT_ROUTER_STALL_TIMEOUT_MS` and `CHAT_ROUTER_COMPLETION_TIMEOUT_MS`
@@ -211,50 +239,78 @@ This is a recurrence of this case. Relatives:
   2-attempt budget as empty and parse misses.
 - Deleted `deadlineRouterFallback` and `EXPLICIT_AGENT_INTENT`, plus their
   `chatHandler.ts` wiring. Deleting them is better than guarding them.
-- The healthy Cerebras path never reaches either bound and is unchanged. The
-  worst case before the apology is 2 × 15s = 30s (previously 3s).
+- `openrouterFastRoute.ts`: the GLM guard (pre-token, connect, and SSE idle)
+  goes from 2s to 5s. A unit test pins the invariant that it is no tighter
+  than the router's own no-progress bound.
+- `hedgedStream.ts`: added `onBranchFailure`. Both chat races now log
+  `cerebras_chat.hedge_branch_failed` (race, branch, error) unless the
+  caller aborted. The Qwen spill branch is renamed from `openrouter-glm` to
+  `openrouter-cerebras-spill`.
+- The healthy Cerebras path never arms the hedge and is unchanged. The worst
+  case before the apology is 2 × 15s = 30s (previously 3s).
 
-**Repro (local, watched fail then pass).**
+**Repro (local, watched fail then pass, prod bound defaults).**
 `back-end/src/tests/blackbox/chat-router-failover.blackbox.ts` drives
-`postMessage` on a seeded completed agent. The agent carries the exact prod
-router context, from the PII-scrubbed fixture
-`chat-router-failover-prod-e8f2279b.json`. The test replays recorded provider
-streams with their real inter-chunk timing, from
-`chat-router-failover-prod-e8f2279b-streams.json`: the live Cerebras stall,
-healthy Cerebras, and the GLM failover.
+`postMessage` on a seeded completed agent whose chat-model projection is the
+exact 30-message, 88,440-char prod router request
+(`chat-router-failover-prod-e8f2279b.json`; PII including the delivery
+street replaced with same-length stand-ins). It replays recorded provider
+streams with their real timing (`chat-router-failover-prod-e8f2279b-streams.json`):
+the Cerebras stall, healthy Cerebras, and the GLM failover.
 
-- Pre-fix:
-  - `FAIL exact prod follow-up escalates through the recorded GLM failover`
-    (got the apology after 3064ms).
-  - `FAIL a fully stalled first router attempt regenerates` (got the apology
-    after 3031ms).
-  - `FAIL exhausted router budget surfaces exactly one notice` (the first
-    stalled attempt must regenerate before the notice).
-  - The healthy case passed.
-- Post-fix: `PASS chat-router-failover (4 cases)`. The exact follow-up
-  escalated at 8399ms via `z-ai/glm-5.3-flash`. The reasoning cites 88
-  Howard, and the `cloud_agent` row and Temporal workflow both exist.
-- Live mode (`CHAT_ROUTER_FAILOVER_LIVE=1`): Cerebras is stalled in-process
-  and OpenRouter is real.
-  - Pre-fix: apology after 3066ms.
-  - Post-fix: 3 of 3 escalated in 6.3–6.9s, and in 8.06s through the
-    canonical blackbox runner.
+- `origin/main`: case (a) fails with the apology after 3064ms, case (b) after
+  3031ms, and case (d) because the first stalled attempt never regenerates.
+- Router fix only: (a) and (b) fail with the apology after about 10.05s; the
+  GLM branch dies to its 2s guard on both attempts.
+- Full fix: `PASS chat-router-failover (4 cases)`.
+  - (a) escalates at 8404ms via `z-ai/glm-5.3-flash`, and the reasoning cites
+    the corrected address.
+  - (b) regenerates after GLM hits the 5s guard on attempt 1.
+  - (c) healthy Cerebras escalates at about 1.0s.
+- Live mode (`CHAT_ROUTER_FAILOVER_LIVE=1`): direct Cerebras and every other
+  OpenRouter route are stalled, so the real GLM failover is the only path
+  that can serve.
+  - `origin/main`: apology after 3066ms. The 3s router bound is tighter than
+    either GLM guard.
+  - Full fix, through the canonical runner: 3 of 3 escalated on router
+    attempt 1, at 4979ms, 11093ms, and 7412ms.
 
 **Cemented in `/deploy`.**
 
 - Step 4a, backend coverage: auto-discovers the offline cases.
 - Step 4p, `scripts/run_deploy_live_probes.py`: runs the live probe as
   `chat-router-failover-live`, after `amplitude-live` because both boot the
-  runner's db push and trigger hooks. `/deploy` fails if the real failover
-  can no longer finish inside the router bounds on this exact context.
-- `chat-router-stream.blackbox.ts`: the string assertions now check the
-  profiled bounds and the regenerate budget, and that the keyword fallback is
-  absent.
+  runner's db push and trigger hooks. `/deploy` fails if real GLM can no
+  longer serve this exact context inside the bounds.
+- `chat-router-options.test.ts` pins the bounds and the GLM-guard invariant.
+  `hedged-stream.test.ts` pins branch-failure reporting.
 
-**10k agents.** One extra timer per in-flight router call, and at most one
-extra router attempt per turn on that agent. There is no shared state or
-fan-in.
+**10k agents.** No shared state, lock, or channel is added; all cost is per
+turn on the agent being served. During a Cerebras-wide stall each turn holds:
+
+- Two direct-Cerebras streams (router and speculative generator) until their
+  1.2s guards fire.
+- Up to four OpenRouter streams (Qwen spill and GLM, for router and
+  generator) for up to 15s per router attempt, previously 3s, with at most
+  one extra router attempt.
+
+The regenerate re-sends the 24k-token prompt and re-tries Cerebras first.
+There is no stall stickiness, so prompt tokens roughly double on a miss. The
+shared fan-in point is the OpenRouter account rate limit, which this raises
+in stream-seconds, not in request count.
+
+**Deeper cause, not fixed (needs schema/prompt approval).** GLM's 1447-char
+decision spends 660 chars on `query`, which the schema says should be an
+empty string for this action. `goal` is emitted after `query`, and partial
+recovery needs a complete `goal`, so the unused field sits on the critical
+path: about 2s at the measured rate. Reordering the fields or enforcing an
+empty `query` could bring the failover under the 5s lifecycle ratchet.
 
 **Known consequence.** `front-end/tests-e2e/chat-lifecycle-latency.spec.ts`
 (5s ratchet) measures the healthy path. While Cerebras is stalled it will now
-fail honestly, at about 6–9s. Previously the keyword fallback masked that.
+fail honestly, at about 5–11s. Previously the keyword fallback masked that.
+
+**Environment footgun.** The Cloud VM injects
+`OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS=20000`, which is not in any repo file
+and not on Render. It must be removed from the Cursor Cloud Agents secrets,
+or any test that does not strip it proves a configuration prod does not run.
