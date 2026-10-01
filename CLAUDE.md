@@ -437,12 +437,17 @@ change that can reduce the slice's end-to-end wall clock by more than 5% without
 changing benchmark tasks, prompts, model behavior, scoring, evidence standards,
 or result classification. A source change or INFRA failure restarts the ten-slice
 streak on a clean commit; forensic recovery never retroactively grants credit.
+For the current campaign, draw 100 distinct tasks from the canonical `daily`
+and `polar-bench` selectors. Reset the task pool whenever the streak restarts
+at slice zero; exclude successful names only within that active campaign.
+The daily selector has no compatible smoke tags in the current eligible pool,
+so do not add smoke tags or borrow tasks from another suite to manufacture
+coverage. The private campaign plan records the seed and each ten-task slice.
 The 2026-09-29 smoke-inclusive candidate `20260929-161610-10375` earned no
 credit: the planner benchmark root reported clean interrupt handling but its
 stack cleanup failed, leaving a worker alive and no guest ACK. The recovery
 path formerly mistook that narrower runner receipt for whole-guest cleanup and
-waited 600 seconds for runtime evidence after the guest reported terminal HTTP
-500. See `docs/rca/cases/2026-09-29-runner-receipt-accepted-before-stack-cleanup.md`.
+waited 600 seconds for runtime evidence after the guest reported terminal HTTP 500. See `docs/rca/cases/2026-09-29-runner-receipt-accepted-before-stack-cleanup.md`.
 Never release its exact pool claims or start another slice until stale-owner
 recovery verifies the guest and provider state. The planner pool VM also showed
 roughly 40–50% CPU pressure during its slow boot versus about 0–1% on comparable
@@ -588,7 +593,7 @@ of truth; do not duplicate them into other files.
 - **Toolchain:** `agents/venv` uses Python 3.11 (the pinned version; system
   `python3` may be newer). A few suites also need `ruby` + `rsync` installed
   (deploy-gate + cloudbench tests) — otherwise you'll see `ruby: command not
-  found` / `rsync: command not found`.
+found` / `rsync: command not found`.
 - **Cloud fleet controller:** Follow the long cloud fleet proof guidance in
   `docs/testing.md` for the dedicated-CPU controller requirement, exact-owner
   recovery, and warm snapshot reuse before starting width-10 validation.
@@ -629,7 +634,11 @@ TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
   working outbound access; HTTP capture does not replace live responses with
   mocks. On Andy's Mac, run that full suite natively when an isolated Linux
   container lacks those prerequisites, and retain Linux checks for the cloud
-  controller and affected platform-specific regressions. Keep Linux `TMPDIR`
+  controller and affected platform-specific regressions. In particular, run
+  `bash scripts/tests/cloudbench-multi-workstream.test.sh` on Linux at the
+  reviewed source: its fake guest executes the real Linux worker subreaper.
+  Darwin rejection tests do not substitute for that mandatory lifecycle gate.
+  Keep Linux `TMPDIR`
   outside the checkout (for example `/var/tmp`): production archive guards
   intentionally redirect paths under the repository.
 
@@ -1098,7 +1107,7 @@ Every LLM call in the agent pipeline, ordered by execution flow.
 
 | #   | Call Site                                                                             | Model        | claudeAuth | Forces Ultra | Context Composition                                                                                                                                                 | Est. Tokens |
 | --- | ------------------------------------------------------------------------------------- | ------------ | ---------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| S1  | **Explore Agent** `tools/spawn_agent.py` → `run_agent`                                | rose-1-flash  | **NO**     | no           | `EXPLORE_AGENT_SYSTEM_PROMPT` (300t) + **network_metadata (2k contacts, 5-15k t)** + local_data_summary + 4 tools (web_search, web_fetch, grep, attempt_completion) | 2-25k       |
+| S1  | **Explore Agent** `tools/spawn_agent.py` → `run_agent`                                | rose-1-flash | **NO**     | no           | `EXPLORE_AGENT_SYSTEM_PROMPT` (300t) + **network_metadata (2k contacts, 5-15k t)** + local_data_summary + 4 tools (web_search, web_fetch, grep, attempt_completion) | 2-25k       |
 | S2  | **Browser Agent** `tools/spawn_browser_agent_v3.py` → `call_llm_structured_streaming` | agent.model  | YES        | no           | `build_browser_system_prompt` (400t) + step history + screenshots (multimodal, heavy)                                                                               | 5-30k       |
 | S3  | **Sub-Agent** spawns full workflow (A1-A5 repeat)                                     | parent.model | YES        | no           | Inherits parent user_context (gatable via context_gates) + own conversation                                                                                         | recursive   |
 

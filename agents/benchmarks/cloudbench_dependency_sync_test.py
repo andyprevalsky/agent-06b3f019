@@ -20334,11 +20334,18 @@ RUN_LOG_TOKEN=run-token
 cloudbench_skip_held_driver_teardown_race() {{ return 1; }}
 # This fixture owns shutdown/run extraction. The adjacent real HTTP fixture
 # exercises the complete raw-log transport.
-cloudbench_collect_runtime_evidence() {{ return 0; }}
+cloudbench_collect_runtime_evidence() {{
+  [ -f "$ROOT_DIR/sealed-run.json" ]
+  mkdir -p "$1/runtime-evidence"
+  cp "$ROOT_DIR/sealed-run.json" "$1/runtime-evidence/run.json"
+}}
 confirm_guest_shutdown() {{
   printf '%s\\n' shutdown > "$ROOT_DIR/order"
-  printf '%s\\n' 'RUNSTAMP-run-token' 'RESULT-BEGIN' \\
+  printf '%s\\n' \\
     '{{"tasks":[{{"name":"fixture","passed":false,"status":"ACTIVE","benchmark_status":"CANCELLED"}}]}}' \\
+    > "$ROOT_DIR/sealed-run.json"
+  printf '%s\\n' 'RUNSTAMP-run-token' 'RESULT-BEGIN' \\
+    '{{"tasks":[{{"name":"fixture","passed":true,"status":"ACTIVE","benchmark_status":"PASSED"}}]}}' \\
     'RESULT-END' '::CLOUDBENCH-DONE:: token=run-token exit=1' > "$ROOT_DIR/remote.log"
 }}
 refresh_bench_log_to_eof() {{
@@ -20356,7 +20363,10 @@ printf '%s\\n' "$RUN_JSON" > "$ROOT_DIR/result.json"
     # post-poll collection block and its token-bound artifact parser execute.
     result = subprocess.run(
         ["bash", "-c", script, "watchdog-collection", str(tmp_path)],
-        text=True, capture_output=True, check=False, timeout=5,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
     )
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "order").read_text().splitlines() == ["shutdown", "collect"]

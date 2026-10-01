@@ -109,7 +109,18 @@ The main integration structural gate requires the canonical transaction wrapper.
 The staging read uses `runTransactionWithRetry` with one attempt and the same
 15-second maxWait/timeout, preserving the cancellation fence and prohibiting
 replay of partially executed CDP mutations. The unchanged memory and functional
-blackboxes are rerun on this integrated source.
+blackboxes passed on this integrated source. Peak RSS was 431 MB. The same
+memory test also passed with V8 coverage in 10.04 seconds. Parallel full-suite
+execution failed at the short injection deadlines while the unchanged isolated
+V8 test passed; fixture contention is inferred from that isolation and the
+subsequent scheduling result, rather than a measured database/CPU attribution.
+The
+existing runner's late exclusive phase now owns the memory and Steel injection
+domains after its fixture-writing pool drains. Their assertions, phase limits,
+RSS budget and domain coverage remain unchanged; both then passed in the full
+backend coverage run. That run still failed its separate live Kernel parity
+check, which is being investigated independently. This scheduling evidence does
+not establish the original live OOM's allocation source.
 
 ## Human feedback
 
