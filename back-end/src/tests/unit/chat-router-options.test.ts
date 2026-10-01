@@ -170,17 +170,19 @@ async function run(): Promise<void> {
       yield chunk;
     }
   }
+  const tricklingStartedAt = performance.now();
   const trickling = createRouterCompletionDeadline(150);
-  const tricklingStartedAt = Date.now();
   let trickled = 0;
   for await (const chunk of streamBeforeRouterCompletionDeadline(trickle(), trickling)) {
     trickled = chunk;
   }
-  const trickledFor = Date.now() - tricklingStartedAt;
+  const trickledFor = Math.round(performance.now() - tricklingStartedAt);
   assert.ok(trickled > 3, 'precondition: the stream kept making progress');
   assert.equal(trickling.expired(), true);
+  // libuv arms timers from the event loop's cached clock, so a 150ms timer can
+  // fire a few milliseconds before 150ms of wall time have elapsed.
   assert.ok(
-    trickledFor >= 150 && trickledFor < 400,
+    trickledFor >= 140 && trickledFor < 400,
     `the deadline runs from the attempt start; progress must not extend it (${trickledFor}ms)`
   );
 
