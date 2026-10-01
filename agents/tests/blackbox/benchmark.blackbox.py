@@ -10109,6 +10109,141 @@ async def test_api_headers_honors_internal_api_key_auth():
         bench._current_benchmark_user_id = original_current_user_id
 
 
+async def test_parallel_benchmark_user_scope_keeps_approval_auth_on_task_user():
+    """A sibling's process-wide user override must not redirect gate polling."""
+    import benchmarks.run_benchmark as bench
+    from types import SimpleNamespace
+
+    previous_env_user = os.environ.get("BENCHMARK_RUN_USER_ID")
+    previous_api_key = bench.API_KEY
+    previous_cached_headers = bench._cached_headers
+    previous_cached_user = bench._cached_headers_user_id
+    previous_auth_mode = bench._auth_mode
+    previous_task_names = bench.MINTED_AGENT_ACCOUNT_TASK_NAMES
+    previous_user_for_task = bench._benchmark_user_id_for_task
+    previous_run_minted = bench.run_minted_agent_account_task
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    first_checked = asyncio.Event()
+
+    async def fake_run_minted(_base_url, task, _keep_failed_agents):
+        if task.name == "first":
+            first_started.set()
+            await second_started.wait()
+            headers = await bench._api_headers()
+            first_checked.set()
+            return headers
+        await first_started.wait()
+        second_started.set()
+        await first_checked.wait()
+        return await bench._api_headers()
+
+    def fake_task(name):
+        return SimpleNamespace(
+            name=name, runner=None, requires_claude_code=False,
+            production_only=False, disable_purchase_reuse=False,
+        )
+
+    try:
+        bench.API_KEY = "benchmark-test-key"
+        bench._cached_headers = None
+        bench._cached_headers_user_id = None
+        bench._auth_mode = None
+        bench.MINTED_AGENT_ACCOUNT_TASK_NAMES = {"first", "second"}
+        bench._benchmark_user_id_for_task = lambda name, _base_url: f"{name}-user"
+        bench.run_minted_agent_account_task = fake_run_minted
+        first_headers, second_headers = await asyncio.gather(
+            bench.run_single_task("http://localhost:3001", fake_task("first")),
+            bench.run_single_task("http://localhost:3001", fake_task("second")),
+        )
+        assert first_headers["X-User-Id"] == "first-user"
+        assert second_headers["X-User-Id"] == "second-user"
+    finally:
+        bench.API_KEY = previous_api_key
+        bench._cached_headers = previous_cached_headers
+        bench._cached_headers_user_id = previous_cached_user
+        bench._auth_mode = previous_auth_mode
+        bench.MINTED_AGENT_ACCOUNT_TASK_NAMES = previous_task_names
+        bench._benchmark_user_id_for_task = previous_user_for_task
+        bench.run_minted_agent_account_task = previous_run_minted
+        if previous_env_user is None:
+            os.environ.pop("BENCHMARK_RUN_USER_ID", None)
+        else:
+            os.environ["BENCHMARK_RUN_USER_ID"] = previous_env_user
+
+
+async def test_benchmark_user_scope_covers_preflight_errors_and_default_tasks():
+    """Preflight errors and early returns cannot change a plain task's identity."""
+    import benchmarks.run_benchmark as bench
+    from types import SimpleNamespace
+
+    previous_task_names = bench.MINTED_AGENT_ACCOUNT_TASK_NAMES
+    previous_user_for_task = bench._benchmark_user_id_for_task
+    previous_run_minted = bench.run_minted_agent_account_task
+    previous_env_user = os.environ.get("BENCHMARK_RUN_USER_ID")
+    expected_default = getattr(
+        bench, "_default_benchmark_user_id", previous_env_user or bench.USER_ID,
+    )
+    plain_started = asyncio.Event()
+    synthetic_started = asyncio.Event()
+    concurrent = False
+
+    def fake_task(name, *, fail_preflight=False):
+        return SimpleNamespace(
+            name=name, runner=None, requires_claude_code=False,
+            production_only=False, disable_purchase_reuse=fail_preflight,
+            environment=None,
+        )
+
+    async def fake_run_minted(_base_url, task, _keep_failed_agents):
+        if concurrent and task.name == "plain":
+            plain_started.set()
+            await synthetic_started.wait()
+        elif concurrent:
+            await plain_started.wait()
+            synthetic_started.set()
+        return bench._current_benchmark_user_id()
+
+    try:
+        bench.MINTED_AGENT_ACCOUNT_TASK_NAMES = {"plain", "synthetic"}
+        bench._benchmark_user_id_for_task = (
+            lambda name, _base_url: "synthetic-user" if name == "synthetic" else None
+        )
+        bench.run_minted_agent_account_task = fake_run_minted
+        try:
+            await bench.run_single_task(
+                "http://localhost:3001", fake_task("synthetic", fail_preflight=True),
+            )
+        except RuntimeError as exc:
+            assert "disable_purchase_reuse requires" in str(exc)
+        else:
+            assert False, "Expected preflight failure"
+        assert await bench.run_single_task(
+            "http://localhost:3001", fake_task("plain"),
+        ) == expected_default
+
+        await bench.run_single_task("http://localhost:3001", fake_task("synthetic"))
+        assert await bench.run_single_task(
+            "http://localhost:3001", fake_task("plain"),
+        ) == expected_default
+
+        concurrent = True
+        plain_user, synthetic_user = await asyncio.gather(
+            bench.run_single_task("http://localhost:3001", fake_task("plain")),
+            bench.run_single_task("http://localhost:3001", fake_task("synthetic")),
+        )
+        assert plain_user == expected_default
+        assert synthetic_user == "synthetic-user"
+    finally:
+        bench.MINTED_AGENT_ACCOUNT_TASK_NAMES = previous_task_names
+        bench._benchmark_user_id_for_task = previous_user_for_task
+        bench.run_minted_agent_account_task = previous_run_minted
+        if previous_env_user is None:
+            os.environ.pop("BENCHMARK_RUN_USER_ID", None)
+        else:
+            os.environ["BENCHMARK_RUN_USER_ID"] = previous_env_user
+
+
 async def test_archive_agent_start_posts_agent_and_returns_fixture_ref():
     """Benchmark runs capture the start fixture immediately after agent setup."""
     import benchmarks.run_benchmark as bench
@@ -18501,6 +18636,14 @@ async def run_all_tests():
         test_primitive_uber_welcome_evidence_uses_exact_recipient,
     )
     await r.record_async("api_headers_internal_api_key", test_api_headers_honors_internal_api_key_auth)
+    await r.record_async(
+        "parallel_benchmark_user_scope",
+        test_parallel_benchmark_user_scope_keeps_approval_auth_on_task_user,
+    )
+    await r.record_async(
+        "benchmark_user_scope_preflight_error",
+        test_benchmark_user_scope_covers_preflight_errors_and_default_tasks,
+    )
     await r.record_async("archive_agent_start", test_archive_agent_start_posts_agent_and_returns_fixture_ref)
     await r.record_async("archive_agent_finalize", test_archive_agent_finalize_posts_task_and_returns_manifest_ref)
     await r.record_async("archive_agent_finalize_best_effort", test_archive_agent_finalize_failure_is_best_effort)
@@ -19468,6 +19611,10 @@ async def run_all_tests():
     r.record(
         "tamy_identity_fixture_declaration_drives_run_user",
         test_tamy_identity_fixture_declaration_drives_the_run_user,
+    )
+    r.record(
+        "sibling_cleanup_cannot_revert_run_identity",
+        test_sibling_task_cleanup_cannot_revert_a_concurrent_run_identity,
     )
     r.record(
         "live_fixture_auth_failure_is_fatal",
