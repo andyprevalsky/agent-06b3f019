@@ -346,6 +346,35 @@ class FailedStackRecoveryTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.verify_archive()
 
+    def test_failed_services_cannot_retire_with_unverified_provider_cleanup(self) -> None:
+        self.original["repo/.context/cloudbench/services.json"] = b'{"status":"failed"}'
+        self.original["repo/.context/cloudbench/stack.log"] = b"Worker cleanup failed\n"
+        self.make_capture()
+        self.assertEqual(self.verify_archive()["proof_credit"], 0)
+        receipt_path = self.out / "guest-cleanup.recovery-receipt.json"
+        manifest_path = self.out / "guest-cleanup.provider-manifest.json"
+        receipt_original = receipt_path.read_text()
+        manifest_original = manifest_path.read_text()
+        for mutation in ("missing-release", "wrong-receipt-kind", "wrong-manifest-kind", "stale-backend"):
+            with self.subTest(mutation=mutation):
+                receipt = json.loads(receipt_original)
+                manifest = json.loads(manifest_original)
+                if mutation == "missing-release":
+                    receipt["results"] = []
+                elif mutation == "wrong-receipt-kind":
+                    receipt["kind"] = "unverified-cleanup"
+                elif mutation == "wrong-manifest-kind":
+                    manifest["kind"] = "unrecognized-provider-manifest"
+                else:
+                    manifest["evidence"]["backend_log_sha256"] = "f" * 64
+                    receipt["manifest_sha256"] = cleanup.canonical_digest(manifest)
+                write(receipt_path, json.dumps(receipt))
+                write(manifest_path, json.dumps(manifest))
+                with self.assertRaises(AssertionError):
+                    self.verify_existing_archive()
+                write(receipt_path, receipt_original)
+                write(manifest_path, manifest_original)
+
 
 if __name__ == "__main__":
     unittest.main()

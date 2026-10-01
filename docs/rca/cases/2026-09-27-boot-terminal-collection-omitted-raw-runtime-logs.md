@@ -556,3 +556,46 @@ benchmark behavior must not be changed to manufacture success.
 ## Reusable lesson
 
 Preserve complete owner-bound runtime evidence before deleting each source, and keep evidence retention independent from truthful workload cleanup acknowledgement.
+
+## Review recurrence: completed standalone ownership poisoned the next admission
+
+On October 1, the actual boot admission preamble and owner writer reproduced
+`FileExistsError` when a completed standalone run reused the default output
+namespace. The prior immutable owner remained even after its pending marker
+was cleared. An initial per-token output-directory draft was rejected by
+independent review: a second run could bypass an unresolved first owner and
+reuse its Machine. That draft was exercised only in temporary fixtures and was
+removed before live allocation.
+
+Standalone admission now holds a nonblocking local `fcntl` lock while inspecting
+that same output namespace. An existing pending marker always rejects admission.
+A completed previous owner can move into `runtime-evidence-history/<old-token>`
+only after verifying its owner/capture identity, clean stack status, complete
+worker-log set, exact tree entries, sizes and hashes. The owner and sealed
+capture are renamed without changing their bytes. Missing owners, partial or
+mismatched captures, symlinks, archive collisions and lock contention fail closed.
+Fleet output ownership remains exclusive and cannot use this archival path.
+New owner and pending records are persisted before guest work is admitted.
+
+The final permanent nine-case test exercises the actual preamble and admission
+function, including unchanged rejection of pending/partial ownership, foreign
+capture identity, corrupt bytes, owner and capture symlinks, fleet reuse and a
+held admission lock. Its completed-reuse case fails on exact baseline
+`864644162722720784dd60447cd8d461cefa54de`; all eight refusal controls pass there.
+All nine cases pass on the corrected source in 2.70 seconds. An additional
+owning reproduction caught an unlisted symlink directory accepted by the first
+archival draft (0.21 seconds RED); the final exact-entry check closes that gap.
+Independent review reran the unchanged final test: nine passes in 1.26 seconds;
+the immutable baseline retained the expected one failure and eight passing
+refusal controls in 1.787 seconds. It confirmed source outside the admission
+helper and all prior test ASTs were unchanged.
+Tests remain in the existing registered `cloudbench_runtime_retention_test.py`,
+with no live API requests or added deploy stage. Private receipts/logs are under
+`.context/acceptance/proof84-standalone-archive-*`.
+
+Searches `runtime-evidence.owner FileExistsError standalone` and `prior run
+evidence output directory admission` identified this capture-ownership case as
+the recurrence. Work is bounded by one previous sealed capture (existing 512 MB
+ceiling) and one local namespace lock. At 10,000 agents there is no global
+registry, Machine inventory scan or per-agent shared lock. This causal admission
+proof grants no live fleet acceptance credit.

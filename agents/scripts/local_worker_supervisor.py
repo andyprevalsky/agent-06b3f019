@@ -114,8 +114,14 @@ def main() -> int:
                             pass
                 break
             time.sleep(0.05)
+        # Share the remaining five-second margin in --shutdown-timeout across
+        # all children; a kill request does not prove a native process exited.
+        reap_deadline = time.monotonic() + 5
         for process in processes:
-            if process.wait() != 0:
+            try:
+                if process.wait(timeout=max(0, reap_deadline - time.monotonic())) != 0:
+                    failed = True
+            except subprocess.TimeoutExpired:
                 failed = True
         for thread in threads:
             thread.join(timeout=2)

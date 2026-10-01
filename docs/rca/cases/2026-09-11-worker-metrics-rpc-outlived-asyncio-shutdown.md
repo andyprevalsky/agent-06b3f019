@@ -121,6 +121,35 @@ This does not convert the failed slice to a pass.
 The exact unchanged polar-bu-034 live task and a fresh ten-slice campaign remain
 required. Until those outcome and lifecycle gates pass, this case stays open.
 
+### 2026-10-01 review recurrence: failed metrics join skipped cleanup
+
+CodeRabbit finding 4151506632 exposed a missing exceptional join case. The
+permanent worker blackbox runs actual `worker.main` with a poller that waits for
+the real stop event and then raises. It checks both a clean worker return and
+an original startup error. The unchanged runtime failed in 5.83 seconds because
+the profiler was never disabled or dumped. After the fix, the identical test
+passed in 2.50 seconds: the poller is joined, the lag monitor is cancelled, the
+profiler finishes, and the final stopped log is emitted. A metrics-only failure
+still propagates after cleanup; an earlier worker failure remains primary.
+
+The earlier native-RPC matrix proves natural completion of successful and
+provider-rejected RPCs, but its poller never failed outside its internal retry
+handler. That omitted branch let the finally block replace earlier errors and
+skip later cleanup. The fix retains the same stop event, native deadlines and
+shutdown order, with constant per-worker state and no added provider calls.
+The review's separate claim about ordinary startup exceptions between task
+creation and the try is not established: there is no await in that interval.
+The intentional hard `os._exit` path is unchanged.
+
+Archive searches were `Worker shutdown pending metrics poller` and
+`supervisor teardown receipt cleanup signal`. Private RED/GREEN receipts are
+`.context/acceptance/proof84-worker-review-{red,green}.receipt.json`. Activate
+`agents/venv`, run from `agents/`, and invoke
+`test_worker_metrics_failure_preserves_primary_and_finishes_cleanup` from
+`tests/blackbox/worker.blackbox.py`; the test is also registered in the normal
+`python scripts/run_blackbox_tests.py worker` deploy gate. The original live
+benchmark outcome gap remains open.
+
 ## Human feedback
 
 Keep the normal 120-minute backstop and use five minutes temporarily for this

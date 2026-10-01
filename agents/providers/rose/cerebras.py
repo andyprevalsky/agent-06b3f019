@@ -39,7 +39,7 @@ _cooldown_reads: Dict[tuple, asyncio.Task] = {}
 
 
 def _reset_cerebras_cooldown_cache() -> None:
-    """Test-only reset; active read tasks must already have completed."""
+    """Test-only reset; active RPC tasks must already have completed."""
     _cooldowns.clear()
     _cooldown_reads.clear()
 
@@ -96,8 +96,9 @@ async def _cerebras_on_cooldown(scope: tuple, api_key: str) -> bool:
     if task is None:
         task = asyncio.create_task(read_shared())
         _cooldown_reads[scope] = task
-        task.add_done_callback(lambda done: _cooldown_reads.pop(scope, None)
-                               if _cooldown_reads.get(scope) is done else None)
+        task.add_done_callback(
+            lambda done: _cooldown_reads.pop(scope, None) if _cooldown_reads.get(scope) is done else None
+        )
     await asyncio.shield(task)
     return time.monotonic() < _cooldowns.get(scope, (0.0, 0.0))[0]
 
@@ -148,17 +149,26 @@ async def _mark_cerebras_cooldown(scope: tuple, api_key: str, seconds: float) ->
     if seconds <= 0:
         return
     _remember_cooldown(scope, seconds)
+    until = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+    await _publish_cerebras_cooldown(scope, api_key, until)
+
+
+async def _publish_cerebras_cooldown(scope: tuple, api_key: str, until: str) -> None:
     if not scope[0] or not api_key:
         return
-    until = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
     try:
         async with asyncio.timeout(_COOLDOWN_RPC_TIMEOUT_S):
             async with httpx.AsyncClient(timeout=_COOLDOWN_RPC_TIMEOUT_S) as client:
                 response = await client.post(
                     f"{scope[0]}/api/integrations/compute-code/token/rate-limited",
                     headers={"X-API-Key": api_key},
-                    json={"type": "cerebras", "source": "pool", "credentialId": scope[1],
-                          "model": scope[2], "rateLimitedUntil": until},
+                    json={
+                        "type": "cerebras",
+                        "source": "pool",
+                        "credentialId": scope[1],
+                        "model": scope[2],
+                        "rateLimitedUntil": until,
+                    },
                 )
                 response.raise_for_status()
     except Exception:
@@ -173,11 +183,7 @@ def _strip_cerebras_cache_control(value: Any) -> Any:
     and then falls through to OpenRouter. Keep text/image parts; drop the key.
     """
     if isinstance(value, dict):
-        return {
-            key: _strip_cerebras_cache_control(nested)
-            for key, nested in value.items()
-            if key != "cache_control"
-        }
+        return {key: _strip_cerebras_cache_control(nested) for key, nested in value.items() if key != "cache_control"}
     if isinstance(value, list):
         return [_strip_cerebras_cache_control(item) for item in value]
     return value
@@ -263,6 +269,8 @@ async def cerebras_complete(
         pool=pool_spec.name,
         model=model,
     )
+    cooldown_mark: Optional[asyncio.Task] = None
+    stream_completed = False
     try:
         async with post_cerebras_stream(
             body=body,
@@ -275,7 +283,15 @@ async def cerebras_complete(
             status = response.status_code
             cooldown_s = _provider_cooldown_seconds(response)
             if cooldown_s is not None:
-                await _mark_cerebras_cooldown(scope, backend_key, cooldown_s)
+                if status >= 400:
+                    await _mark_cerebras_cooldown(scope, backend_key, cooldown_s)
+                elif cooldown_s > 0:
+                    # Quota headers govern later calls, not the successful
+                    # response already streaming. Record locally before yield;
+                    # the existing bounded shared write can finish separately.
+                    _remember_cooldown(scope, cooldown_s)
+                    until = (datetime.now(timezone.utc) + timedelta(seconds=cooldown_s)).isoformat()
+                    cooldown_mark = asyncio.create_task(_publish_cerebras_cooldown(scope, backend_key, until))
             if status >= 400:
                 raise RoseError(
                     f"Cerebras {model} returned {status}",
@@ -289,5 +305,11 @@ async def cerebras_complete(
                 idle_timeout_s=idle_timeout_s,
             ):
                 yield chunk
+            stream_completed = True
     except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
         raise RoseError(f"Cerebras {model} connect/read error: {exc}") from exc
+    finally:
+        if cooldown_mark is not None:
+            if not stream_completed:
+                cooldown_mark.cancel()
+            await asyncio.gather(cooldown_mark, return_exceptions=True)

@@ -375,6 +375,10 @@ backstop after this validation. These are proof acceptance requirements, not
 changes to benchmark pass criteria or deploy-selection qualification.
 The live-query verifier also rejects an owned terminal `rose.complete.failed`
 inside the benchmark's execution window, even if three other calls completed.
+The benchmark blackbox gate runs the fast completed-query regressions: distinct
+requests sharing a span, duplicate trace views, missing or conflicting terminal
+evidence, and cache-only output. Keep these behavioral assertions in the existing
+gate; they require no model calls or separate verification stage.
 An ordinary task verdict cannot hide a model-request stall. Its `failed_queries`
 receipt identifies the exact request and route; foreign trees and post-execution
 cleanup failures cannot be borrowed into this progress check. A rejected primary

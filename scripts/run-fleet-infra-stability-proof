@@ -24,7 +24,7 @@
 # Env overrides: FLEET_INFRA_PROOF_{RUNS,WIDTH,SEED,TIMEOUT}
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
@@ -626,7 +626,7 @@ exit "$status"
 import os, select, sys
 from pathlib import Path
 complete = False
-with Path(sys.argv[1]).open() as handle:
+with Path(sys.argv[1]).open(encoding="utf-8", errors="replace") as handle:
     while True:
         chunk = handle.read()
         if chunk:

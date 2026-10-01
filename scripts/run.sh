@@ -2311,12 +2311,15 @@ cleanup() {
     SHUTTING_DOWN=true
     local cleanup_failed=false
     echo "🛑 Stopping all services... (triggered by: $(caller 0 2>/dev/null || echo 'EXIT trap'), DB_OWNED_BY_US=$DB_OWNED_BY_US)"
-    run_publish_stack_cleanup_status pending || return 1
+    if ! run_publish_stack_cleanup_status pending; then
+        echo "❌ could not publish pending stack cleanup status; continuing teardown" >&2
+        cleanup_failed=true
+    fi
     # Workers finalize recordings and close providers through this backend.
     # Drain their single signal owner while the backend/database remain alive.
     if ! run_drain_owned_agents; then
         cleanup_failed=true
-        run_publish_stack_cleanup_status failed
+        run_publish_stack_cleanup_status failed || true
         # A nonzero exit is a failed cleanup receipt, but a reaped worker must
         # not orphan the rest of the owned stack. Keep services for recovery
         # only when the supervisor's terminal state remains unproven.

@@ -2,9 +2,9 @@
 
 import asyncio
 import logging
+import sys
 from collections.abc import Coroutine
 from typing import Any
-
 
 _BROWSER_TERMINAL_IO_PREFIX = "browser-terminal-io:"
 _TASK_DRAIN_SECONDS = 2.0
@@ -20,10 +20,7 @@ async def _stop_loop_event_buses(loop: asyncio.AbstractEventLoop) -> list[str]:
     failure. Stop the registered buses through their public API first; a bus
     that still refuses to stop remains visible to the pending-task check.
     """
-    buses = [
-        bus for bus in list(getattr(loop, "_eventbus_instances", ()))
-        if getattr(bus, "_is_running", False)
-    ]
+    buses = [bus for bus in list(getattr(loop, "_eventbus_instances", ())) if getattr(bus, "_is_running", False)]
     if not buses:
         return []
     results = await asyncio.gather(
@@ -54,29 +51,27 @@ def run_worker_event_loop(main: Coroutine[Any, Any, Any]) -> Any:
         try:
             return loop.run_until_complete(main)
         finally:
+            primary_error = sys.exception()
             bus_stop_errors = loop.run_until_complete(_stop_loop_event_buses(loop))
             pending = asyncio.all_tasks(loop)
             for task in pending:
                 task.cancel()
             if pending:
-                _done, pending = loop.run_until_complete(
-                    asyncio.wait(pending, timeout=_TASK_DRAIN_SECONDS)
-                )
-            unexpected = [
-                task for task in pending
-                if not task.get_name().startswith(_BROWSER_TERMINAL_IO_PREFIX)
-            ]
+                _done, pending = loop.run_until_complete(asyncio.wait(pending, timeout=_TASK_DRAIN_SECONDS))
+            unexpected = [task for task in pending if not task.get_name().startswith(_BROWSER_TERMINAL_IO_PREFIX)]
             problems = []
             if unexpected:
                 problems.append(
-                    "left unrelated tasks pending: "
-                    + ", ".join(sorted(task.get_name() for task in unexpected))
+                    "left unrelated tasks pending: " + ", ".join(sorted(task.get_name() for task in unexpected))
                 )
             if bus_stop_errors:
                 problems.append("event bus stop failed: " + ", ".join(bus_stop_errors))
             if problems:
-                raise RuntimeError("Worker shutdown " + "; ".join(problems))
-            if pending:
+                shutdown_error = "Worker shutdown " + "; ".join(problems)
+                if primary_error is None:
+                    raise RuntimeError(shutdown_error)
+                _LOG.error(shutdown_error)
+            if pending and not unexpected:
                 # The browser activity has already recorded the timeout, stopped
                 # replay, and returned through the worker's explicit cleanup.
                 _LOG.warning(

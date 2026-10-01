@@ -116,7 +116,6 @@ from helpers import (
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.error_alert import report_failure_activity
 from helpers.generation_handoff import parse_shutdown_grace_seconds
-from helpers.worker_event_loop import run_worker_event_loop
 from helpers.llm import (
     call_planner_llm_activity,
     fetch_claude_max_token_activity,
@@ -140,6 +139,7 @@ from helpers.sms_activities import (
 from helpers.summarize import summarize_and_filter_links
 from helpers.update_tokens import update_agent_tree_cost_activity
 from helpers.worker_activation import wait_for_worker_build_activation
+from helpers.worker_event_loop import run_worker_event_loop
 from helpers.worker_generation import resolve_production_task_queue
 from helpers.world_model_runtime import world_model_step_activity
 from temporal_connection import temporal_connect_options
@@ -1440,6 +1440,8 @@ async def main():
         set_worker_status(False)
         raise
     finally:
+        primary_error = sys.exception()
+        metrics_error = None
         set_worker_status(False)
         # Drain detached browser cleanups so Steel/Playwright sessions and driver
         # PIDs aren't orphaned when the worker exits mid-teardown. Uses the drain
@@ -1452,6 +1454,9 @@ async def main():
         metrics_stop.set()
         try:
             await metrics_task
+        except Exception as error:
+            metrics_error = error
+            logger.warning("Metrics poller failed during shutdown", error=str(error))
         finally:
             lag_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -1462,6 +1467,8 @@ async def main():
             _profiler.dump_stats(out)
             logger.warning("cProfile stats dumped", path=out)
         logger.info("Worker stopped")
+        if metrics_error is not None and primary_error is None:
+            raise metrics_error
 
 
 if __name__ == "__main__":

@@ -27,7 +27,11 @@ def test_runtime_pending_registry_cannot_be_reaped(tmp_path: Path, mode: str) ->
     mutations = tmp_path / "mutations"
     function = _extract_fleet_function(FLEET.read_text(), "reap_registry_clones() {")
     result = subprocess.run(
-        ["bash", "-c", function + '''
+        [
+            "bash",
+            "-c",
+            function
+            + """
 registry_meta_value() { sed -n "s/^$2=//p" "$1"; }
 registry_machine_details() { echo 'stopped clone-a'; }
 fleet_registry_reconcile_mounted_volume() { echo vol_a; }
@@ -35,10 +39,19 @@ reap_machine() { echo destroy >> "$MUTATIONS"; }
 reap_volume() { echo volume >> "$MUTATIONS"; }
 fleet_audit_update_registry_clone() { :; }
 reap_registry_clones "$REGISTRY" "$MODE"
-'''],
-        env={**os.environ, "FLEET_OWNERSHIP_ROOT": str(registry.parent), "REGISTRY": str(registry),
-             "MODE": mode, "MUTATIONS": str(mutations)},
-        capture_output=True, text=True, timeout=10, check=False,
+""",
+        ],
+        env={
+            **os.environ,
+            "FLEET_OWNERSHIP_ROOT": str(registry.parent),
+            "REGISTRY": str(registry),
+            "MODE": mode,
+            "MUTATIONS": str(mutations),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
     )
     assert result.returncode != 0, result.stdout + result.stderr
     assert not mutations.exists(), "uncopied runtime evidence was destroyed"
@@ -56,7 +69,11 @@ def test_worker_capture_precedes_scale_down_destroy(tmp_path: Path, capture_ok: 
     (evidence / "owner.json").write_text("{}\n")
     function = _extract_fleet_function(FLEET.read_text(), "cleanup_failed_worker() {")
     result = subprocess.run(
-        ["bash", "-c", function + '''
+        [
+            "bash",
+            "-c",
+            function
+            + """
 worker_ledger_lock_acquire() { :; }
 worker_ledger_lock_release() { :; }
 fleet_registry_volume_for_id() { echo vol_a; }
@@ -68,10 +85,13 @@ reap_machine() { echo destroy >> "$EVENTS"; }
 fleet_audit_update_fresh_clone_by_id() { :; }
 fleet_registry_release_id() { :; }
 cleanup_failed_worker "$OUT" abc123
-'''],
-        env={**os.environ, "OUT": str(out), "EVENTS": str(tmp_path / "events"),
-             "CAPTURE_OK": str(int(capture_ok))},
-        capture_output=True, text=True, timeout=10, check=False,
+""",
+        ],
+        env={**os.environ, "OUT": str(out), "EVENTS": str(tmp_path / "events"), "CAPTURE_OK": str(int(capture_ok))},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
     )
     events = (tmp_path / "events").read_text().splitlines()
     assert events == (["capture", "destroy"] if capture_ok else ["capture"])
@@ -87,9 +107,11 @@ def primary_fixture(out: Path, token: str = "run-0") -> Path:
     (out / "runtime-evidence.owner.json").write_text(json.dumps(owner))
     files = {
         "services.json": json.dumps({"status": "stopped", "env": {"worker_processes": 2}}),
-        "run.json": '{"tasks": []}', "stack.log": "stack log\n",
+        "run.json": '{"tasks": []}',
+        "stack.log": "stack log\n",
         f"cloudbench-stack-cleanup-{token}.status": f"state=clean\ntoken={token}\n",
-        "logs/backend.log": "backend log\n", "logs/worker.log": "worker zero\n",
+        "logs/backend.log": "backend log\n",
+        "logs/worker.log": "worker zero\n",
         "logs/worker.1.log": "worker one\n",
     }
     manifest = {**owner, "files": {}}
@@ -101,7 +123,9 @@ def primary_fixture(out: Path, token: str = "run-0") -> Path:
     return root
 
 
-@pytest.mark.parametrize("fault", ["none", "live-machine", "foreign-volume", "foreign-owner", "archive", "credit", "successful-controller"])
+@pytest.mark.parametrize(
+    "fault", ["none", "live-machine", "foreign-volume", "foreign-owner", "archive", "credit", "successful-controller"]
+)
 def test_failed_controller_all_sealed_archive_retires_with_zero_credit(tmp_path: Path, fault: str) -> None:
     """A canceled collector can retain its latch after every guest seals."""
     owner = "a" * 32
@@ -146,9 +170,18 @@ def test_failed_controller_all_sealed_archive_retires_with_zero_credit(tmp_path:
         machines.append({"id": machine, "state": "stopped"})
         volumes.append({"id": volume, "attached_machine_id": machine})
     builder = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/cloudbench-build-interrupted-pool-archive.py"),
-         "--registry", str(registry), "--capture-dir", str(tmp_path / "unused-captures")],
-        capture_output=True, text=True, timeout=10, check=False,
+        [
+            sys.executable,
+            str(ROOT / "scripts/cloudbench-build-interrupted-pool-archive.py"),
+            "--registry",
+            str(registry),
+            "--capture-dir",
+            str(tmp_path / "unused-captures"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
     )
     assert builder.returncode == 0, builder.stderr
     assert json.loads(builder.stdout)["incomplete"] == 0
@@ -176,9 +209,13 @@ def test_failed_controller_all_sealed_archive_retires_with_zero_credit(tmp_path:
     machines_path, volumes_path = tmp_path / "machines.json", tmp_path / "volumes.json"
     machines_path.write_text(json.dumps(machines))
     volumes_path.write_text(json.dumps(volumes))
-    functions = "\n".join(_extract_fleet_function(FLEET.read_text(), name + "() {") for name in (
-        "registry_meta_value", "fleet_recovery_confirm_forensic_retirement"))
-    script = functions + f'''
+    functions = "\n".join(
+        _extract_fleet_function(FLEET.read_text(), name + "() {")
+        for name in ("registry_meta_value", "fleet_recovery_confirm_forensic_retirement")
+    )
+    script = (
+        functions
+        + f"""
 APP=bench-app
 FORENSIC_RETIREMENT_HELPER={shlex.quote(str(ROOT / "scripts/cloudbench-forensic-retirement.py"))}
 cloudbench_fsync_directory() {{ :; }}
@@ -190,7 +227,8 @@ fly_with_timeout() {{
     esac
 }}
 fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
-'''
+"""
+    )
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10, check=False)
     receipt_path = run / "_forensic/retirement-verified.json"
     if fault == "none":
@@ -204,7 +242,9 @@ fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
         assert latch.exists() and not receipt_path.exists()
 
 
-@pytest.mark.parametrize("corrupt", ["none", "missing", "hash", "symlink", "extra-worker", "wrong-owner", "borrowed-sibling"])
+@pytest.mark.parametrize(
+    "corrupt", ["none", "missing", "hash", "symlink", "extra-worker", "wrong-owner", "borrowed-sibling"]
+)
 def test_primary_retention_rechecks_complete_capture(tmp_path: Path, corrupt: str) -> None:
     out = tmp_path / "task"
     root = primary_fixture(out)
@@ -226,9 +266,14 @@ def test_primary_retention_rechecks_complete_capture(tmp_path: Path, corrupt: st
             manifest["machine_id"] = "def456"
             (root / "manifest.json").write_text(json.dumps(manifest))
     function = _extract_fleet_function(FLEET.read_text(), "cloudbench_validate_primary_runtime_evidence() {")
-    result = subprocess.run(["bash", "-c", function + '\ncloudbench_validate_primary_runtime_evidence "$OUT" abc123 run-0'],
-                            env={**os.environ, "OUT": str(out)}, capture_output=True, text=True,
-                            timeout=10, check=False)
+    result = subprocess.run(
+        ["bash", "-c", function + '\ncloudbench_validate_primary_runtime_evidence "$OUT" abc123 run-0'],
+        env={**os.environ, "OUT": str(out)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
     assert (result.returncode == 0) == (corrupt == "none"), result.stderr
 
 
@@ -243,7 +288,9 @@ def test_runtime_retention_latch_clears_only_after_all_owners(tmp_path: Path, fa
         (out / "runtime-evidence.owner.json").unlink()
     worker = out / "worker-runtime-evidence/def456"
     worker.mkdir(parents=True)
-    (worker / "owner.json").write_text(json.dumps({"version": 1, "machine_id": "def456", "primary_machine_id": "abc123", "run_token": "run-0"}))
+    (worker / "owner.json").write_text(
+        json.dumps({"version": 1, "machine_id": "def456", "primary_machine_id": "abc123", "run_token": "run-0"})
+    )
     if failure == "missing-worker-owner":
         (worker / "owner.json").unlink()
     registry = tmp_path / "registry"
@@ -252,10 +299,21 @@ def test_runtime_retention_latch_clears_only_after_all_owners(tmp_path: Path, fa
     (registry / "fresh/worker").write_text("source_machine_id=abc123\nmachine_id=def456\n")
     marker = registry / "runtime-evidence-unconfirmed"
     marker.touch()
-    functions = "\n".join(_extract_fleet_function(FLEET.read_text(), name + "() {") for name in (
-        "cloudbench_retain_runtime_evidence", "cloudbench_validate_primary_runtime_evidence",
-        "cloudbench_validate_worker_evidence_coverage", "cloudbench_collect_remaining_runtime_evidence"))
-    result = subprocess.run(["bash", "-c", functions + '''
+    functions = "\n".join(
+        _extract_fleet_function(FLEET.read_text(), name + "() {")
+        for name in (
+            "cloudbench_retain_runtime_evidence",
+            "cloudbench_validate_primary_runtime_evidence",
+            "cloudbench_validate_worker_evidence_coverage",
+            "cloudbench_collect_remaining_runtime_evidence",
+        )
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            functions
+            + """
 CHILD_OUT=("$OUT")
 CHILD_MACHINE=(abc123)
 FLEET_OWNER_TOKEN=run
@@ -265,10 +323,25 @@ cloudbench_capture_worker_runtime_evidence() {
     [ "$FAILURE" != worker ]
 }
 cloudbench_collect_remaining_runtime_evidence
-'''], env={**os.environ, "OUT": str(out), "EVENTS": str(tmp_path / "events"),
-           "FLEET_REGISTRY_PUBLISHED": "1", "FLEET_REGISTRY_DIR": str(registry), "FLEET_TEARDOWN_OWNERSHIP_DIR": str(registry),
-           "FAILURE": failure, "CLOUDBENCH_BOOT_LAUNCH": "1", "INFRA_PROBE": "0", "SKIP_AUTOSCALER": "0"},
-        capture_output=True, text=True, timeout=10, check=False)
+""",
+        ],
+        env={
+            **os.environ,
+            "OUT": str(out),
+            "EVENTS": str(tmp_path / "events"),
+            "FLEET_REGISTRY_PUBLISHED": "1",
+            "FLEET_REGISTRY_DIR": str(registry),
+            "FLEET_TEARDOWN_OWNERSHIP_DIR": str(registry),
+            "FAILURE": failure,
+            "CLOUDBENCH_BOOT_LAUNCH": "1",
+            "INFRA_PROBE": "0",
+            "SKIP_AUTOSCALER": "0",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
     assert (result.returncode == 0) == (failure == "none"), result.stderr
     assert marker.exists() == (failure != "none")
     if failure == "missing-worker-owner":
@@ -279,22 +352,35 @@ cloudbench_collect_remaining_runtime_evidence
 
 def test_worker_evidence_owner_is_immutable_before_launch(tmp_path: Path) -> None:
     function = _extract_fleet_function(FLEET.read_text(), "cloudbench_record_worker_evidence_owner() {")
-    command = ["bash", "-c", function + '\ncloudbench_record_worker_evidence_owner "$OUT" def456 abc123 run-0 workspace']
-    first = subprocess.run(command, env={**os.environ, "OUT": str(tmp_path)},
-                           capture_output=True, text=True, timeout=10, check=False)
+    command = [
+        "bash",
+        "-c",
+        function + '\ncloudbench_record_worker_evidence_owner "$OUT" def456 abc123 run-0 workspace',
+    ]
+    first = subprocess.run(
+        command, env={**os.environ, "OUT": str(tmp_path)}, capture_output=True, text=True, timeout=10, check=False
+    )
     assert first.returncode == 0, first.stderr
     path = tmp_path / "worker-runtime-evidence/def456/owner.json"
     original = path.read_bytes()
-    assert json.loads(original) == {"version": 1, "run_token": "run-0", "machine_id": "def456",
-                                   "primary_machine_id": "abc123", "workspace": "workspace"}
-    again = subprocess.run(command, env={**os.environ, "OUT": str(tmp_path)},
-                           capture_output=True, text=True, timeout=10, check=False)
+    assert json.loads(original) == {
+        "version": 1,
+        "run_token": "run-0",
+        "machine_id": "def456",
+        "primary_machine_id": "abc123",
+        "workspace": "workspace",
+    }
+    again = subprocess.run(
+        command, env={**os.environ, "OUT": str(tmp_path)}, capture_output=True, text=True, timeout=10, check=False
+    )
     assert again.returncode != 0
     assert path.read_bytes() == original
 
 
 @pytest.mark.parametrize("valid_copies", [True, False])
-def test_exact_recovery_consumes_runtime_receipt_without_repeating_guest_shutdown(tmp_path: Path, valid_copies: bool) -> None:
+def test_exact_recovery_consumes_runtime_receipt_without_repeating_guest_shutdown(
+    tmp_path: Path, valid_copies: bool
+) -> None:
     token = "a" * 32
     registry = tmp_path / token
     registry.mkdir()
@@ -302,12 +388,26 @@ def test_exact_recovery_consumes_runtime_receipt_without_repeating_guest_shutdow
     (audit / "pool").mkdir(parents=True)
     (audit / "fresh").mkdir()
     (audit / "meta").write_text(f"fleet_owner_token={token}\napp=app\n")
-    (registry / "meta").write_text(f"version=2\napp=app\nfleet_owner_token={token}\nhost=host\ncleanup_policy=reap\naudit_dir={audit}\n")
+    (registry / "meta").write_text(
+        f"version=2\napp=app\nfleet_owner_token={token}\nhost=host\ncleanup_policy=reap\naudit_dir={audit}\n"
+    )
     (registry / "runtime-evidence-unconfirmed").touch()
-    functions = "\n".join(_extract_fleet_function(FLEET.read_text(), name + "() {") for name in (
-        "registry_meta_value", "fleet_registry_cleanup_state", "exact_owner_pool_claim_ids",
-        "fleet_recovery_confirm_pool_claims", "recover_exact_stale_fleet_owner"))
-    result = subprocess.run(["bash", "-c", functions + '''
+    functions = "\n".join(
+        _extract_fleet_function(FLEET.read_text(), name + "() {")
+        for name in (
+            "registry_meta_value",
+            "fleet_registry_cleanup_state",
+            "exact_owner_pool_claim_ids",
+            "fleet_recovery_confirm_pool_claims",
+            "recover_exact_stale_fleet_owner",
+        )
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            functions
+            + """
 registry_owner_alive() { return 1; }
 release_cleanup_disk_reserve() { :; }
 acquire_registry_recovery_lock() { :; }
@@ -324,16 +424,34 @@ capacity_release_stale_owner_reservations() { :; }
 fleet_audit_finalize_recovered_registry() { :; }
 fleet_registry_remove_if_empty() { :; }
 recover_exact_stale_fleet_owner "$TOKEN"
-'''], env={**os.environ, "FLEET_OWNERSHIP_ROOT": str(tmp_path), "FLEET_AUDIT_ROOT": str(tmp_path / "audit"),
-           "FLEET_OWNER_HOST": "host", "APP": "app", "TOKEN": token,
-           "EVENTS": str(tmp_path / "events"), "VALID_COPIES": str(int(valid_copies))},
-        capture_output=True, text=True, timeout=10, check=False)
-    assert (tmp_path / "events").read_text().splitlines() == (["verify-evidence", "destroy"] if valid_copies else ["verify-evidence"]), result.stderr
+""",
+        ],
+        env={
+            **os.environ,
+            "FLEET_OWNERSHIP_ROOT": str(tmp_path),
+            "FLEET_AUDIT_ROOT": str(tmp_path / "audit"),
+            "FLEET_OWNER_HOST": "host",
+            "APP": "app",
+            "TOKEN": token,
+            "EVENTS": str(tmp_path / "events"),
+            "VALID_COPIES": str(int(valid_copies)),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert (tmp_path / "events").read_text().splitlines() == (
+        ["verify-evidence", "destroy"] if valid_copies else ["verify-evidence"]
+    ), result.stderr
     assert (result.returncode == 0) == valid_copies
     assert (registry / "runtime-evidence-unconfirmed").exists() != valid_copies
 
 
-@pytest.mark.parametrize("corrupt", ["none", "canonical-mismatch", "raw-log", "result-rejected", "omitted-task", "fsync-file", "fsync-directory"])
+@pytest.mark.parametrize(
+    "corrupt",
+    ["none", "canonical-mismatch", "raw-log", "result-rejected", "omitted-task", "fsync-file", "fsync-directory"],
+)
 def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_path: Path, corrupt: str) -> None:
     token = "a" * 32
     registry = tmp_path / "registries" / token
@@ -349,10 +467,16 @@ def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_pa
     (run / "_batch/benches.json").write_text('[{"name":"task","mode":"REAL"}]')
     contract = runpy.run_path(str(ROOT / "scripts/cloudbench_execution_provenance.py"))
     matrix = contract["build_task_matrix"](["task=real"])
-    config = contract["build_config"](contract["CONFIG_SCHEMA_VERSION"], ["task_count=1", "task_matrix_sha256=" + matrix["sha256"]])
-    provenance = {"schema_version": contract["EXECUTION_SCHEMA_VERSION"], "base_sha": "a" * 40,
-                  "workspace_patch_sha256": "none", "controller_snapshot": {"schema_version": contract["SNAPSHOT_SCHEMA_VERSION"], "sha256": "b" * 64},
-                  "config": config}
+    config = contract["build_config"](
+        contract["CONFIG_SCHEMA_VERSION"], ["task_count=1", "task_matrix_sha256=" + matrix["sha256"]]
+    )
+    provenance = {
+        "schema_version": contract["EXECUTION_SCHEMA_VERSION"],
+        "base_sha": "a" * 40,
+        "workspace_patch_sha256": "none",
+        "controller_snapshot": {"schema_version": contract["SNAPSHOT_SCHEMA_VERSION"], "sha256": "b" * 64},
+        "config": config,
+    }
     (run / "execution-provenance.json").write_text(json.dumps(provenance))
     (run / "execution-task-matrix.json").write_text(json.dumps(matrix))
     out = run / "task"
@@ -366,8 +490,12 @@ def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_pa
     latch.touch()
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
-    (snapshot / "cloudbench_execution_provenance.py").write_bytes((ROOT / "scripts/cloudbench_execution_provenance.py").read_bytes())
-    (snapshot / "cloudbench_result.py").write_text("import sys\nsys.exit(" + ("1" if corrupt == "result-rejected" else "0") + ")\n")
+    (snapshot / "cloudbench_execution_provenance.py").write_bytes(
+        (ROOT / "scripts/cloudbench_execution_provenance.py").read_bytes()
+    )
+    (snapshot / "cloudbench_result.py").write_text(
+        "import sys\nsys.exit(" + ("1" if corrupt == "result-rejected" else "0") + ")\n"
+    )
     if corrupt == "canonical-mismatch":
         (out / "cloudbench-run.json").write_text('{"different":true}')
     if corrupt == "raw-log":
@@ -385,17 +513,118 @@ def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_pa
             " return original(fd)\n"
             "os.fsync=injected\n"
         )
-    functions = "\n".join(_extract_fleet_function(FLEET.read_text(), name + "() {") for name in (
-        "registry_meta_value", "cloudbench_retain_runtime_evidence", "cloudbench_validate_primary_runtime_evidence",
-        "cloudbench_validate_worker_evidence_coverage", "cloudbench_collect_remaining_runtime_evidence",
-        "fleet_recovery_confirm_runtime_evidence"))
-    result = subprocess.run(["bash", "-c", functions + '''
+    functions = "\n".join(
+        _extract_fleet_function(FLEET.read_text(), name + "() {")
+        for name in (
+            "registry_meta_value",
+            "cloudbench_retain_runtime_evidence",
+            "cloudbench_validate_primary_runtime_evidence",
+            "cloudbench_validate_worker_evidence_coverage",
+            "cloudbench_collect_remaining_runtime_evidence",
+            "fleet_recovery_confirm_runtime_evidence",
+        )
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            functions
+            + """
 cloudbench_fsync_directory() { :; }
 fleet_recovery_confirm_runtime_evidence "$REGISTRY"
-'''], env={**os.environ, "REGISTRY": str(registry), "FLEET_AUDIT_ROOT": str(audit.parent),
-           "PYTHONPATH": str(injection),
-           "CLOUDBENCH_SCRIPT_SNAPSHOT": str(snapshot), "INFRA_PROBE": "0", "SKIP_AUTOSCALER": "0"},
-        capture_output=True, text=True, timeout=10, check=False)
+""",
+        ],
+        env={
+            **os.environ,
+            "REGISTRY": str(registry),
+            "FLEET_AUDIT_ROOT": str(audit.parent),
+            "PYTHONPATH": str(injection),
+            "CLOUDBENCH_SCRIPT_SNAPSHOT": str(snapshot),
+            "INFRA_PROBE": "0",
+            "SKIP_AUTOSCALER": "0",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
     assert (result.returncode == 0) == (corrupt == "none"), result.stderr
     assert latch.exists() == (corrupt != "none")
     assert (out / "runtime-evidence.pending").exists() == (corrupt != "none")
+
+
+@pytest.mark.parametrize(
+    "state", ["complete", "pending", "partial", "wrong-owner", "hash", "symlink", "capture-symlink", "fleet", "locked"]
+)
+def test_boot_admission_archives_only_verified_completed_standalone_runs(tmp_path: Path, state: str) -> None:
+    """One namespace remains fenced until its exact previous capture is complete."""
+    import fcntl
+
+    cloud = (ROOT / "scripts/run-bench-cloud").read_text()
+    start = cloud.index("# Markers the on-box per-run script prints")
+    end = cloud.index("DONE_MARKER=", start)
+    prepare = _extract_fleet_function(cloud, "cloudbench_prepare_runtime_evidence() {")
+    script = (
+        'set -eu\nMODE=run\nOUT_DIR="$1"\nCLOUDBENCH_BOOT_LAUNCH=1\n'
+        "FLEET_MACHINE_ID=abc123\n"
+        "cloudbench_skip_held_driver_teardown_race() { return 1; }\n"
+        + cloud[start:end]
+        + "\n"
+        + prepare
+        + '\ncloudbench_prepare_runtime_evidence\nprintf "%s\\n" "$OUT_DIR"\n'
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    env = {**os.environ, "CLOUDBENCH_FLEET_RUN_TOKEN": "fleet-one" if state == "fleet" else ""}
+
+    def admit():
+        return subprocess.run(
+            ["bash", "-c", script, "admission", str(output)], env=env, text=True, capture_output=True, timeout=5
+        )
+
+    first = admit()
+    assert first.returncode == 0, first.stderr
+    first_dir = Path(first.stdout.strip())
+    owner_file = first_dir / "runtime-evidence.owner.json"
+    original_owner = owner_file.read_bytes()
+    token = json.loads(original_owner)["run_token"]
+    capture = primary_fixture(first_dir, token)
+    owner_file.write_bytes(original_owner)
+    if state != "pending":
+        (first_dir / "runtime-evidence.pending").unlink()
+    if state == "partial":
+        (capture / "manifest.json").unlink()
+    elif state == "wrong-owner":
+        path = capture / "manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["machine_id"] = "def456"
+        path.write_text(json.dumps(manifest))
+    elif state == "hash":
+        (capture / "logs/backend.log").write_text("changed")
+    elif state == "symlink":
+        owner_file.rename(first_dir / "original-owner")
+        owner_file.symlink_to(first_dir / "original-owner")
+    elif state == "capture-symlink":
+        target = tmp_path / "outside"
+        target.mkdir()
+        (capture / "unlisted").symlink_to(target, target_is_directory=True)
+    before = {str(p.relative_to(first_dir)): p.read_bytes() for p in first_dir.rglob("*") if p.is_file()}
+    with (output / ".runtime-evidence-admission.lock").open("a") as lock:
+        if state == "locked":
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        second = admit()
+    if state != "complete":
+        assert second.returncode != 0, f"unresolved {state} ownership admitted another run"
+        assert all((first_dir / name).read_bytes() == data for name, data in before.items())
+        return
+    assert second.returncode == 0, second.stderr
+    assert Path(second.stdout.strip()) == first_dir == output
+    archived = output / "runtime-evidence-history" / token
+    assert (archived / "runtime-evidence.owner.json").read_bytes() == original_owner
+    for name, data in before.items():
+        if name.startswith("remote-logs/runtime-evidence/"):
+            assert (archived / name.removeprefix("remote-logs/")).read_bytes() == data
+    new_owner = owner_file.read_bytes()
+    assert json.loads(new_owner)["run_token"] != token
+    assert (output / "runtime-evidence.pending").read_bytes() == new_owner
+    assert not capture.exists()

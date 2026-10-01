@@ -100,6 +100,44 @@ exact benchmark-owned tree. Transcript reads use asynchronous concurrency;
 provider operations visit each exact session once. There is no global provider
 inventory or shared production database cleanup.
 
+### 2026-10-01 review recurrence: failed receipt publication and reaping
+
+CodeRabbit findings 4151506600 and 4151506729 identified two missed terminal
+failure paths. The permanent worker blackbox reproduced both on unchanged
+runtime. The local supervisor called `wait()` without a bound after issuing
+SIGKILL; a simulated unreaped native child rejected that unbounded wait in
+0.04 seconds. Its unchanged test passes in 0.01 seconds with a shared five-second
+reap deadline, using the existing outer shutdown-timeout margin. A timeout still
+fails the supervisor; signalling is never promoted into proof of process exit.
+
+The real Bash stack fixture then made the pending receipt's parent directory
+unavailable. Before the fix, `cleanup` returned before draining its worker or
+stopping the actual owned backend, reproducing the leak in 2.17 seconds. The
+identical test passes in 3.46 seconds: the worker finishes its delayed HTTP
+cleanup while the backend remains alive, the backend is reaped, and the receipt
+failure still returns nonzero. The only runtime change records that initial
+publication failure and continues the already-owned teardown. No missing
+receipt is synthesized, and failed cleanup never receives acceptance credit.
+
+A stricter version of the same fixture then invoked `cleanup` directly under
+`set -e` and combined worker failure with receipt failure. It exposed another
+unguarded failed-receipt publication before backend teardown: RED in 6.50 seconds.
+Guarding that publication preserves the recorded cleanup failure while allowing
+owned teardown to finish. Both zero and nonzero worker exits are retained in the
+final fixture. The final terminal receipt failure still returns nonzero.
+
+The previous tests covered worker errors and receipt success, but omitted the
+status sink itself failing and native reaping remaining incomplete after kill.
+Both regressions are registered in `agents/tests/blackbox/worker.blackbox.py` as
+`test_local_worker_supervisor_bounds_reaping_after_kill` and
+`test_stack_reaps_services_when_pending_receipt_cannot_be_written`. Private
+RED/GREEN receipts are `.context/acceptance/proof84-worker-review-{red,green}.receipt.json`.
+Archive searches were `Worker shutdown pending metrics poller` and `supervisor
+teardown receipt cleanup signal`. All state is per owned worker or stack; no
+per-agent requests, shared locks or live verification stage are added. Live
+fleet outcome proof remains outstanding.
+
+
 ## Human feedback
 
 The user required completion without permission prompts, ten consecutive
@@ -532,6 +570,78 @@ Private receipt `.context/acceptance/payment84-exact-recovery/recovery.receipt.p
 binds the source artifacts and all observations by SHA-256. No card, transfer,
 or payment mutation was required. The original gate remains rejected with zero
 credit, and provider recovery does not reconstruct missing durable traces.
-Independent receipt review and fresh complete payment gates are required;
-the existing case remains open. Future cancellation must target the sealed
-benchmark owner first and let that owner keep services available through drain.
+Independent receipt review passed the scoped recovery, including exact identities,
+artifact hashes and fresh terminal card/Stripe checks. Fresh complete payment gates
+remain required; the existing case remains open. Future cancellation must target
+the sealed benchmark owner first and keep services available through drain.
+
+## Validation outcome: corrected TRACE1 smoke hit transient R2 DNS failures
+
+Corrected smoke run `6b3758e0-e471-48d7-818e-31d08623bb75` on source
+`864644162722720784dd60447cd8d461cefa54de` retained its original stack and
+database after failing the gate. Native process evidence confirms
+`TRACE_ARCHIVE_ENABLED=1`. Six earlier automatic finalization events covered five
+distinct roots with nonempty R2 manifest references: webdecoy appeared twice, and
+chat-mode had no earlier finalization event in that capture. The final owning archive barrier nevertheless
+received five HTTP500 responses: one required public-manifest write failed, and
+four finalization-marker writes failed. All six exact provider cleanup receipts
+were retained. Task evaluator passes do not repair those infrastructure failures.
+
+The earliest observed storage boundary is `getaddrinfo ENOTFOUND` for the exact
+bucket-prefixed R2 virtual host at 01:20:09.972 UTC. Retained backend logs contain
+28 such failures through 03:02:21.215 UTC, including exhaustion of the existing
+bounded write retries. This is a different cause from inherited disabled capture
+and premature operator stack cancellation; no source repair is established.
+Archive searches covered missing final manifests, asynchronous finalization,
+storage-mode mismatch, and R2 DNS failures before this conclusion.
+
+Read-only checks later found that exact virtual host and its account endpoint
+resolving on both the Mac and the cloud controller. The unchanged SDK returned
+HTTP200 for all six encrypted and public manifests. A path-style comparison
+returned the same lengths, providing no current evidence for an addressing fix.
+The original `spawn-sub-agents` owner was then used for the unchanged real
+`archive_agent_finalize` call with its original passing evaluator outcome and
+force flag: the strict nonempty-reference assertion passed in 3.882 seconds.
+That postmortem success follows external storage recovery; it grants no credit
+to the original run, reconstructs no missing traces, and does not establish the
+cause of the transient DNS loss. Host-power event counts alone are not causal
+evidence.
+
+Private source hashes, diagnostic reports, exact-host observations and the
+owning unchanged reproduction are retained in
+`.context/acceptance/smoke-trace1-rca/`. Both failed local stacks were retained
+through the scoped recovery; fresh complete required gates and the consecutive
+cloud proof remain outstanding.
+No production source, prompt, model, task, evaluator, timeout or evidence
+requirement changed for this diagnosis.
+
+The sibling corrected payment gate retained exact before/after/final SQL and
+provider/payment receipts for its three reported roots. Its fourth task returned
+HTTP500 without an agent ID. The exact request correlation showed a committed
+root followed by a Temporal start attempt with no success event and the SDK's
+generic `Failed to start Workflow` message. The underlying RPC cause was not
+logged, so the observed R2 DNS failure is not asserted as this RPC's cause.
+The runner already rejects an unknown creation outcome and retains the failed
+stack; it did not acknowledge successful teardown for this missing root.
+
+Recovery queried only that captured root. The original SQL row was present and
+unsealed, with one agent, zero browser sessions and zero purchases. A fresh
+exact Temporal describe observed no execution. The canonical root DELETE
+returned HTTP204; subsequent exact SQL confirmed the deleted root, no unsealed
+descendants, no provider sessions and no payment obligations. A second exact
+Temporal describe still observed no execution. The original error and zero
+credit remain unchanged, and both stacks/databases remained retained during this
+check. This scoped recovery does not justify a network retry or a production-source change.
+
+After those checks, all six smoke roots and all four payment roots were queried
+again in their exact original databases. All ten trees were sealed, and their
+payment ledgers had zero pending obligations. Eight exact root workflows were
+terminal; chat-mode and the unreturned creation root had fresh NOT_FOUND
+observations, with the SQL deletion fences providing the durable admission
+boundary. Original context bytes and two complete owned-database snapshots
+were preserved privately before any service stop. The existing stack owner
+helper then verified each sealed PID/native birth identity and stopped only
+those two stacks. Clean receipts took 7.526 and 5.154 seconds; their recorded
+service identities, exact database containers and volumes were absent afterward.
+Appended terminal logs and the original snapshots remain retained. No unrelated
+process or database was touched, and neither failed gate receives proof credit.

@@ -41,6 +41,7 @@ from providers.rose.browser_use import (
     normalize_browser_use_response,
     normalize_browser_use_tool_calls,
 )
+from providers.rose.cerebras import cerebras_complete
 from providers.rose.claude_auth import (
     DEFAULT_REASONING_EFFORT,
     anthropic_api_key_complete,
@@ -66,8 +67,8 @@ from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
 )
-from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.streaming import _stream_progress
+from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.types import (
     ChunkKind,
     ClaudeAuthContext,
@@ -76,7 +77,6 @@ from providers.rose.types import (
     RoseResponse,
     StreamChunk,
 )
-from providers.rose.cerebras import cerebras_complete
 from providers.rose.waterfall import waterfall_complete
 
 logger = structlog.get_logger()
@@ -583,15 +583,14 @@ class RoseClient:
         agent_id = kwargs.get("agent_id")
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
-        exclude_anthropic_family = anthropic_family_excluded(
-            bool(kwargs.get("_exclude_anthropic_family", False))
-        )
+        exclude_anthropic_family = anthropic_family_excluded(bool(kwargs.get("_exclude_anthropic_family", False)))
         if exclude_anthropic_family != bool(kwargs.get("_exclude_anthropic_family", False)):
             kwargs = {**kwargs, "_exclude_anthropic_family": exclude_anthropic_family}
 
         if pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
-            async for chunk in self._complete_impl(**kwargs):
-                yield chunk
+            async with aclosing(self._complete_impl(**kwargs)) as live_stream:
+                async for chunk in live_stream:
+                    yield chunk
             return
 
         ctx = current_context()
@@ -610,8 +609,9 @@ class RoseClient:
                 }
 
         if ctx is None or not ctx.active or messages is None:
-            async for chunk in self._complete_impl(**kwargs):
-                yield chunk
+            async with aclosing(self._complete_impl(**kwargs)) as live_stream:
+                async for chunk in live_stream:
+                    yield chunk
             return
 
         key = ctx.llm_key(call_site, _fc_request_key_material(kwargs))
@@ -622,9 +622,7 @@ class RoseClient:
             try:
                 from providers.fast_cache.rose_cache import lookup_llm_cache
 
-                stored, hit_key = await lookup_llm_cache(
-                    ctx, call_site, _fc_request_key_material(kwargs)
-                )
+                stored, hit_key = await lookup_llm_cache(ctx, call_site, _fc_request_key_material(kwargs))
             except FastCacheLookupError as exc:
                 logger.warning(
                     "fast_cache.get_error",
@@ -661,14 +659,16 @@ class RoseClient:
                     hit_key=hit_key or key,
                     alias_hit=bool(hit_key and hit_key != key),
                 )
-                async with aclosing(_fc_replay(
-                    stored,
-                    call_site=call_site,
-                    complete_kwargs=kwargs,
-                    cache_key=key,
-                    hit_key=hit_key or key,
-                    reason="cache_hit",
-                )) as replay_stream:
+                async with aclosing(
+                    _fc_replay(
+                        stored,
+                        call_site=call_site,
+                        complete_kwargs=kwargs,
+                        cache_key=key,
+                        hit_key=hit_key or key,
+                        reason="cache_hit",
+                    )
+                ) as replay_stream:
                     async for chunk in replay_stream:
                         yield chunk
                 return
@@ -689,14 +689,16 @@ class RoseClient:
                             hit_key="scrape_passthrough",
                             reason="swf_scrape_passthrough",
                         )
-                        async with aclosing(_fc_replay(
-                            derived,
-                            call_site=call_site,
-                            complete_kwargs=kwargs,
-                            cache_key=key,
-                            hit_key="scrape_passthrough",
-                            reason="swf_scrape_passthrough",
-                        )) as replay_stream:
+                        async with aclosing(
+                            _fc_replay(
+                                derived,
+                                call_site=call_site,
+                                complete_kwargs=kwargs,
+                                cache_key=key,
+                                hit_key="scrape_passthrough",
+                                reason="swf_scrape_passthrough",
+                            )
+                        ) as replay_stream:
                             async for chunk in replay_stream:
                                 yield chunk
                         return
@@ -711,14 +713,16 @@ class RoseClient:
                             hit_key="terminal_passthrough",
                             reason="fm_terminal_passthrough",
                         )
-                        async with aclosing(_fc_replay(
-                            terminal,
-                            call_site=call_site,
-                            complete_kwargs=kwargs,
-                            cache_key=key,
-                            hit_key="terminal_passthrough",
-                            reason="fm_terminal_passthrough",
-                        )) as replay_stream:
+                        async with aclosing(
+                            _fc_replay(
+                                terminal,
+                                call_site=call_site,
+                                complete_kwargs=kwargs,
+                                cache_key=key,
+                                hit_key="terminal_passthrough",
+                                reason="fm_terminal_passthrough",
+                            )
+                        ) as replay_stream:
                             async for chunk in replay_stream:
                                 yield chunk
                         return
@@ -737,14 +741,16 @@ class RoseClient:
                         hit_key="trajectory_end_passthrough",
                         reason="fm_trajectory_end_passthrough",
                     )
-                    async with aclosing(_fc_replay(
-                        soft,
-                        call_site=call_site,
-                        complete_kwargs=kwargs,
-                        cache_key=key,
-                        hit_key="trajectory_end_passthrough",
-                        reason="fm_trajectory_end_passthrough",
-                    )) as replay_stream:
+                    async with aclosing(
+                        _fc_replay(
+                            soft,
+                            call_site=call_site,
+                            complete_kwargs=kwargs,
+                            cache_key=key,
+                            hit_key="trajectory_end_passthrough",
+                            reason="fm_trajectory_end_passthrough",
+                        )
+                    ) as replay_stream:
                         async for chunk in replay_stream:
                             yield chunk
                     return
@@ -766,14 +772,16 @@ class RoseClient:
                         hit_key="cold_namespace_passthrough",
                         reason="fm_cold_namespace_passthrough",
                     )
-                    async with aclosing(_fc_replay(
-                        soft,
-                        call_site=call_site,
-                        complete_kwargs=kwargs,
-                        cache_key=key,
-                        hit_key="cold_namespace_passthrough",
-                        reason="fm_cold_namespace_passthrough",
-                    )) as replay_stream:
+                    async with aclosing(
+                        _fc_replay(
+                            soft,
+                            call_site=call_site,
+                            complete_kwargs=kwargs,
+                            cache_key=key,
+                            hit_key="cold_namespace_passthrough",
+                            reason="fm_cold_namespace_passthrough",
+                        )
+                    ) as replay_stream:
                         async for chunk in replay_stream:
                             yield chunk
                     return
@@ -793,12 +801,13 @@ class RoseClient:
 
         structured_response_model = kwargs.get("response_model") is not None
         acc = _fc_empty()
-        async for chunk in self._complete_impl(**kwargs):
-            _fc_accumulate(acc, chunk)
-            if chunk.kind == "done" and ctx.should_write and not structured_response_model:
-                await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
-                logger.info("llm.cache.stored", call_site=call_site, key=key)
-            yield chunk
+        async with aclosing(self._complete_impl(**kwargs)) as live_stream:
+            async for chunk in live_stream:
+                _fc_accumulate(acc, chunk)
+                if chunk.kind == "done" and ctx.should_write and not structured_response_model:
+                    await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
+                    logger.info("llm.cache.stored", call_site=call_site, key=key)
+                yield chunk
 
     async def _complete_impl(
         self,
@@ -807,7 +816,9 @@ class RoseClient:
         messages: List[Dict[str, Any]],
         response_model: Optional[Type[BaseModel]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
-        context_tools: Optional[List[Dict[str, Any]]] = None,  # Declared-only tools legalizing forked tool history (never called)
+        context_tools: Optional[
+            List[Dict[str, Any]]
+        ] = None,  # Declared-only tools legalizing forked tool history (never called)
         tool_choice: Any = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
@@ -893,9 +904,7 @@ class RoseClient:
                         },
                         # Effective wire effort: callers may omit; body builders
                         # always stamp DEFAULT_REASONING_EFFORT (xhigh).
-                        "reasoning_effort": (
-                            effort if effort is not None else DEFAULT_REASONING_EFFORT
-                        ),
+                        "reasoning_effort": (effort if effort is not None else DEFAULT_REASONING_EFFORT),
                         "response_model": response_model.__name__ if response_model else None,
                         "direct_auth": {
                             "claude": claude_auth is not None,
@@ -1105,7 +1114,9 @@ class RoseClient:
               caps total time.
 
             Nonempty buffered tool-argument fragments are also real progress.
-            They refresh the same idle window without emitting partial tools.
+            They refresh a configured idle window without emitting partial
+            tools. When idle checks are disabled, TTFT still bounds the wait
+            for the first emitted productive chunk.
             Each HTTP attempt resets TTFT; metadata/keepalives do not refresh it.
             """
             nonlocal first_chunk_at, first_contentful_at, first_productive_kind
@@ -1114,17 +1125,20 @@ class RoseClient:
             ttft_budget = ttft_override if ttft_override is not None else ttft_timeout_s
             it = source.__aiter__()
             saw_productive_chunk = False
+            saw_emitted_productive_chunk = False
             attempt_started = time.monotonic()
             last_progress_at: Optional[float] = None
             productive_kinds = {"content", "reasoning", "tool_call", "codex_reasoning_item"}
 
             def note_progress(kind: str, size: int) -> None:
                 nonlocal saw_productive_chunk, attempt_started, last_progress_at
+                nonlocal saw_emitted_productive_chunk
                 nonlocal buffered_tool_argument_fragments, last_tool_argument_at
                 now = time.monotonic()
                 if kind == "attempt":
                     attempt_started = now
                     saw_productive_chunk = False
+                    saw_emitted_productive_chunk = False
                     last_progress_at = None
                     last_tool_argument_at = None
                 elif kind == "tool_arguments" and size > 0:
@@ -1160,14 +1174,18 @@ class RoseClient:
                     _stream_progress.reset(progress_token)
                 try:
                     while True:
-                        if saw_productive_chunk:
+                        using_idle_budget = saw_productive_chunk and (
+                            idle_timeout_s is not None or saw_emitted_productive_chunk
+                        )
+                        if using_idle_budget:
                             progress_timeout = idle_timeout_s
                             # Preserve consumer backpressure tolerance between
                             # normalized chunks, while refreshing a pending
                             # chunk only from actual parser progress.
                             progress_deadline = (
                                 max(wait_started, last_progress_at or wait_started) + progress_timeout
-                                if progress_timeout is not None else started + deadline_s
+                                if progress_timeout is not None
+                                else started + deadline_s
                             )
                         else:
                             progress_timeout = ttft_budget
@@ -1190,9 +1208,7 @@ class RoseClient:
                             break
                         now = time.monotonic()
                         if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
-                            _safe_heartbeat(
-                                f"rose.complete waiting call_site={call_site} request_id={rid}"
-                            )
+                            _safe_heartbeat(f"rose.complete waiting call_site={call_site} request_id={rid}")
                             last_heartbeat = now
                         # Recompute before declaring expiry: the parser may
                         # have consumed arguments without yielding a chunk.
@@ -1218,13 +1234,9 @@ class RoseClient:
                     return
                 if timed_out:
                     if outer_deadline_limited:
-                        raise RoseDeadlineError(
-                            f"rose.complete deadline exceeded after {deadline_s}s"
-                        )
-                    if saw_productive_chunk:
-                        raise RoseDeadlineError(
-                            f"rose.complete idle for {progress_timeout}s (deadline {deadline_s}s)"
-                        )
+                        raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s")
+                    if using_idle_budget:
+                        raise RoseDeadlineError(f"rose.complete idle for {progress_timeout}s (deadline {deadline_s}s)")
                     raise RoseStallError(f"rose.complete TTFT exceeded {ttft_budget}s")
                 assert chunk is not None
                 now = time.monotonic()
@@ -1258,6 +1270,7 @@ class RoseClient:
                             chunk_counts=dict(chunk_counts),
                         )
                     saw_productive_chunk = True
+                    saw_emitted_productive_chunk = True
                     last_progress_at = now
                 if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
                     _safe_heartbeat(f"rose.complete call_site={call_site} request_id={rid}")
@@ -1709,7 +1722,7 @@ class RoseClient:
                 active_route = "cerebras"
                 cerebras_yielded_any = False
                 try:
-                    async for chunk in _guarded(
+                    async with aclosing(
                         cerebras_complete(
                             pool_spec=pool_spec,
                             messages=messages,
@@ -1725,27 +1738,28 @@ class RoseClient:
                             per_step_timeout_s=ttft_timeout_s,
                             idle_timeout_s=idle_timeout_s,
                         )
-                    ):
-                        chunk = _with_timing_if_done(chunk)
-                        cerebras_yielded_any = True
-                        if chunk.kind == "metadata":
-                            metadata = dict(chunk.data)
-                            if claude_token_error is not None:
-                                metadata["claude_token_error"] = claude_token_error
-                            if gpt_token_error is not None:
-                                metadata["gpt_token_error"] = gpt_token_error
-                            chunk = StreamChunk(kind="metadata", data=metadata)
-                            if chunk.data.get("actual_model"):
-                                _seen_actual_model = chunk.data["actual_model"]
-                        elif chunk.kind == "usage":
-                            _emit_llm_cache(chunk.data)
-                            chunk = StreamChunk(
-                                kind="usage",
-                                data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
-                            )
-                        chunk = _with_cache_sequence(chunk)
-                        _record_dump_chunk(chunk)
-                        yield chunk
+                    ) as cerebras_source:
+                        async for chunk in _guarded(cerebras_source):
+                            chunk = _with_timing_if_done(chunk)
+                            cerebras_yielded_any = True
+                            if chunk.kind == "metadata":
+                                metadata = dict(chunk.data)
+                                if claude_token_error is not None:
+                                    metadata["claude_token_error"] = claude_token_error
+                                if gpt_token_error is not None:
+                                    metadata["gpt_token_error"] = gpt_token_error
+                                chunk = StreamChunk(kind="metadata", data=metadata)
+                                if chunk.data.get("actual_model"):
+                                    _seen_actual_model = chunk.data["actual_model"]
+                            elif chunk.kind == "usage":
+                                _emit_llm_cache(chunk.data)
+                                chunk = StreamChunk(
+                                    kind="usage",
+                                    data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                                )
+                            chunk = _with_cache_sequence(chunk)
+                            _record_dump_chunk(chunk)
+                            yield chunk
                     logger.info(
                         "rose.complete.cerebras.done",
                         request_id=rid,

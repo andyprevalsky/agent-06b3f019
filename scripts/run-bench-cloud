@@ -3209,19 +3209,97 @@ cloudbench_prepare_runtime_evidence() {  # before boot config/start; no guest wo
         CLOUDBENCH_BARRIER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" || return 1
     fi
     export CLOUDBENCH_BARRIER_TOKEN
-    python3 - "$OUT_DIR" "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" <<'PY'
+    python3 - "$OUT_DIR" "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" "${CLOUDBENCH_FLEET_RUN_TOKEN:+fleet}" <<'PY'
+import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 os.umask(0o077)
-output_dir, run_token, machine = sys.argv[1:]
+output_dir, run_token, machine, fleet = sys.argv[1:]
 assert re.fullmatch(r"[A-Za-z0-9._-]+", run_token) and machine
-intent = Path(output_dir) / "runtime-evidence.pending"
+assert not Path(output_dir).is_symlink()
+root = Path(output_dir).resolve(strict=True)
+intent = root / "runtime-evidence.pending"
 # The fleet owns deletion. Keep this independent of a truthful guest cleanup
 # acknowledgement: failed collection must retain the original volume.
 owner = intent.with_name("runtime-evidence.owner.json")
+capture = root / "remote-logs/runtime-evidence"
+if not fleet:
+    # Serialize only local admission. The pending owner fences the namespace
+    # after this short-lived lock exits, including an interrupted admission.
+    lock = os.open(root / ".runtime-evidence-admission.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    assert stat.S_ISREG(os.fstat(lock).st_mode)
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+assert not intent.exists() and not intent.is_symlink(), "previous runtime evidence is still pending"
+
+def read(path, ceiling=1048576):
+    assert path.resolve(strict=True) == path
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        assert stat.S_ISREG(info.st_mode) and info.st_size <= ceiling
+        data = stream.read(info.st_size + 1)
+        assert len(data) == info.st_size
+        return data
+
+def sync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+if owner.exists() or owner.is_symlink():
+    assert not fleet, "fleet runtime evidence ownership cannot be reused"
+    previous = json.loads(read(owner))
+    token = previous["run_token"]
+    assert previous["version"] == 1 and re.fullmatch(r"[0-9a-f]+", previous["machine_id"])
+    assert re.fullmatch(r"[A-Za-z0-9._-]+", token) and token not in (".", "..", run_token)
+    manifest = json.loads(read(capture / "manifest.json"))
+    assert all(manifest[key] == previous[key] for key in ("version", "machine_id", "run_token"))
+    services = json.loads(read(capture / "services.json"))
+    count = services["env"]["worker_processes"]
+    assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
+    cleanup_name = f"cloudbench-stack-cleanup-{token}.status"
+    expected = {"services.json", "run.json", "stack.log", cleanup_name, "logs/backend.log",
+                "logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
+    assert set(manifest["files"]) == expected
+    entries = list(capture.rglob("*"))
+    assert all(not path.is_symlink() for path in entries)
+    assert {str(path.relative_to(capture)) for path in entries} == expected | {"manifest.json", "logs"}
+    cleanup = dict(line.split("=", 1) for line in read(capture / cleanup_name).decode().splitlines())
+    assert cleanup["state"] == "clean" and cleanup["token"] == token
+    total = 0
+    for name, metadata in manifest["files"].items():
+        assert set(metadata) == {"bytes", "sha256"}
+        assert type(metadata["bytes"]) is int and metadata["bytes"] >= 0
+        total += metadata["bytes"]
+        assert total <= 512 * 1024 * 1024
+        path = capture / name
+        assert path.resolve(strict=True) == path
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+            before = os.fstat(stream.fileno())
+            assert stat.S_ISREG(before.st_mode) and before.st_size == metadata["bytes"]
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(65536), b""):
+                digest.update(chunk)
+            after = path.stat()
+            assert (before.st_ino, before.st_size, before.st_mtime_ns) == (after.st_ino, after.st_size, after.st_mtime_ns)
+            assert digest.hexdigest() == metadata["sha256"]
+    history = root / "runtime-evidence-history"
+    assert not history.is_symlink()
+    history.mkdir(exist_ok=True)
+    archive = history / token
+    archive.mkdir()
+    owner.rename(archive / owner.name)
+    capture.rename(archive / "runtime-evidence")
+    for directory in (archive, history, capture.parent, root):
+        sync_directory(directory)
+else:
+    assert not capture.exists() and not capture.is_symlink(), "runtime evidence has no matching owner"
 row = {"version": 1, "run_token": run_token, "machine_id": machine}
 for path in (owner, intent):
     with path.open("x") as output:
@@ -3229,11 +3307,7 @@ for path in (owner, intent):
         output.write("\n")
         output.flush()
         os.fsync(output.fileno())
-descriptor = os.open(intent.parent, os.O_RDONLY)
-try:
-    os.fsync(descriptor)
-finally:
-    os.close(descriptor)
+sync_directory(root)
 PY
 }
 

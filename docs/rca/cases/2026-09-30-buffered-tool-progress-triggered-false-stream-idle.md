@@ -89,6 +89,32 @@ At 10,000 agents the change adds constant work per argument fragment and one
 request-local callback; it adds no I/O, storage, locks, polling or model calls.
 Existing heartbeat cadence and provider concurrency remain unchanged.
 
+### 2026-10-01 review recurrence: parser progress disabled TTFT without idle checks
+
+CodeRabbit finding 4151506588 found that buffered argument progress switched the
+guard to its idle phase even when `idle_timeout_s=None`. With no idle budget,
+that prematurely replaced TTFT with the full request deadline before any
+productive normalized chunk was emitted. The final permanent test failed on
+immutable `864644162` in 0.158 seconds. Its real-parser fixtures require the
+unchanged virtual TTFT90 boundary for OpenAI, Anthropic and Responses streams.
+
+The guard now tracks emitted productive output separately. Buffered arguments
+still refresh a configured idle window; with idle checks disabled they cannot
+remove TTFT before productive output reaches the consumer. Each new provider
+attempt resets both states. A positive control retains supported unlimited idle
+waiting after real output, still bounded by the original whole-call deadline.
+No timeout constants, model inputs or completed-query semantics changed.
+
+Independent review reran the exact six sealed provider checks successfully in
+2.109 seconds, confirmed the frozen runtime/test hashes, and inspected the
+request-owned cancellation/join behavior. The new test is registered in the
+existing Rose blackbox. Private sealed RED/GREEN and independent receipts are
+under `.context/acceptance/provider-timing-review/`. Searches `Cerebras success
+quota headers TTFT` and `buffered tool arguments idle disabled deadline`
+identified these existing related cases. Additional state is constant per
+stream; no new provider calls, shared locks or verification stage are added.
+This causal proof does not establish the cause of the original live fleet stall.
+
 ## Human feedback
 
 Fix infrastructure only. Keep task definitions, prompts, models, evaluator

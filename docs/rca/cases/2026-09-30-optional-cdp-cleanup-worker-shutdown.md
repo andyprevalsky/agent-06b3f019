@@ -63,6 +63,31 @@ work rejection remains unchanged. Independent re-review ran all four worker
 regressions successfully and found no blockers. Final-source live fleet proof
 remains outstanding, so this case is mitigated pending that verification.
 
+### 2026-10-01 review recurrence: preserve the original failure
+
+CodeRabbit finding 4151506563 identified a second failure precedence issue in
+this same loop owner. The permanent `worker` blackbox now creates an unrelated,
+cancellation-resistant task and raises an original worker error. On unchanged
+runtime, the test failed in 0.53 seconds because shutdown replaced that error
+with its pending-task RuntimeError. The identical test passed in 0.45 seconds
+after preserving the original exception and logging the shutdown violation.
+Clean worker returns with unrelated pending work still fail closed.
+
+The earlier tests covered clean returns plus abandoned CDP work, but never the
+combination of a worker failure and a cleanup failure. This recurrence extends
+that existing owning suite; it adds no model requests or live benchmark stage.
+The new behavior stores one exception per worker and performs the same bounded
+shutdown work, independent of the number of agents.
+
+Archive searches were `Worker shutdown pending metrics poller` and
+`supervisor teardown receipt cleanup signal`. Private unchanged RED/GREEN
+receipts are `.context/acceptance/proof84-worker-review-{red,green}.receipt.json`;
+the exact command activates `agents/venv`, runs from `agents/`, and invokes
+`test_worker_event_loop_preserves_primary_failure_during_bad_shutdown` from
+`tests/blackbox/worker.blackbox.py`. Registration is in that file's
+`run_all_tests`, exercised by `python scripts/run_blackbox_tests.py worker`.
+The live fleet outcome requirement remains open.
+
 ## Human feedback
 
 Continue autonomously, preserve genuine evidence and exact-owner teardown,

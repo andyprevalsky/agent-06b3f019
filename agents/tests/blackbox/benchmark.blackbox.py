@@ -608,6 +608,19 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
         assert json.loads(live.stdout)["slices"][0]["names"] == ["polar-bu-070"]
 
 
+def test_successful_llm_evidence_is_in_permanent_gate():
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, str(repo_root / "scripts/tests/verify-successful-llm-queries.test.py")],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_cloudbench_codex_auth_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
@@ -18814,6 +18827,7 @@ async def run_all_tests():
     r.record(
         "live_query_proof_zero_spend_admission", test_live_query_proof_rejects_zero_spend_tasks_before_provisioning
     )
+    r.record("successful_llm_evidence_permanent_gate", test_successful_llm_evidence_is_in_permanent_gate)
     r.record(
         "cloudbench_patch_includes_untracked_files",
         test_cloudbench_worktree_patch_includes_tracked_and_untracked_files,

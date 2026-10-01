@@ -87,26 +87,27 @@ def verify_failed_stack_provider_archive(
     out: Path, row: dict[str, object], owner: str, run_id: str,
     originals: dict[str, bytes],
 ) -> None:
-    """Retire a stopped Machine whose required backend died before status flush.
+    """Retire a stopped Machine only after its exact provider cleanup is verified.
 
-    The stale running services.json is retained as original evidence. Only an
-    exact supervisor exit, stopped-Machine proof, and provider cleanup receipt
-    permit zero-credit retirement.
+    Original services.json bytes remain retained. A stale running status also
+    requires an exact supervisor exit; both paths require stopped-Machine proof
+    and an exact provider cleanup receipt before zero-credit retirement.
     """
     services = json.loads(originals["repo/.context/cloudbench/services.json"])
-    assert services["status"] == "running"
-    backends = [service for service in services["services"]
-                if service.get("name") == "back-end"]
-    assert len(backends) == 1 and type(backends[0].get("pid")) is int
-    stack = originals["repo/.context/cloudbench/stack.log"].decode("utf-8")
-    fatal = (f"back-end (PID {backends[0]['pid']}) exited with code 137 "
-             "— shutting down all services.")
-    assert fatal in stack and stack.find("Stopping all services...") > stack.find(fatal)
-    assert "original/repo/.context/cloudbench/run.json" in row["files"]
-    run = json.loads(originals["repo/.context/cloudbench/run.json"])
-    assert len(run["tasks"]) == 1
-    assert run["tasks"][0]["name"] == row["task"]
-    assert run["tasks"][0]["status"] == "ERROR"
+    assert services["status"] in {"running", "failed"}
+    if services["status"] == "running":
+        backends = [service for service in services["services"]
+                    if service.get("name") == "back-end"]
+        assert len(backends) == 1 and type(backends[0].get("pid")) is int
+        stack = originals["repo/.context/cloudbench/stack.log"].decode("utf-8")
+        fatal = (f"back-end (PID {backends[0]['pid']}) exited with code 137 "
+                 "— shutting down all services.")
+        assert fatal in stack and stack.find("Stopping all services...") > stack.find(fatal)
+        assert "original/repo/.context/cloudbench/run.json" in row["files"]
+        run = json.loads(originals["repo/.context/cloudbench/run.json"])
+        assert len(run["tasks"]) == 1
+        assert run["tasks"][0]["name"] == row["task"]
+        assert run["tasks"][0]["status"] == "ERROR"
 
     helper = runpy.run_path(str(Path(__file__).with_name("cloudbench-exact-session-cleanup.py")))
     provider = object_file(out / "guest-cleanup.provider-manifest.json")
@@ -734,13 +735,11 @@ def verify_interrupted_pool_evidence(
                         verify_quiesced_provider_archive(
                             out, row, owner, meta["run_id"])
                     else:
-                        if services["status"] == "running":
-                            verify_failed_stack_provider_archive(
-                                out, row, owner, meta["run_id"],
-                                captured_originals[row["task"]],
-                            )
-                        else:
-                            assert services["status"] == "failed"
+                        assert provider["kind"] == "provider-active-exact-manifest"
+                        verify_failed_stack_provider_archive(
+                            out, row, owner, meta["run_id"],
+                            captured_originals[row["task"]],
+                        )
                 else:
                     assert services["status"] == "stopped"
                     token = row["run_token"]

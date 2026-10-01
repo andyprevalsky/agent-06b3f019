@@ -79,6 +79,32 @@ promises globally zero429 nor turns a terminal model failure into valid proof.
 At10,000 agents the hot path has no RPC during known cooldown; clear-state reads
 are cached/singleflight and writes occur only when quota evidence changes.
 
+### 2026-10-01 review recurrence: successful quota headers delayed streaming
+
+CodeRabbit finding 4151506574 exposed that a successful response with exhausted
+quota headers awaited the shared cooldown POST before reading its ready SSE
+content. The final owning blackbox failed on immutable `864644162` with a
+TimeoutError after 0.109 seconds while the backend write was held. The unchanged
+fixture passes after separating local admission state from the stream-owned
+bounded shared write. The local cooldown is visible before content is emitted;
+the same existing POST runs concurrently with SSE consumption.
+
+The write remains owned by that generator: normal exhaustion joins it, and
+closure or cancellation cancels and joins it. Public live delegates explicitly
+close their inner generators. The regression checks actual POST task completion
+and cancellation state for direct and public close, cancel and normal completion
+(six paths), preserving request count and the error-response marking order.
+No module-wide detached task registry or worker pending-task exception is added.
+
+Independent review reran the exact six sealed focused checks successfully in
+2.109 seconds with all four source hashes unchanged. Tests are registered in the
+existing Rose blackbox; evidence is under
+`.context/acceptance/provider-timing-review/`, including sealed RED/GREEN and
+`independent.receipt.private.json`. Archive searches were `Cerebras success quota
+headers TTFT` and `buffered tool arguments idle disabled deadline`. This is a
+recurrence of the cooldown ownership boundary, with constant per-stream state,
+one existing bounded POST, zero live test requests and zero benchmark credit.
+
 ## Human feedback
 
 Use the existing waterfall to preemptively avoid rate-limited providers. Fix

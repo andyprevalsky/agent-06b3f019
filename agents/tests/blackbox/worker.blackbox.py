@@ -20,7 +20,7 @@ WORKER_PATH = Path(__file__).resolve().parents[2] / "worker.py"
 
 def test_worker_event_loop_closes_after_terminal_browser_io_times_out():
     """A cancellation-resistant CDP call cannot strand a cleaned worker."""
-    script = r'''
+    script = r"""
 import asyncio
 from unittest.mock import patch
 from domains.spawn_browser_agent_v3 import handler
@@ -49,10 +49,13 @@ async def main():
 
 run_worker_event_loop(main())
 print("process-exited", flush=True)
-'''
+"""
     result = subprocess.run(
-        [sys.executable, "-c", script], cwd=WORKER_PATH.parent,
-        capture_output=True, text=True, timeout=6,
+        [sys.executable, "-c", script],
+        cwd=WORKER_PATH.parent,
+        capture_output=True,
+        text=True,
+        timeout=6,
     )
     assert result.returncode == 0, result.stderr[-500:]
     assert "terminal-timeout\ncleanup-complete\n" in result.stdout
@@ -61,7 +64,7 @@ print("process-exited", flush=True)
 
 def test_worker_optional_cdp_timeout_preserves_resource_drain_and_exits():
     """Expired CDP children cannot delay recording cleanup or strand shutdown."""
-    script = r'''
+    script = r"""
 import asyncio
 from unittest.mock import patch
 from domains.spawn_browser_agent_v3 import handler
@@ -99,10 +102,13 @@ async def main():
 
 run_worker_event_loop(main())
 print("process-exited", flush=True)
-'''
+"""
     result = subprocess.run(
-        [sys.executable, "-c", script], cwd=WORKER_PATH.parent,
-        capture_output=True, text=True, timeout=8,
+        [sys.executable, "-c", script],
+        cwd=WORKER_PATH.parent,
+        capture_output=True,
+        text=True,
+        timeout=8,
     )
     assert result.returncode == 0, result.stderr[-500:]
     assert "recording-cleanup-complete" in result.stdout
@@ -110,7 +116,7 @@ print("process-exited", flush=True)
 
 
 def test_worker_event_loop_rejects_unrelated_pending_work():
-    script = r'''
+    script = r"""
 import asyncio
 from helpers.worker_event_loop import run_worker_event_loop
 
@@ -126,18 +132,52 @@ async def main():
     await asyncio.sleep(0)
 
 run_worker_event_loop(main())
-'''
+"""
     result = subprocess.run(
-        [sys.executable, "-c", script], cwd=WORKER_PATH.parent,
-        capture_output=True, text=True, timeout=6,
+        [sys.executable, "-c", script],
+        cwd=WORKER_PATH.parent,
+        capture_output=True,
+        text=True,
+        timeout=6,
     )
     assert result.returncode != 0
     assert "Worker shutdown left unrelated tasks pending: unrelated-work" in result.stderr
 
 
+def test_worker_event_loop_preserves_primary_failure_during_bad_shutdown():
+    script = r"""
+import asyncio
+from helpers import worker_event_loop
+from unittest.mock import patch
+async def main():
+    async def stubborn():
+        while True:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                pass
+    asyncio.create_task(stubborn(), name="unrelated-work")
+    await asyncio.sleep(0)
+    raise ValueError("original worker failure")
+with patch.object(worker_event_loop, "_TASK_DRAIN_SECONDS", 0.01):
+    try:
+        worker_event_loop.run_worker_event_loop(main())
+    except BaseException as error:
+        assert isinstance(error, ValueError), "shutdown replaced the original worker error"
+        assert str(error) == "original worker failure"
+    else:
+        raise AssertionError("worker failure was lost")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=WORKER_PATH.parent, capture_output=True, text=True, timeout=6
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+    assert "Worker shutdown left unrelated tasks pending" in result.stderr
+
+
 def test_worker_event_loop_stops_browser_event_buses_before_pending_check():
     """An idle browser-use bus is owned cleanup work, not an orphaned task."""
-    script = r'''
+    script = r"""
 from bubus import BaseEvent, EventBus
 from helpers.worker_event_loop import run_worker_event_loop
 
@@ -148,10 +188,13 @@ async def main():
 
 run_worker_event_loop(main())
 print("process-exited", flush=True)
-'''
+"""
     result = subprocess.run(
-        [sys.executable, "-c", script], cwd=WORKER_PATH.parent,
-        capture_output=True, text=True, timeout=6,
+        [sys.executable, "-c", script],
+        cwd=WORKER_PATH.parent,
+        capture_output=True,
+        text=True,
+        timeout=6,
     )
     assert result.returncode == 0, result.stderr[-500:]
     assert result.stdout.rstrip().endswith("process-exited")
@@ -355,7 +398,6 @@ def test_activity_admission_closes_on_cpu_pressure():
         pass
 
 
-
 def test_local_worker_supervisor_delivers_one_cancellation_and_waits_for_cleanup():
     """Repeated wrapper signals must not force-exit a worker during replay cleanup."""
     launcher = WORKER_PATH.parent / "scripts" / "run_local_worker.sh"
@@ -380,20 +422,26 @@ def test_local_worker_supervisor_delivers_one_cancellation_and_waits_for_cleanup
                 "while True: time.sleep(.01)\n"
             )
             process = subprocess.Popen(
-                ["bash", str(launcher)], cwd=root,
-                env={**os.environ, "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
-                     "WORKER_PROCESSES": str(count), "NAVI_WORKER_LOG_STREAM": "false",
-                     "NAVI_WORKER_LOG_FILE": str(root / "worker.log")},
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                ["bash", str(launcher)],
+                cwd=root,
+                env={
+                    **os.environ,
+                    "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
+                    "WORKER_PROCESSES": str(count),
+                    "NAVI_WORKER_LOG_STREAM": "false",
+                    "NAVI_WORKER_LOG_FILE": str(root / "worker.log"),
+                },
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             try:
                 deadline = time.monotonic() + 10
                 while not all((root / f"ready-{index}").exists() for index in range(count)):
                     assert process.poll() is None, "worker supervisor exited before readiness"
                     assert time.monotonic() < deadline, "worker fixture did not become ready"
-                    time.sleep(.02)
+                    time.sleep(0.02)
                 process.send_signal(signal.SIGTERM)
-                time.sleep(.05)
+                time.sleep(0.05)
                 process.send_signal(signal.SIGTERM)
                 assert process.wait(timeout=5) == 0, "repeat cancellation killed a cleanup in progress"
                 assert all((root / f"clean-{index}").read_text() == "1" for index in range(count))
@@ -403,14 +451,55 @@ def test_local_worker_supervisor_delivers_one_cancellation_and_waits_for_cleanup
                     process.wait(timeout=10)
 
 
-def _check_stack_worker_cleanup(worker_exit):
+def test_local_worker_supervisor_bounds_reaping_after_kill():
+    import importlib.util
+    from unittest.mock import Mock, patch
+
+    path = WORKER_PATH.parent / "scripts/local_worker_supervisor.py"
+    spec = importlib.util.spec_from_file_location("worker_supervisor_reaping_test", path)
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+    child = Mock(pid=987654321)
+    child.poll.return_value = None
+
+    def wait(timeout=None):
+        assert timeout is not None and 0 <= timeout <= 5, "post-kill wait was unbounded"
+        raise subprocess.TimeoutExpired("owned-worker", timeout)
+
+    child.wait.side_effect = wait
+    clock = iter((0.0, 0.0, 100000.0, 100000.0, 100000.0))
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        patch.dict(
+            os.environ,
+            {
+                "WORKER_PROCESSES": "2",
+                "NAVI_WORKER_LOG_STREAM": "false",
+                "NAVI_WORKER_LOG_FILE": str(Path(directory) / "worker.log"),
+            },
+        ),
+        patch.object(supervisor.subprocess, "Popen", side_effect=[child, OSError("spawn failed")]),
+        patch.object(supervisor.signal, "signal"),
+        patch.object(supervisor.os, "killpg") as kill,
+        patch.object(supervisor.time, "monotonic", side_effect=lambda: next(clock, 100000.0)),
+        patch.object(supervisor.time, "sleep"),
+    ):
+        assert supervisor.main() == 1
+    kill.assert_called_once_with(child.pid, signal.SIGKILL)
+    child.send_signal.assert_called_once_with(signal.SIGTERM)
+
+
+def _check_stack_worker_cleanup(worker_exit, bad_receipt=False):
     """Real Bash-owned children must finish a delayed HTTP cleanup before backend exit."""
     import shlex
+
     repository = WORKER_PATH.parent.parent
     source = (repository / "scripts/run.sh").read_text()
+
     def function(name):
         start = source.index(name + "() {")
-        return source[start:source.index("\n}", start) + 2]
+        return source[start : source.index("\n}", start) + 2]
+
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         (root / "expected-exit").write_text(str(worker_exit))
@@ -431,30 +520,59 @@ def _check_stack_worker_cleanup(worker_exit):
             "signal.signal(signal.SIGTERM,stop)\nPath('worker.ready').touch()\n"
             "while True: time.sleep(.05)\n"
         )
-        script = "\n".join([
-            "set -eo pipefail", f"SCRIPT_DIR={shlex.quote(str(repository / 'scripts'))}",
-            'source "$SCRIPT_DIR/lib/run-process-cleanup.sh"',
-            function("kill_tree"), function("kill_tree_hard"), function("cleanup"),
-            f"{shlex.quote(sys.executable)} backend.py &", "backend_fixture_pid=$!", 'printf "%s" "$backend_fixture_pid" > backend.pid',
-            f"{shlex.quote(sys.executable)} worker.py &", "AGENTS_PID=$!",
-            "trap 'kill \"$AGENTS_PID\" \"$backend_fixture_pid\" 2>/dev/null || true' EXIT",
-            "AGENTS_BIRTH=\"$(ps -p \"$AGENTS_PID\" -o lstart= | sed 's/^ *//;s/ *$//')\"",
-            'PIDS=("$backend_fixture_pid" "$AGENTS_PID")', "NAMES=(back-end agents)",
-            "SHUTTING_DOWN=false", "BENCHMARK_ISOLATED_RUN=true", "DB_OWNED_BY_US=false",
-            "USE_SYSTEM_PG=false", "SYSTEM_DB_OWNED_BY_US=false", "NGROK_CONFIG_FILE=", "FAIL_DIR=",
-            "RUN_STACK_CLEANUP_TOKEN=fixture", f"RUN_STACK_CLEANUP_STATUS_FILE={shlex.quote(str(root / 'stack.status'))}",
-            "BACKEND_PID=", "write_services_manifest() { :; }",
-            'for attempt in {1..100}; do [ ! -f worker.ready ] || [ ! -f backend.port ] || break; sleep .02; done',
-            "cleanup_code=0; cleanup || cleanup_code=$?",
-            'if kill -0 "$backend_fixture_pid" 2>/dev/null; then echo "owned backend survived before fixture safety trap" >&2; exit 99; fi',
-            'exit "$cleanup_code"',
-        ])
-        process = subprocess.Popen(["bash", "-c", script], cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        script = "\n".join(
+            [
+                "set -eo pipefail",
+                f"SCRIPT_DIR={shlex.quote(str(repository / 'scripts'))}",
+                'source "$SCRIPT_DIR/lib/run-process-cleanup.sh"',
+                function("kill_tree"),
+                function("kill_tree_hard"),
+                function("cleanup"),
+                f"{shlex.quote(sys.executable)} backend.py &",
+                "backend_fixture_pid=$!",
+                'printf "%s" "$backend_fixture_pid" > backend.pid',
+                f"{shlex.quote(sys.executable)} worker.py &",
+                "AGENTS_PID=$!",
+                "fixture_cleanup() { local code=$?; "
+                'if kill -0 "$backend_fixture_pid" 2>/dev/null; then '
+                'echo "owned backend survived before fixture safety trap" >&2; code=99; fi; '
+                'kill "$AGENTS_PID" "$backend_fixture_pid" 2>/dev/null || true; '
+                'wait 2>/dev/null || true; exit "$code"; }',
+                "trap fixture_cleanup EXIT",
+                'AGENTS_BIRTH="$(ps -p "$AGENTS_PID" -o lstart= | sed \'s/^ *//;s/ *$//\')"',
+                'PIDS=("$backend_fixture_pid" "$AGENTS_PID")',
+                "NAMES=(back-end agents)",
+                "SHUTTING_DOWN=false",
+                "BENCHMARK_ISOLATED_RUN=true",
+                "DB_OWNED_BY_US=false",
+                "USE_SYSTEM_PG=false",
+                "SYSTEM_DB_OWNED_BY_US=false",
+                "NGROK_CONFIG_FILE=",
+                "FAIL_DIR=",
+                "RUN_STACK_CLEANUP_TOKEN=fixture",
+                f"RUN_STACK_CLEANUP_STATUS_FILE={shlex.quote(str(root / ('missing/stack.status' if bad_receipt else 'stack.status')))}",
+                "BACKEND_PID=",
+                "write_services_manifest() { :; }",
+                "for attempt in {1..100}; do [ ! -f worker.ready ] || [ ! -f backend.port ] || break; sleep .02; done",
+                "cleanup" if bad_receipt else "cleanup_code=0; cleanup || cleanup_code=$?",
+                'if kill -0 "$backend_fixture_pid" 2>/dev/null; then echo "owned backend survived before fixture safety trap" >&2; exit 99; fi',
+                'exit "$cleanup_code"',
+            ]
+        )
+        process = subprocess.Popen(
+            ["bash", "-c", script],
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
         try:
             stdout, stderr = process.communicate(timeout=12)
-            assert process.returncode == (0 if worker_exit == 0 else 1), (stdout, stderr)
-            receipt = dict(line.split("=", 1) for line in (root / "stack.status").read_text().splitlines())
-            assert receipt["state"] == ("clean" if worker_exit == 0 else "failed")
+            assert process.returncode == (0 if worker_exit == 0 and not bad_receipt else 1), (stdout, stderr)
+            if not bad_receipt:
+                receipt = dict(line.split("=", 1) for line in (root / "stack.status").read_text().splitlines())
+                assert receipt["state"] == ("clean" if worker_exit == 0 else "failed")
             backend_pid = (root / "backend.pid").read_text()
             alive = subprocess.run(["ps", "-p", backend_pid, "-o", "stat="], capture_output=True, text=True)
             assert not alive.stdout.strip(), "owned backend survived worker cleanup failure"
@@ -465,6 +583,11 @@ def _check_stack_worker_cleanup(worker_exit):
             process.wait(timeout=5)
 
 
+def test_stack_reaps_services_when_pending_receipt_cannot_be_written():
+    for worker_exit in (0, 1):
+        _check_stack_worker_cleanup(worker_exit, bad_receipt=True)
+
+
 def test_stack_keeps_backend_available_until_owned_worker_cleanup_finishes():
     _check_stack_worker_cleanup(0)
 
@@ -473,10 +596,12 @@ def test_stack_reaps_other_services_and_preserves_failed_worker_receipt():
     _check_stack_worker_cleanup(7)
 
 
-def _cleanup_worker_port_fixture(root, process, identity, sockets, stop_handoff, handoff,
-                                 channel_path, channel_root, primary_error):
+def _cleanup_worker_port_fixture(
+    root, process, identity, sockets, stop_handoff, handoff, channel_path, channel_root, primary_error
+):
     """Keep independent fixture retirement failures from hiding the startup error."""
     import runpy
+
     errors = []
 
     def attempt(label, operation):
@@ -538,8 +663,11 @@ def _cleanup_worker_port_fixture(root, process, identity, sockets, stop_handoff,
             errors.append("primary descriptor handoff thread did not stop")
     attempt("channel unlink", lambda: channel_path.unlink(missing_ok=True))
     attempt("channel directory", channel_root.rmdir)
-    status = {"state": "failed_retained" if errors else "verified",
-              "supervisor_joined": process is None or process.poll() is not None, "cleanup_errors":errors.copy()}
+    status = {
+        "state": "failed_retained" if errors else "verified",
+        "supervisor_joined": process is None or process.poll() is not None,
+        "cleanup_errors": errors.copy(),
+    }
 
     def publish():
         pending = root / "fixture-cleanup.tmp"
@@ -669,14 +797,23 @@ def test_local_workers_do_not_alias_an_occupied_secondary_port():
         env = {
             **os.environ,
             "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
-            "WORKER_PROCESSES": "2", "SDK_METRICS_PORT": str(primary_port),
-            "HEALTH_CHECK_PORT": str(health_port), "NAVI_WORKER_LOG_STREAM": "false",
+            "WORKER_PROCESSES": "2",
+            "SDK_METRICS_PORT": str(primary_port),
+            "HEALTH_CHECK_PORT": str(health_port),
+            "NAVI_WORKER_LOG_STREAM": "false",
             "NAVI_WORKER_LOG_FILE": str(root / "worker.log"),
             "WORKER_FIXTURE_PRIMARY_CHANNEL": str(channel_path),
         }
         with (root / "launcher.log").open("wb") as output:
-            process = subprocess.Popen(["bash", str(launcher)], cwd=root, env=env,
-                                       stdout=output, stderr=subprocess.STDOUT, start_new_session=True, umask=0o077)
+            process = subprocess.Popen(
+                ["bash", str(launcher)],
+                cwd=root,
+                env=env,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                umask=0o077,
+            )
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if all((root / f"ready-{index}").exists() for index in range(2)):
@@ -684,8 +821,10 @@ def test_local_workers_do_not_alias_an_occupied_secondary_port():
             if process.poll() is not None or handoff_errors:
                 break
             time.sleep(0.02)
-        logs = "\n".join(f"{name}:\n" + ((root / name).read_text() if (root / name).exists() else "<missing>")
-                         for name in ("launcher.log", "worker.log", "worker.1.log"))
+        logs = "\n".join(
+            f"{name}:\n" + ((root / name).read_text() if (root / name).exists() else "<missing>")
+            for name in ("launcher.log", "worker.log", "worker.1.log")
+        )
         assert all((root / f"ready-{index}").exists() for index in range(2)), (
             f"Local workers did not become ready; retained evidence: {root}\n{logs}\n{handoff_errors}"
         )
@@ -698,13 +837,15 @@ def test_local_workers_do_not_alias_an_occupied_secondary_port():
         primary_error = error
         raise
     finally:
-        _cleanup_worker_port_fixture(root, process, identity, sockets, stop_handoff, handoff,
-                                     channel_path, channel_root, primary_error)
+        _cleanup_worker_port_fixture(
+            root, process, identity, sockets, stop_handoff, handoff, channel_path, channel_root, primary_error
+        )
 
 
 def _worker_port_regression_case(mode):
     """Drive the real launcher fixture through a stolen-port or early-exit boundary."""
     from unittest.mock import patch
+
     real_popen = subprocess.Popen
     captured = []
     retained = []
@@ -718,6 +859,7 @@ def _worker_port_regression_case(mode):
             path = Path(tempfile.mkdtemp(prefix="worker-port-control-", dir=artifact_root))
             retained.append(path)
             return str(path)
+
         def __exit__(self, *_args):
             return False
 
@@ -733,6 +875,7 @@ def _worker_port_regression_case(mode):
                         blocker.listen()
                     except OSError as error:
                         import errno
+
                         blocker.close()
                         assert error.errno == errno.EADDRINUSE
                         taken.append(False)
@@ -753,7 +896,10 @@ def _worker_port_regression_case(mode):
 
     failure = None
     try:
-        with patch.object(subprocess, "Popen", side_effect=launch), patch.object(tempfile, "TemporaryDirectory", RetainedDirectory):
+        with (
+            patch.object(subprocess, "Popen", side_effect=launch),
+            patch.object(tempfile, "TemporaryDirectory", RetainedDirectory),
+        ):
             try:
                 test_local_workers_do_not_alias_an_occupied_secondary_port()
             except Exception as error:
@@ -798,7 +944,9 @@ def test_local_worker_fixture_cleanup_faults_preserve_primary_error():
     tree = ast.parse(inspect.getsource(test_local_workers_do_not_alias_an_occupied_secondary_port))
     final = next(node.finalbody for node in ast.walk(tree) if isinstance(node, ast.Try) and node.finalbody)
     for disk_failure in (False, True):
-        root = Path(tempfile.mkdtemp(prefix="worker-cleanup-fault-", dir=WORKER_PATH.parent.parent / ".context/test-runs"))
+        root = Path(
+            tempfile.mkdtemp(prefix="worker-cleanup-fault-", dir=WORKER_PATH.parent.parent / ".context/test-runs")
+        )
         (root / "identity-0.json").write_text("{invalid")
         primary = RuntimeError("original worker startup error")
         process = Mock(pid=12345)
@@ -813,17 +961,28 @@ def test_local_worker_fixture_cleanup_faults_preserve_primary_error():
         channel_path.unlink.side_effect = OSError("socket unlink failed")
         channel_root = Mock()
         namespace = {
-            **globals(), "root":root, "process":process, "owner_identity":"fixture",
-            "primary_error":primary, "identity":{"main":Mock()}, "live":Mock(return_value=False),
-            "sockets":[bad_socket,good_socket], "stop_handoff":Mock(), "handoff":thread,
-            "channel_path":channel_path, "channel_root":channel_root,
-            "blocker":good_socket, "os":types.SimpleNamespace(killpg=Mock(side_effect=OSError("unverified group"))),
+            **globals(),
+            "root": root,
+            "process": process,
+            "owner_identity": "fixture",
+            "primary_error": primary,
+            "identity": {"main": Mock()},
+            "live": Mock(return_value=False),
+            "sockets": [bad_socket, good_socket],
+            "stop_handoff": Mock(),
+            "handoff": thread,
+            "channel_path": channel_path,
+            "channel_root": channel_root,
+            "blocker": good_socket,
+            "os": types.SimpleNamespace(killpg=Mock(side_effect=OSError("unverified group"))),
         }
         original_write = Path.write_text
+
         def write(path, *args, **kwargs):
             if disk_failure and path.name == "fixture-cleanup.tmp":
                 raise OSError("fixture disk write failed")
             return original_write(path, *args, **kwargs)
+
         raised = None
         with patch.object(Path, "write_text", write):
             try:
@@ -1018,6 +1177,64 @@ def test_worker_shutdown_joins_native_observability_requests():
             tests["test_worker_entrypoint_joins_inflight_metrics_rpc_before_exit"](outcome, phase)
 
 
+def test_worker_metrics_failure_preserves_primary_and_finishes_cleanup():
+    script = r"""
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+import worker
+
+async def scenario(primary):
+    original = ValueError("worker startup failed")
+    metrics_error = RuntimeError("metrics poller failed")
+    joined = asyncio.Event()
+    async def metrics(*args):
+        await args[-1].wait()
+        joined.set()
+        raise metrics_error
+    class TestWorker:
+        def __init__(self, *args, **kwargs):
+            self.is_running = not primary
+        async def run(self):
+            if primary:
+                raise original
+        async def shutdown(self):
+            pass
+    profiler, logger = Mock(), Mock()
+    with (
+        patch.dict(worker.os.environ, {"PROFILE_WORKER": "1", "TEMPORAL_WORKER_REQUIRE_ACTIVATION": "0"}),
+        patch("cProfile.Profile", return_value=profiler),
+        patch.object(worker, "logger", logger),
+        patch.object(worker, "_start_sdk_runtime", return_value=(None, 0)),
+        patch.object(worker, "run_health_server", return_value=SimpleNamespace(port=0)),
+        patch.object(worker.Client, "connect", AsyncMock(return_value=Mock())),
+        patch.object(worker, "set_temporal_client"),
+        patch.object(worker, "set_worker_status"),
+        patch.object(worker, "Worker", TestWorker),
+        patch.object(worker, "poll_queue_metrics", metrics),
+        patch.object(worker, "drain_background_browser_cleanups", AsyncMock()),
+    ):
+        try:
+            await worker.main()
+        except Exception as error:
+            assert error is (original if primary else metrics_error), "metrics replaced primary failure"
+        else:
+            raise AssertionError("worker failure was suppressed")
+    assert joined.is_set(), "metrics task did not join"
+    profiler.disable.assert_called_once()
+    profiler.dump_stats.assert_called_once()
+    assert any(call.args == ("Worker stopped",) for call in logger.info.call_args_list)
+    assert any(call.args == ("Metrics poller failed during shutdown",) for call in logger.warning.call_args_list)
+
+for primary in (False, True):
+    asyncio.run(scenario(primary))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=WORKER_PATH.parent, capture_output=True, text=True, timeout=8
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+
+
 def test_worker_cancellation_uses_application_heartbeat_cadence():
     """Run the native transport regression through the owning deploy domain."""
     import runpy
@@ -1058,23 +1275,31 @@ async def test_worker_metrics_stop_prevents_later_peer_and_provider_requests():
 
         http = SimpleNamespace(get=get, post=post)
         with (
-            patch.dict(os.environ, {
-                "FLY_APP_NAME": "worker-stop-fixture", "FLY_API_TOKEN": "fixture",
-                "FLY_MACHINE_ID": "fixture-owner", "TEMPORAL_WORKER_SURFACE_HASH": "",
-            }),
+            patch.dict(
+                os.environ,
+                {
+                    "FLY_APP_NAME": "worker-stop-fixture",
+                    "FLY_API_TOKEN": "fixture",
+                    "FLY_MACHINE_ID": "fixture-owner",
+                    "TEMPORAL_WORKER_SURFACE_HASH": "",
+                },
+            ),
             patch.object(worker, "_get_peer_ips", return_value=["::1", "::2", "::3", "::4"]),
         ):
             if phase == "memory":
                 await worker._get_fleet_memory_used_percent(http, 20, stopped)
             elif phase == "admission":
                 await worker._get_fleet_activity_admission_unavailable_count(
-                    http, local_activity_admission_open=True, current_machines=4, stop_event=stopped,
+                    http,
+                    local_activity_admission_open=True,
+                    current_machines=4,
+                    stop_event=stopped,
                 )
             else:
                 await worker._scale_fleet(4 if phase == "start" else 0, http, stopped)
-        assert [method for method, _ in calls] == (
-            ["get", "post"] if phase in ("start", "stop") else ["get"]
-        ), f"{phase}: another fleet request began after shutdown"
+        assert [method for method, _ in calls] == (["get", "post"] if phase in ("start", "stop") else ["get"]), (
+            f"{phase}: another fleet request began after shutdown"
+        )
 
 
 async def run_all_tests():
@@ -1091,20 +1316,54 @@ async def run_all_tests():
     r.record("worker_passes_sticky_queue_timeout_to_temporal", test_worker_passes_sticky_queue_timeout_to_temporal)
     r.record("activity_admission_closes_on_cpu_pressure", test_activity_admission_closes_on_cpu_pressure)
     r.record("local_workers_do_not_alias_occupied_ports", test_local_workers_do_not_alias_an_occupied_secondary_port)
-    r.record("local_worker_fixture_preserves_primary_socket_ownership", test_local_worker_fixture_preserves_primary_socket_ownership)
-    r.record("local_worker_fixture_retains_primary_failure", test_local_worker_fixture_retains_primary_failure_and_joins_owner)
+    r.record(
+        "local_worker_fixture_preserves_primary_socket_ownership",
+        test_local_worker_fixture_preserves_primary_socket_ownership,
+    )
+    r.record(
+        "local_worker_fixture_retains_primary_failure",
+        test_local_worker_fixture_retains_primary_failure_and_joins_owner,
+    )
     r.record("local_worker_fixture_cleanup_faults", test_local_worker_fixture_cleanup_faults_preserve_primary_error)
-    r.record("local_worker_single_cancellation_drains_cleanup", test_local_worker_supervisor_delivers_one_cancellation_and_waits_for_cleanup)
-    r.record("stack_keeps_backend_alive_for_worker_cleanup", test_stack_keeps_backend_available_until_owned_worker_cleanup_finishes)
-    r.record("stack_reaps_services_after_failed_worker", test_stack_reaps_other_services_and_preserves_failed_worker_receipt)
+    r.record(
+        "local_worker_single_cancellation_drains_cleanup",
+        test_local_worker_supervisor_delivers_one_cancellation_and_waits_for_cleanup,
+    )
+    r.record("local_worker_bounds_post_kill_reaping", test_local_worker_supervisor_bounds_reaping_after_kill)
+    r.record(
+        "stack_keeps_backend_alive_for_worker_cleanup",
+        test_stack_keeps_backend_available_until_owned_worker_cleanup_finishes,
+    )
+    r.record(
+        "stack_reaps_services_after_failed_worker", test_stack_reaps_other_services_and_preserves_failed_worker_receipt
+    )
+    r.record(
+        "stack_reaps_services_after_receipt_failure", test_stack_reaps_services_when_pending_receipt_cannot_be_written
+    )
     r.record("dynamic_worker_metrics_discoverable", test_dynamic_worker_metrics_are_discoverable_and_scrapable)
     r.record("dynamic_worker_metrics_bind_race", test_dynamic_worker_metrics_retry_only_address_collisions)
     r.record("dynamic_worker_health_bound_port", test_dynamic_worker_health_server_reports_the_bound_port)
-    r.record("worker_shutdown_joins_native_observability_requests", test_worker_shutdown_joins_native_observability_requests)
-    r.record("worker_terminal_browser_io_cannot_strand_cleanup", test_worker_event_loop_closes_after_terminal_browser_io_times_out)
-    r.record("worker_optional_cdp_timeout_preserves_resource_drain", test_worker_optional_cdp_timeout_preserves_resource_drain_and_exits)
+    r.record(
+        "worker_shutdown_joins_native_observability_requests", test_worker_shutdown_joins_native_observability_requests
+    )
+    r.record(
+        "worker_metrics_failure_finishes_cleanup", test_worker_metrics_failure_preserves_primary_and_finishes_cleanup
+    )
+    r.record(
+        "worker_terminal_browser_io_cannot_strand_cleanup",
+        test_worker_event_loop_closes_after_terminal_browser_io_times_out,
+    )
+    r.record(
+        "worker_optional_cdp_timeout_preserves_resource_drain",
+        test_worker_optional_cdp_timeout_preserves_resource_drain_and_exits,
+    )
     r.record("worker_loop_rejects_unrelated_pending_work", test_worker_event_loop_rejects_unrelated_pending_work)
-    r.record("worker_loop_stops_browser_event_buses", test_worker_event_loop_stops_browser_event_buses_before_pending_check)
+    r.record(
+        "worker_loop_preserves_primary_failure", test_worker_event_loop_preserves_primary_failure_during_bad_shutdown
+    )
+    r.record(
+        "worker_loop_stops_browser_event_buses", test_worker_event_loop_stops_browser_event_buses_before_pending_check
+    )
     r.record("worker_cancellation_heartbeat_cadence", test_worker_cancellation_uses_application_heartbeat_cadence)
     await r.record_async(
         "worker_metrics_stop_prevents_later_fleet_requests",

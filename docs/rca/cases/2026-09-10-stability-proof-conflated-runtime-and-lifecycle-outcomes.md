@@ -120,6 +120,31 @@ the change and pass afterwards. Completed siblings retain their outcomes.
 
 These offline tests are review evidence, not live stability-slice credit.
 
+## Review recurrence: path and diagnostic representation
+
+The October 1 review produced two actual false-INFRA reproductions through the
+real stability-proof CLI and existing fake Fleet. A symlinked checkout supplied
+logical workspace paths to classification while the recorded identity was
+physical. Separately, one invalid UTF-8 diagnostic byte crashed the log relay
+with `UnicodeDecodeError` before an otherwise valid evaluated slice could be
+classified. Both unchanged reproductions exited 1 with zero accepted slices
+(1.152 and 0.681 seconds respectively).
+
+The proof now establishes its physical checkout path once and decodes diagnostic
+relay output with replacement while preserving the original raw log. Exact
+owner, lifecycle, task verdict and evidence assertions remain unchanged. The
+same reproductions now each accept the evaluated task failure and verified
+teardown (1.051 and 1.067 seconds). Both scenarios are permanently in
+`scripts/tests/fleet-infra-stability-proof.test.sh`; that complete existing suite
+also passes. No model calls or live benchmark stages were added.
+
+Archive searches were `UnicodeDecodeError slice relay` and `workspace_root
+symlink proof classification`; the optional-artifact case is a relative, while
+this is another representation error at this case's classification boundary.
+At 10,000 agents the change adds no shared state or per-agent work: one checkout
+resolution per proof and the same bounded diagnostic stream. These offline
+checks grant no live fleet acceptance credit.
+
 ## Human feedback
 
 The user required finishing PR #1299 and explicitly said to stop asking for

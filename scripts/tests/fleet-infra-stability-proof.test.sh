@@ -290,6 +290,9 @@ if teardown != "missing":
     }))
 PY
 echo "🔏 execution provenance: $run_dir/execution-provenance.json"
+if [ "${FLEET_STABILITY_FAKE_BINARY_LOG:-0}" = 1 ]; then
+  printf '\377controller diagnostic\n'
+fi
 if [ -n "${FLEET_STABILITY_FAKE_NESTED_PROVENANCE:-}" ]; then
   python3 - "$run_dir" <<'PY'
 import json
@@ -317,6 +320,25 @@ if [ "${FLEET_STABILITY_FAKE_INFRA_SLICE:-}" = "$FLEET_STABILITY_SLICE" ] \
 fi
 SH
 chmod +x "$tmp/fake-fleet"
+
+# Transport/log representation must not reject genuine evaluated task failures.
+ln -s "$ROOT_DIR" "$tmp/linked-checkout"
+for variant in symlink binary-log; do
+  proof_entry="$PROOF"
+  binary_log=0
+  if [ "$variant" = symlink ]; then
+    proof_entry="$tmp/linked-checkout/scripts/run-fleet-infra-stability-proof"
+  else
+    binary_log=1
+  fi
+  FLEET_STABILITY_FAKE_BINARY_LOG="$binary_log" \
+  FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/representation-$variant" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$proof_entry" --capability --runs 1 --width 2 --seed 13 \
+    >"$tmp/representation-$variant.log" 2>&1 \
+    || fail "$variant representation rejected a verified evaluated slice"
+done
 
 mkdir "$tmp/slow-log-bin"
 cat >"$tmp/slow-log-bin/tee" <<'SH'

@@ -193,6 +193,36 @@ validate together. Native inventory and original archive hashes remain
 mandatory. This extends the existing recovery case rather than treating the
 backend's unexplained SIGKILL as fixed.
 
+### Failed services bypassed exact provider receipt validation
+
+The October 1 independent review found that the interrupted-pool verifier
+validated an active provider manifest and its release receipt when the original
+services status was stale `running`, but accepted `failed` services without
+those checks. The stopped Machine alone does not prove that its external
+provider sessions were released. This could retire an interrupted owner with
+zero benchmark credit while silently dropping its provider cleanup obligation.
+
+Two archive searches, `forensic retirement failed services tampered receipt`
+and `provider manifest cleanup retirement stopped receipt validation bypass`,
+identified this existing recovery case. The actual public verifier reproduction
+is `python3 scripts/tests/cloudbench-prestack-recovery.test.py
+FailedStackRecoveryTest.test_failed_services_cannot_retire_with_unverified_provider_cleanup`.
+Its unchanged native archive fixture accepted all four corruptions before the
+fix: an empty release list, an unrelated receipt kind, an unknown manifest kind,
+and a backend-log digest that did not match the retained original bytes. Each
+negative assertion failed with `AssertionError not raised`; the complete
+positive fixture remained accepted with zero proof credit.
+
+Both `failed` and stale `running` services now require the same recomputed
+active provider manifest, original backend-byte binding, stopped-Machine proof,
+and exact provider release receipt. The stale-running supervisor exit and
+single-task `ERROR` guards remain unchanged. The identical regression passes
+afterward. The focused prestack, quiesced, prestart, and rejected-start suites
+pass 22 tests in total. At 10,000 agents, this adds only validation of each
+owner's already captured bytes and exact recorded sessions; it makes no new
+provider inventory or model requests. Independent review and the consecutive
+live fleet proof remain required; the owning fixture earns no acceptance credit.
+
 ## Human feedback
 
 The user requires infra-only changes, ten consecutive sequential cloud slices
