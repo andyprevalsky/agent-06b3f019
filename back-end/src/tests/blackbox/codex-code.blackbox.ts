@@ -535,10 +535,6 @@ async function runAll() {
       fn: testPersistOutput_coolsExhaustedOAuthCredential,
     },
     {
-      name: 'feedback -- failed OAuth fallback cools OAuth and funded credentials',
-      fn: testPersistOutput_coolsBothCredentialsAfterFailedFallback,
-    },
-    {
       name: 'feedback -- invalid structured credential event is rejected',
       fn: testPersistOutput_rejectsInvalidCredentialFeedback,
     },
@@ -569,6 +565,12 @@ async function runAll() {
       fn: testSmoke_codexCompletesE2bTask,
     });
   }
+  // Must run after the smoke: the server caches the funded-key cooldown in
+  // memory for 30 minutes, which deleting the DB row in cleanup cannot undo.
+  tests.push({
+    name: 'feedback -- failed OAuth fallback cools OAuth and funded credentials',
+    fn: testPersistOutput_coolsBothCredentialsAfterFailedFallback,
+  });
 
   const results: TestResult[] = [];
   for (const test of tests) {
