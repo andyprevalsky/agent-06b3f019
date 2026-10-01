@@ -5,7 +5,8 @@ Creates one stealth Kernel browser (same shape as the backend's
 ``providers/browser/kernel.ts``), connects ``DOMService`` exactly like the
 browser agent, navigates prod-like heavy pages, and times the per-step
 non-LLM work the agent loop does before each decision:
-overlay suppression, ``get_browser_state`` (DOM + screenshot), and the
+overlay suppression, the URL/title-only step observe (``get_page_identity``),
+``get_browser_state`` (DOM + screenshot), and the
 browser-use state request on its own.
 
     cd agents && PYTHONPATH=. venv/bin/python benchmarks/browser_observe_profile.py
@@ -162,6 +163,7 @@ async def profile_url(dom: DOMService, url: str, samples: int, settle_s: float) 
     await asyncio.sleep(settle_s)
     phases: Dict[str, List[float]] = {
         "overlay_suppress": [],
+        "page_identity": [],
         "state_summary_no_screenshot": [],
         "get_browser_state_no_screenshot": [],
         "get_browser_state_with_screenshot": [],
@@ -169,6 +171,7 @@ async def profile_url(dom: DOMService, url: str, samples: int, settle_s: float) 
     dom_chars = 0
     for _ in range(samples):
         phases["overlay_suppress"].append(await _timed(dom.ensure_browser_overlays_suppressed))
+        phases["page_identity"].append(await _timed(dom.get_page_identity))
         phases["state_summary_no_screenshot"].append(
             await _timed(lambda: dom.session.get_browser_state_summary(include_screenshot=False))
         )

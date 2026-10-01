@@ -334,25 +334,36 @@ async def test_light_step_observe_skips_dom_and_read_browser_state_builds_it():
     assert recorded == ["read_browser_state", "read_browser_state"]
 
 
-async def test_page_identity_is_one_page_evaluate():
+async def test_page_identity_reads_cached_target_info():
     from types import SimpleNamespace
 
     from browser_tools.dom_service import DOMService
 
-    calls = []
+    async def renderer_round_trip():
+        raise AssertionError("step observe must not wait on the page's main thread")
 
-    class _Page:
-        async def evaluate(self, fn):
-            calls.append(fn)
-            return '["https://shop.example/cart", "Cart"]'
+    async def url():
+        return "https://shop.example/cart"
 
-    async def get_current_page():
-        return _Page()
+    async def title():
+        return "Cart"
 
     service = DOMService.__new__(DOMService)
-    service._session = SimpleNamespace(get_current_page=get_current_page)
+    service._session = SimpleNamespace(
+        agent_focus_target_id="target-1",
+        get_current_page=renderer_round_trip,
+        get_current_page_url=url,
+        get_current_page_title=title,
+    )
     assert await service.get_page_identity() == {"url": "https://shop.example/cart", "title": "Cart"}
-    assert len(calls) == 1
+
+    service._session.agent_focus_target_id = None
+    try:
+        await service.get_page_identity()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("a session with no focused tab must surface as an observe error")
 
 
 async def test_evidence_capture_join_returns_state_and_swallows_failures():
@@ -432,7 +443,7 @@ async def run_all_tests():
         "light_observe_read_browser_state_builds_dom",
         test_light_step_observe_skips_dom_and_read_browser_state_builds_it,
     )
-    await r.record_async("page_identity_one_evaluate", test_page_identity_is_one_page_evaluate)
+    await r.record_async("page_identity_cached_target_info", test_page_identity_reads_cached_target_info)
     await r.record_async("evidence_join_semantics", test_evidence_capture_join_returns_state_and_swallows_failures)
     r.record("evidence_joined_before_consumers", test_deferred_evaluate_evidence_joined_before_any_consumer)
     teardown_mock()

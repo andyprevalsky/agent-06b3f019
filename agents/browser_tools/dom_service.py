@@ -1864,21 +1864,23 @@ class DOMService:
             return fallback
 
     async def get_page_identity(self) -> Dict[str, Any]:
-        """Return ``{url, title}`` of the focused tab from one renderer round trip.
+        """Return ``{url, title}`` of the focused tab without touching the renderer.
 
-        Unlike ``get_browser_state`` this builds no DOM/AX/snapshot trees, and
-        unlike the cached target info it executes in the page, so a frozen
-        renderer still hangs here (callers rely on that to trigger recovery).
-        The result deliberately has no ``dom_tree`` key.
+        Reads browser-use's target info (kept current by Target.targetInfoChanged),
+        the same source ``get_browser_state`` takes its URL from. A renderer
+        round trip here would queue behind page JS / an in-flight DOM snapshot
+        on the main thread (0.8-3.6s on Amazon vs 45ms idle). Frozen renderers
+        are caught by the action timeouts instead. The result deliberately has
+        no ``dom_tree`` key.
         """
         if not self._session:
             raise RuntimeError("Not connected. Call connect() first.")
-        page = await self._session.get_current_page()
-        if page is None:
-            raise RuntimeError("No focused page")
-        raw = await page.evaluate("() => [location.href, document.title]")
-        url, title = json.loads(raw) if isinstance(raw, str) else raw
-        return {"url": str(url or ""), "title": str(title or "")}
+        if not self._session.agent_focus_target_id:
+            raise RuntimeError("No focused target")
+        return {
+            "url": str(await self._session.get_current_page_url() or ""),
+            "title": str(await self._session.get_current_page_title() or ""),
+        }
 
     async def get_browser_state(self, include_screenshot: bool = True) -> Dict[str, Any]:
         """Get current browser state with full context like browser-use provides.
