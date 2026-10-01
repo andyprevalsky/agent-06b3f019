@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import html
+import importlib.util
 import json
 import os
 import re
@@ -15,7 +16,6 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
 
 SCREENSHOT_KEYS = {"screenshot", "image", "png", "jpeg", "jpg"}
 DEFAULT_OUTPUT_DIR = Path(".context/rendered-llm-dumps")
@@ -1210,7 +1210,6 @@ def token_overview_rows(data: dict[str, Any]) -> str:
 
     input_tokens = numeric_usage_value(usage, "prompt_tokens", "input_tokens")
     output_tokens = numeric_usage_value(usage, "completion_tokens", "output_tokens")
-    total_tokens = numeric_usage_value(usage, "total_tokens") or input_tokens + output_tokens
     cache_read = numeric_usage_value(usage, "cache_read_input_tokens", "cache_read_tokens", "cached_tokens")
     cache_write = numeric_usage_value(usage, "cache_creation_input_tokens", "cache_write_tokens")
     if cache_write == 0 and usage_uses_inclusive_input_cache(data, usage):
@@ -2514,12 +2513,22 @@ def publish_rendered_dump(html_path: Path, artifacts_dir: Path | None = None) ->
     return dest
 
 
+R2_ENV = ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_TRACE_ARCHIVE")
+
+
+def r2_unavailable_reason() -> str:
+    """Why publish_dump_https cannot upload, or "" when it can."""
+    missing = [name for name in R2_ENV if not (os.environ.get(name) or "").strip()]
+    if missing:
+        return f"set {', '.join(missing)}"
+    if importlib.util.find_spec("boto3") is None:
+        return f"boto3 is not importable from {sys.executable}; run with agents/venv/bin/python"
+    return ""
+
+
 def _r2_client():
     """Build a boto3 S3 client for Cloudflare R2, or None when unset/unavailable."""
-    account = (os.environ.get("R2_ACCOUNT_ID") or "").strip()
-    access = (os.environ.get("R2_ACCESS_KEY_ID") or "").strip()
-    secret = (os.environ.get("R2_SECRET_ACCESS_KEY") or "").strip()
-    bucket = (os.environ.get("R2_BUCKET_TRACE_ARCHIVE") or "").strip()
+    account, access, secret, bucket = ((os.environ.get(name) or "").strip() for name in R2_ENV)
     if not account or not access or not secret or not bucket:
         return None, ""
     try:
@@ -2680,7 +2689,8 @@ def main() -> int:
         print(str(published))
         print(
             "warning: no R2 HTTPS publish; /opt/cursor/artifacts paths are not clickable "
-            "for remote reviewers (vscode-remote blank). Set R2_* env to fix.",
+            "for remote reviewers (vscode-remote blank). To fix: "
+            f"{r2_unavailable_reason() or 'check the R2 upload'}.",
             file=sys.stderr,
         )
     else:

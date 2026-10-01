@@ -56,10 +56,7 @@ def discover_domains() -> list[str]:
     """Discover all blackbox test domains from test files."""
     if not TESTS_DIR.exists():
         return []
-    return sorted(
-        f.stem.replace(".blackbox", "").replace("_", "-")
-        for f in TESTS_DIR.glob("*.blackbox.py")
-    )
+    return sorted(f.stem.replace(".blackbox", "").replace("_", "-") for f in TESTS_DIR.glob("*.blackbox.py"))
 
 
 def domain_to_test_file(domain: str) -> Path | None:
@@ -91,9 +88,7 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
     # begin with the same request/logging context as an isolated process.
     structlog.contextvars.clear_contextvars()
     try:
-        spec = importlib.util.spec_from_file_location(
-            f"blackbox_{domain.replace('-', '_')}", test_file
-        )
+        spec = importlib.util.spec_from_file_location(f"blackbox_{domain.replace('-', '_')}", test_file)
         if spec is None or spec.loader is None:
             return (domain, False, "Could not load test file")
 
@@ -121,13 +116,9 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
         structlog.contextvars.clear_contextvars()
 
 
-async def run_tests(
-    domain_filters: list[str] | None = None, concurrency: int = 30
-) -> int:
+async def run_tests(domain_filters: list[str] | None = None, concurrency: int = 30) -> int:
     run_id = os.environ.get("BLACKBOX_TEST_RUN_ID", generate_run_id())
-    artifact_dir = Path(
-        os.environ.get("BLACKBOX_TEST_ARTIFACT_DIR", str(ARTIFACT_ROOT / run_id))
-    )
+    artifact_dir = Path(os.environ.get("BLACKBOX_TEST_ARTIFACT_DIR", str(ARTIFACT_ROOT / run_id)))
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     # Write manifest
@@ -213,9 +204,7 @@ async def run_tests(
         "failed": failed,
         "total": passed + failed,
         "elapsed_seconds": round(elapsed, 1),
-        "details": [
-            {"domain": d, "passed": s, "message": m} for d, s, m in results
-        ],
+        "details": [{"domain": d, "passed": s, "message": m} for d, s, m in results],
     }
     (artifact_dir / "results.json").write_text(json.dumps(result_data, indent=2))
 
@@ -224,6 +213,10 @@ async def run_tests(
 
 def main() -> None:
     args = sys.argv[1:]
+
+    if "-h" in args or "--help" in args:
+        print(__doc__)
+        return
 
     if "--list" in args:
         list_domains()
@@ -245,7 +238,9 @@ def main() -> None:
             domain_filters.append(args[i])
             i += 1
         else:
-            i += 1
+            # Ignoring an unknown flag would silently run all ~100 domains.
+            print(f"Error: unknown option '{args[i]}'\n{__doc__}")
+            sys.exit(2)
 
     exit_code = asyncio.run(run_tests(domain_filters or None, concurrency))
     sys.exit(exit_code)

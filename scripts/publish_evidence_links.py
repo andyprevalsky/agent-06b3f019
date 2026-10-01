@@ -38,6 +38,7 @@ import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+AGENTS_VENV_PYTHON = REPO_ROOT / "agents" / "venv" / "bin" / "python"
 DEFAULT_HUB = "https://navi-j9a9.onrender.com"
 DURABLE_ORIGIN = "https://www.roselabs.ai"
 ARTIFACTS_ROOT = Path("/opt/cursor/artifacts/rca_evidence")
@@ -293,22 +294,31 @@ def latest_dump_for_agent(agent_id: str) -> Path:
     return dumps[-1]
 
 
-def publish_llm_dump(dump: Path, agent_id: str) -> Path:
+def publish_llm_dump(dump: Path, agent_id: str) -> tuple[Path, str]:
+    """Render the dump; return the local HTML and the HTTPS URL ("" when not uploaded)."""
     out_dir = ARTIFACTS_ROOT / agent_id
     out_dir.mkdir(parents=True, exist_ok=True)
     out_html = out_dir / "last_llm_call.html"
+    # The R2 HTTPS upload needs boto3, which lives in agents/venv rather than
+    # the system python3 this script is documented to run under.
+    python = AGENTS_VENV_PYTHON if AGENTS_VENV_PYTHON.is_file() else Path(sys.executable)
     cmd = [
-        sys.executable,
+        str(python),
         str(REPO_ROOT / "scripts" / "render_llm_dump.py"),
         str(dump),
         "-o",
         str(out_html),
         "--no-open",
     ]
-    subprocess.run(cmd, check=True, cwd=str(REPO_ROOT))
+    result = subprocess.run(cmd, check=True, cwd=str(REPO_ROOT), capture_output=True, text=True)
+    sys.stderr.write(result.stderr)
+    https_url = next(
+        (line.strip() for line in result.stdout.splitlines() if line.startswith("https://")),
+        "",
+    )
     # Copy source JSON alongside for greppability.
     shutil.copy2(dump, out_dir / dump.name)
-    return out_html
+    return out_html, https_url
 
 
 def write_manifest(
@@ -318,6 +328,7 @@ def write_manifest(
     fe_status: str,
     message_count: int,
     dump_html: Path,
+    dump_https_url: str,
     source_dump: Path,
 ) -> Path:
     out_dir = ARTIFACTS_ROOT / agent_id
@@ -329,6 +340,7 @@ def write_manifest(
         "fe_verified": fe_status,
         "message_count": message_count,
         "llm_dump_artifact": str(dump_html),
+        "llm_dump_https_url": dump_https_url,
         "source_dump": str(source_dump),
         "call_site": source_dump.stem,
     }
@@ -356,7 +368,7 @@ def main() -> int:
         run_id = upload_run_json(run_path)
         dual_write_claude_code_sessions(run_path, agent_id)
     dump = (args.dump or latest_dump_for_agent(agent_id)).resolve()
-    dump_html = publish_llm_dump(dump, agent_id)
+    dump_html, dump_https_url = publish_llm_dump(dump, agent_id)
     if args.skip_fe_verify:
         fe_status, message_count = "skipped", 0
     else:
@@ -367,10 +379,11 @@ def main() -> int:
         fe_status=fe_status,
         message_count=message_count,
         dump_html=dump_html,
+        dump_https_url=dump_https_url,
         source_dump=dump,
     )
     print(f"FE link: {durable_fe_url(agent_id)} — {fe_status} ({message_count} msgs)")
-    print(f"LLM dump: {dump_html}")
+    print(f"LLM dump: {dump_https_url or f'{dump_html} (local only — not reviewable remotely)'}")
     print(f"manifest: {manifest}")
     return 0
 

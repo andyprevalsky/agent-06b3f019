@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -387,6 +388,34 @@ def test_publish_dump_https_returns_none_without_r2():
         assert renderer.publish_dump_https(html_path, agent_id="a") is None
 
 
+def test_r2_unavailable_reason_names_the_real_cause():
+    """A missing boto3 must not be reported as missing R2 env."""
+    renderer = _load_renderer()
+    saved = {name: os.environ.get(name) for name in renderer.R2_ENV}
+    real_find_spec = renderer.importlib.util.find_spec
+    try:
+        for name in renderer.R2_ENV:
+            os.environ.pop(name, None)
+        assert renderer.r2_unavailable_reason() == "set " + ", ".join(renderer.R2_ENV)
+
+        for name in renderer.R2_ENV:
+            os.environ[name] = "x"
+        renderer.importlib.util.find_spec = lambda name: None if name == "boto3" else real_find_spec(name)
+        reason = renderer.r2_unavailable_reason()
+        assert reason.startswith("boto3 is not importable"), reason
+        assert "agents/venv/bin/python" in reason
+
+        renderer.importlib.util.find_spec = lambda name: object()
+        assert renderer.r2_unavailable_reason() == ""
+    finally:
+        renderer.importlib.util.find_spec = real_find_spec
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def test_publish_rendered_dump_copies_html_and_assets():
     renderer = _load_renderer()
 
@@ -538,6 +567,10 @@ async def run_all_tests():
     r.record(
         "publish_dump_https_returns_none_without_r2",
         test_publish_dump_https_returns_none_without_r2,
+    )
+    r.record(
+        "r2_unavailable_reason_names_the_real_cause",
+        test_r2_unavailable_reason_names_the_real_cause,
     )
     r.record(
         "published_dump_is_viewable_without_sidecar_assets",
