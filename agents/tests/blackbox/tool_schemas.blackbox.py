@@ -246,6 +246,8 @@ def test_grep_tool_schema_exact_contract():
         "-i",
         "head_limit",
         "offset",
+        "order",
+        "page_after",
         "multiline",
         "filters",
         "person",
