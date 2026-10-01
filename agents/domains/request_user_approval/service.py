@@ -17,6 +17,7 @@ from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
 )
+from helpers.sms_activities import notify_sms_event_activity
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 
@@ -280,8 +281,6 @@ async def request_user_approval_direct(
         # silently. Benchmarks are suppressed centrally on the backend
         # (Agent.isBenchmark).
         try:
-            from helpers.sms_activities import notify_sms_event_activity
-
             notification_args = [
                 user_id,
                 "write_lock",
@@ -475,8 +474,6 @@ async def request_user_attention_direct(
     # child is waiting. Benchmarks suppressed centrally (Agent.isBenchmark).
     if sms_event_type:
         try:
-            from helpers.sms_activities import notify_sms_event_activity
-
             notification_args = [
                 user_id,
                 sms_event_type,

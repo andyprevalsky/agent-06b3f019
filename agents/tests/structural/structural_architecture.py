@@ -13,6 +13,7 @@ Invariants tested here:
   9. Wiring correctness — worker.py should import refactored domains from domains/
   10. Cutover classification — every workflow.wait_condition/sleep is tagged
   11. Activity registration — every activity a workflow schedules is registered in worker.py
+  12. Workflow sandbox — workers and tests run workflows under the production restrictions
 
 All tests auto-discover domains. No hardcoded domain names.
 """
@@ -559,6 +560,35 @@ def test_every_scheduled_activity_is_registered():
     )
 
 
+_WORKFLOW_SANDBOX_MODULE = AGENTS_ROOT / "helpers" / "workflow_sandbox.py"
+_SANDBOX_CONFIG_NAMES = frozenset({"SandboxRestrictions", "SandboxedWorkflowRunner", "UnsandboxedWorkflowRunner"})
+
+
+def test_workflow_sandbox_is_production_only():
+    """Only helpers/workflow_sandbox.py builds workflow sandbox restrictions or runners.
+
+    A test sandbox that passes every module through hides workflow code that
+    only fails under the worker's restrictions: a lazily imported module that
+    calls os.getenv failed every production agent's first workflow task while
+    the passthrough-all workflow suites stayed green.
+    """
+    violations: list[str] = []
+    for path in sorted(AGENTS_ROOT.rglob("*.py")):
+        if "venv" in path.parts or path == _WORKFLOW_SANDBOX_MODULE:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("temporalio.worker"):
+                names = {alias.name for alias in node.names} & _SANDBOX_CONFIG_NAMES
+                if names:
+                    violations.append(f"{path.relative_to(AGENTS_ROOT)}:{node.lineno}: imports {sorted(names)}")
+            elif isinstance(node, ast.Attribute) and node.attr in _SANDBOX_CONFIG_NAMES:
+                violations.append(f"{path.relative_to(AGENTS_ROOT)}:{node.lineno}: uses {node.attr}")
+    assert not violations, (
+        "Run workflows with helpers.workflow_sandbox.production_workflow_runner():\n" + "\n".join(violations)
+    )
+
+
 async def run_all_tests():
     print("structural-architecture tests:")
     r = BlackboxResult()
@@ -570,6 +600,7 @@ async def run_all_tests():
     r.record("wiring_correctness", test_wiring_correctness)
     r.record("every_workflow_park_is_cutover_classified", test_every_workflow_park_is_cutover_classified)
     r.record("every_scheduled_activity_is_registered", test_every_scheduled_activity_is_registered)
+    r.record("workflow_sandbox_is_production_only", test_workflow_sandbox_is_production_only)
     return r.all_passed
 
 
