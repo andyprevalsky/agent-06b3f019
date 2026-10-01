@@ -80,9 +80,11 @@ HEARTBEAT_KEEPALIVE_SECONDS = 15
 # attempt within the full timeout.
 MAX_ACTIVITY_ATTEMPTS = 1
 # Activity return when a deploy drains its worker (graceful shutdown) or
-# supersedes its generation: the browser task checkpointed at a step boundary
-# and the manager restarts it from the same step on a live worker/generation.
+# supersedes its generation, or the reused provider session is about to expire:
+# the browser task checkpointed at a step boundary and the manager restarts it
+# from the same step on a live worker/generation/session.
 BROWSER_DRAIN_YIELD_STATUS = "yielded_for_deploy_drain"
+BROWSER_SESSION_EXPIRING = "browser_session_expiring"
 BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS = int(os.getenv("BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS", "45"))
 # Terminal disconnect before payment/write-lock return must not block the
 # workflow forever when CDP/session.stop() hangs after a dead Kernel session.
@@ -167,6 +169,11 @@ BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS = int(
     os.getenv("BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS", str(NAVIGATE_TO_URL_TIMEOUT_SECONDS + 30))
 )
 BROWSER_SUPERVISOR_MAX_RECOVERIES = int(os.getenv("BROWSER_SUPERVISOR_MAX_RECOVERIES", "8"))
+# A resumed task may reuse a live provider session only while it outlives one
+# more supervised step plus teardown (recording finalize + disconnect); the
+# provider releases it at its absolute lifetime even with CDP attached. Mirrors
+# back-end/src/providers/steel/sessionLifetime.ts BROWSER_SESSION_MIN_REMAINING_MS.
+BROWSER_SESSION_MIN_REMAINING_SECONDS = 420
 BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS = float(os.getenv("BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS", "5"))
 
 # Soft/optional get_browser_state budget (post-verifier reject screenshot, etc.).

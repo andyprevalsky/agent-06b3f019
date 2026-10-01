@@ -86,6 +86,8 @@ from .config import (
     BROWSER_DISCONNECT_TIMEOUT_SECONDS,
     BROWSER_DRAIN_YIELD_STATUS,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
+    BROWSER_SESSION_EXPIRING,
+    BROWSER_SESSION_MIN_REMAINING_SECONDS,
     BROWSER_STATE_SOFT_ATTEMPTS,
     BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
     BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
@@ -4854,6 +4856,24 @@ def _payment_resume_fields(resume_state: Optional[Dict[str, Any]]) -> Dict[str, 
     return {key: resume_state[key] for key in _PAYMENT_RESUME_FIELDS if resume_state and resume_state.get(key)}
 
 
+def _reused_session_deadline(session_info: Dict[str, Any]) -> Optional[Tuple[str, float]]:
+    """(session id, monotonic release time) of a reused provider session with a lifetime."""
+    if session_info.get("same_session_available") is not True:
+        return None
+    health = session_info.get("browser_session_health")
+    ttl_ms = health.get("ttlMs") if isinstance(health, dict) else None
+    session_id = session_info.get("session_id")
+    if not isinstance(session_id, str) or isinstance(ttl_ms, bool) or not isinstance(ttl_ms, (int, float)):
+        return None
+    return session_id, time.monotonic() + ttl_ms / 1000
+
+
+def _session_expiring(deadline: Optional[Tuple[str, float]], session_id: Optional[str]) -> bool:
+    if deadline is None or deadline[0] != session_id:
+        return False
+    return deadline[1] - time.monotonic() < BROWSER_SESSION_MIN_REMAINING_SECONDS
+
+
 def _drain_resume_state(result: Dict[str, Any], prior_resume: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Resume state that restarts a drained browser task at its next step."""
     prior = prior_resume or {}
@@ -6148,6 +6168,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             task_id=task_id,
             has_write_lock_resume_state=write_lock_resume_state is not None,
         )
+        reused_session_deadline: Optional[Tuple[str, float]] = None
         if is_resume and task_id:
             is_auth_assistance_resume = (
                 write_lock_resume_state is not None
@@ -6242,6 +6263,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     session_info["resume_mode"] = "new_steel_session_after_unavailable"
                     session_info["same_session_unavailable_reason"] = unavailable_reason
             session_id = session_info.get("session_id")
+            reused_session_deadline = _reused_session_deadline(session_info)
             browser_url = session_info.get("debug_url")
             cdp_url = session_info.get("ws_url")
             fingerprint_injection = session_info.get("fingerprint_injection")
@@ -7227,14 +7249,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         drain_checkpoint_failed = False
         step_timer = StepPhaseTimer(agent_id=agent_id, task_id=task_id)
         while iteration < MAX_ITERATIONS:
-            # Deploy drain checkpoint. Between steps, with no approved action
-            # still owed, the task is fully captured by the same resume payload
-            # a write-lock pause returns, so the manager can restart it at this
-            # step on a live worker (rolling deploy) or generation (cutover)
-            # instead of the worker exiting mid-step. Every invocation runs at
-            # least one step before it may yield again.
+            # Drain checkpoint. Between steps, with no approved action still
+            # owed, the task is fully captured by the same resume payload a
+            # write-lock pause returns, so the manager can restart it at this
+            # step on a live worker (rolling deploy), generation (cutover), or
+            # replacement session (the reused one is about to be released)
+            # instead of dying mid-step. Every invocation runs at least one
+            # step before it may yield again.
             if iteration > resume_step_count and pending_write_lock_action is None and not drain_checkpoint_failed:
                 drain_reason = await activity_drain_reason(allow_generation_handoff=allow_generation_yield)
+                if not drain_reason and _session_expiring(reused_session_deadline, session_id):
+                    drain_reason = BROWSER_SESSION_EXPIRING
                 if drain_reason:
                     try:
                         drain_continuity = await persist_resume_context(
@@ -7261,7 +7286,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         )
                     else:
                         logger.info(
-                            "Browser task yielding at step boundary for deploy drain",
+                            "Browser task yielding at step boundary",
                             agent_id=agent_id,
                             task_id=task_id,
                             session_id=session_id,

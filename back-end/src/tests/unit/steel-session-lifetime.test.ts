@@ -11,10 +11,12 @@
 import assert from 'node:assert';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { sameSessionAvailability } from '../../domains/browser-session/service.task-info';
 import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/sessionRecovery';
 import {
   BROWSER_ACTIVITY_START_TO_CLOSE_MINUTES,
   BROWSER_DEFAULT_MAX_ITERATIONS,
+  BROWSER_SESSION_MIN_REMAINING_MS,
   STEEL_PLAN_MAX_SESSION_MS,
   browserActivityBudgetMinutes,
   steelSessionTimeoutMs,
@@ -57,6 +59,35 @@ test('backend budget constants match the Python browser activity config', () => 
     source.includes('return max(ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES, int(steps * 0.35) + 15)'),
     'Python step-scaled browser budget changed; update browserActivityBudgetMinutes to match'
   );
+  assert.strictEqual(
+    BROWSER_SESSION_MIN_REMAINING_MS,
+    pythonIntConstant(source, 'BROWSER_SESSION_MIN_REMAINING_SECONDS') * 1000,
+    'the step loop yields to a replacement at the same remaining lifetime the backend refuses reuse below'
+  );
+});
+
+test('a resumed task reuses a live session only while it outlives another step', () => {
+  const live = (ttlMs: number | null) => sameSessionAvailability({ status: 'live', ttlMs }, true);
+  assert.deepStrictEqual(live(null), { available: true });
+  assert.deepStrictEqual(live(BROWSER_SESSION_MIN_REMAINING_MS), { available: true });
+  assert.deepStrictEqual(live(BROWSER_SESSION_MIN_REMAINING_MS - 1), {
+    available: false,
+    reason: 'steel_session_expiring',
+  });
+  assert.deepStrictEqual(live(60_000), { available: false, reason: 'steel_session_expiring' });
+  assert.deepStrictEqual(live(0), { available: false, reason: 'steel_session_expired' });
+  assert.deepStrictEqual(sameSessionAvailability({ status: 'live', ttlMs: 60_000 }, false), {
+    available: false,
+    reason: 'browser_session_expiring',
+  });
+  assert.deepStrictEqual(sameSessionAvailability({ status: 'released', ttlMs: 60_000 }, true), {
+    available: false,
+    reason: 'steel_status_released',
+  });
+  assert.deepStrictEqual(sameSessionAvailability({ status: null, ttlMs: null }, false), {
+    available: false,
+    reason: 'browser_status_unknown',
+  });
 });
 
 test('step-scaled budgets mirror the Python formula', () => {

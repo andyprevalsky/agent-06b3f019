@@ -19416,6 +19416,190 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     assert llm_usage and llm_usage[0]["input_tokens"] == 900, result.get("usage_items")
 
 
+async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
+    """Run a drained task resumed at step 3 on the live Steel session the backend let it reuse."""
+    from contextlib import ExitStack
+
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    env = ActivityEnvironment()
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    session_info = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://live",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "user_settings": {},
+        "same_session_available": True,
+        "browser_session_health": {"provider": "steel", "sessionId": "session-1", "status": "live", "ttlMs": ttl_ms},
+    }
+    llm_step = AsyncMock(
+        return_value={
+            "action": {"action": "scroll", "thinking": "Looking for the cart", "params": {"direction": "down"}},
+            "usage": {"prompt_tokens": 900, "completion_tokens": 60, "actual_model": "rose-1-browser-use"},
+            "mode": "waterfall",
+        }
+    )
+
+    async def execute_step(*args, **kwargs):
+        await on_step(env)
+        return {"success": True, "message": "Scrolled down", "current_url": "https://example.com/cart"}
+
+    resume_mock = AsyncMock()
+    close_mock = AsyncMock()
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_info)),
+        patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation", llm_step),
+        patch("domains.spawn_browser_agent_v3.handler.execute_action", side_effect=execute_step),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        result = await env.run(
+            spawn_browser_agent_activity_v3,
+            user_id="user-1",
+            agent_id="agent-1",
+            goal="Add the socks to the cart",
+            tool_call_id="tool-1",
+            task_id="task-1",
+            session_id="session-1",
+            cdp_url="ws://live",
+            is_resume=True,
+            output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False,
+            start_url="https://example.com",
+            write_lock_resume_state={
+                "approval_type": BROWSER_DRAIN_YIELD_STATUS,
+                "pending_action": None,
+                "write_lock_approvals": {},
+                "step_count": 3,
+                "session_id": "session-1",
+                "cdp_url": "ws://live",
+                "task_id": "task-1",
+                "auth_realm": "example.com",
+            },
+        )
+    return result, llm_step, resume_mock, close_mock
+
+
+async def test_browser_task_on_reused_session_yields_before_the_provider_releases_it():
+    """A resumed task must leave a reused Steel session before its lifetime runs out.
+
+    Steel releases a session at its absolute lifetime even with CDP attached.
+    A resumed or retried activity gets a fresh time budget but may reattach a
+    session created by an earlier invocation. Prod agent 3efa7cae lost CDP
+    mid-run when the session it was driving expired. The step loop must
+    checkpoint while the session still outlives one more step plus teardown,
+    so the manager restarts the task on a replacement session.
+    """
+    from domains.spawn_browser_agent_v3.config import (
+        BROWSER_DRAIN_YIELD_STATUS,
+        BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
+        BROWSER_SESSION_EXPIRING,
+        BROWSER_SESSION_MIN_REMAINING_SECONDS,
+        BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+        BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+    )
+
+    assert BROWSER_SESSION_MIN_REMAINING_SECONDS >= (
+        BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS
+        + BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS
+        + BROWSER_DISCONNECT_TIMEOUT_SECONDS
+    ), "a reused session must outlive one supervised step plus teardown"
+
+    async def step_takes_time(env):
+        await asyncio.sleep(0.2)
+
+    result, llm_step, resume_mock, close_mock = await _resume_drained_browser_task_on_reused_session(
+        BROWSER_SESSION_MIN_REMAINING_SECONDS * 1000 + 100, step_takes_time
+    )
+
+    assert llm_step.await_count == 1, (
+        f"the task must not start a step the session may not outlive; it ran {llm_step.await_count} steps"
+    )
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == BROWSER_SESSION_EXPIRING, result
+    assert result["step_count"] == 4, result
+    assert result["session_id"] == "session-1" and result["task_id"] == "task-1", result
+    assert result["current_url"] == "https://example.com/cart", result
+    resume_mock.assert_not_awaited()
+    close_mock.assert_not_awaited()
+
+
+async def test_browser_task_keeps_stepping_on_a_reused_session_with_time_left():
+    """Session lifetime alone must not interrupt a task whose session outlives the next step."""
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS, BROWSER_SESSION_MIN_REMAINING_SECONDS
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    steps = []
+
+    async def deploy_lands_on_the_second_step(env):
+        steps.append(len(steps) + 1)
+        if len(steps) == 2:
+            env.worker_shutdown()
+
+    result, llm_step, resume_mock, close_mock = await _resume_drained_browser_task_on_reused_session(
+        (BROWSER_SESSION_MIN_REMAINING_SECONDS + 600) * 1000, deploy_lands_on_the_second_step
+    )
+
+    assert llm_step.await_count == 2, "a session with time left must keep serving steps"
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == WORKER_SHUTDOWN, result
+    assert result["step_count"] == 5, result
+    resume_mock.assert_not_awaited()
+    close_mock.assert_not_awaited()
+
+
+async def test_session_lifetime_is_tracked_only_for_the_reused_session():
+    from domains.spawn_browser_agent_v3.handler import _reused_session_deadline, _session_expiring
+
+    reused = {"session_id": "session-1", "same_session_available": True, "browser_session_health": {"ttlMs": 1000}}
+    deadline = _reused_session_deadline(reused)
+    assert deadline is not None and deadline[0] == "session-1", deadline
+    assert _session_expiring(deadline, "session-1")
+    assert not _session_expiring(deadline, "session-2"), "a mid-task replacement has a fresh lifetime"
+    assert not _session_expiring(None, "session-1")
+    for info in (
+        {**reused, "browser_session_health": {"ttlMs": None}},
+        {**reused, "browser_session_health": {"ttlMs": True}},
+        {**reused, "browser_session_health": None},
+        {**reused, "same_session_available": False},
+        {"session_id": "replacement", "browser_session_health": {"ttlMs": 1000}},
+    ):
+        assert _reused_session_deadline(info) is None, info
+
+
 async def test_failed_steel_auth_restart_invalidates_before_credential_isolated_resume():
     from domains.spawn_browser_agent_v3.handler import _restart_after_failed_steel_auth
 
@@ -23658,6 +23842,18 @@ async def run_all_tests():
     await r.record_async(
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",
         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
+    )
+    await r.record_async(
+        "reused_session_yields_before_provider_releases_it",
+        test_browser_task_on_reused_session_yields_before_the_provider_releases_it,
+    )
+    await r.record_async(
+        "reused_session_with_time_left_keeps_stepping",
+        test_browser_task_keeps_stepping_on_a_reused_session_with_time_left,
+    )
+    await r.record_async(
+        "session_lifetime_tracked_only_for_reused_session",
+        test_session_lifetime_is_tracked_only_for_the_reused_session,
     )
     await r.record_async(
         "failed_steel_auth_credential_isolated_restart",

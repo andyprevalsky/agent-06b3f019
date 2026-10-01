@@ -16,6 +16,13 @@ export const BROWSER_DEFAULT_MAX_ITERATIONS = 60;
 export const STEEL_SESSION_TEARDOWN_HEADROOM_MINUTES = 5;
 /** Steel rejects longer timeouts on our plan with "exceeds the maximum for your plan (60 min)". */
 export const STEEL_PLAN_MAX_SESSION_MS = 60 * 60_000;
+/**
+ * A resumed browser task may reuse a live session only while it outlives one
+ * more supervised step plus teardown. Mirrors the Python
+ * `BROWSER_SESSION_MIN_REMAINING_SECONDS`, which yields the step loop to a
+ * replacement session at the same threshold.
+ */
+export const BROWSER_SESSION_MIN_REMAINING_MS = 7 * 60_000;
 
 function browserMaxIterations(env: NodeJS.ProcessEnv): number {
   const raw = (env.BROWSER_MAX_ITERATIONS ?? '').trim();
