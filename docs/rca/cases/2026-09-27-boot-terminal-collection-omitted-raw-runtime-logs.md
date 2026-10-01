@@ -11,6 +11,8 @@ symptoms:
   - "remote-logs contains cloudbench-driver.log but no raw backend or worker files"
   - "boot collector omitted complete runtime evidence"
   - "incomplete runtime evidence was accepted"
+  - "ConnectionResetError aborted pre-manifest runtime collection"
+  - "RemoteDisconnected aborted pre-manifest runtime collection"
 tags:
   - cloudbench
   - evidence
@@ -639,3 +641,42 @@ The complete existing terminal-evidence group subsequently passed in 54.64 secon
 under its unchanged 60-second cap, with every tracked script/benchmark input hash
 unchanged across the run. Final source-bound deploy/fleet gates remain separate
 requirements; no acceptance credit is granted by this repair.
+
+### October 1 full-review recurrence: direct socket resets before the first seal
+
+Finding 4155225169 exposed a remaining transport gap in both owning readers.
+An authenticated loopback server reset the first manifest connection with native
+`SO_LINGER`, or disconnected before sending HTTP headers, then served the normal
+complete manifest. The actual canonical and recovery collectors each exited
+after one read with `ConnectionResetError` or `RemoteDisconnected`, despite time
+remaining in their unchanged three-second fixture deadline. All four owning
+checks failed; complete-capture and HTTP 403 refusal controls passed. This proves
+the collector defect, without attributing an earlier fleet incident to it.
+
+Archive searches used `ConnectionResetError RemoteDisconnected runtime evidence
+transport` and `manifest unavailable collector HTTP socket retry`. The previous
+recurrence above covered urllib-wrapped connection failures and socket timeouts,
+but its transport injection did not exercise direct exceptions from the HTTP
+response reader. Both socket exceptions inherit `ConnectionError`. Adding that
+class only to the two existing pre-first-manifest retry tuples makes these reads
+share the original bounded wait. Explicit HTTP rejection, malformed protocol
+responses, the whole-capture alarm, and all reads after the first sealed manifest
+retain their existing failure behavior. Ownership, inventory, digest, publication
+and normal execution backstops are unchanged.
+
+The exact retained private fixture passed all eight controls after the repair
+in 2.533 seconds, with its original bytes preserved. The unchanged permanent
+socket assertions went from four failures in 0.233 seconds to four passes in
+2.342 seconds. Their two parameterized cases, `socket-reset` and
+`socket-disconnect`, are registered in the existing runtime-retention test, with
+both entrypoints exercised per case. The complete existing collector fixture
+passed in 14.443 seconds; its authentication, incomplete evidence, terminal
+cleanup, seal transition and deadline controls were retained. The two registered
+cases and affected Python/Bash syntax checks also passed. Private paired receipts
+and immutable fixture bytes are under
+`.context/acceptance/proof87-review-transport-rca/`.
+
+Independent review verified the owning production boundary, unchanged RED/GREEN assertions, retained failure controls and existing gate registration. This introduces no retry service, shared state,
+new validation stage or model calls: each capture retains its own existing
+deadline and polling interval at 10,000 agents. Historical receipts and fleet
+acceptance remain unchanged; final source-bound review and proof are separate.

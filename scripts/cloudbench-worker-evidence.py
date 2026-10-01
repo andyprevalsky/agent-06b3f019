@@ -119,11 +119,29 @@ def sync_file(path):
 
 def write_json(path, value):
     data = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "wb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Readers require one link and immutable ownership. An exclusive rename
+        # publishes complete bytes without a transient second hard link or an
+        # overwrite race between concurrent publishers.
+        libc = ctypes.CDLL(None, use_errno=True)
+        source = ctypes.c_char_p(os.fsencode(temporary))
+        target = ctypes.c_char_p(os.fsencode(path))
+        if sys.platform == "linux":
+            result = libc.renameat2(-100, source, -100, target, 1)  # RENAME_NOREPLACE
+        elif sys.platform == "darwin":
+            result = libc.renamex_np(source, target, 4)  # RENAME_EXCL
+        else:
+            raise ValueError("atomic worker evidence publication requires Linux or Darwin")
+        if result != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), str(path))
+    finally:
+        Path(temporary).unlink(missing_ok=True)
     sync_directory(path.parent)
     sync_directory(path.parent.parent)
 

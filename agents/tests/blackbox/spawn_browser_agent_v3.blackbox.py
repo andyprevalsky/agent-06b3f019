@@ -20768,6 +20768,8 @@ def _browser_manager_terminal_events(events):
 
 async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
     from domains.spawn_browser_agent_v3 import handler as h
+    from helpers.handle_tool_event import handle_tool_event
+    from helpers.llm import convert_context_to_messages
     from tools.base import MessageStatus
     from tools.request_user_approval import UserRejectedError
 
@@ -20800,6 +20802,10 @@ async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
 
     ids = []
     events = []
+    context = [{
+        "role": "ASSISTANT", "text": "", "timestamp": "2026-10-01T00:00:00Z",
+        "metadata": {"tool_calls": [{"tool": "spawn_browser_agent", "tool_call_id": "fixture-tool"}]},
+    }]
     entered = asyncio.Event()
     release = asyncio.Event()
 
@@ -20818,7 +20824,10 @@ async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
             return {"attention_request_id": "fixture-approval"}
         if kind == "approval-error":
             raise RuntimeError("fixture approval failure")
-        raise UserRejectedError("fixture rejected")
+        raise UserRejectedError(
+            "fixture rejected",
+            rejection_message="fixture feedback" if kind == "write-rejected" else "",
+        )
 
     async def wait_condition(*_args, **_kwargs):
         if kind == "auth-pending" and wf.is_paused:
@@ -20831,6 +20840,17 @@ async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
             wf, {"goal": "fixture action"}, "fixture-tool"
         ):
             events.append(event)
+            if kind == "write-rejected":
+                await handle_tool_event(
+                    event, wf.agent_id, "fixture-tool", "spawn_browser_agent", capture_message
+                )
+
+    async def capture_message(_function, *, args, **_kwargs):
+        _agent_id, text, role, metadata, _file_pointer = args
+        context.append({
+            "role": role, "text": text, "metadata": metadata,
+            "timestamp": (datetime(2026, 10, 1, tzinfo=timezone.utc) + timedelta(seconds=len(context))).isoformat(),
+        })
 
     with (
         patch.object(h.workflow, "start_activity", side_effect=start),
@@ -20878,6 +20898,14 @@ async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
         else MessageStatus.ERROR
     )
     assert len(ids) == (2 if kind in ("write-pending", "auth-pending") else 1)
+    if kind == "write-rejected":
+        tool_results = [
+            message for message in convert_context_to_messages(context, include_assistant=True)
+            if message["role"] == "tool"
+        ]
+        assert len(tool_results) == 1
+        assert tool_results[0]["tool_call_id"] == "fixture-tool"
+        assert "fixture feedback" in tool_results[0]["content"], "FE closure erased the user's rejection feedback"
     return {
         "case": kind,
         "result_has_id": has_id,

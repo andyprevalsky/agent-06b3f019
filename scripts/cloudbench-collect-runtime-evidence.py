@@ -99,7 +99,7 @@ while True:
         # HTTPError is a URLError subclass; authentication and protocol failures
         # are not transient transport reads.
         raise
-    except (urllib.error.URLError, TimeoutError):
+    except (urllib.error.URLError, TimeoutError, ConnectionError):
         pass
     time.sleep(0.5)
 assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine

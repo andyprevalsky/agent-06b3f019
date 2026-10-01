@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -35,6 +37,7 @@ def exercise(
     blocked_manifest: bool = False,
     expect_deadline: bool = False,
     forbidden_manifest: bool = False,
+    socket_fault: str | None = None,
 ):
     token, machine = "test-run-1", "abcdef12345678"
     files = {
@@ -92,6 +95,19 @@ def exercise(
             assert parts.path == "/runtime-evidence"
             if not parts.query:
                 manifest_calls += 1
+                if socket_fault and manifest_calls == 1:
+                    # Exercise an actual peer reset before HTTP headers, rather
+                    # than an exception injected above urllib's owning read.
+                    self.close_connection = True
+                    if socket_fault == "reset":
+                        self.connection.setsockopt(
+                            socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+                        )
+                    else:
+                        assert socket_fault == "disconnect"
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    self.connection.close()
+                    return
                 if forbidden_manifest:
                     self.send_error(403)
                     return
@@ -246,6 +262,15 @@ def exercise_read_transition(case: str):
                 recovery=recovery,
                 seal_during_shutdown=True,
             )
+    elif case in ("socket-reset", "socket-disconnect"):
+        for recovery in (False, True):
+            exercise(
+                seal_after=0,
+                deadline=3,
+                file_delay=0,
+                recovery=recovery,
+                socket_fault=case.removeprefix("socket-"),
+            )
     elif case == "terminal-failures":
         test_collectors_stop_on_clean_shutdown_without_run_result()
         test_recovery_collector_stops_on_terminal_cleanup_failure()
@@ -290,6 +315,8 @@ READ_TRANSITIONS = (
     "seal-transition",
     "manifest-url",
     "manifest-timeout",
+    "socket-reset",
+    "socket-disconnect",
     "shutdown-url",
     "driver-timeout",
     "ack-url",

@@ -271,11 +271,66 @@ def test_worker_stop_request_bound_and_deadline_retains_files(tmp_path, monkeypa
         )
     request = json.loads((state / "stop.json").read_bytes())
     assert request == {**expected, "supervisor": owner["supervisor"]}
+    with pytest.raises(FileExistsError):
+        helper.write_json(state / "stop.json", {"run_token": "foreign"})
+    assert helper.read_json(state / "stop.json") == request
+    assert (state / "stop.json").stat().st_nlink == 1
+    assert (state / "stop.json").stat().st_mode & 0o777 == 0o600
+    assert not list(state.glob(".stop.json.*"))
     assert (data / "worker.log").exists()
     assert not (tmp_path / "out.tar").exists()
 
 
-def test_worker_native_supervisor_closes_every_log_before_terminal(tmp_path):
+WORKER_PUBLICATION_PROBE = """\
+import os
+from pathlib import Path
+import runpy
+import sys
+import time
+
+original = Path(os.environ['WORKER_PUBLICATION_HELPER'])
+probe = Path(os.environ['WORKER_PUBLICATION_PROBE_DIR'])
+created, observed = probe / 'created', probe / 'observed'
+namespace = runpy.run_path(str(original))
+native_exists = Path.exists
+native_read = namespace['read_json']
+native_open = os.open
+
+def exists(path):
+    result = native_exists(path)
+    if path.name == 'stop.json' and native_exists(created) and not result:
+        observed.write_text('not-visible')
+    return result
+
+def read_json(path):
+    try:
+        return native_read(path)
+    finally:
+        if path.name == 'stop.json' and native_exists(created) and not native_exists(observed):
+            observed.write_text('visible')
+
+def open_paused(path, flags, *args, **kwargs):
+    descriptor = native_open(path, flags, *args, **kwargs)
+    name = Path(path).name
+    if flags & os.O_EXCL and (name == 'stop.json' or name.startswith('.stop.json.')):
+        created.touch()
+        deadline = time.monotonic() + 5
+        while not native_exists(observed):
+            assert time.monotonic() < deadline, 'supervisor did not observe publication window'
+            time.sleep(.01)
+    return descriptor
+
+if sys.argv[1] == 'run':
+    Path.exists = exists
+    namespace['run'].__globals__['read_json'] = read_json
+elif sys.argv[1] == 'capture':
+    os.open = open_paused
+raise SystemExit(namespace['main']())
+"""
+
+
+@pytest.mark.parametrize("pause_publication", [False, True])
+def test_worker_native_supervisor_closes_every_log_before_terminal(tmp_path, pause_publication):
     """Actual Linux subreaper + unchanged local worker supervisor, no providers.
 
     On Darwin the production helper must reject unsupported supervision. The
@@ -286,9 +341,16 @@ def test_worker_native_supervisor_closes_every_log_before_terminal(tmp_path):
     data.mkdir()
     agents.mkdir()
     env = dict(os.environ, FLY_MACHINE_ID="1234abcd", WORKER_PROCESSES="2")
+    launcher = [sys.executable, str(HELPER)]
+    if pause_publication and sys.platform == "linux":
+        # Pause the actual producer after creating its file, before writing.
+        # The live supervisor acknowledges one poll in that exact window.
+        probe = tmp_path / "publication_probe.py"
+        probe.write_text(WORKER_PUBLICATION_PROBE)
+        env.update(WORKER_PUBLICATION_HELPER=str(HELPER), WORKER_PUBLICATION_PROBE_DIR=str(tmp_path))
+        launcher = [sys.executable, str(probe)]
     command = [
-        sys.executable,
-        str(HELPER),
+        *launcher,
         "run",
         "--run-token",
         "owned-run",
@@ -348,8 +410,7 @@ def test_worker_native_supervisor_closes_every_log_before_terminal(tmp_path):
         archive = tmp_path / "capture.tar"
         result = subprocess.run(
             [
-                sys.executable,
-                str(HELPER),
+                *launcher,
                 "capture",
                 "--run-token",
                 "owned-run",
@@ -369,6 +430,8 @@ def test_worker_native_supervisor_closes_every_log_before_terminal(tmp_path):
         helper = load_helper()
         manifest = helper.check_archive(archive, helper.authority("owned-run", "1234abcd"))
         assert manifest["terminal"]["term_sent"] is True
+        if pause_publication:
+            assert (tmp_path / "observed").read_text() == "not-visible"
         for path in logs:
             assert path.read_bytes().count(b"FINAL-ONE-TERM") == 1
     finally:

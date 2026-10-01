@@ -10105,7 +10105,12 @@ def _browser_abandoned_resume_event(task_id: str, reason: str) -> ToolEvent:
         title="Browser automation stopped",
         message=reason,
         status=MessageStatus.ERROR,
-        metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete", "task_id": task_id},
+        metadata={
+            "toolName": "spawn_browser_agent",
+            "action_type": "task_complete",
+            "task_id": task_id,
+            "excludeFromModel": True,
+        },
     )
 
 

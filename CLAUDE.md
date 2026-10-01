@@ -530,6 +530,13 @@ An interrupted primary may have an autoscaled worker. Preserve its
 uses the same exact terminal/log-hash/provider-inventory verification as a sealed
 primary. A destroyed worker's missing or mismatched capture cannot be replaced
 by an empty worker ledger or by clearing audit records.
+Worker evidence JSON must become visible only after complete bytes are fsynced,
+without replacing an existing receipt or creating a second hard link. Use the
+existing exclusive-rename publisher; an `O_EXCL` create alone exposes empty JSON.
+Debug receipt failures with the original owner/stop/terminal files retained
+privately. The existing `cloudbench_worker_evidence_test.py` owning gate covers
+the live supervisor's publication race and immutable-owner controls; extend that
+gate instead of adding another verification suite.
 For sustained mixed or load-test validation, select dedicated primary CPUs
 through the existing fleet settings, retaining catalog-specific memory:
 

@@ -184,3 +184,45 @@ backstop. This fixture fix changes none of those bounds or acceptance rules.
 ## Reusable lesson
 
 Publish readiness files with write-close-rename so existence and a complete payload become visible atomically.
+
+
+### October 1 recurrence in immutable worker receipts
+
+PR #1299 finding 4155225138 exposed the same create-before-write boundary in
+`cloudbench-worker-evidence.py`. The capture process created `stop.json` with
+`O_EXCL` before writing its JSON. The live supervisor used existence as readiness,
+so a reader between those operations could fail decoding and retire without the
+required terminal receipt. Archive searches for partial JSON, atomic receipts,
+and `O_EXCL` found the earlier publication cases. This is a reproduced production
+protocol defect; it is not evidence that this race occurred in the archived fleet
+slice, whose independent review found no hidden internal infrastructure failure.
+
+The existing native supervisor fixture now has one additional parameter. It
+pauses the real producer after file creation, before the first write, until the
+real supervisor polls that publication window. The unchanged original close,
+log-tail, archive and exact-terminal assertions remain. On original source, the
+normal control passed and the paused control failed: two cases, one failure in
+1.220 seconds. The same test bytes passed after the repair, and the full existing
+native file passed 38/38 in 2.674 seconds with no skipped cases. The separate
+original owning reproduction also failed in 0.341 seconds and passed unchanged
+in 0.457 seconds. Exact test parent and child processes were retired.
+
+The writer now writes and fsyncs a private sibling, then publishes it with an
+exclusive native rename: Linux `renameat2(RENAME_NOREPLACE)` or Darwin
+`renamex_np(RENAME_EXCL)`. Directory fsyncs remain. A hard-link handoff is unsuitable
+here because readers require `st_nlink == 1`, including during publication.
+Existing destination files still raise `FileExistsError` and cannot be replaced.
+The existing stop-request test checks retained owner contents, single-link mode
+0600 and temporary-file cleanup. All 51 original assertions remain. Darwin's
+existing 38 cases pass; its supervision cases continue to verify the explicit
+Linux-only boundary, while the real subreaper lifecycle runs in the native gate.
+
+Independent review verified the unchanged failing/passing fixture, final source
+and test hashes, owner retirement, immutable publication and existing gate
+registration. The normal capture deadline remains 270 seconds. No new suite,
+model call, provider operation or benchmark verdict change was added. This is
+constant filesystem work per lifecycle receipt, with no shared lock or registry
+at 10,000 agents. Private evidence is sealed in
+`/data/proof87-review-rca/worker-stop-publication.private.tar.gz`, SHA-256
+`56a81e55b5c3eab3cd229a1b1567f985354813ab7e4c10ffe7890f1f0cbb9426`.
+The source change resets fleet acceptance; these fixtures grant zero fleet credit.

@@ -636,6 +636,8 @@ def test_boot_admission_archives_only_verified_completed_standalone_runs(tmp_pat
         "seal-transition",
         "manifest-url",
         "manifest-timeout",
+        "socket-reset",
+        "socket-disconnect",
         "shutdown-url",
         "driver-timeout",
         "ack-url",
