@@ -16,6 +16,7 @@ from temporalio.common import RetryPolicy
 
 from domains.set_plan.config import (
     DEFAULT_GOAL,
+    PLANNER_ACTIVITY_HEARTBEAT_TIMEOUT_SECONDS,
     PLANNER_ACTIVITY_MAX_ATTEMPTS,
     PLANNER_ACTIVITY_TIMEOUT_SECONDS,
 )
@@ -687,6 +688,7 @@ async def run_planner_attempt(
         call_planner_llm_activity,
         args=planner_args,
         start_to_close_timeout=timedelta(seconds=PLANNER_ACTIVITY_TIMEOUT_SECONDS),
+        heartbeat_timeout=timedelta(seconds=PLANNER_ACTIVITY_HEARTBEAT_TIMEOUT_SECONDS),
         retry_policy=RetryPolicy(maximum_attempts=PLANNER_ACTIVITY_MAX_ATTEMPTS),
     )
     planner_only_elapsed = (workflow.now() - planner_only_start).total_seconds()
