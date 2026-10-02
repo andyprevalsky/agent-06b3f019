@@ -64,7 +64,7 @@ _POSITION_MEMO_TTL_S = 1800.0
 _POSITION_PREFETCH_AHEAD = 8
 _POSITION_HTTP_MAX_IN_FLIGHT = int(os.environ.get("FAST_CACHE_POSITION_MAX_IN_FLIGHT", "16") or "16")
 _position_memo: dict[tuple[str, str, int], tuple[Optional[Any], Optional[str], float]] = {}
-_position_inflight: dict[tuple[str, str, int], asyncio.Future[tuple[Optional[Any], Optional[str]]]] = {}
+_position_inflight: dict[tuple[str, str, int], asyncio.Task[tuple[Optional[Any], Optional[str]]]] = {}
 _position_http_sem: Optional[asyncio.Semaphore] = None
 _position_http_sem_loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -512,92 +512,93 @@ async def _fetch_position_http(
     call_site: str,
     step: int,
 ) -> tuple[Optional[Any], Optional[str]]:
-    """One get-position HTTP, single-flighted and memoized per durable slot."""
+    """One get-position HTTP, single-flighted and memoized per durable slot.
+
+    The HTTP runs in a slot-owned task that no caller owns; every caller
+    awaits it through ``asyncio.shield``. A caller's own cancellation (the
+    90s ``wait_for`` in ``call_temporal_activity_from_activity``) therefore
+    cancels only that caller. Awaiting a shared future directly let one
+    timed-out waiter cancel it for every sibling and retry, which surfaced as a
+    bare ``CancelledError`` that failed the whole explore activity.
+    """
     memo_key = _position_memo_key(goal_hash, call_site, step)
     cached = _position_memo_get(goal_hash, call_site, step)
     if cached is not None:
         return cached
-    existing = _position_inflight.get(memo_key)
-    if existing is not None:
-        return await existing
-
     loop = asyncio.get_running_loop()
-    future: asyncio.Future[tuple[Optional[Any], Optional[str]]] = loop.create_future()
-    _position_inflight[memo_key] = future
-    try:
-        api_url, api_key = _backend()
-        body: dict[str, Any] = {"goalHash": goal_hash, "callSite": call_site, "step": int(step)}
-        last_error: Optional[Exception] = None
-        for attempt in range(_GET_MAX_ATTEMPTS):
-            async with _position_http_semaphore():
-                cached = _position_memo_get(goal_hash, call_site, step)
-                if cached is not None:
-                    future.set_result(cached)
-                    return cached
-                try:
-                    resp = await _shared_client().post(
-                        f"{api_url}/api/fast-cache/get-position",
-                        headers=backend_api_headers(api_key),
-                        json=body,
-                        timeout=_GET_TIMEOUT_S,
-                    )
-                except Exception as exc:
-                    last_error = exc
-                    logger.warning(
-                        "fast_cache.get_position_error",
-                        error=f"{type(exc).__name__}: {exc}"[:300],
-                        attempt=attempt + 1,
-                    )
-                    resp = None
-            if resp is None:
-                if attempt < _GET_MAX_ATTEMPTS - 1:
-                    await asyncio.sleep(_GET_RETRY_BACKOFF_S * (attempt + 1))
-                    continue
-                if last_error is not None:
-                    if not future.done():
-                        future.set_exception(last_error)
-                    raise last_error
-                error = RuntimeError("fast-cache get-position failed after retries")
-                if not future.done():
-                    future.set_exception(error)
-                raise error
-            if resp.status_code != 200:
-                if resp.status_code in {404, 405}:
-                    result = (None, None)
-                    _position_memo_put(goal_hash, call_site, step, None, None)
-                    future.set_result(result)
-                    return result
+    fetch = _position_inflight.get(memo_key)
+    if fetch is None or fetch.get_loop() is not loop:
+        fetch = loop.create_task(_position_http_request(goal_hash, call_site, step))
+        _position_inflight[memo_key] = fetch
+
+        def _release_slot(done: asyncio.Future[tuple[Optional[Any], Optional[str]]]) -> None:
+            if _position_inflight.get(memo_key) is done:
+                _position_inflight.pop(memo_key, None)
+            # Every caller may have timed out; retrieve the outcome so an
+            # unobserved failure is not reported as "never retrieved".
+            if not done.cancelled():
+                done.exception()
+
+        fetch.add_done_callback(_release_slot)
+    return await asyncio.shield(fetch)
+
+
+async def _position_http_request(
+    goal_hash: str,
+    call_site: str,
+    step: int,
+) -> tuple[Optional[Any], Optional[str]]:
+    """POST get-position with retries; memoize hits and clean misses."""
+    api_url, api_key = _backend()
+    body: dict[str, Any] = {"goalHash": goal_hash, "callSite": call_site, "step": int(step)}
+    last_error: Optional[Exception] = None
+    for attempt in range(_GET_MAX_ATTEMPTS):
+        async with _position_http_semaphore():
+            cached = _position_memo_get(goal_hash, call_site, step)
+            if cached is not None:
+                return cached
+            try:
+                resp = await _shared_client().post(
+                    f"{api_url}/api/fast-cache/get-position",
+                    headers=backend_api_headers(api_key),
+                    json=body,
+                    timeout=_GET_TIMEOUT_S,
+                )
+            except Exception as exc:
+                last_error = exc
                 logger.warning(
-                    "fast_cache.get_position_failed",
-                    status=resp.status_code,
+                    "fast_cache.get_position_error",
+                    error=f"{type(exc).__name__}: {exc}"[:300],
                     attempt=attempt + 1,
                 )
-                if resp.status_code >= 500 and attempt < _GET_MAX_ATTEMPTS - 1:
-                    await asyncio.sleep(_GET_RETRY_BACKOFF_S * (attempt + 1))
-                    continue
-                error = RuntimeError(f"fast-cache get-position failed: {resp.status_code}")
-                if not future.done():
-                    future.set_exception(error)
-                raise error
-            data = resp.json()
-            if not data.get("hit"):
-                result = (None, None)
-            else:
-                result = (data.get("value"), data.get("key"))
-            _position_memo_put(goal_hash, call_site, step, result[0], result[1])
-            future.set_result(result)
-            return result
-        if last_error is not None:
-            if not future.done():
-                future.set_exception(last_error)
-            raise last_error
-        error = RuntimeError("fast-cache get-position failed after retries")
-        if not future.done():
-            future.set_exception(error)
-        raise error
-    finally:
-        if _position_inflight.get(memo_key) is future:
-            _position_inflight.pop(memo_key, None)
+                resp = None
+        if resp is None:
+            if attempt < _GET_MAX_ATTEMPTS - 1:
+                await asyncio.sleep(_GET_RETRY_BACKOFF_S * (attempt + 1))
+                continue
+            break
+        if resp.status_code != 200:
+            if resp.status_code in {404, 405}:
+                _position_memo_put(goal_hash, call_site, step, None, None)
+                return None, None
+            logger.warning(
+                "fast_cache.get_position_failed",
+                status=resp.status_code,
+                attempt=attempt + 1,
+            )
+            if resp.status_code >= 500 and attempt < _GET_MAX_ATTEMPTS - 1:
+                await asyncio.sleep(_GET_RETRY_BACKOFF_S * (attempt + 1))
+                continue
+            raise RuntimeError(f"fast-cache get-position failed: {resp.status_code}")
+        data = resp.json()
+        result: tuple[Optional[Any], Optional[str]] = (
+            (data.get("value"), data.get("key")) if data.get("hit") else (None, None)
+        )
+        _position_memo_put(goal_hash, call_site, step, result[0], result[1])
+        return result
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("fast-cache get-position failed after retries")
 
 
 async def cache_get_position_fallback(

@@ -2763,6 +2763,90 @@ def test_position_fallback_retries_timeout_then_hits(monkeypatch):
     cache_client.clear_position_memo()
 
 
+def _slow_position_client(cache_client, monkeypatch, release_holder: dict, posts: list[int]):
+    """get-position stub that blocks every POST until ``release_holder['event']`` is set."""
+
+    class _Resp:
+        def __init__(self, step: int):
+            self.status_code = 200
+            self._step = step
+
+        def json(self):
+            return {"hit": True, "value": {"step": self._step}, "key": f"k-{self._step}"}
+
+    class _Client:
+        async def post(self, *args, **kwargs):
+            del args
+            step = int((kwargs.get("json") or {}).get("step") or 0)
+            posts.append(step)
+            await release_holder["event"].wait()
+            return _Resp(step)
+
+    monkeypatch.setattr(cache_client, "_backend", lambda: ("http://cache.test", "key"))
+    monkeypatch.setattr(cache_client, "_shared_client", lambda: _Client())
+
+
+def test_position_fallback_waiter_timeout_does_not_cancel_shared_slot(monkeypatch):
+    """A timed-out waiter must not hand CancelledError to the slot's other callers.
+
+    test-mass-agent-run-0 / 855ae867: summarize_web_fetch's 90s wait_for
+    (loop/activity_helper.py) expired while awaiting a single-flighted
+    get-position slot. Task cancellation cancelled the SHARED future, so the
+    retry 1s later awaited that cancelled future and a bare CancelledError
+    failed the whole explore activity (spawn_agent ERROR, t10-no-tool-failures).
+    """
+    import providers.fast_cache.client as cache_client
+
+    cache_client.clear_position_memo()
+    posts: list[int] = []
+    release: dict = {}
+    _slow_position_client(cache_client, monkeypatch, release, posts)
+
+    async def body():
+        release["event"] = asyncio.Event()
+        slot = ("hash-d", "summarize_web_fetch", 2)
+        owner = asyncio.create_task(cache_client.cache_get_position_fallback(*slot))
+        sibling = asyncio.create_task(cache_client.cache_get_position_fallback(*slot))
+        await asyncio.sleep(0)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(cache_client.cache_get_position_fallback(*slot), timeout=0.01)
+        retry = asyncio.create_task(cache_client.cache_get_position_fallback(*slot))
+        await asyncio.sleep(0)
+        release["event"].set()
+        results = await asyncio.gather(owner, sibling, retry, return_exceptions=True)
+        assert results == [({"step": 2}, "k-2")] * 3
+        assert posts.count(2) == 1
+
+    asyncio.run(body())
+    cache_client.clear_position_memo()
+
+
+def test_position_fallback_owner_timeout_still_resolves_waiters(monkeypatch):
+    """The caller that started the fetch may time out; waiters still get the row."""
+    import providers.fast_cache.client as cache_client
+
+    cache_client.clear_position_memo()
+    posts: list[int] = []
+    release: dict = {}
+    _slow_position_client(cache_client, monkeypatch, release, posts)
+
+    async def body():
+        release["event"] = asyncio.Event()
+        slot = ("hash-e", "summarize_web_fetch", 5)
+        owner = asyncio.create_task(asyncio.wait_for(cache_client.cache_get_position_fallback(*slot), timeout=0.01))
+        await asyncio.sleep(0)
+        waiter = asyncio.create_task(cache_client.cache_get_position_fallback(*slot))
+        with pytest.raises(asyncio.TimeoutError):
+            await owner
+        release["event"].set()
+        assert await asyncio.wait_for(waiter, timeout=1.0) == ({"step": 5}, "k-5")
+        assert await cache_client.cache_get_position_fallback(*slot) == ({"step": 5}, "k-5")
+        assert posts.count(5) == 1
+
+    asyncio.run(body())
+    cache_client.clear_position_memo()
+
+
 def test_cache_replay_usage_zeros_live_output_tokens():
     """Replay must not report stored completion tokens as live streamed output."""
     usage = rose_cache._cache_replay_usage(
