@@ -1,8 +1,24 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`ASSERTION FAILED: ${message}`);
+}
+
+function resolveGptCodeE2bTemplateDir(): string {
+  const root = join(process.cwd(), '..', 'e2b-templates');
+  const match = readdirSync(root).find((name) => {
+    if (name === 'claude-code') return false;
+    try {
+      readFileSync(join(root, name, 'e2b.Dockerfile'), 'utf8');
+      readFileSync(join(root, name, 'ws-server.mjs'), 'utf8');
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  assert(match !== undefined, 'GPT Code E2B template directory is missing');
+  return join(root, match);
 }
 
 export async function testPromptBuilder_sharedContractMentionsOutputRules() {
@@ -34,10 +50,7 @@ export async function testPromptBuilder_sharedContractMentionsOutputRules() {
 }
 
 export async function testTemplate_pinsCodexCliForGpt56() {
-  const dockerfile = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex', 'e2b.Dockerfile'),
-    'utf8'
-  );
+  const dockerfile = readFileSync(join(resolveGptCodeE2bTemplateDir(), 'e2b.Dockerfile'), 'utf8');
   assert(
     dockerfile.includes('ARG CODEX_VERSION=0.144.1') &&
       dockerfile.includes('npm install -g "@openai/codex@$CODEX_VERSION"') &&
@@ -47,10 +60,7 @@ export async function testTemplate_pinsCodexCliForGpt56() {
 }
 
 export async function testRuntimeFallback_recognizesRevokedOAuthRefreshToken() {
-  const wsServer = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex', 'ws-server.mjs'),
-    'utf8'
-  );
+  const wsServer = readFileSync(join(resolveGptCodeE2bTemplateDir(), 'ws-server.mjs'), 'utf8');
   assert(
     wsServer.includes('refresh_token_invalidated') &&
       wsServer.includes('oauth_refresh_invalid') &&
