@@ -13,7 +13,11 @@ source = pathlib.Path(sys.argv.pop(1))
 text = source.read_text()
 start = text.index('echo "Starting isolated backend for black-box tests on port $PORT"')
 end = text.index("\nREADY=0", start)
-block = text[start:end]
+# Cleanup is installed before port reservation. Keep that actual owner setup
+# when exercising the later launch/PID handoff with a pre-owned fixture lock.
+cleanup_start = text.index('source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"')
+cleanup_end = text.index("\n# Sets PORT and PORT_LOCK_DIR", cleanup_start)
+block = 'BACKEND_PID=""\n' + text[cleanup_start:cleanup_end] + "\n" + text[start:end]
 identity = runpy.run_path(str(root / "scripts/process-identity.py"))["current_identity"]
 
 

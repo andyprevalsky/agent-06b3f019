@@ -121,3 +121,24 @@ success does not. This correction is confined to the offline fixture assertion.
 ## Reusable lesson
 
 Assert terminal execution state independently of PID existence, and reject live or unobservable descendants while always joining directly owned children.
+
+
+## October 2 additional owning unit entrypoint
+
+The incoming backend process-tree unit independently used `kill(pid, 0)` to
+classify survivors. It failed in the complete Linux backend gate; that failed
+leaf's state was not retained and is not retroactively declared a zombie. A
+later unchanged standalone replay passed and observed other terminal native
+children, confirming the platform distinction without attributing the original
+failure.
+
+A compact permanent control in that same discovered unit file holds a real
+exited child unreaped. The old predicate counts it as executing and fails in
+1.185 seconds. The identical control passes with native-state observation in
+4.697 seconds, including the existing real npx tree and TERM-resistant tree.
+The predicate also proves live-child retention, joined-child absence, and
+failure on an unavailable state query. Direct fixture children are always
+joined; no signal is authorized by the predicate. Native metadata and failure
+receipts are private under `proof114-backend-fixture-rca`. The first draft's
+escaping failure remains preserved and earns no causal red credit. Independent
+review verifies the final paired files differ only in the predicate.

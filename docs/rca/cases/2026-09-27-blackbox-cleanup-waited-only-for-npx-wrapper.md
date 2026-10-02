@@ -91,3 +91,22 @@ cleanup without changing benchmark behavior or acceptance thresholds.
 ## Reusable lesson
 
 Retire and verify the owned service descendants before treating a launcher PID exit as completed cleanup.
+
+
+## October 2 integration fixture recurrence
+
+After main moved the same cleanup setup before port reservation, the permanent
+fixture still extracted only the later launch block. All four controls failed
+in the complete backend gate: normal, failed, and cancelled exits retained the
+fixture lock, while unknown-state cleanup returned zero. The extracted script
+had omitted the actual cleanup definition and EXIT trap; production cleanup
+was not exercised by those assertions.
+
+The fixture now composes the unchanged early setup and later launch/handoff
+blocks while preserving its pre-owned lock. All six function ASTs and all four
+behavioral assertions are unchanged. The four controls passed in 32.810 seconds
+against the unchanged runtime runner. Their existing entrypoint remains
+`coverage-script.part2.test.ts` in canonical backend units and coverage; no
+additional suite or provider calls were introduced. Originals and corrected
+setup evidence are private under `proof114-backend-fixture-rca`. Final integrated
+backend coverage remains a separate required gate.

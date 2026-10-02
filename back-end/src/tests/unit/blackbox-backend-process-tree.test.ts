@@ -35,13 +35,75 @@ interface TreeRun {
 }
 
 function isAlive(pid: number): boolean {
+  const observed = spawnSync('ps', ['-p', String(pid), '-o', 'stat='], {
+    encoding: 'utf8',
+    timeout: 5_000,
+  });
+  if (observed.status === 0) {
+    const state = observed.stdout.trim();
+    assert.match(state, /^[DIRSTUWXYZ][A-Za-z+<=>-]*$/, 'native process state is malformed');
+    return !state.startsWith('Z');
+  }
+  assert.equal(observed.status, 1, 'native process-state observation failed');
+  assert.equal(observed.stdout.trim(), '', 'failed process lookup returned ambiguous state');
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (error) {
+    assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH', 'process absence is unverified');
     return false;
   }
 }
+
+// Hold a real exited child unreaped: PID existence must not mean execution.
+// The same predicate must retain live children and reject unavailable state.
+const predicateSource = readFileSync(process.argv[1], 'utf8').match(
+  /^function isAlive\(pid: number\): boolean \{[\s\S]*?^\}/m
+)?.[0];
+assert.ok(predicateSource, 'owning process-state predicate is missing');
+const predicateProgram = `const assert=require('node:assert/strict');
+const {spawnSync}=require('node:child_process');
+${predicateSource
+  .replace('(pid: number): boolean', '(pid)')
+  .replace('(error as NodeJS.ErrnoException)', 'error')}
+console.log(isAlive(Number(process.argv[1])));`;
+const predicateControls = spawnSync(
+  'python3',
+  [
+    '-c',
+    String.raw`
+import os,pathlib,signal,subprocess,sys,tempfile,time
+node,program=sys.argv[1:]
+def probe(pid,env=None):
+ return subprocess.run([node,'-e',program,str(pid)],env=env,capture_output=True,text=True,timeout=7)
+reader,writer=os.pipe();child=os.fork()
+if child==0:
+ os.close(writer);os.read(reader,1);os._exit(0)
+os.close(reader)
+try:
+ live=probe(child);assert live.returncode==0 and live.stdout.strip()=='true','live child rejected'
+ os.write(writer,b'x');os.close(writer);deadline=time.monotonic()+3
+ while True:
+  state=subprocess.check_output(['ps','-p',str(child),'-o','stat='],text=True,timeout=2).strip()
+  if state.startswith('Z'):break
+  assert time.monotonic()<deadline,'child never became terminal';time.sleep(.01)
+ terminal=probe(child);assert terminal.returncode==0 and terminal.stdout.strip()=='false','terminal child counted as executing'
+ original=child;os.waitpid(child,0);child=None
+ absent=probe(original);assert absent.returncode==0 and absent.stdout.strip()=='false','joined child counted as executing'
+ with tempfile.TemporaryDirectory() as tmp:
+  fake=pathlib.Path(tmp)/'ps';fake.write_text('#!/bin/sh\nexit 2\n');fake.chmod(0o700)
+  failed=probe(os.getpid(),{**os.environ,'PATH':tmp+os.pathsep+os.environ['PATH']})
+  assert failed.returncode!=0,'unavailable native state counted as absence'
+finally:
+ if child is not None:
+  os.kill(child,signal.SIGKILL);os.waitpid(child,0)
+`,
+    process.execPath,
+    predicateProgram,
+  ],
+  { encoding: 'utf8', timeout: 15_000 }
+);
+assert.equal(predicateControls.status, 0, predicateControls.stderr);
 
 /** PIDs whose command line carries `token` (the harness shell has exited by now). */
 function processesCarrying(token: string): number[] {

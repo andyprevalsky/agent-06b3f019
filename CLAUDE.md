@@ -951,6 +951,11 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
    its registration and execution; a test file alone is not coverage. Extend
    the existing owning suite instead of adding a separate verification system.
    Adding larger tests or verification suites requires human approval.
+   Native process-observation timeouts are read failures, not proof of a leak
+   or absence. Keep bounded re-observation inside the existing owning gate;
+   require positive parent/group/state evidence before cleanup. Teardown
+   fixtures must include the runner's early EXIT-trap setup, and distinguish
+   an executing child from an unreaped terminal child while joining their owners.
    Match timing assertions to the measured operation: a router-stream deadline
    does not bound later database or Temporal completion. Correlate the actual
    stream measurement and retain a separate end-to-end completion bound.

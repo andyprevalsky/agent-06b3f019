@@ -609,10 +609,16 @@ def _run_owned_benchmark_commands(commands, cwd, timeout=60):
     children = []
 
     def snapshot():
-        rows = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,pgid=,stat="],
-            capture_output=True, text=True, check=True, timeout=2,
-        ).stdout
+        for attempt in range(2):
+            try:
+                rows = subprocess.run(
+                    ["ps", "-axo", "pid=,ppid=,pgid=,stat="],
+                    capture_output=True, text=True, check=True, timeout=2.4,
+                ).stdout
+                break
+            except subprocess.TimeoutExpired:
+                if attempt:
+                    raise
         table = {}
         for row in rows.splitlines():
             pid, parent, group, state = row.split()
@@ -19495,12 +19501,33 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
                 [sys.executable, "-c", leader_code],
                 [sys.executable, "-c", "print('owned child failure',flush=True);raise SystemExit(7)"],
             ]
+            # A slow native observation must still prove ownership and drain
+            # descendants. Keep the whole command group's 60-second limit.
+            import shutil
+
+            real_ps = shutil.which("ps")
+            assert real_ps, "native process observer is unavailable"
+            observer_bin = Path(scratch) / "observer-bin"
+            observer_bin.mkdir()
+            observed_once = Path(scratch) / "observed-once"
+            uncancelled_observation = Path(scratch) / "uncancelled-observation"
+            observer = observer_bin / "ps"
+            observer.write_text(
+                f"#!{sys.executable}\nimport os,pathlib,sys,time\n"
+                f"once=pathlib.Path({str(observed_once)!r})\n"
+                "if not once.exists():\n once.touch();time.sleep(2.6)\n"
+                f" pathlib.Path({str(uncancelled_observation)!r}).touch()\n"
+                f"os.execv({real_ps!r},[{real_ps!r},*sys.argv[1:]])\n"
+            )
+            observer.chmod(0o700)
             try:
-                await asyncio.to_thread(_run_owned_benchmark_commands, commands, repo_root)
+                with patch.dict(os.environ, {"PATH": str(observer_bin) + os.pathsep + os.environ["PATH"]}):
+                    await asyncio.to_thread(_run_owned_benchmark_commands, commands, repo_root)
             except AssertionError as error:
                 assert "owned child failure" in str(error), "child exit 7 was not preserved"
             else:
                 raise AssertionError("failed native child was accepted")
+            assert observed_once.exists() and not uncancelled_observation.exists(), "slow observation never timed out"
             assert descendant.exists(), "real inherited descendant never started"
             assert not descendant_live(), "exited leader left a live owned descendant"
         finally:
