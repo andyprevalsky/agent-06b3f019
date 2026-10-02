@@ -600,6 +600,7 @@ async def run_all_tests():
     await r.record_async("happy_path", test_grep_happy_path)
     await r.record_async("boundary", test_grep_boundary)
     await r.record_async("boundary_normalizes_model_dump_keys", test_grep_boundary_normalizes_model_dump_keys)
+    await r.record_async("agent_metadata_only", test_grep_agent_metadata_only)
     await r.record_async("fetch_local_data_summary", test_fetch_local_data_summary)
     await r.record_async("empty_pattern", test_grep_empty_pattern)
     await r.record_async("summary_source", test_grep_summary_source_returns_compact_inventory)

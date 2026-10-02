@@ -438,8 +438,12 @@ process_cwd_in_this_worktree() {
     local pid=$1
     local cwd
     cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
+    # lsof reports the symlink-resolved cwd (macOS /var -> /private/var), while
+    # $PWD keeps the logical path, so compare against both forms.
+    local physical_pwd
+    physical_pwd=$(pwd -P 2>/dev/null) || physical_pwd="$PWD"
     case "$cwd" in
-        "$PWD"|"$PWD"/*) return 0 ;;
+        "$PWD"|"$PWD"/*|"$physical_pwd"|"$physical_pwd"/*) return 0 ;;
     esac
     return 1
 }
