@@ -82,6 +82,7 @@ with workflow.unsafe.imports_passed_through():
         TaskDAG,
         execute_dag,
         extract_plan_from_context,
+        latest_real_user_instruction,
         plan_superseded_by_new_user_instruction,
     )
     from loop.run_agent import _run_verifier, run_agent
@@ -2172,11 +2173,15 @@ class AgentWorkflow:
             workflow.logger.info("[DAG] Skipping DAG (continued after context reset)")
         else:
             plan_data = extract_plan_from_context(execute_context)
-            if plan_data and plan_superseded_by_new_user_instruction(execute_context):
+            plan_stale = plan_superseded_by_new_user_instruction(execute_context)
+            if plan_data and plan_stale:
                 workflow.logger.info(
                     "[DAG] Skipping stale plan superseded by a newer USER instruction after completion_summary"
                 )
                 plan_data = None
+            if plan_stale:
+                await self._regenerate_output_schema_for_new_instruction(execute_context)
+                response_schema = self.output_schema
             if plan_data:
                 workflow.logger.info("[DAG] Found plan, attempting DAG execution")
                 try:
@@ -2678,6 +2683,71 @@ class AgentWorkflow:
             if task is None:
                 raise RuntimeError("Response schema refresh did not start")
             await task
+
+    async def _regenerate_output_schema_for_new_instruction(self, context: List[Dict[str, Any]]) -> None:
+        """Replace a completed-run schema with one generated from the latest USER.
+
+        Chat re-escalation keeps Agent.responseSchema from the previous goal.
+        Mid-run refresh also preserves those fields. A superseded execute is a
+        new task, so generate from the latest real USER text only.
+        """
+        latest = latest_real_user_instruction(context)
+        if not latest:
+            return
+        try:
+            generated = await workflow.execute_activity(
+                set_response_schema_activity,
+                args=[
+                    self.agent_id,
+                    [latest],
+                    self._active_compute_token_payload(),
+                    self.fast_mode_cache_enabled,
+                    False,
+                ],
+                start_to_close_timeout=timedelta(seconds=90),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Failed to regenerate output_schema after superseded plan: {e}")
+            return
+        schema = generated.get("schema") if isinstance(generated, dict) else None
+        if not (isinstance(schema, dict) and schema.get("fields")):
+            return
+        if schema == self.output_schema:
+            return
+        schema_message = format_required_output_schema_user_message(schema)
+        idempotency_key = str(workflow.uuid4())
+        self._response_schema_internal_signal_keys.add(idempotency_key)
+        try:
+            await workflow.execute_activity(
+                post_agent_message,
+                args=[
+                    self.agent_id,
+                    (
+                        f"{RESPONSE_SCHEMA_UPDATE_PREFIX}\n"
+                        "This replaces every earlier output-schema requirement.\n\n"
+                        f"{schema_message}"
+                    ),
+                    "USER",
+                    {
+                        "hidden": True,
+                        "isResponseSchemaUpdate": True,
+                        "responseSchemaRevision": self._response_schema_revision,
+                        "idempotencyKey": idempotency_key,
+                    },
+                ],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Failed to persist regenerated output_schema context message: {e}")
+            return
+        self.output_schema = schema
+        self._system_prompt_output_schema = schema
+        self.message_count += 1
+        workflow.logger.info(
+            f"Regenerated output_schema from latest USER instruction with {len(schema['fields'])} field(s)"
+        )
 
     async def build_system_prompt(self) -> str:
         """Build system prompt for the current phase.

@@ -9,10 +9,10 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: agents/workflows/agent_workflow.py EXECUTE skip_plan path — extract_plan_from_context + execute_dag treated a historical set_plan as live work after it was completed or superseded
 symptoms:
   - "get a refund, the doordasher delivered to the wrong location"
-  - "Research the public DoorDash shopping route"
   - "the second agent spawned here had no context on the first"
   - cloud_agent startPhase execute after completion_summary isFinalSummary
   - "Order one package of Oral-B Glide traditional dental floss"
+  - order_confirmation_id product_name platform after refund request
 tags:
   - dag
   - follow-up
@@ -44,7 +44,11 @@ original `set_plan`, and re-ran both DAG tasks: explore
 then browser `b3d8aac8-26bb-55af-8885-1a384a903ca7` spawned with the original
 "Order one package of Oral-B Glide..." goal. The second explore had no
 context of the completed order because it was given the original buy-floss
-research task, not a context-inheritance miss on a refund task.
+research task, not a context-inheritance miss on a refund task. The Agent
+row also kept the original output schema (`order_confirmation_id`,
+`product_name`, `platform`); chat re-escalation never cleared
+`responseSchema`, and the new workflow reused it because
+`response_schema is not None`.
 
 ## Diagnosis
 
@@ -93,9 +97,12 @@ completed DAG; execute_dag was called 1 time(s)`. Post-fix: PASS.
 treats a plan as not-live when either `completion_summary isFinalSummary`
 already posted, or a real (non-hidden) USER instruction arrived after
 `set_plan`. The EXECUTE skip-plan path then drops that plan and falls
-through to `run_agent`, which polls the DB (including the follow-up). A
-live plan with no later USER and no Task Complete still runs `execute_dag`.
-Cemented by `wf_execute_skips_stale_plan_after_completion_followup`,
+through to `run_agent`, which polls the DB (including the follow-up). The
+same predicate regenerates `output_schema` from the latest real USER
+instruction only (not `Agent.goal`, not "preserve current fields"). A
+live plan with no later USER and no Task Complete still runs `execute_dag`
+and keeps the persisted schema. Cemented by
+`wf_execute_skips_stale_plan_after_completion_followup`,
 `wf_execute_skips_plan_after_user_followup_without_summary`, and the helper
 tests in `dag_executor.blackbox.py`.
 
@@ -109,9 +116,12 @@ wrote Task Complete; restart after Task Complete with no new USER.
 
 ## Human feedback
 
-None recorded.
+User asked whether chat `execute` means continue the existing plan, why the
+second spawn looked like it had no prior chat, and noted the output schema
+was not reset either.
 
 ## Reusable lesson
 
-A historical set_plan is not live work after it is completed or a later USER
-instruction arrives — `start_phase=execute` must not replay it.
+A historical set_plan and its output schema are not live work after the run
+is completed or a later USER instruction arrives — `start_phase=execute`
+must not replay or reuse them.

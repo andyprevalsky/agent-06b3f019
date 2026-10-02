@@ -300,6 +300,28 @@ def test_plan_not_superseded_by_non_final_summary_without_later_user():
     )
 
 
+def test_latest_real_user_instruction_skips_hidden_schema_updates():
+    """Hidden schema-refresh USER rows are not the latest real instruction."""
+    from loop.dag_executor import latest_real_user_instruction
+
+    context = _plan_followup_context(include_final_summary=True, later_user=True)
+    context.append(
+        {
+            "role": "USER",
+            "text": "generated schema",
+            "metadata": {"hidden": True, "isResponseSchemaUpdate": True},
+        }
+    )
+    assert latest_real_user_instruction(context) == "get a refund, the doordasher delivered to the wrong location"
+
+
+def test_latest_real_user_instruction_empty():
+    from loop.dag_executor import latest_real_user_instruction
+
+    assert latest_real_user_instruction([]) is None
+    assert latest_real_user_instruction([{"role": "TOOL", "text": "done", "metadata": {}}]) is None
+
+
 def test_tool_aliases_constants():
     """TOOL_ALIASES and ALIAS_TYPE_OVERRIDES are correctly defined."""
     from loop.dag_executor import ALIAS_TYPE_OVERRIDES, TOOL_ALIASES
@@ -1488,6 +1510,11 @@ async def run_all_tests():
         "plan_not_superseded_by_non_final_summary_without_later_user",
         test_plan_not_superseded_by_non_final_summary_without_later_user,
     )
+    r.record(
+        "latest_real_user_instruction_skips_hidden_schema_updates",
+        test_latest_real_user_instruction_skips_hidden_schema_updates,
+    )
+    r.record("latest_real_user_instruction_empty", test_latest_real_user_instruction_empty)
     r.record("tool_aliases_constants", test_tool_aliases_constants)
     r.record(
         "dag_foreach_alias_override_passes_spawn_agent_validation",

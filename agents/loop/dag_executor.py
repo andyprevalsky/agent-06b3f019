@@ -616,6 +616,24 @@ def plan_superseded_by_new_user_instruction(context: List[Dict[str, Any]]) -> bo
     )
 
 
+def latest_real_user_instruction(context: List[Dict[str, Any]]) -> Optional[str]:
+    """Return the latest non-hidden USER text, or None if there is none."""
+    last_text: Optional[str] = None
+    for msg in context:
+        if not isinstance(msg, dict):
+            continue
+        metadata = msg.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        role = str(msg.get("role") or "").upper()
+        if role != "USER" or _is_hidden_or_internal_user(metadata):
+            continue
+        text = str(msg.get("text") or "").strip()
+        if text:
+            last_text = text
+    return last_text
+
+
 def _metadata_matches_task(metadata: Dict[str, Any], task: DAGTask) -> bool:
     """Return whether a terminal tool row represents a planned DAG task."""
     tool_name = metadata.get("toolName")

@@ -6023,8 +6023,23 @@ async def test_workflow_execute_skips_stale_plan_after_completion_followup():
             "get_user_custom_system_prompt": None,
             "fetch_compute_token_activity": None,
             "fetch_agent_config": {
-                "response_schema": {"fields": []},
+                "response_schema": {
+                    "fields": [
+                        {"name": "order_confirmation_id", "type": "str", "required": True},
+                        {"name": "product_name", "type": "str", "required": True},
+                        {"name": "platform", "type": "str", "required": True},
+                    ]
+                },
                 "write_lock_enabled": True,
+            },
+            "set_response_schema_activity": {
+                "schema": {
+                    "fields": [
+                        {"name": "refund_confirmation_id", "type": "str", "required": True},
+                        {"name": "refund_status", "type": "str", "required": True},
+                    ]
+                },
+                "usage": {},
             },
             "generate_completion_summary": {
                 "summary": "Refund follow-up should not replay the order DAG.",
@@ -6085,6 +6100,25 @@ async def test_workflow_execute_skips_stale_plan_after_completion_followup():
         )
         assert run_agent_calls, "stale completed plan must fall through to run_agent with the new USER instruction"
         assert result == {"status": "completed", "goal": "order me glide floss from doordash"}
+        schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
+        assert schema_calls, "superseded execute must regenerate output_schema from the new USER instruction"
+        assert schema_calls[0][1][1] == [followup], (
+            "schema generation must use the latest USER follow-up, not the persisted Agent.goal"
+        )
+        assert schema_calls[0][1][4] is False
+        assert wf.output_schema == {
+            "fields": [
+                {"name": "refund_confirmation_id", "type": "str", "required": True},
+                {"name": "refund_status", "type": "str", "required": True},
+            ]
+        }
+        assert wf._system_prompt_output_schema == wf.output_schema
+        schema_messages = [
+            c
+            for c in fake.activity_calls
+            if c[0] == "post_agent_message" and (c[1][3] or {}).get("isResponseSchemaUpdate") is True
+        ]
+        assert schema_messages, "regenerated schema must be posted as a hidden replacement USER row"
     finally:
         workflow_module.execute_dag = original_execute_dag
         workflow_module.run_agent = original_run_agent
@@ -6177,6 +6211,9 @@ async def test_workflow_execute_still_runs_live_plan_without_later_user():
             {},
         )
         assert len(dag_calls) == 1, "a live plan with no later USER must still run execute_dag"
+        assert not any(c[0] == "set_response_schema_activity" for c in fake.activity_calls), (
+            "a live plan must keep the persisted output_schema"
+        )
     finally:
         workflow_module.execute_dag = original_execute_dag
         workflow_module.run_agent = original_run_agent
@@ -6202,8 +6239,20 @@ async def test_workflow_execute_skips_plan_after_user_followup_without_summary()
             "get_user_custom_system_prompt": None,
             "fetch_compute_token_activity": None,
             "fetch_agent_config": {
-                "response_schema": {"fields": []},
+                "response_schema": {
+                    "fields": [
+                        {"name": "order_confirmation_id", "type": "str", "required": True},
+                    ]
+                },
                 "write_lock_enabled": True,
+            },
+            "set_response_schema_activity": {
+                "schema": {
+                    "fields": [
+                        {"name": "refund_status", "type": "str", "required": True},
+                    ]
+                },
+                "usage": {},
             },
         }
     )
@@ -6251,6 +6300,14 @@ async def test_workflow_execute_skips_plan_after_user_followup_without_summary()
         assert dag_calls == [], (
             "a USER message after set_plan without completion_summary must not replay the DAG"
         )
+        schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
+        assert schema_calls, "a USER follow-up after set_plan must regenerate output_schema"
+        assert schema_calls[0][1][1] == [followup]
+        assert wf.output_schema == {
+            "fields": [
+                {"name": "refund_status", "type": "str", "required": True},
+            ]
+        }
     finally:
         workflow_module.execute_dag = original_execute_dag
         workflow_module.run_agent = original_run_agent
