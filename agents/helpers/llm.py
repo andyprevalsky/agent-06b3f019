@@ -7069,7 +7069,7 @@ async def call_planner_llm_activity(
     """
     import time
 
-    from domains.set_plan.config import PLANNER_MODEL
+    from domains.set_plan.config import PLANNER_ACTIVITY_HEARTBEAT_INTERVAL_SECONDS, PLANNER_MODEL
     from utils.prompts import build_planner_system_prompt
     from utils.tool_schemas import get_planner_response_model
 
@@ -7084,6 +7084,20 @@ async def call_planner_llm_activity(
 
     activity_start = time.perf_counter()
     _safe_heartbeat("Calling planner LLM")
+    # Heartbeat on a timer, not only on LLM chunks. TTFT can be silent for
+    # up to ttft_timeout_s; without this loop heartbeat_timeout cannot be
+    # shorter than that silence and a dead worker burns the StartToClose budget.
+    liveness_stop = asyncio.Event()
+
+    async def _planner_liveness_heartbeat() -> None:
+        while not liveness_stop.is_set():
+            _safe_heartbeat("planner liveness")
+            try:
+                await asyncio.wait_for(liveness_stop.wait(), timeout=PLANNER_ACTIVITY_HEARTBEAT_INTERVAL_SECONDS)
+            except TimeoutError:
+                continue
+
+    liveness_task = asyncio.create_task(_planner_liveness_heartbeat())
 
     # Fast Mode: set the cache context so the planner's Rose call (via
     # call_llm_structured_streaming → cached_complete) records/replays by canonical
@@ -7265,3 +7279,8 @@ async def call_planner_llm_activity(
     except Exception as e:
         logger.error("Planner LLM failed", error=extract_error_message(e))
         raise
+    finally:
+        liveness_stop.set()
+        liveness_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await liveness_task

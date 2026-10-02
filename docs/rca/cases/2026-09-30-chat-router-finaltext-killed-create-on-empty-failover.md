@@ -8,11 +8,11 @@ classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: back-end/src/providers/chat/routerLlm.ts — first empty/deadline/parse miss threw out of handleChatMessage instead of regenerating in place
 symptoms:
-  - 'Chat handler error: Expected one structured output item, received 0'
-  - 'cerebras_chat.pre_content_failover_to_waterfall'
+  - "Chat handler error: Expected one structured output item, received 0"
+  - "cerebras_chat.pre_content_failover_to_waterfall"
   - "Sorry — I couldn't generate a response just now. Please try again."
-  - '[ChatStructuredRetry] Deadline miss is not regenerated'
-  - 'Chat handler error: Chat router completion expired'
+  - "[ChatStructuredRetry] Deadline miss is not regenerated"
+  - "Chat handler error: Chat router completion expired"
 tags:
   - chat
   - structured-output
@@ -393,19 +393,19 @@ path. Cerebras requests were paced under half of the org's 150k
 tokens/minute. Served on router attempt 1 (prod apologized on any
 attempt-1 miss), with decision times:
 
-| Context (Cerebras tokens) | prod, old bounds | prod, 15s | glm-only, old | glm-only, 15s |
-| --- | --- | --- | --- | --- |
-| 1476ba20 (1.7k) | 2/2 | 2/2 (0.5–0.6s) | 1/2 | 2/2 (1.5–2.6s) |
-| 26576873 (1.7k) | 2/2 | 2/2 (0.4–0.5s) | 2/2 | 2/2 (2.2–10.5s) |
-| d85b0ca9 (5.3k) | 2/2 | 2/2 (0.5–0.6s) | 1/2 | 2/2 (2.4–3.8s) |
-| 2929bc93 (7.9k) | 1/2 | 2/2 (1.9–2.2s) | 0/2 | 1/2 (6.0s) |
-| 3a7c0315 (10.4k) | 2/2 | 2/2 (0.6–0.8s) | 0/2 | 2/2 (3.2–5.3s) |
-| be5f2781 (15.4k) | 0/2 | 2/2 (1.8–3.1s) | 1/2 | 2/2 (2.7–3.1s) |
-| e8f2279b (26.9k) | 2/2 | 2/2 (1.0–1.2s) | 0/2 | 2/2 (4.1–4.4s) |
-| a890a362 (47.8k) | 0/2 | 2/2 (2.4–2.8s) | 0/2 | 2/2 (12.9–14.9s) |
-| a890a362 (47.8k, later turn) | 0/2 | 2/2 (2.6s) | 0/2 | 2/2 (12.2–12.4s) |
-| 3b5c2813 (95.7k) | 0/2 | 2/2 (3.1–7.0s) | 0/2 | 2/2 (7.8–8.4s) |
-| Total | 11/20 | 20/20 | 5/20 | 19/20 |
+| Context (Cerebras tokens)    | prod, old bounds | prod, 15s      | glm-only, old | glm-only, 15s    |
+| ---------------------------- | ---------------- | -------------- | ------------- | ---------------- |
+| 1476ba20 (1.7k)              | 2/2              | 2/2 (0.5–0.6s) | 1/2           | 2/2 (1.5–2.6s)   |
+| 26576873 (1.7k)              | 2/2              | 2/2 (0.4–0.5s) | 2/2           | 2/2 (2.2–10.5s)  |
+| d85b0ca9 (5.3k)              | 2/2              | 2/2 (0.5–0.6s) | 1/2           | 2/2 (2.4–3.8s)   |
+| 2929bc93 (7.9k)              | 1/2              | 2/2 (1.9–2.2s) | 0/2           | 1/2 (6.0s)       |
+| 3a7c0315 (10.4k)             | 2/2              | 2/2 (0.6–0.8s) | 0/2           | 2/2 (3.2–5.3s)   |
+| be5f2781 (15.4k)             | 0/2              | 2/2 (1.8–3.1s) | 1/2           | 2/2 (2.7–3.1s)   |
+| e8f2279b (26.9k)             | 2/2              | 2/2 (1.0–1.2s) | 0/2           | 2/2 (4.1–4.4s)   |
+| a890a362 (47.8k)             | 0/2              | 2/2 (2.4–2.8s) | 0/2           | 2/2 (12.9–14.9s) |
+| a890a362 (47.8k, later turn) | 0/2              | 2/2 (2.6s)     | 0/2           | 2/2 (12.2–12.4s) |
+| 3b5c2813 (95.7k)             | 0/2              | 2/2 (3.1–7.0s) | 0/2           | 2/2 (7.8–8.4s)   |
+| Total                        | 11/20            | 20/20          | 5/20          | 19/20            |
 
 "Old bounds" is prod's 1.2s Cerebras guard, 2s GLM guard, and 3s router
 attempt (the code defaults were set to those values for that run). With
@@ -443,11 +443,11 @@ router turns (1.8k–7.8k tokens), twice each, on the 8s code (15:38–16:10Z).
 A third scenario, "cerebras-only", stalls every OpenRouter route, so direct
 Cerebras is the only path.
 
-| Scenario | Served on attempt 1 | Served at all | Apologies |
-| --- | --- | --- | --- |
-| prod | 39/40 | 40/40 | 0 |
-| glm-only | 39/40 | 40/40 | 0 |
-| cerebras-only | 39/40 | 40/40 | 0 |
+| Scenario      | Served on attempt 1 | Served at all | Apologies |
+| ------------- | ------------------- | ------------- | --------- |
+| prod          | 39/40               | 40/40         | 0         |
+| glm-only      | 39/40               | 40/40         | 0         |
+| cerebras-only | 39/40               | 40/40         | 0         |
 
 - No direct-Cerebras request came near the 8s guard. First content after
   the request was at most 5,650ms (95.7k tokens; 5,585ms in cerebras-only),
@@ -456,7 +456,7 @@ Cerebras is the only path.
   about 2x between runs.
 - None of the three regenerates involves the 8s guard:
   - prod, 95.7k context: Cerebras returned HTTP 429 `Tokens per minute
-    limit exceeded` at once. GLM's first content landed 14.1s into the
+limit exceeded` at once. GLM's first content landed 14.1s into the
     turn, the attempt expired, and the regenerate served via GLM at 25.7s.
   - cerebras-only, 5.3k context: the same 429 with every other route
     stalled. The regenerate served at 15.7s.
@@ -498,7 +498,7 @@ healthy Cerebras, and the GLM failover.
   - (g) Cerebras stalls and GLM's first content lands 8,583ms after its
     request, the slowest measured in the replay (9,383ms into the turn).
     The 8s guard ends Cerebras at 8,015ms with `Cerebras produced no model
-    output within 8000ms`, GLM keeps racing, and the turn escalates on
+output within 8000ms`, GLM keeps racing, and the turn escalates on
     router attempt 1 at 13.8s. On the 15s Cerebras guard, (g) fails its
     precondition, because GLM's first content would land inside the guard.
   - (a) escalates at 8.4–8.6s via `z-ai/glm-5.3-flash`. The reasoning
@@ -791,3 +791,54 @@ Keep the 3/5/15-second bounds and existing assertions unchanged. A later GREEN
 validates the adopted source; it does not establish the missing original
 provider cause. The evidence and archive-search hashes are retained privately
 under `.context/acceptance/proof103-semantic-latency-rca/`.
+
+## Test-clock recurrence (2026-10-02)
+
+The required backend coverage run on `a16c34d8` failed the slow GLM
+failover case after its router stream completed in 13,896 ms, inside the
+unchanged 15-second router bound. Postdecision message/tool persistence then
+took about 6,934 ms before Temporal acceptance. The test compared that later
+whole-turn observation with the router bound. The first bad boundary was the
+test assertion, not evidence that the router exceeded its deadline. The cause
+of the original persistence delay remains open.
+
+Archive searches used `chat-router-failover; GLM guard; first attempt bound`
+and `router clock/deadline; timing assertion; scheduler fixture`; this case
+owns the regression. The related scheduler-window fixture case from 2026-08-03 informed
+boundary selection, without establishing the cause of the database delay.
+
+The existing seven-case offline blackbox now observes the real RouterLLM
+start/completion log pair for the exact fixture agent and stream. This measures
+the whole stream, which contains the successful attempt, rather than nominal
+recorded chunk offsets. Both affected failover cases require a measured stream
+below 15 seconds and actual durable turn completion below 40 seconds. Existing
+single-attempt, escalation, provider cancellation and goal assertions remain.
+Only the slowest case holds its own postdecision assistant-message write until
+after the already completed stream's 15-second boundary. It still performs the
+real database write and Temporal acceptance. The observer forwards stdout
+unchanged, drains its owned write and restores patched methods in `finally`.
+Missing or duplicate measurements fail closed.
+
+With canonical fixture exports, the full seven-case RED ran in 68.767 seconds:
+six passed, and only the wrong-clock assertion failed. Its measured stream took
+13,872 ms while the whole case took 15,302 ms, including setup and cleanup.
+Changing only the two
+comparison operands produced seven passes in 67.836 seconds; the controlled
+case retained a 13,832 ms stream, a 15,171 ms escalation observation and a
+15,316 ms whole-case duration. The actual durable turn stayed below its separate
+40-second assertion. The control
+helper, driver, environment, recorded streams, limits and other assertions were
+identical. The test implementation file necessarily has different RED/GREEN
+hashes because its assertion is the repaired implementation.
+
+Earlier pressured replays exceeded the real stream bound and remain failures.
+A separate seven-case attempt reproduced the clock bug but also omitted the
+canonical fake alert exports; it remains a mixed failure, not part of the
+identical-environment pair. All original aggregate failures are preserved.
+Exact native owners were absent after the final pair and all 21 observed
+fixture agents from the last three runs had zero remaining agent, message and
+tool-usage rows. This is test-boundary proof, not live model acceptance credit.
+The existing `chat-router-failover` domain remains auto-discovered by the normal
+backend blackbox gate in `/deploy`; no suite or deadline was added.
+Independent review and final static checks are recorded with the private
+source-bound evidence under `.context/acceptance/proof113-chat-router-clock-rca/`.

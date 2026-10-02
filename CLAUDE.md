@@ -945,6 +945,9 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
    its registration and execution; a test file alone is not coverage. Extend
    the existing owning suite instead of adding a separate verification system.
    Adding larger tests or verification suites requires human approval.
+   Match timing assertions to the measured operation: a router-stream deadline
+   does not bound later database or Temporal completion. Correlate the actual
+   stream measurement and retain a separate end-to-end completion bound.
 
 2. **TDD loop** - Don't return until tests pass:
 

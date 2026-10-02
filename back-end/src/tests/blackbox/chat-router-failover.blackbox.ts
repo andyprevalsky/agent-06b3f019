@@ -33,8 +33,10 @@
  * rows (fixtures/chat-router-failover-prod-e8f2279b.json; PII, including the
  * delivery street, replaced with same-length stand-ins). It replays provider
  * streams recorded on that request with their real timing
- * (fixtures/chat-router-failover-prod-e8f2279b-streams.json). Only the
- * network boundary (chat-router-failover.network.support.ts) is replaced; the
+ * (fixtures/chat-router-failover-prod-e8f2279b-streams.json). The network
+ * boundary (chat-router-failover.network.support.ts) is replaced; the slowest
+ * failover also holds only its fixture's postdecision persistence, separating
+ * the measured router stream clock from durable turn completion. The
  * Rose hedge, race, stall guards, router bounds, regenerate, escalation, and
  * Temporal acceptance all run for real (Temporal through the in-memory
  * blackbox client), under the bound defaults prod runs with (inherited
@@ -80,6 +82,7 @@ import {
   type FailoverNetwork,
   firstContentDt,
   installNetwork,
+  observeRouterCompletion,
   LONG_CONTEXT_GLM_DELAY_MS,
   LONG_PREFILL_CEREBRAS_DELAY_MS,
   type Scenario,
@@ -220,18 +223,29 @@ async function waitForTurn(
 
 async function sendFollowUp(
   scenario: Scenario,
-  timeoutMs: number
+  timeoutMs: number,
+  routerObservation?: 'measure' | 'hold-persistence'
 ): Promise<{
   outcome: Outcome;
   network: FailoverNetwork;
   seeded: SeededAgent;
   agent: { status: string; temporalWorkflowId: string | null };
   goal?: string;
+  routerDurationMs?: number;
+  turnElapsedMs: number;
 }> {
   const seeded = await seedProdAgent();
   const since = new Date();
   const startedAt = Date.now();
   const network = installNetwork(scenario, startedAt);
+  const router = routerObservation
+    ? observeRouterCompletion(
+        seeded.agentId,
+        DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
+        routerObservation === 'hold-persistence'
+      )
+    : undefined;
+  let returned = false;
   try {
     const posted = await postMessage(
       seeded.agentId,
@@ -249,9 +263,21 @@ async function sendFollowUp(
     });
     const goal =
       outcome.kind === 'escalated' ? await startedWorkflowGoal(seeded.agentId) : undefined;
-    return { outcome, network, seeded, agent, goal };
+    const result = {
+      outcome,
+      network,
+      seeded,
+      agent,
+      goal,
+      routerDurationMs: router?.durationMs(),
+      turnElapsedMs: Date.now() - startedAt,
+    };
+    returned = true;
+    return result;
   } finally {
+    await router?.restore();
     network.restore();
+    if (!returned) await cleanup(seeded);
   }
 }
 
@@ -330,9 +356,10 @@ async function testLongContextFailoverServesOnFirstAttempt(): Promise<void> {
     firstContentAt > OLD_ROUTER_ATTEMPT_MS,
     `precondition: GLM's first content (${firstContentAt}ms) lands past the old ${OLD_ROUTER_ATTEMPT_MS}ms attempt`
   );
-  const { outcome, network, seeded, goal } = await sendFollowUp(
+  const { outcome, network, seeded, goal, routerDurationMs, turnElapsedMs } = await sendFollowUp(
     { cerebras: () => 'stall', glm: () => 'glm-recorded-long-context', openrouterOther: 'stall' },
-    40_000
+    40_000,
+    'measure'
   );
   try {
     assertExactProdRouterContext(network);
@@ -347,9 +374,11 @@ async function testLongContextFailoverServesOnFirstAttempt(): Promise<void> {
       1,
       'the first router attempt must serve it: no regenerate'
     );
+    assert.ok(turnElapsedMs < 40_000, 'actual persisted turn must complete inside its E2E guard');
+    assert.ok(routerDurationMs !== undefined, 'actual router stream duration is required');
     assert.ok(
-      outcome.atMs < DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
-      `decision at ${outcome.atMs}ms must land inside the first attempt's bound`
+      routerDurationMs < DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
+      `measured router stream took ${routerDurationMs}ms; persisted turn took ${turnElapsedMs}ms`
     );
     assert.equal(goalAnchorFailure(goal, CORRECTED_GOAL), undefined);
     process.stdout.write(
@@ -369,9 +398,10 @@ async function testCerebrasGuardLeavesFailoverRacing(): Promise<void> {
     firstContentAt > DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS,
     `precondition: GLM's first content (${firstContentAt}ms) lands after the ${DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS}ms Cerebras guard`
   );
-  const { outcome, network, seeded, goal } = await sendFollowUp(
+  const { outcome, network, seeded, goal, routerDurationMs, turnElapsedMs } = await sendFollowUp(
     { cerebras: () => 'stall', glm: () => 'glm-recorded-slowest', openrouterOther: 'stall' },
-    40_000
+    40_000,
+    'hold-persistence'
   );
   try {
     assert.equal(
@@ -391,11 +421,16 @@ async function testCerebrasGuardLeavesFailoverRacing(): Promise<void> {
       (cerebras[0].abortedAtMs ?? Infinity) < firstContentAt,
       `Cerebras ended at ${cerebras[0].abortedAtMs}ms, before GLM's first content at ${firstContentAt}ms`
     );
-    assert.ok(outcome.atMs < DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS);
+    assert.ok(turnElapsedMs < 40_000, 'actual persisted turn must complete inside its E2E guard');
+    assert.ok(routerDurationMs !== undefined, 'actual router stream duration is required');
+    assert.ok(
+      routerDurationMs < DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
+      `measured router stream took ${routerDurationMs}ms; persisted turn took ${turnElapsedMs}ms`
+    );
     assert.equal(goalAnchorFailure(goal, CORRECTED_GOAL), undefined);
     process.stdout.write(
       `  Cerebras ended at ${cerebras[0].abortedAtMs}ms; GLM first content at ${firstContentAt}ms; ` +
-        `escalated at ${outcome.atMs}ms on attempt 1\n`
+        `router stream finished at ${routerDurationMs}ms; escalated at ${outcome.atMs}ms on attempt 1\n`
     );
   } finally {
     await cleanup(seeded);
