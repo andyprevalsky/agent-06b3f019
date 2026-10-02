@@ -1445,6 +1445,7 @@ Inspect the newest CodeRabbit-authored content from all three endpoints. Treat C
 - The check is missing, failed, or timed out.
 - The newest bot output contains `Review limit reached`, `rate limited`, `usage spending cap`, `review skipped`, or a service/internal error.
 - The check is green but there is no substantive review result for `REVIEW_HEAD`. A quota/error comment is not a review.
+- The `@coderabbitai review` comment was posted by a bot account (for example `cursor[bot]` when a Cloud Agent comments through its PR tool). CodeRabbit silently ignores bot-authored commands, so the push only produces `Review skipped: incremental reviews are disabled` and no review follows. Go straight to the fallback instead of re-requesting.
 
 Do not repeatedly request more CodeRabbit reviews during a quota window. Trigger exactly one Claude review for `REVIEW_HEAD` by toggling the opt-in label. The fallback remains part of the already-open lifecycle; it does not consume another review cycle:
 
