@@ -1102,6 +1102,7 @@ billing state.
 cd "$(git rev-parse --show-toplevel)"
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
   BENCHMARK_SKIP_WMH_BUILD=1 \
+  BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0 \
   bash scripts/run-deploy-stage agentcard-lifecycle -- \
   bash scripts/run-bench --local agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment --bootstrap --max-concurrency 1 --no-dashboard
 ```
@@ -1109,6 +1110,11 @@ CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
 These four real-mode payment tasks never use the simulated World Model Harness.
 The explicit opt-out prevents every fresh deploy workspace from downloading the
 full trace archive and running a first-time GEPA build before the payment gate.
+
+`BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0` keeps these active-worktree attempts
+out of the canary pass-streak history, exactly like `run-predeploy-local`. Without
+it an unmerged branch's AgentCard failure (or a provider blip) evicted the payment
+canaries from the smoke floor of every later deploy until three fresh passes.
 
 The bootstrap must report an AgentCard sandbox pool of at least $500. This is
 test-only float provisioned through the authenticated admin session; it does not
