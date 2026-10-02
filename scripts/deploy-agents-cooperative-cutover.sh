@@ -204,12 +204,17 @@ done
 
 echo "Waiting for new-gen machines to pass /health..."
 deadline=$((SECONDS + 300))
+healthy=0
 while [ "$SECONDS" -lt "$deadline" ]; do
-  NEW_GEN_STATES="$(flyctl machines list -a "$APP" --json | jq -r --arg h "$SURFACE_HASH" '
+  if ! NEW_GEN_STATES="$(flyctl machines list -a "$APP" --json | jq -r --arg h "$SURFACE_HASH" '
     .[]
     | select((.config.env.TEMPORAL_WORKER_SURFACE_HASH // "") == $h)
     | "\(.id) \(.state)"
-  ')"
+  ')"; then
+    echo "  ⚠️  machines list failed; retrying" >&2
+    sleep 5
+    continue
+  fi
   healthy="$(printf '%s\n' "$NEW_GEN_STATES" | awk '$2 == "started" { n++ } END { print n + 0 }')"
   echo "  new-gen started=$healthy / $MIN"
   if [ "$healthy" -ge "$MIN" ]; then
@@ -218,7 +223,8 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   # Fly refuses a start issued while the preceding update is still replacing
   # the VM ("failed_precondition: machine getting replaced"; run 36963508348),
   # so a single start right after the update is not enough.
-  for ID in $(printf '%s\n' "$NEW_GEN_STATES" | awk '$2 == "stopped" || $2 == "created" { print $1 }'); do
+  for ID in $(printf '%s\n' "$NEW_GEN_STATES" |
+    awk -v need="$((MIN - healthy))" '($2 == "stopped" || $2 == "created") && n < need { n++; print $1 }'); do
     flyctl machines start "$ID" -a "$APP" || true
   done
   sleep 5

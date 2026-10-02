@@ -42,6 +42,13 @@ def save():
 if args[0] == 'deploy':
     print('image: registry.fly.io/test:cutover-abc-token')
 elif args[:2] == ['machines', 'list']:
+    list_failures = Path(os.environ['FAKE_FLY_LIST_FAILURES'])
+    remaining = int(list_failures.read_text())
+    if remaining > 0 and 'start-refused' in journal.read_text():
+        list_failures.write_text(str(remaining - 1))
+        journal.write_text(journal.read_text() + 'list-failed\n')
+        print('Error: failed to list machines: request returned non-2xx status: 503', file=sys.stderr)
+        sys.exit(1)
     print(json.dumps(machines))
 elif args[:2] == ['machine', 'clone']:
     assert '--detach' in args, 'clone must return on creation, not wait for template startup'
@@ -93,6 +100,7 @@ seed_state() {
   local previous_hash="$2"
   printf '%s' "$3" > "$TMP/update-failures"
   printf '%s' "${4:-0}" > "$TMP/start-refusals"
+  printf '%s' "${5:-0}" > "$TMP/list-failures"
   python3 - "$TMP/state.json" "$orphans" "$previous_hash" <<'PY'
 import json, sys
 orphans = int(sys.argv[2])
@@ -113,6 +121,7 @@ run_cutover() {
   PATH="$TMP/bin:$PATH" FAKE_FLY_STATE="$TMP/state.json" \
     FAKE_FLY_JOURNAL="$TMP/journal" FAKE_FLY_UPDATE_FAILURES="$TMP/update-failures" \
     FAKE_FLY_START_REFUSALS="$TMP/start-refusals" \
+    FAKE_FLY_LIST_FAILURES="$TMP/list-failures" \
     FLY_API_TOKEN=fake APP=test \
     SURFACE_HASH=abc GENERATION_QUEUE=navi-agent-tasks@abc \
     BUILD_ID=build DEPLOYMENT_TOKEN=token \
@@ -123,7 +132,8 @@ run_case() {
   local orphans="$1"
   local update_failures="${3:-0}"
   local start_refusals="${4:-0}"
-  seed_state "$orphans" "${2:-old}" "$update_failures" "$start_refusals"
+  local list_failures="${5:-0}"
+  seed_state "$orphans" "${2:-old}" "$update_failures" "$start_refusals" "$list_failures"
   run_cutover || { cat "$TMP/output" >&2; echo "FAIL: cutover exited non-zero" >&2; exit 1; }
   python3 - "$TMP/state.json" "$TMP/journal" "$orphans" "$update_failures" <<'PY'
 import json, sys
@@ -147,6 +157,20 @@ run_case 0 # fresh rollout clones with --detach and configures every machine
 run_case 0 old 2 # Fly Machines API 408s on update are retried in-run, not fatal
 run_case 0 old 0 4 # starts refused while Fly is still replacing the VM are re-issued
 run_case 8 abc 0 4 # adopted clones refused at start are re-issued too
+run_case 0 old 0 4 2 # a transient machines-list failure while waiting is retried, not fatal
+
+# Surplus target-generation clones: only the machines needed to reach MIN start.
+seed_state 9 abc 0 9
+run_cutover || { cat "$TMP/output" >&2; echo "FAIL: surplus cutover exited non-zero" >&2; exit 1; }
+python3 - "$TMP/state.json" "$TMP/journal" <<'PY'
+import json, sys
+machines = json.load(open(sys.argv[1]))
+journal = open(sys.argv[2]).read()
+new = [m for m in machines if m['config']['env'].get('TEMPORAL_WORKER_SURFACE_HASH') == 'abc']
+assert len(new) == 9, new
+assert sum(m['state'] == 'started' for m in new) == 8, (new, journal)
+assert journal.count('flip\n') == 1, journal
+PY
 
 seed_state 0 old 4
 if run_cutover; then
