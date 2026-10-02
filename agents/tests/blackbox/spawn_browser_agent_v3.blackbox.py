@@ -14139,6 +14139,133 @@ async def test_execute_click_with_element_humanizer():
     assert out == {"success": True, "message": ""}
     hu.click_at_coords.assert_awaited_once_with(10, 20)
 
+async def test_execute_click_reports_missing_dom_delivery_after_humanized_click():
+    from domains.spawn_browser_agent_v3.service_actions import _execute_click
+
+    class Page:
+        url = "https://example.com/checkout"
+
+        async def evaluate(self, script, args):
+            if "addEventListener" in script:
+                return True
+            if "removeEventListener" in script:
+                return False
+            raise AssertionError("unexpected page evaluation")
+
+    page = Page()
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=page)
+    dom = MagicMock()
+    dom.get_click_coordinates = AsyncMock(return_value=(120, 757))
+    history = MagicMock()
+    history.record_action = AsyncMock()
+    humanizer = MagicMock()
+    humanizer.click_at_coords = AsyncMock()  # CDP accepted input, but the page saw no click.
+    element = MagicMock()
+    element.node_name = "BUTTON"
+    element.node_value = ""
+    element.attributes = {}
+    element.absolute_position = None
+    element.target_id = "tab"
+    element.frame_id = None
+    element.session_id = None
+
+    result = await _execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=history,
+        element=element,
+        index=21,
+        coords=None,
+        thinking=None,
+        humanizer=humanizer,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        current_url=page.url,
+        system_name="Rose",
+    )
+
+    assert result["success"] is False
+    assert "did not reach" in result["error"]
+    session.event_bus.dispatch.assert_called_once()
+    history.record_action.assert_not_awaited()
+
+async def test_execute_click_retries_via_browser_session_after_input_misses_page():
+    from domains.spawn_browser_agent_v3.service_actions import _execute_click
+
+    class Page:
+        url = "https://example.com/checkout"
+        delivered = False
+
+        async def evaluate(self, script, args):
+            if "addEventListener" in script:
+                return True
+            if "removeEventListener" in script:
+                return self.delivered
+            raise AssertionError("unexpected page evaluation")
+
+    page = Page()
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=page)
+
+    def deliver_to_focused_page(_event):
+        page.delivered = True
+        return _make_awaitable_event(None)
+
+    session.event_bus.dispatch.side_effect = deliver_to_focused_page
+    dom = MagicMock()
+    dom.get_click_coordinates = AsyncMock(return_value=(120, 757))
+    history = MagicMock()
+    history.record_action = AsyncMock()
+    humanizer = MagicMock()
+    humanizer.click_at_coords = AsyncMock()  # Input transport is bound to another page.
+    element = MagicMock()
+    element.node_name = "BUTTON"
+    element.node_value = ""
+    element.attributes = {}
+    element.absolute_position = None
+    element.target_id = "tab"
+    element.frame_id = None
+    element.session_id = None
+
+    result = await _execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=history,
+        element=element,
+        index=21,
+        coords=None,
+        thinking=None,
+        humanizer=humanizer,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        current_url=page.url,
+        system_name="Rose",
+    )
+
+    assert result == {"success": True, "message": ""}
+    session.event_bus.dispatch.assert_called_once()
+    history.record_action.assert_awaited_once()
+
+async def test_click_receipt_declines_parent_document_for_iframe_control():
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.service_actions import _arm_click_receipt
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content(
+                '<iframe style="position:absolute;left:70px;top:736px;width:110px;height:44px" '
+                'srcdoc="<button>Pay</button>"></iframe>'
+            )
+            session = MagicMock()
+            session.get_page = AsyncMock(return_value=page)
+            assert await _arm_click_receipt(session, {"x": 120, "y": 757}) is None
+        finally:
+            await browser.close()
+
 async def test_execute_click_with_element_humanizer_missing_coords_refuses_fallback():
     from domains.spawn_browser_agent_v3.service_actions import _execute_click
 
@@ -23248,6 +23375,18 @@ async def run_all_tests():
         test_browser_activity_memory_cleanup_clears_retained_buffers,
     )
     await r.record_async("execute_click_element_humanizer", test_execute_click_with_element_humanizer)
+    await r.record_async(
+        "execute_click_missing_dom_delivery",
+        test_execute_click_reports_missing_dom_delivery_after_humanized_click,
+    )
+    await r.record_async(
+        "execute_click_session_retry_after_missed_input",
+        test_execute_click_retries_via_browser_session_after_input_misses_page,
+    )
+    await r.record_async(
+        "click_receipt_skips_iframe_control",
+        test_click_receipt_declines_parent_document_for_iframe_control,
+    )
     await r.record_async(
         "execute_click_element_humanizer_missing_coords",
         test_execute_click_with_element_humanizer_missing_coords_refuses_fallback,

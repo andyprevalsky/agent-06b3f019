@@ -3134,6 +3134,71 @@ def _evaluate_element_text_write_lock(
     return None
 
 
+_ARM_CLICK_RECEIPT_JS = """
+({ token, x, y }) => {
+    const hit = document.elementFromPoint(x, y);
+    // Click events inside a child document do not bubble into this document.
+    if (hit?.tagName === 'IFRAME') return false;
+    const target = hit?.closest('button, [role="button"], a, input, select, textarea') || hit;
+    if (!target) return false;
+    const receipts = window.__roseBrowserClickReceipts ||= {};
+    const receipt = { seen: false, listener: null };
+    receipt.listener = (event) => {
+        if (Math.abs(event.clientX - x) <= 8 && Math.abs(event.clientY - y) <= 8
+            && (event.target === target || target.contains(event.target))) {
+            receipt.seen = true;
+        }
+    };
+    receipts[token] = receipt;
+    document.addEventListener('click', receipt.listener, true);
+    return true;
+}
+"""
+
+_READ_CLICK_RECEIPT_JS = """
+(token) => {
+    const receipts = window.__roseBrowserClickReceipts;
+    const receipt = receipts?.[token];
+    if (!receipt) return null; // A navigation may have replaced the document.
+    document.removeEventListener('click', receipt.listener, true);
+    delete receipts[token];
+    return receipt.seen;
+}
+"""
+
+
+async def _arm_click_receipt(session: Any, coords: Dict[str, int]) -> Optional[tuple[Any, str]]:
+    """Observe DOM delivery on the authoritative browser-use page, not the input transport."""
+    get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
+    if not callable(get_page):
+        return None
+    try:
+        page = await _maybe_await(get_page())
+        if page is None:
+            return None
+        token = uuid.uuid4().hex
+        armed = await page.evaluate(
+            _ARM_CLICK_RECEIPT_JS, {"token": token, "x": int(coords["x"]), "y": int(coords["y"])}
+        )
+        return (page, token) if armed is True else None
+    except Exception as error:
+        logger.debug("Unable to arm browser click receipt", error=str(error))
+        return None
+
+
+async def _read_click_receipt(receipt: Optional[tuple[Any, str]]) -> Optional[bool]:
+    if receipt is None:
+        return None
+    page, token = receipt
+    try:
+        delivered = await page.evaluate(_READ_CLICK_RECEIPT_JS, token)
+        return delivered if isinstance(delivered, bool) else None
+    except Exception as error:
+        # A navigation can destroy the old document immediately after a valid click.
+        logger.debug("Browser click receipt unavailable after navigation", error=str(error))
+        return None
+
+
 async def _execute_click(
     *,
     session: Any,
@@ -3179,7 +3244,24 @@ async def _execute_click(
         asyncio.create_task(session.highlight_interaction_element(element))
 
         if humanizer and element_coords:
+            receipt = await _arm_click_receipt(session, element_coords)
             await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
+            if await _read_click_receipt(receipt) is False:
+                logger.warning(
+                    "Humanized click did not reach target DOM control; retrying through browser session",
+                    index=index,
+                    coordinates=element_coords,
+                    url=current_url[:120],
+                )
+                retry_receipt = await _arm_click_receipt(session, element_coords)
+                event = session.event_bus.dispatch(ClickElementEvent(node=element))
+                await event
+                await event.event_result(raise_if_any=True, raise_if_none=False)
+                if await _read_click_receipt(retry_receipt) is False:
+                    return {
+                        "success": False,
+                        "error": "Click did not reach the target control; refresh browser state and try again",
+                    }
         else:
             if humanizer:
                 logger.error(
