@@ -25,6 +25,7 @@
 #   case 6 — edge 000 then 502            → routing (recovers within the window)
 #   case 7 — run.sh actually recycles a dead tunnel and backs off
 #   case 8 — prefers IPv4 (curl -4) + localtunnel fallback + NXDOMAIN skip
+#   case 9 — run-scoped ngrok fallback domains are bound, never reserved
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -169,5 +170,75 @@ fi
 ! grep -nE 'echo .*missing an authtoken' -A1 "$TMP/start_ngrok.sh" | grep -q 'exit 1' \
   || fail "case 8: start_ngrok_public_tunnel still bare-exits on missing authtoken"
 echo "PASS: NXDOMAIN skip + localtunnel fallback are wired into start_public_tunnel"
+
+# --- case 9: run-scoped ngrok fallback domains are bound, never reserved -----
+# Every isolated benchmark run has a unique "<worktree>-bench-<run id>" name.
+# Reserving its fallback domain left one permanent reservation per run until the
+# account's reserved-domain cap was full.
+awk '/^dns_label_from_workspace\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/ngrok_fallback.sh"
+awk '/^ensure_ngrok_domain_reserved\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/ngrok_fallback.sh"
+awk '/^start_ngrok_ephemeral_tunnel\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/ngrok_fallback.sh"
+for fn in dns_label_from_workspace ensure_ngrok_domain_reserved start_ngrok_ephemeral_tunnel; do
+  grep -q "^$fn() {" "$TMP/ngrok_fallback.sh" || fail "case 9: could not extract $fn from run.sh"
+done
+mkdir -p "$TMP/fake-ngrok-bin"
+cat > "$TMP/fake-ngrok-bin/ngrok" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NGROK_CALLS"
+case "$1" in
+  config) exit 0 ;;
+  api)
+    case "$3" in
+      list) printf '%s\n' '{"next_page_uri": null, "reserved_domains": []}' ;;
+      create) printf '%s\n' '{"id": "rd_created"}' ;;
+    esac
+    exit 0
+    ;;
+  http)
+    domain=""
+    while [ "$#" -gt 0 ]; do
+      [ "$1" = "--domain" ] && domain="$2"
+      shift
+    done
+    printf '{"url":"https://%s"}\n' "${domain:-free.ngrok-free.dev}"
+    exec sleep 30
+    ;;
+esac
+STUB
+chmod +x "$TMP/fake-ngrok-bin/ngrok"
+run_ngrok_fallback() { # run_ngrok_fallback <CONDUCTOR_WORKSPACE_NAME>
+  : > "$TMP/ngrok-calls"
+  NGROK_CALLS="$TMP/ngrok-calls" PATH="$TMP/fake-ngrok-bin:$PATH" \
+    CONDUCTOR_WORKSPACE_NAME="$1" NGROK_API_KEY=test-api-key NGROK_AUTHTOKEN=test-token \
+    RUN_CONTEXT_DIR="$TMP/ngrok-run" FRONTEND_PORT=3002 \
+    bash -c "
+      PIDS=(); NAMES=()
+      public_tunnel_publish_environment() { PUBLIC_BASE_URL=\"\$1\"; }
+      cloudflare_tunnel_edge_is_routing() { return 0; }
+      source '$TMP/ngrok_fallback.sh'
+      start_ngrok_ephemeral_tunnel
+      rc=\$?
+      kill \"\$NGROK_PID\" 2>/dev/null
+      exit \$rc
+    " > "$TMP/ngrok-fallback.out" 2>&1
+}
+
+run_ngrok_fallback krakow-bench-1790879218-96570-58551 \
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 9: run-scoped ngrok fallback did not publish a tunnel"; }
+grep -qx 'http 3002 --domain rose-krakow-bench-1790879218-96570-58551-bench.ngrok.app --log stdout --log-format json --log-level info' "$TMP/ngrok-calls" \
+  || { cat "$TMP/ngrok-calls" >&2; fail "case 9: run-scoped fallback must still bind its own named domain"; }
+if grep -q '^api reserved-domains' "$TMP/ngrok-calls"; then
+  cat "$TMP/ngrok-calls" >&2
+  fail "case 9: a run-scoped fallback domain must never be listed or reserved"
+fi
+echo "PASS: a run-scoped ngrok fallback binds its own domain without reserving it"
+
+run_ngrok_fallback krakow \
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 9: per-worktree ngrok fallback did not publish a tunnel"; }
+grep -qx 'api reserved-domains create --domain rose-krakow-bench.ngrok.app --description Conductor workspace krakow public frontend' "$TMP/ngrok-calls" \
+  || { cat "$TMP/ngrok-calls" >&2; fail "case 9: the per-worktree fallback domain must still be reserved"; }
+grep -qx 'http 3002 --domain rose-krakow-bench.ngrok.app --log stdout --log-format json --log-level info' "$TMP/ngrok-calls" \
+  || { cat "$TMP/ngrok-calls" >&2; fail "case 9: per-worktree fallback must bind its reserved domain"; }
+echo "PASS: the per-worktree ngrok fallback domain is still reserved and bound"
 
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

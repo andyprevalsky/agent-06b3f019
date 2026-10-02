@@ -145,18 +145,14 @@ trap 'rm -f "$JS_LOG" "$PY_LOG"' EXIT
 JS_PID=$!
 
 (
-    # Snapshot VMs reuse an old venv; key the install on requirements.txt so
-    # pin bumps on main (e.g. browser-use) are applied instead of silently skipped.
-    REQ_HASH="$(sha256sum agents/requirements.txt | cut -d' ' -f1)"
-    REQ_STAMP="agents/venv/.requirements.sha256"
+    # Snapshot VMs reuse an old venv; reinstall whenever an installed release no
+    # longer satisfies requirements.txt so pin bumps on main are applied.
     if [ ! -f agents/venv/bin/activate ] \
-        || ! agents/venv/bin/python -c "import temporalio" 2>/dev/null \
-        || [ "$(cat "$REQ_STAMP" 2>/dev/null)" != "$REQ_HASH" ]; then
+        || ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
         echo "🐍 Setting up agents venv..."
         PYTHON_BIN="$(command -v python3)"
         [ -f agents/venv/bin/activate ] || (cd agents && "$PYTHON_BIN" -m venv venv)
         (cd agents && . venv/bin/activate && pip install -q -r requirements.txt)
-        echo "$REQ_HASH" > "$REQ_STAMP"
     else
         echo "✅ agents venv already provisioned"
     fi

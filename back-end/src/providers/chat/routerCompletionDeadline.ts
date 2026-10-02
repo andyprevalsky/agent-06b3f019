@@ -1,4 +1,22 @@
-export const DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS = 3_000;
+/**
+ * Router stream bound: one deadline per router attempt, the chat timeout from
+ * the attempt's start, with no shorter no-progress bound inside it.
+ *
+ * The router needs a complete decision, and while the Cerebras primary stalls
+ * its serving path is the Rose OpenRouter failover, whose time to first
+ * content grows with the router context. On the 30-message, 24k-token prod
+ * router request from agent e8f2279b (2026-10-01, n=24, timed from the turn
+ * start) the failover emitted first content at p50 1.8s / p90 3.8s / max 8.6s
+ * and closed the decision in 4.1–19.1s (p50 6.0s, p90 10.7s); the previous
+ * 3s bound killed every one. The bound holds only while each failover request
+ * picks its GLM host by live performance (OPENROUTER_CHAT_LATENCY_PROVIDER,
+ * fresh session per request): pinned to a slow host that price-weighted
+ * routing favors, the same request finished at p90 16.6s.
+ */
+
+import { CHAT_TIMEOUT_MS } from '../rose/cerebrasRoute';
+
+export const DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS = CHAT_TIMEOUT_MS;
 
 export interface RouterCompletionDeadline {
   signal: AbortSignal;
