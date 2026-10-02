@@ -326,6 +326,7 @@ run_suite "Auto RCA Lifecycle Blackbox" bash scripts/tests/auto-rca-lifecycle.bl
 run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
 run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
+run_suite "Blackbox Backend Teardown" bash scripts/tests/blackbox-backend-teardown.test.sh
 run_suite "Agent Workflow Surface Hash" bash scripts/tests/agent-surface-hash.test.sh
 run_suite "Fly Cutover Clone Recovery" bash scripts/tests/deploy-agent-clone-recovery.test.sh
 run_suite "Mac App Release Drift" bash scripts/tests/mac-app-release-drift.test.sh
@@ -395,10 +396,10 @@ fi
 
 if should_run "agents"; then
   if $AUTO_RCA_MODE; then
-    run_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py && python tests/structural/structural_test_registration.py"
+    run_suite "Agents Structural" bash scripts/tests/agents-structural.test.sh
     run_suite "Agents Coverage and Blackbox" bash -c "cd agents && source venv/bin/activate && AGENTS_COVERAGE_CONCURRENCY=3 bash scripts/run-coverage.sh"
   else
-    bg_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py && python tests/structural/structural_test_registration.py"
+    bg_suite "Agents Structural" bash scripts/tests/agents-structural.test.sh
 
     if [ -n "$DOMAIN" ] && [ "$REPO" = "agents" ]; then
       bg_suite "Agents Blackbox ($DOMAIN)" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py $DOMAIN"

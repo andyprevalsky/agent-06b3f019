@@ -10,7 +10,7 @@ import {
   type TemporalWorkflowExecutionRef,
 } from '../../providers/temporal';
 import { createLogger } from '../../providers/logger';
-import { releaseAgentBrowserSessions } from '../../providers/agentCleanup';
+import { releaseTerminatedWorkflowResources } from '../../providers/agentCleanup';
 import {
   captureInProgressWorkflowTools,
   finalizeInterruptedWorkflowTools,
@@ -165,28 +165,18 @@ async function sealClaimedReplacement(
     assertRestartDeadline(deadlineAtMs, 'descendant cleanup');
     await cleanupNonterminalDescendantWorkflows(agentId, {}, { deadlineAtMs });
     assertRestartDeadline(deadlineAtMs, 'browser release');
-    // Close the sealed generation's rented browsers.
+    // Close the sealed generation's rented browsers and code sandboxes.
     //
-    // Browser/explore sub-agents are ACTIVITIES of the root workflow, not
+    // Browser/explore/code sub-agents are ACTIVITIES of the root workflow, not
     // descendants — they own no Agent row, so descendant cleanup cannot see
     // them. Temporal `terminate()` closes the workflow without cancelling its
     // in-flight activities, the browser activity has no cancellation poll, and
     // its own `close_browser_session` sits in a `try` rather than a `finally`.
     // Replacement also keeps the agent non-terminal, so the terminal-status
     // release hook never fires either. Without this call the rented browser is
-    // simply orphaned and keeps billing (prod: 90 minutes on one agent).
-    //
-    // 10k agents: one query + one close per session owned by the ONE agent
-    // being cut over. Failure is logged, never fatal — a cutover must not be
-    // blocked by a browser provider outage.
-    try {
-      await releaseAgentBrowserSessions(agentId);
-    } catch (error) {
-      log.warn('Cutover browser release unavailable', {
-        agent_id: agentId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    // simply orphaned and keeps billing (prod: 90 minutes on one agent), and an
+    // old Claude Code CLI keeps working next to the replacement run.
+    await releaseTerminatedWorkflowResources(agentId, 'Cutover');
     assertRestartDeadline(deadlineAtMs, 'replacement state refresh');
     finalClaim = await refreshWorkflowReplacementResumeState(claim);
     return finalClaim;

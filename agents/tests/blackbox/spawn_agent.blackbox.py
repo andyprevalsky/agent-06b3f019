@@ -804,11 +804,8 @@ async def test_handler_explore_passes_canonical_oai_demo_flag():
     """
     import inspect
 
-    from domains.spawn_agent.config import (
-        OAI_DEMO_CHILD_GOAL_PREFIX,
-        is_oai_demo_goal,
-        resolve_explore_depth,
-    )
+    from domains.spawn_agent.config import resolve_explore_depth
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX, is_oai_demo_goal
     from domains.spawn_agent.handler import SpawnAgentManager
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
@@ -1147,8 +1144,12 @@ async def test_handler_explore_cancelled_yields_error():
     assert any(e.status == MessageStatus.ERROR for e in events)
 
 
-def _explore_timeout_activity_error(heartbeat=None):
+def _explore_timeout_activity_error(*heartbeat_details):
+    """A timed-out explore as the workflow receives it: Temporal decodes the
+    last heartbeat's details into a list on the TimeoutError cause."""
     from temporalio.exceptions import ActivityError
+    from temporalio.exceptions import TimeoutError as TemporalTimeoutError
+    from temporalio.exceptions import TimeoutType
 
     exc = ActivityError(
         message="activity StartToClose timeout",
@@ -1159,9 +1160,11 @@ def _explore_timeout_activity_error(heartbeat=None):
         activity_id="1",
         retry_state=None,
     )
-    exc.__cause__ = TimeoutError("StartToClose")
-    if heartbeat is not None:
-        exc.last_heartbeat_details = (heartbeat,)
+    exc.__cause__ = TemporalTimeoutError(
+        "activity StartToClose timeout",
+        type=TimeoutType.START_TO_CLOSE,
+        last_heartbeat_details=list(heartbeat_details),
+    )
     return exc
 
 
@@ -1200,6 +1203,53 @@ async def test_handler_explore_timeout_finishes_with_heartbeat_wrap_up():
     assert not any(event.status == MessageStatus.ERROR for event in events)
     assert fake.wait_condition_timeouts
     assert fake.wait_condition_timeouts[0] is not None
+
+
+async def test_explore_timeout_during_an_llm_call_keeps_the_tool_evidence():
+    """Explore evidence must survive a timeout that lands mid LLM call.
+
+    Each heartbeat replaces the details the timeout hands the parent. The LLM
+    helpers run_agent calls heartbeat with a status string only, so a timeout
+    during the wrap-up call delivered no evidence and the explore ended as
+    "stopped before completion with no tool evidence" despite its results.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_agent.handler import _explore_result_after_activity_failure
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+    from helpers.llm import _safe_heartbeat as llm_heartbeat
+
+    search = MagicMock()
+    search.execute_tool = AsyncMock(
+        return_value={"result": "Denver median rent is $1,800 (Zillow, Sep 2026)", "usage": {"llm": [], "service": []}}
+    )
+    beats: list = []
+    beat_at_timeout: list = []
+
+    async def run_agent_until_wrap_up(**kwargs):
+        await kwargs["execute_tool"]("web_search", {"query": "Denver rent"}, "tc-search")
+        llm_heartbeat("LLM streaming... 120 chars")
+        beat_at_timeout.append(beats[-1])
+        return {"status": "completed", "final_response": "Denver rent summary"}
+
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+    with (
+        patch("loop.run_agent.run_agent", new=run_agent_until_wrap_up),
+        patch("tools.web_search.WebSearchManager", return_value=search),
+    ):
+        await env.run(spawn_explore_agent_activity, agent_id="a", user_id="u", goal="research Denver rent", model="m")
+
+    result, was_cancelled = _explore_result_after_activity_failure(
+        _explore_timeout_activity_error(*beat_at_timeout[0]), user_paused=False
+    )
+    assert not was_cancelled
+    assert result.get("status") == "completed", (
+        f"the last heartbeat {beat_at_timeout[0]!r} lost the explore evidence: {result}"
+    )
+    assert any("$1,800" in text for text in result["tool_call_results"]), result
 
 
 async def test_handler_explore_timeout_without_heartbeat_recovers_persisted_tool_evidence():
@@ -1318,6 +1368,40 @@ async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
     assert not handle._awaited
     assert fake.wait_condition_timeouts == [LIVE_EXPLORE_PARENT_WAIT, EXPLORE_CANCEL_GRACE]
     assert 3 * (LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE) <= timedelta(seconds=540)
+
+
+def test_live_explore_settles_within_worker_shutdown_grace():
+    """A rolling deploy never kills a live explore before its parent settles it.
+
+    SIGTERM stops the worker's polling and gives running activities
+    WORKER_SHUTDOWN_GRACE_PERIOD before it exits. A live parent stops waiting
+    after LIVE_EXPLORE_PARENT_WAIT and cancels with EXPLORE_CANCEL_GRACE, so
+    when both fit inside the grace every explore in flight at SIGTERM returns
+    (or is cancelled into evidence recovery) before the machine goes away.
+    """
+    import tomllib
+    from datetime import timedelta
+    from pathlib import Path
+
+    from domains.spawn_agent.config import (
+        EXPLORE_CANCEL_GRACE,
+        EXPLORE_DEPTH_LIMITS,
+        LIVE_EXPLORE_PARENT_WAIT,
+        explore_parent_wait_timeout,
+    )
+    from helpers.generation_handoff import parse_shutdown_grace_seconds
+
+    fly = tomllib.loads((Path(__file__).resolve().parents[2] / "fly.toml").read_text())
+    grace = timedelta(seconds=parse_shutdown_grace_seconds(fly["env"]["WORKER_SHUTDOWN_GRACE_PERIOD"]))
+    kill_timeout = timedelta(seconds=parse_shutdown_grace_seconds(fly["kill_timeout"]))
+    assert grace <= kill_timeout, f"Fly kills the machine at {kill_timeout} before the {grace} worker grace"
+    for depth, (_turns, activity_timeout) in EXPLORE_DEPTH_LIMITS.items():
+        parent_wait = explore_parent_wait_timeout(activity_timeout, oai_demo=False)
+        assert parent_wait + EXPLORE_CANCEL_GRACE < grace, (
+            f"live {depth} explore can outlive the {grace} shutdown grace "
+            f"(parent wait {parent_wait} + cancel grace {EXPLORE_CANCEL_GRACE})"
+        )
+    assert LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE < grace
 
 
 async def test_handler_explore_empty_recovery_stays_error_in_fast_mode():
@@ -1855,7 +1939,7 @@ async def test_handler_fast_mode_skips_second_root_for_each_when_first_in_progre
 
 async def test_handler_fast_mode_does_not_self_skip_root_for_each_in_progress():
     """The in-flight first for_each must still spawn (same toolCallId IN_PROGRESS)."""
-    from domains.spawn_agent.oai_demo_july import JULY_FOR_EACH_ITEMS
+    from utils.oai_demo_july import JULY_FOR_EACH_ITEMS
     import domains.spawn_agent.handler as h
 
     fake_mgr = _FakeDelegateManager([])
@@ -2577,7 +2661,7 @@ async def test_handler_oai_demo_for_each_pins_july_creators():
     """test-mass-agent-run-0 Fast Mode for_each must spawn the July 50, not a live list."""
     from tools.base import EventType, MessageStatus, ToolEvent
     import domains.spawn_agent.handler as h
-    from domains.spawn_agent.oai_demo_july import JULY_FOR_EACH_ITEMS
+    from utils.oai_demo_july import JULY_FOR_EACH_ITEMS
 
     fake_mgr = _FakeDelegateManager(
         [ToolEvent(type=EventType.POST_MESSAGE, title="sub ok", message="ok", status=MessageStatus.FINISHED)]
@@ -3152,7 +3236,7 @@ async def test_spawn_explore_agent_activity_reraises_cancel_on_demo():
     """Demo cancel re-raises like live — Fast Mode does not change the harness."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
     fake_ws = MagicMock()
@@ -3247,7 +3331,7 @@ async def test_spawn_explore_agent_activity_accepts_second_no_evidence_completio
     """A demo Fast Mode completion stub must not reject-loop the explore chip."""
     from unittest.mock import patch
 
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
     completion_results = []
@@ -3317,7 +3401,7 @@ async def test_spawn_explore_agent_activity_explicit_live_reraises_cancel_on_dem
     """Passed False must re-raise even when the explore goal matches a demo prefix."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
     fake_ws = MagicMock()
@@ -3348,7 +3432,7 @@ async def test_spawn_explore_agent_activity_ignores_fast_mode_root_for_class():
     """A Fast Mode demo root must not promote a live explore when the flag is omitted."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
     fake_ws = MagicMock()
@@ -4233,7 +4317,7 @@ async def test_handler_for_each_oai_demo_timeout_recovery_reconciles_instead_of_
     succeeded, then one drain entered ``_recover_oai_demo_for_each_timeout`` with
     an empty in-memory map and never called fetch_child_terminal_result_activity.
     """
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
     from tools.base import MessageStatus
     import domains.spawn_agent.handler as h
 
@@ -4513,6 +4597,10 @@ async def run_all_tests():
         test_handler_explore_timeout_finishes_with_heartbeat_wrap_up,
     )
     await r.record_async(
+        "explore_timeout_during_llm_call_keeps_tool_evidence",
+        test_explore_timeout_during_an_llm_call_keeps_the_tool_evidence,
+    )
+    await r.record_async(
         "handler_explore_timeout_without_heartbeat_recovers_persisted_tool_evidence",
         test_handler_explore_timeout_without_heartbeat_recovers_persisted_tool_evidence,
     )
@@ -4739,6 +4827,10 @@ async def run_all_tests():
     r.record(
         "user_facing_explore_result_keeps_prod_summaries",
         test_user_facing_explore_result_keeps_prod_summaries,
+    )
+    r.record(
+        "live_explore_settles_within_worker_shutdown_grace",
+        test_live_explore_settles_within_worker_shutdown_grace,
     )
     teardown_mock()
     return r.all_passed

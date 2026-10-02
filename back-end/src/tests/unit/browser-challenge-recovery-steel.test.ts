@@ -27,9 +27,9 @@ async function testSteelRecoverySessionDropsUnsupportedCity(): Promise<void> {
           proxySource: 'steel',
         };
       },
-      connectValidatedBrowser: async () =>
+      connect: async () =>
         ({
-          contexts: () => [],
+          contexts: () => [{ pages: () => [], addInitScript: async () => {} }],
           close: async () => {},
         }) as unknown as Browser,
       releaseRemoteSession: async () => {},

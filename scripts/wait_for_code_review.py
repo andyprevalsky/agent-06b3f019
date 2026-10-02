@@ -57,6 +57,15 @@ class ReviewWaitError(RuntimeError):
     """Raised when the requested review cannot safely complete."""
 
 
+class GhCommandError(ReviewWaitError):
+    """A gh call failed or timed out; the next poll may succeed.
+
+    Cloud-agent GitHub tokens rotate on a schedule and can be rejected for
+    minutes before the replacement lands, so one failed poll must not end a
+    review wait that still has time left.
+    """
+
+
 @dataclass(frozen=True)
 class ReviewStatus:
     state: str
@@ -123,11 +132,11 @@ def _gh_json(command: list[str], *, timeout: float | None = None) -> object:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
-        raise ReviewWaitError(
+        raise GhCommandError(
             f"gh timed out after {timeout:g}s: {' '.join(command)}"
         ) from error
     if completed.returncode != 0:
-        raise ReviewWaitError(completed.stderr.strip() or " ".join(command) + " failed")
+        raise GhCommandError(completed.stderr.strip() or " ".join(command) + " failed")
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -342,7 +351,7 @@ def gh_payload(
             timeout=_remaining(),
         )
     except subprocess.TimeoutExpired as error:
-        raise ReviewWaitError("gh timed out: gh pr view") from error
+        raise GhCommandError("gh timed out: gh pr view") from error
     if completed.returncode == 0:
         try:
             payload = json.loads(completed.stdout)
@@ -356,7 +365,7 @@ def gh_payload(
     # Limited tokens often fail only on statusCheckRollup; recover HEAD alone
     # and synthesize the rollup from the REST commit status endpoint.
     if "statusCheckRollup" not in stderr and "Resource not accessible" not in stderr:
-        raise ReviewWaitError(stderr or "gh pr view failed")
+        raise GhCommandError(stderr or "gh pr view failed")
 
     head_command = ["gh", "pr", "view", pr]
     if repo:
@@ -435,10 +444,22 @@ def wait_for_review(
 
     active_loader = loader or default_loader
 
+    def _report(message: str) -> None:
+        nonlocal last_message
+        if progress is not None and message != last_message:
+            progress(message)
+            last_message = message
+
     while True:
         if deadline - time.monotonic() <= 0:
             raise timed_out()
-        payload = active_loader(pr, repo)
+        try:
+            payload = active_loader(pr, repo)
+        except GhCommandError as error:
+            last_state = f"gh error: {error}"
+            _report(f"gh failed while waiting on {expected_head[:12]}; retrying: {error}")
+            sleeper(max(0.0, min(poll_seconds, deadline - time.monotonic())))
+            continue
         actual_head = str(payload.get("headRefOid") or "")
         if actual_head != expected_head:
             raise ReviewWaitError(
@@ -459,10 +480,7 @@ def wait_for_review(
                     "AWAITING_TRIGGERED_REVIEW", False, False, status.kind, status.raw
                 )
         last_state = status.state
-        message = f"CodeRabbit {status.state} on {expected_head[:12]}"
-        if progress is not None and message != last_message:
-            progress(message)
-            last_message = message
+        _report(f"CodeRabbit {status.state} on {expected_head[:12]}")
         if status.terminal:
             return status
         if time.monotonic() >= deadline:

@@ -3,9 +3,6 @@
 # Maximum planner LLM retry attempts on validation failure
 MAX_RETRIES = 2
 
-# Planner always uses rose-ultra for best DAG generation quality
-PLANNER_MODEL = "rose-labs/rose-1-ultra"
-
 # Temporal activity timeouts (seconds)
 PLANNER_ACTIVITY_TIMEOUT_SECONDS = 240
 # StartToClose is the LLM budget after Temporal considers the activity started.
@@ -14,7 +11,6 @@ PLANNER_ACTIVITY_TIMEOUT_SECONDS = 240
 # Do not add a short schedule_to_start with max_attempts=2 — that can fail a
 # healthy pickup that would have succeeded inside the 240s budget.
 PLANNER_ACTIVITY_HEARTBEAT_TIMEOUT_SECONDS = 30
-PLANNER_ACTIVITY_HEARTBEAT_INTERVAL_SECONDS = 10
 PLANNER_ACTIVITY_MAX_ATTEMPTS = 2
 
 SCHEMA_ACTIVITY_TIMEOUT_SECONDS = 90

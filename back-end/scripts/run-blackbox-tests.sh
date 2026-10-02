@@ -363,7 +363,25 @@ BASE_PORT="${CONDUCTOR_PORT:-55000}"
 START_PORT="${BLACKBOX_TEST_BACKEND_START_PORT:-${CONTRACT_TEST_BACKEND_START_PORT:-$((BASE_PORT + 100))}}"
 PORT="${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-$START_PORT}}"
 PORT_LOCK_DIR=""
+BACKEND_PID=""
 
+source "$ROOT_DIR/scripts/lib/process-tree.sh"
+cleanup() {
+  stop_process_tree "$BACKEND_PID"
+  BACKEND_PID=""
+
+  if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
+    rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
+  fi
+}
+# Bash resumes the script after a signal trap returns, so INT/TERM must exit
+# (and let the EXIT trap clean up) rather than release the lock and keep going.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Sets PORT and PORT_LOCK_DIR in the caller's shell; running it in a command
+# substitution would drop PORT_LOCK_DIR and leave the lock behind forever.
 reserve_port() {
   local candidate="$1"
 
@@ -374,7 +392,7 @@ reserve_port() {
         rmdir "$lock_dir" >/dev/null 2>&1 || true
       else
         PORT_LOCK_DIR="$lock_dir"
-        echo "$candidate"
+        PORT="$candidate"
         return 0
       fi
     fi
@@ -383,13 +401,13 @@ reserve_port() {
 }
 
 if [[ -z "${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-}}" ]]; then
-  PORT="$(reserve_port "$START_PORT")"
+  reserve_port "$START_PORT"
 else
-  PORT_LOCK_DIR="$PORT_LOCK_ROOT/$PORT"
-  if ! mkdir "$PORT_LOCK_DIR" 2>/dev/null; then
+  if ! mkdir "$PORT_LOCK_ROOT/$PORT" 2>/dev/null; then
     echo "❌ Failed to reserve requested black-box test port $PORT"
     exit 1
   fi
+  PORT_LOCK_DIR="$PORT_LOCK_ROOT/$PORT"
 fi
 
 export TEST_BASE_URL="http://localhost:$PORT"
@@ -426,20 +444,6 @@ EOF
 echo "Starting isolated backend for black-box tests on port $PORT"
 echo "Backend log: $BACKEND_LOG"
 echo "Artifacts: $ARTIFACT_DIR"
-
-source "$ROOT_DIR/scripts/lib/process-tree.sh"
-BACKEND_PID=""
-cleanup() {
-  stop_process_tree "$BACKEND_PID"
-  BACKEND_PID=""
-
-  if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
-    rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 PORT="$PORT" \
 DISABLE_GMAIL_SYNC=1 \

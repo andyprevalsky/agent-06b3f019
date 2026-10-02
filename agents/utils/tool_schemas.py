@@ -1163,7 +1163,7 @@ EXPLORE_AGENT_TOOLS = ["web_search", "people_search", "web_fetch", "grep", "api_
 
 def get_explore_agent_tools() -> list[str]:
     """Explore tool names for injection, honoring ROSE_DISABLE_API_REQUEST."""
-    from domains.api_request.config import api_request_disabled
+    from utils.kill_switches import api_request_disabled
 
     if not api_request_disabled():
         return list(EXPLORE_AGENT_TOOLS)
@@ -1245,7 +1245,7 @@ def get_tool_models(*, phase: Optional[str] = None) -> ToolRegistry:
     ``ROSE_DISABLE_GENERAL_PURPOSE_AGENT`` is set so the LLM cannot select
     general_purpose / for_each.
     """
-    from domains.spawn_agent.config import general_purpose_agent_disabled
+    from utils.kill_switches import general_purpose_agent_disabled
 
     if phase == "plan":
         return dict(PLAN_TOOL_MODELS)
@@ -1257,7 +1257,7 @@ def get_tool_models(*, phase: Optional[str] = None) -> ToolRegistry:
 
 def get_planner_assignable_tools() -> list[str]:
     """Planner-assignable tool names, stripping GPA aliases when disabled."""
-    from domains.spawn_agent.config import general_purpose_agent_disabled
+    from utils.kill_switches import general_purpose_agent_disabled
 
     if not general_purpose_agent_disabled():
         return list(PLANNER_ASSIGNABLE_TOOLS)
@@ -1274,7 +1274,7 @@ def get_planner_assignable_tools() -> list[str]:
 
 def get_planner_response_model() -> Type[BaseModel]:
     """PlannerResponse model, with GPA aliases removed when the kill-switch is on."""
-    from domains.spawn_agent.config import general_purpose_agent_disabled
+    from utils.kill_switches import general_purpose_agent_disabled
 
     if not general_purpose_agent_disabled():
         return PlannerResponse
