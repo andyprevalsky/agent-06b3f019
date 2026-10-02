@@ -181,7 +181,7 @@ test('signup_fails and created_account_reused: sign-up errors, or leaves a passw
         password: 'correct-horse-7',
       });
       assert(
-        (await refused.text()).includes('create new Rose Shop accounts right now'),
+        (await refused.text()).includes('is not accepting new accounts'),
         'sign-up must error'
       );
       const failingReport = await fetchReport(base, failing.siteId);
@@ -347,7 +347,7 @@ test('signup_fails_purchase: with sign-up down nothing is ordered or charged', a
           cart
         );
         assert(
-          (await refused.text()).includes('create new Rose Shop accounts right now'),
+          (await refused.text()).includes('is not accepting new accounts'),
           'sign-up must error'
         );
         await postForm(base, pagePath(manifest, '/checkout'), CARD, cart);

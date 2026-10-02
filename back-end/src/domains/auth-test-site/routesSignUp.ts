@@ -19,7 +19,8 @@ export const signUpRouter = Router();
 
 const SIGN_UP_ERRORS = {
   already_registered: 'An account with this email already exists. Sign in instead.',
-  signup_unavailable: `We can't create new ${AUTH_TEST_SITE_NAME} accounts right now. Please try again later.`,
+  // A closed door, not a transient error: "try again later" reads as an invitation to retry.
+  signup_unavailable: `${AUTH_TEST_SITE_NAME} is not accepting new accounts. Existing members can sign in.`,
   invalid_details: `Enter a valid email address and a password of at least ${MIN_PASSWORD_LENGTH} characters.`,
 } as const;
 

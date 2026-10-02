@@ -1,5 +1,5 @@
 import { prisma } from '../../providers/database';
-import { SAVED_PASSWORD_BROWSER_SOURCE } from './config';
+import { FIXTURE_INBOX_TOKEN, SAVED_PASSWORD_BROWSER_SOURCE } from './config';
 
 /** Chrome stores cookie times as microseconds since 1601-01-01. */
 const CHROMIUM_EPOCH_OFFSET_MS = 11644473600000n;
@@ -12,19 +12,29 @@ export async function findUserName(userId: string): Promise<{ name: string | nul
   return prisma.user.findUnique({ where: { userId }, select: { name: true } });
 }
 
-/** The inbox the user connected most recently whose mail the backend can still read. */
-export async function findConnectedInbox(userId: string): Promise<string | null> {
-  const row = await prisma.emailIntegrationCredential.findFirst({
-    where: {
+/**
+ * Connects an inbox for the user, the way linking a mail account does. The
+ * address is on our own mail domain, so the site's mail to it is delivered and
+ * read through that provider; the stored tokens are never used.
+ */
+export async function connectInbox(userId: string, email: string): Promise<void> {
+  const integration =
+    (await prisma.integration.findFirst({ where: { userId, name: 'gmail' } })) ??
+    (await prisma.integration.create({
+      data: { userId, name: 'gmail', type: 'TOOL_SETUP', status: 'CONNECTED', isActive: true },
+    }));
+  await prisma.emailIntegrationCredential.upsert({
+    where: { userId_provider_email: { userId, provider: 'GMAIL', email } },
+    create: {
       userId,
-      refreshToken: { not: null },
-      accessToken: { not: null },
-      email: { not: null },
+      integrationId: integration.id,
+      provider: 'GMAIL',
+      email,
+      accessToken: FIXTURE_INBOX_TOKEN,
+      refreshToken: FIXTURE_INBOX_TOKEN,
     },
-    orderBy: { updatedAt: 'desc' },
-    select: { email: true },
+    update: { state: 'connected' },
   });
-  return row?.email ?? null;
 }
 
 /**
@@ -195,6 +205,9 @@ export async function deleteFixtureCredentials(params: {
     browserSource: SAVED_PASSWORD_BROWSER_SOURCE,
     browserProfile: params.siteId,
   };
+  await prisma.emailIntegrationCredential.deleteMany({
+    where: { userId: params.userId, accessToken: FIXTURE_INBOX_TOKEN },
+  });
   const [passwords, mintedAccounts, passkeys, cookies, cookieBundles] = await Promise.all([
     // Saved logins the fixture seeded, plus any the agent saved on one of this
     // site's pages during the run (a sign-up saves under the sign-up page's URL).

@@ -289,7 +289,7 @@ test('all_fail: every rung the user has is offered and fails, and minted stays h
         password: 'a-new-password-1',
       });
       assert(
-        (await signUp.text()).includes('create new Rose Shop accounts right now'),
+        (await signUp.text()).includes('is not accepting new accounts'),
         'sign-up must be unavailable'
       );
       const guest = await getPage(base, pagePath(manifest, '/guest'));

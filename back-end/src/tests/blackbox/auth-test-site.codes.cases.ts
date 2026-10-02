@@ -5,11 +5,12 @@
  */
 
 import { prisma } from '../../providers/database';
-import { IntegrationStatus, IntegrationType, EmailProvider } from '@prisma/client';
 import { AUTH_TEST_SITE_BASE_PATH } from '../../domains/auth-test-site/config';
 import { findSite } from '../../domains/auth-test-site/service';
 import { fetchAgentPhoneMessagesSince } from '../../domains/agent-phone/service';
 import {
+  API_KEY,
+  STUB_MAIL_DOMAIN,
   assert,
   cleanup,
   createFixture,
@@ -230,31 +231,20 @@ test('minted_sms_otp: the texted code signs in the account on the agent phone', 
 
 test('email_otp: the code goes to the inbox the user connected', async () => {
   const userId = await createUser('Avery Ross');
-  const inbox = `avery.${userId.slice(-8)}@inbox.example`;
   try {
-    await createMintedIdentity(userId);
-    const integration = await prisma.integration.create({
-      data: {
-        userId,
-        name: 'gmail',
-        type: IntegrationType.TOOL_SETUP,
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-      },
-    });
-    await prisma.emailIntegrationCredential.create({
-      data: {
-        userId,
-        integrationId: integration.id,
-        provider: EmailProvider.GMAIL,
-        email: inbox,
-        accessToken: 'access-token',
-        refreshToken: 'refresh-token',
-      },
-    });
+    const minted = await createMintedIdentity(userId);
     await withLocalSite(async ({ base, sentMail }) => {
       const manifest = await seed(base, userId, 'email_otp');
-      assert(manifest.expectedSignInEmail === inbox, `account must live under the user's inbox`);
+      const inbox = manifest.expectedSignInEmail ?? '';
+      assert(
+        inbox === `avery.ross.${manifest.siteId}@${STUB_MAIL_DOMAIN}`,
+        `the account lives under the user's own connected inbox, got ${inbox}`
+      );
+      assert(
+        JSON.stringify(manifest.authOptionsPreview.emailOtpInboxes) === JSON.stringify([inbox]),
+        `auth options must list the inbox for email OTP: ${JSON.stringify(manifest.authOptionsPreview)}`
+      );
+      assert(manifest.authOptionsPreview.mintedEmail === minted.email, 'minted stays offered');
       assert(manifest.authOptionsPreview.passwordUsernames.length === 0, 'nothing is saved');
       await postForm(base, pagePath(manifest, '/login/code'), { email: inbox });
       const code = /sign-in code is (\d{6})/.exec(lastMailTo(sentMail, inbox))?.[1] ?? '';
@@ -266,6 +256,14 @@ test('email_otp: the code goes to the inbox the user connected', async () => {
       assert(verified.status === 303, 'the code must sign in');
       const report = await fetchReport(base, manifest.siteId);
       assert(report.sessions[0]?.email === inbox, 'signed in as the connected inbox account');
+
+      const removed = await fetch(
+        `${base}${AUTH_TEST_SITE_BASE_PATH}/fixtures/${manifest.siteId}`,
+        { method: 'DELETE', headers: { 'X-API-Key': API_KEY } }
+      );
+      assert(removed.status === 200, 'delete');
+      const left = await prisma.emailIntegrationCredential.count({ where: { userId } });
+      assert(left === 0, 'the fixture inbox is disconnected at teardown');
     });
   } finally {
     await prisma.emailIntegrationCredential.deleteMany({ where: { userId } });

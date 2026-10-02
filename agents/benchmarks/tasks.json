@@ -2766,6 +2766,9 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
+    "min_steps": {
+      "browser": 1
+    },
     "start_phase": "execute",
     "status": "ready",
     "runner": "agent",

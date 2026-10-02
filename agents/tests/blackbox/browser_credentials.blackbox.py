@@ -69,7 +69,7 @@ async def test_minted_account_is_offered_a_new_password_ref_that_is_saved_when_t
     )
     assert MINTED_NEW_PASSWORD_REF == "pwd:new"
     assert (
-        "- Minted account: Email -> rose.cedar11@mail.example | New password ref: pwd:new | enabled" in section
+        "- Minted account: Email -> rose.cedar11@mail.example | Sign-up password ref: pwd:new | enabled" in section
     ), section
     assert encrypted_refs == {"pwd:new": "envelope"}, "the worker decrypts the ref like any saved password"
     assert credential_refs["pwd:new"] == {"kind": "minted_account", "id": "minted-row-1"}
@@ -77,7 +77,7 @@ async def test_minted_account_is_offered_a_new_password_ref_that_is_saved_when_t
     older_backend, refs, _origins, _credential_refs = build_auth_options_prompt_section(
         {"realm": "shop.example", "minted": {**minted, "newPassword": None}}
     )
-    assert "New password ref" not in older_backend and refs == {}
+    assert "password ref" not in older_backend and refs == {}
 
     setup_mock({"/api/auth-options/minted-password": {"status": 200, "json": {"saved": True}}})
     try:

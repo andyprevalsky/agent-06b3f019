@@ -29,3 +29,5 @@ export const SAVED_PASSWORD_BROWSER_SOURCE = 'auth-test-site';
 export const SHOP_TAX_RATE = 0.0825;
 export const SHOP_SHIPPING_CENTS = 499;
 export const SHOP_CURRENCY = 'USD';
+/** Marks the connected inbox the fixture creates; never a real mail token. */
+export const FIXTURE_INBOX_TOKEN = 'rose-shop-fixture-inbox';

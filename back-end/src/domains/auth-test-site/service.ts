@@ -3,6 +3,7 @@ import { canonicalAuthRealm } from '../../providers/authRealm';
 import { getAuthOptions } from '../../providers/authOptions';
 import { benchmarkSavedBrowserAuthDisabled } from '../../providers/benchmarkBrowserAuth';
 import { createLogger } from '../../providers/logger';
+import { primitiveDomain } from '../../providers/primitive';
 import * as repo from './repo';
 import * as sites from './repoSites';
 import { AUTH_TEST_SITE_BASE_PATH, fixtureApiKey } from './config';
@@ -60,6 +61,14 @@ function normalizePublicBaseUrl(raw: string): URL {
   return parsed;
 }
 
+function inboxLocalPart(holderName: string | null): string {
+  const local = (holderName ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '.')
+    .replace(/^\.+|\.+$/g, '');
+  return local === '' ? 'member' : local;
+}
+
 /** Resolves the identities a scenario's accounts live under, before anything is seeded. */
 async function resolvePlanContext(
   input: CreateAuthTestSiteInput,
@@ -89,11 +98,11 @@ async function resolvePlanContext(
     }
   }
   if (input.scenario === 'email_otp') {
-    const inbox = await repo.findConnectedInbox(input.userId);
-    if (inbox === null) {
-      throw new AuthTestSiteError('The user has no connected inbox to receive a code', 503);
-    }
-    ctx.connectedInbox = inbox.toLowerCase();
+    // The user's own inbox, as if they had linked their mail account. It lives
+    // on our mail domain so the run needs no real mailbox.
+    const inbox = `${inboxLocalPart(holderName)}.${siteId}@${primitiveDomain().toLowerCase()}`;
+    await repo.connectInbox(input.userId, inbox);
+    ctx.connectedInbox = inbox;
   }
   return ctx;
 }
