@@ -7,7 +7,7 @@ Imports: own repo, own types, own config, external packages.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, Optional
 
 import structlog
 from temporalio import workflow
@@ -17,6 +17,7 @@ from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
 )
+from helpers.sms_activities import notify_sms_event_activity
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 
@@ -380,11 +381,27 @@ class RequestUserApprovalManager(ToolManager):
         )
 
 
+def _approval_event_metadata(
+    question: str, metadata: Optional[Dict[str, Any]], request_id: str
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    metadata_payload = dict(metadata or {})
+    metadata_payload["attentionRequestId"] = request_id
+    event_metadata = {
+        "isUserAttentionMessage": True,
+        "attentionMessage": question,
+        "requestUserApproval": metadata_payload,
+    }
+    return metadata_payload, event_metadata
+
+
 async def request_user_approval_direct(
     workflow_instance: Any,
     question: str,
     image_url: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    *,
+    park: Optional[Callable[[Dict[str, str]], bool]] = None,
+    resume_request: Optional[Dict[str, str]] = None,
 ) -> ApprovalResult:
     """Direct call helper for tools that need to request user approval.
 
@@ -395,6 +412,13 @@ async def request_user_approval_direct(
         question: The question to ask the user.
         image_url: Optional image URL (e.g. product thumbnail).
         metadata: Optional additional metadata.
+        park: Called with ``{"attention_request_id", "tool_call_id"}`` when a
+            generation handoff interrupts the wait. Returning True means the
+            caller parked that request for the next generation: the request
+            and its chip stay open and ``GenerationHandoffRequested(parked=True)``
+            is raised. Otherwise both are closed with DEPLOY_INTERRUPTED.
+        resume_request: The dict ``park`` received in the previous generation.
+            Re-waits on the same attention request: no new request, chip, or SMS.
 
     Returns:
         Dict with response, question, and attention_request_id.
@@ -402,12 +426,31 @@ async def request_user_approval_direct(
     Raises:
         UserRejectedError: If the user rejects the approval request.
     """
+    if resume_request:
+        request_id = str(resume_request["attention_request_id"])
+        tool_call_id = str(resume_request["tool_call_id"])
+        metadata_payload, event_metadata = _approval_event_metadata(question, metadata, request_id)
+        logger.info(
+            "Resuming approval wait after generation handoff",
+            request_id=request_id,
+            agent_id=workflow_instance.agent_id,
+        )
+        return await _await_approval_response(
+            workflow_instance,
+            question=question,
+            request_id=request_id,
+            tool_call_id=tool_call_id,
+            event_metadata=event_metadata,
+            metadata_payload=metadata_payload,
+            park=park,
+        )
+
     info = workflow.info()
     workflow_id = info.workflow_id
     user_id = workflow_instance.user_id
     agent_id = workflow_instance.agent_id
 
-    tool_call_id = workflow.uuid4()
+    tool_call_id = str(workflow.uuid4())
 
     event_metadata = None
     metadata_payload: Optional[Dict[str, Any]] = None
@@ -441,13 +484,7 @@ async def request_user_approval_direct(
             workflow_id=workflow_id,
         )
 
-        metadata_payload = dict(metadata or {})
-        metadata_payload["attentionRequestId"] = request_id
-        event_metadata = {
-            "isUserAttentionMessage": True,
-            "attentionMessage": question,
-            "requestUserApproval": metadata_payload,
-        }
+        metadata_payload, event_metadata = _approval_event_metadata(question, metadata, request_id)
 
         # Send SMS write_lock notification for EVERY agent that blocks on
         # approval — root or sub-agent, any source. agent_started stays
@@ -457,8 +494,6 @@ async def request_user_approval_direct(
         # (Agent.isBenchmark). Skip on resume — the original wait already notified.
         if not reused_request:
             try:
-                from helpers.sms_activities import notify_sms_event_activity
-
                 notification_args = [
                     user_id,
                     "write_lock",
@@ -503,6 +538,27 @@ async def request_user_approval_direct(
     )
     await workflow_instance._handle_tool_event(pre_event, tool_call_id, TOOL_NAME)
 
+    return await _await_approval_response(
+        workflow_instance,
+        question=question,
+        request_id=request_id,
+        tool_call_id=tool_call_id,
+        event_metadata=event_metadata,
+        metadata_payload=metadata_payload,
+        park=park,
+    )
+
+
+async def _await_approval_response(
+    workflow_instance: Any,
+    *,
+    question: str,
+    request_id: str,
+    tool_call_id: str,
+    event_metadata: Dict[str, Any],
+    metadata_payload: Dict[str, Any],
+    park: Optional[Callable[[Dict[str, str]], bool]],
+) -> ApprovalResult:
     # Snapshot context length before waiting
     context_len_before_wait = len(workflow_instance.context)
 
@@ -513,7 +569,9 @@ async def request_user_approval_direct(
             workflow_instance,
             workflow_mod=workflow,
         )
-    except GenerationHandoffRequested:
+    except GenerationHandoffRequested as exc:
+        if park is not None and park({"attention_request_id": request_id, "tool_call_id": tool_call_id}):
+            raise GenerationHandoffRequested(exc.task_queue, parked=True) from None
         _stash_approval_resume(workflow_instance, request_id, question)
         interrupt_event = ToolEvent(
             type=EventType.POST_MESSAGE,
@@ -579,7 +637,7 @@ async def request_user_approval_direct(
     return {
         "response": response_text,
         "question": question,
-        "attention_request_id": metadata_payload.get("attentionRequestId") if metadata_payload else None,
+        "attention_request_id": metadata_payload.get("attentionRequestId"),
     }
 
 
@@ -631,8 +689,6 @@ async def request_user_attention_direct(
     # child is waiting. Benchmarks suppressed centrally (Agent.isBenchmark).
     if sms_event_type:
         try:
-            from helpers.sms_activities import notify_sms_event_activity
-
             notification_args = [
                 user_id,
                 sms_event_type,

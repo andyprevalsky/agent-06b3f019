@@ -84,6 +84,10 @@ def _check_layer(
         # Own domain import?
         if mod.startswith(own_prefix):
             target_layer = mod.split(".")[-1] if mod.count(".") >= 2 else ""
+            # service_<part>.py files are the service layer split across modules
+            # (e.g. spawn_browser_agent_v3/service_actions.py).
+            if target_layer.startswith("service_"):
+                target_layer = "service"
             if target_layer and target_layer not in allowed_own_layers:
                 violations.append(
                     f"{domain_name}/{layer} imports own layer '{target_layer}' "

@@ -1,0 +1,40 @@
+"""Temporal workflow sandbox restrictions shared by the worker and workflow tests."""
+
+from __future__ import annotations
+
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
+
+
+def workflow_sandbox_restrictions() -> SandboxRestrictions:
+    """Sandbox restrictions every production workflow worker runs under.
+
+    Workflow tests that run AgentWorkflow must use these, not
+    ``with_passthrough_all_modules()``: a module that is only imported lazily
+    from workflow code is re-imported inside the sandbox, where restricted
+    calls such as ``os.getenv`` fail the workflow task.
+    """
+    return SandboxRestrictions.default.with_passthrough_modules(
+        # These libraries use threading.local which isn't allowed in the sandbox,
+        # but they're only used in activities, not workflows
+        "rich",
+        "rich.console",
+        "structlog.dev",
+        "markdown_it",
+        "markdown_it_py",
+        "pygments",
+        "httpx",
+        "sniffio",
+        # helpers.llm uses threading.Lock via OpenAI/instructor clients
+        # but workflow only calls activities via execute_activity, not directly
+        "helpers.llm",
+        # helpers.attachments downloads files from storage using httpx
+        # called from build_llm_messages when resolving file attachments
+        "helpers.attachments",
+        # Tool schemas and prompts built inside run_agent read these env
+        # switches; they are fixed for the life of the worker process.
+        "utils.kill_switches",
+    )
+
+
+def production_workflow_runner() -> SandboxedWorkflowRunner:
+    return SandboxedWorkflowRunner(restrictions=workflow_sandbox_restrictions())

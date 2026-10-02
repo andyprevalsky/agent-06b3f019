@@ -1273,7 +1273,7 @@ async def test_handler_condition_leftover_child_without_root_goal_honors_sleep()
 
 async def test_handler_condition_leftover_child_inherits_root_goal_skip_sleep():
     """Mass-agent leftover GPs inherit DEMO wait_for skips from the tree root."""
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
     from domains.wait_for.handler import WaitForManager
     from tools.base import EventType, MessageStatus, ToolEvent
     from tools.spawn_agent import SpawnAgentManager

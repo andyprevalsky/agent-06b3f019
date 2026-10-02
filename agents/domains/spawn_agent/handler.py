@@ -17,7 +17,6 @@ from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
-from domains.grep.repo import fetch_local_data_summary
 from domains.spawn_agent.config import (
     EXPLORE_CANCEL_GRACE,
     EXPLORE_DEFAULT_MODEL,
@@ -33,14 +32,13 @@ from domains.spawn_agent.config import (
     resolve_explore_depth,
     should_skip_oai_demo_browser_spawn,
 )
-from domains.spawn_agent.oai_demo_july import apply_oai_demo_july_for_each
-from domains.spawn_agent.repo import fetch_explore_tool_evidence
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     build_for_each_goal,
     coerce_for_each_items,
     compile_explore_grep_evidence,
     compile_explore_wrap_up,
+    fetch_explore_tool_evidence,
     resolve_start_phase,
     spawn_explore_agent_activity,
     validate_spawn_params,
@@ -51,14 +49,16 @@ from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
 )
+from helpers.source_connect_gates import raise_source_connect_gates
 from helpers.tracing import span
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
+from tools.grep import fetch_local_data_summary
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
 from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
-from utils.source_connect_gates import raise_source_connect_gates
+from utils.oai_demo_july import apply_oai_demo_july_for_each
 from utils.tool_call_ids import spawn_group_id
 
 _FAST_MODE_USER_COPY = (
@@ -92,11 +92,14 @@ def wrap_up_payload_from_failure(exc: BaseException) -> Dict[str, Any]:
         seen.add(id(cur))
         details = getattr(cur, "last_heartbeat_details", None)
         if details:
-            payload = details[0] if isinstance(details, tuple) and details else details
-            if isinstance(payload, dict):
-                return payload
-            if isinstance(payload, str) and payload.strip():
-                return {"result": payload}
+            # Temporal decodes heartbeat details into a list; the evidence dict
+            # follows the message when an LLM helper sent the last beat.
+            payloads = list(details) if isinstance(details, (list, tuple)) else [details]
+            for payload in payloads:
+                if isinstance(payload, dict):
+                    return payload
+            if isinstance(payloads[0], str) and payloads[0].strip():
+                return {"result": payloads[0]}
         cur = getattr(cur, "cause", None) or getattr(cur, "__cause__", None)
     return {}
 
@@ -585,7 +588,7 @@ class SpawnAgentManager(ToolManager):
             async for event in self._spawn_for_each(workflow_instance, tool_call, tool_call_id):
                 yield event
 
-    async def _spawn_explore(  # noqa: C901
+    async def _spawn_explore(
         self,
         workflow_instance,
         tool_call: Dict[str, Any],
@@ -780,10 +783,11 @@ class SpawnAgentManager(ToolManager):
                 # Wait for activity completion or pause signal.
                 # Live trees cap the wait so a hung child cannot pin the parent
                 # past the smoke cap. Cancel + grace lets continue_as_new run
-                # (cutover-class: activity-bound) without awaiting the 600s
-                # activity timeout. Demo / Fast Mode keeps the full timeout.
+                # without awaiting the 600s activity timeout. Demo / Fast Mode
+                # keeps the full timeout.
                 was_cancelled = False
                 try:
+                    # cutover-class: activity-bound
                     await workflow.wait_condition(
                         lambda: activity_handle.done() or workflow_instance.is_paused,
                         timeout=parent_wait,
@@ -797,6 +801,7 @@ class SpawnAgentManager(ToolManager):
                         )
                         activity_handle.cancel()
                         try:
+                            # cutover-class: bounded
                             await workflow.wait_condition(
                                 lambda: activity_handle.done(),
                                 timeout=EXPLORE_CANCEL_GRACE,
@@ -1043,7 +1048,7 @@ class SpawnAgentManager(ToolManager):
         ):
             yield event
 
-    async def _spawn_for_each(  # noqa: C901
+    async def _spawn_for_each(
         self,
         workflow_instance,
         tool_call: Dict[str, Any],
@@ -1354,8 +1359,9 @@ async def spawn_agent(workflow_instance, tool_call: Dict, tool_call_id: str):
                 await workflow_instance._track_usage(
                     event.data["usage"], tool_name="spawn_agent", call_site="explore_agent"
                 )
-    except GenerationHandoffRequested:
-        if last_status != MessageStatus.FINISHED:
+    except GenerationHandoffRequested as exc:
+        # A parked tool keeps its chip open for the next generation to finish.
+        if not exc.parked and last_status != MessageStatus.FINISHED:
             await workflow_instance._handle_tool_event(
                 ToolEvent(
                     type=EventType.POST_MESSAGE,

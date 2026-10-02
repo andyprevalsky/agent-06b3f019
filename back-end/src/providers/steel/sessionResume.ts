@@ -21,7 +21,12 @@ import {
   steelCdpUrl,
   steelDebugUrl,
 } from './session';
-import { STEEL_CDP_TIMEOUT_MESSAGE, validateSessionConnectionOrThrow } from './sessionConnection';
+import {
+  STEEL_CDP_TIMEOUT_MESSAGE,
+  steelStartupProbe,
+  validateBrowserConnection,
+} from './sessionConnection';
+import { steelSessionTimeoutMs } from './sessionLifetime';
 import { steelCdpConnectionUrl } from './urls';
 
 function hasValue(value: string | null | undefined): value is string {
@@ -142,13 +147,20 @@ export interface SteelSessionReplacementDependencies {
     profileId?: string | null;
     proxySource?: string | null;
   }>;
-  validateConnection: (wsUrl: string) => Promise<boolean>;
+  /** Resolves null when the session accepts CDP, otherwise the failure reason. */
+  validateConnection: (wsUrl: string, sessionId: string) => Promise<string | null>;
   releaseSession?: (sessionId: string) => Promise<void>;
 }
 
 const defaultReplacementDependencies: SteelSessionReplacementDependencies = {
   createSession: async (input) => steel.sessions.create(input),
-  validateConnection: validateSessionConnectionOrThrow,
+  validateConnection: async (wsUrl, sessionId) => {
+    const validation = await validateBrowserConnection(wsUrl, {
+      startupProbe: steelStartupProbe(sessionId, (id) => steel.sessions.retrieve(id)),
+    });
+    await validation.browser?.close().catch(() => {});
+    return validation.failure;
+  },
 };
 
 export async function recreateSession(
@@ -200,6 +212,7 @@ export async function recreateSession(
     log.info(`  Steel session attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
     let createdSessionId: string | null = null;
     let committed = false;
+    let attemptCdpTimedOut = false;
     try {
       const proxySettings = buildSteelProxySettings(
         proxyGeo,
@@ -223,7 +236,7 @@ export async function recreateSession(
         solveCaptcha: envEnabled('BROWSER_AGENT_STEEL_CAPTCHA_SOLVER_ENABLED', true),
         debugConfig: { systemCursor: false },
         stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
-        timeout: 900000,
+        timeout: steelSessionTimeoutMs(),
         dimensions: { width: 1288, height: 891 },
       });
       createdSessionId = session.id;
@@ -241,8 +254,10 @@ export async function recreateSession(
       const debugUrl = steelDebugUrl(session.debugUrl);
       const wsUrl = steelCdpUrl(session.id);
 
-      if (!(await dependencies.validateConnection(wsUrl))) {
-        throw new Error(`Session validation failed on attempt ${attempt}`);
+      const validationFailure = await dependencies.validateConnection(wsUrl, session.id);
+      if (validationFailure !== null) {
+        attemptCdpTimedOut = validationFailure === STEEL_CDP_TIMEOUT_MESSAGE;
+        throw new Error(`Session validation failed on attempt ${attempt}: ${validationFailure}`);
       }
 
       await navigateToSavedUrl(wsUrl, savedUrl);
@@ -317,7 +332,9 @@ export async function recreateSession(
       lastError = error instanceof Error ? error : new Error('Unknown error');
       log.info(`  Steel session attempt ${attempt} failed: ${lastError.message}`);
       consecutiveCdpTimeouts =
-        lastError.message === STEEL_CDP_TIMEOUT_MESSAGE ? consecutiveCdpTimeouts + 1 : 0;
+        attemptCdpTimedOut || lastError.message === STEEL_CDP_TIMEOUT_MESSAGE
+          ? consecutiveCdpTimeouts + 1
+          : 0;
       // Each timeout already includes three CDP handshakes against a distinct
       // new session. Two in a row indicate a provider transport outage; leave
       // the old session intact and let browser recovery try another provider.
