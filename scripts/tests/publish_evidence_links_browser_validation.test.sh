@@ -76,6 +76,24 @@ assert list_snippets == {
 # No browser tasks → pass
 assert mod.validate_browser_agents_terminated_with_recording(agent, []) == []
 
+# Claude Code lifecycle events use task_started/task_complete too, but have no
+# browser session or recording. They must not be treated as browser tasks.
+claude_code_messages = [
+    msg(
+        task_id="code-1",
+        toolName="spawn_claude_code_agent",
+        action_type="task_started",
+        toolStatus="FINISHED",
+    ),
+    msg(
+        task_id="code-1",
+        toolName="spawn_claude_code_agent",
+        action_type="task_complete",
+        toolStatus="FINISHED",
+    ),
+]
+assert mod.validate_browser_agents_terminated_with_recording(agent, claude_code_messages) == []
+
 # Live browser without task_complete / recording → fail both
 failures = mod.validate_browser_agents_terminated_with_recording(
     agent,
