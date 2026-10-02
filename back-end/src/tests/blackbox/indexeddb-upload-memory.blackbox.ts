@@ -25,6 +25,7 @@
  */
 
 import { spawn } from 'child_process';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -104,56 +105,49 @@ function runChildJsonParseControl(): void {
 
 const prisma = new PrismaClient();
 
-async function buildPayloadFile(): Promise<number> {
-  // Prisma may lease a different pooled connection for every query. Build and
-  // read the fixture in one statement so its lifetime cannot depend on a
-  // connection-local TEMP table surviving between client calls.
-  const rows = await prisma.$queryRawUnsafe<Array<{ chars: number; doc: string }>>(`
-    WITH idb_upload_memory_fixture AS MATERIALIZED (
-      SELECT jsonb_build_object(
-        'batchIndex', 0,
-        'totalBatches', 1,
-        'hashes', jsonb_build_object(
-          ${sqlString(BIG_ORIGIN)}, 'big-hash',
-          ${sqlString(SMALL_ORIGIN)}, 'small-hash'
-        ),
-        'origins', jsonb_build_array(
-          jsonb_build_object(
-            'origin', ${sqlString(BIG_ORIGIN)},
-            'databases', jsonb_build_array(jsonb_build_object(
-              'name', 'DocsErrors',
-              'objectStores', jsonb_build_array(jsonb_build_object(
-                'name', 'Errors',
-                'records', (
-                  SELECT jsonb_agg(jsonb_build_object(
-                    'key', 'record-key-' || i,
-                    'value', jsonb_build_object(
-                      'key', 'record-key-' || i,
-                      'value', md5(i::text) || md5((i * 7)::text)
-                    )
-                  ))
-                  FROM generate_series(1, ${BLOB_RECORDS}) i
-                )
-              ))
-            ))
-          ),
-          jsonb_build_object(
-            'origin', ${sqlString(SMALL_ORIGIN)},
-            'databases', '[{"name":"tiny","objectStores":[]}]'::jsonb
-          )
-        )
-      ) AS doc
-    )
-    SELECT length(doc::text)::int AS chars, doc::text AS doc
-    FROM idb_upload_memory_fixture
-  `);
-  const chars = Number(rows[0]?.chars ?? 0);
-  fs.writeFileSync(payloadPath, rows[0]?.doc ?? '');
-  return chars;
-}
+function buildPayloadFile(): number {
+  // Keep the fixture as large as the production blob without making Postgres
+  // assemble all 360,000 records in one jsonb_agg allocation. The ingest and
+  // round-trip assertions below still send and verify the complete payload.
+  const envelope = JSON.stringify({
+    batchIndex: 0,
+    totalBatches: 1,
+    hashes: { [BIG_ORIGIN]: 'big-hash', [SMALL_ORIGIN]: 'small-hash' },
+    origins: [
+      {
+        origin: BIG_ORIGIN,
+        databases: [{ name: 'DocsErrors', objectStores: [{ name: 'Errors', records: null }] }],
+      },
+      { origin: SMALL_ORIGIN, databases: [{ name: 'tiny', objectStores: [] }] },
+    ],
+  });
+  const marker = '"records":null';
+  const markerIndex = envelope.indexOf(marker);
+  assert(markerIndex >= 0, 'large fixture records marker missing');
 
-function sqlString(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
+  const fd = fs.openSync(payloadPath, 'w');
+  try {
+    fs.writeSync(fd, `${envelope.slice(0, markerIndex)}"records":[`);
+    let chunk = '';
+    for (let i = 1; i <= BLOB_RECORDS; i += 1) {
+      const key = `record-key-${i}`;
+      const value =
+        createHash('md5').update(String(i)).digest('hex') +
+        createHash('md5')
+          .update(String(i * 7))
+          .digest('hex');
+      chunk += `${i === 1 ? '' : ','}${JSON.stringify({ key, value: { key, value } })}`;
+      if (chunk.length >= 1_000_000) {
+        fs.writeSync(fd, chunk);
+        chunk = '';
+      }
+    }
+    if (chunk) fs.writeSync(fd, chunk);
+    fs.writeSync(fd, `]${envelope.slice(markerIndex + marker.length)}`);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return fs.statSync(payloadPath).size;
 }
 
 async function cleanupUser(): Promise<void> {
@@ -333,7 +327,7 @@ async function main(): Promise<void> {
   let failed = 0;
   try {
     await cleanupUser();
-    payloadChars = await buildPayloadFile();
+    payloadChars = buildPayloadFile();
     assert(payloadChars >= MIN_PAYLOAD_CHARS, `fixture payload too small: ${payloadChars} chars`);
     console.log(`fixture payload: ${(payloadChars / 1024 / 1024).toFixed(1)}MB at ${payloadPath}`);
 
