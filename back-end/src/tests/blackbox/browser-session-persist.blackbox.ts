@@ -31,6 +31,7 @@ async function testPersist_preallocatedTaskIdReclaimIsIdempotent(): Promise<void
       debugUrl: 'https://debug.example/first',
       wsUrl: 'ws://example/first',
       provider: 'kernel',
+      initialProxyKey: 'residential:US:CA',
     });
     await prisma.browserSession.update({
       where: { id: taskId },
@@ -45,6 +46,7 @@ async function testPersist_preallocatedTaskIdReclaimIsIdempotent(): Promise<void
       debugUrl: 'https://debug.example/second',
       wsUrl: 'ws://example/second',
       provider: 'kernel',
+      initialProxyKey: 'residential:US:CA',
       releaseRemoteSession: async (previousSessionId) => {
         released.push(previousSessionId);
       },
@@ -57,6 +59,9 @@ async function testPersist_preallocatedTaskIdReclaimIsIdempotent(): Promise<void
     }
     if (reclaimed.status !== 'ACTIVE' || reclaimed.closedAt !== null) {
       throw new Error('Reclaimed row must be ACTIVE with cleared closedAt');
+    }
+    if (reclaimed.initialProxyKey !== 'residential:US:CA') {
+      throw new Error(`Expected persisted proxy fallback key, got ${reclaimed.initialProxyKey}`);
     }
     if (released.length !== 1) {
       throw new Error(`Expected one previous remote release, got ${released.length}`);
@@ -71,6 +76,7 @@ async function testPersist_preallocatedTaskIdReclaimIsIdempotent(): Promise<void
       debugUrl: 'https://debug.example/third',
       wsUrl: 'ws://example/third',
       provider: 'kernel',
+      initialProxyKey: 'residential:US:CA',
       releaseRemoteSession: async (previousSessionId) => {
         released.push(previousSessionId);
       },

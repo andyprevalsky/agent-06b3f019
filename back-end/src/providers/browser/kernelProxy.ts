@@ -113,6 +113,19 @@ export function kernelProxyCandidates(
   return candidates;
 }
 
+/** Resume on the first resolved exit when it still exists. Keep the complete
+ * location ladder behind it so a deleted proxy can still fall back. */
+export function preferKernelProxyCandidate(
+  candidates: KernelProxyCandidate[],
+  preferredKey?: string | null
+): KernelProxyCandidate[] {
+  if (!preferredKey) return candidates;
+  return [
+    ...candidates.filter((candidate) => candidate.proxyKey === preferredKey),
+    ...candidates.filter((candidate) => candidate.proxyKey !== preferredKey),
+  ];
+}
+
 export function selectReusableKernelProxy(
   proxies: ProxyListResponse[],
   candidate: KernelProxyCandidate

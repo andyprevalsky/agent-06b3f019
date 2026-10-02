@@ -1,7 +1,11 @@
 #!/usr/bin/env tsx
 
 import { selectedBrowserProvider } from '../../providers/browser/config';
-import { kernelProxyCandidates, resolveKernelProxyMode } from '../../providers/browser/kernelProxy';
+import {
+  kernelProxyCandidates,
+  preferKernelProxyCandidate,
+  resolveKernelProxyMode,
+} from '../../providers/browser/kernelProxy';
 import { steel } from '../../providers/steel/session';
 import {
   assert,
@@ -116,6 +120,23 @@ const tests: Array<[string, () => void]> = [
       assert(candidates[0]?.config.city === 'san_francisco', 'bad city alias');
       assert(candidates[1]?.proxyKey === 'residential:US:CA', 'bad state key');
       assert(candidates[2]?.proxyKey === 'residential:US', 'bad country key');
+    },
+  ],
+  [
+    'Kernel resume prefers its original state fallback even if city becomes available',
+    () => {
+      const candidates = kernelProxyCandidates({
+        country: 'US',
+        state: 'CA',
+        city: 'San Francisco',
+      });
+      const ordered = preferKernelProxyCandidate(candidates, 'residential:US:CA');
+      assert(ordered[0]?.proxyKey === 'residential:US:CA', 'resume changed its resolved proxy');
+      assert(
+        ordered.length === 3 &&
+          ordered.some((candidate) => candidate.proxyKey === 'residential:US'),
+        'resume dropped its lower-specificity fallback'
+      );
     },
   ],
   [

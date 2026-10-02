@@ -18,6 +18,7 @@ import {
   isKernelProxyAvailabilityError,
   KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
+  preferKernelProxyCandidate,
   resolveKernelProxyMode,
   type KernelProxyType,
   type ResolvedKernelProxy,
@@ -102,6 +103,7 @@ export type KernelRecoveryProxySpecificity = 'city' | 'state' | 'country';
 
 interface KernelRemoteSessionOptions {
   forceManagedProxyType?: KernelProxyType;
+  preferredManagedProxyKey?: string | null;
   exactManagedProxy?: {
     type: KernelProxyType;
     specificity: KernelRecoveryProxySpecificity;
@@ -230,6 +232,7 @@ async function createRemoteSession(
   wsUrl: string;
   proxySource: string;
   proxyLocation: ProxyGeoLocation;
+  proxyKey?: string;
   profileId: string | null;
   profileSource: string;
   validationBrowser: Browser;
@@ -294,6 +297,7 @@ async function createRemoteSession(
               wsUrl: session.cdp_ws_url,
               proxySource: proxy.proxySource,
               proxyLocation: proxy.proxyLocation,
+              proxyKey: proxy.proxyKey,
               profileId: session.profile?.id ?? profile.profileId,
               profileSource: profile.profileSource,
               validationBrowser,
@@ -412,7 +416,13 @@ async function createRemoteSession(
           proxyLocation,
         });
       } else {
-        remote = await createWithManagedProxy(kernelProxyCandidates(proxyLocation), 0);
+        remote = await createWithManagedProxy(
+          preferKernelProxyCandidate(
+            kernelProxyCandidates(proxyLocation),
+            options.preferredManagedProxyKey
+          ),
+          0
+        );
       }
     }
     // Do not mark the profile bound here — persistBrowserSessionRow (or the
@@ -458,6 +468,7 @@ export async function createKernelSessionWithContext(
       wsUrl: remote.wsUrl,
       startUrl: _startUrl || undefined,
       provider: 'kernel',
+      initialProxyKey: remote.proxyKey ?? null,
       ...providerProfileData(remote.profileId, remote.profileSource, true),
       releaseRemoteSession: releaseKernelRemoteSession,
     });
@@ -578,6 +589,8 @@ async function recreateKernelSession(
     proxyLocation,
     {
       forceManagedProxyType: opts.forceManagedProxyType,
+      preferredManagedProxyKey:
+        opts.forceManagedProxyType === undefined ? oldSession.initialProxyKey : undefined,
       boundProfile: recordedProviderProfileBinding(oldSession),
     }
   );
