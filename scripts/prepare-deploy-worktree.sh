@@ -216,6 +216,8 @@ ensure_dependencies() {
       "$source_python" -m venv agents/venv
       agents/venv/bin/python -m pip install --upgrade pip
       agents/venv/bin/python -m pip install -r agents/requirements.txt
+    elif ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
+      agents/venv/bin/python -m pip install -r agents/requirements.txt
     fi
     agents/venv/bin/python -c 'import browser_use, pytest, temporalio' >/dev/null
   )

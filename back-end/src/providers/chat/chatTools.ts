@@ -41,13 +41,22 @@ class ParallelSearchHttpError extends Error {
   }
 }
 
+type ParallelSearchResponse = { results?: SearchResult[] };
+
+// Turbo usually answers in well under a second, but one slow provider response
+// alone can exceed the 6s chat lifecycle. A single duplicate request after this
+// delay bounds that tail; at most one extra search per turn, only on slow turns.
+const PARALLEL_SEARCH_HEDGE_AFTER_MS = 1_500;
+
 async function fetchParallelSearch(
   apiKey: string,
-  query: string
-): Promise<{ results?: SearchResult[] }> {
+  query: string,
+  signal: AbortSignal
+): Promise<ParallelSearchResponse> {
   return retryWithBackoff(
     async () => {
       const response = await fetch('https://api.parallel.ai/v1/search', {
+        signal,
         method: 'POST',
         headers: {
           'x-api-key': apiKey,
@@ -57,7 +66,7 @@ async function fetchParallelSearch(
           mode: 'turbo',
           objective: query,
           search_queries: [query],
-          // Chat turbo must stay inside the 5s full-lifecycle SLA. 10×6000
+          // Chat turbo must stay inside the 6s full-lifecycle SLA. 10×6000
           // chars (~18–60KB) made the generator the dominant cost (~3.7s)
           // after a 0.6s Parallel round-trip. Bound excerpts so the compose
           // step stays a snippet summary, not a document rewrite.
@@ -71,16 +80,51 @@ async function fetchParallelSearch(
       if (!response.ok) {
         throw new ParallelSearchHttpError(response.status, await response.text());
       }
-      return (await response.json()) as { results?: SearchResult[] };
+      return (await response.json()) as ParallelSearchResponse;
     },
     {
       maxRetries: MAX_RETRIES,
       initialBackoffMs: INITIAL_BACKOFF_MS,
       component: 'ParallelSearch',
       isRetryable: (error) =>
-        error instanceof TypeError || (error instanceof ParallelSearchHttpError && error.retryable),
+        !signal.aborted &&
+        (error instanceof TypeError ||
+          (error instanceof ParallelSearchHttpError && error.retryable)),
     }
   );
+}
+
+async function fetchParallelSearchHedged(
+  apiKey: string,
+  query: string
+): Promise<ParallelSearchResponse> {
+  const primary = new AbortController();
+  const primaryRequest = fetchParallelSearch(apiKey, query, primary.signal);
+  let hedgeTimer: ReturnType<typeof setTimeout> | undefined;
+  const hedgeDue = new Promise<null>((resolve) => {
+    hedgeTimer = setTimeout(() => resolve(null), PARALLEL_SEARCH_HEDGE_AFTER_MS);
+  });
+  try {
+    const early = await Promise.race([primaryRequest, hedgeDue]);
+    if (early !== null) return early;
+  } finally {
+    clearTimeout(hedgeTimer);
+  }
+
+  log.info('Parallel search hedged', { afterMs: PARALLEL_SEARCH_HEDGE_AFTER_MS });
+  const hedge = new AbortController();
+  const hedgeRequest = fetchParallelSearch(apiKey, query, hedge.signal);
+  try {
+    const winner = await Promise.any([
+      primaryRequest.then((value) => ({ value, name: 'primary', loser: hedge })),
+      hedgeRequest.then((value) => ({ value, name: 'hedge', loser: primary })),
+    ]);
+    winner.loser.abort();
+    log.info('Parallel search hedge settled', { winner: winner.name });
+    return winner.value;
+  } catch (error) {
+    throw error instanceof AggregateError ? error.errors[0] : error;
+  }
 }
 
 function formatSearchResults(results: SearchResult[]): string {
@@ -139,7 +183,7 @@ export async function executeWebSearch(
       throw new Error('PARRALLEL_API_KEY not configured');
     }
 
-    const data = await fetchParallelSearch(apiKey, query);
+    const data = await fetchParallelSearchHedged(apiKey, query);
 
     const results = data.results || [];
 
