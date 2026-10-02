@@ -26,6 +26,7 @@ cd "$ROOT_DIR"
 source scripts/lib/workspace-env.sh
 normalize_conductor_workspace_env
 source "$SCRIPT_DIR/local-db-container.sh"
+source "$SCRIPT_DIR/coverage-failure-evidence.sh"
 cd "$BACKEND_DIR"
 
 # Cursor Cloud (and similar) may inject BROWSER_PROVIDER into the process
@@ -596,6 +597,8 @@ if command -v npx >/dev/null 2>&1; then
 fi
 
 echo "Running blackbox and unit tests in parallel..."
+HOST_PRESSURE_LOG="$BLACKBOX_ARTIFACT_DIR/host-pressure.log"
+record_host_pressure "$HOST_PRESSURE_LOG" "suite-start"
 TEST_EXIT=0
 UNIT_EXIT=0
 launch_coverage_process_group env \
@@ -621,7 +624,16 @@ wait "$UNIT_PID" || UNIT_EXIT=$?
 UNIT_PID=""
 
 if [[ "$TEST_EXIT" -ne 0 || "$UNIT_EXIT" -ne 0 ]]; then
-  echo "Backend test phase failed; skipping report work until the failing lifecycle is fixed."
+  echo "Backend test phase failed (blackbox exit $TEST_EXIT, unit exit $UNIT_EXIT); skipping report work until the failing lifecycle is fixed."
+  record_host_pressure "$HOST_PRESSURE_LOG" "suite-failed"
+  if EVIDENCE_DIR="$(preserve_coverage_failure "$COV_LOG" "$BLACKBOX_ARTIFACT_DIR" "$ROOT_DIR/.context/test-runs")"; then
+    echo "    Failure evidence (kept across reruns): $EVIDENCE_DIR"
+    echo "    Backend log:   $EVIDENCE_DIR/server.log"
+    echo "    Runner log:    $EVIDENCE_DIR/runner.log"
+    echo "    Host pressure: $EVIDENCE_DIR/host-pressure.log"
+  else
+    echo "    Could not preserve failure evidence; live copies: $COV_LOG, $BLACKBOX_ARTIFACT_DIR"
+  fi
   if [[ "$TEST_EXIT" -ne 0 ]]; then
     exit "$TEST_EXIT"
   fi
@@ -713,24 +725,4 @@ print("     Add or expand blackbox tests in  src/tests/blackbox/<domain>.blackbo
 PYEOF
   fi
   exit "$COV_EXIT"
-fi
-
-# If blackbox tests failed, surface the runner log path + failure tail so the
-# caller can diagnose without rerunning the whole coverage suite.
-if [[ "$TEST_EXIT" -ne 0 || "$UNIT_EXIT" -ne 0 ]]; then
-  RUNNER_LOG="$BLACKBOX_ARTIFACT_DIR/runner.log"
-  echo ""
-  echo "⚠️  Tests failed (blackbox exit $TEST_EXIT, unit exit $UNIT_EXIT). Coverage data may be incomplete."
-  echo "    Full runner log: $RUNNER_LOG"
-  echo "    Backend log:     $BLACKBOX_ARTIFACT_DIR/backend.log"
-  if [[ -f "$RUNNER_LOG" ]]; then
-    echo ""
-    echo "=== Failure tail (last 120 lines of runner.log) ==="
-    tail -n 120 "$RUNNER_LOG"
-    echo "=== End failure tail ==="
-  fi
-  if [[ "$TEST_EXIT" -ne 0 ]]; then
-    exit "$TEST_EXIT"
-  fi
-  exit "$UNIT_EXIT"
 fi
