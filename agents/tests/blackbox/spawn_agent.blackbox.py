@@ -4729,6 +4729,10 @@ async def run_all_tests():
     await r.record_async(
         "tagged_execute_activity_injects", test_tagged_execute_activity_injects_taskid_for_post_agent_message
     )
+    r.record(
+        "user_facing_explore_result_keeps_prod_summaries",
+        test_user_facing_explore_result_keeps_prod_summaries,
+    )
     teardown_mock()
     return r.all_passed
 

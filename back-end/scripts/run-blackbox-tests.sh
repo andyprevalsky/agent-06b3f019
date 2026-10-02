@@ -433,13 +433,10 @@ echo "Backend log: $BACKEND_LOG"
 echo "Artifacts: $ARTIFACT_DIR"
 
 source "$ROOT_DIR/scripts/lib/process-tree.sh"
-PORT="$PORT" \
-DISABLE_GMAIL_SYNC=1 \
-npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
-BACKEND_PID=$!
-
+BACKEND_PID=""
 cleanup() {
   stop_process_tree "$BACKEND_PID"
+  BACKEND_PID=""
 
   if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
     rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
@@ -448,6 +445,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+PORT="$PORT" \
+DISABLE_GMAIL_SYNC=1 \
+npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
+BACKEND_PID=$!
 
 READY=0
 for _ in $(seq 1 120); do

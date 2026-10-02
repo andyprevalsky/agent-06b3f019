@@ -642,7 +642,7 @@ export async function isAnthropicApiKeyOnCooldown(): Promise<boolean> {
     return Date.now() < cachedCooldownUntilMs;
   }
   cachedCooldownUntilMs = row?.rateLimitedUntil ? row.rateLimitedUntil.getTime() : 0;
-  return now < cachedCooldownUntilMs;
+  return Date.now() < cachedCooldownUntilMs;
 }
 
 /** Back the shared Anthropic API key off for the cooldown window (DB + cache). */

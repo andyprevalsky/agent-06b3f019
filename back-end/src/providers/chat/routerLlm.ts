@@ -511,6 +511,15 @@ export async function callRouterLlm(params: {
           deadlineExpired,
         });
         if (!finalized.decision && deadlineExpired) {
+          log.warn('[RouterLLM] Completion deadline expired without a decision', {
+            agentId: params.agentId,
+            attempt,
+            timeoutMs: completionTimeoutMs,
+            elapsedMs: Date.now() - startTime,
+            actualModel,
+            chunksReceived: chunkCount,
+            jsonLength: accumulatedJson.length,
+          });
           if (webSearchToolCallId) {
             await broadcastToolEvent(
               params.agentId,

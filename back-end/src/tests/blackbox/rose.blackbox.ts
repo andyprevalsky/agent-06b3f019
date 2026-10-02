@@ -829,7 +829,7 @@ async function testWaterfall_openAiToolCallsCarryFunctionType() {
     },
     {
       label: 'buildOpenRouterFastChatBody',
-      build: (messages) => buildOpenRouterFastChatBody({ messages }),
+      build: (messages) => buildOpenRouterFastChatBody({ messages }, 'req-tool-shape'),
     },
   ];
 
@@ -2395,13 +2395,16 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
     'openrouter→cerebras stamps reasoning.effort=low'
   );
 
-  const orFast = buildOpenRouterFastChatBody({ messages });
+  const orFast = buildOpenRouterFastChatBody({ messages }, 'req-effort');
   assertEqual(
     (orFast.reasoning as Record<string, unknown>).effort,
     'xhigh',
     'openrouter-fast default effort=xhigh'
   );
-  const orFastMinimal = buildOpenRouterFastChatBody({ messages, effort: 'minimal' });
+  const orFastMinimal = buildOpenRouterFastChatBody(
+    { messages, effort: 'minimal' },
+    'req-effort-minimal'
+  );
   assertEqual(
     (orFastMinimal.reasoning as Record<string, unknown>).effort,
     'low',

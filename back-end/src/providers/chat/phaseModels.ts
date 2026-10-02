@@ -1,7 +1,7 @@
 /**
  * Chat model selection boundary.
  *
- * requested model ──┬─ router ──> rose-fast via direct-cerebras (Qwen + 1.2s stall hedge)
+ * requested model ──┬─ router ──> rose-fast via direct-cerebras (Qwen + 0.8s hedge)
  *                   ├─ generator ──> rose-fast via direct-cerebras (same)
  *                   └─ Temporal ──> persisted requested model (outside this module)
  *
