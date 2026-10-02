@@ -141,6 +141,10 @@ def test_google_oauth_root_tool_emits_twelve_cards_without_external_activity():
     cards = [(event, call_id, tool_name) for event, call_id, tool_name in workflow.events if (event.metadata or {}).get("fixtureRow")]
     progress = [event for event, _, _ in workflow.events if (event.metadata or {}).get("fixtureProgress")]
     assert len(cards) == 12 and len(progress) == 5
+    assert all(event.metadata["isUserAttentionMessage"] is True for event in progress)
+    assert all(event.metadata["attentionMessage"] == event.message for event in progress)
+    assert all(event.metadata["sendMessageToUser"]["attentionKind"] == "info" for event in progress)
+    assert all(event.metadata["sendMessageToUser"]["isWaitingForUser"] is False for event in progress)
     assert [tool_name for _, _, tool_name in cards] == [
         row["tool"] for row in result["result"]["rows"]
     ]

@@ -75,6 +75,22 @@ def check_google_oauth_demo_trace(data: dict[str, Any]) -> tuple[bool, str]:
         ]
         if len(progress) != 5:
             raise ValueError("expected five progress updates")
+        for note in progress:
+            meta = note["metadata"]
+            if (
+                note.get("role") != "TOOL"
+                or meta.get("toolName") != "google_workspace_progress"
+                or meta.get("toolStatus") != "FINISHED"
+                or meta.get("title") != "FYI for User"
+                or meta.get("isUserAttentionMessage") is not True
+                or meta.get("attentionMessage") != _message_text(note)
+                or meta.get("sendMessageToUser") != {
+                    "isQuestion": False,
+                    "attentionKind": "info",
+                    "isWaitingForUser": False,
+                }
+            ):
+                raise ValueError("progress is not displayed as an immediate user message")
         progress_terms = {
             1: ("connected account", "unread"),
             3: ("Sam", "Sent"),
@@ -130,6 +146,25 @@ def check_google_oauth_demo_trace(data: dict[str, Any]) -> tuple[bool, str]:
         if result[11] != {"connected": False}:
             raise ValueError("disconnect card is incorrect")
 
+        visible_results = [
+            ("connected", result[0]["account"]),
+            (result[1]["summary"],),
+            ("drafted", args[2]["body"], "Sam"),
+            ("approved", args[2]["body"], "Sam"),
+            ("sent", "Sent", args[2]["body"], "Sam"),
+            ("archived", "Acme", "Inbox"),
+            (result[6]["events"][0]["title"], result[6]["events"][0]["time"], result[6]["events"][0]["date"]),
+            (lunch["title"], lunch["date"], lunch["time"]),
+            (result[8]["title"], "Drive"),
+            (result[9]["end_date"], "Lease"),
+            (args[10]["line"], "Lease", "once"),
+            ("disconnected", result[0]["account"]),
+        ]
+        for index, (card, terms) in enumerate(zip(cards, visible_results), start=1):
+            shown = _message_text(card).lower()
+            if not all(term.lower() in shown for term in terms):
+                raise ValueError(f"operation card {index} does not show its resolved outcome")
+
         parent = [
             message
             for message in messages
@@ -152,6 +187,11 @@ def check_google_oauth_demo_trace(data: dict[str, Any]) -> tuple[bool, str]:
             raise ValueError("fixture state assertions are incomplete")
         if len(summary.get("answers") or []) != 7:
             raise ValueError("fixture does not provide all seven answers")
+        parent_text = _message_text(parent[0])
+        if not all(answer in parent_text for answer in summary["answers"]):
+            raise ValueError("root tool response omits a resolved answer")
+        if "disconnected" not in parent_text.lower():
+            raise ValueError("root tool response omits final disconnect state")
 
         complete = [
             (message.get("metadata") or {}).get("completionSummary")

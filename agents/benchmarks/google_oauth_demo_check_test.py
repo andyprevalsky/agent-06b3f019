@@ -91,6 +91,21 @@ def test_google_oauth_checker_grades_visible_flow_and_completion_without_a_model
     missing_progress["messages"].remove(note)
     assert not check_google_oauth_demo_trace(missing_progress)[0]
 
+    hidden_progress = copy.deepcopy(transcript)
+    note = next(message for message in hidden_progress["messages"] if (message.get("metadata") or {}).get("fixtureProgress"))
+    note["metadata"].pop("isUserAttentionMessage")
+    assert not check_google_oauth_demo_trace(hidden_progress)[0]
+
+    vague_result = copy.deepcopy(transcript)
+    card = next(message for message in vague_result["messages"] if (message.get("metadata") or {}).get("toolName") == "gmail_send_draft")
+    card["message"] = "Done."
+    assert not check_google_oauth_demo_trace(vague_result)[0]
+
+    vague_parent = copy.deepcopy(transcript)
+    parent = next(message for message in vague_parent["messages"] if (message.get("metadata") or {}).get("toolName") == "google_workspace_run" and (message.get("metadata") or {}).get("toolStatus") == "FINISHED")
+    parent["message"] = "Everything completed."
+    assert not check_google_oauth_demo_trace(vague_parent)[0]
+
     visible_label = copy.deepcopy(transcript)
     visible_label["messages"][1]["message"] = "DEMO"
     assert not check_google_oauth_demo_trace(visible_label)[0]
