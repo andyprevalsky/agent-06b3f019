@@ -368,6 +368,7 @@ BACKEND_PID=""
 source "$ROOT_DIR/scripts/lib/process-tree.sh"
 cleanup() {
   stop_process_tree "$BACKEND_PID"
+  BACKEND_PID=""
 
   if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
     rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true

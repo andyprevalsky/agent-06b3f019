@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run the independent credential and Amplitude /deploy probes concurrently."""
+"""Run the focused live /deploy probes under one foreground supervisor.
+
+Independent probes start together. A probe with ``after`` starts once that
+probe exits, pass or fail, so two ``run-blackbox-tests.sh`` setups never race
+the same local database's schema sync and runtime SQL hooks.
+"""
 
 from __future__ import annotations
 
@@ -7,10 +12,9 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -20,13 +24,25 @@ class Command:
     name: str
     argv: tuple[str, ...]
     cwd: Path
+    after: str | None = None
 
 
 def run_commands(commands: Sequence[Command]) -> dict[str, int]:
+    names = [command.name for command in commands]
+    if len(set(names)) != len(names):
+        raise ValueError(f"duplicate live probe names: {names}")
+    for command in commands:
+        if command.after is not None and command.after not in names:
+            raise ValueError(f"{command.name} waits for unknown probe {command.after}")
+        if command.after == command.name:
+            raise ValueError(f"{command.name} cannot wait for itself")
+
     processes: dict[str, subprocess.Popen[bytes]] = {}
     results: dict[str, int] = {}
+    pending = list(commands)
+    stopped: list[int] = []
 
-    def forward(signum: int, _frame: object) -> None:
+    def terminate(signum: int) -> None:
         for process in processes.values():
             if process.poll() is not None:
                 continue
@@ -35,6 +51,23 @@ def run_commands(commands: Sequence[Command]) -> dict[str, int]:
             except ProcessLookupError:
                 pass
 
+    def forward(signum: int, _frame: object) -> None:
+        stopped.append(signum)
+        terminate(signum)
+
+    def launch_ready() -> None:
+        if stopped:
+            return
+        for command in list(pending):
+            if command.after is not None and command.after not in results:
+                continue
+            pending.remove(command)
+            processes[command.name] = subprocess.Popen(
+                command.argv,
+                cwd=command.cwd,
+                start_new_session=True,
+            )
+
     previous_handlers = {
         signum: signal.getsignal(signum)
         for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
@@ -42,12 +75,7 @@ def run_commands(commands: Sequence[Command]) -> dict[str, int]:
     for signum in previous_handlers:
         signal.signal(signum, forward)
     try:
-        for command in commands:
-            processes[command.name] = subprocess.Popen(
-                command.argv,
-                cwd=command.cwd,
-                start_new_session=True,
-            )
+        launch_ready()
         while processes:
             for name, process in list(processes.items()):
                 exit_code = process.poll()
@@ -55,19 +83,22 @@ def run_commands(commands: Sequence[Command]) -> dict[str, int]:
                     continue
                 results[name] = process.wait()
                 del processes[name]
+                launch_ready()
             if processes:
                 time.sleep(0.02)
     finally:
-        forward(signal.SIGTERM, None)
+        terminate(signal.SIGTERM)
         for name, process in processes.items():
             results[name] = process.wait()
         for signum, previous in previous_handlers.items():
             signal.signal(signum, previous)
+    for command in pending:
+        results[command.name] = 128 + (stopped[0] if stopped else signal.SIGTERM)
     return {command.name: results[command.name] for command in commands}
 
 
-def main() -> int:
-    commands = (
+def deploy_commands() -> tuple[Command, ...]:
+    return (
         Command(
             "credential-health",
             (
@@ -97,8 +128,28 @@ def main() -> int:
             ),
             ROOT / "back-end",
         ),
+        Command(
+            "chat-router-failover-live",
+            (
+                "bash",
+                "../scripts/run-deploy-stage",
+                "chat-router-failover-live",
+                "--",
+                "env",
+                "CHAT_ROUTER_FAILOVER_LIVE=1",
+                "BLACKBOX_TEST_CONCURRENCY=1",
+                "bash",
+                "scripts/run-blackbox-tests.sh",
+                "chat-router-failover",
+            ),
+            ROOT / "back-end",
+            after="amplitude-live",
+        ),
     )
-    results = run_commands(commands)
+
+
+def main() -> int:
+    results = run_commands(deploy_commands())
     for name, exit_code in results.items():
         print(f"live probe {name}: exit={exit_code}")
     return 0 if all(exit_code == 0 for exit_code in results.values()) else 1

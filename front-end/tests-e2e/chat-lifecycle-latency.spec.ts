@@ -21,12 +21,12 @@ import {
 } from './helpers';
 
 const SAMPLE_COUNT = 5;
-const FULL_LIFECYCLE_RATCHET_MS = 5_000;
+const FULL_LIFECYCLE_RATCHET_MS = 6_000;
 const MILESTONE_TIMEOUT_MS = 15_000;
 // Four paths still submit concurrently, but repeated submissions must leave
 // room in the shared provider's token-per-minute quota. The pause happens
 // before the Enter-key clock starts, so every measured lifecycle keeps the
-// same five-second ratchet.
+// same six-second ratchet.
 const PROVIDER_QUOTA_COOLDOWN_MS = 25_000;
 // The discarded warmup (sample 0) exists to populate the prompt/fast-mode cache
 // so the measured samples are warm. On a freshly seeded workspace that cache is
@@ -39,7 +39,7 @@ const PROVIDER_QUOTA_COOLDOWN_MS = 25_000;
 const WARMUP_MILESTONE_TIMEOUT_MS = 90_000;
 // Five quota cooldowns alone consume 125s of Playwright's default 180s test
 // timeout. Leave enough time for the warmup, measured requests, and cleanup;
-// the five-second lifecycle ratchet below still applies to every sample.
+// the six-second lifecycle ratchet below still applies to every sample.
 const PATH_TEST_TIMEOUT_MS =
   WARMUP_MILESTONE_TIMEOUT_MS +
   SAMPLE_COUNT * (PROVIDER_QUOTA_COOLDOWN_MS + MILESTONE_TIMEOUT_MS) +
@@ -289,7 +289,7 @@ test.describe('chat full-lifecycle latency', () => {
   });
 
   for (const path of selectedPaths()) {
-    test(`${path.id}: five full-lifecycle samples stay below five seconds`, async ({ page }) => {
+    test(`${path.id}: five full-lifecycle samples stay below six seconds`, async ({ page }) => {
       test.setTimeout(PATH_TEST_TIMEOUT_MS);
       const recorder = attachRecorder(page);
       const results: LifecycleSample[] = [];

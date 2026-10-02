@@ -6,6 +6,11 @@ validated on every poll, so a success from an older commit can never satisfy
 the wait. Both GitHub CheckRun and legacy StatusContext payloads are supported;
 neither requires a timestamp to prove freshness because statuses are scoped to
 the exact commit SHA.
+
+A manual ``@coderabbitai review`` / ``full review`` comment supersedes an
+unsuccessful status (skip, rate limit, failure) that started before it, so the
+wait keeps polling for the triggered review instead of returning the stale
+skip. Successful reviews of the exact HEAD are accepted regardless of timing.
 """
 
 from __future__ import annotations
@@ -13,11 +18,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 
 def _trusted_github_host() -> str:
@@ -43,6 +50,7 @@ FAILURE_STATES = {
     "STARTUP_FAILURE",
     "TIMED_OUT",
 }
+REVIEW_TRIGGER = re.compile(r"^\s*@coderabbitai\s+(full\s+)?review\b", re.IGNORECASE)
 
 
 class ReviewWaitError(RuntimeError):
@@ -233,6 +241,8 @@ def gh_commit_status_rollup(
             # non-substantive CodeRabbit successes ("Review skipped", etc.).
             if entry.get("description") is not None:
                 mapped["description"] = entry.get("description")
+            if entry.get("created_at"):
+                mapped["startedAt"] = entry.get("created_at")
             rollup.append(mapped)
         if len(statuses) < 100:
             break
@@ -241,6 +251,61 @@ def gh_commit_status_rollup(
     # so reverse so the newest status is last.
     rollup.reverse()
     return rollup
+
+
+def parse_github_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _pr_number(pr: str) -> str:
+    match = re.search(r"(\d+)/*$", pr.strip())
+    if not match:
+        raise ReviewWaitError(f"could not parse a pull-request number from {pr!r}")
+    return match.group(1)
+
+
+def latest_review_trigger_at(
+    pr: str,
+    repo: str | None = None,
+    *,
+    timeout: float | None = None,
+) -> datetime | None:
+    """Return when the newest ``@coderabbitai review`` comment was posted."""
+    deadline = None if timeout is None else time.monotonic() + float(timeout)
+
+    def _remaining() -> float | None:
+        if deadline is None:
+            return None
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise ReviewWaitError("review trigger lookup exceeded its time budget")
+        return left
+
+    _validate_repo_ref(repo)
+    slug = _repo_slug(repo, timeout=_remaining())
+    endpoint = f"repos/{slug}/issues/{_pr_number(pr)}/comments?per_page=100"
+    newest: datetime | None = None
+    max_pages = 20
+    for page in range(1, max_pages + 1):
+        comments = _gh_api_json(f"{endpoint}&page={page}", repo=repo, timeout=_remaining())
+        if not isinstance(comments, list):
+            raise ReviewWaitError("issue comments API returned a non-list payload")
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            if not REVIEW_TRIGGER.match(str(comment.get("body") or "")):
+                continue
+            created = parse_github_time(comment.get("created_at"))
+            if created is not None and (newest is None or created > newest):
+                newest = created
+        if len(comments) < 100:
+            break
+    return newest
 
 
 def _validate_repo_ref(repo: str | None) -> None:
@@ -354,21 +419,30 @@ def wait_for_review(
     loader: Callable[[str, str | None], dict[str, object]] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     progress: Callable[[str], None] | None = None,
+    triggered_at: datetime | None = None,
 ) -> ReviewStatus:
     deadline = time.monotonic() + timeout_seconds
     last_message = ""
+    last_state = "MISSING"
+
+    def timed_out() -> TimeoutError:
+        return TimeoutError(
+            f"CodeRabbit did not reach a terminal state on {expected_head[:12]} "
+            f"within {timeout_seconds:g}s (last state: {last_state})"
+        )
 
     def default_loader(pr_number: str, repo_name: str | None) -> dict[str, object]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError(
-                f"CodeRabbit did not reach a terminal state on {expected_head[:12]} "
-                f"within {timeout_seconds:g}s (last state: {last_state})"
-            )
-        return gh_payload(pr_number, repo_name, timeout=remaining)
+            raise timed_out()
+        try:
+            return gh_payload(pr_number, repo_name, timeout=remaining)
+        except ReviewWaitError as error:
+            if deadline - time.monotonic() <= 0:
+                raise timed_out() from error
+            raise
 
     active_loader = loader or default_loader
-    last_state = "MISSING"
 
     def _report(message: str) -> None:
         nonlocal last_message
@@ -377,12 +451,8 @@ def wait_for_review(
             last_message = message
 
     while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError(
-                f"CodeRabbit did not reach a terminal state on {expected_head[:12]} "
-                f"within {timeout_seconds:g}s (last state: {last_state})"
-            )
+        if deadline - time.monotonic() <= 0:
+            raise timed_out()
         try:
             payload = active_loader(pr, repo)
         except GhCommandError as error:
@@ -403,15 +473,18 @@ def wait_for_review(
             if entry is not None
             else ReviewStatus("MISSING", False, False, "missing", {})
         )
+        if triggered_at is not None and status.terminal and not status.successful:
+            started = parse_github_time(status.raw.get("startedAt"))
+            if started is None or started < triggered_at:
+                status = ReviewStatus(
+                    "AWAITING_TRIGGERED_REVIEW", False, False, status.kind, status.raw
+                )
         last_state = status.state
         _report(f"CodeRabbit {status.state} on {expected_head[:12]}")
         if status.terminal:
             return status
         if time.monotonic() >= deadline:
-            raise TimeoutError(
-                f"CodeRabbit did not reach a terminal state on {expected_head[:12]} "
-                f"within {timeout_seconds:g}s (last state: {status.state})"
-            )
+            raise timed_out()
         sleeper(max(0.0, min(poll_seconds, deadline - time.monotonic())))
 
 
@@ -428,6 +501,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
+        triggered_at = latest_review_trigger_at(
+            args.pr, args.repo, timeout=min(60.0, args.timeout)
+        )
         status = wait_for_review(
             pr=args.pr,
             expected_head=args.head,
@@ -435,6 +511,7 @@ def main() -> int:
             timeout_seconds=args.timeout,
             poll_seconds=args.poll,
             progress=lambda message: print(message, file=sys.stderr, flush=True),
+            triggered_at=triggered_at,
         )
     except (ReviewWaitError, TimeoutError) as error:
         print(str(error), file=sys.stderr)

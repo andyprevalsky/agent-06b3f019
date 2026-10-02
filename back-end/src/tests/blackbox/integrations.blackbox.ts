@@ -90,7 +90,7 @@ import {
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
-import { waitForBackendFundedKeyCooldown } from './funded-key-cooldown.helper';
+import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
 import { generateSupabaseSession } from '../../providers/sessionTokens';
 config();
 
@@ -719,17 +719,13 @@ async function testAnthropicApiKeyCooldown_markThenOnCooldown() {
     );
   } finally {
     await restoreAnthropicApiKeyCooldown(previous);
-    await waitForBackendFundedKeyCooldown(
-      BASE_URL,
-      API_KEY,
-      'anthropic-key',
-      isStillCooled(previous)
-    );
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'anthropic',
+      onCooldown: cooldownIsLive(previous),
+    });
   }
-}
-
-function isStillCooled(row: { rateLimitedUntil: Date | null } | null): boolean {
-  return row?.rateLimitedUntil instanceof Date && row.rateLimitedUntil.getTime() > Date.now();
 }
 
 async function testGptApiKeyCooldown_markThenOnCooldown() {
@@ -787,7 +783,12 @@ async function testGptApiKeyCooldown_markThenOnCooldown() {
     // Resets only this process's cache; the backend under test keeps the funded GPT key cooled for
     // the full window, so real-credential smokes on a shared backend must run before this case.
     __clearGptApiKeyCooldownCache();
-    await waitForBackendFundedKeyCooldown(BASE_URL, API_KEY, 'gpt-key', isStillCooled(previous));
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: cooldownIsLive(previous),
+    });
   }
 }
 
@@ -6406,12 +6407,12 @@ async function testClaudeCodeBillingFailure_backsOffFundedApiKey() {
     await restoreAnthropicApiKeyCooldown(previousCooldown);
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
-    await waitForBackendFundedKeyCooldown(
-      BASE_URL,
-      API_KEY,
-      'anthropic-key',
-      isStillCooled(previousCooldown)
-    );
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'anthropic',
+      onCooldown: cooldownIsLive(previousCooldown),
+    });
   }
 }
 
@@ -6446,7 +6447,12 @@ async function testClaudeCodeBillingFailure_marksSharedAnthropicCooldown() {
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
     await __resetAnthropicApiKeyCooldown();
-    await waitForBackendFundedKeyCooldown(BASE_URL, API_KEY, 'anthropic-key', false);
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'anthropic',
+      onCooldown: false,
+    });
   }
 }
 
