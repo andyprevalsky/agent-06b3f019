@@ -18,9 +18,9 @@ from pathlib import Path
 # Resolve from the caller, not a hardcoded /workspace: that path only exists in
 # the container image, so this gate failed on every developer machine.
 text = Path(os.environ["RUN_SH"]).read_text()
-idx = text.find('for pattern in "worker\\.py"')
+idx = text.find('for pattern in "${RUN_CLOUD_SERVICE_KILL_PATTERNS[@]}"')
 if idx < 0:
-    raise SystemExit("FAIL: worker.py cloud kill pattern missing")
+    raise SystemExit("FAIL: cloud service kill pattern loop missing")
 window = text[max(0, idx - 250) : idx + 600]
 if "BENCHMARK_ISOLATED_RUN" not in window:
     raise SystemExit(
