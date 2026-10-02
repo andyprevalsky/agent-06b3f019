@@ -341,90 +341,6 @@ else
     FAIL=$((FAIL+1)); echo "  ❌ system materialize path failed: status=$SYSTEM_MATERIALIZE_STATUS path='$SYSTEM_MATERIALIZED_PATH'"
 fi
 
-echo
-echo "canonical fetch — consumers outside run.sh (the /deploy seed-memory ratchet)"
-echo "must pull the shared base fixture on a host that never ran a benchmark."
-FETCH_BIN="$TMP/fetch-bin"
-FETCH_CACHE="$TMP/fetch-cache"
-FETCH_BACKEND="$TMP/fetch-backend"
-FETCH_LOG="$TMP/fetch-npx.log"
-mkdir -p "$FETCH_BIN" "$FETCH_BACKEND"
-: > "$FETCH_LOG"
-printf '%s\n' \
-    '#!/bin/sh' \
-    'printf "%s\n" "$*" >> "$FAKE_NPX_LOG"' \
-    '[ "$1 $2 $3" = "tsx scripts/seed-dump-cache.ts get" ] || exit 95' \
-    '[ "${FAKE_NPX_FAIL:-0}" = 0 ] || exit 1' \
-    'printf "canonical-dump-%s\n" "$4" > "$5"' \
-    > "$FETCH_BIN/npx"
-chmod +x "$FETCH_BIN/npx"
-fetch_canonical() {
-    FAKE_NPX_LOG="$FETCH_LOG" PATH="$FETCH_BIN:$PATH" \
-        bash "$SEED_CLI" fetch "$SCHEMA_FILE" "$FETCH_CACHE" 16 "$FETCH_BACKEND"
-}
-FETCH_TOKEN="$(benchmark_base_cache_token "$SCHEMA_FILE" 16)"
-FETCH_EXPECTED="$(
-    PYTHONPATH="$ROOT_DIR/agents" "$PYTHON_BIN" -c \
-        'import sys; from pathlib import Path; from benchmarks.local import local_seed_dump_path; print(local_seed_dump_path(Path(sys.argv[1]), Path(sys.argv[2])))' \
-        "$SCHEMA_FILE" "$FETCH_CACHE"
-)"
-FETCH_HASH="$( (shasum "$SCHEMA_FILE" 2>/dev/null || sha1sum "$SCHEMA_FILE") | awk '{print $1}')"
-
-set +e
-FETCHED_PATH="$(fetch_canonical)"
-FETCH_STATUS=$?
-set -e
-if [ "$FETCH_STATUS" -eq 0 ] \
-   && [ "$FETCHED_PATH" = "$FETCH_EXPECTED" ] \
-   && [ "$(cat "$FETCH_EXPECTED" 2>/dev/null)" = "canonical-dump-$FETCH_TOKEN" ] \
-   && [ "$(seed_cache_decision "$FETCH_EXPECTED" "$FETCH_HASH" 1 "$FETCH_TOKEN")" = "restore-local" ] \
-   && [ "$(wc -l < "$FETCH_LOG" | tr -d ' ')" = 1 ]; then
-    PASS=$((PASS+1)); echo "  ✅ empty cache pulls the pg-major token into local.py's canonical path with run.sh's sidecars"
-else
-    FAIL=$((FAIL+1)); echo "  ❌ canonical fetch failed: status=$FETCH_STATUS path='$FETCHED_PATH' expected='$FETCH_EXPECTED'"
-fi
-
-FETCHED_AGAIN="$(fetch_canonical)"
-check "valid canonical pair is reused without another download" \
-    "$FETCH_EXPECTED:1" "$FETCHED_AGAIN:$(wc -l < "$FETCH_LOG" | tr -d ' ')"
-
-printf 'older-revision' > "${FETCH_EXPECTED}.cachetoken"
-FETCHED_STALE="$(fetch_canonical)"
-check "pair from another pg major/revision is replaced from the shared cache" \
-    "$FETCH_EXPECTED:2:$FETCH_TOKEN" \
-    "$FETCHED_STALE:$(wc -l < "$FETCH_LOG" | tr -d ' '):$(cat "${FETCH_EXPECTED}.cachetoken")"
-
-rm -rf "$FETCH_CACHE"
-set +e
-FAKE_NPX_FAIL=1 fetch_canonical >/dev/null 2>&1
-MISS_STATUS=$?
-set -e
-if [ "$MISS_STATUS" -ne 0 ] \
-   && ! find "$FETCH_CACHE" -name '*.dump*' -print -quit 2>/dev/null | grep -q . \
-   && [ ! -L "${FETCH_EXPECTED}.publish.lock" ]; then
-    PASS=$((PASS+1)); echo "  ✅ shared-cache miss fails closed without a partial dump or leaked lock"
-else
-    FAIL=$((FAIL+1)); echo "  ❌ shared-cache miss left state behind or reported success (status=$MISS_STATUS)"
-fi
-
-# measure-seed-memory.sh runs the fetch as `DUMP="$(...)" || DUMP=""`, which
-# disables errexit inside it: a sidecar that cannot be written must still fail
-# the fetch instead of handing back an unpublished pair.
-rm -rf "$FETCH_CACHE"
-mkdir -p "${FETCH_EXPECTED}.schemahash"
-if PUBLISH_PATH="$(FAKE_NPX_LOG="$FETCH_LOG" PATH="$FETCH_BIN:$PATH" \
-    fetch_canonical_seed_dump "$SCHEMA_FILE" "$FETCH_CACHE" 16 "$FETCH_BACKEND" 2>/dev/null)"; then
-    PUBLISH_STATUS=0
-else
-    PUBLISH_STATUS=$?
-fi
-if [ "$PUBLISH_STATUS" -ne 0 ] && [ -z "$PUBLISH_PATH" ] && [ ! -L "${FETCH_EXPECTED}.publish.lock" ]; then
-    PASS=$((PASS+1)); echo "  ✅ a failed sidecar write fails the fetch even under a conditional caller"
-else
-    FAIL=$((FAIL+1)); echo "  ❌ unpublished canonical pair reported as fetched (status=$PUBLISH_STATUS path='$PUBLISH_PATH')"
-fi
-rm -rf "$FETCH_CACHE"
-
 # setup-db.sh must support ROSE_USE_SYSTEM_PG and pass "system" to materialize.
 SETUP_DB="$ROOT_DIR/scripts/setup-db.sh"
 if grep -q 'ROSE_USE_SYSTEM_PG' "$SETUP_DB" \
@@ -446,6 +362,74 @@ if grep -q 'CLOUDBENCH_GUEST_PG_MAJOR' "$FLEET" \
     PASS=$((PASS+1)); echo "  ✅ run-bench-fleet preflights the cloud-guest pg major seed dump"
 else
     FAIL=$((FAIL+1)); echo "  ❌ run-bench-fleet missing cloud-guest canonical seed-dump preflight"
+fi
+
+echo
+echo "canonical base pull — a box that has not run a benchmark yet must fetch the"
+echo "reviewed base fixture into the exact pair an isolated benchmark restores."
+
+SEED_CACHE_GET_LOG="$TMP/seed-cache-get.log"
+: > "$SEED_CACHE_GET_LOG"
+export SEED_CACHE_GET_LOG
+printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "%s\n" "$*" >> "$SEED_CACHE_GET_LOG"' \
+    '[ "$1 $2 $3" = "tsx scripts/seed-dump-cache.ts get" ] || exit 95' \
+    '[ "${FAKE_SEED_CACHE_MISS:-0}" = 0 ] || exit 1' \
+    'printf "canonical-base-for-%s\n" "$4" > "$5"' \
+    > "$FAKE_BIN/npx"
+chmod +x "$FAKE_BIN/npx"
+PULL_CACHE="$TMP/pull-cache"
+CANONICAL_TOKEN="$(benchmark_base_cache_token "$SCHEMA_FILE" 16)"
+CANONICAL_HASH="${CANONICAL_TOKEN%%-*}"
+CANONICAL_PATH="$(
+    PYTHONPATH="$ROOT_DIR/agents" "$PYTHON_BIN" -c \
+        'import sys; from pathlib import Path; from benchmarks.local import local_seed_dump_path; print(local_seed_dump_path(Path(sys.argv[1]), Path(sys.argv[2])))' \
+        "$SCHEMA_FILE" "$PULL_CACHE"
+)"
+
+set +e
+PULLED_PATH="$(cd "$TMP" && PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" pull-canonical \
+    "$SCHEMA_FILE" pull-cache 16)"
+PULL_STATUS=$?
+set -e
+check "canonical pull exits 0" "0" "$PULL_STATUS"
+check "canonical pull lands on the path local.py restores" "$CANONICAL_PATH" "$PULLED_PATH"
+check "canonical pull fetches the run.sh shared-cache token" \
+    "canonical-base-for-$CANONICAL_TOKEN" "$(cat "$CANONICAL_PATH" 2>/dev/null)"
+check "pulled pair restores locally for the same token" "restore-local" \
+    "$(seed_cache_decision "$CANONICAL_PATH" "$CANONICAL_HASH" 1 "$CANONICAL_TOKEN")"
+
+set +e
+REPULLED_PATH="$(PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" pull-canonical \
+    "$SCHEMA_FILE" "$PULL_CACHE" 16)"
+REPULL_STATUS=$?
+set -e
+check "a valid pulled pair is reused without another fetch" \
+    "0 $CANONICAL_PATH 1" "$REPULL_STATUS $REPULLED_PATH $(wc -l < "$SEED_CACHE_GET_LOG" | tr -d ' ')"
+
+rm -f "$CANONICAL_PATH" "$CANONICAL_PATH.schemahash" "$CANONICAL_PATH.cachetoken"
+set +e
+FAKE_SEED_CACHE_MISS=1 PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" pull-canonical \
+    "$SCHEMA_FILE" "$PULL_CACHE" 16 >/dev/null 2>&1
+MISS_STATUS=$?
+set -e
+if [ "$MISS_STATUS" -ne 0 ] \
+   && [ ! -e "$CANONICAL_PATH" ] \
+   && [ ! -e "$CANONICAL_PATH.schemahash" ] \
+   && [ ! -e "$CANONICAL_PATH.cachetoken" ] \
+   && [ ! -L "$CANONICAL_PATH.publish.lock" ] \
+   && ! find "$PULL_CACHE" -type f -name '*.tmp.*' -print -quit | grep -q .; then
+    PASS=$((PASS+1)); echo "  ✅ a shared-cache miss fails without leaving a pair, lock, or temp file"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ shared-cache miss: status=$MISS_STATUS or leaked dump/sidecar/lock/temp state"
+fi
+
+MEASUREMENT="$ROOT_DIR/back-end/scripts/measure-seed-memory.sh"
+if grep -q 'benchmark-seed-cache" pull-canonical' "$MEASUREMENT"; then
+    PASS=$((PASS+1)); echo "  ✅ seed memory measurement pulls the canonical base when no dump is cached"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ seed memory measurement fails on a box with no cached dump"
 fi
 
 echo "RESULTS: $PASS passed, $FAIL failed"

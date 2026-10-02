@@ -19,6 +19,7 @@ from config import load_config
 from helpers.context_compaction import project_model_context_after_compaction
 from helpers.context_scope import filter_internal_subagent_messages, select_completion_evidence_messages
 from helpers.fetch_config import _fetch_agent_data_impl
+from helpers.http_client import get_http_client
 from helpers.tracing import span
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
@@ -774,33 +775,33 @@ async def update_agent_tree_state(
             if broadcast_payload.get("_statusExplicit") and "status" in broadcast_payload:
                 update_payload["status"] = broadcast_payload["status"]
 
-        async with httpx.AsyncClient() as client:
-            response = await client.patch(
-                f"{config.backend.api_url}/api/agents/{agent_id}",
-                json=update_payload,
-                headers={
-                    "X-API-Key": config.backend.api_key,
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
-                },
-                timeout=10.0,
-            )
+        client = get_http_client()
+        response = await client.patch(
+            f"{config.backend.api_url}/api/agents/{agent_id}",
+            json=update_payload,
+            headers={
+                "X-API-Key": config.backend.api_key,
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
+            timeout=10.0,
+        )
 
-            if response.status_code not in (200, 204):
-                logger.debug(f"Tree state update failed: status={response.status_code}")
-                return
-            accepted = True
-            if response.status_code == 200:
-                try:
-                    accepted = response.json().get("mutation_accepted", True) is True
-                except (ValueError, AttributeError):
-                    accepted = True
-            if not accepted:
-                logger.info(
-                    "Tree state update fenced after workflow replacement",
-                    agent_id=agent_id,
-                )
-                return
+        if response.status_code not in (200, 204):
+            logger.debug(f"Tree state update failed: status={response.status_code}")
+            return
+        accepted = True
+        if response.status_code == 200:
+            try:
+                accepted = response.json().get("mutation_accepted", True) is True
+            except (ValueError, AttributeError):
+                accepted = True
+        if not accepted:
+            logger.info(
+                "Tree state update fenced after workflow replacement",
+                agent_id=agent_id,
+            )
+            return
 
         if bus_id and broadcast_payload:
             try:
@@ -936,46 +937,44 @@ async def post_agent_message(
         if file_pointer:
             payload["file_pointer"] = file_pointer
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                json=payload,
-                headers={
-                    "X-API-Key": config.backend.api_key,
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
-                },
-                timeout=30.0,
-            )
-            if response.status_code == 409:
-                # STOP. This worker belongs to a generation a deploy replaced.
-                # Returning a sentinel here used to let the caller keep going,
-                # so an orphaned activity kept emitting tool events that were
-                # each fenced into a red "Tool interrupted by deployment" chip —
-                # 35 web_search + 19 spawn_agent rows over 13s in the explore
-                # e2e. Nothing ever read the sentinel, so raising is safe.
-                logger.info(
-                    "Message write fenced after workflow replacement; stopping worker",
-                    agent_id=agent_id,
-                    role=role,
-                )
-                raise WorkflowGenerationSealed(
-                    f"post_agent_message({agent_id}, {role}): generation replaced by a deploy"
-                )
-            if response.status_code != 201:
-                logger.error(
-                    f"Failed to post message - HTTP error: agent_id={agent_id}, status_code={response.status_code}, response_body={response.text}, payload={payload}"
-                )
-
-            response.raise_for_status()
-
-            message = response.json()
-
+        client = get_http_client()
+        response = await client.post(
+            f"{config.backend.api_url}/api/agents/{agent_id}/messages",
+            json=payload,
+            headers={
+                "X-API-Key": config.backend.api_key,
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
+            timeout=30.0,
+        )
+        if response.status_code == 409:
+            # STOP. This worker belongs to a generation a deploy replaced.
+            # Returning a sentinel here used to let the caller keep going,
+            # so an orphaned activity kept emitting tool events that were
+            # each fenced into a red "Tool interrupted by deployment" chip —
+            # 35 web_search + 19 spawn_agent rows over 13s in the explore
+            # e2e. Nothing ever read the sentinel, so raising is safe.
             logger.info(
-                f"Message posted: agent_id={agent_id}, message_id={message.get('message_id')}, role={role}, has_metadata={metadata is not None}"
+                "Message write fenced after workflow replacement; stopping worker",
+                agent_id=agent_id,
+                role=role,
+            )
+            raise WorkflowGenerationSealed(f"post_agent_message({agent_id}, {role}): generation replaced by a deploy")
+        if response.status_code != 201:
+            logger.error(
+                f"Failed to post message - HTTP error: agent_id={agent_id}, status_code={response.status_code}, response_body={response.text}, payload={payload}"
             )
 
-            return message
+        response.raise_for_status()
+
+        message = response.json()
+
+        logger.info(
+            f"Message posted: agent_id={agent_id}, message_id={message.get('message_id')}, role={role}, has_metadata={metadata is not None}"
+        )
+
+        return message
 
     except Exception as e:
         logger.error(f"Failed to post message: agent_id={agent_id}, error={str(e)}")

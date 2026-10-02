@@ -59,6 +59,7 @@ import {
   replyIntentBlackboxCase,
 } from './sms-supervisor.intent.behavior';
 import { smsTimezoneBehaviorCases } from './sms-supervisor.timezone.behavior';
+import { smsPausedReplyBehaviorCases } from './sms-supervisor.paused-reply.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
 const prisma = new PrismaClient();
@@ -623,6 +624,7 @@ async function runAll() {
     },
     replyIntentBlackboxCase(prisma),
     bareRejectionBlackboxCase(prisma),
+    ...smsPausedReplyBehaviorCases(prisma),
     {
       name: 'prompt -- supervisor never exposes routing identifiers',
       fn: () => testPrompt_neverExposeRoutingIds(prisma),

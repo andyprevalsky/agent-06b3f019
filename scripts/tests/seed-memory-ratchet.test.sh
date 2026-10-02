@@ -59,12 +59,6 @@ require_text "$MEASUREMENT" \
     'seed-mem-$$' \
     "default OUT_DIR must be PID-scoped so concurrent measurements cannot share summary.txt"
 require_text "$MEASUREMENT" \
-    'fetch_canonical_seed_dump prisma/schema.prisma "$SEED_CACHE_DIR"' \
-    "an empty local seed cache must pull the canonical base fixture instead of failing the gate"
-require_text "$MEASUREMENT" \
-    'benchmark_seed_client_major "$USE_SYSTEM_PG"' \
-    "the fetched fixture must match the pg_restore that reads it"
-require_text "$MEASUREMENT" \
     'TIME_BIN' \
     "measurement must resolve an external time binary (not the shell builtin)"
 require_text "$MEASUREMENT" \

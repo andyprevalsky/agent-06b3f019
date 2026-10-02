@@ -4,6 +4,7 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
 import structlog.contextvars
 
 
@@ -171,3 +172,38 @@ def test_failed_import_write_keeps_cached_import_default(tmp_path: Path, monkeyp
         sys.modules.pop(module_name, None)
         sys.modules.pop(broken_name, None)
         os.environ.pop(key, None)
+
+
+def _run_main(runner, monkeypatch, argv: list[str], started: list[tuple]) -> None:
+    async def fake_run_tests(domain_filters, concurrency):
+        started.append((domain_filters, concurrency))
+        return 0
+
+    monkeypatch.setattr(runner, "run_tests", fake_run_tests)
+    monkeypatch.setattr(sys, "argv", ["run_blackbox_tests.py", *argv])
+    runner.main()
+
+
+@pytest.mark.parametrize("argv", [["--concurency", "5"], ["workflow", "--verbose"], ["--concurrency"]])
+def test_unrecognized_or_incomplete_option_exits_before_running_any_domain(monkeypatch, argv):
+    started: list[tuple] = []
+    with pytest.raises(SystemExit) as exited:
+        _run_main(load_runner(), monkeypatch, argv, started)
+    assert exited.value.code == 2
+    assert started == []
+
+
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_help_prints_usage_without_running_any_domain(monkeypatch, capsys, flag):
+    started: list[tuple] = []
+    _run_main(load_runner(), monkeypatch, [flag], started)
+    assert started == []
+    assert "--concurrency" in capsys.readouterr().out
+
+
+def test_domains_and_concurrency_reach_the_suite_runner(monkeypatch):
+    started: list[tuple] = []
+    with pytest.raises(SystemExit) as exited:
+        _run_main(load_runner(), monkeypatch, ["workflow", "--concurrency", "4", "web-search"], started)
+    assert exited.value.code == 0
+    assert started == [(["workflow", "web-search"], 4)]

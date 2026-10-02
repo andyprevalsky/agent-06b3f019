@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 MODE="${1:-}"
 if [ -z "$MODE" ]; then
-    echo "usage: benchmark-seed-cache <path|materialize|fetch|wait> ..." >&2
+    echo "usage: benchmark-seed-cache <path|materialize|pull-canonical|wait> ..." >&2
     exit 2
 fi
 shift
@@ -18,8 +18,8 @@ case "$MODE" in
     materialize)
         materialize_benchmark_seed_dump "$@"
         ;;
-    fetch)
-        fetch_canonical_seed_dump "$@"
+    pull-canonical)
+        pull_canonical_benchmark_seed_dump "$@"
         ;;
     wait)
         wait_for_benchmark_seed_publish "$@"

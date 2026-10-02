@@ -85,52 +85,6 @@ run_kill_tree() {
   kill "$pid" 2>/dev/null || true
 }
 
-run_tree_pids() {
-  local pid="$1"
-  local child
-  for child in $(pgrep -P "$pid" 2>/dev/null); do
-    run_tree_pids "$child"
-  done
-  printf '%s\n' "$pid"
-}
-
-# A zombie still answers `kill -0`, so an exited-but-unreaped launcher would
-# otherwise hold run_stop_tree for its whole grace period.
-run_pid_running() {
-  local state
-  state="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')"
-  [ -n "$state" ] && [ "${state#Z}" = "$state" ]
-}
-
-# TERM a launcher and every descendant, then KILL whatever outlives the grace
-# period. Signalling only a wrapper such as `npx` lets it exit without
-# forwarding, which re-parents the real server to init with its port held.
-run_stop_tree() {
-  local root="$1"
-  local grace_seconds="${2:-10}"
-  local deadline=$((SECONDS + grace_seconds))
-  local pids pid alive
-
-  pids="$(run_tree_pids "$root")"
-  for pid in $pids; do
-    kill "$pid" 2>/dev/null || true
-  done
-  while :; do
-    alive=""
-    for pid in $pids; do
-      if run_pid_running "$pid"; then
-        alive="$alive $pid"
-      fi
-    done
-    [ -n "$alive" ] || return 0
-    [ "$SECONDS" -lt "$deadline" ] || break
-    sleep 0.1
-  done
-  for pid in $alive; do
-    kill -9 "$pid" 2>/dev/null || true
-  done
-}
-
 run_db_container_instance_is_owned() {
   local expected_id="$1"
   local container_name="$2"

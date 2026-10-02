@@ -9,10 +9,10 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: agents/domains/spawn_browser_agent_v3/handler.py SpawnBrowserAgentManagerV3 started the cancellable activity before allocating its stable browser task ID, then persisted session_paused after TRY_CANCEL while the activity's task_complete write was only best effort
 symptoms:
   - 'FE link browser validation failed: browser task 5955d7c7-281f-43fe-9552-3b6abf64fcd3 has not terminated (missing action_type=task_complete)'
-  - agent-payment-production-abandonment passed with status ACTIVE
-  - durable Hub bundle ended at action_type=payment_card_ready
+  - agent-payment-production-abandonment passed with status ACTIVE and its durable Hub bundle ended at action_type=payment_card_ready
   - Payment-abandonment browser did not reach terminal state with a recording before Hub archive
   - root pause produced action_type=session_paused and a FINISHED recording but no task_complete
+  - 'new code version deployed, retry this tool' task_complete row with no task_id; purchase_cancelled / purchase_blocked rows never close the browser task
 tags:
   - agentcard
   - benchmark-hub
@@ -32,7 +32,13 @@ sources:
   - hub run 7f9d7018-54c4-4ed6-a29c-91815c8bd380 (production)
   - agent 10a722c3-a1a3-435d-8c32-0eca142119e9 (durable https://www.roselabs.ai/?agent-id=10a722c3-a1a3-435d-8c32-0eca142119e9)
   - task production semantic workflow https://github.com/Rose-Ai-Labs/rose/actions/runs/34013583378
-repro: agents/tests/blackbox/benchmark.blackbox.py payment_abandonment_seals_browser_before_hub_archive and agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py manager_cancelled_pause_is_task_complete
+  - agent f2e7166d-e90f-4f25-8f07-375383eca5f4 (production 13c recurrence, 2026-10-02)
+  - hub run f9f16b34-55b1-4297-8caa-38bb1d8533f9 (production)
+  - PR #1381 concurrent cooperative cutover https://github.com/Rose-Ai-Labs/rose/actions/runs/36961086645
+  - PR #1392 production verification at merge 5f4054378ed49d9b88a0dbfc6c2841e598c2992c
+  - hub run 603cf495-982b-47e7-abc5-af768f83343d (production)
+  - agent f3e3ff16-5519-455a-b887-0ebee8e5cc73 (durable https://www.roselabs.ai/?agent-id=f3e3ff16-5519-455a-b887-0ebee8e5cc73)
+repro: agents/tests/blackbox/benchmark.blackbox.py payment_abandonment_seals_browser_before_hub_archive and agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py manager_cancelled_pause_is_task_complete, manager_generation_handoff_during_payment_card_approval_is_task_scoped, and the manager_*_terminal_is_task_scoped / manager_payment_gate_* exits
 status: fixed
 ---
 
@@ -182,6 +188,99 @@ rehydration, and an R2-backed verifier LLM dump; its manifest is archived under
 The exact-merge production semantic workflow also passed both the complete
 frontend flow suite and five-sample chat lifecycle latency ratchet.
 
+## Recurrence: deploy handoff during the payment approval wait (2026-10-02)
+
+The `/deploy` 13c AgentCard production gate for PR #1362 failed with the same
+seal error, `Payment-abandonment browser did not reach terminal state with a
+recording before Hub archive`, for agent `f2e7166d-e90f-4f25-8f07-375383eca5f4`
+(Hub run `f9f16b34-55b1-4297-8caa-38bb1d8533f9`). Another agent's cooperative
+cutover (PR #1381, deploy-agents run 36961086645) landed while browser task
+`01248403-b20f-5399-9963-b21c268d6fad` was parked on its payment-card approval.
+`GenerationHandoffRequested` surfaced in the manager, which posted
+`Browser automation interrupted` / `new code version deployed, retry this tool`
+with `action_type=task_complete` but **no `task_id`**. The task already had a
+FINISHED, playable Kernel recording, so the only missing piece was the
+task-scoped terminal. Replaying `_agent_messages_ready_for_durable_browser_evidence`
+on the archived transcript returns `False`; adding only `task_id` to that row
+returns `True`. The agent was already COMPLETED, so neither the seal's pause nor
+its 60-second poll could have produced the row. The parent re-issued the browser
+call with a new tool-call id (new deterministic task id, new session), so the
+interrupted task was never resumed or closed by anyone.
+
+Searches for the literal seal error and for `GenerationHandoffRequested
+task_complete task_id browser` found this case. It is a genuine recurrence: the
+earlier fix made the pause producer task-scoped and pinned only that branch, and
+it left the remaining manager exits on hand-built metadata. A parked activity
+(`awaiting_write_approval`, `awaiting_payment_card_approval`,
+`awaiting_auth_assistance`) posts no terminal of its own, so every manager exit
+after it owns the terminal. Before this fix, these exits closed the task without
+a task-scoped `task_complete`:
+
+- deploy handoff and generic manager failure (no `task_id`)
+- write-lock rejection (`write_lock_rejected`, which the FE accepts but the
+  durable predicates do not)
+- `purchase_cancelled` and `purchase_blocked` (no `task_id`, and not FE-terminal
+  either)
+- `purchase_funding_delayed`
+- the AgentCard setup re-prompt and setup timeout (no terminal at all)
+- the auth-assistance failure (no `task_id`)
+
+Problem class: logical inconsistency in harness contracts. One terminal
+contract had many producers, and only the one that had failed before honored it.
+
+### Recurrence fix
+
+`_browser_task_terminal_metadata(result, started_task_id, code=...)` is now the
+single producer of manager-side terminal metadata. It emits
+`action_type=task_complete` with the result's `task_id`, falling back to the id
+the manager handed the started activity, plus `browser_url`/`session_id` and an
+optional `code` that keeps the specific outcome (`write_lock_rejected`,
+`purchase_cancelled`, `purchase_blocked`, `purchase_funding_delayed`,
+`agentcard_user_<status>`, `agentcard_setup_timed_out`,
+`auth_assistance_failed`). This follows the existing `purchase_above_max_limit`
+precedent. Every manager exit listed above uses it.
+
+The fallback id is recorded only after `workflow.start_activity`, so a
+pre-activity failure still names no task. The AgentCard setup timeout has no
+final row to annotate, so it posts an FE/evidence-only terminal with
+`excludeFromModel=True`. That keeps the setup request as the parent model's tool
+result, the same pattern as `_emit_browser_task_terminal_for_fe`. Titles,
+messages, statuses, control flow, and every LLM-visible tool result are
+unchanged. The only consumers of the old purchase action types were these
+blackbox tests, and the FE and evidence predicates keep accepting historical
+`write_lock_rejected` rows.
+
+Local repro, using the same 17 manager-exit tests against `origin/main`
+`a0423fed0` and against the fix:
+
+- Before: 14 failed and 3 passed. The 3 that passed were the already-fixed pause
+  exit, the already-terminal above-max-limit exit, and the pre-activity failure.
+- After: all 17 passed.
+
+The handoff test drives the production branch, a payment-card approval wait that
+raises `GenerationHandoffRequested`. The exact benchmark is production-only and
+needs a concurrent cutover, so these tests are the causal proof. The change is
+metadata-only: no new queries, rows per exit, or per-agent state, so its
+behavior at 10,000 agents is unchanged.
+
+Production verification passed on merge
+`5f4054378ed49d9b88a0dbfc6c2841e598c2992c` (PR #1392), after deploy-agents run
+36966171014 cut the Fly worker over. The exact
+`agent-payment-production-abandonment` gate passed 1/1 in 414 seconds as Hub run
+`603cf495-982b-47e7-abc5-af768f83343d`, agent
+`f3e3ff16-5519-455a-b887-0ebee8e5cc73`. Its 58-message durable transcript
+landed the browser terminal after the pause, and the fail-closed evidence
+publisher verified the public FE link in a fresh browser. The manifest and last
+LLM dump are archived under
+`/opt/cursor/artifacts/rca_evidence/f3e3ff16-5519-455a-b887-0ebee8e5cc73/`.
+
+Open follow-ups the adversarial review raised and this fix leaves open:
+
+- Workflow cancellation while the manager is parked re-raises with no terminal.
+  Emitting one there needs a cancellation-safe activity, so this is an open gap.
+- A deploy handoff leaves the parked Kernel session alive until terminal-agent
+  cleanup. That is a session-cost follow-up, not verified in this RCA.
+
 ## Human feedback
 
 The user required `/deploy when finished`; the deploy and repository evidence
@@ -190,4 +289,4 @@ terminal with a recording attached.
 
 ## Reusable lesson
 
-Make the deterministic cancellation observer emit the same scoped terminal contract as best-effort activity cleanup before freezing durable evidence.
+Route every manager exit that ends a browser task (pause, rejection, purchase outcome, deploy handoff, failure) through one task-scoped terminal producer, and pin each exit with a test, before freezing durable evidence.

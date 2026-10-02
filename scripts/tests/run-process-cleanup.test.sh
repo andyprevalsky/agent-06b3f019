@@ -162,67 +162,6 @@ assert_db_cleanup_guard "container-old" "container-old" false "" "normal service
 assert_required_service_exit_code 0 1
 assert_required_service_exit_code 17 17
 
-# ── run_stop_tree: a non-forwarding launcher must not orphan its server ──
-#
-# run-blackbox-tests.sh records `$!` for `npx tsx src/bootstrap.ts &`, which is
-# the npx wrapper. npx exits on TERM without forwarding it, so the old
-# `kill "$BACKEND_PID"` re-parented every isolated backend to init, where each
-# kept its port and its crons running against the shared local DB (observed:
-# six leaked backends on ports 3101-3106 after one /deploy).
-child_pid_of() {
-  local parent="$1"
-  local attempt child
-  for attempt in $(seq 1 50); do
-    child="$(pgrep -P "$parent" 2>/dev/null | head -1 || true)"
-    if [ -n "$child" ]; then
-      printf '%s\n' "$child"
-      return 0
-    fi
-    sleep 0.1
-  done
-  echo "FAIL: launcher $parent never started its server" >&2
-  exit 1
-}
-
-bash -c 'sleep 300 & wait' &
-naive_launcher="$!"
-naive_server="$(child_pid_of "$naive_launcher")"
-PIDS+=("$naive_server")
-kill "$naive_launcher"
-wait "$naive_launcher" 2>/dev/null || true
-assert_alive "$naive_server" "control: signalling only a non-forwarding launcher orphans its server"
-kill "$naive_server" 2>/dev/null || true
-
-bash -c 'sleep 300 & wait' &
-launcher="$!"
-server="$(child_pid_of "$launcher")"
-PIDS+=("$launcher" "$server")
-run_stop_tree "$launcher" 5
-wait "$launcher" 2>/dev/null || true
-assert_dead "$server" "run_stop_tree terminates the server behind a non-forwarding launcher"
-
-bash -c 'trap "" TERM; sleep 300 & wait' &
-stubborn_launcher="$!"
-stubborn_server="$(child_pid_of "$stubborn_launcher")"
-PIDS+=("$stubborn_launcher" "$stubborn_server")
-stop_started="$SECONDS"
-run_stop_tree "$stubborn_launcher" 1
-wait "$stubborn_launcher" 2>/dev/null || true
-assert_dead "$stubborn_server" "run_stop_tree escalates to KILL when the tree ignores TERM"
-if [ $((SECONDS - stop_started)) -gt 4 ]; then
-  echo "FAIL: run_stop_tree overran its 1s grace period" >&2
-  exit 1
-fi
-echo "PASS: run_stop_tree honours its grace period"
-
-if grep -Fq 'source scripts/lib/run-process-cleanup.sh' "$ROOT_DIR/back-end/scripts/run-blackbox-tests.sh" \
-  && grep -Fq 'run_stop_tree "$BACKEND_PID"' "$ROOT_DIR/back-end/scripts/run-blackbox-tests.sh"; then
-  echo "PASS: isolated blackbox backend cleanup stops the whole launcher tree"
-else
-  echo "FAIL: run-blackbox-tests.sh cleanup no longer stops the isolated backend's process tree" >&2
-  exit 1
-fi
-
 # ── process_age_seconds: portable elapsed time (BSD + GNU ps) ──
 #
 # `ps -o etimes=` is GNU-only. On macOS BSD ps it is not a valid keyword and ps
@@ -270,5 +209,37 @@ case "$age_dead" in
   ''|[0-9]*) echo "PASS: process_age_seconds is empty-or-numeric for a dead pid" ;;
   *) echo "FAIL: process_age_seconds returned garbage for a dead pid: [$age_dead]" >&2; exit 1 ;;
 esac
+
+# ── run_kill_tree: a wrapper's grandchildren die with it ──
+#
+# The isolated blackbox backend is `npx tsx src/bootstrap.ts`: npx -> tsx -> node.
+# Its cleanup used to signal only the npx PID, so every passing run left the tsx
+# launcher and the server alive under init, holding their port and DB pool.
+grandchild_pid_file="$TMP_ROOT/grandchild.pid"
+bash -c 'bash -c "sleep 300 & echo \$! >\"\$1\"; wait" _ "$1" & wait' _ "$grandchild_pid_file" &
+wrapper_pid=$!
+PIDS+=("$wrapper_pid")
+for _ in $(seq 1 100); do
+  [ -s "$grandchild_pid_file" ] && break
+  sleep 0.05
+done
+grandchild_pid="$(cat "$grandchild_pid_file")"
+run_kill_tree "$wrapper_pid"
+wait "$wrapper_pid" 2>/dev/null || true
+for _ in $(seq 1 40); do
+  kill -0 "$grandchild_pid" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$grandchild_pid" 2>/dev/null; then
+  echo "FAIL: run_kill_tree left grandchild $grandchild_pid alive" >&2
+  exit 1
+fi
+echo "PASS: run_kill_tree reaps a wrapper's grandchildren"
+
+blackbox_runner="$ROOT_DIR/back-end/scripts/run-blackbox-tests.sh"
+grep -qF 'source "$ROOT_DIR/scripts/lib/process-tree.sh"' "$blackbox_runner" \
+  && grep -qF 'stop_process_tree "$BACKEND_PID"' "$blackbox_runner" \
+  || { echo "FAIL: run-blackbox-tests.sh cleanup must reap the npx backend tree with stop_process_tree" >&2; exit 1; }
+echo "PASS: run-blackbox-tests.sh cleanup reaps the whole backend tree"
 
 echo "All run process cleanup tests passed."

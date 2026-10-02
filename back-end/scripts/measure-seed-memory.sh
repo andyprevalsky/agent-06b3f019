@@ -39,12 +39,10 @@ if ! $USE_SYSTEM_PG; then
 fi
 SRC_DB="victoria_seedmem_src_$$"
 TARGET_DB="victoria_seedmem_tgt_$$"
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/seed-cache.sh"
-SEED_CACHE_DIR="${SEED_MEM_CACHE_DIR:-../.context/benchmarks/seed-cache}"
 # Newest cached prod dump. Restored into a LOCAL source db so the measurement
 # does not depend on outbound reachability to prod (all .env hosts were
 # TCP-closed on 2026-07-29 and every run died in ~4s).
-DUMP="$(ls -t "$SEED_CACHE_DIR"/*.dump 2>/dev/null | head -1)"
+DUMP="$(ls -t ../.context/benchmarks/seed-cache/*.dump 2>/dev/null | head -1)"
 # Default to a PID-scoped directory so two concurrent /deploy worktrees (or a
 # controller + worker both hitting Step 4r) cannot append into one shared
 # summary.txt and poison `len(peaks) != requested_runs` (observed: interleaved
@@ -97,14 +95,20 @@ trap cleanup_all EXIT INT TERM
 export NO_PROXY="*" no_proxy="*"
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 
-# A host that never ran a benchmark has an empty cache; pull the same canonical
-# base fixture run.sh restores rather than failing the gate on setup state.
+# A deploy box that has not run a benchmark yet has no cached dump. Measure the
+# same reviewed canonical base an isolated benchmark restores. System Postgres
+# can only restore archives written by its own pg_dump major; the Docker path
+# picks its image from the archive header, so the pinned pg16 publication works.
 if [ -z "$DUMP" ]; then
-    echo "   no local seed dump — pulling the canonical base fixture from the shared cache…" | tee -a "$SUMMARY"
-    DUMP="$(fetch_canonical_seed_dump prisma/schema.prisma "$SEED_CACHE_DIR" \
-        "$(benchmark_seed_client_major "$USE_SYSTEM_PG")" .)" || DUMP=""
+    CANONICAL_PG_MAJOR=16
+    if $USE_SYSTEM_PG; then
+        CANONICAL_PG_MAJOR="$(pg_dump --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/')"
+    fi
+    echo "   no cached dump; pulling the canonical base fixture (pg${CANONICAL_PG_MAJOR})…" | tee -a "$SUMMARY"
+    DUMP="$(bash "../scripts/benchmark-seed-cache" pull-canonical prisma/schema.prisma \
+        ../.context/benchmarks/seed-cache "$CANONICAL_PG_MAJOR")" || DUMP=""
 fi
-[ -n "$DUMP" ] || { echo "❌ no cached prod dump in $SEED_CACHE_DIR and the shared cache had none for this schema" | tee -a "$SUMMARY"; exit 1; }
+[ -n "$DUMP" ] || { echo "❌ no cached prod dump in .context/benchmarks/seed-cache" | tee -a "$SUMMARY"; exit 1; }
 echo "🧪 seed memory measurement: $RUNS run(s), target :$PORT_REQUESTED, source :$SRC_PORT_REQUESTED" | tee -a "$SUMMARY"
 echo "   source dump: $(basename "$DUMP")" | tee -a "$SUMMARY"
 if $USE_SYSTEM_PG; then

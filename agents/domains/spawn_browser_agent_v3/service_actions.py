@@ -897,11 +897,11 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
 async def _execute_read_browser_state(context: _ActionContext) -> Dict[str, Any]:
     from providers.rose.browser_use import format_browser_state_for_tool
 
-    # Reuse the loop's just-fetched observe_page_state when present — no browser
-    # action ran between that fetch and this tool, so a second full DOM walk is
-    # pure duplicate cost.
+    # Reuse the loop's just-fetched observe_page_state when it carries a DOM —
+    # no browser action ran between that fetch and this tool, so a second full
+    # DOM walk is pure duplicate cost. URL/title-only observes have no dom_tree.
     state = context.prefetched_browser_state
-    if not isinstance(state, dict) or not state:
+    if not isinstance(state, dict) or "dom_tree" not in state:
         state = await context.dom_service.get_browser_state(include_screenshot=False)
     formatted_state = format_browser_state_for_tool(state)
     result = {

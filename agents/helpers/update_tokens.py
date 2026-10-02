@@ -1,10 +1,10 @@
 """Workflow-fenced agent accounting activities."""
 
-import httpx
 import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.http_client import get_http_client
 from helpers.workflow_generation import workflow_generation_headers
 
 logger = structlog.get_logger()
@@ -29,29 +29,29 @@ async def update_agent_tree_cost_activity(
 
         config = load_config()
 
-        async with httpx.AsyncClient() as client:
-            response = await client.patch(
-                f"{config.backend.api_url}/api/agents/{agent_id}",
-                json={
-                    "tree_cost_cents": tree_cost_cents,
-                    "own_cost_cents": own_cost_cents,
-                },
-                headers={
-                    "X-API-Key": config.backend.api_key,
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
-                },
-                timeout=15.0,
-            )
+        client = get_http_client()
+        response = await client.patch(
+            f"{config.backend.api_url}/api/agents/{agent_id}",
+            json={
+                "tree_cost_cents": tree_cost_cents,
+                "own_cost_cents": own_cost_cents,
+            },
+            headers={
+                "X-API-Key": config.backend.api_key,
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
+            timeout=15.0,
+        )
 
-            response.raise_for_status()
+        response.raise_for_status()
 
-            logger.debug(
-                "Agent cost updated",
-                agent_id=agent_id,
-                tree_cost_cents=tree_cost_cents,
-                own_cost_cents=own_cost_cents,
-            )
+        logger.debug(
+            "Agent cost updated",
+            agent_id=agent_id,
+            tree_cost_cents=tree_cost_cents,
+            own_cost_cents=own_cost_cents,
+        )
 
     except Exception as e:
         logger.warning(

@@ -1157,36 +1157,27 @@ async def test_browser_verifier_context_grounds_in_final_state():
     assert screenshot_msg["metadata"]["screenshot_b64"] == "ZmFrZS1iNjQ="
 
 
-async def test_evaluate_always_preserves_browser_evidence_checkpoint():
-    """Every successful evaluate snapshots live DOM for the verifier — no flag."""
-    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
-    from domains.spawn_browser_agent_v3.handler import (
-        _append_bounded_verifier_checkpoint,
-        _capture_preserved_evidence_after_evaluate,
-    )
+def test_evaluate_does_not_snapshot_dom_behind_the_model():
+    """The browser LLM owns its context: evaluate returns only its JS result."""
+    import inspect
 
-    class _FakeDom:
-        async def get_browser_state(self, include_screenshot=False):
-            assert include_screenshot is False
-            return {
-                "url": "https://shop.example/item/cable",
-                "title": "Cable",
-                "dom_tree": "<main>Six-foot cable; supports 100 watts; $19.99</main>",
-            }
+    from domains.spawn_browser_agent_v3 import handler
+
+    assert not hasattr(handler, "_capture_preserved_evidence_after_evaluate")
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    assert 'kind="preserved_evidence"' not in source
+    after_action = source[source.index('step_timer.mark("execute_action")') :]
+    success_branch = after_action[after_action.index('if result.get("success", True):') :]
+    success_branch = success_branch[: success_branch.index('step_timer.mark("post_action_bookkeeping")')]
+    assert 'action_name == "evaluate"' not in success_branch
+    assert "get_browser_state" not in success_branch
+
+
+def test_verifier_checkpoints_stay_bounded():
+    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+    from domains.spawn_browser_agent_v3.handler import _append_bounded_verifier_checkpoint
 
     checkpoints: list = []
-    state = await _capture_preserved_evidence_after_evaluate(
-        dom_service=_FakeDom(),
-        verifier_checkpoints=checkpoints,
-        current_url="https://shop.example/item/cable",
-    )
-    assert state is not None
-    assert len(checkpoints) == 1
-    assert checkpoints[0]["kind"] == "preserved_evidence"
-    assert "100 watts" in checkpoints[0]["dom_tree"]
-    assert "preserve_evidence" not in str(checkpoints)
-
-    # Cap retains the most recent VERIFIER_CHECKPOINT_MAX distinct snapshots.
     for i in range(VERIFIER_CHECKPOINT_MAX + 5):
         _append_bounded_verifier_checkpoint(
             checkpoints,
@@ -1208,24 +1199,26 @@ def test_evaluate_tool_schema_has_no_preserve_evidence_flag():
 
     fields = EvaluateTool.model_fields
     assert "preserve_evidence" not in fields
-    assert "always retains" in fields["code"].description.lower() or "snapshot" in fields["code"].description.lower()
+    assert "snapshot" not in (EvaluateTool.__doc__ or "").lower()
+    assert "snapshot" not in fields["code"].description.lower()
 
     evaluate_desc = BROWSER_USE_TOOLS["evaluate"]["description"]
     assert "preserve_evidence" not in evaluate_desc
-    assert "bounded browser-extracted DOM snapshot" in evaluate_desc
+    assert "snapshot" not in evaluate_desc.lower()
     assert "use `extract`" not in evaluate_desc
     assert "NOT for extracting visible content" not in evaluate_desc
 
     tools = build_browser_use_tools(["evaluate"])
     assert len(tools) == 1
     assert "preserve_evidence" not in tools[0]["input_schema"].get("properties", {})
-    assert "bounded browser-extracted DOM snapshot" in tools[0]["description"]
+    assert "snapshot" not in tools[0]["description"].lower()
     assert "use `extract`" not in tools[0]["description"]
 
     prompt = build_browser_use_system_prompt([])
     assert "# Evidence Retention" in prompt
-    assert "preserve flag" in prompt.lower() or "do not pass a preserve flag" in prompt
+    assert "preserve flag" not in prompt.lower()
     assert "preserve_evidence=true" not in prompt
+    assert "after a successful `evaluate`" not in prompt
 
 
 def test_action_history_restores_across_activity_boundary():
@@ -1289,7 +1282,7 @@ def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state
     # Keep a tight window around the fetch so a distant unused assignment cannot
     # satisfy the positive asserts while a nearby UnboundLocalError regresses.
     start = src.index(marker)
-    block = src[start : start + 1200]
+    block = src[start : start + 2000]
     assert (
         "auth_runtime_state.observe_page_text(observe_page_state.get(\"title\")"
         in block
@@ -1545,15 +1538,14 @@ async def test_browser_agent_recording_marks_do_not_block_on_slow_screenshots():
             )
             recorder.frames_dir.mkdir(parents=True)
             recorder._loop_task = asyncio.create_task(asyncio.sleep(60))
-            await asyncio.wait_for(
-                recorder.mark("Submit started", action="click", metadata={"step": 1, "phase": "start"}),
-                timeout=0.5,
-            )
-            await asyncio.wait_for(
-                recorder.mark("Submit finished", action="click", metadata={"step": 1, "phase": "finish"}),
-                timeout=0.5,
-            )
-            assert page.screenshot_calls == 2
+            for label, phase in (("Submit started", "start"), ("Submit finished", "finish")):
+                started = time_module.monotonic()
+                await recorder.mark(label, action="click", metadata={"step": 1, "phase": phase})
+                # Marks run twice per step; the bounded 200ms capture must not
+                # be on the step's critical path.
+                assert time_module.monotonic() - started < 0.05
+            await recorder.flush_marks()
+            assert page.screenshot_calls >= 1
             assert recorder.frames == []
             await recorder.record_observation(
                 iteration=1,
@@ -1804,6 +1796,7 @@ async def test_browser_agent_recording_mark_survives_wiped_frames_dir():
 
             # Must not raise — this is the Place-order finish mark path.
             await recorder.mark("Clicked <button \"Place order $1.00\">", action="click")
+            await recorder.flush_marks()
 
             assert recorder.frames_dir.exists()
             assert len(recorder.frames) == frames_before_wipe + 1
@@ -2191,6 +2184,7 @@ async def test_browser_agent_recording_survives_kernel_to_steel_recovery():
                     session_metadata={"provider": "steel"},
                 )
                 await recorder.mark("post-recovery checkout", action="recovery")
+                await recorder.flush_marks()
 
                 assert any(frame["label"] == "post-recovery checkout" for frame in recorder.frames), (
                     "the promoted Steel half of the recording was dropped"
@@ -3521,6 +3515,38 @@ def test_mouse_input_synthesis_rejects_unrealistic_sample_jumps():
         ]
         assert max(steps) <= 62
         assert max(velocities) <= MIMIC_MAX_VELOCITY_PX_PER_S + 60
+
+
+def test_mouse_path_duration_tracks_request_within_velocity_cap():
+    """A stroke takes about as long as its peak-velocity bound allows, not a
+    slow linear crawl, and long moves stay near human Fitts'-law times
+    (350px used to take ~1.85s at p50, 800px ~1.9s)."""
+    import math
+    import random
+    import statistics
+
+    from browser_tools.input_synthesis import MIMIC_MAX_VELOCITY_PX_PER_S, synthesize_mouse_path
+
+    for distance, p50_ceiling_s in ((60, 0.2), (350, 0.55), (800, 1.1)):
+        requested = max(0.08, min(0.95, 0.05 + distance / 1100))
+        totals = []
+        for seed in range(120):
+            path = synthesize_mouse_path(
+                (100, 300),
+                (100 + distance, 300),
+                screen=(1280, 800),
+                frequency_hz=105,
+                duration_s=requested,
+                rng=random.Random(seed),
+            )
+            totals.append(sum(sample.delay_s for sample in path))
+            velocities = [
+                math.hypot(b.x - a.x, b.y - a.y) / b.delay_s for a, b in zip(path, path[1:])
+            ]
+            assert max(velocities) <= MIMIC_MAX_VELOCITY_PX_PER_S + 1e-6
+            halfway = next(i for i, s in enumerate(path) if s.x - 100 >= distance / 2)
+            assert sum(s.delay_s for s in path[: halfway + 1]) < 0.75 * totals[-1] or distance < 100
+        assert statistics.median(totals) <= p50_ceiling_s, (distance, statistics.median(totals))
 
 def test_idle_mouse_drift_stays_near_anchor_and_inside_viewport():
     import random
@@ -7628,7 +7654,7 @@ def test_passkeys_rearmed_before_each_step_state_observe():
     window = source[start : observe + 120]
     assert "ensure_browser_overlays_suppressed()" in window
     assert window.index("ensure_browser_overlays_suppressed()") < window.index(
-        "get_browser_state("
+        "_observe_step_page("
     )
 
 async def test_provider_handoff_replaces_humanizer_without_leaking_idle_work():
@@ -19067,6 +19093,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
         async def get_browser_state(self, include_screenshot=False):
             return {"url": "https://example.com/login", "screenshot": None}
 
+        async def get_page_identity(self):
+            return {"url": "https://example.com/login", "title": ""}
+
         async def get_current_url(self, *, fallback: str = ""):
             return fallback or "https://example.com/login"
 
@@ -19514,6 +19543,227 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
         "action_type": "task_complete",
         "task_id": expected_task_id,
     }
+
+
+async def _run_manager_with_parked_activity(
+    activity_result, *, approval_error=None, start_activity_error=None
+):
+    """Drive one browser tool call whose activity returns ``activity_result``.
+
+    The approval/attention wait raises ``approval_error``; ``start_activity_error``
+    fails the manager before any browser activity starts.
+    """
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+
+    class _DoneActivityHandle:
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("done activity should not be cancelled")
+
+        def __await__(self):
+            async def _result():
+                return dict(activity_result)
+
+            return _result().__await__()
+
+    async def fake_execute_activity(activity_name, *args, **kwargs):
+        if activity_name == "lookup_purchase_activity":
+            return {"found": False, "reusable": False, "purchase": None}
+        raise AssertionError(f"unexpected activity: {activity_name}")
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="22222222-2222-4222-8222-222222222222",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+    )
+    start_activity = (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            side_effect=start_activity_error,
+        )
+        if start_activity_error is not None
+        else patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            return_value=_DoneActivityHandle(),
+        )
+    )
+    events = []
+    raised = None
+    with (
+        start_activity,
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.wait_condition",
+            AsyncMock(return_value=None),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.execute_activity",
+            side_effect=fake_execute_activity,
+        ),
+        patch(
+            "tools.request_user_approval.request_user_approval_direct",
+            AsyncMock(side_effect=approval_error),
+        ),
+    ):
+        try:
+            async for event in SpawnBrowserAgentManagerV3().execute_tool(
+                workflow_instance, {"goal": "Buy one probe item"}, "tool-1"
+            ):
+                events.append(event)
+        except Exception as exc:
+            raised = exc
+    return workflow_instance, events, raised
+
+
+_PARKED_BROWSER_ROW = {
+    "current_url": "https://roselabs.ai/test_payment",
+    "write_lock_approvals": {},
+    "step_count": 4,
+    "session_id": "session-1",
+    "browser_url": "https://kernel.example/live",
+    "task_id": "task-1",
+}
+_AWAITING_PURCHASE_WRITE_APPROVAL = {
+    **_PARKED_BROWSER_ROW,
+    "status": "awaiting_write_approval",
+    "approval_type": "purchase",
+    "question": "Approve checkout?",
+    "pending_action": {"action": "click", "index": 7, "params": {}},
+}
+_AWAITING_PAYMENT_CARD_APPROVAL = {
+    **_PARKED_BROWSER_ROW,
+    "status": "awaiting_payment_card_approval",
+    "payment_request": {
+        "merchant": "Rose Labs Test Store",
+        "line_items": [
+            {
+                "name": "Probe item",
+                "product_url": "https://roselabs.ai/test_payment",
+                "rating": "4.7 stars",
+                "review_count": "84 reviews",
+                "quantity": 1,
+                "line_total_cents": 100,
+            }
+        ],
+        "subtotal_cents": 100,
+        "total_cents": 100,
+    },
+}
+_TASK_SCOPED_TERMINAL = {
+    "toolName": "spawn_browser_agent",
+    "action_type": "task_complete",
+    "task_id": "task-1",
+    "browser_url": "https://kernel.example/live",
+    "session_id": "session-1",
+}
+
+
+async def _assert_generation_handoff_terminal_is_task_scoped(parked_result):
+    from helpers.generation_handoff import (
+        DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+        GenerationHandoffRequested,
+    )
+    from tools.base import MessageStatus
+
+    _, events, raised = await _run_manager_with_parked_activity(
+        parked_result, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
+    )
+
+    assert isinstance(raised, GenerationHandoffRequested)
+    terminal = events[-1]
+    assert terminal.message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+    assert terminal.status == MessageStatus.FINISHED
+    assert terminal.metadata == _TASK_SCOPED_TERMINAL
+
+
+async def test_manager_generation_handoff_during_payment_card_approval_is_task_scoped():
+    """A deploy handoff mid-browser-call must close that browser task durably.
+
+    Production agent f2e7166d (2026-10-02, agent-payment-production-abandonment)
+    was parked on its payment-card approval when a cooperative cutover raised
+    GenerationHandoffRequested. The manager posted task_complete with no
+    task_id, so the browser's task-scoped rows never got the publisher's
+    terminal and the durable-evidence seal failed before Hub archive.
+    """
+    await _assert_generation_handoff_terminal_is_task_scoped(_AWAITING_PAYMENT_CARD_APPROVAL)
+
+
+async def test_manager_generation_handoff_during_write_approval_is_task_scoped():
+    await _assert_generation_handoff_terminal_is_task_scoped(_AWAITING_PURCHASE_WRITE_APPROVAL)
+
+
+async def test_manager_generation_handoff_terminal_falls_back_to_preallocated_task_id():
+    from domains.spawn_browser_agent_v3.handler import _stable_browser_task_id
+    from helpers.generation_handoff import GenerationHandoffRequested
+
+    result_without_task_id = {
+        key: value for key, value in _AWAITING_PURCHASE_WRITE_APPROVAL.items() if key != "task_id"
+    }
+    workflow_instance, events, raised = await _run_manager_with_parked_activity(
+        result_without_task_id, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
+    )
+
+    assert isinstance(raised, GenerationHandoffRequested)
+    assert events[-1].metadata["action_type"] == "task_complete"
+    assert events[-1].metadata["task_id"] == _stable_browser_task_id(
+        workflow_instance.agent_id, "tool-1"
+    )
+
+
+async def test_manager_failure_terminal_is_task_scoped():
+    from tools.base import MessageStatus
+
+    _, events, raised = await _run_manager_with_parked_activity(
+        _AWAITING_PURCHASE_WRITE_APPROVAL, approval_error=RuntimeError("approval service unavailable")
+    )
+
+    assert raised is None
+    terminal = events[-1]
+    assert terminal.status == MessageStatus.ERROR
+    assert terminal.message == "approval service unavailable"
+    assert terminal.metadata == _TASK_SCOPED_TERMINAL
+
+
+async def test_manager_failure_before_activity_start_names_no_task():
+    """No browser activity ran, so no task posted rows the terminal could close."""
+    _, events, raised = await _run_manager_with_parked_activity(
+        _AWAITING_PURCHASE_WRITE_APPROVAL, start_activity_error=RuntimeError("worker unavailable")
+    )
+
+    assert raised is None
+    assert events[-1].title == "Browser automation failed"
+    assert events[-1].metadata == {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
+
+
+async def test_manager_write_lock_rejection_terminal_is_task_scoped():
+    from tools.request_user_approval import UserRejectedError
+
+    _, events, raised = await _run_manager_with_parked_activity(
+        _AWAITING_PURCHASE_WRITE_APPROVAL,
+        approval_error=UserRejectedError(rejection_message="not now"),
+    )
+
+    assert raised is None
+    terminal = events[-1]
+    assert terminal.title == "Action blocked by user"
+    assert terminal.metadata == {**_TASK_SCOPED_TERMINAL, "code": "write_lock_rejected"}
+
+
+async def test_manager_auth_assistance_failure_terminal_is_task_scoped():
+    from tools.base import MessageStatus
+
+    _, events, raised = await _run_manager_with_parked_activity(
+        {**_PARKED_BROWSER_ROW, "status": "awaiting_auth_assistance", "base_site": "Example"}
+    )
+
+    assert raised is None
+    terminal = events[-1]
+    assert terminal.title == "Authentication assistance failed"
+    assert terminal.status == MessageStatus.ERROR
+    assert terminal.metadata == {**_TASK_SCOPED_TERMINAL, "code": "auth_assistance_failed"}
 
 async def test_manager_passes_fast_mode_cache_for_browser_activity():
     """Browser activities must receive the workflow Fast Mode flag (re-enabled).
@@ -20571,6 +20821,13 @@ async def test_manager_payment_gate_agentcard_setup_required_prompts_and_retries
     assert "Agent payment setup complete" in setup_titles
     # Second mint still setup_required → prompt once more and stop (no card issued).
     assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+    final = events[-1]
+    assert final.title == "One Time Agent Payment Setup"
+    assert final.metadata["action_type"] == "task_complete"
+    assert final.metadata["code"] == "agentcard_user_setup_required"
+    assert final.metadata["task_id"] == "task-1"
+    first_setup = next(e for e in events if getattr(e, "title", "") == "One Time Agent Payment Setup")
+    assert first_setup.metadata["action_type"] == "agentcard_user_setup_required"
 
 async def test_manager_payment_gate_agentcard_setup_times_out_when_never_connected():
     events, activity_calls, _, _ = await _drive_payment_card_gate(
@@ -20582,6 +20839,13 @@ async def test_manager_payment_gate_agentcard_setup_times_out_when_never_connect
     assert "resolve_attention_request_activity" not in activity_calls
     assert any(getattr(e, "title", "") == "One Time Agent Payment Setup" for e in events)
     assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+    final = events[-1]
+    assert final.title == "Agent payment setup not completed"
+    assert final.metadata["action_type"] == "task_complete"
+    assert final.metadata["code"] == "agentcard_setup_timed_out"
+    assert final.metadata["task_id"] == "task-1"
+    # FE/evidence terminal only: the setup request stays the parent's tool result.
+    assert final.metadata["excludeFromModel"] is True
 
 async def test_manager_payment_gate_subscription_rejected_cancels_purchase():
     events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
@@ -20590,7 +20854,9 @@ async def test_manager_payment_gate_subscription_rejected_cancels_purchase():
     )
     assert gate_keys == ["subscription"]
     cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
-    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+    assert cancelled.metadata["action_type"] == "task_complete"
+    assert cancelled.metadata["code"] == "purchase_cancelled"
+    assert cancelled.metadata["task_id"] == "task-1"
     assert activity_calls.count("mint_purchase_card_activity") == 1
 
 async def test_manager_payment_gate_subscription_still_inactive_after_retry_blocks():
@@ -20600,7 +20866,9 @@ async def test_manager_payment_gate_subscription_still_inactive_after_retry_bloc
     )
     assert gate_keys == ["subscription"]
     blocked = next(e for e in events if getattr(e, "title", "") == "Subscription still inactive")
-    assert blocked.metadata["action_type"] == "purchase_blocked"
+    assert blocked.metadata["action_type"] == "task_complete"
+    assert blocked.metadata["code"] == "purchase_blocked"
+    assert blocked.metadata["task_id"] == "task-1"
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 async def test_manager_payment_gate_subscription_checkout_failure_still_raises_gate():
@@ -20615,7 +20883,9 @@ async def test_manager_payment_gate_subscription_checkout_failure_still_raises_g
     assert gate_payloads[0]["action"]["url"] == "https://roselabs.ai/subscribe"
     assert "mint_subscription_checkout_activity" in activity_calls
     cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
-    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+    assert cancelled.metadata["action_type"] == "task_complete"
+    assert cancelled.metadata["code"] == "purchase_cancelled"
+    assert cancelled.metadata["task_id"] == "task-1"
 
 async def test_manager_payment_gate_above_max_limit_errors_without_subscribe_gate():
     from tools.base import MessageStatus
@@ -20648,7 +20918,9 @@ async def test_manager_payment_gate_kyc_rejected_cancels_purchase():
     )
     assert gate_keys == ["kyc"]
     cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
-    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+    assert cancelled.metadata["action_type"] == "task_complete"
+    assert cancelled.metadata["code"] == "purchase_cancelled"
+    assert cancelled.metadata["task_id"] == "task-1"
 
 async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
     events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
@@ -20657,7 +20929,9 @@ async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
     )
     assert gate_keys == ["kyc"]
     blocked = next(e for e in events if getattr(e, "title", "") == "Identity verification still incomplete")
-    assert blocked.metadata["action_type"] == "purchase_blocked"
+    assert blocked.metadata["action_type"] == "task_complete"
+    assert blocked.metadata["code"] == "purchase_blocked"
+    assert blocked.metadata["task_id"] == "task-1"
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 async def test_manager_payment_gate_retries_company_funding_and_mints():
@@ -20701,7 +20975,9 @@ async def test_manager_payment_gate_reports_company_funding_deadline():
     )
     assert activity_calls.count("mint_purchase_card_activity") == 2
     delayed = next(e for e in events if getattr(e, "title", "") == "Payment funding is delayed")
-    assert delayed.metadata["action_type"] == "purchase_funding_delayed"
+    assert delayed.metadata["action_type"] == "task_complete"
+    assert delayed.metadata["code"] == "purchase_funding_delayed"
+    assert delayed.metadata["task_id"] == "task-1"
 
 # ========================================
 # Runner
@@ -21399,8 +21675,9 @@ def test_handoff_autofill_invalidates_observe_page_state_prefetch():
         "observe_page_state = {}",
         autofill,
     )
-    prefetch = source.index("prefetched_browser_state=observe_page_state", autofill)
+    prefetch = source.index("prefetched_browser_state = observe_page_state", autofill)
     assert invalidate < prefetch
+    assert autofill < source.index("state_prefetch.start(dom_service)", autofill) < prefetch
 
 
 def test_browser_tool_events_declare_action_type():
@@ -21429,6 +21706,14 @@ def test_browser_tool_events_declare_action_type():
     untyped_lines = []
     typed_count = 0
     for node in ast.walk(tree):
+        # The shared terminal producer always declares action_type=task_complete.
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_browser_task_terminal_metadata"
+        ):
+            typed_count += 1
+            continue
         if not isinstance(node, ast.Dict):
             continue
         literal_items = {
@@ -21675,10 +21960,8 @@ async def run_all_tests():
     await r.record_async(
         "browser_verifier_context_grounds_final_state", test_browser_verifier_context_grounds_in_final_state
     )
-    await r.record_async(
-        "evaluate_always_preserves_browser_evidence_checkpoint",
-        test_evaluate_always_preserves_browser_evidence_checkpoint,
-    )
+    r.record("evaluate_does_not_snapshot_dom", test_evaluate_does_not_snapshot_dom_behind_the_model)
+    r.record("verifier_checkpoints_stay_bounded", test_verifier_checkpoints_stay_bounded)
     r.record(
         "evaluate_tool_schema_has_no_preserve_evidence_flag",
         test_evaluate_tool_schema_has_no_preserve_evidence_flag,
@@ -23127,6 +23410,7 @@ async def run_all_tests():
         "mouse_input_synthesis_velocity_guard",
         test_mouse_input_synthesis_rejects_unrealistic_sample_jumps,
     )
+    r.record("mouse_path_duration_tracks_request", test_mouse_path_duration_tracks_request_within_velocity_cap)
     r.record("idle_mouse_drift", test_idle_mouse_drift_stays_near_anchor_and_inside_viewport)
     r.record(
         "mouse_click_synthesis_duration",
