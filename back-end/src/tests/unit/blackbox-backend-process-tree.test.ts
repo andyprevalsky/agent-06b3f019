@@ -146,7 +146,11 @@ try {
 } finally {
   rmSync(slowPsDir, { recursive: true, force: true });
 }
-assert.deepEqual(slowPsProof.survivors, [], 'a slow ps must not leave TERM-ignoring processes alive');
+assert.deepEqual(
+  slowPsProof.survivors,
+  [],
+  'a slow ps must not leave TERM-ignoring processes alive'
+);
 assert.ok(
   slowPsProof.stopMs >= 900 && slowPsProof.stopMs < 4000,
   `the grace must be wall clock even when each ps is slow (took ${slowPsProof.stopMs}ms)`
