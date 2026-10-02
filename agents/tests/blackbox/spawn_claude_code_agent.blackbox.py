@@ -4082,7 +4082,9 @@ class _LocalCodeSandbox:
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def _signal_sandbox(self, sig: signal.Signals) -> None:
-        with contextlib.suppress(ProcessLookupError):
+        # macOS killpg reports EPERM, not ESRCH, when only zombies remain in
+        # the group (the SIGTERM already ended it); both mean nothing to signal.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(self._process.pid, sig)
 
 

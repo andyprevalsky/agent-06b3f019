@@ -25,7 +25,20 @@ MODE="${1:-check}"
 # Python revision missing ("Executable doesn't exist at
 # chromium_headless_shell-1234"). Install the venv browsers before the
 # suite so a shared cache cannot fail the domain.
-"$PYTHON_BIN" -m playwright install chromium
+# The install takes a cache-wide lock even when the browser is present. On a
+# loaded host the installer can miss its own lock refresh ("Unable to update
+# lock within the stale threshold") while other worktrees install, so retry.
+for attempt in 1 2 3; do
+    if "$PYTHON_BIN" -m playwright install chromium; then
+        break
+    fi
+    if [ "$attempt" -eq 3 ]; then
+        echo "playwright install chromium failed after $attempt attempts" >&2
+        exit 1
+    fi
+    echo "playwright install chromium failed (attempt $attempt); retrying" >&2
+    sleep $((attempt * 5))
+done
 
 # Domain tests share process-global mock state. Give each domain a fresh process
 # inside a bounded worker pool, then merge their parallel coverage files before

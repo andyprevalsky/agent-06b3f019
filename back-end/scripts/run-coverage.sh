@@ -469,9 +469,10 @@ if $DB_FOUND; then
   LOCAL_DB_URL="$LOCAL_PSQL_URL?connection_limit=$TEST_DB_CONNECTION_LIMIT&pool_timeout=30&connect_timeout=15"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
-  if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
-    export BACKEND_UNIT_DATABASE_URL="$LOCAL_DB_URL"
-  fi
+  # run-unit-tests.ts resolves `victoria-db-<basename>` on its own, which misses
+  # a hash-suffixed worktree container and falls back to the shared :5432 DB
+  # with a stale schema. Hand the unit tests the database synced below.
+  export BACKEND_UNIT_DATABASE_URL="$LOCAL_DB_URL"
   if command -v psql >/dev/null 2>&1; then
     psql "$LOCAL_PSQL_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;

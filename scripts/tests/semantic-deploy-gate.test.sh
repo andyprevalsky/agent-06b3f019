@@ -267,6 +267,12 @@ require_text "$DEPLOY_COMMAND" 'Missing credentials fail closed' "/deploy must d
 require_text "$DEPLOY_COMMAND" "scripts/run-bench-hub-poller\$" "/deploy must classify poller-only changes into backend coverage"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'integration-health"' "backend coverage must isolate live credential health from deterministic coverage"
 require_text "$ROOT_DIR/agents/scripts/run-coverage.sh" 'playwright install chromium' "agents coverage must install the venv Playwright chromium revision before real-browser blackboxes"
+require_text "$ROOT_DIR/agents/scripts/run-coverage.sh" 'for attempt in 1 2 3; do' "agents coverage must retry a Playwright install that loses the shared cache lock"
+require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" '  export BACKEND_UNIT_DATABASE_URL="$LOCAL_DB_URL"' "backend coverage must hand unit tests the schema-synced coverage database"
+if grep -Fq 'if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then' "$ROOT_DIR/back-end/scripts/run-coverage.sh" &&
+  grep -A1 -F 'if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then' "$ROOT_DIR/back-end/scripts/run-coverage.sh" | grep -Fq 'BACKEND_UNIT_DATABASE_URL'; then
+  fail "backend coverage must not gate the unit-test database on BACKEND_COVERAGE_DATABASE_URL (unit tests fall back to a stale shared DB)"
+fi
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'playwright install chromium' "backend coverage must install Node Playwright Chromium before captcha-solve-indicator"
 require_text "$DEPLOY_COMMAND" 'Step 4c: Credential health check (runs unless explicitly overridden)' "/deploy must retain one focused credential probe unless the user explicitly overrides it"
 require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"credential-health"' "/deploy must record the focused credential probe"
