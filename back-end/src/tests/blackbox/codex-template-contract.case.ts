@@ -35,7 +35,7 @@ export async function testPromptBuilder_sharedContractMentionsOutputRules() {
 
 export async function testTemplate_pinsCodexCliForGpt56() {
   const dockerfile = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex', 'e2b.Dockerfile'),
+    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'e2b.Dockerfile'),
     'utf8'
   );
   assert(
@@ -48,7 +48,7 @@ export async function testTemplate_pinsCodexCliForGpt56() {
 
 export async function testRuntimeFallback_recognizesRevokedOAuthRefreshToken() {
   const wsServer = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex', 'ws-server.mjs'),
+    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'ws-server.mjs'),
     'utf8'
   );
   assert(
