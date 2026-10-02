@@ -2172,6 +2172,51 @@ async def test_abandonment_timeout_surfaces_the_last_durable_mismatch():
         )
 
 
+async def test_abandonment_timeout_names_the_unreleased_agentcard_transfer():
+    """A HELD timeout must show whether AgentCard ever released THIS card's hold.
+
+    Regression: agent 22d0b761 timed out as "expected 'VOIDED', got 'HELD'" while the real stall
+    was AgentCard leaving owt_f982bfbd5e7f4b0cb2312920 `consumed` with nothing released for over
+    an hour after close_card succeeded.
+    """
+    import pytest
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    lifecycle = {
+        "purchase": {"status": "HELD"},
+        "walletFunding": {"status": "RECLAIMING"},
+        "orgTransfer": {
+            "id": "owt_f982bfbd5e7f4b0cb2312920",
+            "status": "consumed",
+            "amountCents": 4396,
+            "transferredCents": 4396,
+            "releasedCents": 0,
+            "cardId": "card_b671f34fed0a52c94625b715",
+            "livemode": False,
+        },
+    }
+
+    with pytest.raises(RuntimeError) as raised:
+        await _wait_for_expected_payment_lifecycle(
+            "http://localhost:55120",
+            "agent-123",
+            get_task_by_name("agent-payment-abandonment"),
+            lifecycle,
+            timeout_seconds=0,
+            poll_interval_seconds=0,
+        )
+
+    message = str(raised.value)
+    assert "expected 'VOIDED', got 'HELD'" in message
+    assert "walletFunding.status='RECLAIMING'" in message
+    assert '"id": "owt_f982bfbd5e7f4b0cb2312920"' in message
+    assert '"cardId": "card_b671f34fed0a52c94625b715"' in message
+    assert '"status": "consumed"' in message
+    assert '"releasedCents": 0' in message
+
+
 async def test_abandonment_waits_between_funding_reclaim_and_purchase_void():
     """The reconciler persists RECLAIMED before its refund and purchase-status updates."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -19143,6 +19188,10 @@ async def run_all_tests():
     await r.record_async(
         "abandonment_timeout_surfaces_durable_mismatch",
         test_abandonment_timeout_surfaces_the_last_durable_mismatch,
+    )
+    await r.record_async(
+        "abandonment_timeout_names_unreleased_agentcard_transfer",
+        test_abandonment_timeout_names_the_unreleased_agentcard_transfer,
     )
     await r.record_async(
         "abandonment_waits_between_reclaim_and_void",

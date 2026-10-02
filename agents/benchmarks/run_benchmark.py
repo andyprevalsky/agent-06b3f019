@@ -2683,6 +2683,26 @@ async def _get_initial_payment_lifecycle_with_retry(
     ) from last_error
 
 
+def _payment_lifecycle_settlement_state(lifecycle: object) -> str:
+    """Describe the provider money rows a timed-out lifecycle was still waiting on.
+
+    The first mismatch is usually Rose's purchase status, which reads the same whether Rose's
+    reconciler stalled or AgentCard never released the closed card's hold. Only THIS card's
+    org transfer row tells those apart.
+    """
+    if not isinstance(lifecycle, dict):
+        return ""
+    parts = []
+    wallet_funding = lifecycle.get("walletFunding")
+    if isinstance(wallet_funding, dict):
+        parts.append(f"walletFunding.status={wallet_funding.get('status')!r}")
+    org_transfer = lifecycle.get("orgTransfer")
+    if isinstance(org_transfer, dict):
+        fields = ("id", "cardId", "status", "transferredCents", "releasedCents")
+        parts.append(f"orgTransfer={json.dumps({key: org_transfer.get(key) for key in fields})}")
+    return f"; last observed {', '.join(parts)}" if parts else ""
+
+
 async def _wait_for_expected_payment_lifecycle(
     base_url: str,
     agent_id: str,
@@ -2739,7 +2759,10 @@ async def _wait_for_expected_payment_lifecycle(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {last_fetch_error}"
                 ) from last_fetch_error
-            raise RuntimeError(f"Payment lifecycle did not reach the expected terminal state before timeout: {error}")
+            raise RuntimeError(
+                "Payment lifecycle did not reach the expected terminal state before timeout: "
+                f"{error}{_payment_lifecycle_settlement_state(lifecycle)}"
+            )
         await asyncio.sleep(poll_interval_seconds)
         try:
             lifecycle = await (recover_lifecycle or fetch_lifecycle)(base_url, agent_id)
