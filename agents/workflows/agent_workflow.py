@@ -2158,6 +2158,12 @@ class AgentWorkflow:
                     # The completed path must use the attempt_completion tool so
                     # the UI and transcript show the same visible completion
                     # attempt as an LLM-initiated finish.
+                    if dag_result["status"] == "generation_handoff":
+                        workflow.logger.info(
+                            "[DAG] Cooperative generation handoff during planned task — "
+                            "continue_as_new before dependents or post-DAG completion"
+                        )
+                        return await self._handle_incomplete(dag_result, "EXECUTE")
                     if dag_result["status"] == "completed":
                         workflow.logger.info("[DAG] Tasks completed, attempting completion")
                         await self._flush_pending_messages()

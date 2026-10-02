@@ -28,10 +28,38 @@ from .config import (
     SMS_NOTIFY_TIMEOUT_SECONDS,
     TOOL_NAME,
 )
-from .repo import create_approval_request_activity
+from .repo import create_approval_request_activity, resolve_attention_request_activity
 from .types import ApprovalResult, UserRejectedError
 
 logger = structlog.get_logger()
+
+
+async def _close_attention_for_generation_handoff(
+    workflow_mod: Any,
+    user_id: Any,
+    request_id: str,
+) -> None:
+    """Close the attention row when an in-tool wait yields for cutover.
+
+    The chip is already FINISHED with DEPLOY_INTERRUPTED. Leaving
+    ``userResponse`` NULL keeps the request in the SMS supervisor pending
+    list, so a later approve signals the stale id and the live wait ignores it.
+    """
+    if not request_id:
+        return
+    try:
+        await workflow_mod.execute_activity(
+            resolve_attention_request_activity,
+            args=[str(user_id or ""), str(request_id), DEPLOY_INTERRUPTED_TOOL_MESSAGE],
+            start_to_close_timeout=timedelta(seconds=CREATE_REQUEST_TIMEOUT_SECONDS),
+            retry_policy=RetryPolicy(maximum_attempts=CREATE_REQUEST_MAX_ATTEMPTS),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to close attention request on generation handoff",
+            request_id=request_id,
+            error=str(exc),
+        )
 
 
 def _build_approval_completion_message(question: str, response_text: str) -> str:
@@ -133,6 +161,7 @@ class RequestUserApprovalManager(ToolManager):
             logger.info("User responded to approval request", request_id=request_id)
 
         except GenerationHandoffRequested:
+            await _close_attention_for_generation_handoff(workflow, user_id, request_id)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="🔐 Requesting user approval",
@@ -301,6 +330,7 @@ async def request_user_approval_direct(
             workflow_mod=workflow,
         )
     except GenerationHandoffRequested:
+        await _close_attention_for_generation_handoff(workflow, user_id, request_id)
         interrupt_event = ToolEvent(
             type=EventType.POST_MESSAGE,
             title="🔐 Requesting user approval",

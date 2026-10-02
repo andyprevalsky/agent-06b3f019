@@ -418,6 +418,105 @@ async def test_direct_approval_ignores_unscoped_trailing_messages():
     assert result["response"] == "ok"
 
 
+async def test_direct_generation_handoff_resolves_attention_request():
+    """Cooperative cutover must close the attention row, not just the chip.
+
+    Prod agent 262669d8 left four phone-call approvals with
+    userResponse=NULL after ``new code version deployed, retry this tool``.
+    SMS supervisor then approved the stale attn_id; the live wait ignored it.
+    """
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+    from domains.request_user_approval.service import request_user_approval_direct
+    from tools.base import MessageStatus
+
+    wf = _WFInstance()
+
+    async def _handoff_queue():
+        return "navi-agent-tasks-live"
+
+    wf._check_generation_handoff = _handoff_queue
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-stale-prod",
+            "notify_sms_event_activity": None,
+            "resolve_attention_request_activity": {"success": True, "request_id": "req-stale-prod"},
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    raised = False
+    try:
+        try:
+            await request_user_approval_direct(
+                workflow_instance=wf,
+                question="Make a phone call to +1 (415) 800-8345?",
+                metadata={"toolApproval": True},
+            )
+        except GenerationHandoffRequested as exc:
+            raised = True
+            assert exc.task_queue == "navi-agent-tasks-live"
+    finally:
+        restore()
+
+    assert raised is True
+    resolve_calls = [c for c in fake.activity_calls if c["name"] == "resolve_attention_request_activity"]
+    assert resolve_calls, (
+        "handoff must resolve the attention request so SMS cannot approve a stale attn_id"
+    )
+    assert resolve_calls[0]["args"][0] == wf.user_id
+    assert resolve_calls[0]["args"][1] == "req-stale-prod"
+    assert resolve_calls[0]["args"][2] == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+    finished = [ev for ev, _, _ in wf.handled_events if ev.status == MessageStatus.FINISHED]
+    assert finished
+    assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+
+async def test_manager_generation_handoff_resolves_attention_request():
+    """LLM-facing execute_tool handoff must close the same attention row."""
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+    from domains.request_user_approval.service import RequestUserApprovalManager
+    from tools.base import MessageStatus
+
+    wf = _WFInstance()
+
+    async def _handoff_queue():
+        return "navi-agent-tasks-live"
+
+    wf._check_generation_handoff = _handoff_queue
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-mgr-stale",
+            "resolve_attention_request_activity": {"success": True, "request_id": "req-mgr-stale"},
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    manager = RequestUserApprovalManager()
+    events = []
+    raised = False
+    try:
+        try:
+            async for event in manager.execute_tool(
+                workflow_instance=wf,
+                tool_call={"question": "Approve sending this email?"},
+                tool_call_id="tc-handoff",
+            ):
+                events.append(event)
+        except GenerationHandoffRequested:
+            raised = True
+    finally:
+        restore()
+
+    assert raised is True
+    resolve_calls = [c for c in fake.activity_calls if c["name"] == "resolve_attention_request_activity"]
+    assert resolve_calls
+    assert resolve_calls[0]["args"][1] == "req-mgr-stale"
+    assert resolve_calls[0]["args"][2] == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+    finished = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert finished
+    assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+
 async def test_direct_create_failure_propagates():
     """Create-request failure posts error event and re-raises."""
     from domains.request_user_approval.service import request_user_approval_direct
@@ -677,6 +776,14 @@ async def run_all_tests():
     await r.record_async(
         "direct_approval_scoped_signal",
         test_direct_approval_ignores_unscoped_trailing_messages,
+    )
+    await r.record_async(
+        "direct_handoff_resolves_attention",
+        test_direct_generation_handoff_resolves_attention_request,
+    )
+    await r.record_async(
+        "manager_handoff_resolves_attention",
+        test_manager_generation_handoff_resolves_attention_request,
     )
     await r.record_async("direct_create_fail", test_direct_create_failure_propagates)
     await r.record_async("direct_sms_notify", test_direct_sms_source_attempts_sms_notify)
