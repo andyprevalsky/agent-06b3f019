@@ -274,7 +274,10 @@ async function runRateLimitedCerebrasWithSlowSameModelSpill(): Promise<void> {
       const model = requestedModel(init);
       openRouterModels.push(model);
       if (model === OPENROUTER_CEREBRAS_MODEL) return stallingCerebrasResponse(init?.signal);
-      if (model === OPENROUTER_FAST_CHAT_MODEL) return sseResponse(FALLBACK_SSE);
+      if (model === OPENROUTER_FAST_CHAT_MODEL) {
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        return sseResponse(FALLBACK_SSE);
+      }
       return new Response('unexpected model', { status: 400 });
     }
     return originalFetch(input, init);

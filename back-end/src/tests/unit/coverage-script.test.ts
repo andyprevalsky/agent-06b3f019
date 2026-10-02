@@ -184,7 +184,12 @@ const listener = spawn(
 );
 try {
   waitForPath(occupiedPortFile, true);
-  const occupiedPort = Number(readFileSync(occupiedPortFile, 'utf8'));
+  let occupiedPort = 0;
+  for (let attempt = 0; attempt < 100 && occupiedPort === 0; attempt++) {
+    occupiedPort = Number(readFileSync(occupiedPortFile, 'utf8'));
+    if (occupiedPort === 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  assert.ok(occupiedPort > 0, 'fixture listener must publish a port before selection');
   const lockRoot = join(portFixtureRoot, 'locks');
   const endPort = occupiedPort + 20;
   const selectedPort = Number(
