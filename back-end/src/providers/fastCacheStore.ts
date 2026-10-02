@@ -1,9 +1,13 @@
 import { PrismaClient } from '@prisma/client';
 import { FAST_CACHE_POOL_LIMIT, prisma } from './database';
 import { demoCacheAllowed } from './demoCachePolicy';
+import { demoCacheWriteEnabled, fastCacheWritesDisabled } from './fastCacheAccountPolicy';
 import { type CacheKind } from './fastCacheNormalizeConstants';
 import { stripSecrets } from './fastCacheNormalizeCore';
+import { createLogger } from './logger';
 import { withSpan } from './tracing';
+
+const log = createLogger('FastCacheStore');
 
 const globalForFastCachePrisma = global as unknown as {
   fastCacheMemory?: Map<string, FastCacheMemoryEntry>;
@@ -299,6 +303,10 @@ export async function cacheSet(args: {
   value: unknown;
   blobPath?: string | null;
 }): Promise<void> {
+  if (fastCacheWritesDisabled()) {
+    log.info('fast_cache.write_skipped_read_only', { key: args.key, kind: args.kind });
+    return;
+  }
   const value = stripSecrets(args.value);
   const blobPath = args.blobPath ?? null;
   deleteMemoryCache(args.key);
@@ -500,7 +508,7 @@ export async function agentFastMode(agentId: string): Promise<{
   return {
     enabled,
     goal,
-    writeEnabled: enabled,
+    writeEnabled: demoCacheWriteEnabled(enabled),
     rootAgentId,
     rootGoal,
     providerFastMode,
