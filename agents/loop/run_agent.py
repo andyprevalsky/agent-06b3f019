@@ -1927,7 +1927,11 @@ async def run_agent(
                         context_len=len(context),
                     )
                     # When no poll_messages, locally append so agent sees tool results
-                    if not poll_messages:
+                    if isinstance(result, dict) and result.get("pending_tool_resume"):
+                        # Parked across the handoff: the next generation re-enters
+                        # this call and posts its real result before the next LLM turn.
+                        pass
+                    elif not poll_messages:
                         context.append(new_msg)
                     elif isinstance(result, dict) and result.get("generation_handoff"):
                         # Cut over this turn; poll will not run again before continue_as_new.

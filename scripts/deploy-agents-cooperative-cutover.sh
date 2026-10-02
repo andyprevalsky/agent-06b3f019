@@ -106,16 +106,6 @@ all_started_ids() {
   flyctl machines list -a "$APP" --json | jq -r '.[] | select(.state=="started") | .id'
 }
 
-started_ids_for_hash() {
-  local hash="$1"
-  flyctl machines list -a "$APP" --json | jq -r --arg h "$hash" '
-    .[]
-    | select(.state=="started")
-    | select((.config.env.TEMPORAL_WORKER_SURFACE_HASH // "") == $h)
-    | .id
-  '
-}
-
 if [ "$CURRENT_HASH" = "$SURFACE_HASH" ]; then
   echo "Surface unchanged — rolling deploy with activity-boundary drain"
   cd "$ROOT/agents"
@@ -124,15 +114,9 @@ if [ "$CURRENT_HASH" = "$SURFACE_HASH" ]; then
     --env TEMPORAL_WORKER_SURFACE_HASH="$SURFACE_HASH" \
     --env TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$DEPLOYMENT_TOKEN" \
     --env TEMPORAL_WORKER_REQUIRE_ACTIVATION="0"
-  # Scale excess back to MIN (same-gen only — do not stop other generations).
-  STARTED="$(started_ids_for_hash "$SURFACE_HASH")"
-  COUNT=0
-  for ID in $STARTED; do
-    COUNT=$((COUNT + 1))
-    if [ "$COUNT" -gt "$MIN" ]; then
-      flyctl machines stop "$ID" -a "$APP" || true
-    fi
-  done
+  # Excess same-generation machines are left to the in-worker autoscaler,
+  # which only stops peers reporting zero in-flight activities. Stopping them
+  # here by position would SIGTERM machines mid-activity.
   echo "Same-generation rolling deploy complete"
   exit 0
 fi

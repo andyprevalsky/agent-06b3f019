@@ -15,7 +15,6 @@ from typing import Any, AsyncGenerator, Optional
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from domains.spawn_agent.config import is_oai_demo_mass_agent_task
 from domains.wait_for.config import (
     DEFAULT_CHECK_INTERVAL_SECONDS,
     DEFAULT_MAX_CHECKS,
@@ -31,9 +30,10 @@ from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
 )
+from helpers.source_connect_gates import raise_source_connect_gates
 from helpers.wait_condition_or_handoff import sleep_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
-from utils.source_connect_gates import raise_source_connect_gates
+from utils.oai_demo import is_oai_demo_mass_agent_task
 
 
 def skip_wait_wall_clock_for_fast_mode_replay(workflow_instance: Any) -> bool:

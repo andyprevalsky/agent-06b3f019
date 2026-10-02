@@ -39,6 +39,7 @@ class ClaudeCodeWsClient:
         heartbeat_fn: Optional[Callable[[str], None]] = None,
         max_reconnects: int = 5,
         reconnect_delay: float = 1.0,
+        on_events_replay: Optional[Callable[[list[dict[str, Any]]], Awaitable[None]]] = None,
     ):
         """
         Initialize the WebSocket client.
@@ -54,6 +55,9 @@ class ClaudeCodeWsClient:
             heartbeat_fn: Optional Temporal activity heartbeat function.
             max_reconnects: Maximum reconnection attempts.
             reconnect_delay: Base delay for exponential backoff (seconds).
+            on_events_replay: Callback for the server's full event history, sent on
+                every (re)connect. Replaces everything seen so far; without it each
+                replayed event goes to ``on_event``.
         """
         self.ws_url = ws_url
         self.on_output = on_output
@@ -61,6 +65,7 @@ class ClaudeCodeWsClient:
         self.on_connection_change = on_connection_change
         self.on_stdin_error = on_stdin_error
         self.on_event = on_event
+        self.on_events_replay = on_events_replay
         self.heartbeat_fn = heartbeat_fn
         self.max_reconnects = max_reconnects
         self.reconnect_delay = reconnect_delay
@@ -242,9 +247,12 @@ class ClaudeCodeWsClient:
 
             elif msg_type == "code_agent_events":
                 events = msg.get("data")
-                if isinstance(events, list) and self.on_event:
-                    for event in events:
-                        if isinstance(event, dict):
+                if isinstance(events, list):
+                    replayed = [event for event in events if isinstance(event, dict)]
+                    if self.on_events_replay:
+                        await self.on_events_replay(replayed)
+                    elif self.on_event:
+                        for event in replayed:
                             await self.on_event(event)
 
             elif msg_type == "exit":
@@ -333,3 +341,32 @@ class ClaudeCodeWsClient:
     def reconnects_exhausted(self) -> bool:
         """Check if all reconnection attempts have been exhausted."""
         return self._reconnects_exhausted
+
+
+async def ws_endpoint_reachable(
+    ws_url: str,
+    timeout: float = 10.0,
+    attempts: int = 1,
+    backoff_s: float = 2.0,
+) -> bool:
+    """True when a WebSocket handshake with ``ws_url`` succeeds within ``timeout``.
+
+    Tries up to ``attempts`` times, doubling ``backoff_s`` between tries.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            async with aiohttp.ClientSession() as session:
+                ws = await asyncio.wait_for(session.ws_connect(ws_url), timeout=timeout)
+                await ws.close()
+            return True
+        except Exception as e:
+            logger.info(
+                "[ClaudeCodeWs] Endpoint unreachable",
+                url=ws_url[:60],
+                attempt=attempt,
+                attempts=attempts,
+                error=str(e),
+            )
+        if attempt < attempts:
+            await asyncio.sleep(backoff_s * 2 ** (attempt - 1))
+    return False

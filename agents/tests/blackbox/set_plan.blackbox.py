@@ -948,11 +948,14 @@ async def test_run_planner_attempt_redelivers_after_dead_worker():
 
     import inspect
 
-    from helpers.llm import call_planner_llm_activity
+    from helpers.llm import PLANNER_ACTIVITY_HEARTBEAT_INTERVAL_SECONDS, call_planner_llm_activity
 
     source = inspect.getsource(call_planner_llm_activity)
     assert "_planner_liveness_heartbeat" in source
     assert "planner liveness" in source
+    assert PLANNER_ACTIVITY_HEARTBEAT_INTERVAL_SECONDS * 2 < PLANNER_ACTIVITY_HEARTBEAT_TIMEOUT_SECONDS, (
+        "the activity's liveness beat must fit at least twice inside the scheduled heartbeat_timeout"
+    )
 
 
 async def run_all_tests():

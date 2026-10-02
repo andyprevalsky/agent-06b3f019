@@ -2397,7 +2397,7 @@ async def test_set_response_schema_activity_cache_lookup_error_falls_through_to_
 
 async def test_set_response_schema_activity_mass_agent_title_when_generation_fails():
     """Mass-agent root still PATCHes Creator Brand Strategy if schema generation throws."""
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX, OAI_DEMO_ROOT_TITLE
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX, OAI_DEMO_ROOT_TITLE
 
     setup_mock(
         {

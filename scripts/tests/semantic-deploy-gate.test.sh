@@ -303,12 +303,24 @@ if grep -Fq 'BLACKBOX_TEST_REPLAY_OUTBOUND=1' "$DEPLOY_COMMAND"; then
   fail "/deploy semantic stack must not retain replay config used only by the removed duplicate backend blackbox run"
 fi
 require_text "$DEPLOY_COMMAND" 'bash scripts/run-deploy-stage agentcard-lifecycle --' "/deploy must record AgentCard as one lifecycle lane"
-require_text "$DEPLOY_COMMAND" 'bash scripts/run-bench --local' "/deploy AgentCard lane must own an isolated local stack"
-require_text "$DEPLOY_COMMAND" 'ROSE_EXCLUDE_ANTHROPIC_FAMILY=1' "/deploy AgentCard lane must use the non-Claude compute lane when Claude credentials are unavailable"
-require_text "$DEPLOY_COMMAND" 'SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt' "/deploy AgentCard lane must pass GPT-only seed policy into the isolated stack"
-require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1' "/deploy AgentCard lane must not cold-build an unused simulated world model"
-require_text "$DEPLOY_COMMAND" 'agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment' "/deploy must keep all four AgentCard lifecycle tasks in one lane"
-require_text "$DEPLOY_COMMAND" '--max-concurrency 1 --no-dashboard' "/deploy must preserve sequential payment state inside the isolated AgentCard lane"
+# Assert on the fenced command that actually runs, not deploy.md prose, which
+# mentions env vars the lane deliberately does not set.
+AGENTCARD_DEPLOY_BLOCK="$(awk '
+  /^```/ { if (in_block) { if (block ~ /run-deploy-stage agentcard-lifecycle --/) printf "%s", block; in_block = 0; block = "" } else { in_block = 1 }; next }
+  in_block { block = block $0 "\n" }
+' "$DEPLOY_COMMAND")"
+[ -n "$AGENTCARD_DEPLOY_BLOCK" ] || fail "/deploy must run the AgentCard lane from a fenced command block"
+require_agentcard_command() {
+  grep -Fq -- "$1" <<<"$AGENTCARD_DEPLOY_BLOCK" || fail "$2"
+}
+require_agentcard_command 'bash scripts/run-bench --local' "/deploy AgentCard lane must own an isolated local stack"
+if grep -Eq 'ROSE_EXCLUDE_ANTHROPIC_FAMILY=1|SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt' <<<"$AGENTCARD_DEPLOY_BLOCK"; then
+  fail "/deploy AgentCard lane must let normal pool selection choose the compute lane"
+fi
+require_agentcard_command 'BENCHMARK_SKIP_WMH_BUILD=1' "/deploy AgentCard lane must not cold-build an unused simulated world model"
+require_agentcard_command 'BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0' "/deploy AgentCard lane must not count active-worktree attempts toward canary eligibility"
+require_agentcard_command 'agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment' "/deploy must keep all four AgentCard lifecycle tasks in one lane"
+require_agentcard_command '--max-concurrency 1 --no-dashboard' "/deploy must preserve sequential payment state inside the isolated AgentCard lane"
 if grep -Fq 'bash scripts/run-agentcard-lifecycle-task.sh' "$DEPLOY_COMMAND"; then
   fail "/deploy must not tear down and rebuild the shared stack for each AgentCard task"
 fi
