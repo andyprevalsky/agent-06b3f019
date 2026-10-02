@@ -3047,7 +3047,23 @@ async def respond_to_attention_request(base_url: str, request_id: str, response:
         )
 
 
-async def _respond_as_user_to_auth_assistance(base_url: str, req: dict, user_response: str) -> None:
+AUTH_ASSISTANCE_TASK_ID_WAIT_SECONDS = 45
+
+
+async def _browser_task_for_auth_assistance(base_url: str, agent_id: str, req: dict) -> str:
+    """Wait for the agent's own message that names the browser task behind the request."""
+    deadline = time.time() + AUTH_ASSISTANCE_TASK_ID_WAIT_SECONDS
+    while True:
+        data = await get_agent(base_url, agent_id)
+        task_id = auth_assistance_user.browser_task_id(req, data.get("messages") or [])
+        if task_id:
+            return task_id
+        if time.time() >= deadline:
+            raise RuntimeError("the agent never posted the browser task for its sign-in-help request")
+        await asyncio.sleep(3)
+
+
+async def _respond_as_user_to_auth_assistance(base_url: str, agent_id: str, req: dict, user_response: str) -> None:
     """Play the user for a sign-in-help request on the hosted auth site."""
     headers = await _api_headers()
     req_id = str(req.get("id") or "")[:8]
@@ -3062,7 +3078,8 @@ async def _respond_as_user_to_auth_assistance(base_url: str, req: dict, user_res
     credentials = (auth_test_site.active_manifest() or {}).get("userSignIn")
     if not isinstance(credentials, dict):
         raise RuntimeError("the site manifest carries no password for the user to type")
-    landed = await auth_assistance_user.sign_in_as_user(base_url, headers, req, credentials)
+    task_id = await _browser_task_for_auth_assistance(base_url, agent_id, req)
+    landed = await auth_assistance_user.sign_in_as_user(base_url, headers, req, task_id, credentials)
     print(f"    🙋 Signed in as the user for sign-in-help request {req_id} (now on {landed})")
 
 
@@ -4580,7 +4597,7 @@ async def poll_agent(
                             )
                             if user_response:
                                 try:
-                                    await _respond_as_user_to_auth_assistance(base_url, req, user_response)
+                                    await _respond_as_user_to_auth_assistance(base_url, agent_id, req, user_response)
                                 except Exception as user_error:
                                     return (
                                         data, approvals_triggered, approvals_resolved,

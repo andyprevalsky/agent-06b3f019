@@ -777,18 +777,36 @@ async def test_stand_in_user_signs_in_or_declines_a_sign_in_help_request() -> No
     from benchmarks import auth_assistance_user, auth_test_site
     from benchmarks import run_benchmark as rb
 
-    request = {"id": "req-12345678", "metadata": {"requestUserAuthentication": {"taskId": "browser-task-1"}}}
-    assert auth_assistance_user._browser_task_id(request) == "browser-task-1"
-    assert auth_assistance_user._browser_task_id({"id": "x", "metadata": {}}) is None
+    # The request names only the browser session; the task id is on the agent's own message.
+    request = {"id": "req-12345678", "metadata": {"requestUserAuthentication": {"requestId": "req-12345678"}}}
+    announcement = {
+        "role": "TOOL",
+        "metadata": {
+            "action_type": "auth_assistance",
+            "requestUserAuthentication": {"requestId": "req-12345678", "taskId": "browser-task-1"},
+        },
+    }
+    other = {"role": "TOOL", "metadata": {"requestUserAuthentication": {"requestId": "another", "taskId": "task-9"}}}
+    assert auth_assistance_user.browser_task_id(request, [other, announcement]) == "browser-task-1"
+    assert auth_assistance_user.browser_task_id(request, [other]) is None
+
+    polls = {"count": 0}
+
+    async def fake_get_agent(base_url, agent_id):
+        polls["count"] += 1
+        return {"messages": [other] if polls["count"] == 1 else [other, announcement]}
 
     calls: list[tuple] = []
 
     async def fake_headers() -> dict:
         return {"X-API-Key": "fixture-key"}
 
-    async def fake_sign_in(base_url, headers, req, credentials):
-        calls.append(("sign_in", req["id"], credentials["email"], credentials["password"]))
+    async def fake_sign_in(base_url, headers, req, task_id, credentials):
+        calls.append(("sign_in", req["id"], task_id, credentials["email"], credentials["password"]))
         return "https://site/account"
+
+    async def no_sleep(_seconds):
+        return None
 
     async def fake_decline(base_url, headers, req):
         calls.append(("decline", req["id"]))
@@ -801,18 +819,21 @@ async def test_stand_in_user_signs_in_or_declines_a_sign_in_help_request() -> No
             auth_assistance_user, "sign_in_as_user", fake_sign_in
         ), patch.object(auth_assistance_user, "decline", fake_decline), patch.object(
             auth_test_site, "mark_run", fake_mark
-        ):
+        ), patch.object(rb, "get_agent", fake_get_agent), patch.object(rb.asyncio, "sleep", no_sleep):
             auth_test_site.set_active_manifest(_manifest("user_signs_in"))
-            await rb._respond_as_user_to_auth_assistance("http://localhost:1", request, "sign_in")
-            assert calls == [("sign_in", "req-12345678", SAVED[0], "only-the-user-knows")], calls
+            await rb._respond_as_user_to_auth_assistance("http://localhost:1", "agent-1", request, "sign_in")
+            assert calls == [
+                ("sign_in", "req-12345678", "browser-task-1", SAVED[0], "only-the-user-knows")
+            ], calls
+            assert polls["count"] == 2, "the stand-in waits for the agent's message instead of failing"
 
             calls.clear()
             auth_test_site.set_active_manifest(_manifest("saved_logins_fail"))
-            await rb._respond_as_user_to_auth_assistance("http://localhost:1", request, "decline")
+            await rb._respond_as_user_to_auth_assistance("http://localhost:1", "agent-1", request, "decline")
             assert calls == [("decline", "req-12345678"), ("mark", "abc123", "user-declined")], calls
 
             try:
-                await rb._respond_as_user_to_auth_assistance("http://localhost:1", request, "sign_in")
+                await rb._respond_as_user_to_auth_assistance("http://localhost:1", "agent-1", request, "sign_in")
             except RuntimeError as exc:
                 assert "no password for the user" in str(exc)
             else:

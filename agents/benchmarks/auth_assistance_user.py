@@ -29,20 +29,26 @@ class AuthAssistanceUserError(RuntimeError):
     """The stand-in user could not do what a real user would have done."""
 
 
-def _browser_task_id(request: dict) -> Optional[str]:
-    metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
-    for block_name in ("requestUserAuthentication", "authAssistance"):
-        block = metadata.get(block_name)
-        if not isinstance(block, dict):
+_TASK_ID_KEYS = ("taskId", "task_id", "subAgentId", "sub_agent_id")
+
+
+def browser_task_id(request: dict, messages: list[dict]) -> Optional[str]:
+    """The browser task that raised the request.
+
+    The request itself only names the browser session. The task id rides on the
+    "Requesting User Assistance" message the agent posts for the same request,
+    which can land a moment after the request does.
+    """
+    request_id = str(request.get("id") or "")
+    for message in reversed(messages):
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        block = metadata.get("requestUserAuthentication")
+        if not isinstance(block, dict) or str(block.get("requestId") or "") != request_id:
             continue
-        for key in ("taskId", "task_id", "subAgentId", "sub_agent_id"):
-            value = block.get(key)
+        for key in _TASK_ID_KEYS:
+            value = block.get(key) or metadata.get(key)
             if isinstance(value, str) and value:
                 return value
-    for key in ("taskId", "task_id", "subAgentId", "sub_agent_id"):
-        value = metadata.get(key)
-        if isinstance(value, str) and value:
-            return value
     return None
 
 
@@ -102,9 +108,8 @@ async def _type_credentials(cdp_url: str, email: str, password: str) -> str:
         return page.url
 
 
-async def sign_in_as_user(base_url: str, headers: dict, request: dict, credentials: dict) -> str:
+async def sign_in_as_user(base_url: str, headers: dict, request: dict, task_id: str, credentials: dict) -> str:
     request_id = str(request.get("id") or "")
-    task_id = _browser_task_id(request)
     if not request_id or not task_id:
         raise AuthAssistanceUserError("sign-in-help request is missing its id or browser task id")
     cdp_url = await _live_cdp_url(base_url, headers, task_id)
