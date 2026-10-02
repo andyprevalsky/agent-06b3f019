@@ -8445,10 +8445,15 @@ def test_isolated_backend_session_launcher_is_macos_portable(tmp_path: Path) -> 
     )
     try:
         deadline = time.time() + 5
-        while time.time() < deadline and not ready.exists():
+        values: list[str] = []
+        while time.time() < deadline:
+            if ready.exists():
+                values = ready.read_text().split()
+                if len(values) == 3:
+                    break
             time.sleep(0.05)
-        assert ready.exists(), "session-owned child did not start"
-        pid, sid, pgid = (int(value) for value in ready.read_text().split())
+        assert len(values) == 3, "session-owned child did not publish its process identity"
+        pid, sid, pgid = (int(value) for value in values)
         assert pid == process.pid
         assert sid == process.pid
         assert pgid == process.pid
