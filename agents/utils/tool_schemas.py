@@ -372,6 +372,14 @@ class WebFetchTool(BaseModel):
     )
 
 
+class GoogleOAuthDemoTool(BaseModel):
+    """Run the single synthetic Google OAuth video fixture on the root agent."""
+
+    tool: Literal["google_oauth_demo"] = Field(
+        description="Emit twelve in-memory DEMO cards for Gmail, Calendar, Drive, and disconnect."
+    )
+
+
 class ApiRequestTool(BaseModel):
     """Call a public HTTP API and return the full response body."""
 
@@ -1122,6 +1130,7 @@ TOOL_MODELS: ToolRegistry = {
     "people_search": PeopleSearchTool,
     "web_fetch": WebFetchTool,
     "api_request": ApiRequestTool,
+    "google_oauth_demo": GoogleOAuthDemoTool,
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
     "spawn_agent": SpawnAgentTool,
