@@ -50,7 +50,7 @@ def test_oai_demo_requires_readable_files_and_forbids_browser_calls():
     assert goal == task.prompt
 
 
-def test_google_oauth_demo_uses_cached_fixture_without_browser_or_code_agent():
+def test_google_oauth_demo_uses_cached_fixture_without_subagents_or_google_io():
     from domains.api_request.google_oauth_demo_fixture import (
         DEMO_LABEL,
         matches_demo_goal,
@@ -62,6 +62,7 @@ def test_google_oauth_demo_uses_cached_fixture_without_browser_or_code_agent():
         goal_hash,
         google_oauth_demo_goal_hash,
     )
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
 
     task = get_task_by_name("google-oauth")
     assert task.title == "Google OAuth"
@@ -70,10 +71,17 @@ def test_google_oauth_demo_uses_cached_fixture_without_browser_or_code_agent():
     assert task.fast_cache == "on"
     assert task.requires_browser_agent is False
     assert task.requires_claude_code is False
-    assert task.expected_tool_counts == {"spawn_agent": 1}
+    assert task.expected_tool_counts == {"google_oauth_demo": 1}
+    assert "google_oauth_demo" not in EXECUTE_PHASE_TOOLS
+    assert "google_oauth_demo" not in PLAN_PHASE_TOOLS
+    assert "spawn_agent" in task.forbidden_tools
     assert "spawn_browser_agent" in task.forbidden_tools
     assert "spawn_claude_code_agent" in task.forbidden_tools
     assert task.environment["mode"] == "synthetic"
+    assert task.environment["db_fixtures"] == []
+    assert task.environment["live_targets"] == []
+    assert "Do not spawn any subagent" in task.prompt
+    assert "no database request" in task.prompt
     assert "gmail_create_reply_draft" in task.prompt
     assert "calendar_create_event" in task.prompt
     assert "drive_append_line" in task.prompt
@@ -111,6 +119,43 @@ def test_google_oauth_demo_cache_is_available_without_catalog_in_worker_image():
             assert matches_demo_goal(goal)
     finally:
         demo_cache_goal_hashes.cache_clear()
+
+
+def test_google_oauth_root_tool_emits_twelve_cards_without_external_activity():
+    import asyncio
+
+    from tools.google_oauth_demo import google_oauth_demo
+
+    class WorkflowStub:
+        goal = get_task_by_name("google-oauth").prompt
+
+        def __init__(self):
+            self.events = []
+
+        async def _handle_tool_event(self, event, tool_call_id, tool_name):
+            self.events.append((event, tool_call_id, tool_name))
+
+    workflow = WorkflowStub()
+    result = asyncio.run(google_oauth_demo(workflow, {"tool": "google_oauth_demo"}, "tc-demo"))
+    assert len(result["result"]["rows"]) == 12
+    assert [event.title for event, _, _ in workflow.events[1:13]] == [
+        f"DEMO · {row['tool']}" for row in result["result"]["rows"]
+    ]
+    assert [tool_name for _, _, tool_name in workflow.events[1:13]] == [
+        row["tool"] for row in result["result"]["rows"]
+    ]
+    assert workflow.events[0][1] == "tc-demo"
+    assert workflow.events[-1][1] == "tc-demo"
+
+    other = WorkflowStub()
+    other.goal = "unrelated task"
+    try:
+        asyncio.run(google_oauth_demo(other, {"tool": "google_oauth_demo"}, "tc-other"))
+    except ValueError as exc:
+        assert "exact benchmark goal" in str(exc)
+    else:
+        raise AssertionError("non-demo goal unexpectedly ran the fixture")
+    assert other.events == []
 
 
 def test_agentcard_idempotency_task_terminates_after_reporting_results():
