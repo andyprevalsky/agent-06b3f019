@@ -479,6 +479,14 @@ function parseClassifierResponse(
   return { reason: parsed.reason, decisions: [...decisionsByKey.values()] };
 }
 
+/**
+ * Output budget for the judge. The flash pool's model thinks before it answers
+ * and its thinking counts against this cap: at 200 every call ended with no
+ * answer (a real two-login run thought for 1,543 tokens), so no rejected
+ * credential was ever classified.
+ */
+const CLASSIFIER_MAX_OUTPUT_TOKENS = 8192;
+
 /* c8 ignore start -- live classifier auth path requires real compute credentials */
 async function directAuthForClassifier(agent: AgentForPropagation) {
   if (agent.userId === undefined || agent.userId === '') return {};
@@ -572,7 +580,7 @@ async function classifierContent(
   const stream = await createStreamingCompletion({
     model: 'rose-labs/rose-1-flash',
     temperature: 0,
-    max_tokens: 200,
+    max_tokens: CLASSIFIER_MAX_OUTPUT_TOKENS,
     ...directAuth,
     messages: [
       { role: 'system' as const, content: buildCredentialClassifierSystemPrompt() },
