@@ -68,10 +68,18 @@ run connected normally.
   `{ browser, failure }`. Before each retry it calls an optional
   `startupProbe`. `steelStartupProbe` reads the Steel session and reports
   `Steel reported session <id> failed (<releaseReason>)` once Steel marks it
-  `failed`, which stops the remaining connect attempts. Both Steel create sites
-  (`createSessionWithContext` and `recreateSession`) append the failure to
-  `Session validation failed on attempt N: <reason>`. The per-attempt connect
-  timer is now cleared, so a fast failure no longer leaves a 10s timer pending.
+  `failed`, which stops the remaining connect attempts. All three Steel create
+  sites (`createSessionWithContext`, `recreateSession`, and the
+  challenge-recovery factory `createSteelRecoverySession`) carry the failure
+  into their error. The per-attempt connect timer is now cleared, so a fast
+  failure no longer leaves a 10s timer pending.
+- The recovery factory was missed at first. The next deploy's AgentCard lane
+  then spent 137s on one `probe-cookie-variant` call (5 candidates × 3 connect
+  timeouts) and about 8 minutes on one `recover_from_challenge` step while Steel
+  was down. The same unit file now drives `createSteelRecoverySession` through
+  the real validation with a Steel session reporting `startup_failed`. Before
+  the fix it threw only `failed CDP validation`; after, each candidate dials CDP
+  once and the error names Steel's verdict.
 - The parity gate no longer counts a validation failure as an outage based on
   the message alone, because our own create options could also stop Steel from
   booting. `shouldSkipSteelLegs` creates a session with only Steel's defaults
