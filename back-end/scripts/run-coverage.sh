@@ -486,6 +486,14 @@ BEGIN
       WHERE attention.id = request.id
     );
   END IF;
+  -- On system Postgres this database is shared with the local stack, whose
+  -- real provider quota failures persist process-global funded-key cooldowns.
+  -- Tests that exercise the funded routes assume no backoff is active.
+  IF to_regclass('"Integration"') IS NOT NULL THEN
+    DELETE FROM "Integration"
+    WHERE "userId" = '00000000-0000-0000-0000-000000000000'
+      AND name IN ('gpt_api_key_cooldown', 'anthropic_api_key_cooldown');
+  END IF;
 END $$;
 SQL
   fi
