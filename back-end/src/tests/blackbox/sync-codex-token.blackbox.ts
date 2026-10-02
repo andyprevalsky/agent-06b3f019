@@ -56,7 +56,7 @@ async function cleanup(prisma: PrismaClient): Promise<void> {
   await prisma.user.deleteMany({ where: { userId: TEST_USER_ID } });
 }
 
-async function testSyncLeavesOneLiveLineagePerAccount(): Promise<void> {
+async function testSyncLeavesOneLiveLineagePerAccount(withAccountRow: boolean): Promise<void> {
   const host = new URL(LOCAL_DB_URL).hostname.toLowerCase();
   assert(
     host === 'localhost' || host === '127.0.0.1',
@@ -83,7 +83,9 @@ async function testSyncLeavesOneLiveLineagePerAccount(): Promise<void> {
           config: { encryptedCredentials: marker },
         },
       });
-    const staleSameAccount = await seed(ACCOUNT_ID, 'stale-lineage');
+    // With an account-keyed row the sync updates it; without one (only the
+    // legacy '' row) it must create the account-keyed row, not collide on ''.
+    const staleSameAccount = withAccountRow ? await seed(ACCOUNT_ID, 'stale-lineage') : null;
     const legacyBlank = await seed('', 'legacy-blank-lineage');
     const otherAccount = await seed(OTHER_ACCOUNT_ID, 'other-account-lineage');
 
@@ -123,7 +125,9 @@ async function testSyncLeavesOneLiveLineagePerAccount(): Promise<void> {
       (row) => row.status === IntegrationStatus.CONNECTED && row.accountId !== OTHER_ACCOUNT_ID
     );
     assert(
-      live.length === 1 && live[0].id === staleSameAccount.id,
+      live.length === 1 &&
+        live[0].accountId === ACCOUNT_ID &&
+        (staleSameAccount === null || live[0].id === staleSameAccount.id),
       `expected only the account-keyed row to stay live, got ${JSON.stringify(
         live.map((row) => ({ id: row.id, accountId: row.accountId }))
       )}`
@@ -155,8 +159,12 @@ async function testSyncLeavesOneLiveLineagePerAccount(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  await testSyncLeavesOneLiveLineagePerAccount();
-  process.stdout.write('PASS sync-codex-token leaves one live lineage per ChatGPT account\n');
+  await testSyncLeavesOneLiveLineagePerAccount(true);
+  process.stdout.write(
+    'PASS sync-codex-token refreshes the account row and retires stale copies\n'
+  );
+  await testSyncLeavesOneLiveLineagePerAccount(false);
+  process.stdout.write('PASS sync-codex-token creates the account row beside a legacy blank row\n');
 }
 
 main().catch((error) => {

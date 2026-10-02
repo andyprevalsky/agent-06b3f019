@@ -121,6 +121,7 @@ async function main() {
     create: {
       userId,
       name: 'gpt_code',
+      accountId,
       type: IntegrationType.TOOL_SETUP,
       status: IntegrationStatus.CONNECTED,
       isActive: true,
