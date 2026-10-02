@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
 import {
   testResolveCodexAuthEnvs_apiKeyFallback,
@@ -340,12 +341,32 @@ async function testPersistOutput_rejectsInvalidCredentialFeedback() {
   assertStatus(res.status, 400, res.data);
 }
 
+/**
+ * Feedback cases on this backend cool the shared funded key and then delete
+ * its row; the backend honors that within its 15-second recheck interval.
+ */
+async function waitForFundedGptKeyRestore(): Promise<void> {
+  await retryWithBackoff(
+    () =>
+      request(`${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`, {
+        headers: apiKeyHeaders(),
+      }),
+    {
+      maxRetries: 21,
+      fixedDelays: Array.from({ length: 20 }, () => 1500),
+      shouldRetryResult: (res) => (res.data as { onCooldown?: boolean }).onCooldown === true,
+      component: 'CodexSmokeFundedKey',
+    }
+  );
+}
+
 async function testSmoke_codexCompletesE2bTask() {
   assert(API_KEY !== '', 'BACKEND_API_KEY is required');
   assert(
     process.env.E2B_API_KEY !== undefined && process.env.E2B_API_KEY !== '',
     'E2B_API_KEY is required'
   );
+  await waitForFundedGptKeyRestore();
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
