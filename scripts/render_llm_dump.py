@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import html
+import importlib.util
 import json
 import os
 import re
@@ -16,7 +17,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 SCREENSHOT_KEYS = {"screenshot", "image", "png", "jpeg", "jpg"}
 DEFAULT_OUTPUT_DIR = Path(".context/rendered-llm-dumps")
 DEFAULT_ARTIFACTS_DIR = Path(os.environ.get("CURSOR_ARTIFACTS_DIR", "/opt/cursor/artifacts"))
@@ -25,7 +25,7 @@ AVAILABLE_ACTIONS_HEADING = "# Available Actions"
 NEXT_SYSTEM_HEADING_RE = re.compile(r"\n# (?!Available Actions\b)")
 ATTACHMENT_PATH_RE = re.compile(r"((?:\.context|/\S*?\.context)/attachments/[^\s`<>\]]+)")
 BROWSER_STATE_HEADING = "# Current Browser State"
-SCREENSHOT_TOOL_SECTION_RE = re.compile(r"\n?# Screenshot Tool\n.*?(?=\n# |\Z)", re.S)
+SCREENSHOT_TOOL_SECTION_RE = re.compile(r"\n?# Screenshot Tool\n.*?(?=\n# |\Z)", re.DOTALL)
 TOKEN_ENCODINGS: dict[str, Any] = {}
 
 
@@ -43,9 +43,7 @@ def looks_like_base64_image(value: Any) -> bool:
         return False
     if value.startswith("data:image/"):
         return True
-    if value.startswith(("iVBOR", "/9j/", "R0lGOD")):
-        return True
-    return False
+    return value.startswith(("iVBOR", "/9j/", "R0lGOD"))
 
 
 def image_data_uri(value: str) -> str:
@@ -123,12 +121,12 @@ def token_encoder() -> Any | None:
         if encoding_name in TOKEN_ENCODINGS:
             return TOKEN_ENCODINGS[encoding_name]
         try:
-            import tiktoken  # type: ignore[import-not-found]
+            import tiktoken
 
             encoding = tiktoken.get_encoding(encoding_name)
             TOKEN_ENCODINGS[encoding_name] = encoding
             return encoding
-        except Exception:
+        except (ImportError, OSError, ValueError):
             continue
     return None
 
@@ -247,21 +245,21 @@ def split_browser_state_text(text: str) -> tuple[str, str | None]:
 
 
 def render_browser_state_text(state_text: str) -> str:
-    page_stats_match = re.search(r"<page_stats>(.*?)</page_stats>", state_text, re.S)
+    page_stats_match = re.search(r"<page_stats>(.*?)</page_stats>", state_text, re.DOTALL)
     page_stats = page_stats_match.group(1).strip() if page_stats_match else ""
 
-    current_url_match = re.search(r"^Current URL:\s*(.*)$", state_text, re.M)
-    viewport_match = re.search(r"^Viewport:\s*(.*)$", state_text, re.M)
-    scroll_match = re.search(r"^Scroll:\s*(.*)$", state_text, re.M)
+    current_url_match = re.search(r"^Current URL:\s*(.*)$", state_text, re.MULTILINE)
+    viewport_match = re.search(r"^Viewport:\s*(.*)$", state_text, re.MULTILINE)
+    scroll_match = re.search(r"^Scroll:\s*(.*)$", state_text, re.MULTILINE)
 
     tabs = ""
-    tabs_match = re.search(r"^Open Tabs:\n(.*?)(?=^Interactive elements:)", state_text, re.S | re.M)
+    tabs_match = re.search(r"^Open Tabs:\n(.*?)(?=^Interactive elements:)", state_text, re.DOTALL | re.MULTILINE)
     if tabs_match:
         tabs = tabs_match.group(1).strip()
 
     dom_tree = ""
     previous_actions = ""
-    dom_match = re.search(r"^Interactive elements:\n(.*)$", state_text, re.S | re.M)
+    dom_match = re.search(r"^Interactive elements:\n(.*)$", state_text, re.DOTALL | re.MULTILINE)
     if dom_match:
         dom_and_actions = dom_match.group(1).strip()
         previous_actions_marker = "\n\nPrevious Actions:\n"
@@ -446,7 +444,7 @@ def normalize_inline_structured_sections(text: str) -> str:
 
         try:
             parsed = json.loads(raw_value)
-        except Exception:
+        except (ValueError, RecursionError):
             if matched_marker == "Structured Response:":
                 lines.append(line)
             continue
@@ -502,7 +500,7 @@ def maybe_parse_json_string(value: Any) -> Any:
         return value
     try:
         return json.loads(stripped)
-    except Exception:
+    except (ValueError, RecursionError):
         return value
 
 
@@ -551,7 +549,7 @@ def recording_search_roots(source_path: Path | None = None) -> list[Path]:
                 candidate = parent / ".context/browser-agent-recordings"
                 if candidate.exists():
                     add(candidate)
-        except Exception:
+        except (OSError, RuntimeError):
             pass
     return roots
 
@@ -569,7 +567,7 @@ def dump_contains_browser_context(data: dict[str, Any]) -> bool:
 def score_recording_manifest(data: dict[str, Any], manifest_path: Path) -> tuple[int, float]:
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return (-1, 0.0)
 
     haystack = json.dumps(data, default=str)
@@ -725,7 +723,7 @@ def load_recording_frames(
 
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception as exc:
+    except (OSError, ValueError) as exc:
         return {}, [], f"Could not read recording manifest {manifest_path}: {exc}"
 
     raw_frames = manifest.get("frames")
@@ -976,7 +974,7 @@ def parse_message_timestamp_epoch(message: dict[str, Any]) -> float | None:
     try:
         # Provider-context timestamps are UTC minute stamps in current dumps.
         return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc).timestamp()
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -987,7 +985,7 @@ def manifest_index_path(manifest_path: Path) -> Path:
 def recording_manifest_summary(manifest_path: Path) -> dict[str, Any]:
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         manifest = {}
     index_path = manifest_index_path(manifest_path)
     return {
@@ -1210,7 +1208,6 @@ def token_overview_rows(data: dict[str, Any]) -> str:
 
     input_tokens = numeric_usage_value(usage, "prompt_tokens", "input_tokens")
     output_tokens = numeric_usage_value(usage, "completion_tokens", "output_tokens")
-    total_tokens = numeric_usage_value(usage, "total_tokens") or input_tokens + output_tokens
     cache_read = numeric_usage_value(usage, "cache_read_input_tokens", "cache_read_tokens", "cached_tokens")
     cache_write = numeric_usage_value(usage, "cache_creation_input_tokens", "cache_write_tokens")
     if cache_write == 0 and usage_uses_inclusive_input_cache(data, usage):
@@ -1505,7 +1502,7 @@ def available_tool_count(data: dict[str, Any], messages: list[dict[str, Any]]) -
     system_prompt = remove_deprecated_screenshot_tool_section(system_prompt)
     _, tools_text = split_available_actions_from_system_prompt(system_prompt)
     if tools_text:
-        matches = re.findall(r"^\s*[-*]\s+`?[\w.-]+`?\s*:", tools_text, re.M)
+        matches = re.findall(r"^\s*[-*]\s+`?[\w.-]+`?\s*:", tools_text, re.MULTILINE)
         if matches:
             return len(matches)
 
@@ -1662,7 +1659,7 @@ def parse_json_maybe(value: Any) -> Any:
         return value
     try:
         return json.loads(stripped)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return value
 
 
@@ -1865,7 +1862,7 @@ def render_screenshots(data: dict[str, Any], output_path: Path) -> str:
         safe_name = slug(path.replace(".", "_").replace("[", "_").replace("]", ""))
         try:
             src = write_image_asset(output_path, f"screenshot-{index:02d}-{safe_name}", image)
-        except Exception as exc:  # pragma: no cover - defensive fallback for corrupt dumps.
+        except (OSError, ValueError) as exc:
             src = image_data_uri(image)
             path = f"{path} (could not write image file: {exc})"
         cards.append(
@@ -2514,12 +2511,22 @@ def publish_rendered_dump(html_path: Path, artifacts_dir: Path | None = None) ->
     return dest
 
 
+R2_ENV = ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_TRACE_ARCHIVE")
+
+
+def r2_unavailable_reason() -> str:
+    """Why publish_dump_https cannot upload, or "" when it can."""
+    missing = [name for name in R2_ENV if not (os.environ.get(name) or "").strip()]
+    if missing:
+        return f"set {', '.join(missing)}"
+    if importlib.util.find_spec("boto3") is None:
+        return f"boto3 is not importable from {sys.executable}; run with agents/venv/bin/python"
+    return ""
+
+
 def _r2_client():
     """Build a boto3 S3 client for Cloudflare R2, or None when unset/unavailable."""
-    account = (os.environ.get("R2_ACCOUNT_ID") or "").strip()
-    access = (os.environ.get("R2_ACCESS_KEY_ID") or "").strip()
-    secret = (os.environ.get("R2_SECRET_ACCESS_KEY") or "").strip()
-    bucket = (os.environ.get("R2_BUCKET_TRACE_ARCHIVE") or "").strip()
+    account, access, secret, bucket = ((os.environ.get(name) or "").strip() for name in R2_ENV)
     if not account or not access or not secret or not bucket:
         return None, ""
     try:
@@ -2680,7 +2687,8 @@ def main() -> int:
         print(str(published))
         print(
             "warning: no R2 HTTPS publish; /opt/cursor/artifacts paths are not clickable "
-            "for remote reviewers (vscode-remote blank). Set R2_* env to fix.",
+            "for remote reviewers (vscode-remote blank). To fix: "
+            f"{r2_unavailable_reason() or 'check the R2 upload'}.",
             file=sys.stderr,
         )
     else:
