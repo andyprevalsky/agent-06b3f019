@@ -21,7 +21,7 @@ import {
   steelCdpUrl,
   steelDebugUrl,
 } from './session';
-import { validateSessionConnection } from './sessionConnection';
+import { steelStartupProbe, validateBrowserConnection } from './sessionConnection';
 import { steelSessionTimeoutMs } from './sessionLifetime';
 import { steelCdpConnectionUrl } from './urls';
 
@@ -143,13 +143,20 @@ export interface SteelSessionReplacementDependencies {
     profileId?: string | null;
     proxySource?: string | null;
   }>;
-  validateConnection: (wsUrl: string) => Promise<boolean>;
+  /** Resolves null when the session accepts CDP, otherwise the failure reason. */
+  validateConnection: (wsUrl: string, sessionId: string) => Promise<string | null>;
   releaseSession?: (sessionId: string) => Promise<void>;
 }
 
 const defaultReplacementDependencies: SteelSessionReplacementDependencies = {
   createSession: async (input) => steel.sessions.create(input),
-  validateConnection: validateSessionConnection,
+  validateConnection: async (wsUrl, sessionId) => {
+    const validation = await validateBrowserConnection(wsUrl, {
+      startupProbe: steelStartupProbe(sessionId, (id) => steel.sessions.retrieve(id)),
+    });
+    await validation.browser?.close().catch(() => {});
+    return validation.failure;
+  },
 };
 
 export async function recreateSession(
@@ -239,8 +246,9 @@ export async function recreateSession(
       const debugUrl = steelDebugUrl(session.debugUrl);
       const wsUrl = steelCdpUrl(session.id);
 
-      if (!(await dependencies.validateConnection(wsUrl))) {
-        throw new Error(`Session validation failed on attempt ${attempt}`);
+      const validationFailure = await dependencies.validateConnection(wsUrl, session.id);
+      if (validationFailure !== null) {
+        throw new Error(`Session validation failed on attempt ${attempt}: ${validationFailure}`);
       }
 
       await navigateToSavedUrl(wsUrl, savedUrl);

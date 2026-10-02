@@ -9,7 +9,11 @@ import { logJson } from '../../utils/log';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
 import { retryWithBackoff } from '../retry';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
-import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
+import {
+  createLocalBrowserSession,
+  steelStartupProbe,
+  validateBrowserConnection,
+} from './sessionConnection';
 import { installCaptchaSolveIndicator } from '../browser/captchaSolveIndicator';
 import { persistBrowserSessionRow } from '../browser/sessionPersist';
 import { STEEL_API_BASE_URL, steelCdpUrl, steelDebugUrl } from './urls';
@@ -262,21 +266,26 @@ export async function createSessionWithContext(
       // VALIDATE: Test that the WebSocket connection actually works before
       // proceeding. The connection is kept open so injectUserData can reuse it
       // instead of paying a second 3-5s CDP handshake.
-      validationBrowser = await connectValidatedBrowser(wsUrl);
+      const validation = await validateBrowserConnection(wsUrl, {
+        startupProbe: steelStartupProbe(session.id, (id) => steel.sessions.retrieve(id)),
+      });
 
-      if (validationBrowser === null) {
+      if (validation.browser === null) {
         log.info(`  ⚠️ Session ${session.id} failed validation, releasing...`);
         try {
           await releaseSteelRemoteSession(session.id);
         } catch (releaseErr) {
           throw new SteelSessionCleanupError(session.id, releaseErr);
         }
-        lastError = new Error(`Session validation failed on attempt ${attempt}`);
+        lastError = new Error(
+          `Session validation failed on attempt ${attempt}: ${validation.failure}`
+        );
         if (attempt < MAX_SESSION_RETRIES) {
           await sleepBeforeSteelRetry(attempt);
         }
         continue; // Retry
       }
+      validationBrowser = validation.browser;
 
       // Visible live-view cue while Steel's native CAPTCHA solver runs.
       // Agent CDP attach re-installs this after the validation connection closes.
