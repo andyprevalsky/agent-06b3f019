@@ -10,9 +10,8 @@ from unittest.mock import patch
 import pytest
 
 from domains.spawn_agent.config import (
-    EXPLORE_CANCEL_GRACE,
-    LIVE_EXPLORE_PARENT_WAIT,
-    explore_parent_wait_timeout,
+    EXPLORE_DEPTH_LIMITS,
+    explore_limits_for_depth,
     resolve_explore_depth,
     resolve_explore_oai_demo,
     should_skip_oai_demo_browser_spawn,
@@ -48,19 +47,13 @@ from utils.oai_demo import (
 )
 
 
-def test_explore_parent_wait_timeout_caps_live_not_demo():
-    hour = timedelta(seconds=3600)
-    assert explore_parent_wait_timeout(hour, oai_demo=True) == hour
-    assert explore_parent_wait_timeout(hour, oai_demo=False) == LIVE_EXPLORE_PARENT_WAIT
-    assert explore_parent_wait_timeout(timedelta(seconds=120), oai_demo=False) == timedelta(seconds=120)
-
-
-def test_live_explore_parent_wait_fits_three_sequential_under_smoke_cap():
-    """parallel-tool-calls cap is 600s; 3 hung explores must leave synthesis room."""
-    worst = 3 * (LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE)
-    assert worst <= timedelta(seconds=540)
-    assert LIVE_EXPLORE_PARENT_WAIT == timedelta(seconds=150)
-    assert EXPLORE_CANCEL_GRACE == timedelta(seconds=15)
+def test_explore_depth_timeouts():
+    assert EXPLORE_DEPTH_LIMITS == {
+        "quick": (5, timedelta(seconds=600)),
+        "medium": (20, timedelta(seconds=600)),
+        "deep": (50, timedelta(seconds=1800)),
+    }
+    assert explore_limits_for_depth(None) == EXPLORE_DEPTH_LIMITS["quick"]
 
 
 def test_is_oai_demo_goal_matches_all_three_prefixes():
@@ -75,7 +68,9 @@ def test_is_oai_demo_goal_matches_all_three_prefixes():
 
 def test_is_oai_demo_mass_agent_task_reads_goal_or_fast_cache_goal():
     assert is_oai_demo_mass_agent_task(SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_cache_goal=""))
-    assert is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky"))
+    assert is_oai_demo_mass_agent_task(
+        SimpleNamespace(goal="Buy socks", fast_cache_goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky")
+    )
     assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=None))
 
 
@@ -85,9 +80,7 @@ def test_is_oai_demo_mass_agent_task_inherits_tree_root_goal():
         "deliverables for Andy Prevalsky's [REDACTED] brand task."
     )
     assert not is_oai_demo_goal(leftover)
-    assert not is_oai_demo_mass_agent_task(
-        SimpleNamespace(goal=leftover, fast_cache_goal=leftover, root_goal=None)
-    )
+    assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal=leftover, fast_cache_goal=leftover, root_goal=None))
     assert is_oai_demo_mass_agent_task(
         SimpleNamespace(
             goal=leftover,
@@ -116,7 +109,9 @@ def test_browser_timeout_and_recording_are_demo_only():
         browser_start_to_close_timeout_minutes(fast_mode=False, goal=OAI_DEMO_ROOT_GOAL_PREFIX)
         == ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
     )
-    assert skip_browser_network_recording(fast_mode=True, goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky") is True
+    assert (
+        skip_browser_network_recording(fast_mode=True, goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky") is True
+    )
     assert skip_browser_network_recording(fast_mode=True, goal="Buy socks") is False
     assert skip_browser_network_recording(fast_mode=False, goal=OAI_DEMO_ROOT_GOAL_PREFIX) is False
 
@@ -815,9 +810,7 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
 
         with patch.object(spawn_handler.workflow, "execute_activity", _durable_completed):
             recovered = await asyncio.wait_for(
-                _recover_oai_demo_for_each_timeout(
-                    demo_empty, "cid", TimeoutError("Activity task timed out")
-                ),
+                _recover_oai_demo_for_each_timeout(demo_empty, "cid", TimeoutError("Activity task timed out")),
                 timeout=1.0,
             )
         assert recovered == {"status": "completed", "summary": "from-db"}
@@ -987,9 +980,7 @@ def test_for_each_timeout_recovers_terminal_child_without_completion_signal(monk
 
     monkeypatch.setattr(handler.workflow, "execute_activity", fetch_terminal_result)
     recovered = asyncio.run(
-        handler._recover_oai_demo_for_each_timeout(
-            workflow_instance, child_id, TimeoutError("activity timed out")
-        )
+        handler._recover_oai_demo_for_each_timeout(workflow_instance, child_id, TimeoutError("activity timed out"))
     )
     assert recovered == {"status": "completed", "summary": "saved result"}
     assert child_id not in workflow_instance.pending_children

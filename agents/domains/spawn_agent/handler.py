@@ -27,7 +27,6 @@ from domains.spawn_agent.config import (
     SUB_ACTIVITY_MAX_ATTEMPTS,
     SUB_ACTIVITY_TIMEOUT,
     explore_limits_for_depth,
-    explore_parent_wait_timeout,
     is_oai_demo_mass_agent_task,
     resolve_explore_depth,
     should_skip_oai_demo_browser_spawn,
@@ -110,9 +109,7 @@ def _explore_chip_text(result: Dict[str, Any]) -> str:
     )
 
 
-def _explore_result_after_activity_failure(
-    exc: BaseException, *, user_paused: bool
-) -> tuple[Dict[str, Any], bool]:
+def _explore_result_after_activity_failure(exc: BaseException, *, user_paused: bool) -> tuple[Dict[str, Any], bool]:
     """Map an explore activity failure to (result, was_cancelled).
 
     Timeout / wait-budget cancel with heartbeat evidence FINISHES so the
@@ -128,10 +125,7 @@ def _explore_result_after_activity_failure(
     if recovered.get("tool_call_results") and _explore_chip_text(recovered):
         return {
             "status": "completed",
-            "result": recovered.get("result")
-            or recovered.get("final_response")
-            or recovered.get("summary")
-            or "",
+            "result": recovered.get("result") or recovered.get("final_response") or recovered.get("summary") or "",
             "tool_call_results": recovered.get("tool_call_results") or [],
             "accumulated_usage": recovered.get("accumulated_usage") or [],
             "llm_iteration_usage": recovered.get("llm_iteration_usage") or [],
@@ -149,6 +143,7 @@ def _explore_result_after_activity_failure(
             "llm_iteration_usage": [],
         }, False
     return {}, True
+
 
 logger = structlog.get_logger()
 
@@ -186,9 +181,7 @@ async def wait_for_fast_mode_explore_slot(
 
     if _has_slot():
         return
-    await wait_condition_or_generation_handoff(
-        _has_slot, workflow_instance, workflow_mod=workflow
-    )
+    await wait_condition_or_generation_handoff(_has_slot, workflow_instance, workflow_mod=workflow)
 
 
 def track_fast_mode_explore(
@@ -482,10 +475,7 @@ class SpawnAgentManager(ToolManager):
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="spawn_agent complete",
-                    message=(
-                        "Research already gathered; skipping nested spawn so the "
-                        "main sub-agent handles it."
-                    ),
+                message=("Research already gathered; skipping nested spawn so the main sub-agent handles it."),
                 status=MessageStatus.FINISHED,
                 metadata={"agentType": agent_type, "skippedNestedSpawn": True},
             )
@@ -499,10 +489,7 @@ class SpawnAgentManager(ToolManager):
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="spawn_agent complete",
-                message=(
-                    "Research already gathered; skipping browser spawn so the "
-                    "explore tree handles it."
-                ),
+                message=("Research already gathered; skipping browser spawn so the explore tree handles it."),
                 status=MessageStatus.FINISHED,
                 metadata={"skippedBrowserSpawn": True},
             )
@@ -562,9 +549,7 @@ class SpawnAgentManager(ToolManager):
         # reach attempt_completion (~14 turns avg; quick aborts at 5).
         depth = resolve_explore_depth(
             tool_call.get("depth"),
-            fast_mode_cache_enabled=bool(
-                getattr(workflow_instance, "fast_mode_cache_enabled", False)
-            ),
+            fast_mode_cache_enabled=bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)),
             oai_demo=oai_demo,
         )
         explore_max_iterations, explore_activity_timeout = explore_limits_for_depth(depth)
@@ -705,7 +690,9 @@ class SpawnAgentManager(ToolManager):
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
-            parent_wait = explore_parent_wait_timeout(explore_activity_timeout, oai_demo=oai_demo)
+            # Every tree waits the depth's full activity timeout (quick/medium
+            # 600s, deep 1800s); there is no shorter live cap.
+            parent_wait = explore_activity_timeout
 
             async with span(
                 "explore_activity_wait",
@@ -716,11 +703,9 @@ class SpawnAgentManager(ToolManager):
                 span_source="agents.domains.spawn_agent.handler.SpawnAgentManager._spawn_explore",
                 span_key="agents.domains.spawn_agent.handler.SpawnAgentManager._spawn_explore",
             ):
-                # Wait for activity completion or pause signal.
-                # Live trees cap the wait so a hung child cannot pin the parent
-                # past the smoke cap. Cancel + grace lets continue_as_new run
-                # without awaiting the 600s activity timeout. Demo / Fast Mode
-                # keeps the full timeout.
+                # Wait for activity completion or pause signal. If the handle is
+                # still open at the activity timeout, cancel + grace instead of
+                # awaiting it unbounded.
                 was_cancelled = False
                 try:
                     # cutover-class: activity-bound
@@ -753,10 +738,8 @@ class SpawnAgentManager(ToolManager):
                     was_cancelled = True
 
                 # Get result. Live trees never await a still-running handle
-                # unbounded — that races the 600s activity timeout against
-                # the smoke cap (53831ac9). Demo / Fast Mode July replays
-                # keep the full activity timeout and must await so
-                # capture_tool_results / wait_for see the cached result.
+                # unbounded (53831ac9). Demo / Fast Mode July replays must
+                # await so capture_tool_results / wait_for see the cached result.
                 try:
                     if activity_handle.done() or oai_demo:
                         result = await activity_handle
@@ -1148,9 +1131,7 @@ class SpawnAgentManager(ToolManager):
             except GenerationHandoffRequested:
                 raise
             except Exception as exc:
-                recovered = await _recover_oai_demo_for_each_timeout(
-                    workflow_instance, child_info.get("agent_id"), exc
-                )
+                recovered = await _recover_oai_demo_for_each_timeout(workflow_instance, child_info.get("agent_id"), exc)
                 if recovered is not None and not _oai_demo_child_result_failed(recovered):
                     logger.warning(
                         "for_each child finalize timed out; recovered completed child",

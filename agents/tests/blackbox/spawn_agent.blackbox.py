@@ -65,12 +65,14 @@ async def test_fetch_explore_tool_evidence_is_scoped_and_bounded():
     from domains.spawn_agent.repo import fetch_explore_tool_evidence
 
     source = "[web_fetch] **Result:** Source: https://www.toukei.metro.tokyo.lg.jp/ — 14,303,513"
-    setup_mock({
-        "/api/agents/parent-1/explore-tool-evidence": {
-            "status": 200,
-            "json": {"results": [source] + ["x" * 2000] * 12},
-        },
-    })
+    setup_mock(
+        {
+            "/api/agents/parent-1/explore-tool-evidence": {
+                "status": 200,
+                "json": {"results": [source] + ["x" * 2000] * 12},
+            },
+        }
+    )
     results = await fetch_explore_tool_evidence("parent-1", "owner-1", "task-1")
     assert len(results) == 8
     assert results[0] == source
@@ -101,13 +103,17 @@ def test_is_oai_demo_mass_agent_task_only_matches_catalog_task():
             self.fast_cache_goal = fast_cache_goal
 
     assert is_oai_demo_mass_agent_task(
-        _Goal("I'm building a personal brand for health, longevity, technology, founder journey [x]")  # pragma: allowlist secret
+        _Goal(
+            "I'm building a personal brand for health, longevity, technology, founder journey [x]"
+        )  # pragma: allowlist secret
     )
     assert is_oai_demo_mass_agent_task(
         _Goal("You are analyzing ONE creator. Window 2026-04-04 through 2026-07-03.")  # pragma: allowlist secret
     )
     assert is_oai_demo_mass_agent_task(
-        _Goal("You are analyzing ONE creator for Andy Prevalsky, a technology founder building a personal brand at the intersection of health, longevity, technology, and founder journey (exact angle still being refi")  # pragma: allowlist secret
+        _Goal(
+            "You are analyzing ONE creator for Andy Prevalsky, a technology founder building a personal brand at the intersection of health, longevity, technology, and founder journey (exact angle still being refi"
+        )  # pragma: allowlist secret
     )
     assert not is_oai_demo_mass_agent_task(_Goal("Find the current population of Tokyo."))
     assert not is_oai_demo_mass_agent_task(_Goal("Order me 1 rocky fish sandwich"))
@@ -973,7 +979,9 @@ async def test_handler_explore_failed_result_fast_mode_finishes():
             result={
                 "status": "error",
                 "result": "LLM call failed 3 consecutive times: Unterminated string",
-                "tool_call_results": ["[web_fetch] **Result:** Source: https://www.toukei.metro.tokyo.lg.jp/ — 14,303,513"],
+                "tool_call_results": [
+                    "[web_fetch] **Result:** Source: https://www.toukei.metro.tokyo.lg.jp/ — 14,303,513"
+                ],
                 "accumulated_usage": [],
                 "llm_iteration_usage": [],
             }
@@ -1003,23 +1011,27 @@ async def test_handler_explore_failed_result_fast_mode_without_evidence_errors()
 
     fake = _FakeSpawnWF(
         activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
-        start_activity_result=_Activity(result={
-            "status": "error",
-            "result": "LLM call failed 3 consecutive times: Unterminated string",
-            "tool_call_results": [],
-            "accumulated_usage": [],
-            "llm_iteration_usage": [],
-        }),
+        start_activity_result=_Activity(
+            result={
+                "status": "error",
+                "result": "LLM call failed 3 consecutive times: Unterminated string",
+                "tool_call_results": [],
+                "accumulated_usage": [],
+                "llm_iteration_usage": [],
+            }
+        ),
     )
     restore = _patch_spawn_workflow(fake)
     try:
         wf = _FakeWFInstance()
         wf.fast_mode_cache_enabled = True
-        events = await _collect(SpawnAgentManager()._spawn_explore(
-            workflow_instance=wf,
-            tool_call={"type": "explore", "goal": "g"},
-            tool_call_id="tc-fast-empty",
-        ))
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=wf,
+                tool_call={"type": "explore", "goal": "g"},
+                tool_call_id="tc-fast-empty",
+            )
+        )
     finally:
         restore()
     assert any(event.status == MessageStatus.ERROR for event in events)
@@ -1314,9 +1326,7 @@ async def test_handler_explore_replay_keeps_evidence_task_id():
         posted_id = events[0].metadata["taskId"]
         started_id = fake.start_activity_calls[0]["args"][4]
         recovered_id = next(
-            call["args"][2]
-            for call in fake.activity_calls
-            if call["name"] == "fetch_explore_tool_evidence"
+            call["args"][2] for call in fake.activity_calls if call["name"] == "fetch_explore_tool_evidence"
         )
         assert posted_id == started_id == recovered_id
         return posted_id
@@ -1328,14 +1338,14 @@ async def test_handler_explore_replay_keeps_evidence_task_id():
 
 
 async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
-    """Hung explore after parent wait + cancel grace ERRORS without unbounded await.
+    """Hung explore after the full activity wait + cancel grace ERRORS without unbounded await.
 
     53831ac9 cancelled at the parent-wait budget then `await activity_handle`
-    blocked until the 600s activity timeout, tying the 600s smoke cap.
+    blocked past the activity timeout.
     """
     from datetime import timedelta
 
-    from domains.spawn_agent.config import EXPLORE_CANCEL_GRACE, LIVE_EXPLORE_PARENT_WAIT
+    from domains.spawn_agent.config import EXPLORE_CANCEL_GRACE
     from domains.spawn_agent.handler import SpawnAgentManager
     from tools.base import MessageStatus
 
@@ -1362,42 +1372,79 @@ async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
     assert not any(event.status == MessageStatus.FINISHED for event in events)
     assert handle._cancelled
     assert not handle._awaited
-    assert fake.wait_condition_timeouts == [LIVE_EXPLORE_PARENT_WAIT, EXPLORE_CANCEL_GRACE]
-    assert 3 * (LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE) <= timedelta(seconds=540)
+    assert fake.wait_condition_timeouts == [timedelta(seconds=600), EXPLORE_CANCEL_GRACE]
 
 
-def test_live_explore_settles_within_worker_shutdown_grace():
-    """A rolling deploy never kills a live explore before its parent settles it.
+async def test_handler_live_explore_waits_full_depth_timeout():
+    """A live parent waits the depth's whole activity timeout, never a shorter cap.
 
-    SIGTERM stops the worker's polling and gives running activities
-    WORKER_SHUTDOWN_GRACE_PERIOD before it exits. A live parent stops waiting
-    after LIVE_EXPLORE_PARENT_WAIT and cancels with EXPLORE_CANCEL_GRACE, so
-    when both fit inside the grace every explore in flight at SIGTERM returns
-    (or is cancelled into evidence recovery) before the machine goes away.
+    quick/medium = 600s and deep = 1800s are the explore timeouts. A 150s live
+    cap (a4642904a) cut real research short to fit a smoke benchmark.
     """
+    from datetime import timedelta
+
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    expected = {
+        "quick": timedelta(seconds=600),
+        "medium": timedelta(seconds=600),
+        "deep": timedelta(seconds=1800),
+    }
+    for depth, timeout in expected.items():
+        fake = _FakeSpawnWF(
+            activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        )
+        restore = _patch_spawn_workflow(fake)
+        try:
+            await _collect(
+                SpawnAgentManager()._spawn_explore(
+                    workflow_instance=_FakeWFInstance(),
+                    tool_call={"type": "explore", "goal": "research Denver weather", "depth": depth},
+                    tool_call_id=f"tc-wait-{depth}",
+                )
+            )
+        finally:
+            restore()
+
+        explore_starts = [call for call in fake.start_activity_calls if call["name"] == "spawn_explore_agent_activity"]
+        assert len(explore_starts) == 1, fake.start_activity_calls
+        assert explore_starts[0]["kwargs"]["start_to_close_timeout"] == timeout, depth
+        assert fake.wait_condition_timeouts[0] == timeout, (
+            f"live {depth} explore parent waited {fake.wait_condition_timeouts[0]}, expected {timeout}"
+        )
+
+
+def test_explore_timeouts_drain_within_deploy_cutover():
+    """Explores in flight at deploy end before their worker is retired.
+
+    A changed agent surface keeps old-generation workers polling until the
+    cooperative drain SLO, so the longest explore plus cancel grace must fit
+    inside it. A same-surface rolling deploy gives running activities the
+    worker shutdown grace before Fly kills the machine; an explore cut there
+    fails its heartbeat and recovers its evidence like any other timeout.
+    """
+    import re
     import tomllib
     from datetime import timedelta
     from pathlib import Path
 
-    from domains.spawn_agent.config import (
-        EXPLORE_CANCEL_GRACE,
-        EXPLORE_DEPTH_LIMITS,
-        LIVE_EXPLORE_PARENT_WAIT,
-        explore_parent_wait_timeout,
-    )
+    from domains.spawn_agent.config import EXPLORE_CANCEL_GRACE, EXPLORE_DEPTH_LIMITS
     from helpers.generation_handoff import parse_shutdown_grace_seconds
 
-    fly = tomllib.loads((Path(__file__).resolve().parents[2] / "fly.toml").read_text())
+    root = Path(__file__).resolve().parents[3]
+    cutover = (root / "scripts" / "deploy-agents-cooperative-cutover.sh").read_text()
+    match = re.search(r'DRAIN_TIMEOUT_SECONDS="\$\{DRAIN_TIMEOUT_SECONDS:-(\d+)\}"', cutover)
+    assert match, "deploy-agents-cooperative-cutover.sh must default DRAIN_TIMEOUT_SECONDS"
+    drain_slo = timedelta(seconds=int(match.group(1)))
+    for depth, (_turns, activity_timeout) in EXPLORE_DEPTH_LIMITS.items():
+        assert activity_timeout + EXPLORE_CANCEL_GRACE < drain_slo, (
+            f"{depth} explore ({activity_timeout} + {EXPLORE_CANCEL_GRACE} grace) outlives the {drain_slo} cutover drain"
+        )
+
+    fly = tomllib.loads((root / "agents" / "fly.toml").read_text())
     grace = timedelta(seconds=parse_shutdown_grace_seconds(fly["env"]["WORKER_SHUTDOWN_GRACE_PERIOD"]))
     kill_timeout = timedelta(seconds=parse_shutdown_grace_seconds(fly["kill_timeout"]))
     assert grace <= kill_timeout, f"Fly kills the machine at {kill_timeout} before the {grace} worker grace"
-    for depth, (_turns, activity_timeout) in EXPLORE_DEPTH_LIMITS.items():
-        parent_wait = explore_parent_wait_timeout(activity_timeout, oai_demo=False)
-        assert parent_wait + EXPLORE_CANCEL_GRACE < grace, (
-            f"live {depth} explore can outlive the {grace} shutdown grace "
-            f"(parent wait {parent_wait} + cancel grace {EXPLORE_CANCEL_GRACE})"
-        )
-    assert LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE < grace
 
 
 async def test_handler_explore_empty_recovery_stays_error_in_fast_mode():
@@ -1418,11 +1465,13 @@ async def test_handler_explore_empty_recovery_stays_error_in_fast_mode():
     try:
         wf = _FakeWFInstance()
         wf.fast_mode_cache_enabled = True
-        events = await _collect(SpawnAgentManager()._spawn_explore(
-            workflow_instance=wf,
-            tool_call={"type": "explore", "goal": "research Denver weather"},
-            tool_call_id="tc-fast-mode-empty",
-        ))
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=wf,
+                tool_call={"type": "explore", "goal": "research Denver weather"},
+                tool_call_id="tc-fast-mode-empty",
+            )
+        )
     finally:
         restore()
     assert any(event.status == MessageStatus.ERROR and "no tool evidence" in event.message.lower() for event in events)
@@ -3027,29 +3076,40 @@ def test_compile_explore_wrap_up_renders_late_verified_evidence():
     """A large escaped search result must not hide a later sourced fetch."""
     from domains.spawn_agent.service import compile_explore_wrap_up
 
-    stale_search = json.dumps({
-        "answer": "**住民基本台帳による世帯と人口：毎月**\nJuly 2026: 14,301,986\n" + "古い資料\n" * 900,
-        "sources": ["https://www.toukei.metro.tokyo.lg.jp/juukim/jm-index.htm"],
-    })
-    failed_fetch = json.dumps({
-        "content": "The URL https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js269f0000.pdf returned a Page not found / 404 error page.",
-        "url": "https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js269f0000.pdf",
-    })
-    current_fetch = json.dumps({
-        "content": "Source: https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf — 東京都の人口（推計）令和8年8月1日現在. 人口総数: 14,303,513人.",
-        "url": "https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf",
-    })
-    valid_404_discussion = json.dumps({
-        "content": "This valid page discusses 404 responses in its documentation.",
-        "url": "https://example.com/http-status-guide",
-    })
-    result = compile_explore_wrap_up("", [
-        f"[web_search] {stale_search}",
-        f"[web_search] {stale_search}",
-        f"[web_fetch] {failed_fetch}",
-        f"[web_fetch] {valid_404_discussion}",
-        f"[web_fetch] {current_fetch}",
-    ])
+    stale_search = json.dumps(
+        {
+            "answer": "**住民基本台帳による世帯と人口：毎月**\nJuly 2026: 14,301,986\n" + "古い資料\n" * 900,
+            "sources": ["https://www.toukei.metro.tokyo.lg.jp/juukim/jm-index.htm"],
+        }
+    )
+    failed_fetch = json.dumps(
+        {
+            "content": "The URL https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js269f0000.pdf returned a Page not found / 404 error page.",
+            "url": "https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js269f0000.pdf",
+        }
+    )
+    current_fetch = json.dumps(
+        {
+            "content": "Source: https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf — 東京都の人口（推計）令和8年8月1日現在. 人口総数: 14,303,513人.",
+            "url": "https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf",
+        }
+    )
+    valid_404_discussion = json.dumps(
+        {
+            "content": "This valid page discusses 404 responses in its documentation.",
+            "url": "https://example.com/http-status-guide",
+        }
+    )
+    result = compile_explore_wrap_up(
+        "",
+        [
+            f"[web_search] {stale_search}",
+            f"[web_search] {stale_search}",
+            f"[web_fetch] {failed_fetch}",
+            f"[web_fetch] {valid_404_discussion}",
+            f"[web_fetch] {current_fetch}",
+        ],
+    )
     assert len(result) <= 12_000
     assert "14,303,513" in result
     assert "js268f0000.pdf" in result
@@ -3066,26 +3126,36 @@ async def test_explore_web_tool_messages_are_readable_and_skip_failed_fetch():
 
     stale_answer = "**住民基本台帳による世帯と人口：毎月**\nJuly: 14,301,986\n" + "古い資料\n" * 2000
     search = MagicMock()
-    search.execute_tool = AsyncMock(return_value={
-        "result": {
-            "answer": stale_answer,
-            "sources": ["https://www.toukei.metro.tokyo.lg.jp/juukim/jm-index.htm"],
-            "query": "Tokyo population",
-        },
-        "usage": {"llm": [], "service": []},
-    })
+    search.execute_tool = AsyncMock(
+        return_value={
+            "result": {
+                "answer": stale_answer,
+                "sources": ["https://www.toukei.metro.tokyo.lg.jp/juukim/jm-index.htm"],
+                "query": "Tokyo population",
+            },
+            "usage": {"llm": [], "service": []},
+        }
+    )
     fetch = MagicMock()
-    fetch.execute_tool = AsyncMock(side_effect=[
-        {"result": {
-            "content": "The URL https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js269f0000.pdf returned a Page not found / 404 error page.",
-            "url": "https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js269f0000.pdf",
-            "status_code": 404,
-        }, "usage": {"llm": [], "service": []}},
-        {"result": {
-            "content": "Source: https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf — 東京都の人口（推計）令和8年8月1日現在. 人口総数: 14,303,513人.",
-            "url": "https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf",
-        }, "usage": {"llm": [], "service": []}},
-    ])
+    fetch.execute_tool = AsyncMock(
+        side_effect=[
+            {
+                "result": {
+                    "content": "The URL https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js269f0000.pdf returned a Page not found / 404 error page.",
+                    "url": "https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js269f0000.pdf",
+                    "status_code": 404,
+                },
+                "usage": {"llm": [], "service": []},
+            },
+            {
+                "result": {
+                    "content": "Source: https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf — 東京都の人口（推計）令和8年8月1日現在. 人口総数: 14,303,513人.",
+                    "url": "https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf",
+                },
+                "usage": {"llm": [], "service": []},
+            },
+        ]
+    )
     model_messages = []
 
     async def fake_run_agent(**kwargs):
@@ -3099,7 +3169,10 @@ async def test_explore_web_tool_messages_are_readable_and_skip_failed_fetch():
     with (
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
-        patch("providers.fast_cache.client.resolve_agent_fast_mode", new=AsyncMock(return_value=(False, "g", True, None, None, True))),
+        patch(
+            "providers.fast_cache.client.resolve_agent_fast_mode",
+            new=AsyncMock(return_value=(False, "g", True, None, None, True)),
+        ),
         patch("tools.web_search.WebSearchManager", return_value=search),
         patch("tools.web_fetch.WebFetchManager", return_value=fetch),
     ):
@@ -3205,8 +3278,7 @@ async def test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_ev
         return {
             "status": "completed",
             "final_response": (
-                "Fast Mode cache trajectory ended for this explore goal. "
-                "Returning with evidence gathered so far."
+                "Fast Mode cache trajectory ended for this explore goal. Returning with evidence gathered so far."
             ),
         }
 
@@ -3299,9 +3371,7 @@ async def test_spawn_explore_agent_activity_rejects_completion_until_evidence_su
 
     async def fake_run_agent(**kwargs):
         execute_tool = kwargs["execute_tool"]
-        completion_results.append(
-            await execute_tool("attempt_completion_with_result", {"result": "early"}, "tc1")
-        )
+        completion_results.append(await execute_tool("attempt_completion_with_result", {"result": "early"}, "tc1"))
         await execute_tool("web_search", {"query": "research X"}, "tc2")
         completion_results.append(await execute_tool("attempt_completion_with_result", {"result": "done"}, "tc3"))
         return {
@@ -3334,12 +3404,8 @@ async def test_spawn_explore_agent_activity_accepts_second_no_evidence_completio
 
     async def fake_run_agent(**kwargs):
         execute_tool = kwargs["execute_tool"]
-        completion_results.append(
-            await execute_tool("attempt_completion_with_result", {"result": "early"}, "tc1")
-        )
-        completion_results.append(
-            await execute_tool("attempt_completion_with_result", {"result": "again"}, "tc2")
-        )
+        completion_results.append(await execute_tool("attempt_completion_with_result", {"result": "early"}, "tc1"))
+        completion_results.append(await execute_tool("attempt_completion_with_result", {"result": "again"}, "tc2"))
         return {
             "status": "completed",
             "final_response": "ended without evidence",
@@ -3468,12 +3534,8 @@ async def test_spawn_explore_agent_activity_keeps_rejecting_no_evidence_outside_
 
     async def fake_run_agent(**kwargs):
         execute_tool = kwargs["execute_tool"]
-        completion_results.append(
-            await execute_tool("attempt_completion_with_result", {"result": "early"}, "tc1")
-        )
-        completion_results.append(
-            await execute_tool("attempt_completion_with_result", {"result": "again"}, "tc2")
-        )
+        completion_results.append(await execute_tool("attempt_completion_with_result", {"result": "early"}, "tc1"))
+        completion_results.append(await execute_tool("attempt_completion_with_result", {"result": "again"}, "tc2"))
         return {
             "status": "completed",
             "final_response": "ended without evidence",
@@ -3943,14 +4005,10 @@ async def test_explore_tool_error_persists_under_the_failing_tools_name():
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
     ):
-        await spawn_explore_agent_activity(
-            agent_id="agent-x", user_id="u", goal="g", model="m", task_id="task-explore"
-        )
+        await spawn_explore_agent_activity(agent_id="agent-x", user_id="u", goal="g", model="m", task_id="task-explore")
 
     posted = [
-        json.loads(c["requestBody"])
-        for c in get_captured_requests()
-        if "/api/agents/agent-x/messages" in c["url"]
+        json.loads(c["requestBody"]) for c in get_captured_requests() if "/api/agents/agent-x/messages" in c["url"]
     ]
     tool_errors = [b for b in posted if b["metadata"].get("error") is True]
     assert tool_errors, f"no error message persisted: {posted}"
@@ -4018,9 +4076,7 @@ async def test_explore_fe_posts_are_ordered_within_one_tool_call():
         patch("domains.grep.handler.GrepManager.execute_tool", new=fake_grep_execute_tool),
         patch("loop.activity_helper.call_temporal_activity_from_activity", new=slow_first_post),
     ):
-        await spawn_explore_agent_activity(
-            agent_id="agent-x", user_id="u", goal="g", model="m", task_id="task-explore"
-        )
+        await spawn_explore_agent_activity(agent_id="agent-x", user_id="u", goal="g", model="m", task_id="task-explore")
 
     chip = [d for d in delivered if d.startswith("chip-1:")]
     assert chip == ["chip-1:IN_PROGRESS", "chip-1:ERROR"], (
@@ -4456,15 +4512,11 @@ async def test_spawn_agent_wrapper_handoff_closes_finished_chip():
     assert raised is not None
     assert raised.task_queue == "navi-agent-tasks@new"
     finished = [
-        event
-        for event, _tcid, _name in wf.handled_events
-        if getattr(event, "status", None) == MessageStatus.FINISHED
+        event for event, _tcid, _name in wf.handled_events if getattr(event, "status", None) == MessageStatus.FINISHED
     ]
     assert finished
     assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
-    assert all(
-        getattr(event, "status", None) != MessageStatus.ERROR for event, _tcid, _name in wf.handled_events
-    )
+    assert all(getattr(event, "status", None) != MessageStatus.ERROR for event, _tcid, _name in wf.handled_events)
 
 
 # ── service: explore tool dispatch wraps call_temporal_activity_from_activity ──
@@ -4514,14 +4566,18 @@ async def test_tagged_execute_activity_injects_taskid_for_post_agent_message():
 async def run_all_tests():
     print("spawn-agent blackbox tests:")
     r = BlackboxResult()
-    r.record("explore_wrap_up_renders_late_verified_evidence", test_compile_explore_wrap_up_renders_late_verified_evidence)
+    r.record(
+        "explore_wrap_up_renders_late_verified_evidence", test_compile_explore_wrap_up_renders_late_verified_evidence
+    )
     await r.record_async(
         "explore_web_tool_messages_readable_skip_failed_fetch",
         test_explore_web_tool_messages_are_readable_and_skip_failed_fetch,
     )
     await r.record_async("fetch_network_metadata_happy_path", test_fetch_full_network_metadata_happy_path)
     await r.record_async("fetch_network_metadata_boundary", test_fetch_full_network_metadata_boundary)
-    await r.record_async("fetch_explore_tool_evidence_scoped_bounded", test_fetch_explore_tool_evidence_is_scoped_and_bounded)
+    await r.record_async(
+        "fetch_explore_tool_evidence_scoped_bounded", test_fetch_explore_tool_evidence_is_scoped_and_bounded
+    )
     # validation
     r.record("validate_missing_type", test_validate_spawn_missing_type)
     r.record("validate_invalid_type", test_validate_spawn_invalid_type)
@@ -4607,6 +4663,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_explore_cancel_grace_wraps_up_without_awaiting_handle",
         test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle,
+    )
+    await r.record_async(
+        "handler_live_explore_waits_full_depth_timeout",
+        test_handler_live_explore_waits_full_depth_timeout,
     )
     await r.record_async(
         "handler_explore_empty_recovery_stays_error_in_fast_mode",
@@ -4825,8 +4885,8 @@ async def run_all_tests():
         test_user_facing_explore_result_keeps_prod_summaries,
     )
     r.record(
-        "live_explore_settles_within_worker_shutdown_grace",
-        test_live_explore_settles_within_worker_shutdown_grace,
+        "explore_timeouts_drain_within_deploy_cutover",
+        test_explore_timeouts_drain_within_deploy_cutover,
     )
     teardown_mock()
     return r.all_passed
