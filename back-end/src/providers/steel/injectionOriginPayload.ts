@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { runTransactionWithRetry } from '../database';
 import { browserStateInjectionTimeoutMs } from './injectionTimeouts';
+import { createOriginPayloadWriter, type OriginPayloadContext } from './injectionOriginPage';
 import { log } from './types';
 
 export interface InitScriptContext {
@@ -135,7 +136,7 @@ function chunkScript(
 
 /** Keep blob decoding in the matching document and each CDP mutation byte-bounded. */
 export async function injectOriginPayload(
-  context: InitScriptContext,
+  context: OriginPayloadContext,
   row: OriginPayloadRef | { origin: string },
   table: OriginTable,
   apply: string,
@@ -143,6 +144,9 @@ export async function injectOriginPayload(
   targetOrigin = row.origin,
   signal?: AbortSignal
 ): Promise<void> {
+  const ownedWriter =
+    'writeOriginScript' in context ? undefined : createOriginPayloadWriter(context, signal);
+  const writer = 'writeOriginScript' in context ? context : ownedWriter!;
   const token = `rose.origin-state.${randomUUID()}`;
   let index = 0;
   const started = performance.now();
@@ -175,7 +179,7 @@ export async function injectOriginPayload(
     submittedEnvelopeBudgetBytes += wireBytes;
     pendingSince = performance.now();
     try {
-      await context.addInitScript(script);
+      await writer.writeOriginScript(targetOrigin, script);
       acknowledgedScripts++;
     } finally {
       cdpWaitMs += performance.now() - pendingSince;
@@ -224,6 +228,7 @@ export async function injectOriginPayload(
     await send(finish, finishBytes);
   } finally {
     signal?.removeEventListener('abort', onAbort);
+    await ownedWriter?.close();
     report('settled');
   }
 }

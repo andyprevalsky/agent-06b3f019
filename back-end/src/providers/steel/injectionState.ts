@@ -4,13 +4,14 @@ import {
   type InitScriptContext,
   type OriginPayloadRef,
 } from './injectionOriginPayload';
+import type { OriginPayloadContext } from './injectionOriginPage';
 
 type LocalStorageOriginState = OriginPayloadRef | { origin: string; entries: unknown };
 type IndexedDBOriginState = OriginPayloadRef | { origin: string; databases: unknown };
 type CacheStorageOriginState = OriginPayloadRef | { origin: string; caches: unknown };
 
 export async function injectLocalStorageState(
-  context: InitScriptContext,
+  context: OriginPayloadContext,
   localStorageOrigins: LocalStorageOriginState[],
   startTime: number,
   signal?: AbortSignal
@@ -39,7 +40,7 @@ export async function injectLocalStorageState(
 }
 
 export async function injectIndexedDBState(
-  context: InitScriptContext,
+  context: OriginPayloadContext,
   indexedDBOrigins: IndexedDBOriginState[],
   startTime: number,
   signal?: AbortSignal
@@ -55,42 +56,53 @@ export async function injectIndexedDBState(
       if (!matchingDatabases) return;
       async function injectDatabase(dbInfo) {
         return new Promise((resolve) => {
-          const checkRequest = indexedDB.open(dbInfo.name);
-          checkRequest.onerror = () => resolve(false);
-          checkRequest.onsuccess = (e) => {
-            const existingDb = e.target.result;
-            const request = indexedDB.open(dbInfo.name, existingDb.version + 1);
-            existingDb.close();
-            request.onerror = () => resolve(false);
-            request.onupgradeneeded = (event) => {
-              const db = event.target.result;
-              for (const store of dbInfo.objectStores) {
-                if (!db.objectStoreNames.contains(store.name)) {
-                  try { db.createObjectStore(store.name); } catch (err) {}
-                }
+          const createStores = (db) => {
+            for (const store of dbInfo.objectStores) {
+              if (!db.objectStoreNames.contains(store.name)) {
+                try { db.createObjectStore(store.name); } catch (err) {}
               }
-            };
-            request.onsuccess = (event) => {
-              const db = event.target.result;
-              for (const store of dbInfo.objectStores) {
-                if (db.objectStoreNames.contains(store.name) && store.records && store.records.length > 0) {
+            }
+          };
+          const restoreRecords = async (db) => {
+            try {
+              await Promise.all(dbInfo.objectStores.map((store) => {
+                if (!db.objectStoreNames.contains(store.name) || !store.records?.length) return;
+                return new Promise((settled) => {
                   try {
                     const tx = db.transaction(store.name, 'readwrite');
+                    tx.oncomplete = () => settled(true);
+                    tx.onabort = () => settled(false);
                     const objectStore = tx.objectStore(store.name);
                     for (const record of store.records) {
                       try { objectStore.put(record.value, record.key); } catch (err) {}
                     }
-                  } catch (err) {}
-                }
-              }
+                  } catch (err) { settled(false); }
+                });
+              }));
+            } finally {
               db.close();
               resolve(true);
-            };
+            }
+          };
+          const checkRequest = indexedDB.open(dbInfo.name);
+          checkRequest.onerror = () => resolve(false);
+          checkRequest.onupgradeneeded = (e) => createStores(e.target.result);
+          checkRequest.onsuccess = (e) => {
+            const existingDb = e.target.result;
+            if (dbInfo.objectStores.every(store => existingDb.objectStoreNames.contains(store.name))) {
+              void restoreRecords(existingDb);
+              return;
+            }
+            const request = indexedDB.open(dbInfo.name, existingDb.version + 1);
+            existingDb.close();
+            request.onerror = () => resolve(false);
+            request.onupgradeneeded = (event) => createStores(event.target.result);
+            request.onsuccess = (event) => { void restoreRecords(event.target.result); };
           };
           checkRequest.onblocked = () => resolve(false);
         });
       }
-      (async () => {
+      return (async () => {
         for (const dbInfo of matchingDatabases) {
           await injectDatabase(dbInfo);
         }
@@ -152,7 +164,7 @@ export async function injectPermissionState(
 }
 
 export async function injectCacheStorageState(
-  context: InitScriptContext,
+  context: OriginPayloadContext,
   cacheStorageOrigins: CacheStorageOriginState[],
   startTime: number,
   signal?: AbortSignal
@@ -169,7 +181,7 @@ export async function injectCacheStorageState(
       'CacheStorageOrigin',
       `
       if (!data || data.length === 0) return;
-      (async function() {
+      return (async function() {
         for (const cache of data) {
           try { await caches.open(cache.name); } catch (e) {}
         }

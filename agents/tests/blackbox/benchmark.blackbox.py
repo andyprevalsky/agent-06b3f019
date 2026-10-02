@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import contextlib
+import gzip
 import hashlib
 import json
 import pathlib
@@ -101,7 +102,9 @@ def test_every_benchmark_run_registers_in_app_hub_before_execution():
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(length) or b"{}")
+            raw = self.rfile.read(length)
+            decoded = gzip.decompress(raw) if self.headers.get("Content-Encoding") == "gzip" else raw
+            body = json.loads(decoded or b"{}")
             requests.append(("POST", self.path, body))
             payload = json.dumps({"run": {"run_id": body["run_id"]}}).encode()
             self.send_response(201)
@@ -179,7 +182,9 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(length) or b"{}")
+            raw = self.rfile.read(length)
+            decoded = gzip.decompress(raw) if self.headers.get("Content-Encoding") == "gzip" else raw
+            body = json.loads(decoded or b"{}")
             run_id = body["run_id"]
             post_attempts.append(run_id)
             visible_runs.add(run_id)
@@ -235,6 +240,139 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+def test_hub_upload_rejection_retains_safe_response_identity_without_retry():
+    """A forbidden upload stays failed while preserving upstream correlation."""
+    from benchmarks.hub_upload import HubVisibilityError, upload_run_bundle
+
+    attempts = []
+    private_marker = "private-response-canary"
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            attempts.append(self.path)
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(403)
+            self.send_header("CF-Ray", "0123456789abcdef-IAD")
+            self.send_header("CF-Mitigated", "challenge")
+            self.send_header("Rndr-Id", "12345678-abcd-4321")
+            self.send_header("X-Request-Id", private_marker)
+            self.send_header("X-Span-Id", "012345abcdef")
+            self.send_header("Content-Type", "text/html; private=" + private_marker)
+            self.send_header("Set-Cookie", private_marker)
+            self.send_header("Content-Length", str(len(private_marker)))
+            self.end_headers()
+            self.wfile.write(private_marker.encode())
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with patch.dict(
+            os.environ,
+            {
+                "BENCHMARK_HUB_UPLOAD_URL": f"http://127.0.0.1:{server.server_address[1]}",
+                "BENCHMARK_HUB_API_KEY": private_marker,
+            },
+        ):
+            try:
+                upload_run_bundle({"run_id": "safe-error-evidence", "tasks": []}, required=True)
+            except HubVisibilityError as error:
+                evidence = str(error)
+                response_closed = error.__cause__.closed
+            else:
+                raise AssertionError("forbidden upload was accepted")
+        assert attempts == ["/api/benchmarks/runs"], "403 must not retry"
+        assert private_marker not in evidence, "response body, arbitrary headers and key must stay private"
+        assert "0123456789abcdef-IAD" in evidence, "upstream request identity was discarded"
+        assert "12345678-abcd-4321" in evidence
+        assert "012345abcdef" in evidence
+        assert '"content_type": "text/html"' in evidence
+        assert '"status": 403' in evidence
+        assert '"cf_mitigated": "challenge"' in evidence
+        assert response_closed, "rejected response must close without reading its body"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+
+
+def test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry():
+    """Standard content encoding preserves every field and the owning retry budget."""
+    import urllib.request
+
+    from benchmarks.hub_upload import upload_run_bundle, upload_timeout_for_payload
+
+    calls = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            encoding = self.headers.get("Content-Encoding")
+            decoded = gzip.decompress(raw) if encoding == "gzip" else raw
+            calls.append((self.path, encoding, raw, json.loads(decoded), self.headers.get("X-API-Key")))
+            self.send_response(503 if len(calls) % 2 else 201)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self):
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with patch.dict(
+            os.environ,
+            {
+                "BENCHMARK_HUB_UPLOAD_URL": f"http://127.0.0.1:{server.server_address[1]}",
+                "BENCHMARK_HUB_API_KEY": "gzip-fixture-key",
+            },
+        ), patch("benchmarks.hub_upload.time.sleep", lambda _delay: None):
+            native_open = urllib.request.OpenerDirector.open
+            timeouts = []
+
+            def observe_open(opener, request, *, timeout):
+                if request.get_method() == "POST":
+                    timeouts.append(timeout)
+                return native_open(opener, request, timeout=timeout)
+
+            for live in (True, False):
+                message = {
+                    "role": "TOOL", "message": "escaped \\\" 🧪 " * 512,
+                    "metadata": {"nested": [True, None, {"step": 3}]},
+                }
+                bundle = {"run_id": "gzip-transport", "tasks": [{
+                    "name": "wire-fixture", "agent_id": "fixture-root", "passed": False,
+                    "logs": {"messages": [message]},
+                }]}
+                expected = {**bundle, "source": "manual-run"}
+                with patch("urllib.request.OpenerDirector.open", observe_open):
+                    assert upload_run_bundle(bundle, live=live, required=True)
+                pair = calls[-2:]
+                assert [row[0] for row in pair] == ["/api/benchmarks/runs" + ("?live=1" if live else "")] * 2
+                assert all(row[1] == "gzip" for row in pair), "Hub wire representation must use gzip"
+                assert pair[0][2] == pair[1][2], "retry must preserve deterministic compressed bytes"
+                assert all(row[3] == expected and row[4] == "gzip-fixture-key" for row in pair)
+                decoded_bytes = len(json.dumps(expected).encode())
+                assert timeouts[-2:] == [upload_timeout_for_payload(decoded_bytes)] * 2
+                assert len(pair[0][2]) < decoded_bytes
+            assert len(calls) == 4
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+        assert not thread.is_alive()
 
 
 def _load_cloudbench_result_module():
@@ -19355,6 +19493,14 @@ async def run_all_tests():
     r.record(
         "hub_registration_recovers_ambiguous_committed_post_timeout",
         test_hub_registration_recovers_ambiguous_committed_post_timeout,
+    )
+    r.record(
+        "hub_upload_rejection_retains_safe_response_identity_without_retry",
+        test_hub_upload_rejection_retains_safe_response_identity_without_retry,
+    )
+    r.record(
+        "hub_upload_gzip_preserves_live_and_final_bundles_across_retry",
+        test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry,
     )
     r.record(
         "cloudbench_rejects_stale_wrong_task",

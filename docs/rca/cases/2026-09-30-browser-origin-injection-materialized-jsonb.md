@@ -24,6 +24,7 @@ sources:
   - commit d4c3d87c05f364a5dfb5ef28a6ed8828e9e537b0
   - fleet run 20260930-205255-27412
   - fleet run 20261001-195536-10470
+  - fleet run 20261002-091933-1152
 repro: back-end/src/tests/blackbox/browser-origin-injection-memory.blackbox.ts
 status: open
 ---
@@ -213,6 +214,72 @@ this work reduction does not yet establish resolution of the 18-second cloud
 timeouts or the original live OOM. Archive searches were
 `BrowserStateInjectionTimeout 18000` (no exact hit) and
 `large origin payload injection timeouts serialization` (this open case).
+
+### October 2: bounded scripts still replayed the entire payload to every target
+
+The exact cloud diagnostic reproduced a browser-action save ReadTimeout during
+execution. Its 614-byte request first entered the pre-Express observer 5.297
+seconds after the worker began saving, 207 ms after the client timed out. The
+same backend had acknowledged 50 IndexedDB scripts containing 41,255,356 raw
+bytes. Critical CPU samples were dominated by Playwright's attached-target
+initialization and synchronous init-script WebSocket serialization/writes.
+Those samples identify the active path, not an exact attribution of every
+millisecond of the failed request. The request correlation and limits are
+recorded in the October 2 browser-action-save case. The diagnostic remained
+INFRA despite evaluation, 17 LIVE queries, durable evidence and native cleanup.
+
+The earlier memory receiver executed each script immediately and discarded it.
+It therefore missed Playwright's retained script list: every newly attached page
+or iframe receives every context init script. The script's origin condition runs
+in Chromium, after Node has serialized and transmitted the whole source. Bounded
+individual envelopes did not bound this repeated work.
+
+The permanent `browser-origin-target-replay.blackbox.ts` uses actual Chromium,
+an observed CDP WebSocket and out-of-process frames. It supplies a 2,097,172-byte
+synthetic IndexedDB value through the real storage helper. On the original
+source the final frozen test failed in 6.232 seconds because an unrelated new
+page received 2,104,969 bytes of payload scripts. The identical test passed in
+1.644 seconds after the fix: both unrelated page and iframe received zero bulk
+payload bytes, and all observed init-script traffic totaled 416 bytes. The
+fixture also reads the exact IndexedDB value from the first application script
+after injector disconnect and again after reload; it checks additive existing
+records, LocalStorage including empty/Unicode values, CacheStorage names, caller
+pages and cancellation during a pending page acquisition. The command, from
+`back-end` with the owned local database environment, is
+`node node_modules/tsx/dist/cli.mjs src/tests/blackbox/browser-origin-target-replay.blackbox.ts`.
+
+Storage restoration now reuses one lazily created, owned page across the existing
+serial preparation phase. Page-scoped routing fulfills only its exact synthetic
+navigation and aborts other requests; page-scoped service-worker bypass prevents
+an existing worker from substituting application content. Bounded evaluation
+transfers the opaque slices into the matching origin once. IndexedDB transaction
+completion or abort and CacheStorage opens settle before that page closes.
+Existing stores are restored without an unnecessary version upgrade; a required
+upgrade remains subject to the original phase deadline. No cookies, existing
+stores, caller pages or context-wide state are cleared. No origin-partition
+metadata is invented beyond the stored origin-only schema.
+
+The SQL snapshot/revision lease, Unicode assembly, cancellation fences, escaped
+packet budget and 18-second infrastructure budget remain. Permissions and
+scrollbar scripts remain small context init scripts. The existing memory and
+assembly fixtures now use the one-time evaluation seam while retaining their
+content, scope, serialization-work and 1,200 MB RSS assertions. All four owning
+backend domains passed the canonical runner in 50.533 seconds before the final
+review cleanup; final full backend validation is tracked separately. Independent
+review removed an early transaction-error settlement and a new blocked-upgrade
+early return, preserving terminal commit/abort and the existing timeout behavior.
+
+Initial fixture attempts are retained as setup failures, not causal evidence:
+the CDP relay initially used binary instead of text frames; a Mac loopback alias
+did not navigate; and CacheStorage requires a secure context. The final fixture
+uses trusted loopback for storage and locally mapped distinct test hosts for
+unrelated targets, with no external service or model calls. Private immutable
+RED/GREEN and cleanup receipts live under
+`.context/acceptance/proof110-origin-target-replay-rca/`.
+
+This proves and repairs retained-payload fanout at its owning boundary. The
+original live OOM allocation and a fresh post-repair cloud outcome are separate
+claims and remain unverified here. The ten-slice fleet gate is still required.
 
 ## Human feedback
 

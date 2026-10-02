@@ -364,7 +364,15 @@ parts arrive, and preserve the selected user/origin/revision and cancellation
 fence. `browser-origin-injection-memory` transfers a 78.6 MB synthetic origin
 through real `injectUserData` and Postgres under an unchanged 1,200 MB RSS budget;
 `browser-origin-payload` owns assembly, storage behavior, wire bounds and revision
-isolation. Both are discovered by the backend blackbox runner in `/deploy`.
+isolation. Restore these payloads through one owned synthetic-origin page reused
+within preparation, then close it after storage commits. Do not register large
+payloads with `context.addInitScript`: Playwright retains and retransmits every
+script to new pages and frames, even when its JavaScript origin guard returns.
+Keep restoration additive, bypass service workers only on the owned page, and
+intercept its navigation without visiting the real site. The real Chromium/CDP
+`browser-origin-target-replay` blackbox checks unrelated-target wire bytes,
+storage after injector disconnect, caller-page preservation and late page
+acquisition after cancellation. All three suites run in the backend `/deploy` gate.
 These causal tests do not prove that an earlier live OOM had the same allocation
 source; retain its evidence and verify fresh fleet outcomes separately.
 Bound packet-sizing work as well as transmitted bytes: do not repeatedly
@@ -683,6 +691,12 @@ deployed backend configuration and Chromium installed for the backend's declared
 Playwright version. Preserve the existing key when synchronizing env files;
 never print it. The publisher verifies the signed link in a fresh browser;
 `--run-id <UUID>` identifies an existing Hub run when `--run-json` is unavailable.
+Hub uploads use standard gzip without changing decoded transcripts or the
+original size-derived timeout. For a forbidden upload, preserve validated
+CF-Ray/Render/backend request IDs and compare retained server logs before
+changing auth or retry policy. A 403 stays terminal; never log its raw body or
+arbitrary headers. Registered benchmark blackboxes cover lossless live/final
+upload retries and safe rejection evidence. A diagnostic republish is zero credit.
 On Linux, install the host libraries with the declared backend Playwright CLI
 (`node back-end/node_modules/playwright/cli.js install-deps chromium`) as well as
 its Chromium binary. If a direct launch reports that the browser closed, inspect

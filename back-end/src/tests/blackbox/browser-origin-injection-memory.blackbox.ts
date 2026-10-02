@@ -51,26 +51,40 @@ async function child(userId: string, sessionId: string) {
   });
   // The receiver observes the wire bytes before the browser decodes them. The
   // payload is deliberately opaque to this Node process, as it is in transfer.
+  let pageUrl = 'about:blank';
+  let pageCloses = 0;
   const browser = {
     contexts: () => [
       {
         addCookies: async () => undefined,
-        addInitScript: async (script: string) => {
-          scriptCount++;
-          if (!script.includes('indexedDB')) return;
-          deliveredBytes += Buffer.byteLength(stringify({ source: script }));
-          const transferRssMb = process.resourceUsage().maxRSS / 1024;
-          console.log(JSON.stringify({ transferMemorySample: true, rssMb: transferRssMb }));
-          assert(
-            transferRssMb < MAX_RSS_MB,
-            `origin transfer exceeded ${MAX_RSS_MB}MB RSS: ${transferRssMb}`
-          );
-          assert(
-            Buffer.byteLength(script, 'utf8') <= 1024 * 1024,
-            'origin transfer sent an unbounded CDP script'
-          );
-          runInContext(script, receiver);
-        },
+        addInitScript: async () => undefined,
+        newCDPSession: async () => ({ send: async () => undefined }),
+        newPage: async () => ({
+          route: async () => undefined,
+          url: () => pageUrl,
+          goto: async (url: string) => {
+            pageUrl = url;
+          },
+          close: async () => {
+            pageCloses++;
+          },
+          evaluate: async (script: string) => {
+            scriptCount++;
+            if (!script.includes('indexedDB')) return;
+            deliveredBytes += Buffer.byteLength(stringify({ source: script }));
+            const transferRssMb = process.resourceUsage().maxRSS / 1024;
+            console.log(JSON.stringify({ transferMemorySample: true, rssMb: transferRssMb }));
+            assert(
+              transferRssMb < MAX_RSS_MB,
+              `origin transfer exceeded ${MAX_RSS_MB}MB RSS: ${transferRssMb}`
+            );
+            assert(
+              Buffer.byteLength(script, 'utf8') <= 1024 * 1024,
+              'origin transfer sent an unbounded CDP script'
+            );
+            return runInContext(script, receiver);
+          },
+        }),
       },
     ],
     close: async () => {
@@ -84,6 +98,7 @@ async function child(userId: string, sessionId: string) {
       'large origin was omitted from realm preparation'
     );
     assert(deliveredHash.length === 32, 'receiver did not observe opaque origin payload');
+    assert(pageCloses === 1, 'origin preparation did not retire its owned restore page');
     assert(
       encodedBytes <= deliveredBytes * 8,
       `origin packet sizing amplified serialization: ${encodedBytes} encoded bytes for ${deliveredBytes} delivered bytes`

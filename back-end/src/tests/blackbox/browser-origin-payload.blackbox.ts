@@ -19,7 +19,7 @@ async function collect(value: unknown) {
   const scripts: string[] = [];
   await injectOriginPayload(
     {
-      addInitScript: async (script) => {
+      writeOriginScript: async (_origin, script) => {
         scripts.push(script);
       },
     },
@@ -103,7 +103,7 @@ async function verifyAssembly() {
 async function verifyReceivers() {
   const scripts: string[] = [];
   const context = {
-    addInitScript: async (s: string) => {
+    writeOriginScript: async (_origin: string, s: string) => {
       scripts.push(s);
     },
   };
@@ -141,13 +141,20 @@ async function verifyReceivers() {
     createObjectStore: (n: string) => {
       stores.add(n);
     },
-    transaction: (name: string) => ({
-      objectStore: () => ({
-        put: (value: unknown, key: unknown) => {
-          writes.push({ name, key, value });
-        },
-      }),
-    }),
+    transaction: (name: string) => {
+      const tx: {
+        oncomplete?: () => void;
+        objectStore: () => { put: (value: unknown, key: unknown) => void };
+      } = {
+        objectStore: () => ({
+          put: (value: unknown, key: unknown) => {
+            writes.push({ name, key, value });
+          },
+        }),
+      };
+      queueMicrotask(() => tx.oncomplete?.());
+      return tx;
+    },
   };
   const indexedDB = {
     open: (_name: string, version?: number) => {
@@ -171,7 +178,7 @@ async function verifyReceivers() {
       },
     },
   });
-  for (const s of [...scripts].reverse()) runInContext(s, vm);
+  for (const s of [...scripts].reverse()) await runInContext(s, vm);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert(
     JSON.stringify([...stored]) === JSON.stringify(entries.map((e) => [e.key, e.value])),
@@ -200,7 +207,7 @@ async function verifyAbort() {
   });
   const run = injectOriginPayload(
     {
-      addInitScript: async () => {
+      writeOriginScript: async () => {
         calls++;
         await first;
       },
@@ -240,7 +247,7 @@ async function verifyDatabaseScopeAndRevision() {
     try {
       await injectOriginPayload(
         {
-          addInitScript: async (script) => {
+          writeOriginScript: async (_origin, script) => {
             scripts.push(script);
             if (++calls === 1)
               await prisma.localStorageOrigin.update({
@@ -272,7 +279,7 @@ async function verifyDatabaseScopeAndRevision() {
       try {
         await injectOriginPayload(
           {
-            addInitScript: async () => {
+            writeOriginScript: async () => {
               mutations++;
             },
           },
@@ -302,7 +309,7 @@ async function verifyDatabaseUnicodeAndAbort() {
     const scripts: string[] = [];
     await injectOriginPayload(
       {
-        addInitScript: async (s) => {
+        writeOriginScript: async (_origin, s) => {
           scripts.push(s);
         },
       },
@@ -322,7 +329,7 @@ async function verifyDatabaseUnicodeAndAbort() {
     try {
       await injectOriginPayload(
         {
-          addInitScript: async () => {
+          writeOriginScript: async () => {
             calls++;
             abort.abort();
           },

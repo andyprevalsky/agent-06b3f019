@@ -1,5 +1,6 @@
 """Tests for hub_upload — env-gated, best-effort run-bundle upload."""
 
+import gzip
 import json
 import socket
 import threading
@@ -23,14 +24,16 @@ from benchmarks.hub_upload import (
 
 def _serve(record: list):
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):  # noqa: N802
+        def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length)
+            decoded = gzip.decompress(raw) if self.headers.get("Content-Encoding") == "gzip" else raw
             record.append(
                 {
                     "path": self.path,
                     "api_key": self.headers.get("X-API-Key"),
                     "user_id": self.headers.get("X-User-Id"),
-                    "body": json.loads(self.rfile.read(length) or b"{}"),
+                    "body": json.loads(decoded or b"{}"),
                 }
             )
             payload = b'{"run": {"run_id": "x"}}'
@@ -51,7 +54,7 @@ def _serve(record: list):
 def test_upload_timeout_scales_with_payload_size():
     """Mass-agent bundles (~40MB+) must not keep a flat 30s Hub POST deadline."""
     assert upload_timeout_for_payload(0) == 30.0
-    assert upload_timeout_for_payload(1024) == 30.0
+    assert upload_timeout_for_payload(1024) == 30.0 + 1024 / (512 * 1024)
     # ~47MB mass-agent smoke bundle needs well above 30s.
     forty_seven_mb = 47 * 1024 * 1024
     timeout = upload_timeout_for_payload(forty_seven_mb)
@@ -114,9 +117,7 @@ def test_mirror_dual_writes_ephemeral_hub_to_prod(monkeypatch):
             "benchmarks.hub_upload.DEFAULT_HUB_URL",
             url,
         )
-        assert mirror_run_bundle_to_durable_hub(
-            {"run_id": "run-durable", "tasks": [{"name": "t", "agent_id": "a1"}]}
-        )
+        assert mirror_run_bundle_to_durable_hub({"run_id": "run-durable", "tasks": [{"name": "t", "agent_id": "a1"}]})
         assert len(record) == 1
         assert record[0]["body"]["run_id"] == "run-durable"
     finally:
@@ -154,7 +155,7 @@ def test_required_upload_retries_transient_disconnect(monkeypatch):
     attempts: list[int] = []
 
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):  # noqa: N802
+        def do_POST(self):
             attempts.append(1)
             length = int(self.headers.get("Content-Length") or 0)
             self.rfile.read(length)
@@ -340,9 +341,7 @@ def test_hub_upload_copied_script_works_without_sibling_logs(tmp_path):
     src = Path(__file__).resolve().parent
     (bench / "hub_upload.py").write_text((src / "hub_upload.py").read_text())
     bundle = tmp_path / "bundle.json"
-    bundle.write_text(
-        '{"run_id": "copied-only", "tasks": [{"name": "t", "logs": {"tree": {"root_agent_id": "x"}}}]}'
-    )
+    bundle.write_text('{"run_id": "copied-only", "tasks": [{"name": "t", "logs": {"tree": {"root_agent_id": "x"}}}]}')
     proc = _run_hub_upload_script(bench / "hub_upload.py", bundle, cwd=repo)
     combined = f"{proc.stdout}\n{proc.stderr}"
     assert "ModuleNotFoundError" not in combined, combined

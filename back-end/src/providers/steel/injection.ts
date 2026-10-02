@@ -9,6 +9,7 @@ import { cookieSelectionWhere } from '../browserCookies';
 import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
 import { type FingerprintData, log } from './types';
 import { steelCdpConnectionUrl } from './urls';
+import { createOriginPayloadWriter } from './injectionOriginPage';
 import {
   injectCacheStorageState,
   injectIndexedDBState,
@@ -571,6 +572,7 @@ export async function injectUserData(
     log.info(`  [4/5] Injecting browser state serially...`);
     const injectionTasks: Array<() => Promise<void>> = [];
     const injectionAbort = new AbortController();
+    const originWriter = createOriginPayloadWriter(context, injectionAbort.signal);
 
     // 2. Fingerprint: NOT injected here on purpose. CDP-level settings
     // (Network.setUserAgentOverride, addInitScript, Emulation overrides) are
@@ -590,7 +592,7 @@ export async function injectUserData(
       injectionTasks.push(async () => {
         try {
           localStorageResult = await injectLocalStorageState(
-            context,
+            originWriter,
             localStorageOrigins,
             startTime,
             injectionAbort.signal
@@ -608,7 +610,7 @@ export async function injectUserData(
       injectionTasks.push(async () => {
         try {
           indexedDBResult = await injectIndexedDBState(
-            context,
+            originWriter,
             indexedDBOrigins,
             startTime,
             injectionAbort.signal
@@ -641,7 +643,7 @@ export async function injectUserData(
       injectionTasks.push(async () => {
         try {
           cacheStorageResult = await injectCacheStorageState(
-            context,
+            originWriter,
             cacheStorageOrigins,
             startTime,
             injectionAbort.signal
@@ -679,9 +681,13 @@ export async function injectUserData(
     try {
       await withTimeout(
         (async () => {
-          for (const injectState of injectionTasks) {
-            if (injectionAborted) break;
-            await injectState();
+          try {
+            for (const injectState of injectionTasks) {
+              if (injectionAborted) break;
+              await injectState();
+            }
+          } finally {
+            await originWriter.close();
           }
         })(),
         stateTimeoutMs,

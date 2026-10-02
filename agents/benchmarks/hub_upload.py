@@ -15,14 +15,16 @@ to the required runner contract.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
-from pathlib import Path
+import re
 import sys
 import time
-from urllib.parse import quote
 import urllib.error
 import urllib.request
+from pathlib import Path
+from urllib.parse import quote
 
 # Script-mode (`python agents/benchmarks/hub_upload.py`) puts this file's
 # directory on sys.path, not `agents/`. Cloudbench copies run that way.
@@ -40,6 +42,33 @@ DURABLE_OPEN_AGENT_ORIGIN = "https://www.roselabs.ai"
 
 class HubVisibilityError(RuntimeError):
     """A benchmark could not prove its run is visible in the in-app Hub."""
+
+
+def _safe_http_error_metadata(error: urllib.error.HTTPError) -> dict:
+    """Keep upstream correlation without reading bodies or reflecting arbitrary headers."""
+    result = {"status": error.code}
+    headers = error.headers or {}
+    for name, pattern in (
+        ("CF-Ray", r"[0-9a-fA-F]{16,32}-[A-Z]{3}"),
+        ("Rndr-Id", r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"),
+        ("X-Request-Id", r"[0-9a-fA-F]{12}"),
+        ("X-Span-Id", r"[0-9a-fA-F]{12}"),
+    ):
+        value = headers.get(name, "")
+        if re.fullmatch(pattern, value):
+            result[name.lower().replace("-", "_")] = value
+    content_type = headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if content_type in {"application/json", "text/html", "text/plain", "application/octet-stream"}:
+        result["content_type"] = content_type
+    server = headers.get("Server", "").lower()
+    if server in {"cloudflare", "render", "nginx"}:
+        result["server"] = server
+    if headers.get("CF-Mitigated") == "challenge":
+        result["cf_mitigated"] = "challenge"
+    length = headers.get("Content-Length", "")
+    if re.fullmatch(r"[0-9]{1,10}", length):
+        result["content_length"] = int(length)
+    return result
 
 
 def upload_timeout_for_payload(payload_bytes: int, *, base_timeout: float = 30.0) -> float:
@@ -61,9 +90,7 @@ def hub_upload_enabled() -> bool:
 def is_ephemeral_hub_url(url: str | None) -> bool:
     """True when a Hub URL dies with the local/isolated stack that hosts it."""
     candidate = (url or "").rstrip("/")
-    return candidate.startswith("http://localhost") or candidate.startswith(
-        "http://127.0.0.1"
-    )
+    return candidate.startswith("http://localhost") or candidate.startswith("http://127.0.0.1")
 
 
 def durable_open_agent_url(agent_id: str) -> str:
@@ -102,6 +129,7 @@ def resolve_hub_upload_url(base_url: str | None = None) -> str:
 def _hub_url(*, required: bool) -> str:
     configured = (os.getenv("BENCHMARK_HUB_UPLOAD_URL") or "").rstrip("/")
     return configured or (DEFAULT_HUB_URL if required else "")
+
 
 def _auth_headers(*, required: bool) -> dict[str, str] | None:
     key = os.getenv("BENCHMARK_HUB_API_KEY") or os.getenv("BACKEND_API_KEY") or ""
@@ -239,6 +267,8 @@ def _post_run_bundle(
     body.setdefault("source", "manual-run")
     payload = json.dumps(body, default=str).encode("utf-8")
     effective_timeout = upload_timeout_for_payload(len(payload), base_timeout=timeout)
+    payload = gzip.compress(payload, mtime=0)
+    headers = {**headers, "Content-Encoding": "gzip"}
     suffix = "?live=1" if live else ""
     request = urllib.request.Request(
         f"{base.rstrip('/')}/api/benchmarks/runs{suffix}",
@@ -258,11 +288,24 @@ def _post_run_bundle(
                     print(f"📤 uploaded run bundle to {label}: {body.get('run_id')}")
                 return ok
         except Exception as exc:
-            retryable = not isinstance(exc, urllib.error.HTTPError) or exc.code in {
-                408,
-                425,
-                429,
-            } or exc.code >= 500
+            if isinstance(exc, urllib.error.HTTPError):
+                try:
+                    metadata = json.dumps(_safe_http_error_metadata(exc), sort_keys=True)
+                    failure = f"HTTP Error {exc.code}; response_metadata={metadata}"
+                finally:
+                    exc.close()
+            else:
+                failure = str(exc)
+            retryable = (
+                not isinstance(exc, urllib.error.HTTPError)
+                or exc.code
+                in {
+                    408,
+                    425,
+                    429,
+                }
+                or exc.code >= 500
+            )
             recovered_visible_run = False
             run_id = str(body.get("run_id") or "")
             if required and live and retryable and run_id:
@@ -281,13 +324,13 @@ def _post_run_bundle(
                 delay = min(2 ** (attempt - 1), 4)
                 print(
                     f"⚠️  benchmark Hub upload attempt {attempt}/{max_attempts} "
-                    f"failed transiently; retrying in {delay}s: {exc}"
+                    f"failed transiently; retrying in {delay}s: {failure}"
                 )
                 time.sleep(delay)
                 continue
             if required:
-                raise HubVisibilityError(f"benchmark Hub upload failed: {exc}") from exc
-            print(f"⚠️  hub upload failed (non-fatal): {exc}")
+                raise HubVisibilityError(f"benchmark Hub upload failed: {failure}") from exc
+            print(f"⚠️  hub upload failed (non-fatal): {failure}")
             return False
     raise AssertionError("unreachable")
 
@@ -366,9 +409,7 @@ def print_durable_agent_links(bundle: dict) -> None:
         print(f"🔗 durable FE ({name}): {durable_open_agent_url(str(agent_id))}")
         printed = True
     if printed:
-        print(
-            "   (rehydrates from the in-app Benchmark Hub after the local stack is gone)"
-        )
+        print("   (rehydrates from the in-app Benchmark Hub after the local stack is gone)")
 
 
 def verify_run_visible(run_id: str, *, timeout: float = 30.0) -> None:
@@ -391,9 +432,7 @@ def verify_run_visible(run_id: str, *, timeout: float = 30.0) -> None:
         raise HubVisibilityError(f"benchmark Hub visibility check failed: {exc}") from exc
     visible_id = ((payload.get("run") or {}).get("run_id")) if isinstance(payload, dict) else None
     if visible_id != run_id:
-        raise HubVisibilityError(
-            f"benchmark Hub returned the wrong run after registration: {visible_id!r}"
-        )
+        raise HubVisibilityError(f"benchmark Hub returned the wrong run after registration: {visible_id!r}")
     print(f"✅ in-app Benchmark Hub registration verified: run={run_id}")
 
 
