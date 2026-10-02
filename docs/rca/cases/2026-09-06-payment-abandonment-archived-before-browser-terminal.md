@@ -35,6 +35,9 @@ sources:
   - agent f2e7166d-e90f-4f25-8f07-375383eca5f4 (production 13c recurrence, 2026-10-02)
   - hub run f9f16b34-55b1-4297-8caa-38bb1d8533f9 (production)
   - PR #1381 concurrent cooperative cutover https://github.com/Rose-Ai-Labs/rose/actions/runs/36961086645
+  - PR #1392 production verification at merge 5f4054378ed49d9b88a0dbfc6c2841e598c2992c
+  - hub run 603cf495-982b-47e7-abc5-af768f83343d (production)
+  - agent f3e3ff16-5519-455a-b887-0ebee8e5cc73 (durable https://www.roselabs.ai/?agent-id=f3e3ff16-5519-455a-b887-0ebee8e5cc73)
 repro: agents/tests/blackbox/benchmark.blackbox.py payment_abandonment_seals_browser_before_hub_archive and agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py manager_cancelled_pause_is_task_complete, manager_generation_handoff_during_payment_card_approval_is_task_scoped, and the manager_*_terminal_is_task_scoped / manager_payment_gate_* exits
 status: fixed
 ---
@@ -256,10 +259,20 @@ Local repro, using the same 17 manager-exit tests against `origin/main`
 
 The handoff test drives the production branch, a payment-card approval wait that
 raises `GenerationHandoffRequested`. The exact benchmark is production-only and
-needs a concurrent cutover, so these tests are the causal proof. The post-merge
-13c production rerun is outcome evidence; production verification is pending
-until that run passes. The change is metadata-only: no new queries, rows per
-exit, or per-agent state, so its behavior at 10,000 agents is unchanged.
+needs a concurrent cutover, so these tests are the causal proof. The change is
+metadata-only: no new queries, rows per exit, or per-agent state, so its
+behavior at 10,000 agents is unchanged.
+
+Production verification passed on merge
+`5f4054378ed49d9b88a0dbfc6c2841e598c2992c` (PR #1392), after deploy-agents run
+36966171014 cut the Fly worker over. The exact
+`agent-payment-production-abandonment` gate passed 1/1 in 414 seconds as Hub run
+`603cf495-982b-47e7-abc5-af768f83343d`, agent
+`f3e3ff16-5519-455a-b887-0ebee8e5cc73`. Its 58-message durable transcript
+landed the browser terminal after the pause, and the fail-closed evidence
+publisher verified the public FE link in a fresh browser. The manifest and last
+LLM dump are archived under
+`/opt/cursor/artifacts/rca_evidence/f3e3ff16-5519-455a-b887-0ebee8e5cc73/`.
 
 Open follow-ups the adversarial review raised and this fix leaves open:
 
