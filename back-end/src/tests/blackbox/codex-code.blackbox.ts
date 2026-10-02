@@ -37,7 +37,7 @@ import {
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
 import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
-import { waitForCodexOutput } from './codex-code-websocket.support';
+import { waitForCodexOutput } from './codex-smoke-output.support';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';

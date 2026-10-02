@@ -1,6 +1,7 @@
 import { ROTATION_CAP, selectRotationStep } from '../../providers/browser/rotation';
 import { retryWithBackoff } from '../../providers/retry';
 import { chromium } from 'playwright';
+import { browserActivityBudgetMinutes } from '../../providers/steel/sessionLifetime';
 
 interface RotationResponse {
   task_id?: string;
@@ -14,7 +15,7 @@ interface RotationResponse {
   previous_provider?: string;
   recovery_action?: string;
   next_recovery?: string;
-  browser_session_metadata?: { provider?: string; steel_profile_id?: string };
+  browser_session_metadata?: { provider?: string; steel_profile_id?: string; profile_id?: string };
 }
 
 interface CrossProviderLadderOptions {
@@ -27,9 +28,11 @@ interface CrossProviderLadderOptions {
   readDifferentExitIp: (wsUrl: string, previousIp: string) => Promise<string>;
   readExitIp: (wsUrl: string) => Promise<string>;
   retrieveKernelBrowser: (sessionId: string) => Promise<{ deleted_at?: string | Date | null }>;
-  retrieveSteelBrowser: (sessionId: string) => Promise<{ status?: string }>;
+  retrieveSteelBrowser: (sessionId: string) => Promise<{ status?: string; timeout?: number }>;
   retrieveBrowserUseBrowser: (sessionId: string) => Promise<{ status?: string }>;
   browserUseAvailable: boolean;
+  /** Whether Steel can boot a session created with its default options right now. */
+  steelControlSessionBoots?: () => Promise<boolean>;
   /**
    * Every provider session this ladder allocates, appended as it is created.
    *
@@ -108,15 +111,37 @@ export function isSteelCapacityRateLimit(error: unknown): boolean {
  * Deliberately narrow so real defects still fail loudly: assertion failures,
  * wrong provider/tier/counters, leaked sessions, and Steel AUTH/QUOTA rejections
  * (401/402/403 — a credential problem to fix, no connectivity hint) do NOT match.
+ * CDP validation failures are excluded too: our own create options can stop a
+ * Steel browser from booting, so {@link shouldSkipSteelLegs} decides those
+ * against a control session.
  */
 export function isSteelProvisioningOutage(error: unknown): boolean {
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  const isRotateProxy5xx = message.includes('/rotate-proxy') && /\b5\d\d\b/.test(message);
-  const isSteelReplacementFailure = message.includes('failed to create steel replacement');
   const looksLikeConnectivity = STEEL_OUTAGE_CONNECTIVITY_HINTS.some((hint) =>
     message.includes(hint)
   );
-  return isRotateProxy5xx && isSteelReplacementFailure && looksLikeConnectivity;
+  return (
+    isSteelReplacementFailure(message) &&
+    !message.includes('session validation failed') &&
+    looksLikeConnectivity
+  );
+}
+
+function isSteelReplacementFailure(lowerCaseMessage: string): boolean {
+  return (
+    lowerCaseMessage.includes('/rotate-proxy') &&
+    /\b5\d\d\b/.test(lowerCaseMessage) &&
+    lowerCaseMessage.includes('failed to create steel replacement')
+  );
+}
+
+/**
+ * True when every replacement attempt was created by Steel but never accepted
+ * CDP (Steel's `startup_failed`, or a connect timeout before Steel ruled).
+ */
+export function isSteelSessionValidationFailure(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return isSteelReplacementFailure(message) && message.includes('session validation failed');
 }
 
 /**
@@ -131,8 +156,26 @@ export function isSteelSessionRateLimited(error: unknown): boolean {
   return isSteelCapacityRateLimit(error);
 }
 
-function shouldSkipSteelLegs(error: unknown): boolean {
-  return isSteelProvisioningOutage(error) || isSteelSessionRateLimited(error);
+/**
+ * A validation failure is a Steel outage only when Steel cannot boot even a
+ * session with its default options. If that control boots, our replacement
+ * options are what break startup and the ladder must fail.
+ */
+export async function shouldSkipSteelLegs(
+  error: unknown,
+  steelControlSessionBoots?: () => Promise<boolean>
+): Promise<boolean> {
+  if (isSteelProvisioningOutage(error) || isSteelSessionRateLimited(error)) return true;
+  if (!isSteelSessionValidationFailure(error) || steelControlSessionBoots === undefined) {
+    return false;
+  }
+  if (await steelControlSessionBoots()) {
+    console.error(
+      'Steel boots a default control session, so the replacement session options broke startup'
+    );
+    return false;
+  }
+  return true;
 }
 
 export function assertFixedRotationLadder(): void {
@@ -189,6 +232,7 @@ export async function runCrossProviderRotationLadder(
     retrieveSteelBrowser,
     retrieveBrowserUseBrowser,
     browserUseAvailable,
+    steelControlSessionBoots,
     allocatedSessionIds,
   } = options;
   const recordAllocation = (sessionId: unknown): void => {
@@ -228,7 +272,7 @@ export async function runCrossProviderRotationLadder(
   } catch (error) {
     // Retries exhausted. If Steel's infra is genuinely down or rate-limited
     // (not a rotation defect), skip the Steel legs while Kernel is healthy.
-    if (shouldSkipSteelLegs(error)) {
+    if (await shouldSkipSteelLegs(error, steelControlSessionBoots)) {
       throw new SteelProviderUnavailableError(
         `Kernel→Steel switch (call 3) could not provision a Steel session: ${
           error instanceof Error ? error.message : String(error)
@@ -271,6 +315,15 @@ export async function runCrossProviderRotationLadder(
   const evictedKernel = await retrieveKernelBrowser(currentKernelSessionId);
   assert(Boolean(evictedKernel.deleted_at), 'provider switch leaked the superseded Kernel session');
   const firstSteelIp = await readDifferentExitIp(String(switched.ws_url), mobileIp);
+  const assertSteelLifetime = async (sessionId: string): Promise<void> => {
+    const timeout = (await retrieveSteelBrowser(sessionId)).timeout;
+    const activityBudgetMs = browserActivityBudgetMinutes() * 60_000;
+    assert(
+      typeof timeout === 'number' && timeout > activityBudgetMs,
+      `Steel session lifetime ${String(timeout)}ms does not outlive the ${activityBudgetMs}ms browser activity budget; Steel releases it mid-run`
+    );
+  };
+  await assertSteelLifetime(String(switched.session_id));
 
   const assertSteelReleased = async (sessionId: string): Promise<void> => {
     const status = await retryWithBackoff(
@@ -314,7 +367,7 @@ export async function runCrossProviderRotationLadder(
         current_url: 'https://example.com/steel-rotation-check',
       });
     } catch (error) {
-      if (shouldSkipSteelLegs(error)) {
+      if (await shouldSkipSteelLegs(error, steelControlSessionBoots)) {
         throw new SteelProviderUnavailableError(
           `Steel residential rotation (call 4) could not provision a session: ${String(error)}`
         );
@@ -347,6 +400,7 @@ export async function runCrossProviderRotationLadder(
     );
     await assertSteelReleased(String(switched.session_id));
     await readDifferentExitIp(String(steelRotated.ws_url), firstSteelIp);
+    await assertSteelLifetime(String(steelRotated.session_id));
     await assertRotationExhausted();
     return { finalSessionId: String(steelRotated.session_id), firstSteelIp, browserUseIp: null };
   }

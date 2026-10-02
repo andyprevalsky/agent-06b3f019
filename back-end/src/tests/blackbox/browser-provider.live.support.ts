@@ -9,7 +9,16 @@ import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
 import { browserUseEnabled } from '../../providers/browser/config';
 import { retryWithBackoff } from '../../providers/retry';
-import { steel, steelCdpConnectionUrl } from '../../providers/steel/session';
+import {
+  releaseSteelRemoteSession,
+  steel,
+  steelCdpConnectionUrl,
+  steelCdpUrl,
+} from '../../providers/steel/session';
+import {
+  steelStartupProbe,
+  validateBrowserConnection,
+} from '../../providers/steel/sessionConnection';
 import {
   assert,
   type BrowserApiResponse,
@@ -24,6 +33,23 @@ import {
 import { assertResumeReprovisionsDeletedProxy } from './browser-provider-stale-proxy.support';
 
 const AGENT_LOCATION = { country: 'US', state: 'CA', city: 'San Francisco' } as const;
+
+/** Create, validate, and release a Steel session that uses only Steel's defaults. */
+async function steelDefaultSessionBoots(): Promise<boolean> {
+  const session = await steel.sessions.create({});
+  try {
+    const validation = await validateBrowserConnection(steelCdpUrl(session.id), {
+      startupProbe: steelStartupProbe(session.id, (id) => steel.sessions.retrieve(id)),
+    });
+    await validation.browser?.close().catch(() => {});
+    console.warn(
+      `[rotate_ip repro] Steel default control session ${session.id}: ${validation.failure ?? 'booted'}`
+    );
+    return validation.browser !== null;
+  } finally {
+    await releaseSteelRemoteSession(session.id).catch(() => {});
+  }
+}
 
 export async function runLiveProviderParity(): Promise<void> {
   const baseUrl = process.env.TEST_BASE_URL?.replace(/\/$/, '');
@@ -488,6 +514,7 @@ export async function runLiveProviderParity(): Promise<void> {
         return response.json() as Promise<{ status: string }>;
       },
       browserUseAvailable,
+      steelControlSessionBoots: steelDefaultSessionBoots,
       allocatedSessionIds,
     });
     if (crossProvider === null) return;

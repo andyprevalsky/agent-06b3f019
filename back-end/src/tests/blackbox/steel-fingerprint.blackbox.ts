@@ -227,7 +227,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
             proxySource: 'steel',
           };
         },
-        validateConnection: async () => true,
+        validateConnection: async () => null,
       }
     );
 
@@ -281,7 +281,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
             profileId: 'steel-auth-profile',
           };
         },
-        validateConnection: async () => true,
+        validateConnection: async () => null,
       }
     );
     assert(
@@ -315,7 +315,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
               profileId: 'steel-force-fresh-profile',
             };
           },
-          validateConnection: async () => true,
+          validateConnection: async () => null,
         }
       );
     } finally {
@@ -361,7 +361,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
               profileId: 'wrong-profile',
             };
           },
-          validateConnection: async () => true,
+          validateConnection: async () => null,
           releaseSession: async () => {
             mismatchReleaseCount += 1;
           },
@@ -395,7 +395,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
               profileId: null,
             };
           },
-          validateConnection: async () => false,
+          validateConnection: async () => 'Connection timeout',
           releaseSession: async () => {
             throw new Error('release unavailable after bounded retries');
           },

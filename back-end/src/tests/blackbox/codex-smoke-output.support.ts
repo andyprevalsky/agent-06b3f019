@@ -1,4 +1,3 @@
-/** Collect one Codex sandbox websocket run until its exit event or completion sentinel. */
 export async function waitForCodexOutput(
   wsUrl: string,
   timeoutMs = 240_000

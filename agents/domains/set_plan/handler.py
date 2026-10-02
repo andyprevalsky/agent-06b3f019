@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 from temporalio import workflow
 
+from domains.set_plan.config import MAX_RETRIES
 from domains.set_plan.service import (
-    MAX_RETRIES,
     build_plan_data,
     build_plan_message,
     build_planner_messages,

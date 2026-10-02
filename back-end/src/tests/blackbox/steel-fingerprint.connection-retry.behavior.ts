@@ -75,7 +75,7 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
             proxySource: 'steel',
           };
         },
-        validateConnection: async () => true,
+        validateConnection: async () => null,
       }
     );
     assert(
