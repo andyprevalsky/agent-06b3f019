@@ -271,3 +271,32 @@ and fully funded transfers pass only with the original final funding and
 release checks. This is an observability correction, not a causal fix for the
 original provider state. Independent review and final canonical coverage are
 required before reporting this candidate gate as passed.
+
+### Separate initial-wallet-read observability gap
+
+The next canonical backend run on `15fef86b` failed in 203.784 seconds:
+231/231 units and 174/175 blackboxes passed, but treasury-rails failed after
+1.119 seconds at its initial wallet read. The returned value lacked a structured
+wallet; no card was minted and the issuance observation never ran. This is a
+separate failure boundary, not evidence of another netted mint or shared-holder
+actor. Searches for the missing-wallet error and MCP structured-response behavior
+found no archived diagnosis of this exact response. The actual failed provider
+response was not retained, so its cause remains open.
+
+One authorized read-only call with the canonical environment returned the expected
+structured wallet in 0.398 seconds. No parser or retry change follows from that
+restoration alone. One unchanged owning treasury execution then passed in
+149.456 seconds: its card showed 1,300 cents transferred at issuance, closed
+unused, and passed the original full pool-funding and 1,300-cent reclaim checks.
+It skipped only the existing optional, unconfigured Brex leg; the AgentCard flow
+did not skip. All four observed native process identities retired.
+
+That replay's private response observer captured nothing: the `tsx` CLI did not
+propagate its parent-only preload to the actual test child. Do not cite it as
+raw-response evidence. A corrected private observer uses inherited `NODE_OPTIONS`,
+retains all prior options, and guards the actual treasury script. An offline
+child-process control verified one capture, zero pending/failed captures, and
+the exact original fetch Promise, without provider requests. The original
+canonical aggregate remains failed. A fresh canonical aggregate with the
+correctly bound observer is still required; neither restored execution nor
+observation wiring proves the original provider cause fixed.
