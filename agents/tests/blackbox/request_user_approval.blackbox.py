@@ -418,12 +418,11 @@ async def test_direct_approval_ignores_unscoped_trailing_messages():
     assert result["response"] == "ok"
 
 
-async def test_direct_generation_handoff_resolves_attention_request():
-    """Cooperative cutover must close the attention row, not just the chip.
+async def test_direct_generation_handoff_stashes_request_without_resolving():
+    """Cooperative cutover must keep the original attn_id, not fence the row.
 
-    Prod agent 262669d8 left four phone-call approvals with
-    userResponse=NULL after ``new code version deployed, retry this tool``.
-    SMS supervisor then approved the stale attn_id; the live wait ignored it.
+    DEPLOY_INTERRUPTED on the row is the dead-generation fence. A live
+    continue_as_new has to re-wait that same id so SMS approve still works.
     """
     from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
     from domains.request_user_approval.service import request_user_approval_direct
@@ -440,7 +439,6 @@ async def test_direct_generation_handoff_resolves_attention_request():
         activity_results={
             "create_approval_request_activity": "req-stale-prod",
             "notify_sms_event_activity": None,
-            "resolve_attention_request_activity": {"success": True, "request_id": "req-stale-prod"},
         },
     )
     restore = _patch_service_workflow(fake)
@@ -460,19 +458,111 @@ async def test_direct_generation_handoff_resolves_attention_request():
 
     assert raised is True
     resolve_calls = [c for c in fake.activity_calls if c["name"] == "resolve_attention_request_activity"]
-    assert resolve_calls, (
-        "handoff must resolve the attention request so SMS cannot approve a stale attn_id"
-    )
-    assert resolve_calls[0]["args"][0] == wf.user_id
-    assert resolve_calls[0]["args"][1] == "req-stale-prod"
-    assert resolve_calls[0]["args"][2] == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+    assert not resolve_calls, "live continue_as_new must not fence the approval row"
+    assert wf._pending_approval_resume == {"request_id": "req-stale-prod"}
     finished = [ev for ev, _, _ in wf.handled_events if ev.status == MessageStatus.FINISHED]
     assert finished
     assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
 
 
-async def test_manager_generation_handoff_resolves_attention_request():
-    """LLM-facing execute_tool handoff must close the same attention row."""
+async def test_direct_retry_after_handoff_reuses_request_and_consumes_late_signal():
+    """After continue_as_new, retry the tool against the original attn_id.
+
+    Prod agent 262669d8 created cmuq98lzx after cutover; SMS approved
+    cmuq8f9bo and the live wait ignored it. A late signal on the original
+    id must complete the resumed wait without creating a second row.
+    """
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from domains.request_user_approval.service import request_user_approval_direct
+
+    wf = _WFInstance()
+
+    async def _handoff_queue():
+        return "navi-agent-tasks-live"
+
+    wf._check_generation_handoff = _handoff_queue
+    create_ids = ["req-stale-prod", "req-new-must-not-be-created"]
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": lambda: create_ids.pop(0),
+            "notify_sms_event_activity": None,
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        try:
+            await request_user_approval_direct(
+                workflow_instance=wf,
+                question="Make a phone call to +1 (415) 800-8345?",
+                metadata={"toolApproval": True},
+            )
+        except GenerationHandoffRequested:
+            pass
+
+        # Late SMS approve of the original id, then the replacement run retries.
+        wf._check_generation_handoff = None
+        wf._signal_responses["req-stale-prod"] = "Approved. Go ahead and make the call."
+        result = await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Make a phone call to +1 (415) 800-8345? Retry after deploy.",
+            metadata={"toolApproval": True},
+        )
+    finally:
+        restore()
+
+    create_calls = [c for c in fake.activity_calls if c["name"] == "create_approval_request_activity"]
+    assert len(create_calls) == 1
+    assert result["attention_request_id"] == "req-stale-prod"
+    assert result["response"] == "Approved. Go ahead and make the call."
+    assert wf._pending_approval_resume is None
+
+
+async def test_pending_approval_request_to_resume_reads_interrupted_chip():
+    from domains.request_user_approval.service import pending_approval_request_to_resume
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+    assert (
+        pending_approval_request_to_resume(
+            [
+                {
+                    "role": "TOOL",
+                    "text": DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    "metadata": {
+                        "toolStatus": "FINISHED",
+                        "requestUserApproval": {"attentionRequestId": "cmuq8f9bo"},
+                    },
+                }
+            ]
+        )
+        == "cmuq8f9bo"
+    )
+    assert (
+        pending_approval_request_to_resume(
+            [
+                {
+                    "role": "TOOL",
+                    "text": DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    "metadata": {
+                        "toolStatus": "FINISHED",
+                        "requestUserApproval": {"attentionRequestId": "cmuq8f9bo"},
+                    },
+                },
+                {
+                    "role": "TOOL",
+                    "text": "Approval request:\ncall\n\nUser response:\nApproved",
+                    "metadata": {
+                        "toolStatus": "FINISHED",
+                        "requestUserApproval": {"attentionRequestId": "cmuq8f9bo"},
+                    },
+                },
+            ]
+        )
+        is None
+    )
+
+
+async def test_manager_generation_handoff_stashes_request_without_resolving():
+    """LLM-facing execute_tool handoff must stash the same attn_id for reuse."""
     from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
     from domains.request_user_approval.service import RequestUserApprovalManager
     from tools.base import MessageStatus
@@ -487,7 +577,6 @@ async def test_manager_generation_handoff_resolves_attention_request():
     fake = _FakeWFModule(
         activity_results={
             "create_approval_request_activity": "req-mgr-stale",
-            "resolve_attention_request_activity": {"success": True, "request_id": "req-mgr-stale"},
         },
     )
     restore = _patch_service_workflow(fake)
@@ -509,9 +598,8 @@ async def test_manager_generation_handoff_resolves_attention_request():
 
     assert raised is True
     resolve_calls = [c for c in fake.activity_calls if c["name"] == "resolve_attention_request_activity"]
-    assert resolve_calls
-    assert resolve_calls[0]["args"][1] == "req-mgr-stale"
-    assert resolve_calls[0]["args"][2] == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+    assert not resolve_calls
+    assert wf._pending_approval_resume == {"request_id": "req-mgr-stale"}
     finished = [e for e in events if e.status == MessageStatus.FINISHED]
     assert finished
     assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
@@ -778,12 +866,20 @@ async def run_all_tests():
         test_direct_approval_ignores_unscoped_trailing_messages,
     )
     await r.record_async(
-        "direct_handoff_resolves_attention",
-        test_direct_generation_handoff_resolves_attention_request,
+        "direct_handoff_stashes_request",
+        test_direct_generation_handoff_stashes_request_without_resolving,
     )
     await r.record_async(
-        "manager_handoff_resolves_attention",
-        test_manager_generation_handoff_resolves_attention_request,
+        "direct_retry_reuses_request",
+        test_direct_retry_after_handoff_reuses_request_and_consumes_late_signal,
+    )
+    await r.record_async(
+        "pending_approval_resume_scan",
+        test_pending_approval_request_to_resume_reads_interrupted_chip,
+    )
+    await r.record_async(
+        "manager_handoff_stashes_request",
+        test_manager_generation_handoff_stashes_request_without_resolving,
     )
     await r.record_async("direct_create_fail", test_direct_create_failure_propagates)
     await r.record_async("direct_sms_notify", test_direct_sms_source_attempts_sms_notify)

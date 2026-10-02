@@ -28,38 +28,92 @@ from .config import (
     SMS_NOTIFY_TIMEOUT_SECONDS,
     TOOL_NAME,
 )
-from .repo import create_approval_request_activity, resolve_attention_request_activity
+from .repo import create_approval_request_activity
 from .types import ApprovalResult, UserRejectedError
 
 logger = structlog.get_logger()
 
+DEPLOY_INTERRUPTED_ERROR_CODE = "DEPLOY_INTERRUPTED"
 
-async def _close_attention_for_generation_handoff(
-    workflow_mod: Any,
-    user_id: Any,
-    request_id: str,
-) -> None:
-    """Close the attention row when an in-tool wait yields for cutover.
 
-    The chip is already FINISHED with DEPLOY_INTERRUPTED. Leaving
-    ``userResponse`` NULL keeps the request in the SMS supervisor pending
-    list, so a later approve signals the stale id and the live wait ignores it.
+def _attention_request_id_from_metadata(metadata: Dict[str, Any]) -> Optional[str]:
+    nested = metadata.get("requestUserApproval")
+    if isinstance(nested, dict):
+        request_id = nested.get("attentionRequestId")
+        if isinstance(request_id, str) and request_id:
+            return request_id
+    request_id = metadata.get("attentionRequestId")
+    if isinstance(request_id, str) and request_id:
+        return request_id
+    return None
+
+
+def pending_approval_request_to_resume(messages: list[Dict[str, Any]]) -> Optional[str]:
+    """Return the attn_id of an approval wait that must be re-armed after cutover.
+
+    ``wait_for`` already resumes its original target across continue_as_new.
+    Approval waits did not: the replacement run created a new row, SMS approved
+    the original attn_id, and the live wait (keyed on the new id) ignored it.
     """
-    if not request_id:
-        return
-    try:
-        await workflow_mod.execute_activity(
-            resolve_attention_request_activity,
-            args=[str(user_id or ""), str(request_id), DEPLOY_INTERRUPTED_TOOL_MESSAGE],
-            start_to_close_timeout=timedelta(seconds=CREATE_REQUEST_TIMEOUT_SECONDS),
-            retry_policy=RetryPolicy(maximum_attempts=CREATE_REQUEST_MAX_ATTEMPTS),
-        )
-    except Exception as exc:
-        logger.warning(
-            "Failed to close attention request on generation handoff",
-            request_id=request_id,
-            error=str(exc),
-        )
+    groups: Dict[str, Dict[str, bool]] = {}
+    order: list[str] = []
+    for msg in messages:
+        if msg.get("role") != "TOOL":
+            continue
+        metadata = msg.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        request_id = _attention_request_id_from_metadata(metadata)
+        if not request_id:
+            continue
+        group = groups.get(request_id)
+        if group is None:
+            group = {"completed": False, "interrupted": False, "in_progress": False}
+            groups[request_id] = group
+            order.append(request_id)
+
+        status = str(metadata.get("toolStatus") or "").upper()
+        error_code = metadata.get("errorCode")
+        text = str(msg.get("text") or msg.get("message") or "")
+        if error_code == DEPLOY_INTERRUPTED_ERROR_CODE or text == DEPLOY_INTERRUPTED_TOOL_MESSAGE:
+            group["interrupted"] = True
+        elif status in ("FINISHED", "SUCCESS", "COMPLETED"):
+            group["completed"] = True
+        elif status == "IN_PROGRESS":
+            group["in_progress"] = True
+
+    for request_id in reversed(order):
+        group = groups[request_id]
+        if group["completed"]:
+            return None
+        if group["interrupted"] or group["in_progress"]:
+            return request_id
+        return None
+    return None
+
+
+def _stashed_approval_request_id(workflow_instance: Any) -> Optional[str]:
+    pending = getattr(workflow_instance, "_pending_approval_resume", None)
+    if isinstance(pending, dict):
+        request_id = pending.get("request_id")
+        if isinstance(request_id, str) and request_id:
+            return request_id
+    if isinstance(pending, str) and pending:
+        return pending
+    return pending_approval_request_to_resume(getattr(workflow_instance, "context", None) or [])
+
+
+def _stash_approval_resume(workflow_instance: Any, request_id: str) -> None:
+    if request_id:
+        workflow_instance._pending_approval_resume = {"request_id": request_id}
+
+
+def _clear_approval_resume(workflow_instance: Any, request_id: str) -> None:
+    pending = getattr(workflow_instance, "_pending_approval_resume", None)
+    if isinstance(pending, dict) and pending.get("request_id") == request_id:
+        workflow_instance._pending_approval_resume = None
+    elif pending == request_id:
+        workflow_instance._pending_approval_resume = None
 
 
 def _build_approval_completion_message(question: str, response_text: str) -> str:
@@ -99,26 +153,30 @@ class RequestUserApprovalManager(ToolManager):
             )
             return
 
-        # 1. Create attention request in database
+        # 1. Create attention request in database, or reuse the in-flight
+        # row after a cooperative continue_as_new so SMS still approves
+        # the original attn_id.
         try:
             info = workflow.info()
             workflow_id = info.workflow_id
             user_id = workflow_instance.user_id
             agent_id = workflow_instance.agent_id
 
-            request_id = await workflow.execute_activity(
-                create_approval_request_activity,
-                args=[
-                    str(user_id) if user_id else "",
-                    str(agent_id) if agent_id else "",
-                    str(workflow_id) if workflow_id else "",
-                    str(question) if question else "",
-                    str(image_url) if image_url else "",
-                    metadata or None,
-                ],
-                start_to_close_timeout=timedelta(seconds=CREATE_REQUEST_TIMEOUT_SECONDS),
-                retry_policy=RetryPolicy(maximum_attempts=CREATE_REQUEST_MAX_ATTEMPTS),
-            )
+            request_id = _stashed_approval_request_id(workflow_instance)
+            if not request_id:
+                request_id = await workflow.execute_activity(
+                    create_approval_request_activity,
+                    args=[
+                        str(user_id) if user_id else "",
+                        str(agent_id) if agent_id else "",
+                        str(workflow_id) if workflow_id else "",
+                        str(question) if question else "",
+                        str(image_url) if image_url else "",
+                        metadata or None,
+                    ],
+                    start_to_close_timeout=timedelta(seconds=CREATE_REQUEST_TIMEOUT_SECONDS),
+                    retry_policy=RetryPolicy(maximum_attempts=CREATE_REQUEST_MAX_ATTEMPTS),
+                )
 
             if metadata or request_id:
                 payload = dict(metadata or {})
@@ -159,9 +217,10 @@ class RequestUserApprovalManager(ToolManager):
             )
 
             logger.info("User responded to approval request", request_id=request_id)
+            _clear_approval_resume(workflow_instance, request_id)
 
         except GenerationHandoffRequested:
-            await _close_attention_for_generation_handoff(workflow, user_id, request_id)
+            _stash_approval_resume(workflow_instance, request_id)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="🔐 Requesting user approval",
@@ -236,24 +295,31 @@ async def request_user_approval_direct(
     event_metadata = None
     metadata_payload: Optional[Dict[str, Any]] = None
 
-    # Create the approval request via activity
+    # Create the approval request via activity, or reuse the in-flight row
+    # after continue_as_new so a late SMS approve of the original attn_id
+    # still unblocks this wait.
     try:
-        request_id = await workflow.execute_activity(
-            create_approval_request_activity,
-            args=[
-                str(user_id) if user_id else "",
-                str(agent_id) if agent_id else "",
-                str(workflow_id) if workflow_id else "",
-                str(question) if question else "",
-                str(image_url) if image_url else "",
-                metadata or None,
-            ],
-            start_to_close_timeout=timedelta(seconds=CREATE_REQUEST_TIMEOUT_SECONDS),
-            retry_policy=RetryPolicy(maximum_attempts=CREATE_REQUEST_MAX_ATTEMPTS),
-        )
+        request_id = _stashed_approval_request_id(workflow_instance)
+        reused_request = bool(request_id)
+        if not request_id:
+            request_id = await workflow.execute_activity(
+                create_approval_request_activity,
+                args=[
+                    str(user_id) if user_id else "",
+                    str(agent_id) if agent_id else "",
+                    str(workflow_id) if workflow_id else "",
+                    str(question) if question else "",
+                    str(image_url) if image_url else "",
+                    metadata or None,
+                ],
+                start_to_close_timeout=timedelta(seconds=CREATE_REQUEST_TIMEOUT_SECONDS),
+                retry_policy=RetryPolicy(maximum_attempts=CREATE_REQUEST_MAX_ATTEMPTS),
+            )
 
         logger.info(
-            "Approval request created, waiting for user response",
+            "Approval request created, waiting for user response"
+            if not reused_request
+            else "Reusing in-flight approval request after generation handoff",
             request_id=request_id,
             workflow_id=workflow_id,
         )
@@ -271,33 +337,34 @@ async def request_user_approval_direct(
         # root-only (per-spawn firehose at 10k agents); a write_lock/payment
         # approval is O(approvals) and must reach the user or the child hangs
         # silently. Benchmarks are suppressed centrally on the backend
-        # (Agent.isBenchmark).
-        try:
-            from helpers.sms_activities import notify_sms_event_activity
+        # (Agent.isBenchmark). Skip on resume — the original wait already notified.
+        if not reused_request:
+            try:
+                from helpers.sms_activities import notify_sms_event_activity
 
-            notification_args = [
-                user_id,
-                "write_lock",
-                agent_id,
-                {
-                    "question": question,
-                    "attention_request_id": request_id,
-                    "workflow_id": workflow_id,
-                    "metadata": metadata or None,
-                },
-            ]
-            world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
-            if world_model_mode != "real":
-                notification_args.append(world_model_mode)
-            await workflow.execute_activity(
-                notify_sms_event_activity,
-                args=notification_args,
-                start_to_close_timeout=timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS),
-                retry_policy=RetryPolicy(maximum_attempts=SMS_NOTIFY_MAX_ATTEMPTS),
-            )
-            logger.info("Sent write_lock SMS notification", request_id=request_id, agent_id=agent_id)
-        except Exception as sms_err:
-            logger.warning(f"Failed to send write_lock SMS notification: {sms_err}")
+                notification_args = [
+                    user_id,
+                    "write_lock",
+                    agent_id,
+                    {
+                        "question": question,
+                        "attention_request_id": request_id,
+                        "workflow_id": workflow_id,
+                        "metadata": metadata or None,
+                    },
+                ]
+                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+                if world_model_mode != "real":
+                    notification_args.append(world_model_mode)
+                await workflow.execute_activity(
+                    notify_sms_event_activity,
+                    args=notification_args,
+                    start_to_close_timeout=timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS),
+                    retry_policy=RetryPolicy(maximum_attempts=SMS_NOTIFY_MAX_ATTEMPTS),
+                )
+                logger.info("Sent write_lock SMS notification", request_id=request_id, agent_id=agent_id)
+            except Exception as sms_err:
+                logger.warning(f"Failed to send write_lock SMS notification: {sms_err}")
 
     except Exception as e:
         error_event = ToolEvent(
@@ -330,7 +397,7 @@ async def request_user_approval_direct(
             workflow_mod=workflow,
         )
     except GenerationHandoffRequested:
-        await _close_attention_for_generation_handoff(workflow, user_id, request_id)
+        _stash_approval_resume(workflow_instance, request_id)
         interrupt_event = ToolEvent(
             type=EventType.POST_MESSAGE,
             title="🔐 Requesting user approval",
@@ -342,6 +409,7 @@ async def request_user_approval_direct(
         raise
 
     signal_response = workflow_instance._signal_responses.pop(request_id)
+    _clear_approval_resume(workflow_instance, request_id)
 
     if signal_response and signal_response.strip() == REJECTION_SENTINEL:
         logger.info("User rejected approval request (via signal)", request_id=request_id)

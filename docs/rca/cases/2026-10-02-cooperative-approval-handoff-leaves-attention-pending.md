@@ -6,7 +6,7 @@ surface: agents
 component: request-user-approval
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: agents/domains/request_user_approval/service.py request_user_approval_direct — GenerationHandoffRequested handler posted DEPLOY_INTERRUPTED on the chip and re-raised without resolve_attention_request_activity
+first_bad_boundary: agents/domains/request_user_approval/service.py request_user_approval_direct — GenerationHandoffRequested yields and continue_as_new, then the replacement run creates a new attn_id instead of re-waiting the original row (wait_for already resumes; approval did not)
 symptoms:
   - new code version deployed, retry this tool
   - The sms agent approved but didn’t respond to the approval request
@@ -22,7 +22,7 @@ tags:
   - deploy
 sources:
   - agent 262669d8-1d99-4fe5-991b-dda0c7c89f85
-repro: agents/tests/blackbox/request_user_approval.blackbox.py::test_direct_generation_handoff_resolves_attention_request (via python scripts/run_blackbox_tests.py request-user-approval)
+repro: agents/tests/blackbox/request_user_approval.blackbox.py::test_direct_retry_after_handoff_reuses_request_and_consumes_late_signal (via python scripts/run_blackbox_tests.py request-user-approval)
 status: fixed
 ---
 
@@ -79,45 +79,44 @@ Binary search:
 4. Live row unchanged until `01:36:36Z`, then `Approved` from the FE chip
    (no USER row — `respond()` does not create one).
 
-Step 5a: why was a stale approve possible? Because cooperative handoff does not
-write `userResponse`. Why did three more orphans appear? Because `dag_executor`
-treated generation_handoff as `success=True`. Stop at those two owned rungs.
+Step 5a: why was a stale approve possible? Because the replacement run created
+a new attn_id and waited on that key. `_signal_responses` already migrates
+across continue_as_new; the wait identity did not. `wait_for` already resumes
+its original target; approval did not. Why did three more orphans appear?
+Because `dag_executor` treated generation_handoff as `success=True`. Stop at
+migrating the wait identity; DAG dependents are an amplifier.
 
-Next-deeper class tried: route every attention-creating park through
-`closeInterruptedAttentionRequests` (the seal/fence primitive). That is
-generation-wide, skips foreign `gateWaiters`, and has no agent-facing activity
-because it is for sealed/replaced workflows. Calling it from a still-running
-continue-as-new would also close a later live wait on the same workflow id.
-Request-scoped `resolve_attention_request_activity` (existing `/respond`) is
-the coherent close for one yielded wait. The leftover Temporal signal is keyed
-by the old `request_id` and is not consumed by the already-exited wait.
+Next-deeper class tried: fence the old row with DEPLOY_INTERRUPTED so SMS
+cannot target it. That is the dead-generation closer (`commitReplyToAgent`
+treats that sentinel as `fencedApproval` and may restart). On a live
+continue_as_new it drops a real user approve. Failed to be coherent for a
+replacement that will keep running.
 
-Gate sibling (`raise_gate_direct`): same chip-without-row-close handler.
-Closing a deduped gate via `/respond` would `signalAllWaiters` and can strand
-foreign occupants (2026-08-19). Cooperative yield is not a seal — the
-replacement `continue_as_new` can join the still-pending gate. Leave gates on
-the fence/seal closer. Do not close them with `/respond`.
+Gate sibling (`raise_gate_direct`): leave on the fence/seal closer. Closing a
+deduped gate via `/respond` would `signalAllWaiters` and can strand foreign
+occupants (2026-08-19).
 
 ## Solution
 
-`request_user_approval_direct` and `RequestUserApprovalManager.execute_tool` call
-`resolve_attention_request_activity` with `DEPLOY_INTERRUPTED_TOOL_MESSAGE` before
-re-raising `GenerationHandoffRequested`. That is the existing request-scoped
-`/respond` path (writes `userResponse`, signals the old `request_id`). The chip
-and the attention row now terminate together, so SMS cannot approve a cut-over
-request. Resolve failures are logged and still yield — cutover must proceed;
-the activity already retries three times.
+Do not fence the row on cooperative yield. Stash the original `attn_id` on the
+workflow (`_pending_approval_resume`), persist it in continue_as_new
+`runtime_state` next to `_signal_responses`, and have
+`request_user_approval_direct` / `RequestUserApprovalManager` reuse that id on
+the next wait instead of POSTing a new attention row. A late SMS approve of the
+original id lands in the migrated `_signal_responses` map and unblocks the
+resumed wait. Conversation scan (`pending_approval_request_to_resume`) is the
+same fallback `wait_for` already uses when resume state is missing.
 
-`execute_dag` returns `status=generation_handoff` instead of marking the task
-COMPLETED. `AgentWorkflow` `continue_as_new`s immediately — no dependent phone
-approvals, no post-DAG verifier on a deploy interrupt.
+`execute_dag` still returns `status=generation_handoff` instead of marking the
+task COMPLETED, so dependents do not open extra pending rows. `AgentWorkflow`
+`continue_as_new`s immediately.
 
-Sibling failures prevented: any `requires_approval` tool (not just
-`call_phone_number`) that yields mid-wait; DAG dependents that would otherwise
-open more pending attn_ids.
+`DEPLOY_INTERRUPTED` on the attention row stays the dead-generation fence
+(`commitReplyToAgent` treats it as `fencedApproval` and may restart). Do not
+write it on a live replacement.
 
-10k-agent behavior: one extra resolve activity per handed-off approval (O(waits),
-not O(agents)). No new fan-in, subscriptions, or shared mutable state.
+10k-agent behavior: no extra resolve activity; one reused row per wait
+(O(waits), not O(agents)). No new fan-in, subscriptions, or shared mutable state.
 
 Local repro (identical command pre/post):
 
@@ -125,16 +124,21 @@ Local repro (identical command pre/post):
 cd agents && python scripts/run_blackbox_tests.py request-user-approval dag-executor
 ```
 
-Pre-fix: `direct_handoff_resolves_attention` and
-`execute_dag_generation_handoff_does_not_start_dependents` failed (no resolve
-call; DAG started the dependent). Post-fix: both domains PASS.
+Pre-fix: `direct_retry_reuses_request` created a second attn_id and ignored
+the late signal on the original id. Post-fix: retry reuses `req-stale-prod`
+and returns `Approved. Go ahead and make the call.` DAG dependents still do
+not start.
 
 ## Human feedback
 
-None recorded.
+The first proposed fix closed the handed-off row with DEPLOY_INTERRUPTED so
+SMS would stop targeting it. The user rejected that class: this is not a
+DAG-only bug, and a live continue_as_new must migrate the original approval
+request the way wait_for already resumes its target. Fencing the row is the
+dead-generation closer; using it on a replacement run drops a real approve.
 
 ## Reusable lesson
 
-When an in-tool approval wait yields for generation handoff, close the
-AgentAttentionRequest row with DEPLOY_INTERRUPTED — a FINISHED chip with a still-pending
-row is how SMS approves a stale attn_id and the live wait never moves.
+When an in-tool approval wait yields for continue_as_new, migrate the original
+attn_id onto the replacement run — creating a new row is how SMS approves a
+stale id and the live wait never moves; fencing the row is only for dead generations.

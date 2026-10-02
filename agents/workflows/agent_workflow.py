@@ -720,6 +720,9 @@ class AgentWorkflow:
         self._has_new_messages: bool = False
         self._last_signal_response: Optional[str] = None  # Stores response from receive_user_response signal
         self._signal_responses: dict = {}  # Per-request responses keyed by attention request ID
+        # In-flight approval identity that must be re-armed after continue_as_new.
+        # Creating a new attn_id on retry is how SMS approves a stale row.
+        self._pending_approval_resume: Optional[Dict[str, str]] = None
         # Free-form feedback can change the required final shape after the run
         # starts. Revisions let prompt/verifier boundaries refresh exactly once
         # per accepted batch while still catching feedback that arrives during
@@ -939,6 +942,14 @@ class AgentWorkflow:
         )
         if isinstance(runtime.get("signal_responses"), dict):
             self._signal_responses = dict(runtime["signal_responses"])
+        pending_approval = runtime.get("pending_approval_resume")
+        if isinstance(pending_approval, dict):
+            request_id = pending_approval.get("request_id")
+            self._pending_approval_resume = (
+                {"request_id": request_id} if isinstance(request_id, str) and request_id else None
+            )
+        elif isinstance(pending_approval, str) and pending_approval:
+            self._pending_approval_resume = {"request_id": pending_approval}
         if isinstance(runtime.get("response_schema_feedback"), list):
             self._response_schema_feedback = [
                 value for value in runtime["response_schema_feedback"] if isinstance(value, str)
@@ -1146,6 +1157,11 @@ class AgentWorkflow:
                 "has_new_messages": self._has_new_messages,
                 "last_signal_response": self._last_signal_response,
                 "signal_responses": dict(self._signal_responses),
+                "pending_approval_resume": (
+                    dict(self._pending_approval_resume)
+                    if isinstance(self._pending_approval_resume, dict)
+                    else None
+                ),
                 "response_schema_feedback": list(self._response_schema_feedback),
                 "response_schema_revision": self._response_schema_revision,
                 "response_schema_applied_revision": self._response_schema_applied_revision,
