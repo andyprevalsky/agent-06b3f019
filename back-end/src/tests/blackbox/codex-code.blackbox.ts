@@ -1,13 +1,10 @@
 #!/usr/bin/env tsx
 import { config } from 'dotenv';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
 import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
 import { testCodexWsServerOverlayUsesLocalSource } from './codex-code-overlay.case';
-import { testPromptBuilder_sharedContractMentionsOutputRules } from './codex-code-prompt.case';
 import {
   testResolveCodexAuthEnvs_apiKeyFallback,
   testResolveCodexAuthEnvs_cooldownExcludesFundedKey,
@@ -24,6 +21,11 @@ import {
   testCodexCreditSkip_matchesE2bTeamBlockedWording,
   testCodexCreditSkip_createUnavailableOnCooldownIsSkip,
 } from './codex-credit-skip.case';
+import {
+  testPromptBuilder_sharedContractMentionsOutputRules,
+  testRuntimeFallback_recognizesRevokedOAuthRefreshToken,
+  testTemplate_pinsCodexCliForGpt56,
+} from './codex-template-contract.case';
 import {
   CredentialExhaustionSkip,
   codexCreateUnavailableSkipReason,
@@ -199,32 +201,6 @@ async function waitForCodexOutput(
         }
       });
     }
-  );
-}
-
-async function testTemplate_pinsCodexCliForGpt56() {
-  const dockerfile = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'e2b.Dockerfile'),
-    'utf8'
-  );
-  assert(
-    dockerfile.includes('ARG CODEX_VERSION=0.144.1') &&
-      dockerfile.includes('npm install -g "@openai/codex@$CODEX_VERSION"') &&
-      !dockerfile.includes('ubuntu.mirror.constant.com'),
-    'Codex E2B template must pin the GPT-5.6-compatible Codex CLI and use reliable Ubuntu sources'
-  );
-}
-
-async function testRuntimeFallback_recognizesRevokedOAuthRefreshToken() {
-  const wsServer = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'ws-server.mjs'),
-    'utf8'
-  );
-  assert(
-    wsServer.includes('refresh_token_invalidated') &&
-      wsServer.includes('oauth_refresh_invalid') &&
-      wsServer.includes('oauthFallbackReason ??= classifyOAuthFallbackReason(message)'),
-    'Codex ws-server must classify revoked refresh tokens for funded-key fallback'
   );
 }
 
