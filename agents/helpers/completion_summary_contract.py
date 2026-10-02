@@ -11,7 +11,6 @@ import json
 import re
 from typing import Any
 
-
 _FETCH_FILTER_PROMPT = "you are filtering a fetched web page for an autonomous agent"
 _TOOL_PARAMETER_NAMES = (
     "query",

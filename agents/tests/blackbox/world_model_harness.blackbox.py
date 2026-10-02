@@ -2258,7 +2258,6 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
         patch.object(browser_handler, "save_browser_action_message", AsyncMock()),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
-        patch.object(browser_handler, "ACTION_LOOP_DELAY_SECONDS", 0),
     ):
         pending = await browser_handler._spawn_browser_agent_activity_v3_simulated(**kwargs)
         assert pending["status"] == "awaiting_payment_card_approval"
@@ -2378,7 +2377,6 @@ async def test_simulated_browser_runs_five_policy_steps_then_verified_completion
         patch.object(browser_handler, "save_browser_action_message", AsyncMock()),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
-        patch.object(browser_handler, "ACTION_LOOP_DELAY_SECONDS", 0),
     ):
         result = await browser_handler._spawn_browser_agent_activity_v3_simulated(
             user_id="user-1",
@@ -2548,7 +2546,6 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
         patch.object(browser_handler, "save_browser_action_message", saved_actions),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
-        patch.object(browser_handler, "ACTION_LOOP_DELAY_SECONDS", 0),
     ):
         result = await browser_handler._spawn_browser_agent_activity_v3_simulated(
             user_id="user-1",

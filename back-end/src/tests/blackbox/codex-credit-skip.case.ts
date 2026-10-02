@@ -1,4 +1,4 @@
-import { codexSmokeCreditSkipReason } from './codex-credit-skip';
+import { codexCreateUnavailableSkipReason, codexSmokeCreditSkipReason } from './codex-credit-skip';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`ASSERTION FAILED: ${message}`);
@@ -61,5 +61,22 @@ export function testCodexCreditSkip_matchesE2bTeamBlockedWording() {
   assert(
     codexSmokeCreditSkipReason('Expected status 200, got 403: {"error":"Forbidden"}', []) === null,
     'a generic 403 must remain a hard failure, not a funding skip'
+  );
+}
+
+export function testCodexCreditSkip_createUnavailableOnCooldownIsSkip() {
+  // Verbatim from the 2026-10-02 coverage fail: create returned this 500 body
+  // after waitForFundedGptKeyRestore exhausted, because the shared funded key
+  // was still on its leftover out-of-credits cooldown and no OAuth/pool token
+  // existed. That is every Codex path unusable — deploy-approved SKIP.
+  const createBody =
+    '{"error":"Code agent credentials are unavailable; the session could not be started"}';
+  assert(
+    codexCreateUnavailableSkipReason(createBody, true) !== null,
+    'create-time credentials-unavailable + funded-key cooldown must skip'
+  );
+  assert(
+    codexCreateUnavailableSkipReason(createBody, false) === null,
+    'create-time credentials-unavailable without cooldown must stay a hard failure'
   );
 }

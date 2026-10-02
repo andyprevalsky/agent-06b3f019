@@ -11517,6 +11517,22 @@ def _run_declared_static_check(
     benchmark_state = data.get("_benchmark", {})
     for check in evaluator.get("checks", []):
         check_type = check.get("type")
+        if check_type == "google_oauth_demo_trace":
+            from benchmarks.google_oauth_demo_check import check_google_oauth_demo_trace
+
+            ok, reason = check_google_oauth_demo_trace(data)
+            if not ok:
+                return False, reason
+            continue
+        if check_type == "fully_cached_agent":
+            usage = benchmark_state.get("usage") or {}
+            if (
+                int(usage.get("cache_read_input_tokens") or 0) <= 0
+                or int(usage.get("cache_creation_input_tokens") or 0) != 0
+                or int(usage.get("live_output_tokens") or 0) != 0
+            ):
+                return False, "Agent trajectory was not fully cached"
+            continue
         if check_type == "plan_shape":
             plan = benchmark_state.get("plan") or find_accepted_plan(data.get("messages") or [])
             assertions = {k: v for k, v in check.items() if k != "type"}
