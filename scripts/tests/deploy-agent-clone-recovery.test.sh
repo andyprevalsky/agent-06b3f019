@@ -71,6 +71,15 @@ elif args[:2] == ['machine', 'update']:
     save()
     journal.write_text(journal.read_text() + f'update {machine["id"]}\n')
 elif args[:2] == ['machines', 'start']:
+    refusals = Path(os.environ['FAKE_FLY_START_REFUSALS'])
+    remaining = int(refusals.read_text())
+    if remaining > 0:
+        refusals.write_text(str(remaining - 1))
+        journal.write_text(journal.read_text() + 'start-refused\n')
+        print(f'Error: could not start machine {args[2]}: failed to start VM {args[2]}: '
+              'failed_precondition: machine getting replaced, refusing to start '
+              '(Request ID: fake-iad)', file=sys.stderr)
+        sys.exit(1)
     machine = next(m for m in machines if m['id'] == args[2])
     machine['state'] = 'started'
     save()
@@ -83,6 +92,7 @@ seed_state() {
   local orphans="$1"
   local previous_hash="$2"
   printf '%s' "$3" > "$TMP/update-failures"
+  printf '%s' "${4:-0}" > "$TMP/start-refusals"
   python3 - "$TMP/state.json" "$orphans" "$previous_hash" <<'PY'
 import json, sys
 orphans = int(sys.argv[2])
@@ -102,6 +112,7 @@ PY
 run_cutover() {
   PATH="$TMP/bin:$PATH" FAKE_FLY_STATE="$TMP/state.json" \
     FAKE_FLY_JOURNAL="$TMP/journal" FAKE_FLY_UPDATE_FAILURES="$TMP/update-failures" \
+    FAKE_FLY_START_REFUSALS="$TMP/start-refusals" \
     FLY_API_TOKEN=fake APP=test \
     SURFACE_HASH=abc GENERATION_QUEUE=navi-agent-tasks@abc \
     BUILD_ID=build DEPLOYMENT_TOKEN=token \
@@ -111,7 +122,8 @@ run_cutover() {
 run_case() {
   local orphans="$1"
   local update_failures="${3:-0}"
-  seed_state "$orphans" "${2:-old}" "$update_failures"
+  local start_refusals="${4:-0}"
+  seed_state "$orphans" "${2:-old}" "$update_failures" "$start_refusals"
   run_cutover || { cat "$TMP/output" >&2; echo "FAIL: cutover exited non-zero" >&2; exit 1; }
   python3 - "$TMP/state.json" "$TMP/journal" "$orphans" "$update_failures" <<'PY'
 import json, sys
@@ -133,6 +145,8 @@ run_case 8 # retry adopts every clone created by a previous failed attempt
 run_case 8 abc # retry restarts machines already updated to the target hash
 run_case 0 # fresh rollout clones with --detach and configures every machine
 run_case 0 old 2 # Fly Machines API 408s on update are retried in-run, not fatal
+run_case 0 old 0 4 # starts refused while Fly is still replacing the VM are re-issued
+run_case 8 abc 0 4 # adopted clones refused at start are re-issued too
 
 seed_state 0 old 4
 if run_cutover; then
