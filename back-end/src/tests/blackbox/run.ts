@@ -217,7 +217,14 @@ function runDomain(domain: string, workerIndex: number): Promise<Result> {
     // `npx tsx` creates npm + tsx wrapper processes for every domain. Under
     // NODE_V8_COVERAGE those wrappers emit irrelevant coverage blobs that slow
     // merging without exercising product code.
-    const child = spawn(process.execPath, ['--import', 'tsx', file], {
+    // The live treasury rail uses the same sandbox cardholders as agent benchmarks.
+    // Hold their host-wide payment lock across mint, close, and recovery.
+    const paymentDomain = domain === 'treasury-rails';
+    const command = paymentDomain ? 'python3' : process.execPath;
+    const args = paymentDomain
+      ? [resolve(cwd, 'scripts/with-agentcard-lock.py'), process.execPath, '--import', 'tsx', file]
+      : ['--import', 'tsx', file];
+    const child = spawn(command, args, {
       cwd,
       env: {
         ...process.env,
