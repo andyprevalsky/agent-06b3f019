@@ -31,6 +31,7 @@ export const KNOWN_TAGS = [
   'fleet-concurrency',
   'needs-auth',
   'auth',
+  'browser-auth',
   'auth-anon',
   'auth-cookie',
   'biometrics',

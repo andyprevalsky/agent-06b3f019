@@ -289,7 +289,7 @@ export async function deleteAuthTestSite(siteId: string) {
   const site = requireSite(siteId);
   const deleted = await repo.deleteFixtureCredentials({
     userId: site.userId,
-    origin: site.entryUrl,
+    sitePath: `${AUTH_TEST_SITE_BASE_PATH}/${site.siteId}/`,
     realm: site.realm,
     siteId: site.siteId,
   });

@@ -235,12 +235,19 @@ NEW_USER_PAYMENT_JOURNEY_TASK_NAME = "agent-payment-new-user-journey"
 # Same journey on the hosted Rose Shop: a fresh account per lane, no subscription.
 ROSE_SHOP_NO_SUBSCRIPTION_TASK_NAME = "browser-auth-signup-purchase-no-subscription"
 AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
+# Hosted Rose Shop purchases settle through the same sandbox AgentCard fixture,
+# as the same seeded user. Must equal local.ROSE_SHOP_PAYMENT_TASK_NAMES.
+ROSE_SHOP_PAYMENT_TASK_NAMES = {
+    "browser-auth-guest-purchase",
+    "browser-auth-signup-purchase",
+    "browser-auth-session-expires-at-checkout",
+}
 AGENT_PAYMENT_SANDBOX_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
     "agent-payment-setup-resume",
     "agent-payment-idempotent-abandonment",
     "agent-payment-abandonment",
-}
+} | ROSE_SHOP_PAYMENT_TASK_NAMES
 AGENT_PAYMENT_BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
 AGENT_PAYMENT_FORCE_CUSTOMER_PATH_ENV = "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"
@@ -282,7 +289,7 @@ AGENT_PAYMENT_LIFECYCLE_TASK_NAMES = {
     "agent-payment-setup-resume",
     "agent-payment-idempotent-abandonment",
     "agent-payment-abandonment",
-}
+} | ROSE_SHOP_PAYMENT_TASK_NAMES
 # Production counterpart of the four sandbox tasks above, and the same hard requirement.
 # `agent-payment-production-abandonment` is /deploy Step 13c and asserts stripeHold succeeded plus
 # stripePaymentIntentCount 1; running it as the default (admin) benchmark user routes the mint to

@@ -179,7 +179,8 @@ export async function findPasskeyState(id: string | null) {
 
 export async function deleteFixtureCredentials(params: {
   userId: string;
-  origin: string;
+  /** The site's own path prefix, present in every one of its page URLs. */
+  sitePath: string;
   realm: string;
   siteId: string;
 }): Promise<{
@@ -195,9 +196,10 @@ export async function deleteFixtureCredentials(params: {
     browserProfile: params.siteId,
   };
   const [passwords, mintedAccounts, passkeys, cookies, cookieBundles] = await Promise.all([
-    // Saved logins the fixture seeded, plus any the agent saved for this site during the run.
+    // Saved logins the fixture seeded, plus any the agent saved on one of this
+    // site's pages during the run (a sign-up saves under the sign-up page's URL).
     prisma.browserPassword.deleteMany({
-      where: { userId: params.userId, origin: params.origin },
+      where: { userId: params.userId, origin: { contains: params.sitePath } },
     }),
     prisma.mintedAccount.deleteMany({
       where: { userId: params.userId, authRealm: params.realm },
