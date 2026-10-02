@@ -10,6 +10,8 @@ export {
   createHmac,
   createPrivateKey,
   createPublicKey,
+  generateKeyPairSync,
+  verify,
   timingSafeEqual,
   createCipheriv,
   createDecipheriv,

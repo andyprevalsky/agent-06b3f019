@@ -15,7 +15,15 @@ export const AUTH_TEST_SITE_NAME = 'Rose Shop';
 export const MAX_ACTIVE_SITES = 200;
 export const SITE_TTL_MS = 6 * 60 * 60 * 1000;
 export const SIGN_IN_CODE_TTL_MS = 10 * 60 * 1000;
+export const PASSKEY_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+export const SAVED_SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 export const SESSION_COOKIE_NAME = 'rose_shop_session';
+export const CART_COOKIE_NAME = 'rose_shop_cart';
 
 export const SIGN_IN_EMAIL_SENDER_LOCAL_PART = 'rose-shop';
+/** Marks every credential row the fixture seeds, so teardown removes exactly those. */
 export const SAVED_PASSWORD_BROWSER_SOURCE = 'auth-test-site';
+
+export const SHOP_TAX_RATE = 0.0825;
+export const SHOP_SHIPPING_CENTS = 499;
+export const SHOP_CURRENCY = 'USD';

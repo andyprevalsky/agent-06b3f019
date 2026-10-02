@@ -3915,3 +3915,7 @@
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 413.4, "cost_cents": 12.0, "timestamp": "2026-10-01T20:04:53.282522+00:00", "agent_id": "99c8265c-f56f-4398-84b8-c824e3724769"}
 {"task": "agent-payment-abandonment", "duration_seconds": 252.2, "cost_cents": 9.0, "timestamp": "2026-10-01T20:04:53.282522+00:00", "agent_id": "8db16d4c-24e9-4ac1-99a1-a2c01937e2d0"}
 {"task": "agent-payment-new-user-journey", "duration_seconds": 226.0, "cost_cents": 3.0, "timestamp": "2026-10-01T20:04:53.282522+00:00", "agent_id": "0c3d8e65-e2f5-49bd-b9d6-aee420f57da8"}
+{"task": "browser-auth-saved-password-retry", "duration_seconds": 281.4, "cost_cents": 6.0, "timestamp": "2026-10-02T17:31:54.117545+00:00", "agent_id": "64e148a1-b82d-401b-868b-b6adc9485538"}
+{"task": "browser-auth-saved-password-retry", "duration_seconds": 307.1, "cost_cents": 7.0, "timestamp": "2026-10-02T17:31:54.117545+00:00", "agent_id": "3bc05316-0886-4e5f-baff-51c6507ddc52"}
+{"task": "browser-auth-saved-password-retry", "duration_seconds": 338.3, "cost_cents": 8.0, "timestamp": "2026-10-02T17:31:54.117545+00:00", "agent_id": "9d903496-b481-421d-859e-30746ac5c44f"}
+{"task": "browser-auth-minted-email-otp", "duration_seconds": 227.5, "cost_cents": 5.0, "timestamp": "2026-10-02T17:39:56.523862+00:00", "agent_id": "47c51baf-da80-482a-ac36-e3cc06fcbe8d"}

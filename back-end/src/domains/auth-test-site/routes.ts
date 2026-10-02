@@ -2,7 +2,13 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
 import { authTestSiteEnabled } from './config';
-import { buildReport, createAuthTestSite, deleteAuthTestSite, isFixtureApiKey } from './service';
+import {
+  buildReport,
+  createAuthTestSite,
+  deleteAuthTestSite,
+  isFixtureApiKey,
+  markRun,
+} from './service';
 import { pagesRouter } from './routesPages';
 import { AUTH_TEST_SITE_SCENARIOS, AuthTestSiteError, type AuthTestSiteScenario } from './types';
 
@@ -84,6 +90,17 @@ router.get(
     }
   })
 );
+
+/** Marks a boundary in the site's event log, e.g. between two agent runs on one site. */
+router.post('/fixtures/:siteId/mark', requireFixtureApiKey, (req: Request, res: Response) => {
+  const label = ((req.body ?? {}) as Record<string, unknown>).label;
+  try {
+    markRun(req.params.siteId, typeof label === 'string' ? label : '');
+    res.status(201).json({ siteId: req.params.siteId });
+  } catch (error) {
+    respondError(res, error, { site_id: req.params.siteId });
+  }
+});
 
 router.delete(
   '/fixtures/:siteId',

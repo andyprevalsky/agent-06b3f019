@@ -85,6 +85,15 @@ export async function upsertAgentIdentityEmail(userId: string, email: string) {
   });
 }
 
+/**
+ * First writer wins: when two callers mint an inbox for the same user at once,
+ * both get the row that landed first, never two different identities.
+ */
+export async function createAgentIdentityEmailIfAbsent(userId: string, email: string) {
+  await prisma.agentIdentity.createMany({ data: [{ userId, email }], skipDuplicates: true });
+  return prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
+}
+
 export async function setAgentIdentityPhone(params: {
   userId: string;
   phone: string;

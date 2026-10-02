@@ -1490,7 +1490,7 @@
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "antibot"],
+    "tags": ["browser", "auth", "ecommerce", "antibot", "browser-auth"],
     "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -1574,7 +1574,7 @@
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth"],
+    "tags": ["browser", "auth", "browser-auth"],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -1943,7 +1943,8 @@
       "grocery",
       "doordash",
       "food-plan",
-      "cart-reauth"
+      "cart-reauth",
+      "browser-auth"
     ],
     "group": "daily",
     "price_limit_cents": 300,
@@ -2613,7 +2614,7 @@
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "transportation"],
+    "tags": ["browser", "auth", "ecommerce", "transportation", "browser-auth"],
     "group": "daily",
     "price_limit_cents": 400,
     "requires_browser_agent": true,
@@ -2689,7 +2690,7 @@
     "timeout_seconds": 1200,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "social"],
+    "tags": ["browser", "auth", "social", "browser-auth"],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2748,10 +2749,10 @@
     "enforce_declared_evaluators": true
   },
   {
-    "name": "browser-auth-saved-password-retry",
-    "title": "Hosted Sign-In: Retry Saved Passwords",
-    "description": "Three saved Rose Shop logins where the first two the agent tries fail and the third works; the browser agent must keep trying saved logins until one signs in.",
-    "prompt": "Sign in to my Rose Shop account at {auth_test_site_url} and tell me my member number.",
+    "name": "browser-auth-existing-browser-session",
+    "title": "Hosted Sign-In: Existing Browser Session",
+    "description": "The user's saved browser session for Rose Shop is still valid; the browser agent must use it and not sign in again.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -2759,7 +2760,383 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth"],
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options"],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "saved_session"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture saves a live site session (cookie bundle) and one working saved password for the user."
+    },
+    "evaluators": [
+      {
+        "id": "existing-browser-session-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "existing-browser-session-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site honored the saved session",
+          "No sign-in of any kind was attempted",
+          "The final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "saved_session",
+            "trail": [
+              {
+                "kind": "session",
+                "outcome": "resumed"
+              }
+            ],
+            "forbid": [
+              {
+                "kind": "password"
+              },
+              {
+                "kind": "code_request"
+              },
+              {
+                "kind": "passkey"
+              }
+            ],
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-stale-session-password",
+    "title": "Hosted Sign-In: Expired Session Falls Back To Password",
+    "description": "The user's saved browser session for Rose Shop has expired; the browser agent must fall back to the saved password.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options"],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "stale_session"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture saves a session cookie the site no longer honors and one working saved password."
+    },
+    "evaluators": [
+      {
+        "id": "stale-session-password-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "stale-session-password-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site refused the expired saved session",
+          "The saved password then signed in",
+          "The final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "password",
+            "trail": [
+              {
+                "kind": "session",
+                "outcome": "rejected",
+                "reason": "expired_session"
+              },
+              {
+                "kind": "password",
+                "outcome": "signed_in"
+              }
+            ],
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-passkey-preferred",
+    "title": "Hosted Sign-In: Passkey Before Password",
+    "description": "A passkey and a working password are both saved and the site asks for the email first; the browser agent must sign in with the passkey and never type the password.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options"],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "passkey"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture enrolls a passkey for the member account (private key stored for the agent's virtual authenticator, public key held by the site) and also saves the account's working password. The sign-in page asks for the email first, then offers the passkey and the password."
+    },
+    "evaluators": [
+      {
+        "id": "passkey-preferred-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "passkey-preferred-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site verified the passkey assertion and signed the member in",
+          "No password was ever submitted",
+          "The final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "passkey",
+            "forbid": [
+              {
+                "kind": "password"
+              }
+            ],
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-passkey-rejected-password",
+    "title": "Hosted Sign-In: Rejected Passkey Falls Back To Password",
+    "description": "The site no longer recognizes the saved passkey; the browser agent must fall back to the saved password.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options"],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "passkey_rejected"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Same fixture as the passkey bench, but the site refuses the (genuine) passkey as removed from the account."
+    },
+    "evaluators": [
+      {
+        "id": "passkey-rejected-password-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "passkey-rejected-password-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The passkey was tried first and refused",
+          "The saved password then signed in",
+          "The final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "password",
+            "trail": [
+              {
+                "kind": "passkey",
+                "outcome": "rejected",
+                "reason": "passkey_not_recognized"
+              },
+              {
+                "kind": "password",
+                "outcome": "signed_in"
+              }
+            ],
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-saved-password-retry",
+    "title": "Hosted Sign-In: Retry Saved Passwords",
+    "description": "Three saved Rose Shop logins where the first two the agent tries fail and the third works; the browser agent must keep trying saved logins until one signs in.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2784,7 +3161,7 @@
       "auth_test_site": {
         "scenario": "password_retry"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. The fixture seeds three saved logins, named for the user, for a per-run realm rose-shop-<siteId>.test. The site decides the working login at sign-in time: whichever two distinct saved logins the agent submits first fail (a stale password, then an unknown account) and the third signs in, so two failures precede success whatever order the agent picks. The site records every sign-in attempt and session; auth_test_site_outcome grades those records."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture seeds three saved logins, named for the user. The site decides the working login at sign-in time: whichever two distinct saved logins the agent submits first fail (a stale password, then an unknown account) and the third signs in, so two failures precede success whatever order the agent picks."
     },
     "evaluators": [
       {
@@ -2833,10 +3210,10 @@
     "source": ["user-request:auth-critical-path-e2e"]
   },
   {
-    "name": "browser-auth-all-options-fail-assistance",
-    "title": "Hosted Sign-In: Every Option Fails",
-    "description": "Three saved Rose Shop logins that all fail and no sign-up path; the browser agent must try each and then ask the user for sign-in help.",
-    "prompt": "Sign in to my Rose Shop account at {auth_test_site_url} and tell me my member number.",
+    "name": "browser-auth-password-email-2fa",
+    "title": "Hosted Sign-In: Password Then Emailed Code",
+    "description": "A saved password for an account under the agent's own inbox; after the password the site emails a verification code that the browser agent must enter.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -2844,7 +3221,90 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth"],
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "secrets": ["PRIMITIVE_API_KEY"],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "password_email_2fa"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The saved login is the agent's minted inbox (an account the agent made earlier), so the second-factor code the site emails through Primitive arrives where the agent's one-time-code polling reads it."
+    },
+    "evaluators": [
+      {
+        "id": "password-email-2fa-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "password-email-2fa-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The saved password was accepted",
+          "The emailed verification code completed the sign-in",
+          "The final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "password_email_2fa",
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-account-locked",
+    "title": "Hosted Sign-In: Locked Account",
+    "description": "The saved login's account is locked; the browser agent must stop trying and ask the user for sign-in help.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2868,17 +3328,18 @@
       "secrets": [],
       "live_targets": [],
       "auth_test_site": {
-        "scenario": "all_fail"
+        "scenario": "account_locked"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. The fixture seeds three saved passwords for a per-run realm rose-shop-<siteId>.test and none of them works: two are stale passwords for real members and one is a login with no account. The site has no sign-up and only emails sign-in codes to member addresses it can deliver to, so the correct end state is an auth_assistance request after every saved login was tried."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. One saved login. The site answers its password with an account-locked message and withholds sign-in codes for it. The correct end state is one auth_assistance request with no session."
     },
     "evaluators": [
       {
-        "id": "all-options-fail-runtime",
+        "id": "account-locked-runtime",
         "method": "static_check",
         "criteria": [
           "No tool call fails",
-          "Exactly one browser-agent session is used"
+          "Exactly one browser-agent session is used",
+          "Exactly 1 request(s) are raised to the user"
         ],
         "checks": [
           {
@@ -2888,21 +3349,31 @@
             "type": "browser_agent_session_count",
             "min": 1,
             "max": 1
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
           }
         ]
       },
       {
-        "id": "all-options-fail-outcome",
+        "id": "account-locked-outcome",
         "method": "static_check",
         "criteria": [
-          "The site recorded a password attempt for every saved login",
+          "The saved password was tried at most twice against the locked account",
           "No session was ever signed in"
         ],
         "checks": [
           {
             "type": "auth_test_site_outcome",
             "expect": "no_session",
-            "require_all_saved_passwords_attempted": true
+            "counts": [
+              {
+                "kind": "password",
+                "min": 1,
+                "max": 2
+              }
+            ]
           }
         ]
       }
@@ -2914,7 +3385,7 @@
     "name": "browser-auth-minted-email-otp",
     "title": "Hosted Sign-In: Minted Identity Email Code",
     "description": "No saved Rose Shop credentials; the browser agent signs in with the user's minted agent identity using an emailed one-time code.",
-    "prompt": "Sign in to my Rose Shop account at {auth_test_site_url} and tell me my member number.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -2922,7 +3393,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth"],
+    "tags": ["browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2946,7 +3417,7 @@
       "auth_test_site": {
         "scenario": "minted_otp"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. No credentials are saved for the per-run realm rose-shop-<siteId>.test, so auth options offer only the user's minted agent identity, which has a passwordless Rose Shop account. The site emails a 6-digit sign-in code through Primitive to the minted inbox, where the browser agent's one-time-code polling picks it up."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No credentials are saved, so auth options offer only the user's minted agent identity, which has a passwordless account. The site emails a 6-digit sign-in code through Primitive to the minted inbox."
     },
     "evaluators": [
       {
@@ -2993,6 +3464,2062 @@
     "source": ["user-request:auth-critical-path-e2e"]
   },
   {
+    "name": "browser-auth-code-never-arrives",
+    "title": "Hosted Sign-In: Emailed Code Never Arrives",
+    "description": "The site accepts the code request but never sends the code; the browser agent must request a resend and then ask the user for sign-in help.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "auth_assistance",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "attention_requests",
+        "minted_identity",
+        "primitive_email"
+      ],
+      "secrets": ["PRIMITIVE_API_KEY"],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "code_never_arrives"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials; the minted identity has a passwordless account. The site shows its usual 'code is on its way' page but sends nothing. The correct end state is at least one resend, then one auth_assistance request."
+    },
+    "evaluators": [
+      {
+        "id": "code-never-arrives-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "Exactly 1 request(s) are raised to the user"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          }
+        ]
+      },
+      {
+        "id": "code-never-arrives-outcome",
+        "method": "static_check",
+        "criteria": ["The code was requested and then requested again", "No session was ever signed in"],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "no_session",
+            "counts": [
+              {
+                "kind": "code_request",
+                "email": "minted",
+                "min": 2
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-expired-code-retry",
+    "title": "Hosted Sign-In: Expired Code, Fresh Code",
+    "description": "The first emailed code is already expired when entered; the browser agent must request a new code and sign in with it.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "secrets": ["PRIMITIVE_API_KEY"],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "expired_code"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials; the minted identity has a passwordless account. The first sign-in code the site issues is refused as expired; every later code works."
+    },
+    "evaluators": [
+      {
+        "id": "expired-code-retry-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "expired-code-retry-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The first code was refused as expired",
+          "A new code was requested and signed in",
+          "The final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "email_code",
+            "trail": [
+              {
+                "kind": "code_verify",
+                "outcome": "rejected",
+                "reason": "expired_code"
+              },
+              {
+                "kind": "code_request"
+              },
+              {
+                "kind": "code_verify",
+                "outcome": "signed_in"
+              }
+            ],
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-minted-sms-otp",
+    "title": "Hosted Sign-In: Minted Identity Texted Code",
+    "description": "The site only signs in by a code texted to the phone on the account; the browser agent signs in with the minted identity's phone number.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "minted_identity",
+        "agentphone",
+        "surge_sms"
+      ],
+      "secrets": ["AGENTPHONE_API_KEY", "SURGE_API_KEY"],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "minted_sms_otp"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials. The site account is on the minted identity's AgentPhone number and the site has no password or email sign-in. The site texts a 6-digit code through Surge; the agent's one-time-code polling reads it from AgentPhone."
+    },
+    "evaluators": [
+      {
+        "id": "minted-sms-otp-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "minted-sms-otp-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site recorded a texted-code session for the minted identity",
+          "The final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "sms_code",
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-magic-link",
+    "title": "Hosted Sign-In: Emailed Sign-In Link",
+    "description": "The site emails a sign-in link instead of a code; the browser agent must open the link to sign in.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "secrets": ["PRIMITIVE_API_KEY"],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "magic_link"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials; the minted identity has a passwordless account. The site emails a single-use sign-in link (no code) through Primitive to the minted inbox."
+    },
+    "evaluators": [
+      {
+        "id": "magic-link-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "magic-link-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site recorded a session opened through the emailed link",
+          "The final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "magic_link",
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-email-otp",
+    "title": "Hosted Sign-In: Code To The User's Own Inbox",
+    "description": "The user's account is under an inbox they connected; the browser agent signs in with a code emailed there, not with the minted identity.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options", "gmail", "primitive_email"],
+      "secrets": ["PRIMITIVE_API_KEY"],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "email_otp"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials. The member account's email is the inbox the user connected (Gmail), so the site's emailed code is read through the user's Gmail integration. The minted identity is also offered and has no account here."
+    },
+    "evaluators": [
+      {
+        "id": "email-otp-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "email-otp-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site recorded an email-code session for the account under the user's connected inbox",
+          "The minted identity was never used",
+          "The final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "email_code",
+            "minted_unused": true,
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-minted-signup",
+    "title": "Hosted Sign-Up: New Account With The Minted Identity",
+    "description": "No account exists; the browser agent signs up with the minted identity and verifies the emailed code.",
+    "prompt": "Create an account for me at {auth_test_site_url} and tell me my member number",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "secrets": ["PRIMITIVE_API_KEY"],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "signup"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials and no site account. Sign-up asks for name, email and password, then emails a verification code through Primitive to the minted inbox."
+    },
+    "evaluators": [
+      {
+        "id": "minted-signup-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "minted-signup-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site has exactly one new verified account, under the minted email",
+          "The final answer reports the new member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "signup",
+            "accounts_created": 1,
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-signup-already-registered",
+    "title": "Hosted Sign-Up: Email Already Registered",
+    "description": "Sign-up is refused because the minted email already has an account; the browser agent must sign in to it instead.",
+    "prompt": "Create an account for me at {auth_test_site_url} and tell me my member number",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "secrets": ["PRIMITIVE_API_KEY"],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "signup_already_registered"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials. The minted email already has a passwordless account, so sign-up answers 'already exists'. The site emails sign-in codes to the minted inbox."
+    },
+    "evaluators": [
+      {
+        "id": "signup-already-registered-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "signup-already-registered-outcome",
+        "method": "static_check",
+        "criteria": [
+          "No second account was created",
+          "The existing account was signed in by emailed code",
+          "The final answer reports the existing member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "email_code",
+            "accounts_created": 0,
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-signup-fails-assistance",
+    "title": "Hosted Sign-Up: Sign-Up Fails",
+    "description": "Sign-up errors and there is no account; the browser agent must ask the user for sign-in help.",
+    "prompt": "Create an account for me at {auth_test_site_url} and tell me my member number",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "auth_assistance",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "attention_requests",
+        "minted_identity"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "signup_fails"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials and no site account. The sign-up form always answers that new accounts cannot be created right now. The correct end state is one auth_assistance request with no account and no session."
+    },
+    "evaluators": [
+      {
+        "id": "signup-fails-assistance-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "Exactly 1 request(s) are raised to the user"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          }
+        ]
+      },
+      {
+        "id": "signup-fails-assistance-outcome",
+        "method": "static_check",
+        "criteria": ["Sign-up was attempted and refused", "No account and no session exist"],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "no_session",
+            "accounts_created": 0,
+            "counts": [
+              {
+                "kind": "signup",
+                "outcome": "rejected",
+                "min": 1
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-all-options-fail-assistance",
+    "title": "Hosted Sign-In: Every Option Fails",
+    "description": "An expired saved session, a passkey the site rejects and three saved logins that all fail; the browser agent must try each in ladder order and then ask the user for sign-in help.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "auth_assistance",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options", "attention_requests"],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "all_fail"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture saves an expired session, a passkey the site refuses, and three passwords that fail (two stale, one for no account). The site also shows email-code, text-code, sign-up and guest links, none of which can sign the user in. Because saved credentials exist, the minted identity is not offered and must not be used. The correct end state is one auth_assistance request with the sign-in form left open."
+    },
+    "evaluators": [
+      {
+        "id": "all-options-fail-assistance-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "Exactly 1 request(s) are raised to the user"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          }
+        ]
+      },
+      {
+        "id": "all-options-fail-assistance-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The expired session, then the passkey, then every saved password were tried, in that order",
+          "The minted identity was never used",
+          "No session was ever signed in",
+          "The sign-in form was the page left open"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "no_session",
+            "require_all_saved_passwords_attempted": true,
+            "minted_unused": true,
+            "ladder_order": [
+              {
+                "kind": "session",
+                "outcome": "rejected",
+                "reason": "expired_session"
+              },
+              {
+                "kind": "passkey",
+                "outcome": "rejected"
+              },
+              {
+                "kind": "password",
+                "outcome": "rejected"
+              }
+            ],
+            "left_on_sign_in_form": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-assistance-user-signs-in",
+    "title": "Hosted Sign-In: User Signs In Through The Live View",
+    "description": "Every saved login fails; the agent asks for help, the user signs in through the live browser, and the agent finishes the task.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "auth_assistance",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options", "attention_requests"],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "user_signs_in",
+        "user_response": "sign_in"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Three saved passwords that all fail. When the auth_assistance request appears, the harness plays the user: it attaches to the agent's live browser, types the password only the user knows into the sign-in form the agent left open, and marks the request done."
+    },
+    "evaluators": [
+      {
+        "id": "assistance-user-signs-in-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "The root agent completes",
+          "Exactly 1 request(s) are raised to the user"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          }
+        ]
+      },
+      {
+        "id": "assistance-user-signs-in-outcome",
+        "method": "static_check",
+        "criteria": [
+          "Every saved login was tried before asking",
+          "The user's own sign-in created the session",
+          "The agent resumed and the final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "password",
+            "require_all_saved_passwords_attempted": true,
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-assistance-declined",
+    "title": "Hosted Sign-In: User Declines To Help",
+    "description": "Every saved login fails; the agent asks for help and the user declines. The agent must stop without retrying or asking again.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "auth_assistance",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options", "attention_requests"],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "saved_logins_fail",
+        "user_response": "decline"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Three saved passwords that all fail. When the auth_assistance request appears, the harness declines it as the user."
+    },
+    "evaluators": [
+      {
+        "id": "assistance-declined-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "The root agent completes",
+          "Exactly 1 request(s) are raised to the user"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          }
+        ]
+      },
+      {
+        "id": "assistance-declined-outcome",
+        "method": "static_check",
+        "criteria": [
+          "Every saved login was tried before asking",
+          "After the user declined, the site saw no further sign-in attempt",
+          "No session was ever signed in"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "no_session",
+            "require_all_saved_passwords_attempted": true,
+            "after_marker": {
+              "forbid": [
+                {
+                  "kind": "password"
+                },
+                {
+                  "kind": "code_request"
+                },
+                {
+                  "kind": "signup"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "assistance-declined-answer",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The final answer tells the user the task was not completed because sign-in is still needed",
+          "The final answer does not report a member number"
+        ],
+        "judge_prompt": "Pass only when the agent's final answer plainly tells the user it could not get their member number because it could not sign in (or sign-in was declined / is still needed). Fail if the answer reports any member number, claims success, or is missing."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-guest-purchase",
+    "title": "Hosted Purchase: Buy Without An Account",
+    "description": "No saved credentials and the shop lets shoppers buy without an account; the browser agent buys as a guest instead of creating an account.",
+    "prompt": "Buy me a Canvas Tote from {auth_test_site_url}",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth", "payment", "agentcard-lifecycle-sandbox"],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kind": "payment_approval",
+    "expected_approval_count": 1,
+    "expected_payment_receipt": {
+      "merchant": "Rose Shop",
+      "currency": "USD",
+      "subtotalCents": 1500,
+      "totalCents": 2123,
+      "lineItems": [
+        {
+          "name": "Canvas Tote",
+          "imageUrl": "https://placehold.co/320x220/png?text=Canvas+Tote",
+          "unitPriceCents": 1500,
+          "quantity": 1,
+          "lineTotalCents": 1500
+        }
+      ],
+      "fees": [
+        {
+          "label": "Tax",
+          "amountCents": 124
+        },
+        {
+          "label": "Shipping",
+          "amountCents": 499
+        }
+      ]
+    },
+    "expected_payment_lifecycle": {
+      "integrity": {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "cardCount": 1
+      },
+      "purchase": {
+        "status": "CLEARED",
+        "merchant": "Rose Shop",
+        "totalCents": 2123
+      },
+      "walletFunding": {
+        "status": "CONSUMED",
+        "amountCents": 2123
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 2123,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 2123
+      },
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "orgTransfer": {
+        "status": "consumed",
+        "amountCents": 2123,
+        "transferredCents": 2123,
+        "releasedCents": 0,
+        "livemode": false
+      }
+    },
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "guest_purchase"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). At checkout the shop offers sign in, create an account, or continue without an account. No credentials are saved for the site."
+    },
+    "evaluators": [
+      {
+        "id": "guest-purchase-runtime",
+        "method": "static_check",
+        "criteria": ["No tool call fails", "The root agent completes"],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "expected_payment_receipt"
+          },
+          {
+            "type": "expected_payment_lifecycle"
+          }
+        ]
+      },
+      {
+        "id": "guest-purchase-outcome",
+        "method": "static_check",
+        "criteria": [
+          "Exactly one order was placed, by a guest",
+          "No sign-up or sign-in was attempted",
+          "The final answer reports the order number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "no_session",
+            "orders": {
+              "count": 1,
+              "placed_by": "guest"
+            },
+            "forbid": [
+              {
+                "kind": "signup"
+              },
+              {
+                "kind": "password"
+              },
+              {
+                "kind": "code_request"
+              }
+            ],
+            "deliverable_contains_order_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-signup-purchase",
+    "title": "Hosted Purchase: New Account Then Purchase",
+    "description": "The shop requires an account to check out and none exists; the browser agent signs up with the minted identity, verifies the emailed code, and completes exactly one clean purchase.",
+    "prompt": "Buy me a Canvas Tote from {auth_test_site_url}",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth", "payment", "agentcard-lifecycle-sandbox"],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kind": "payment_approval",
+    "expected_approval_count": 1,
+    "expected_payment_receipt": {
+      "merchant": "Rose Shop",
+      "currency": "USD",
+      "subtotalCents": 1500,
+      "totalCents": 2123,
+      "lineItems": [
+        {
+          "name": "Canvas Tote",
+          "imageUrl": "https://placehold.co/320x220/png?text=Canvas+Tote",
+          "unitPriceCents": 1500,
+          "quantity": 1,
+          "lineTotalCents": 1500
+        }
+      ],
+      "fees": [
+        {
+          "label": "Tax",
+          "amountCents": 124
+        },
+        {
+          "label": "Shipping",
+          "amountCents": 499
+        }
+      ]
+    },
+    "expected_payment_lifecycle": {
+      "integrity": {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "cardCount": 1
+      },
+      "purchase": {
+        "status": "CLEARED",
+        "merchant": "Rose Shop",
+        "totalCents": 2123
+      },
+      "walletFunding": {
+        "status": "CONSUMED",
+        "amountCents": 2123
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 2123,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 2123
+      },
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "orgTransfer": {
+        "status": "consumed",
+        "amountCents": 2123,
+        "transferredCents": 2123,
+        "releasedCents": 0,
+        "livemode": false
+      }
+    },
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests",
+        "minted_identity",
+        "primitive_email"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET",
+        "PRIMITIVE_API_KEY"
+      ],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "signup_purchase"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). Checkout requires an account. No credentials are saved, so only the minted identity is offered; sign-up emails a verification code to the minted inbox."
+    },
+    "evaluators": [
+      {
+        "id": "signup-purchase-runtime",
+        "method": "static_check",
+        "criteria": ["No tool call fails", "The root agent completes"],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "expected_payment_receipt"
+          },
+          {
+            "type": "expected_payment_lifecycle"
+          }
+        ]
+      },
+      {
+        "id": "signup-purchase-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site has one new verified account under the minted email",
+          "Exactly one order was placed, by that account",
+          "The final answer reports the order number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "signup",
+            "accounts_created": 1,
+            "orders": {
+              "count": 1,
+              "placed_by": "signed_in_account"
+            },
+            "deliverable_contains_order_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-signup-purchase-no-subscription",
+    "title": "Hosted Purchase: New Account, No Rose Subscription",
+    "description": "Same as the new-account purchase, but the Rose user has no subscription and no free credit: the subscription gate must fire before the payment approval, and the purchase still completes exactly once.",
+    "prompt": "Buy me a Canvas Tote from {auth_test_site_url}",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": [
+      "browser",
+      "auth",
+      "browser-auth",
+      "payment",
+      "agentcard-lifecycle-sandbox",
+      "subscription",
+      "new-user"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_payment_receipt": {
+      "merchant": "Rose Shop",
+      "currency": "USD",
+      "subtotalCents": 1500,
+      "totalCents": 2123,
+      "lineItems": [
+        {
+          "name": "Canvas Tote",
+          "imageUrl": "https://placehold.co/320x220/png?text=Canvas+Tote",
+          "unitPriceCents": 1500,
+          "quantity": 1,
+          "lineTotalCents": 1500
+        }
+      ],
+      "fees": [
+        {
+          "label": "Tax",
+          "amountCents": 124
+        },
+        {
+          "label": "Shipping",
+          "amountCents": 499
+        }
+      ]
+    },
+    "expected_payment_lifecycle": {
+      "integrity": {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "cardCount": 1
+      },
+      "purchase": {
+        "status": "CLEARED",
+        "merchant": "Rose Shop",
+        "totalCents": 2123
+      },
+      "walletFunding": {
+        "status": "CONSUMED",
+        "amountCents": 2123
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 2123,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 2123
+      },
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "orgTransfer": {
+        "status": "consumed",
+        "amountCents": 2123,
+        "transferredCents": 2123,
+        "releasedCents": 0,
+        "livemode": false
+      }
+    },
+    "expected_attention_kinds": ["gate:subscription", "payment_approval"],
+    "require_attention_order": true,
+    "expected_gate": {
+      "type": "subscription",
+      "gateKey": "subscription",
+      "severity": "blocking",
+      "action": {
+        "kind": "link"
+      }
+    },
+    "complete_subscription_checkout": true,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests",
+        "minted_identity",
+        "primitive_email"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET",
+        "STRIPE_WEBHOOK_SECRET",
+        "PRIMITIVE_API_KEY"
+      ],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "signup_purchase"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). Checkout requires an account. A dedicated non-admin user starts with exhausted free credit and no subscription; the harness completes hosted Stripe test Checkout when the subscription gate appears."
+    },
+    "evaluators": [
+      {
+        "id": "signup-purchase-no-subscription-runtime",
+        "method": "static_check",
+        "criteria": ["No tool call fails", "The root agent completes"],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "expected_gate"
+          },
+          {
+            "type": "attention_kind_sequence",
+            "value": ["gate:subscription", "payment_approval"]
+          },
+          {
+            "type": "subscription_checkout_completed"
+          },
+          {
+            "type": "expected_payment_receipt"
+          },
+          {
+            "type": "expected_payment_lifecycle"
+          }
+        ]
+      },
+      {
+        "id": "signup-purchase-no-subscription-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site has one new verified account under the minted email",
+          "Exactly one order was placed, by that account",
+          "The final answer reports the order number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "signup",
+            "accounts_created": 1,
+            "orders": {
+              "count": 1,
+              "placed_by": "signed_in_account"
+            },
+            "deliverable_contains_order_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-signup-fails-purchase-assistance",
+    "title": "Hosted Purchase: Sign-Up Fails Before Checkout",
+    "description": "The shop requires an account and sign-up errors; the browser agent must ask the user for sign-in help without ordering or requesting a card.",
+    "prompt": "Buy me a Canvas Tote from {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "auth_assistance",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "attention_requests",
+        "minted_identity"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "signup_fails_purchase"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout requires an account and no credentials are saved. The sign-up form always answers that new accounts cannot be created right now. The correct end state is one auth_assistance request with no order; a payment request would be an unexpected attention kind and fails the run."
+    },
+    "evaluators": [
+      {
+        "id": "signup-fails-purchase-assistance-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "Exactly 1 request(s) are raised to the user"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          }
+        ]
+      },
+      {
+        "id": "signup-fails-purchase-assistance-outcome",
+        "method": "static_check",
+        "criteria": ["Sign-up was attempted and refused", "No account, no session and no order exist"],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "no_session",
+            "accounts_created": 0,
+            "orders": {
+              "count": 0
+            },
+            "counts": [
+              {
+                "kind": "signup",
+                "outcome": "rejected",
+                "min": 1
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-session-expires-at-checkout",
+    "title": "Hosted Purchase: Session Expires At Checkout",
+    "description": "The shop ends the session when the order is submitted; the browser agent must sign in again and buy exactly once.",
+    "prompt": "Buy me a Canvas Tote from {auth_test_site_url}",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth", "payment", "agentcard-lifecycle-sandbox"],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kind": "payment_approval",
+    "expected_approval_count": 1,
+    "expected_payment_receipt": {
+      "merchant": "Rose Shop",
+      "currency": "USD",
+      "subtotalCents": 1500,
+      "totalCents": 2123,
+      "lineItems": [
+        {
+          "name": "Canvas Tote",
+          "imageUrl": "https://placehold.co/320x220/png?text=Canvas+Tote",
+          "unitPriceCents": 1500,
+          "quantity": 1,
+          "lineTotalCents": 1500
+        }
+      ],
+      "fees": [
+        {
+          "label": "Tax",
+          "amountCents": 124
+        },
+        {
+          "label": "Shipping",
+          "amountCents": 499
+        }
+      ]
+    },
+    "expected_payment_lifecycle": {
+      "integrity": {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "cardCount": 1
+      },
+      "purchase": {
+        "status": "CLEARED",
+        "merchant": "Rose Shop",
+        "totalCents": 2123
+      },
+      "walletFunding": {
+        "status": "CONSUMED",
+        "amountCents": 2123
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 2123,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 2123
+      },
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "orgTransfer": {
+        "status": "consumed",
+        "amountCents": 2123,
+        "transferredCents": 2123,
+        "releasedCents": 0,
+        "livemode": false
+      }
+    },
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "session_expires_at_checkout"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). One working saved password. The first order submit ends the session and charges nothing; the shop asks the member to sign in again and keeps the cart."
+    },
+    "evaluators": [
+      {
+        "id": "session-expires-at-checkout-runtime",
+        "method": "static_check",
+        "criteria": ["No tool call fails", "The root agent completes"],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "expected_payment_receipt"
+          },
+          {
+            "type": "expected_payment_lifecycle"
+          }
+        ]
+      },
+      {
+        "id": "session-expires-at-checkout-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The member signed in, was signed out at the order, and signed in again",
+          "Exactly one order was placed",
+          "The final answer reports the order number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "password",
+            "orders": {
+              "count": 1,
+              "placed_by": "signed_in_account"
+            },
+            "trail": [
+              {
+                "kind": "password",
+                "outcome": "signed_in"
+              },
+              {
+                "kind": "session",
+                "outcome": "rejected",
+                "reason": "expired_session"
+              },
+              {
+                "kind": "password",
+                "outcome": "signed_in"
+              },
+              {
+                "kind": "order",
+                "outcome": "placed"
+              }
+            ],
+            "deliverable_contains_order_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-failed-login-not-reoffered",
+    "title": "Hosted Sign-In: Failed Login Is Not Offered Again",
+    "description": "A first run signs in after one saved login fails; in the second run that failed login must no longer be offered, so the agent signs in without a failed attempt.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options"],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "failed_login_not_reoffered",
+        "first_run_prompt": "Tell me my member number for {auth_test_site_url}"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Two saved logins: the freshest has a stale password, the older one works. The harness runs the same prompt twice against one site; the site's event log is split by a run marker and the graded run is the second."
+    },
+    "evaluators": [
+      {
+        "id": "failed-login-not-reoffered-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "failed-login-not-reoffered-outcome",
+        "method": "static_check",
+        "criteria": [
+          "After the first run the stale login is disabled and the working one is not",
+          "The second run signed in with no failed password attempt",
+          "The final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "password",
+            "disabled_saved_passwords": "failed_only",
+            "after_marker": {
+              "trail": [
+                {
+                  "kind": "password",
+                  "outcome": "signed_in"
+                }
+              ],
+              "forbid": [
+                {
+                  "kind": "password",
+                  "outcome": "rejected"
+                }
+              ]
+            },
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-created-account-reused",
+    "title": "Hosted Sign-In: Reuse An Account Made Earlier",
+    "description": "A first run creates an account with the minted identity; the second run must sign in to it with the password saved at sign-up.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "secrets": ["PRIMITIVE_API_KEY"],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "created_account_reused",
+        "first_run_prompt": "Create an account for me at {auth_test_site_url} and tell me my member number"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No account exists at first. The first run signs up (prompt: create an account) and the site then accepts passwords only, so the second, graded run can only sign in if the new account's password was saved."
+    },
+    "evaluators": [
+      {
+        "id": "created-account-reused-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "created-account-reused-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The second run signed in with a password and did not sign up again",
+          "The final answer reports the member number of the account made in the first run"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "after_marker": {
+              "trail": [
+                {
+                  "kind": "password",
+                  "outcome": "signed_in"
+                }
+              ],
+              "forbid": [
+                {
+                  "kind": "signup"
+                }
+              ]
+            },
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-named-account",
+    "title": "Hosted Sign-In: Use The Account The User Named",
+    "description": "Two working saved logins for different accounts; the prompt names the older one and the browser agent must sign in to that account only.",
+    "prompt": "Tell me my member number for my {auth_test_site_account} account at {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options"],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "named_account"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.test. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Two saved logins, both valid, for two different member accounts. The prompt names the older (less recently used) one."
+    },
+    "evaluators": [
+      {
+        "id": "named-account-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "named-account-outcome",
+        "method": "static_check",
+        "criteria": [
+          "Only the named account was signed in",
+          "The final answer reports that account's member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "password",
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
     "name": "browser-indeed-account-create",
     "title": "Browser Indeed Account Creation",
     "description": "Use the browser agent to create a benchmark-safe Indeed job-seeker account.",
@@ -3000,7 +5527,7 @@
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "antibot"],
+    "tags": ["browser", "auth", "antibot", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -5532,7 +8059,7 @@
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "purchase", "passkey"],
+    "tags": ["browser", "auth", "purchase", "passkey", "browser-auth"],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,

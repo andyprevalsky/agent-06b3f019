@@ -1,9 +1,9 @@
 """Black-box coverage for the hosted Rose Shop auth benchmarks.
 
-The three daily tasks share one natural prompt; only the seeded fixture decides
-whether the correct end state is a password retry, an auth-assistance request,
-or a minted-identity email-code sign-in. These tests pin that contract, the
-fail-closed fixture preflight, the evaluator, and the runner's site lifecycle.
+Every daily task uses one of four natural prompts with no sign-in hints; only
+the seeded fixture decides which branch of the auth ladder is correct. These
+tests pin that contract, the fail-closed fixture preflight, the evaluator, and
+the runner's site lifecycle (including the stand-in user and two-run tasks).
 """
 
 from __future__ import annotations
@@ -18,30 +18,74 @@ from unittest.mock import patch
 from _test_utils import BlackboxResult
 
 TASK_SCENARIOS = {
+    "browser-auth-existing-browser-session": "saved_session",
+    "browser-auth-stale-session-password": "stale_session",
+    "browser-auth-passkey-preferred": "passkey",
+    "browser-auth-passkey-rejected-password": "passkey_rejected",
     "browser-auth-saved-password-retry": "password_retry",
-    "browser-auth-all-options-fail-assistance": "all_fail",
+    "browser-auth-password-email-2fa": "password_email_2fa",
+    "browser-auth-account-locked": "account_locked",
     "browser-auth-minted-email-otp": "minted_otp",
+    "browser-auth-code-never-arrives": "code_never_arrives",
+    "browser-auth-expired-code-retry": "expired_code",
+    "browser-auth-minted-sms-otp": "minted_sms_otp",
+    "browser-auth-magic-link": "magic_link",
+    "browser-auth-email-otp": "email_otp",
+    "browser-auth-minted-signup": "signup",
+    "browser-auth-signup-already-registered": "signup_already_registered",
+    "browser-auth-signup-fails-assistance": "signup_fails",
+    "browser-auth-all-options-fail-assistance": "all_fail",
+    "browser-auth-assistance-user-signs-in": "user_signs_in",
+    "browser-auth-assistance-declined": "saved_logins_fail",
+    "browser-auth-guest-purchase": "guest_purchase",
+    "browser-auth-signup-purchase": "signup_purchase",
+    "browser-auth-signup-purchase-no-subscription": "signup_purchase",
+    "browser-auth-signup-fails-purchase-assistance": "signup_fails_purchase",
+    "browser-auth-session-expires-at-checkout": "session_expires_at_checkout",
+    "browser-auth-failed-login-not-reoffered": "failed_login_not_reoffered",
+    "browser-auth-created-account-reused": "created_account_reused",
+    "browser-auth-named-account": "named_account",
+}
+PROMPTS = {
+    "Tell me my member number for {auth_test_site_url}",
+    "Create an account for me at {auth_test_site_url} and tell me my member number",
+    "Buy me a Canvas Tote from {auth_test_site_url}",
+    "Tell me my member number for my {auth_test_site_account} account at {auth_test_site_url}",
 }
 SAVED = ["jordan.ellis.abc@example.com", "jordan.e.abc@example.com", "j.ellis.abc@example.com"]
 MINTED = "rose-agent-7@mail.example.test"
+INBOX = "jordan.ellis@inbox.example"
 MEMBER_NUMBER = "RS-12345678"
 
 
 def _manifest(scenario: str, **overrides) -> dict:
-    password_scenario = scenario != "minted_otp"
+    """A manifest whose ladder is exactly what the scenario promises."""
+    from benchmarks.auth_test_site import NO_SESSION_SCENARIOS, SCENARIO_LADDERS
+
+    passwords, minted_offered, passkeys, sessions = SCENARIO_LADDERS[scenario]
+    saved = list(SAVED[:passwords])
+    minted = MINTED if minted_offered else None
+    reachable = scenario not in NO_SESSION_SCENARIOS
     manifest = {
         "siteId": "abc123",
         "scenario": scenario,
         "realm": "rose-shop-abc123.test",
         "entryUrl": "https://rose-x.ngrok.app/api/test-sites/rose-shop/abc123/?authRealm=rose-shop-abc123.test",
-        "savedPasswordUsernames": list(SAVED) if password_scenario else [],
-        "mintedEmail": None if password_scenario else MINTED,
-        "expectedSignInEmail": MINTED if scenario == "minted_otp" else None,
-        "expectedMemberNumber": None if scenario == "all_fail" else MEMBER_NUMBER,
+        "savedPasswordUsernames": saved,
+        "mintedEmail": minted,
+        "mintedPhone": "+15555550142" if minted_offered else None,
+        "expectedSignInEmail": INBOX if scenario == "email_otp" else (MINTED if scenario == "minted_otp" else None),
+        "expectedMemberNumber": MEMBER_NUMBER if reachable else None,
+        "namedAccountEmail": SAVED[1] if scenario == "named_account" else None,
+        "userSignIn": {"email": SAVED[0], "password": "only-the-user-knows"} if scenario == "user_signs_in" else None,
+        "savedSession": {"saved_session": "valid", "stale_session": "expired", "all_fail": "expired"}.get(scenario),
         "savedBrowserAuthHidden": False,
         "authOptionsPreview": {
-            "passwordUsernames": list(SAVED) if password_scenario else [],
-            "mintedEmail": None if password_scenario else MINTED,
+            "passwordUsernames": list(saved),
+            "mintedEmail": minted,
+            "passkeyCount": passkeys,
+            "cookieBundleCount": sessions,
+            "emailOtpInboxes": [INBOX] if scenario == "email_otp" else [],
         },
     }
     manifest.update(overrides)
@@ -84,30 +128,90 @@ def _outcome_check(name: str) -> dict:
     )
 
 
-def test_daily_catalog_covers_every_hosted_auth_branch_with_one_natural_prompt() -> None:
-    from benchmarks.auth_test_site import AUTH_TEST_SITE_SCENARIOS
+def test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts() -> None:
+    from benchmarks.auth_test_site import AUTH_TEST_SITE_SCENARIOS, declared_block
     from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.long_horizon import load_raw_catalog
 
-    prompts = set()
+    hosted = {raw["name"] for raw in load_raw_catalog() if "auth_test_site" in (raw.get("environment") or {})}
+    assert hosted == set(TASK_SCENARIOS), f"catalog and test disagree on hosted auth tasks: {hosted ^ set(TASK_SCENARIOS)}"
     for name, scenario in TASK_SCENARIOS.items():
         task = get_task_by_name(name)
         assert task.group == "daily" and task.status == "ready", name
         assert task.environment["mode"] == "synthetic" and not task.environment.get("live_fixtures"), name
-        assert task.environment["auth_test_site"] == {"scenario": scenario}, name
+        assert declared_block(task.environment)["scenario"] == scenario, name
         assert task.enforce_declared_evaluators is True, name
         assert task.requires_browser_agent is True, name
-        prompts.add(task.prompt)
+        assert "browser-auth" in task.tags, name
+        assert task.prompt in PROMPTS, f"{name}: fixtures, not prompts, must decide the branch: {task.prompt!r}"
+        first_run = declared_block(task.environment).get("first_run_prompt")
+        assert first_run is None or first_run in PROMPTS, f"{name}: {first_run!r}"
     assert set(TASK_SCENARIOS.values()) == set(AUTH_TEST_SITE_SCENARIOS)
-    assert len(prompts) == 1, f"fixtures, not prompts, must decide the branch: {prompts}"
-    prompt = prompts.pop().lower()
-    assert "{auth_test_site_url}" in prompt
-    for hint in ("password", "minted", "code", "otp", "assist", "help", "retry", "email"):
-        assert hint not in prompt, f"prompt leaks the expected auth branch via {hint!r}"
+    for prompt in PROMPTS:
+        lowered = prompt.lower()
+        for hint in (
+            "password", "minted", "code", "otp", "assist", "help", "retry", "passkey", "session",
+            "sign in", "sign-in", "log in", "login", "guest", "link", "text", "sms", "saved",
+        ):
+            assert hint not in lowered, f"prompt leaks the expected auth branch via {hint!r}: {prompt!r}"
 
-    assert get_task_by_name("browser-auth-all-options-fail-assistance").expected_attention_kind == "auth_assistance"
+    for name in (
+        "browser-auth-all-options-fail-assistance",
+        "browser-auth-account-locked",
+        "browser-auth-code-never-arrives",
+        "browser-auth-signup-fails-assistance",
+        "browser-auth-signup-fails-purchase-assistance",
+        "browser-auth-assistance-user-signs-in",
+        "browser-auth-assistance-declined",
+    ):
+        assert get_task_by_name(name).expected_attention_kind == "auth_assistance", name
     assert _outcome_check("browser-auth-saved-password-retry")["require_all_saved_passwords_attempted"] is True
-    assert _outcome_check("browser-auth-all-options-fail-assistance")["require_all_saved_passwords_attempted"] is True
+    assert _outcome_check("browser-auth-all-options-fail-assistance")["minted_unused"] is True
     assert _outcome_check("browser-auth-minted-email-otp")["signed_in_method"] == "email_code"
+    assert _outcome_check("browser-auth-signup-purchase")["orders"] == {"count": 1, "placed_by": "signed_in_account"}
+    for name in ("browser-auth-guest-purchase", "browser-auth-signup-purchase", "browser-auth-session-expires-at-checkout"):
+        lifecycle = get_task_by_name(name).expected_payment_lifecycle
+        assert lifecycle["integrity"] == {"purchaseCount": 1, "walletFundingCount": 1, "cardCount": 1}, name
+        assert get_task_by_name(name).expected_approval_count == 1, name
+
+
+async def test_tasks_that_share_the_agent_inbox_never_overlap() -> None:
+    """Sites email codes to the one inbox the user's agent owns; lanes must not read each other's."""
+    from benchmarks.auth_test_site import uses_shared_inbox
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _parallel_task_runners
+
+    inbox_tasks = [name for name in TASK_SCENARIOS if uses_shared_inbox(get_task_by_name(name).environment)]
+    assert "browser-auth-minted-email-otp" in inbox_tasks and "browser-auth-signup-purchase" in inbox_tasks
+    assert "browser-auth-saved-password-retry" not in inbox_tasks
+
+    running: list[str] = []
+    overlaps: list[tuple[str, ...]] = []
+
+    async def runner(task):
+        running.append(task.name)
+        if sum(1 for name in running if name in inbox_tasks) > 1:
+            overlaps.append(tuple(running))
+        await asyncio.sleep(0.01)
+        running.remove(task.name)
+        return task.name
+
+    tasks = [
+        get_task_by_name("browser-auth-minted-email-otp"),
+        get_task_by_name("browser-auth-minted-email-otp"),
+        get_task_by_name("browser-auth-expired-code-retry"),
+        get_task_by_name("browser-auth-saved-password-retry"),
+    ]
+    previous = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
+    os.environ["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "1"
+    try:
+        results = await asyncio.gather(*_parallel_task_runners(tasks, None, runner))
+    finally:
+        if previous is None:
+            os.environ.pop("BENCHMARK_ISOLATED_BROWSER_PROFILES", None)
+        else:
+            os.environ["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = previous
+    assert len(results) == 4 and not overlaps, f"inbox tasks overlapped: {overlaps}"
 
 
 def test_hosted_auth_tasks_never_get_the_guest_checkout_kill_switch() -> None:
@@ -168,6 +272,19 @@ def test_catalog_rejects_inconsistent_hosted_auth_contracts() -> None:
     )
     rejects(lambda raw: outcome(raw).update(expect="no_session"), "contradicts scenario")
     rejects(lambda raw: outcome(raw).update(signed_in_method="sms"), "signed_in_method")
+    rejects(lambda raw: outcome(raw).update(trail=[{"kind": "telepathy"}]), "entries need a kind")
+    rejects(lambda raw: outcome(raw).update(counts=[{"kind": "password"}]), "min and/or max")
+    rejects(lambda raw: outcome(raw).update(orders={"count": "one"}), "integer count")
+    rejects(lambda raw: outcome(raw).update(surprise=True), "unknown keys")
+    rejects(lambda raw: raw["environment"]["auth_test_site"].update(user_response="shrug"), "user_response must be one of")
+    rejects(
+        lambda raw: raw["environment"]["auth_test_site"].update(user_response="sign_in"),
+        "the user knows a working password",
+    )
+    rejects(
+        lambda raw: raw["environment"]["auth_test_site"].update(first_run_prompt="Sign in again."),
+        "first_run_prompt must contain",
+    )
 
     minted = copy.deepcopy(_task_raw("browser-auth-minted-email-otp"))
     outcome(minted)["require_all_saved_passwords_attempted"] = True
@@ -194,6 +311,9 @@ def test_manifest_preflight_fails_closed_before_an_agent_exists() -> None:
     for scenario in TASK_SCENARIOS.values():
         validate_manifest(scenario, _manifest(scenario))
 
+    def preview(scenario: str, **changes) -> dict:
+        return {"authOptionsPreview": {**_manifest(scenario)["authOptionsPreview"], **changes}}
+
     def rejects(scenario: str, needle: str, **overrides) -> None:
         try:
             validate_manifest(scenario, _manifest(scenario, **overrides))
@@ -203,29 +323,15 @@ def test_manifest_preflight_fails_closed_before_an_agent_exists() -> None:
         raise AssertionError(f"{scenario} manifest accepted ({needle})")
 
     rejects("password_retry", "BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", savedBrowserAuthHidden=True)
+    rejects("saved_session", "BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", savedBrowserAuthHidden=True)
     rejects("all_fail", "expected 3", savedPasswordUsernames=SAVED[:2])
-    rejects(
-        "password_retry",
-        "freshest first",
-        authOptionsPreview={"passwordUsernames": list(reversed(SAVED)), "mintedEmail": None},
-    )
-    rejects(
-        "all_fail",
-        "minted account alongside",
-        authOptionsPreview={"passwordUsernames": list(SAVED), "mintedEmail": MINTED},
-    )
-    rejects(
-        "minted_otp",
-        "auth options would offer minted account",
-        authOptionsPreview={"passwordUsernames": [], "mintedEmail": None},
-    )
-    rejects(
-        "minted_otp",
-        "must not seed saved passwords",
-        authOptionsPreview={"passwordUsernames": [SAVED[0]], "mintedEmail": MINTED},
-    )
-    rejects("password_retry", "no reachable member account", expectedMemberNumber=None)
-    rejects("password_retry", "decides its member account at sign-in", expectedSignInEmail=SAVED[2])
+    rejects("password_retry", "freshest first", **preview("password_retry", passwordUsernames=list(reversed(SAVED))))
+    rejects("all_fail", "minted account alongside", **preview("all_fail", mintedEmail=MINTED))
+    rejects("all_fail", "0 passkeys, expected 1", **preview("all_fail", passkeyCount=0))
+    rejects("saved_session", "0 saved sessions, expected 1", **preview("saved_session", cookieBundleCount=0))
+    rejects("minted_otp", "auth options would offer minted account", **preview("minted_otp", mintedEmail=None))
+    rejects("minted_sms_otp", "needs a minted phone number", mintedPhone=None)
+    rejects("email_otp", "must list the connected inbox", **preview("email_otp", emailOtpInboxes=[]))
     rejects("all_fail", "must not have a reachable member account", expectedSignInEmail=SAVED[0])
     try:
         validate_manifest("all_fail", _manifest("password_retry"))
@@ -251,6 +357,7 @@ def test_outcome_check_grades_the_sites_own_records() -> None:
     lucky = {
         "manifest": _manifest("password_retry"),
         "report": {
+            "signInEmail": SAVED[2],
             "attempts": [_attempt("password", SAVED[2], "signed_in")],
             "sessions": [_session(SAVED[2], "password")],
         },
@@ -285,26 +392,34 @@ def test_outcome_check_grades_the_sites_own_records() -> None:
     assert not ok and "No member account was ever reachable" in detail, detail
 
     all_fail = _outcome_check("browser-auth-all-options-fail-assistance")
+    ladder = [
+        _attempt("session", SAVED[0], "rejected", "expired_session"),
+        _attempt("passkey", SAVED[0], "rejected", "passkey_not_recognized"),
+        _attempt("password", SAVED[0], "rejected", "wrong_password"),
+        _attempt("code_request", SAVED[0], "code_withheld"),
+        _attempt("password", SAVED[1], "rejected", "unknown_account"),
+        _attempt("password", SAVED[2], "rejected", "wrong_password"),
+    ]
     rejected = {
-        "manifest": _manifest("all_fail"),
-        "report": {
-            "attempts": [
-                _attempt("password", SAVED[0], "rejected", "wrong_password"),
-                _attempt("code_request", SAVED[0], "code_withheld"),
-                _attempt("password", SAVED[1], "rejected", "unknown_account"),
-                _attempt("password", SAVED[2], "rejected", "wrong_password"),
-            ],
-            "sessions": [],
-        },
+        "manifest": _manifest("all_fail", mintedEmail=MINTED),
+        "report": {"attempts": ladder, "sessions": [], "lastPagePath": "/login/methods"},
     }
     ok, detail = evaluate_outcome(all_fail, rejected, "")
     assert ok, detail
-    gave_up_early = {"manifest": _manifest("all_fail"), "report": {**rejected["report"], "attempts": rejected["report"]["attempts"][:2]}}
-    ok, detail = evaluate_outcome(all_fail, gave_up_early, "")
+
+    def all_fail_with(**report) -> tuple[bool, str]:
+        return evaluate_outcome(all_fail, {**rejected, "report": {**rejected["report"], **report}}, "")
+
+    ok, detail = all_fail_with(attempts=ladder[:4])
     assert not ok and SAVED[1] in detail
-    broke_in = {"manifest": _manifest("all_fail"), "report": {**rejected["report"], "sessions": [_session(SAVED[0], "password")]}}
-    ok, detail = evaluate_outcome(all_fail, broke_in, "")
+    ok, detail = all_fail_with(sessions=[_session(SAVED[0], "password")])
     assert not ok and "no option should work" in detail
+    ok, detail = all_fail_with(attempts=[ladder[1], ladder[0], *ladder[2:]])
+    assert not ok and "passkey:rejected was tried before the rung above it" in detail, detail
+    ok, detail = all_fail_with(attempts=[*ladder, _attempt("signup", MINTED, "rejected", "signup_unavailable")])
+    assert not ok and "minted identity was used" in detail, detail
+    ok, detail = all_fail_with(lastPagePath="/account")
+    assert not ok and "not on the sign-in form" in detail, detail
 
     minted = _outcome_check("browser-auth-minted-email-otp")
     minted_report = {
@@ -494,12 +609,224 @@ async def test_missing_report_fails_the_outcome_check_closed() -> None:
     assert auth_test_site.active_manifest() is None
 
 
+def test_outcome_check_grades_orders_accounts_and_second_runs() -> None:
+    from benchmarks.auth_test_site import evaluate_outcome
+
+    key = _outcome_check("browser-auth-signup-purchase")
+    account = {"email": MINTED, "memberNumber": MEMBER_NUMBER, "origin": "signup", "verified": True}
+    order = {"orderNumber": "ORD-10000001", "email": MINTED, "totalCents": 2123, "purchaseId": "p1", "itemIds": ["canvas-tote"]}
+    bought = {
+        "signInEmail": MINTED,
+        "attempts": [
+            _attempt("signup", MINTED, "pending"),
+            _attempt("signup_verify", MINTED, "signed_in"),
+            _attempt("order", MINTED, "placed"),
+        ],
+        "sessions": [_session(MINTED, "signup")],
+        "accounts": [account],
+        "orders": [order],
+    }
+
+    def key_with(answer: str = "Order ORD-10000001 is placed.", **report) -> tuple[bool, str]:
+        return evaluate_outcome(key, {"manifest": _manifest("signup_purchase"), "report": {**bought, **report}}, answer)
+
+    ok, detail = key_with()
+    assert ok, detail
+    ok, detail = key_with(orders=[order, {**order, "orderNumber": "ORD-10000002"}])
+    assert not ok and "2 order(s); expected exactly 1" in detail, detail
+    ok, detail = key_with(orders=[{**order, "email": None}])
+    assert not ok and "placed by a guest" in detail, detail
+    ok, detail = key_with(accounts=[{**account, "verified": False}])
+    assert not ok and "0 verified new account(s)" in detail, detail
+    ok, detail = key_with(answer="Your tote is on its way.")
+    assert not ok and "ORD-10000001" in detail, detail
+
+    guest = _outcome_check("browser-auth-guest-purchase")
+    guest_report = {"attempts": [_attempt("guest", "", "started"), _attempt("order", "", "placed")], "sessions": [], "orders": [{**order, "email": None}]}
+    ok, detail = evaluate_outcome(guest, {"manifest": _manifest("guest_purchase"), "report": guest_report}, "ORD-10000001")
+    assert ok, detail
+    signed_up = {**guest_report, "attempts": [_attempt("signup", MINTED, "pending"), *guest_report["attempts"]]}
+    ok, detail = evaluate_outcome(guest, {"manifest": _manifest("guest_purchase"), "report": signed_up}, "ORD-10000001")
+    assert not ok and "signup" in detail and "must not happen" in detail, detail
+
+    reoffer = _outcome_check("browser-auth-failed-login-not-reoffered")
+    two_runs = {
+        "signInEmail": SAVED[1],
+        "attempts": [
+            _attempt("password", SAVED[0], "rejected", "wrong_password"),
+            _attempt("password", SAVED[1], "signed_in"),
+            _attempt("run_marker", "graded-run", "started"),
+            _attempt("password", SAVED[1], "signed_in"),
+        ],
+        "sessions": [_session(SAVED[1], "password"), _session(SAVED[1], "password")],
+        "savedPasswords": [
+            {"username": SAVED[0], "matchesAccount": False, "disabledAt": "2026-10-01T00:00:02.000Z"},
+            {"username": SAVED[1], "matchesAccount": True, "disabledAt": None},
+        ],
+    }
+
+    def reoffer_with(**report) -> tuple[bool, str]:
+        evidence = {"manifest": _manifest("failed_login_not_reoffered"), "report": {**two_runs, **report}}
+        return evaluate_outcome(reoffer, evidence, MEMBER_NUMBER)
+
+    ok, detail = reoffer_with()
+    assert ok, detail
+    still_offered = [{**two_runs["savedPasswords"][0], "disabledAt": None}, two_runs["savedPasswords"][1]]
+    ok, detail = reoffer_with(savedPasswords=still_offered)
+    assert not ok and "is still offered" in detail, detail
+    retried = [*two_runs["attempts"][:3], two_runs["attempts"][0], two_runs["attempts"][3]]
+    ok, detail = reoffer_with(attempts=retried)
+    assert not ok and "in the second run" in detail, detail
+    ok, detail = reoffer_with(attempts=two_runs["attempts"][:2])
+    assert not ok and "no second run" in detail, detail
+
+    named = _outcome_check("browser-auth-named-account")
+    wrong_account = {
+        "signInEmail": SAVED[1],
+        "attempts": [_attempt("password", SAVED[0], "signed_in"), _attempt("password", SAVED[1], "signed_in")],
+        "sessions": [_session(SAVED[0], "password"), _session(SAVED[1], "password")],
+    }
+    ok, detail = evaluate_outcome(named, {"manifest": _manifest("named_account"), "report": wrong_account}, MEMBER_NUMBER)
+    assert not ok and "wrong account" in detail, detail
+
+    never_arrives = _outcome_check("browser-auth-code-never-arrives")
+    one_request = {"attempts": [_attempt("code_request", MINTED, "code_withheld")], "sessions": []}
+    ok, detail = evaluate_outcome(never_arrives, {"manifest": _manifest("code_never_arrives"), "report": one_request}, "")
+    assert not ok and "1 time(s)" in detail, detail
+
+
+async def test_goal_names_the_account_and_first_run_precedes_the_graded_run() -> None:
+    from benchmarks import auth_test_site
+    from benchmarks import run_benchmark as rb
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    named = get_task_by_name("browser-auth-named-account")
+    try:
+        auth_test_site.set_active_manifest(_manifest("named_account"))
+        goal = rb._benchmark_goal_for_task(named, "http://localhost:3201")
+        assert SAVED[1] in goal and "{auth_test_site_account}" not in goal, goal
+        auth_test_site.set_active_manifest(_manifest("password_retry"))
+        try:
+            rb._benchmark_goal_for_task(named, "http://localhost:3201")
+        except auth_test_site.AuthTestSiteFixtureError as exc:
+            assert "names no account" in str(exc)
+        else:
+            raise AssertionError("a named-account goal resolved without a named account")
+    finally:
+        auth_test_site.set_active_manifest(None)
+
+    task = get_task_by_name("browser-auth-created-account-reused")
+    headers = {"X-API-Key": "fixture-key", "X-User-Id": "user-1", "Content-Type": "application/json"}
+
+    async def fake_headers() -> dict:
+        return dict(headers)
+
+    created_goals: list[str] = []
+    first_run_status = {"value": "COMPLETED"}
+
+    async def fake_create_agent(base_url: str, first_task) -> str:
+        created_goals.append(rb._benchmark_goal_for_task(first_task, base_url))
+        assert first_task.evaluators == [] and first_task.enforce_declared_evaluators is False
+        return "first-run-agent"
+
+    async def fake_poll_agent(base_url: str, agent_id: str, first_task, *_args):
+        return {"agent": {"status": first_run_status["value"]}}, 0, 0, None
+
+    previous_frontend = os.environ.get("BENCHMARK_FRONTEND_URL")
+    os.environ["BENCHMARK_FRONTEND_URL"] = "https://rose-x.ngrok.app/"
+    try:
+        with _FakeBackend("created_account_reused", {}) as backend, patch.object(
+            rb, "_api_headers", fake_headers
+        ), patch.object(rb, "_current_benchmark_user_id", lambda: "user-1"), patch.object(
+            rb, "create_agent", fake_create_agent
+        ), patch.object(rb, "poll_agent", fake_poll_agent):
+            manifest = await rb._apply_auth_test_site(task, backend.base_url)
+            assert manifest is not None and manifest["firstRunAgentId"] == "first-run-agent"
+            assert len(created_goals) == 1 and created_goals[0].startswith("Create an account for me at https://")
+            assert [request[:2] for request in backend.requests] == [
+                ("POST", "/api/test-sites/rose-shop/fixtures"),
+                ("POST", "/api/test-sites/rose-shop/fixtures/abc123/mark"),
+            ], backend.requests
+            assert backend.requests[1][2] == {"label": "graded-run"}
+            assert rb._benchmark_goal_for_task(task, backend.base_url).startswith("Tell me my member number for https://")
+            await rb._release_auth_test_site(backend.base_url, manifest)
+
+            first_run_status["value"] = "FAILED"
+            backend.requests.clear()
+            try:
+                await rb._apply_auth_test_site(task, backend.base_url)
+            except auth_test_site.AuthTestSiteFixtureError as exc:
+                assert "first run did not complete" in str(exc)
+            else:
+                raise AssertionError("a failed first run was allowed to continue into the graded run")
+            assert backend.requests[-1][:2] == ("DELETE", "/api/test-sites/rose-shop/fixtures/abc123"), backend.requests
+            assert auth_test_site.active_manifest() is None
+    finally:
+        auth_test_site.set_active_manifest(None)
+        if previous_frontend is None:
+            os.environ.pop("BENCHMARK_FRONTEND_URL", None)
+        else:
+            os.environ["BENCHMARK_FRONTEND_URL"] = previous_frontend
+
+
+async def test_stand_in_user_signs_in_or_declines_a_sign_in_help_request() -> None:
+    from benchmarks import auth_assistance_user, auth_test_site
+    from benchmarks import run_benchmark as rb
+
+    request = {"id": "req-12345678", "metadata": {"requestUserAuthentication": {"taskId": "browser-task-1"}}}
+    assert auth_assistance_user._browser_task_id(request) == "browser-task-1"
+    assert auth_assistance_user._browser_task_id({"id": "x", "metadata": {}}) is None
+
+    calls: list[tuple] = []
+
+    async def fake_headers() -> dict:
+        return {"X-API-Key": "fixture-key"}
+
+    async def fake_sign_in(base_url, headers, req, credentials):
+        calls.append(("sign_in", req["id"], credentials["email"], credentials["password"]))
+        return "https://site/account"
+
+    async def fake_decline(base_url, headers, req):
+        calls.append(("decline", req["id"]))
+
+    async def fake_mark(base_url, headers, site_id, label):
+        calls.append(("mark", site_id, label))
+
+    try:
+        with patch.object(rb, "_api_headers", fake_headers), patch.object(
+            auth_assistance_user, "sign_in_as_user", fake_sign_in
+        ), patch.object(auth_assistance_user, "decline", fake_decline), patch.object(
+            auth_test_site, "mark_run", fake_mark
+        ):
+            auth_test_site.set_active_manifest(_manifest("user_signs_in"))
+            await rb._respond_as_user_to_auth_assistance("http://localhost:1", request, "sign_in")
+            assert calls == [("sign_in", "req-12345678", SAVED[0], "only-the-user-knows")], calls
+
+            calls.clear()
+            auth_test_site.set_active_manifest(_manifest("saved_logins_fail"))
+            await rb._respond_as_user_to_auth_assistance("http://localhost:1", request, "decline")
+            assert calls == [("decline", "req-12345678"), ("mark", "abc123", "user-declined")], calls
+
+            try:
+                await rb._respond_as_user_to_auth_assistance("http://localhost:1", request, "sign_in")
+            except RuntimeError as exc:
+                assert "no password for the user" in str(exc)
+            else:
+                raise AssertionError("the stand-in user signed in without a password to type")
+    finally:
+        auth_test_site.set_active_manifest(None)
+
+
 async def run_all_tests():
     print("auth-test-site-benchmark blackbox tests:")
     runner = BlackboxResult()
     runner.record(
-        "daily_catalog_covers_every_hosted_auth_branch_with_one_natural_prompt",
-        test_daily_catalog_covers_every_hosted_auth_branch_with_one_natural_prompt,
+        "daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts",
+        test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts,
+    )
+    await runner.record_async(
+        "tasks_that_share_the_agent_inbox_never_overlap",
+        test_tasks_that_share_the_agent_inbox_never_overlap,
     )
     runner.record(
         "hosted_auth_tasks_never_get_the_guest_checkout_kill_switch",
@@ -532,5 +859,17 @@ async def run_all_tests():
     await runner.record_async(
         "missing_report_fails_the_outcome_check_closed",
         test_missing_report_fails_the_outcome_check_closed,
+    )
+    runner.record(
+        "outcome_check_grades_orders_accounts_and_second_runs",
+        test_outcome_check_grades_orders_accounts_and_second_runs,
+    )
+    await runner.record_async(
+        "goal_names_the_account_and_first_run_precedes_the_graded_run",
+        test_goal_names_the_account_and_first_run_precedes_the_graded_run,
+    )
+    await runner.record_async(
+        "stand_in_user_signs_in_or_declines_a_sign_in_help_request",
+        test_stand_in_user_signs_in_or_declines_a_sign_in_help_request,
     )
     return runner.all_passed

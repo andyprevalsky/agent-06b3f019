@@ -255,22 +255,47 @@ async function resolveMintedAccount({
   });
 }
 
+type AgentIdentityRow = Awaited<ReturnType<typeof repo.findAgentIdentity>>;
+
+/**
+ * One in-flight mint per user in this process. Browser agents that start
+ * together each ask for auth options at once; without this every one of them
+ * minted its own inbox (and provisioned its own phone number), and each was
+ * told a different identity than the one finally stored.
+ */
+const identityMints = new Map<string, Promise<AgentIdentityRow>>();
+
 async function ensureMintedIdentity(
   userId: string,
-  existingIdentity: Awaited<ReturnType<typeof repo.findAgentIdentity>>,
+  existingIdentity: AgentIdentityRow,
   existingMintedAccount: Awaited<ReturnType<typeof repo.findMintedAccount>>
-) {
+): Promise<AgentIdentityRow> {
+  const inFlight = identityMints.get(userId);
+  if (inFlight !== undefined) return inFlight;
+  const mint = mintIdentity(userId, existingIdentity, existingMintedAccount).finally(() => {
+    identityMints.delete(userId);
+  });
+  identityMints.set(userId, mint);
+  return mint;
+}
+
+async function mintIdentity(
+  userId: string,
+  existingIdentity: AgentIdentityRow,
+  existingMintedAccount: Awaited<ReturnType<typeof repo.findMintedAccount>>
+): Promise<AgentIdentityRow> {
   const agentName = await repo.findUserAgentName(userId);
-  let identity = existingIdentity;
+  // A caller that queued behind another mint read "no identity" before it landed.
+  let identity = existingIdentity ?? (await repo.findAgentIdentity(userId));
 
   if (identity === null) {
     const existingEmail = existingMintedAccount?.accountLabel ?? null;
     if (existingEmail !== null) {
-      identity = await repo.upsertAgentIdentityEmail(userId, existingEmail);
+      identity = await repo.createAgentIdentityEmailIfAbsent(userId, existingEmail);
     } else {
       const inbox = await createMintedInbox({ userId, authRealm: 'agent-identity', agentName });
       if (inbox === null) return null;
-      identity = await repo.upsertAgentIdentityEmail(userId, inbox.email);
+      identity = await repo.createAgentIdentityEmailIfAbsent(userId, inbox.email);
     }
   } else {
     const hasCurrentMintedDomain = emailUsesCurrentMintedDomain(identity.email);

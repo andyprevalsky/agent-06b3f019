@@ -57,7 +57,7 @@ import httpx
 
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from benchmarks import auth_test_site
+from benchmarks import auth_assistance_user, auth_test_site
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
@@ -3034,6 +3034,25 @@ async def respond_to_attention_request(base_url: str, request_id: str, response:
         )
 
 
+async def _respond_as_user_to_auth_assistance(base_url: str, req: dict, user_response: str) -> None:
+    """Play the user for a sign-in-help request on the hosted auth site."""
+    headers = await _api_headers()
+    req_id = str(req.get("id") or "")[:8]
+    if user_response == "decline":
+        await auth_assistance_user.decline(base_url, headers, req)
+        site_id = str((auth_test_site.active_manifest() or {}).get("siteId") or "")
+        if site_id:
+            # Everything the site records from here on happened after the user said no.
+            await auth_test_site.mark_run(base_url, headers, site_id, "user-declined")
+        print(f"    🙅 Declined sign-in-help request {req_id}")
+        return
+    credentials = (auth_test_site.active_manifest() or {}).get("userSignIn")
+    if not isinstance(credentials, dict):
+        raise RuntimeError("the site manifest carries no password for the user to type")
+    landed = await auth_assistance_user.sign_in_as_user(base_url, headers, req, credentials)
+    print(f"    🙋 Signed in as the user for sign-in-help request {req_id} (now on {landed})")
+
+
 def _count_only_release_response() -> str:
     """Response used to unblock counted approval requests without approving side effects."""
     return "__REJECTED__"
@@ -4541,6 +4560,21 @@ async def poll_agent(
                                 await respond_to_attention_request(base_url, req_id, _count_only_release_response())
                                 approvals_resolved += 1
                                 print(f"    ✅ Counted and released approval request {req_id[:8]}")
+                            user_response = (
+                                (auth_test_site.declared_block(task.environment) or {}).get("user_response")
+                                if observed_kind == "auth_assistance"
+                                else None
+                            )
+                            if user_response:
+                                try:
+                                    await _respond_as_user_to_auth_assistance(base_url, req, user_response)
+                                except Exception as user_error:
+                                    return (
+                                        data, approvals_triggered, approvals_resolved,
+                                        f"Stand-in user could not {user_response}: {user_error}",
+                                    )
+                                approvals_resolved += 1
+                                continue
                             if task.approval_handling == "ignore":
                                 kind_label = (
                                     f" ({observed_kind})"
@@ -7446,7 +7480,46 @@ async def _apply_auth_test_site(task: "BenchmarkTask", base_url: str) -> Optiona
         f"{len(manifest.get('savedPasswordUsernames') or [])} saved password(s), "
         f"minted={manifest.get('mintedEmail') or 'none'}"
     )
+    first_run_prompt = (auth_test_site.declared_block(task.environment) or {}).get("first_run_prompt")
+    if first_run_prompt:
+        try:
+            await _run_auth_test_site_first_run(task, base_url, manifest, first_run_prompt)
+        except BaseException:
+            await _release_auth_test_site(base_url, manifest)
+            raise
     return manifest
+
+
+async def _run_auth_test_site_first_run(
+    task: "BenchmarkTask", base_url: str, manifest: dict, first_run_prompt: str
+) -> None:
+    """Run one agent to completion on the site before the graded run.
+
+    Behavior that spans two runs (a login that failed is not offered again, an
+    account made earlier can be signed into) needs a real first run whose only
+    job is to leave that state behind. It must complete; the graded run and the
+    evaluators then see the site's event log split by a run marker.
+    """
+    first_task = replace(
+        task,
+        prompt=first_run_prompt,
+        approval_handling=None,
+        expected_approval_count=None,
+        expected_attention_kind=None,
+        enforce_declared_evaluators=False,
+        evaluators=[],
+    )
+    first_agent_id = await create_agent(base_url, first_task)
+    manifest["firstRunAgentId"] = first_agent_id
+    print(f"    ① First run agent created: {first_agent_id[:12]}...")
+    data, _triggered, _resolved, early_fail = await poll_agent(base_url, first_agent_id, first_task)
+    status = (data.get("agent") or {}).get("status")
+    if early_fail or status != "COMPLETED":
+        raise auth_test_site.AuthTestSiteFixtureError(
+            f"first run did not complete (status={status}, reason={early_fail}); agent {first_agent_id}"
+        )
+    await auth_test_site.mark_run(base_url, await _api_headers(), str(manifest["siteId"]), "graded-run")
+    print(f"    ① First run completed; graded run starts on site {manifest['siteId']}")
 
 
 async def _release_auth_test_site(base_url: str, manifest: Optional[dict]) -> None:
@@ -12901,6 +12974,11 @@ async def run_single_task(
         if session_evidence_error:
             logs["claude_code_session_evidence_error"] = session_evidence_error
         auth_test_site_evidence = (data.get("_benchmark") or {}).get("auth_test_site")
+        if not auth_test_site_evidence and auth_test_site.active_manifest():
+            # A run that failed before its evaluators still needs the site's own
+            # record: it is the only account of what the agent actually tried.
+            await _hydrate_auth_test_site_evidence(data, base_url)
+            auth_test_site_evidence = (data.get("_benchmark") or {}).get("auth_test_site")
         if auth_test_site_evidence:
             logs["auth_test_site"] = auth_test_site_evidence
         # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
@@ -14024,6 +14102,10 @@ def _parallel_task_runners(
     # The cross-process lock is held by the task runner below. Keep a local
     # semaphore too so one batch does not spin many waiters on the file lock.
     payment_surface = asyncio.Semaphore(1)
+    # The user's agent identity owns one inbox and one phone. Hosted-auth sites
+    # that send codes there cannot tell lanes apart, so concurrent lanes would
+    # read (and burn) each other's codes. One at a time; other work overlaps.
+    agent_inbox = asyncio.Semaphore(1)
 
     async def run_with_batch_limit(task: BenchmarkTask) -> TaskResult:
         if semaphore is None:
@@ -14044,11 +14126,17 @@ def _parallel_task_runners(
                 return await run_with_batch_limit(task)
         return await run_with_batch_limit(task)
 
+    async def run_with_inbox_limit(task: BenchmarkTask) -> TaskResult:
+        if auth_test_site.uses_shared_inbox(getattr(task, "environment", None)):
+            async with agent_inbox:
+                return await run_with_other_surface_limits(task)
+        return await run_with_other_surface_limits(task)
+
     async def run_limited(task: BenchmarkTask) -> TaskResult:
         if "agentcard-lifecycle-sandbox" in getattr(task, "tags", []):
             async with payment_surface:
-                return await run_with_other_surface_limits(task)
-        return await run_with_other_surface_limits(task)
+                return await run_with_inbox_limit(task)
+        return await run_with_inbox_limit(task)
 
     return [run_limited(task) for task in tasks]
 
