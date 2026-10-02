@@ -33,7 +33,7 @@ async function run(): Promise<void> {
   assert.equal(options.provider_route, 'direct-cerebras');
   assert.equal(options.provider_fast_mode, true);
   assert.equal(options.abort_signal, abortController.signal);
-  assert.equal(options.temperature, 0.3);
+  assert.equal(options.temperature, 0);
   assert.equal(options.max_tokens, 1_024);
   assert.equal(
     buildRouterCompletionOptions({
