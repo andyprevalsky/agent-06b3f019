@@ -21,6 +21,7 @@ import re
 import time
 import traceback
 import uuid as uuid_module
+import weakref
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 
@@ -78,7 +79,6 @@ from .challenge_recovery import (
     verify_live_page_cleared_challenge,
 )
 from .config import (
-    ACTION_LOOP_DELAY_SECONDS,
     BROWSER_DISCONNECT_TIMEOUT_SECONDS,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_STATE_SOFT_ATTEMPTS,
@@ -182,6 +182,7 @@ from .service_crypto import (
     has_payment_card_secret_refs,
     is_usable_email_otp,
 )
+from .state_prefetch import BrowserStatePrefetch
 from .step_timing import StepPhaseTimer
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .types import ClaudeTokenState
@@ -1745,11 +1746,49 @@ async def _discard_replacement_browser_stack(
     )
 
 
+class TabFocusCache:
+    """Per-activity memo for tab focus sync.
+
+    A Playwright page keeps its CDP target id for its whole life, so resolving
+    it once per page replaces a per-step CDP session + Target.getTargetInfo
+    round trip for every open tab. ``foreground`` remembers the last
+    (target, tab count) brought to front: an unchanged pair means nothing could
+    have taken the foreground from the agent, while a new/closed tab forces
+    a fresh bring_to_front.
+    """
+
+    def __init__(self) -> None:
+        self.target_ids: "weakref.WeakKeyDictionary[Any, str]" = weakref.WeakKeyDictionary()
+        self.foreground: Optional[Tuple[str, int]] = None
+
+
+async def _page_target_id(context: Any, page: Any, cache: Optional[TabFocusCache]) -> Optional[str]:
+    if cache is not None:
+        with contextlib.suppress(TypeError):
+            cached = cache.target_ids.get(page)
+            if cached:
+                return cached
+    cdp_session = None
+    try:
+        cdp_session = await context.new_cdp_session(page)
+        target_info = await cdp_session.send("Target.getTargetInfo")
+        target_id = target_info.get("targetInfo", {}).get("targetId")
+    finally:
+        if cdp_session is not None:
+            with contextlib.suppress(Exception):
+                await cdp_session.detach()
+    if target_id and cache is not None:
+        with contextlib.suppress(TypeError):
+            cache.target_ids[page] = target_id
+    return target_id
+
+
 async def _synchronize_playwright_page_with_agent_focus(
     *,
     dom_service: Any,
     playwright_browser: Any,
     current_page: Any,
+    focus_cache: Optional[TabFocusCache] = None,
 ) -> Any:
     """Make Playwright input and the provider live view follow browser-use focus.
 
@@ -1766,25 +1805,22 @@ async def _synchronize_playwright_page_with_agent_focus(
         return current_page
 
     pages = getattr(contexts[0], "pages", None) or []
+    foreground_key = (focused_target_id, len(pages))
     for page in pages:
-        cdp_session = None
         try:
-            cdp_session = await contexts[0].new_cdp_session(page)
-            target_info = await cdp_session.send("Target.getTargetInfo")
-            target_id = target_info.get("targetInfo", {}).get("targetId")
+            target_id = await _page_target_id(contexts[0], page, focus_cache)
             if target_id != focused_target_id:
                 continue
-            await page.bring_to_front()
+            if focus_cache is None or focus_cache.foreground != foreground_key or page is not current_page:
+                await page.bring_to_front()
+                if focus_cache is not None:
+                    focus_cache.foreground = foreground_key
             return page
         except Exception as exc:
             logger.debug(
                 "Unable to compare Playwright page with browser-use focus",
                 error=str(exc),
             )
-        finally:
-            if cdp_session is not None:
-                with contextlib.suppress(Exception):
-                    await cdp_session.detach()
 
     return current_page
 
@@ -1799,12 +1835,14 @@ async def _rebind_browser_tab_runtime(
     browser_recorder: Any,
     cursor_observer: Any,
     humanizer_factory: Any = None,
+    focus_cache: Optional[TabFocusCache] = None,
 ) -> Tuple[Any, Any]:
     """Atomically move live view, recorder, and synthesized input to agent focus."""
     focused_page = await _synchronize_playwright_page_with_agent_focus(
         dom_service=dom_service,
         playwright_browser=playwright_browser,
         current_page=current_page,
+        focus_cache=focus_cache,
     )
     if focused_page is current_page:
         return current_page, humanizer
@@ -1843,6 +1881,82 @@ async def _replace_browser_humanizer(
     rebound_humanizer.set_cursor_observer(cursor_observer)
     rebound_humanizer.start_idle_movement()
     return rebound_humanizer
+
+
+def _harvest_otp_poll(task: Optional["asyncio.Task[int]"]) -> Optional["asyncio.Task[int]"]:
+    """Collect a finished background OTP poll without ever waiting on it.
+
+    Returns the task while it is still in flight, ``None`` once it has been
+    harvested (or never started) so the caller can start the next poll. A
+    failed poll never fails the step.
+    """
+    if task is None or not task.done():
+        return task
+    if task.cancelled():
+        return None
+    error = task.exception()
+    if error is not None:
+        logger.warning("Failed to fetch OTPs", error=str(error)[:200])
+    elif task.result():
+        logger.info("Appended OTP user messages", count=task.result())
+    return None
+
+
+async def _drain_otp_poll(task: Optional["asyncio.Task[int]"], *, grace_s: float = 2.0) -> None:
+    """Let an in-flight OTP poll finish its credential-ref writes, then stop it."""
+    if task is None:
+        return
+    if not task.done():
+        await asyncio.wait({task}, timeout=grace_s)
+        task.cancel()
+    task.add_done_callback(_harvest_otp_poll)
+
+
+def _step_observe_needs_dom(*, fast_mode_replay: bool, browser_recorder: Any) -> bool:
+    """Whether the per-step observe must build the full DOM.
+
+    The browser LLM never receives page state implicitly (it calls
+    read_browser_state, which builds its own DOM), so the step-start observe
+    only needs URL/title. Two consumers still need the full tree every step:
+    Fast Mode replay remaps cached targets against the live selector map, and
+    file-based recorders persist per-iteration DOM observations for the world
+    model corpus (Kernel replay recorders ignore observations).
+    """
+    if fast_mode_replay:
+        return True
+    return browser_recorder is not None and not getattr(browser_recorder, "uses_kernel_replay", False)
+
+
+async def _take_speculative_browser_state(
+    state_prefetch: BrowserStatePrefetch,
+    dom_service: Any,
+) -> Optional[Dict[str, Any]]:
+    """Speculative DOM build for read_browser_state, if still on the same page."""
+    if not state_prefetch.in_flight or dom_service is None:
+        state_prefetch.discard()
+        return None
+    try:
+        live_url = (await dom_service.get_page_identity()).get("url")
+    except Exception:
+        state_prefetch.discard()
+        return None
+    try:
+        # The build already overlapped the LLM call; one still running after
+        # the soft budget is stalled, and the fresh build that replaces it keeps
+        # the full action timeout for challenge freezes.
+        return await asyncio.wait_for(
+            state_prefetch.take(dom_service, live_url),
+            timeout=BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Speculative browser state build timed out; building fresh")
+        return None
+
+
+async def _observe_step_page(dom_service: Any, *, needs_dom: bool) -> Dict[str, Any]:
+    if needs_dom:
+        return await dom_service.get_browser_state(include_screenshot=False)
+    return await dom_service.get_page_identity()
 
 
 async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
@@ -5684,8 +5798,6 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                 status=MessageStatus.FINISHED if transition.get("success", True) else MessageStatus.ERROR,
             )
             await browser_stream.finish_tools(status="FINISHED" if transition.get("success", True) else "ERROR")
-            if ACTION_LOOP_DELAY_SECONDS > 0:
-                await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)
 
         await finalize_recording()
         return {
@@ -6055,6 +6167,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             payment_card_last4,
         )
     otp_user_messages: List[Dict[str, str]] = []
+    # The background OTP poll writes here, not into credential_refs_by_secret_ref,
+    # because a realm transition rebinds that dict while a poll is in flight.
+    otp_credential_refs: Dict[str, Dict[str, str]] = {}
     seen_otp_codes: set[str] = set()
     available_file_paths: Dict[str, str] = {}
     passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
@@ -6141,6 +6256,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # ``finally`` teardown, but must NOT emit task_complete — the browser task
     # resumes in a later activity call and the FE chip must stay open.
     browser_task_paused_for_resume = False
+    otp_poll_task: Optional["asyncio.Task[int]"] = None
+    state_prefetch = BrowserStatePrefetch()
 
     try:
         # ===== SETUP TIMING TRACKER =====
@@ -7247,11 +7364,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         consecutive_budget_free = 0
         consecutive_keystroke_free = 0
         step_timer = StepPhaseTimer(agent_id=agent_id, task_id=task_id)
+        tab_focus_cache = TabFocusCache()
         while iteration < MAX_ITERATIONS:
             iteration += 1
             step_timer.start_step(iteration)
             activity.heartbeat(f"Step {iteration}")
-            await _wait_for_browser_user_control(config, task_id)
+            if await _wait_for_browser_user_control(config, task_id):
+                tab_focus_cache.foreground = None
+                state_prefetch.discard()
             step_timer.mark("user_control_wait")
 
             # TAB/INPUT/LIVE-VIEW STATE MACHINE:
@@ -7267,14 +7387,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 humanizer=humanizer,
                 browser_recorder=browser_recorder,
                 cursor_observer=observe_cursor,
+                focus_cache=tab_focus_cache,
             )
             step_timer.mark("tab_rebind")
 
             # Handle pending write lock action
             if pending_write_lock_action:
+                state_prefetch.discard()
                 if await _wait_for_browser_user_control(config, task_id):
                     # The approved target may have changed under user control;
                     # retain it and re-resolve against a fresh DOM next step.
+                    tab_focus_cache.foreground = None
                     continue
                 logger.info("Executing pending write lock action after approval")
                 unified_action, _, current_url = await _prepare_pending_write_lock_action(
@@ -7347,26 +7470,30 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
                 continue
 
-            # 0. Fetch recent OTPs and append unseen codes as USER messages.
-            try:
-                new_otp_count = await _fetch_and_append_recent_otp_user_messages(
-                    user_id=user_id,
-                    api_url=config.backend.api_url,
-                    api_key=config.backend.api_key,
-                    seen_otp_codes=seen_otp_codes,
-                    otp_user_messages=otp_user_messages,
-                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
-                    agent_id=agent_id,
-                    task_id=task_id,
+            # 0. Recent OTPs are polled in the background (backend HTTP); the
+            # step never waits on it. Codes a finished poll found are appended
+            # as USER messages here, at a turn boundary, and the next poll starts.
+            otp_poll_task = _harvest_otp_poll(otp_poll_task)
+            if otp_credential_refs:
+                credential_refs_by_secret_ref.update(otp_credential_refs)
+                otp_credential_refs.clear()
+            if len(otp_user_messages) > otp_history_count:
+                browser_turn_messages.extend(otp_user_messages[otp_history_count:])
+                otp_history_count = len(otp_user_messages)
+            if otp_poll_task is None:
+                otp_poll_task = asyncio.create_task(
+                    _fetch_and_append_recent_otp_user_messages(
+                        user_id=user_id,
+                        api_url=config.backend.api_url,
+                        api_key=config.backend.api_key,
+                        seen_otp_codes=seen_otp_codes,
+                        otp_user_messages=otp_user_messages,
+                        credential_refs_by_secret_ref=otp_credential_refs,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                    )
                 )
-                if new_otp_count:
-                    logger.info("Appended OTP user messages", count=new_otp_count)
-                if len(otp_user_messages) > otp_history_count:
-                    browser_turn_messages.extend(otp_user_messages[otp_history_count:])
-                    otp_history_count = len(otp_user_messages)
-            except Exception as e:
-                logger.warning("Failed to fetch OTPs", error=str(e))
-            step_timer.mark("otp_fetch")
+            step_timer.mark("otp_poll")
 
             # One guarded state fetch supplies URL + observe text (avoid double DOM).
             activity.heartbeat(f"Step {iteration} - resolving page state")
@@ -7385,11 +7512,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         timeout=BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
                     )
                 step_timer.mark("overlay_suppress")
+                observe_needs_dom = _step_observe_needs_dom(
+                    fast_mode_replay=bool(fast_mode_cache_enabled),
+                    browser_recorder=browser_recorder,
+                )
                 observe_page_state = await asyncio.wait_for(
-                    dom_service.get_browser_state(include_screenshot=False),
+                    _observe_step_page(dom_service, needs_dom=observe_needs_dom),
                     timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                 )
+                step_timer.annotate(observe_dom=observe_needs_dom)
                 current_url = str(observe_page_state.get("url") or current_url)
+                step_timer.mark("observe_state")
             except asyncio.TimeoutError:
                 recovered = await _recover_browser_step(
                     f"browser_url_timeout_{BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS}s",
@@ -7406,7 +7539,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 if recovered:
                     continue
                 raise
-            step_timer.mark("observe_state")
             await record_passkey_usage_once()
             step_timer.mark("passkey_usage")
             auth_runtime_state.observe_page_text(observe_page_state.get("title") or "")
@@ -7696,6 +7828,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             action_entries=action_entries,
                         )
                 step_timer.mark("record_observation")
+                if not observe_needs_dom:
+                    state_prefetch.start(dom_service)
 
                 # Fast Mode: replay the recorded decision when the browser request
                 # fingerprint matches. The live browser session still executes the
@@ -7888,6 +8022,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
             if await _wait_for_browser_user_control(config, task_id):
                 # Never execute an action planned against the pre-handoff DOM.
+                tab_focus_cache.foreground = None
+                state_prefetch.discard()
                 await browser_stream.finish_tools(status="ERROR")
                 continue
 
@@ -9272,6 +9408,13 @@ Based on this feedback, I need to continue working on the task and address the i
                 with contextlib.suppress(Exception):
                     browser_network_recorder = network_recorder_task.result()
 
+            prefetched_browser_state = observe_page_state
+            if action_name == "read_browser_state" and "dom_tree" not in observe_page_state:
+                speculative_state = await _take_speculative_browser_state(state_prefetch, dom_service)
+                step_timer.annotate(state_prefetch="hit" if speculative_state else "miss")
+                prefetched_browser_state = speculative_state or observe_page_state
+            else:
+                state_prefetch.discard()
             step_timer.mark("pre_action_bookkeeping")
             step_timer.annotate(action=action_name)
             activity.heartbeat(f"Step {iteration} - executing {action_name}")
@@ -9297,7 +9440,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_network_recorder=browser_network_recorder,
                         current_auth_realm=auth_realm,
                         prepare_credentials_for_url=_prepare_credentials_for_url,
-                        prefetched_browser_state=observe_page_state,
+                        prefetched_browser_state=prefetched_browser_state,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
@@ -9385,6 +9528,7 @@ Based on this feedback, I need to continue working on the task and address the i
                             humanizer=humanizer,
                             browser_recorder=browser_recorder,
                             cursor_observer=observe_cursor,
+                            focus_cache=tab_focus_cache,
                         )
                 result = {
                     "success": False,
@@ -9429,6 +9573,10 @@ Based on this feedback, I need to continue working on the task and address the i
                     "supervisor_recovered": True,
                 }
             step_timer.mark("execute_action")
+            state_prefetch.arm(
+                action_name,
+                success=isinstance(result, dict) and bool(result.get("success", True)),
+            )
             if isinstance(result, dict) and result.get("current_url"):
                 current_url = str(result.get("current_url") or "")
                 if current_url and (not visited_urls or current_url != visited_urls[-1]):
@@ -9766,15 +9914,6 @@ Based on this feedback, I need to continue working on the task and address the i
                     title=title_done,
                     task_id=task_id,
                 )
-                if action_name == "evaluate":
-                    preserved_state = await _capture_preserved_evidence_after_evaluate(
-                        dom_service=dom_service,
-                        verifier_checkpoints=verifier_checkpoints,
-                        current_url=current_url,
-                    )
-                    if preserved_state:
-                        browser_state = preserved_state
-                        current_url = str(preserved_state.get("url") or current_url or "")
                 if input_page and _botsigged_diagnostics_enabled(start_url):
                     with contextlib.suppress(Exception):
                         await _capture_botsigged_diagnostics(
@@ -9883,8 +10022,6 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
 
             step_timer.mark("post_action_bookkeeping")
-            await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)
-            step_timer.mark("loop_delay")
 
         step_timer.finish()
         # Max iterations reached
@@ -10174,6 +10311,8 @@ Based on this feedback, I need to continue working on the task and address the i
         raise
     finally:
         stop_browser_activity_heartbeat(_heartbeat_token)
+        await _drain_otp_poll(otp_poll_task)
+        state_prefetch.discard()
         diagnostics_finalized = False
         if browser_network_recorder is None and network_recorder_task is not None:
             try:

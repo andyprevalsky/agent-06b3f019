@@ -149,9 +149,6 @@ STEEL_COST_CENTS_PER_MS = 100 / 3_600_000  # ~0.00002778
 KERNEL_COST_CENTS_PER_MS = float(os.getenv("KERNEL_COST_CENTS_PER_HOUR", "48")) / 3_600_000
 BROWSER_USE_COST_CENTS_PER_MS = float(os.getenv("BROWSER_USE_COST_CENTS_PER_HOUR", "2")) / 3_600_000
 
-# Action loop delay between iterations (seconds)
-ACTION_LOOP_DELAY_SECONDS = 0.5
-
 # Browser supervisor watchdogs. These must be longer than browser-use's own
 # per-event caps because those EventBus requests are not reliably cancellable
 # from an outer asyncio.wait_for. If the supervisor preempts BrowserStateRequest
