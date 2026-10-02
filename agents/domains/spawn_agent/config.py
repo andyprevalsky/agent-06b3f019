@@ -193,6 +193,8 @@ _demo_cache_goal_hash = None
 try:
     from providers.fast_cache.normalize import (
         demo_cache_goal_hashes as _load_demo_cache_goal_hashes,
+    )
+    from providers.fast_cache.normalize import (
         goal_hash as _load_demo_cache_goal_hash,
     )
 

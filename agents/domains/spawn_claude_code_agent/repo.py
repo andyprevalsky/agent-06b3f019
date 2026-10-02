@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 import httpx
 import structlog
+from temporalio.exceptions import ApplicationError
 
 from config import load_config
 from helpers.workflow_generation import (
@@ -17,7 +18,6 @@ from helpers.workflow_generation import (
 )
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
-from temporalio.exceptions import ApplicationError
 
 logger = structlog.get_logger()
 

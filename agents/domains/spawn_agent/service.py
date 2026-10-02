@@ -16,7 +16,6 @@ import structlog.contextvars
 from temporalio import activity
 
 from domains.spawn_agent.config import (
-    EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
     explore_limits_for_depth,
@@ -629,7 +628,10 @@ async def spawn_explore_agent_activity(
                 metadata["agentType"] = "explore"
                 metadata["subAgentId"] = task_id
                 tool_call_id = metadata.get("toolCallId")
-                chain_key = str(tool_call_id) if tool_call_id else None
+                # DEMO fixture cards have distinct visible IDs but belong to
+                # one ordered tool call. Preserve their script order in the FE.
+                chain_id = metadata.get("demoParentToolCallId") or tool_call_id
+                chain_key = str(chain_id) if chain_id else None
             _dispatch_fe_post(
                 chain_key,
                 lambda: call_temporal_activity_from_activity(activity_fn, args=args, **kwargs),

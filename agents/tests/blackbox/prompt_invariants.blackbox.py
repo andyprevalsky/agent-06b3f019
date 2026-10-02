@@ -266,7 +266,11 @@ def test_every_tool_model_appears_in_at_least_one_phase_list():
         | set(PLANNER_ASSIGNABLE_TOOLS)
     )
 
-    orphans = set(TOOL_MODELS.keys()) - union
+    # This exact-goal benchmark tool is injected into the root workflow's
+    # execute list only for the Google OAuth video task. Adding it to a shared
+    # phase list would expose the fixture to unrelated agents.
+    exact_goal_tools = {"google_oauth_demo"}
+    orphans = set(TOOL_MODELS.keys()) - union - exact_goal_tools
     assert not orphans, (
         f"Tool model(s) {sorted(orphans)} are registered in TOOL_MODELS but "
         f"do not appear in any phase list (PLAN_PHASE_TOOLS, "
@@ -1851,6 +1855,61 @@ def test_output_schema_states_attempt_completion_takes_no_arguments():
     )
 
 
+# ============================================================================
+# 21. Write-lock approval is requested by the commit click
+# ----------------------------------------------------------------------------
+# WHY: The browser write lock intercepts the final commit click (Place order,
+# Pay, Send, Post) and asks the user before replaying it. No tool requests
+# approval. Prod agent 5c8b0ca4 stalled at the Amazon review page because its
+# parent wrote "do not click Place order without approval" and the browser
+# agent, told only that it "may be asked to confirm", stopped there or called
+# generate_write_lock_notification / request_payment_card / attempt_completion
+# as if they were the approval tool. Live replay of that decision point
+# (benchmarks/run_write_lock_approval_scenarios.py, pre and post run
+# concurrently, 10 trials x 5 scenarios): 7/50 trials passed before these
+# prompts, 39/50 after.
+# ============================================================================
+
+
+def test_browser_prompt_says_commit_click_requests_approval():
+    """The browser prompt states that the commit click is the approval request."""
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    from providers.rose.browser_use import build_browser_use_system_prompt
+
+    prompt = build_browser_use_system_prompt(AVAILABLE_ACTIONS)
+    assert "Clicking the commit control is how approval is requested; no tool requests it." in prompt, (
+        "The browser prompt no longer says the commit click is the approval request. Without it the "
+        "model stops at the review page or calls a non-approval tool when the goal asks for approval."
+    )
+    assert "The runtime intercepts the click, shows the user what the action will do, and asks for approval." in prompt
+    assert "finish every earlier step, then click the commit control" in prompt
+    assert "you may be asked to confirm with the user first" not in prompt, (
+        "The vague pre-fix wording is back; it does not tell the model how approval is requested."
+    )
+
+
+def test_parent_prompts_route_browser_approval_through_commit_click():
+    """Main-loop and planner prompts tell parents not to forbid the commit click."""
+    from tools.prompts.spawn_agent import PROMPT as SPAWN_AGENT_PROMPT
+    from utils.prompts import build_planner_system_prompt, build_system_prompt
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS
+
+    sentence = (
+        "In browser sessions the approval prompt fires when the browser agent clicks the final commit "
+        "control itself (Place order, Pay, Send, Post, etc.), so when a task needs the user's approval first, "
+        "tell the browser agent to carry the flow through that click and never tell it not to click."
+    )
+    prompts = {
+        "EXECUTE": build_system_prompt("EXECUTE", list(EXECUTE_PHASE_TOOLS)),
+        "planner": build_planner_system_prompt(SPAWN_AGENT_PROMPT),
+    }
+    for name, prompt in prompts.items():
+        assert sentence in prompt, (
+            f"The {name} prompt no longer tells parents that browser approval fires on the commit "
+            "click. Parents then write 'do not click Place order' and the approval prompt never fires."
+        )
+
+
 async def run_all_tests():
     print("prompt-invariants blackbox tests:")
     r = BlackboxResult()
@@ -2076,6 +2135,15 @@ async def run_all_tests():
         test_output_schema_states_attempt_completion_takes_no_arguments,
     )
 
+    # 21. Write-lock approval is requested by the commit click
+    r.record(
+        "browser_prompt_says_commit_click_requests_approval",
+        test_browser_prompt_says_commit_click_requests_approval,
+    )
+    r.record(
+        "parent_prompts_route_browser_approval_through_commit_click",
+        test_parent_prompts_route_browser_approval_through_commit_click,
+    )
     teardown_mock()
     return r.all_passed
 

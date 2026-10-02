@@ -1009,6 +1009,39 @@ async def test_execute_dag_rejects_multiple_param_tool_calls():
     assert dag.tasks[0].state.value == "FAILED"
 
 
+async def test_execute_dag_generation_handoff_does_not_start_dependents():
+    """A deploy yield is not task success — dependents must not create more approvals.
+
+    Prod agent 262669d8 handed off call_phone_number #1, then the DAG treated
+    ``success: True, generation_handoff: True`` as completed and started three
+    more phone-call approvals, each leaving another pending attn_id.
+    """
+    plan_data = {
+        "tasks": [
+            {"goal": "Place the initial call", "tool_name": "call_phone_number"},
+            {"goal": "Conditional retry #1", "tool_name": "call_phone_number"},
+        ],
+        "dependencies": {"1": [0]},
+    }
+    started: list[str] = []
+
+    async def execute_tool(name, params, tool_call_id):
+        started.append(tool_call_id)
+        return {
+            "success": True,
+            "generation_handoff": True,
+            "handoff_task_queue": "navi-agent-tasks-live",
+            "message": "new code version deployed, retry this tool",
+        }
+
+    result, _events, dag = await _run_execute_dag(plan_data, execute_tool_impl=execute_tool)
+
+    assert result["status"] == "generation_handoff"
+    assert result["handoff_task_queue"] == "navi-agent-tasks-live"
+    assert len(started) == 1
+    assert dag.tasks[1].state.value != "COMPLETED"
+
+
 async def test_execute_dag_tool_failure_returns_needs_llm():
     """execute_dag returns status=needs_llm (recoverable) when a tool reports error."""
     plan_data = {
@@ -1428,6 +1461,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_dag_rejects_multiple_param_tool_calls",
         test_execute_dag_rejects_multiple_param_tool_calls,
+    )
+    await r.record_async(
+        "execute_dag_generation_handoff_does_not_start_dependents",
+        test_execute_dag_generation_handoff_does_not_start_dependents,
     )
     await r.record_async("execute_dag_tool_failure_returns_needs_llm", test_execute_dag_tool_failure_returns_needs_llm)
     await r.record_async(

@@ -22,9 +22,9 @@ from typing import Callable, Optional
 
 from temporalio import activity
 
-logger = logging.getLogger(__name__)
-
 from .config import HEARTBEAT_KEEPALIVE_SECONDS
+
+logger = logging.getLogger(__name__)
 
 KEEPALIVE_MESSAGE = "browser keepalive (renderer/CDP may be blocked by a bot-challenge)"
 

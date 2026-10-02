@@ -23,6 +23,16 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from providers.rose.schema import build_anthropic_tools_from_response_model
+from tools.prompts import attempt_completion_prompt
+
+# Single source of truth for verifier rules. The browser prompt embeds the
+# same grading block as the main agent so attempt_completion semantics do not
+# drift between agent types.
+from utils.prompts import VERIFICATION_RULES
+
+logger = structlog.get_logger()
+
 
 def recover_from_challenge_enabled() -> bool:
     """Temp kill-switch for challenge recovery (bench A/B).
@@ -32,17 +42,6 @@ def recover_from_challenge_enabled() -> bool:
     """
     raw = (os.environ.get("BROWSER_DISABLE_RECOVER_FROM_CHALLENGE") or "").strip().lower()
     return raw not in {"1", "true", "yes", "on"}
-
-from providers.rose.schema import build_anthropic_tools_from_response_model
-from tools.prompts import attempt_completion_prompt
-
-# Single source of truth for verifier rules. The browser prompt embeds the
-# same grading block as the main agent so attempt_completion semantics do not
-# drift between agent types.
-from utils.prompts import VERIFICATION_RULES
-from utils.user_facing_writing_prompt import user_facing_text_description
-
-logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------
@@ -176,9 +175,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "Execute JavaScript in the live browser page context. Use for ACTIONS or LIVE DOM STATE QUERIES "
             "that page markdown cannot answer: hover, drag, custom selectors, shadow DOM traversal, reading "
             "computed styles, dispatching events, querying iframe contents, or reading visible product/cart "
-            "facts before navigating away. Wrap in IIFE with try-catch. Every successful evaluate also "
-            "retains a bounded browser-extracted DOM snapshot for the verifier (no flag); the JS return "
-            "value is not trusted as proof. Prefer evaluate over inventing page content."
+            "facts before navigating away. Wrap in IIFE with try-catch. Prefer evaluate over inventing "
+            "page content."
         ),
         "params": {"code": {"type": "string", "description": "JavaScript code to execute", "required": True}},
     },
@@ -831,14 +829,14 @@ action envelope in text; use the provided tool call.
 
 # Evidence Retention
 
-- Completion verification retains action results, the final DOM, bounded pre-write DOM checkpoints, and DOM snapshots captured after each successful `evaluate`, not arbitrary historical DOM.
-- Before navigating away from a page with load-bearing facts required by the goal (product name, size, price, quantity, wattage, model, etc.), call `evaluate` while those facts are still visible. The runtime always snapshots the live browser-extracted DOM after a successful evaluate; you do not pass a preserve flag.
+- Completion verification retains action results, the final DOM, and bounded pre-write DOM checkpoints, not arbitrary historical DOM.
 
 # Safety Rules
 
 - NEVER delete or close any user account
 - NEVER sign legal agreements on the user's behalf (accepting Terms of Service checkboxes is acceptable)
-- When making payments or posting to social media, you may be asked to confirm with the user first
+- Write lock: clicking a final commit control (Place order, Pay, Buy now, Send, Post, Confirm return) does not run it right away. The runtime intercepts the click, shows the user what the action will do, and asks for approval. If the user approves, the click runs; if they reject, the browser session ends. If approval was already granted earlier in this session, the click runs immediately. Clicking the commit control is how approval is requested; no tool requests it.
+- When the goal asks for approval before a purchase, send, or post (including wording like "do not place the order without approval"), finish every earlier step, then click the commit control. Do not stop before it, and do not call attempt_completion, request_payment_card, or generate_write_lock_notification to ask for approval.
 - Once a requested purchase is visibly placed or an order confirmation is shown, do not open cancellation, return, edit, or modification flows. The pre-write checkout state and prior actions are retained for verification; call attempt_completion promptly from the confirmation or order-details page instead of reopening product or checkout pages solely to reconstruct evidence.
 
 # Returns
