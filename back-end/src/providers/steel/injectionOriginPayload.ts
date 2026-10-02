@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { runTransactionWithRetry } from '../database';
 import { browserStateInjectionTimeoutMs } from './injectionTimeouts';
+import { log } from './types';
 
 export interface InitScriptContext {
   addInitScript(script: string): Promise<unknown>;
@@ -144,29 +145,85 @@ export async function injectOriginPayload(
 ): Promise<void> {
   const token = `rose.origin-state.${randomUUID()}`;
   let index = 0;
+  const started = performance.now();
+  let rawBytes = 0;
+  let submittedEnvelopeBudgetBytes = 0;
+  let encodingMs = 0;
+  let cdpWaitMs = 0;
+  let acknowledgedScripts = 0;
+  let pendingSince: number | null = null;
+  const report = (phase: 'aborted' | 'settled') => {
+    if (rawBytes < MAX_ORIGIN_INIT_SCRIPT_BYTES && !signal?.aborted) return;
+    // Numeric phase evidence only: never origin, identity, scripts, or payload.
+    log.info('Origin payload transfer timing', {
+      table,
+      phase,
+      transferStartedMonotonicMs: started,
+      rawBytes,
+      submittedEnvelopeBudgetBytes,
+      acknowledgedScripts,
+      encodingMs: Math.round(encodingMs),
+      cdpWaitMs: Math.round(cdpWaitMs),
+      pendingAcknowledgementMs:
+        pendingSince === null ? 0 : Math.round(performance.now() - pendingSince),
+      elapsedMs: Math.round(performance.now() - started),
+      aborted: signal?.aborted ?? false,
+    });
+  };
+  const send = async (script: string, wireBytes: number) => {
+    signal?.throwIfAborted();
+    submittedEnvelopeBudgetBytes += wireBytes;
+    pendingSince = performance.now();
+    try {
+      await context.addInitScript(script);
+      acknowledgedScripts++;
+    } finally {
+      cdpWaitMs += performance.now() - pendingSince;
+      pendingSince = null;
+    }
+  };
   const consume = async (raw: string) => {
     signal?.throwIfAborted();
+    rawBytes += Buffer.byteLength(raw);
     let offset = 0;
     while (offset < raw.length) {
       signal?.throwIfAborted();
-      let end = raw.length;
+      const encodingStarted = performance.now();
+      // A raw character cannot occupy less than one wire byte. Starting with
+      // the entire unsent SQL chunk repeatedly serializes impossible packets.
+      let end = Math.min(raw.length, offset + MAX_ORIGIN_INIT_SCRIPT_BYTES);
       let script = chunkScript(targetOrigin, token, index, raw.slice(offset, end), null, apply);
-      while (scriptWireBytes(script) > MAX_ORIGIN_INIT_SCRIPT_BYTES) {
-        end = offset + Math.floor((end - offset) / 2);
+      let wireBytes = scriptWireBytes(script);
+      while (wireBytes > MAX_ORIGIN_INIT_SCRIPT_BYTES) {
+        // Use measured escaping expansion rather than halving near-full
+        // packets. The 10% minimum reduction guarantees bounded retries for
+        // nonuniform Unicode/escaping; every candidate is still checked exactly.
+        end =
+          offset +
+          Math.floor((end - offset) * Math.min(0.9, MAX_ORIGIN_INIT_SCRIPT_BYTES / wireBytes));
         if (end <= offset) throw new Error('Origin init-script envelope exceeds its byte budget');
         script = chunkScript(targetOrigin, token, index, raw.slice(offset, end), null, apply);
+        wireBytes = scriptWireBytes(script);
       }
-      await context.addInitScript(script);
+      encodingMs += performance.now() - encodingStarted;
+      await send(script, wireBytes);
       offset = end;
       index++;
     }
   };
-  if ('id' in row) await readOriginTextParts(table, row, consume, signal);
-  else await consume(JSON.stringify(legacyValue) ?? 'null');
-  const finish = chunkScript(targetOrigin, token, null, '', index, apply);
-  if (scriptWireBytes(finish) > MAX_ORIGIN_INIT_SCRIPT_BYTES) {
-    throw new Error('Origin init-script envelope exceeds its byte budget');
+  const onAbort = () => report('aborted');
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    if ('id' in row) await readOriginTextParts(table, row, consume, signal);
+    else await consume(JSON.stringify(legacyValue) ?? 'null');
+    const finish = chunkScript(targetOrigin, token, null, '', index, apply);
+    const finishBytes = scriptWireBytes(finish);
+    if (finishBytes > MAX_ORIGIN_INIT_SCRIPT_BYTES) {
+      throw new Error('Origin init-script envelope exceeds its byte budget');
+    }
+    await send(finish, finishBytes);
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+    report('settled');
   }
-  signal?.throwIfAborted();
-  await context.addInitScript(finish);
 }

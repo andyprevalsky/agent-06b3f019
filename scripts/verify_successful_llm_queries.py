@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import sys
 import uuid
 from collections import defaultdict
@@ -33,6 +34,20 @@ ROSE_EVIDENCE_EVENTS = ROSE_DONE_EVENTS | {
 def _unique_events(events):
     """Collapse identical copied log lines; conflicting copies remain distinct."""
     return [json.loads(raw) for raw in {json.dumps(e, sort_keys=True) for e in events}]
+
+
+def _browser_state_timeout(event):
+    """An owned backend failure remains INFRA even if browser init retries work."""
+    if (event.get('event') != 'Transient browser session init failure; retrying with a fresh proxy'
+            or event.get('status_code') != 500):
+        return False
+    try:
+        detail = json.loads(event.get('detail', ''))
+    except (ValueError, TypeError):
+        return False
+    return (isinstance(detail, dict) and isinstance(detail.get('error'), str)
+            and re.fullmatch(r'Browser state injection timed out after [0-9]+ms', detail['error'])
+            is not None)
 
 
 def _rose_completed_queries(events, usage, start, finish):
@@ -163,6 +178,7 @@ def verify(payload, minimum=3):
     spans = defaultdict(lambda: defaultdict(list))
     usage = []
     rose_events = []
+    infra_events = []
     stage_owners = set()
     for stage_root, stage in stages:
         tree = stage.get('tree')
@@ -190,6 +206,8 @@ def verify(payload, minimum=3):
                 continue
             if event.get('root_agent_id') not in (None, stage_root):
                 continue
+            if _browser_state_timeout(event):
+                infra_events.append(event)
             if event.get('event') == 'llm.cache':
                 usage.append(event)
             elif event.get('event') in ROSE_EVIDENCE_EVENTS:
@@ -277,7 +295,18 @@ def verify(payload, minimum=3):
                 'error_type', 'active_route',
             )})
     failed_queries.sort(key=lambda e: (e['timestamp'], e['agent_id'], e['request_id'] or ''))
-    result = {'task': task['name'], 'agent_id': root, 'run_id': payload['run_id'], 'minimum_required': minimum, 'successful_llm_queries': len(queries), 'status': 'passed' if len(queries) >= minimum and not failed_queries else 'failed', 'queries': sorted(queries.values(), key=lambda e: (e['completed_at'], e['agent_id'], e['request_id'])), 'failed_queries': failed_queries}
+    infra_errors = []
+    for event in _unique_events(infra_events):
+        if start <= stamp(event['timestamp']) <= finish:
+            # Keep response bodies out of portable reports. The input artifact
+            # and exact event hashes retain the private evidence binding.
+            infra_errors.append({
+                'agent_id': event['agent_id'], 'timestamp': event['timestamp'],
+                'error_type': 'BrowserStateInjectionTimeout',
+                'event_sha256': hashlib.sha256(json.dumps(event, sort_keys=True).encode()).hexdigest(),
+            })
+    infra_errors.sort(key=lambda e: (e['timestamp'], e['agent_id'], e['event_sha256']))
+    result = {'task': task['name'], 'agent_id': root, 'run_id': payload['run_id'], 'minimum_required': minimum, 'successful_llm_queries': len(queries), 'status': 'passed' if len(queries) >= minimum and not failed_queries and not infra_errors else 'failed', 'queries': sorted(queries.values(), key=lambda e: (e['completed_at'], e['agent_id'], e['request_id'])), 'failed_queries': failed_queries, 'infra_errors': infra_errors}
     return result
 
 
@@ -303,12 +332,12 @@ def main(argv=None):
         row.update(run_json=str(path), run_json_sha256=hashlib.sha256(data).hexdigest())
         rows.append(row)
     assert len({r['agent_id'] for r in rows}) == args.expected_count
-    report = {'status': 'passed' if all(r['status'] == 'passed' for r in rows) else 'failed', 'scope': 'Successful LLM queries and terminal model-request failures; startup, task outcome and cleanup gates remain separately mandatory', 'minimum_per_benchmark': args.minimum, 'benchmark_count': args.expected_count, 'tasks': rows}
+    report = {'status': 'passed' if all(r['status'] == 'passed' for r in rows) else 'failed', 'scope': 'Successful LLM queries, terminal model-request failures and owned browser-state timeouts; startup, task outcome, other infrastructure and cleanup gates remain separately mandatory', 'minimum_per_benchmark': args.minimum, 'benchmark_count': args.expected_count, 'tasks': rows}
     target = args.report_json
     assert not target.exists(), 'preserve original evidence receipts'
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(report, indent=2) + '\n')
-    print(json.dumps({'status': report['status'], 'counts': {r['task']: r['successful_llm_queries'] for r in rows}, 'failed_query_counts': {r['task']: len(r['failed_queries']) for r in rows}}))
+    print(json.dumps({'status': report['status'], 'counts': {r['task']: r['successful_llm_queries'] for r in rows}, 'failed_query_counts': {r['task']: len(r['failed_queries']) for r in rows}, 'infra_error_counts': {r['task']: len(r['infra_errors']) for r in rows}}))
     return 0 if report['status'] == 'passed' else 70
 
 

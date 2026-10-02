@@ -23,6 +23,18 @@ function assert(ok: unknown, message: string): asserts ok {
 async function child(userId: string, sessionId: string) {
   let deliveredHash = '';
   let scriptCount = 0;
+  let encodedBytes = 0;
+  let deliveredBytes = 0;
+  const stringify = JSON.stringify;
+  // Measure serialization work, not a host-dependent CPU deadline. The actual
+  // SQL-to-browser path must not repeatedly encode the unsent origin suffix.
+  JSON.stringify = function (value, replacer, space) {
+    const text = stringify(value, replacer, space);
+    if (typeof text === 'string' && text.length >= 64 * 1024) {
+      encodedBytes += Buffer.byteLength(text);
+    }
+    return text;
+  };
   const receiver = createContext({
     window: { location: { origin: bigOrigin } },
     JSON: {
@@ -46,6 +58,7 @@ async function child(userId: string, sessionId: string) {
         addInitScript: async (script: string) => {
           scriptCount++;
           if (!script.includes('indexedDB')) return;
+          deliveredBytes += Buffer.byteLength(stringify({ source: script }));
           const transferRssMb = process.resourceUsage().maxRSS / 1024;
           console.log(JSON.stringify({ transferMemorySample: true, rssMb: transferRssMb }));
           assert(
@@ -71,10 +84,24 @@ async function child(userId: string, sessionId: string) {
       'large origin was omitted from realm preparation'
     );
     assert(deliveredHash.length === 32, 'receiver did not observe opaque origin payload');
+    assert(
+      encodedBytes <= deliveredBytes * 8,
+      `origin packet sizing amplified serialization: ${encodedBytes} encoded bytes for ${deliveredBytes} delivered bytes`
+    );
     const rssMb = process.resourceUsage().maxRSS / 1024;
     assert(rssMb < MAX_RSS_MB, `origin preparation exceeded ${MAX_RSS_MB}MB RSS: ${rssMb}`);
-    console.log(JSON.stringify({ originMemoryReceipt: true, deliveredHash, rssMb, scriptCount }));
+    console.log(
+      JSON.stringify({
+        originMemoryReceipt: true,
+        deliveredHash,
+        rssMb,
+        scriptCount,
+        encodedBytes,
+        deliveredBytes,
+      })
+    );
   } finally {
+    JSON.stringify = stringify;
     await prisma.$disconnect();
   }
 }

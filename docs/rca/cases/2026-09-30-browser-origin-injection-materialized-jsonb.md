@@ -176,6 +176,44 @@ to verify that no later mutation begins. Actual SQL scope, content and chunk
 cancellation remain covered by the payload and memory blackboxes. No production
 behavior or harness deadline was changed for this fixture correction.
 
+### October 1 recurrence: bounded packets still amplified encoding work
+
+The unchanged exact cloud diagnostic on source `67e420e` completed task
+evaluation, 27 correlated LIVE queries, durable publication and native teardown,
+but four browser-state injections exhausted the approved 18-second budget and
+returned HTTP 500 before a fifth succeeded. It was rejected with zero campaign
+credit. All five attempts selected 34 LocalStorage and eight IndexedDB origins.
+The failures took 18.228, 18.249, 18.326 and 18.223 seconds; completed raw SQL
+inside their serial state phases consumed 4.507, 8.201, 4.999 and 6.441 seconds.
+Existing logs lacked per-CDP timings, so the remainder cannot be assigned to
+browser transfer alone. The same frozen origin set passed an isolated one-core
+profile in 11.200 seconds, including 6.430 seconds awaiting browser calls.
+
+That profile measured 502.944 MB of payload/envelope serialization for 42.462 MB
+of delivered envelopes. Packet sizing started from the complete unsent SQL
+chunk on every iteration, encoded impossible candidates and repeatedly halved
+them. The existing real-Postgres memory blackbox now also measures large JSON
+encoding work, with an eight-times-delivered-byte ceiling for its unchanged
+78.6 MB fixture. On the buggy source it failed with 1,344,412,305 encoded bytes
+for 101,644,555 delivered bytes. After bounding the initial candidate and
+shrinking by measured escaped size, the identical command passed in 10.327
+seconds at 461 MB peak RSS. Hash, record count, RSS ceiling and test timeout
+were unchanged. This is a deterministic work regression, not a machine-speed
+deadline or a universal ratio guarantee for arbitrary payloads.
+
+Every candidate still receives the exact serialized-envelope check. A minimum
+10% shrink ensures progress for nonuniform escaping, and the existing assembler
+preserves Unicode content across split surrogate pairs, order and complete content. Numeric per-origin
+transfer timing now captures encoding work, CDP wait including failed awaits,
+and any in-flight wait at cancellation; it includes no payload, origin or user
+identity. The existing memory, assembly and Steel injection blackbox domains all
+passed, as did affected lint and backend typecheck. Independent review found no
+static packet-sizing blocker. The next exact live outcome remains required:
+this work reduction does not yet establish resolution of the 18-second cloud
+timeouts or the original live OOM. Archive searches were
+`BrowserStateInjectionTimeout 18000` (no exact hit) and
+`large origin payload injection timeouts serialization` (this open case).
+
 ## Human feedback
 
 The user required completing the infrastructure repair and ten consecutive

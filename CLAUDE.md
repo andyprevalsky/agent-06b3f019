@@ -367,6 +367,12 @@ through real `injectUserData` and Postgres under an unchanged 1,200 MB RSS budge
 isolation. Both are discovered by the backend blackbox runner in `/deploy`.
 These causal tests do not prove that an earlier live OOM had the same allocation
 source; retain its evidence and verify fresh fleet outcomes separately.
+Bound packet-sizing work as well as transmitted bytes: do not repeatedly
+serialize the entire unsent SQL chunk. The same memory blackbox measures encoded
+bytes against delivered bytes while preserving its content hash and RSS budget.
+`Origin payload transfer timing` reports numeric encoding/CDP wait totals and an
+in-flight wait on cancellation without logging origin payloads. Compare those
+with the same request's SQL timings before attributing a live timeout.
 Credential CDP connection and browser-state injection default to 18 seconds;
 `BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS` and `BROWSER_STATE_INJECTION_TIMEOUT_MS`
 override those infrastructure budgets. Origin-payload SQL uses the configured
@@ -402,6 +408,9 @@ both scopes on cancellation. The existing cleanup and benchmark identity tests
 cover concurrent siblings, preflight failures and callback/result contracts.
 The live-query verifier also rejects an owned terminal `rose.complete.failed`
 inside the benchmark's execution window, even if three other calls completed.
+It also rejects an owned browser-init HTTP 500 whose structured `detail.error`
+reports a browser-state injection timeout, even if a later retry succeeds.
+The separate `infra_errors` receipt contains event hashes, never response bodies.
 The benchmark blackbox gate runs the fast completed-query regressions: distinct
 requests sharing a span, duplicate trace views, missing or conflicting terminal
 evidence, and cache-only output. Keep these behavioral assertions in the existing

@@ -160,6 +160,35 @@ kept immutable in a separate checkout throughout this diagnosis. This is
 acceptance-observer regression proof, not credit for any live benchmark or
 resolution of the original upstream provider-stall gap.
 
+### October 1 recurrence: recovered browser-state failures escaped the observer
+
+The exact cloud diagnostic on `67e420e` exposed a sibling count-only blind spot.
+Its immutable artifact contained 27 completed LIVE queries and four owned
+browser-init HTTP 500 events, each with a JSON `detail.error` recording
+`Browser state injection timed out after 18000ms`. The later successful retry
+did not erase those infrastructure failures. The private guard ignored the
+detail field, and the permanent verifier checked only terminal model failures.
+Manual review rejected the diagnostic and preserved its original evidence.
+
+The permanent verifier now recognizes that exact infrastructure event contract
+within its existing owned-tree and execution-window boundary. A separate
+`infra_errors` collection reports event hashes and the error type without raw
+response bodies. Successful-query counts, evaluator verdicts, normal provider
+fallback and expected browser challenge recovery remain unchanged.
+
+One parameterized regression in the existing registered suite failed before the
+change and passed unchanged afterward. It covers root/child failures, duplicate
+views, foreign roots, events before/after execution, ordinary task FAILURE,
+challenge recovery and unrelated retries. All 14 verifier tests passed. The
+preserved real artifact (SHA-256
+`88b249e9cef6e8d53f2f41ccff98bbc1ce8d18d62a5ca6b37e9998ac3da0321b`)
+changed from incorrectly accepted to rejected while retaining exactly 27
+queries and identifying all four infrastructure events. The artifact itself
+was unchanged. This repairs acceptance, not the underlying browser timeout.
+Archive searches for the literal injection timeout and
+`terminal model request failures query proof` identified this related observer
+boundary; no new verification suite or live model calls were added.
+
 ## Human feedback
 
 Require ten consecutive mixed slices of ten distinct benchmarks, with at least
