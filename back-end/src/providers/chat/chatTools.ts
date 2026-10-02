@@ -44,7 +44,7 @@ class ParallelSearchHttpError extends Error {
 type ParallelSearchResponse = { results?: SearchResult[] };
 
 // Turbo usually answers in well under a second, but one slow provider response
-// alone can exceed the 5s chat lifecycle. A single duplicate request after this
+// alone can exceed the 6s chat lifecycle. A single duplicate request after this
 // delay bounds that tail; at most one extra search per turn, only on slow turns.
 const PARALLEL_SEARCH_HEDGE_AFTER_MS = 1_500;
 
@@ -66,7 +66,7 @@ async function fetchParallelSearch(
           mode: 'turbo',
           objective: query,
           search_queries: [query],
-          // Chat turbo must stay inside the 5s full-lifecycle SLA. 10×6000
+          // Chat turbo must stay inside the 6s full-lifecycle SLA. 10×6000
           // chars (~18–60KB) made the generator the dominant cost (~3.7s)
           // after a 0.6s Parallel round-trip. Bound excerpts so the compose
           // step stays a snippet summary, not a document rewrite.
