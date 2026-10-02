@@ -4,7 +4,7 @@
  * seconds after creation. Validation must stop retrying CDP against that
  * session and report Steel's verdict; before this, every replacement attempt
  * waited out three 10s connect timeouts and surfaced only "Session validation
- * failed".
+ * failed", which the live parity gate could not tell apart from a defect.
  *
  * Run: npx tsx src/tests/unit/steel-session-startup-failure.test.ts
  */
@@ -15,6 +15,11 @@ import {
   steelStartupProbe,
   validateBrowserConnection,
 } from '../../providers/steel/sessionConnection';
+import {
+  isSteelProvisioningOutage,
+  isSteelSessionValidationFailure,
+  shouldSkipSteelLegs,
+} from '../blackbox/browser-provider-rotation.support';
 
 let passed = 0;
 const failures: string[] = [];
@@ -37,6 +42,10 @@ function fakeBrowser(): Browser {
 }
 
 const STARTUP_FAILED = 'Steel reported session s-1 failed (startup_failed)';
+const replacementFailure = (cause: string) =>
+  new Error(
+    `/rotate-proxy 500: {"error":"Failed to create Steel replacement after 5 attempts: ${cause}"}`
+  );
 
 async function main(): Promise<void> {
   await test('validation stops at the first retry once Steel declares startup failure', async () => {
@@ -104,6 +113,41 @@ async function main(): Promise<void> {
       throw new Error('fetch failed');
     });
     assert.strictEqual(await unreachable(), null, 'a lookup failure must not end validation');
+  });
+
+  await test('validation failures are not classified as outages from their message alone', async () => {
+    const startupFailure = replacementFailure(
+      `Session validation failed on attempt 5: ${STARTUP_FAILED}`
+    );
+    const connectTimeout = replacementFailure(
+      'Session validation failed on attempt 5: Connection timeout'
+    );
+    for (const error of [startupFailure, connectTimeout]) {
+      assert.strictEqual(isSteelProvisioningOutage(error), false);
+      assert.strictEqual(isSteelSessionValidationFailure(error), true);
+    }
+    assert.strictEqual(
+      isSteelProvisioningOutage(replacementFailure('Connection error.')),
+      true,
+      'SDK connectivity failures still count as an outage'
+    );
+  });
+
+  await test('Steel legs skip on a validation failure only when a default session fails too', async () => {
+    const error = replacementFailure(`Session validation failed on attempt 5: ${STARTUP_FAILED}`);
+    assert.strictEqual(await shouldSkipSteelLegs(error, async () => false), true);
+    assert.strictEqual(await shouldSkipSteelLegs(error, async () => true), false);
+    assert.strictEqual(await shouldSkipSteelLegs(error), false, 'no control means fail closed');
+    let controlRuns = 0;
+    const control = async () => {
+      controlRuns += 1;
+      return false;
+    };
+    assert.strictEqual(
+      await shouldSkipSteelLegs(new Error('call 3 expected Steel residential'), control),
+      false
+    );
+    assert.strictEqual(controlRuns, 0, 'non-Steel failures must not consult the control');
   });
 
   if (failures.length > 0) {
