@@ -25,7 +25,6 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
-    from domains.api_request.google_oauth_demo_fixture import normalize_completion_notice
     from domains.param_populator.config import PARAM_POPULATOR_MODEL
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
@@ -81,6 +80,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
     from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
     from loop.run_agent import _run_verifier, run_agent
+    from providers.fast_cache.google_oauth_demo_fixture import normalize_completion_notice
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
     from tools.attempt_completion import attempt_completion
     from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
