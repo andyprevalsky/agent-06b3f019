@@ -25,7 +25,10 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
 from urllib.parse import urlparse
 
-from domains.spawn_browser_agent_v3.challenge_urls import blocked_resource_urls_for_verify
+from domains.spawn_browser_agent_v3.challenge_urls import (
+    blocked_resource_urls_for_verify,
+    urls_cited_in_recovery_reason,
+)
 
 StorageState = Dict[str, Any]
 CookieKey = Tuple[str, str, str]
