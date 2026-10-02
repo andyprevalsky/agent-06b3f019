@@ -5995,6 +5995,7 @@ async def call_llm_activity(
     cache_before_extra_user_message: bool = False,
     cache_sequence_id: Optional[str] = None,
     exclude_anthropic_family: bool = False,
+    context_version: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -6064,15 +6065,26 @@ async def call_llm_activity(
 
         # Resolve messages: either pre-built or build from shared context
         _context_key = None
+        used_pending = None
+        stale_pending = None
         if isinstance(messages_or_agent_id, str):
             _context_key = messages_or_agent_id
             pending = None if force_backend_context else _pending_llm_context.get(_context_key)
+            if pending is not None and context_version is not None:
+                if len(pending) < 5 or pending[4] != context_version:
+                    stale_pending = pending
+                    pending = None
             if pending is None and not force_backend_context:
                 await asyncio.sleep(0.5)
                 pending = _pending_llm_context.get(_context_key)
+                if pending is not None and context_version is not None:
+                    if len(pending) < 5 or pending[4] != context_version:
+                        stale_pending = pending
+                        pending = None
             if pending is not None:
+                used_pending = pending
                 if len(pending) >= 4:
-                    context, _sys_prompt, pre_resolved_ids, pending_user_id = pending
+                    context, _sys_prompt, pre_resolved_ids, pending_user_id = pending[:4]
                 else:
                     context, _sys_prompt, pre_resolved_ids = pending
                     pending_user_id = user_id
@@ -6102,8 +6114,6 @@ async def call_llm_activity(
                     llm_only_user_preamble=llm_only_user_preamble,
                     user_id=user_id,
                 )
-                if not force_backend_context:
-                    _pending_llm_context[_context_key] = (context, system_prompt, None, user_id)
             else:
                 raise ValueError(f"No pending LLM context for agent {_context_key} and no system_prompt provided")
         else:
@@ -6309,8 +6319,12 @@ async def call_llm_activity(
         )
 
         # Clean up shared state on success
-        if _context_key and not force_backend_context:
-            _pending_llm_context.pop(_context_key, None)
+        if _context_key and used_pending is not None:
+            if _pending_llm_context.get(_context_key) is used_pending:
+                _pending_llm_context.pop(_context_key, None)
+        elif _context_key and stale_pending is not None:
+            if _pending_llm_context.get(_context_key) is stale_pending:
+                _pending_llm_context.pop(_context_key, None)
 
         return {
             "response": result.response if result.response else "",

@@ -68,6 +68,11 @@ _FAST_MODE_USER_COPY = (
     "from_fast_cache",
 )
 _EXPLORE_NO_EVIDENCE = "Explore stopped before completion with no tool evidence."
+_EXPLORE_RECOVERED_EVIDENCE_PREFIX = (
+    "The explore agent stopped at its time budget. This tool call is complete; "
+    "no further result will arrive from this agent. The source excerpts below "
+    "are partial. Use them to finish the parent task:\n\n"
+)
 
 
 def user_facing_explore_result(text: Any) -> str:
@@ -129,6 +134,7 @@ def _explore_result_after_activity_failure(
             or recovered.get("final_response")
             or recovered.get("summary")
             or "",
+            "partial_recovery": True,
             "tool_call_results": recovered.get("tool_call_results") or [],
             "accumulated_usage": recovered.get("accumulated_usage") or [],
             "llm_iteration_usage": recovered.get("llm_iteration_usage") or [],
@@ -789,6 +795,7 @@ class SpawnAgentManager(ToolManager):
                     result = {
                         "status": "completed",
                         "result": recovered_text,
+                        "partial_recovery": True,
                         "tool_call_results": persisted_results,
                         "accumulated_usage": [],
                         "llm_iteration_usage": [],
@@ -806,6 +813,8 @@ class SpawnAgentManager(ToolManager):
                 return
 
             explore_result = result.get("result", "No results found.")
+            if result.get("partial_recovery") and explore_result:
+                explore_result = _EXPLORE_RECOVERED_EVIDENCE_PREFIX + explore_result
             explore_tool_call_results = result.get("tool_call_results") or []
             accumulated_usage = result.get("accumulated_usage", [])
             llm_iteration_usage = result.get("llm_iteration_usage", [])

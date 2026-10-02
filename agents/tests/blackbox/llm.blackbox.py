@@ -5047,6 +5047,8 @@ async def test_call_llm_activity_with_agent_id_reads_shared_context():
         [{"role": "USER", "text": "Hello!", "timestamp": "2024-01-01T00:00:00Z"}],
         "test system prompt",
         set(),
+        None,
+        "same-worker-turn",
     )
 
     payload = {
@@ -5078,6 +5080,7 @@ async def test_call_llm_activity_with_agent_id_reads_shared_context():
             agent_id="agent-llm-sc",
             stream_id="stream-2",
             call_site="shared-ctx",
+            context_version="same-worker-turn",
         )
 
     assert result["response"] == "ack"
@@ -5160,6 +5163,56 @@ async def test_call_llm_activity_cross_machine_fallback():
     assert result["response"] == "cross-machine ok"
     assert backend_called[0], "Should have fetched context from backend API"
     assert agent_id_key not in _pending_llm_context
+
+
+async def test_call_llm_activity_replayed_context_does_not_hide_completed_tool():
+    """A snapshot left by an earlier workflow activation cannot hide new tool evidence."""
+    from helpers.llm import _pending_llm_context, call_llm_activity
+
+    agent_id_key = "agent-replayed-context-test"
+    initial = {"role": "USER", "text": "Find the population", "timestamp": "2026-10-02T18:02:00Z"}
+    _pending_llm_context[agent_id_key] = ([initial], "test system prompt", set(), None, "old-turn")
+    backend_data = {
+        "agent": {"id": agent_id_key},
+        "messages": [
+            initial,
+            {
+                "role": "TOOL",
+                "text": "Official population: 14,296,683",
+                "timestamp": "2026-10-02T18:06:00Z",
+                "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED", "toolCallId": "research-1"},
+            },
+        ],
+    }
+    captured_messages = []
+
+    async def fake_structured_streaming(**kwargs):
+        captured_messages.extend(kwargs["messages"])
+        response_model = kwargs["response_model"]
+        return response_model(response="ack", tool_calls=[]), {"total_tokens": 2}, []
+
+    fetch = AsyncMock(return_value=backend_data)
+    try:
+        with (
+            patch("helpers.fetch_config._fetch_agent_data_impl", fetch),
+            patch("helpers.llm.call_llm_structured_streaming", fake_structured_streaming),
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm.activity.in_activity", return_value=False),
+        ):
+            await call_llm_activity(
+                messages_or_agent_id=agent_id_key,
+                model="rose",
+                tool_names=[],
+                reasoning_max_tokens=0,
+                agent_id=agent_id_key,
+                system_prompt="test system prompt",
+                context_version="new-turn",
+            )
+        assert fetch.await_count == 1, "the next turn must fetch context after an old local snapshot"
+        assert any("14,296,683" in str(message.get("content")) for message in captured_messages)
+        assert agent_id_key not in _pending_llm_context, "the stale snapshot must be released"
+    finally:
+        _pending_llm_context.pop(agent_id_key, None)
 
 
 async def test_call_llm_activity_force_backend_ignores_and_preserves_shared_context():
@@ -8620,6 +8673,10 @@ async def run_all_tests():
     )
     await r.record_async("call_llm_activity_missing_ctx", test_call_llm_activity_missing_context_raises)
     await r.record_async("call_llm_activity_cross_machine_fb", test_call_llm_activity_cross_machine_fallback)
+    await r.record_async(
+        "call_llm_activity_replayed_context_refreshes_tool_result",
+        test_call_llm_activity_replayed_context_does_not_hide_completed_tool,
+    )
     await r.record_async(
         "call_llm_activity_force_backend",
         test_call_llm_activity_force_backend_ignores_and_preserves_shared_context,
