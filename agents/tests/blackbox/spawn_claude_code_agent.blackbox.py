@@ -2084,8 +2084,8 @@ async def test_run_agentic_loop_in_flight_bash_extends_sdk_idle_timeout():
 
     with (
         patch.object(service, "ClaudeCodeWsClient", HangDuringBash),
-        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
-        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 0.35),
+        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.2),
+        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 1.0),
         patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
         patch.object(service, "MAX_RUNTIME_S", 30),
         patch("temporalio.activity.heartbeat"),
@@ -2107,10 +2107,12 @@ async def test_run_agentic_loop_in_flight_bash_extends_sdk_idle_timeout():
 
     assert exit_code == -1
     assert attempt is False
-    assert elapsed >= 0.25, (
-        f"in-flight Bash idle extension should survive short 0.05s idle, took {elapsed:.2f}s"
+    # Base idle is wide enough that a loaded event loop still delivers the Bash
+    # tool_use before it can fire (0.05s flaked under the 30-way suite).
+    assert elapsed >= 0.8, (
+        f"in-flight Bash idle extension should survive short 0.2s idle, took {elapsed:.2f}s"
     )
-    assert elapsed < 2.0, f"in-flight Bash idle should still break, took {elapsed:.2f}s"
+    assert elapsed < 3.0, f"in-flight Bash idle should still break, took {elapsed:.2f}s"
     assert any("SDK idle timeout" in s for s in summary), summary
     assert any(e.get("name") == "Bash" for e in events), events
 

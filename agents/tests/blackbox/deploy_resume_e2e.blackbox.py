@@ -437,6 +437,9 @@ class _BrowserServices:
             async def get_browser_state(self, include_screenshot=False):
                 return {"url": "https://shop.example.com/checkout", "screenshot": None}
 
+            async def get_page_identity(self):
+                return {"url": "https://shop.example.com/checkout", "title": ""}
+
             async def get_current_url(self, *, fallback: str = ""):
                 return fallback or "https://shop.example.com/checkout"
 

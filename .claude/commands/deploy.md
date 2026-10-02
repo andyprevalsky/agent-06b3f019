@@ -479,6 +479,7 @@ their assertions or test counts:
 `bash scripts/tests/cooperative-cutover-monitor.test.sh`,
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `bash scripts/tests/agents-structural.test.sh`,
+`bash scripts/tests/deploy-agent-clone-recovery.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,

@@ -47,6 +47,7 @@ codex_funded_fallback_configured() {
 # Docker database and silently fall back to a shared system Postgres instance.
 cd "$ROOT_DIR"
 source scripts/lib/workspace-env.sh
+source scripts/lib/run-process-cleanup.sh
 normalize_conductor_workspace_env
 cd "$BACKEND_DIR"
 source "$SCRIPT_DIR/local-db-container.sh"
@@ -275,7 +276,7 @@ END $$;
 SQL
     fi
     echo "Syncing Prisma schema to local test database..."
-    npx prisma generate >/dev/null
+    bash "$SCRIPT_DIR/sync-prisma-client.sh"
     npx prisma db push --skip-generate --accept-data-loss >/dev/null
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
     # Credential seeding and smoke execution are separate controls. A caller may
@@ -364,16 +365,9 @@ PORT="${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-$START_PORT}}"
 PORT_LOCK_DIR=""
 BACKEND_PID=""
 
+source "$ROOT_DIR/scripts/lib/process-tree.sh"
 cleanup() {
-  if [[ -n "$BACKEND_PID" ]] && kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
-    kill "$BACKEND_PID" >/dev/null 2>&1 || true
-    for _ in $(seq 1 100); do
-      kill -0 "$BACKEND_PID" >/dev/null 2>&1 || break
-      sleep 0.1
-    done
-    kill -KILL "$BACKEND_PID" >/dev/null 2>&1 || true
-    wait "$BACKEND_PID" 2>/dev/null || true
-  fi
+  stop_process_tree "$BACKEND_PID"
 
   if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
     rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
@@ -450,11 +444,9 @@ echo "Starting isolated backend for black-box tests on port $PORT"
 echo "Backend log: $BACKEND_LOG"
 echo "Artifacts: $ARTIFACT_DIR"
 
-# BACKEND_PID must be the server itself: npx does not forward SIGTERM to the
-# process it starts, so stopping an npx wrapper leaves the backend on this port.
 PORT="$PORT" \
 DISABLE_GMAIL_SYNC=1 \
-node --import tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
+npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
 
 READY=0

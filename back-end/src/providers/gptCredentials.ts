@@ -281,9 +281,11 @@ export async function markGptIntegrationRateLimited(
   log.info(`GPT integration ${integrationId} rate-limited until ${until.toISOString()}`);
 }
 
-/** True when the shared funded GPT_API_KEY is currently backed off. The DB row
- *  is authoritative in both directions: a cached cooldown is re-validated on the
- *  recheck interval so a cleared row releases the key in every process. */
+/**
+ * True when the shared funded GPT_API_KEY is currently backed off. The shared
+ * row is re-read at most once per recheck interval in both states, so a
+ * cooldown cleared in the DB is honored by every instance within that interval.
+ */
 export async function isGptApiKeyOnCooldown(): Promise<boolean> {
   const now = Date.now();
   if (now - lastGptKeyCooldownDbCheckMs < GPT_API_KEY_COOLDOWN_DB_RECHECK_MS) {
@@ -313,6 +315,7 @@ export async function markGptApiKeyOnCooldown(reason: string): Promise<void> {
   const until = new Date(Date.now() + GPT_API_KEY_COOLDOWN_MS);
   gptKeyCooldownCacheRevision++;
   cachedGptKeyCooldownUntilMs = until.getTime();
+  // A read issued before the upsert below commits would drop this mark.
   lastGptKeyCooldownDbCheckMs = Date.now();
   await prisma.integration.upsert({
     where: {

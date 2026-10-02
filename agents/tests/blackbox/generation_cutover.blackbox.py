@@ -76,6 +76,15 @@ async def mock_notify_sms_event_activity(
     return None
 
 
+@activity.defn(name="resolve_attention_request_activity")
+async def mock_resolve_attention_request_activity(
+    user_id: str,
+    request_id: str,
+    response_text: str,
+) -> dict[str, Any]:
+    return {"success": True, "request_id": request_id}
+
+
 @activity.defn(name="create_gate_request_activity")
 async def mock_create_gate_request_activity(
     user_id: str,
@@ -92,6 +101,7 @@ MOCK_ACTIVITIES = [
     mock_fetch_agent_queue_pointer,
     mock_create_approval_request_activity,
     mock_notify_sms_event_activity,
+    mock_resolve_attention_request_activity,
     mock_create_gate_request_activity,
 ]
 

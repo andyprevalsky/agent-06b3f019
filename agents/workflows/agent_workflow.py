@@ -80,7 +80,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
     from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
     from loop.run_agent import _run_verifier, run_agent
-    from providers.fast_cache.google_oauth_demo_fixture import normalize_completion_notice
+    from providers.fast_cache.google_oauth_demo_fixture import matches_demo_goal, normalize_completion_notice
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
     from tools.attempt_completion import attempt_completion
     from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
@@ -95,10 +95,15 @@ with workflow.unsafe.imports_passed_through():
 
     # Tool executors (map tool name → workflow helper)
     from tools.grep import grep
+    from tools.google_oauth_demo import google_oauth_demo
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
-    from tools.request_user_approval import UserRejectedError, request_user_approval_direct
+    from tools.request_user_approval import (
+        UserRejectedError,
+        request_user_approval_direct,
+        stash_pending_approvals_from_context,
+    )
     from tools.request_user_signup import request_user_signup
     from tools.send_message_to_user import send_message_to_user
     from tools.set_plan import set_plan
@@ -172,6 +177,7 @@ def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
 
 # Tool name → executor function mapping
 TOOL_EXECUTORS = {
+    "google_oauth_demo": google_oauth_demo,
     "spawn_agent": spawn_agent,  # Unified: browser/code/general_purpose/explore
     "wait_for": wait_for,
     "send_message_to_user": send_message_to_user,
@@ -675,6 +681,25 @@ def _structured_from_payload(payload: Any, names: List[str]) -> Dict[str, Any]:
     return found
 
 
+def _canonical_pending_approval_resume(pending_approval: Any) -> Optional[Dict[str, Any]]:
+    """Normalize approval resume so serialize and restore stay symmetric."""
+    if isinstance(pending_approval, dict):
+        raw_requests = pending_approval.get("requests")
+        if isinstance(raw_requests, list):
+            return {"requests": list(raw_requests)}
+        request_id = pending_approval.get("request_id")
+        if isinstance(request_id, str) and request_id:
+            question = pending_approval.get("question")
+            return {
+                "request_id": request_id,
+                "question": question if isinstance(question, str) else "",
+            }
+        return None
+    if isinstance(pending_approval, str) and pending_approval:
+        return {"request_id": pending_approval, "question": ""}
+    return None
+
+
 @workflow.defn
 class AgentWorkflow:
     """
@@ -722,6 +747,9 @@ class AgentWorkflow:
         self._has_new_messages: bool = False
         self._last_signal_response: Optional[str] = None  # Stores response from receive_user_response signal
         self._signal_responses: dict = {}  # Per-request responses keyed by attention request ID
+        # In-flight approval identity that must be re-armed after continue_as_new.
+        # Creating a new attn_id on retry is how SMS approves a stale row.
+        self._pending_approval_resume: Optional[Dict[str, str]] = None
         # Free-form feedback can change the required final shape after the run
         # starts. Revisions let prompt/verifier boundaries refresh exactly once
         # per accepted batch while still catching feedback that arrives during
@@ -949,6 +977,9 @@ class AgentWorkflow:
         )
         if isinstance(runtime.get("signal_responses"), dict):
             self._signal_responses = dict(runtime["signal_responses"])
+        self._pending_approval_resume = _canonical_pending_approval_resume(
+            runtime.get("pending_approval_resume")
+        )
         if isinstance(runtime.get("response_schema_feedback"), list):
             self._response_schema_feedback = [
                 value for value in runtime["response_schema_feedback"] if isinstance(value, str)
@@ -1167,6 +1198,9 @@ class AgentWorkflow:
                 "has_new_messages": self._has_new_messages,
                 "last_signal_response": self._last_signal_response,
                 "signal_responses": dict(self._signal_responses),
+                "pending_approval_resume": _canonical_pending_approval_resume(
+                    self._pending_approval_resume
+                ),
                 "response_schema_feedback": list(self._response_schema_feedback),
                 "response_schema_revision": self._response_schema_revision,
                 "response_schema_applied_revision": self._response_schema_applied_revision,
@@ -2001,7 +2035,11 @@ class AgentWorkflow:
         # Tool lists from centralized source of truth
         # =====================================================================
         plan_tools = PLAN_PHASE_TOOLS
-        execute_tools = EXECUTE_PHASE_TOOLS
+        execute_tools = (
+            ["google_oauth_demo", "attempt_completion"]
+            if matches_demo_goal(self.goal)
+            else EXECUTE_PHASE_TOOLS
+        )
 
         # Determine whether to skip PLAN phase and/or DAG. ``execute_dag_resume``
         # is a local checkpoint/debug phase: it keeps the persisted plan, marks
@@ -2180,6 +2218,12 @@ class AgentWorkflow:
                     # The completed path must use the attempt_completion tool so
                     # the UI and transcript show the same visible completion
                     # attempt as an LLM-initiated finish.
+                    if dag_result["status"] == "generation_handoff":
+                        workflow.logger.info(
+                            "[DAG] Cooperative generation handoff during planned task — "
+                            "continue_as_new before dependents or post-DAG completion"
+                        )
+                        return await self._handle_incomplete(dag_result, "EXECUTE")
                     if dag_result["status"] == "completed":
                         workflow.logger.info("[DAG] Tasks completed, attempting completion")
                         await self._flush_pending_messages()
@@ -4748,6 +4792,9 @@ class AgentWorkflow:
         if result["status"] == "generation_handoff":
             # Cooperative cutover: current tools/LLM finished; move to the live
             # generation queue before the next LLM call. Do NOT terminate.
+            # Cancelled sibling approval waits never enter GenerationHandoffRequested,
+            # so re-arm every still-open approval chip from the transcript.
+            stash_pending_approvals_from_context(self)
             handoff_queue = result.get("handoff_task_queue")
             if not isinstance(handoff_queue, str) or not handoff_queue.strip():
                 workflow.logger.error("generation_handoff missing handoff_task_queue; failing open")

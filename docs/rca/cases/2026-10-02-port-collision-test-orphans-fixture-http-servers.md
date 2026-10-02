@@ -43,11 +43,12 @@ accumulated across every deploy on the machine.
 
 ## Solution
 
-Each subshell now `exec`s its server so the tracked PID is the listener. The test
-records every fixture port, runs `cleanup` explicitly at the end, and fails if any
-of those ports is still listening. A copy without `exec` fails with
-`fixture listener on port 61024 outlived the test cleanup`; the fixed test passes
-and leaves no listener. The gate runs in `/deploy` via
+Each subshell now `exec`s its server so the tracked PID is the listener, and the
+test fails if any fixture port is still listening after its PIDs are stopped.
+This deploy reproduced and fixed it independently (a copy without `exec` failed
+with `fixture listener on port 61024 outlived the test cleanup`; the fixed test
+passed and left no listener). Main had already landed the same fix in
+`f0ef0ea58`, so the merged test is main's version. The gate runs in `/deploy` via
 `scripts/run-deploy-structural-gates.py`.
 
 ## Human feedback

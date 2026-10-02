@@ -77,15 +77,29 @@ candidate_ids_for_hash() {
   '
 }
 
+# The Machines API intermittently answers an update with 408/5xx (run
+# 36958270333). The update is safe to repeat — image and env are fixed for this
+# rollout — so retry it in-run instead of failing the whole cutover.
+MACHINE_UPDATE_ATTEMPTS="${MACHINE_UPDATE_ATTEMPTS:-4}"
 configure_new_machine() {
-  local id="$1"
-  flyctl machine update "$id" -a "$APP" --image "$IMAGE_REF" --yes \
-    --skip-start --skip-health-checks \
-    --env "TEMPORAL_WORKER_BUILD_ID=$BUILD_ID" \
-    --env "TEMPORAL_WORKER_SURFACE_HASH=$SURFACE_HASH" \
-    --env "TEMPORAL_WORKER_DEPLOYMENT_TOKEN=$DEPLOYMENT_TOKEN" \
-    --env "TEMPORAL_WORKER_REQUIRE_ACTIVATION=0"
-  flyctl machines start "$id" -a "$APP" || true
+  local id="$1" attempt
+  for ((attempt = 1; attempt <= MACHINE_UPDATE_ATTEMPTS; attempt++)); do
+    if flyctl machine update "$id" -a "$APP" --image "$IMAGE_REF" --yes \
+      --skip-start --skip-health-checks \
+      --env "TEMPORAL_WORKER_BUILD_ID=$BUILD_ID" \
+      --env "TEMPORAL_WORKER_SURFACE_HASH=$SURFACE_HASH" \
+      --env "TEMPORAL_WORKER_DEPLOYMENT_TOKEN=$DEPLOYMENT_TOKEN" \
+      --env "TEMPORAL_WORKER_REQUIRE_ACTIVATION=0"; then
+      flyctl machines start "$id" -a "$APP" || true
+      return 0
+    fi
+    if [ "$attempt" -lt "$MACHINE_UPDATE_ATTEMPTS" ]; then
+      echo "⚠️  machine update $id failed (attempt $attempt/$MACHINE_UPDATE_ATTEMPTS); retrying in $((attempt * 15))s" >&2
+      sleep $((attempt * 15))
+    fi
+  done
+  echo "❌ machine update $id failed after $MACHINE_UPDATE_ATTEMPTS attempts" >&2
+  return 1
 }
 
 all_started_ids() {
@@ -174,17 +188,29 @@ done
 
 echo "Waiting for new-gen machines to pass /health..."
 deadline=$((SECONDS + 300))
+healthy=0
 while [ "$SECONDS" -lt "$deadline" ]; do
-  healthy=0
-  for ID in $(machine_ids_for_hash "$SURFACE_HASH"); do
-    if flyctl machines list -a "$APP" -j | jq -e --arg id "$ID" '.[] | select(.id==$id and .state=="started")' >/dev/null; then
-      healthy=$((healthy + 1))
-    fi
-  done
+  if ! NEW_GEN_STATES="$(flyctl machines list -a "$APP" --json | jq -r --arg h "$SURFACE_HASH" '
+    .[]
+    | select((.config.env.TEMPORAL_WORKER_SURFACE_HASH // "") == $h)
+    | "\(.id) \(.state)"
+  ')"; then
+    echo "  ⚠️  machines list failed; retrying" >&2
+    sleep 5
+    continue
+  fi
+  healthy="$(printf '%s\n' "$NEW_GEN_STATES" | awk '$2 == "started" { n++ } END { print n + 0 }')"
   echo "  new-gen started=$healthy / $MIN"
   if [ "$healthy" -ge "$MIN" ]; then
     break
   fi
+  # Fly refuses a start issued while the preceding update is still replacing
+  # the VM ("failed_precondition: machine getting replaced"; run 36963508348),
+  # so a single start right after the update is not enough.
+  for ID in $(printf '%s\n' "$NEW_GEN_STATES" |
+    awk -v need="$((MIN - healthy))" '($2 == "stopped" || $2 == "created") && n < need { n++; print $1 }'); do
+    flyctl machines start "$ID" -a "$APP" || true
+  done
   sleep 5
 done
 
