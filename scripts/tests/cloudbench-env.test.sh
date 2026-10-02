@@ -654,7 +654,8 @@ fleet_production_function() {
     capture && /^}$/ { exit }
   ' "$ROOT_DIR/scripts/run-bench-fleet"
 }
-for function_name in worker_ledger_lock_acquire worker_ledger_lock_release; do
+for function_name in worker_ledger_lock_acquire worker_ledger_lock_release \
+  inventory_index_healthy inventory_machine_record_path inventory_machine_field; do
   function_source="$(fleet_production_function "$function_name")"
   [ -n "$function_source" ] || fail "could not load production function $function_name"
   eval "$function_source"
@@ -667,6 +668,15 @@ APP="navi-whisper-lux-bench"
 FLEET_PRIMARY_VM_SIZE="shared-cpu-2x"
 FLEET_PRIMARY_VM_MEMORY="4096"
 clone_args="$TMP_ROOT/primary-clone.args"
+INVENTORY_INDEX="$TMP_ROOT/primary-clone-inventory"
+INVENTORY_CLOCK_EPOCH="$(date +%s)"
+INVENTORY_CLOCK_SECONDS="$SECONDS"
+SNAPSHOT_LOOP_PID=$$
+SNAPSHOT_LOOP_TOKEN=standalone
+printf '%s\n' '[{"id":"warm-source","state":"started","config":{"init":{"cmd":["bash","/cloudbench-boot.sh"]},"mounts":[]}}]' > "$TMP_ROOT/primary-machines.json"
+printf '[]\n' > "$TMP_ROOT/primary-volumes.json"
+python3 "$ROOT_DIR/scripts/cloudbench-machine-readiness.py" --publish-index \
+  "$TMP_ROOT/primary-machines.json" "$TMP_ROOT/primary-volumes.json" "$INVENTORY_INDEX"
 fleet_registry_record_name() { return 0; }
 fleet_registry_record_id() { return 0; }
 fleet_registry_release_name() { return 0; }
@@ -691,7 +701,9 @@ primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE '
   fail "daily fleet primary shape exceeds the observed Fly CPU governor ceiling"
 unset -f clone_machine_target fleet_registry_record_name fleet_registry_record_id \
   fleet_registry_release_name machine_volume_id machine_storage_ready machine_storage_failed fly_with_timeout \
-  worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function
+  worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function \
+  inventory_index_healthy inventory_machine_record_path inventory_machine_field
+unset INVENTORY_INDEX INVENTORY_CLOCK_EPOCH INVENTORY_CLOCK_SECONDS SNAPSHOT_LOOP_PID SNAPSHOT_LOOP_TOKEN
 
 resize_function_source="$(awk '
   /^resize_pool_machine\(\)/ { capture = 1 }

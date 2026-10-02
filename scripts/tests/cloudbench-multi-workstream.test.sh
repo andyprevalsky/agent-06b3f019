@@ -2317,7 +2317,7 @@ hub_stub() {  # hub_stub <port> <runs-root> [test-owner-token]
     trap '[ -n "$HUB_LAUNCH_DEFERRED_SIGNAL" ] || HUB_LAUNCH_DEFERRED_SIGNAL=INT' INT
     trap '[ -n "$HUB_LAUNCH_DEFERRED_SIGNAL" ] || HUB_LAUNCH_DEFERRED_SIGNAL=TERM' TERM
     python3 - "$port" "$runs_root" "$token" "$pending_file" <<'PY' &
-import hashlib, http.server, json, os, pathlib, subprocess, sys
+import gzip, hashlib, http.server, json, os, pathlib, subprocess, sys
 import time
 from urllib.parse import urlparse
 
@@ -2429,7 +2429,18 @@ class Hub(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         length = int(self.headers.get("Content-Length", "0"))
-        payload = json.loads(self.rfile.read(length) or b"{}")
+        wire = self.rfile.read(length)
+        encoding = self.headers.get("Content-Encoding", "identity").strip().lower()
+        if encoding not in {"identity", "gzip"}:
+            self.send_error(415)
+            return
+        try:
+            if encoding == "gzip":
+                wire = gzip.decompress(wire)
+            payload = json.loads(wire or b"{}")
+        except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError):
+            self.send_error(400)
+            return
         run_id = payload.get("run_id")
         if not run_id:
             self.send_error(400)

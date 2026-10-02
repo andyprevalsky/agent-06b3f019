@@ -775,6 +775,12 @@ TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
   per-workspace queue). `BROWSER_PROVIDER` must be `kernel` or `steel`. When
   something is misconfigured despite a correct `.env`, check for an injected env
   var of the same name first.
+- **Local backend tests on Fly hosts:** launch the test child with
+  `env -u FLY_APP_NAME` before TypeScript imports. Any defined value, including an
+  empty string, selects production mode and suppresses the local LLM dumps that
+  the Rose and stream-contract blackboxes verify. Preserve the parent controller
+  environment and fleet runtime identity. The existing capture assertions remain
+  mandatory; a focused green replay does not replace complete coverage.
 - **ngrok (public tunnels / AgentCard):** Cursor Secrets must include both
   `NGROK_AUTHTOKEN` and `NGROK_API_KEY`. `NGROK_API_KEY` is the **secret token**
   (`FIRSTPART_SECONDPART` from dashboard.ngrok.com/api-keys → Reveal), **not** the

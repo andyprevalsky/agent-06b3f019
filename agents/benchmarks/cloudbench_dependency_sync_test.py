@@ -9601,6 +9601,9 @@ reap_volume vol_exact || reap_status=$?
             "registry_record_is_stale_phantom() {",
             "reap_registry_clones() {",
             "clone_machine_target() {",
+            "inventory_index_healthy() {",
+            "inventory_machine_record_path() {",
+            "inventory_machine_field() {",
         )
     )
     ownership_root = tmp_path / "ownership"
@@ -9618,6 +9621,35 @@ reap_volume vol_exact || reap_status=$?
     volume_lookups.write_text("0\n")
     volumes.write_text("vol_exact\nvol_neighbor\n")
 
+    inventory = tmp_path / "inventory"
+    machines_json = tmp_path / "machines.json"
+    volumes_json = tmp_path / "volumes.json"
+    machines_json.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "feedface000000",
+                    "state": "started",
+                    "config": {"init": {"cmd": ["bash", "/cloudbench-boot.sh"]}, "mounts": []},
+                }
+            ]
+        )
+    )
+    volumes_json.write_text("[]")
+    subprocess.run(
+        [
+            sys.executable,
+            str(MACHINE_READINESS_SCRIPT),
+            "--publish-index",
+            str(machines_json),
+            str(volumes_json),
+            str(inventory),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
     script = f"""set -uo pipefail
 APP=bench-app
 REGION=iad
@@ -9634,6 +9666,11 @@ MACHINE_STATE={shlex.quote(str(machine_state))}
 VOLUME_LOOKUPS={shlex.quote(str(volume_lookups))}
 VOLUMES={shlex.quote(str(volumes))}
 CALLS={shlex.quote(str(calls))}
+INVENTORY_INDEX={shlex.quote(str(inventory))}
+INVENTORY_CLOCK_EPOCH="$(date +%s)"
+INVENTORY_CLOCK_SECONDS="$SECONDS"
+SNAPSHOT_LOOP_PID=$$
+SNAPSHOT_LOOP_TOKEN=standalone
 FAIL_VOLUME=1
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=1
 CLOUDBENCH_CLONE_STORAGE_READY_SECONDS=10

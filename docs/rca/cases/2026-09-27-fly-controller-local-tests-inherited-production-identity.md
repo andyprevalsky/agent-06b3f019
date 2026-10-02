@@ -87,3 +87,31 @@ not alter those requirements.
 ## Reusable lesson
 
 Set a local test process's environment before importing modules that cache deployment identity, while preserving the controller's own provider identity.
+
+## October 2 recurrence: controller coverage
+
+The local coverage child repeated this boundary on `e5586839`.
+The controller retained a defined `FLY_APP_NAME`; its private canonical child
+configuration copied the host environment without removing that variable. The
+unchanged production guard consequently suppressed local captures. The failed
+634.411-second aggregate remains native exit 1 with 177/179 domains passing.
+`llm-stream-contract` failed both router/generator completed-capture assertions;
+Rose failed its request/output dump read with `ENOENT`. Rose's 84/85 case count
+is its internal tally, not a third failed domain.
+
+The existing unchanged capture assertion failed with defined identity in 2.555
+seconds and passed with that one child variable absent in 0.192 seconds. The
+actual unchanged two-domain runner then passed both domains in 4.838 seconds,
+including all 85 Rose controls and completed/consumer-close chat captures. All
+2,561 source-input hashes matched the failed aggregate; both native owners and
+the child process group retired. Only the test child identity changed. The
+controller identity, production guard, provider stubs, normal domain limits,
+and 1,800-second supervisor bound were preserved.
+
+An earlier selected attempt used the prelaunch database placeholder and failed
+Prisma initialization before those assertions. Its original evidence is retained
+as an ineligible harness attempt. Private causal and native receipts are under
+`.context/acceptance/proof115-backend-failure-rca/`. The required correction is
+`env -u FLY_APP_NAME` before local test imports; an empty assignment still enables
+the production guard. The original failed aggregate stays failed, and selected
+passes do not claim a fresh full coverage threshold or any fleet credit.
