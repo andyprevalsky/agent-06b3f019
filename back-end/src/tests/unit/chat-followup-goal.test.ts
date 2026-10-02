@@ -83,12 +83,16 @@ async function main(): Promise<void> {
     await prisma.agent.deleteMany({ where: { userId: firstRunUserId } });
   }
 
-  process.stdout.write('PASS chat follow-up persists router goal and keeps prior goal snapshotable\n');
+  process.stdout.write(
+    'PASS chat follow-up persists router goal and keeps prior goal snapshotable\n'
+  );
 }
 
 void main()
   .catch((error: unknown) => {
-    console.error(error);
+    process.stderr.write(
+      `${error instanceof Error ? error.stack || error.message : String(error)}\n`
+    );
     process.exitCode = 1;
   })
   .finally(async () => {
