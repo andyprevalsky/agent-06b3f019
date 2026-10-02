@@ -775,14 +775,23 @@ async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
 
   // Collapsing the union must not drop the model-facing field documentation.
   const startAgent = extracted.tools.find((tool) => tool.name === 'start_new_agent');
-  const budget = (
-    ((startAgent?.input_schema as Record<string, unknown>).properties as Record<string, unknown>)
-      .arguments as Record<string, unknown>
-  ).properties as Record<string, Record<string, unknown>>;
+  const startAgentArgs = (
+    (startAgent?.input_schema as Record<string, unknown>).properties as Record<string, unknown>
+  ).arguments as { properties: Record<string, Record<string, unknown>>; required?: string[] };
+  const budget = startAgentArgs.properties;
   assert(
     typeof budget.budget_dollars.description === 'string' &&
       budget.budget_dollars.description.length > 0,
     'budget_dollars description must survive the Anthropic transform'
+  );
+  assertEqual(
+    JSON.stringify(budget.start_phase?.enum),
+    '["plan","execute"]',
+    'start_phase enum must survive the Anthropic transform'
+  );
+  assert(
+    (startAgentArgs.required ?? []).includes('start_phase'),
+    'start_phase must stay required so the native tool path always chooses a phase'
   );
 }
 
