@@ -272,6 +272,7 @@ Not all errors are bugs in our code. Before writing a fix, classify:
 | **Configuration error** — missing env var, expired token, wrong URL | TEMPORAL_ADDRESS not set, expired Claude OAuth token                                       | Report the specific missing config; do NOT add "works without it" fallbacks                                    |
 | **Test bug** — the test itself asserts the wrong thing              | Test expects old API shape after a schema change                                           | Fix the test, not the production code                                                                          |
 | **Model intelligence limitation**                                   | The unchanged captured call fails on the original model and passes on a more capable model | Upgrade the minimum capable model or model-selection policy and preserve the controlled replay as a regression |
+| **Unresolved** — an open RCA lacks proof for the other buckets         | A timed-out agent has model research turns, but replay does not establish a code, provider, or model-capability cause | Preserve the evidence and verification gap; keep the case open until a boundary reproduction supports a classification |
 
 **The critical rule:** Third-party failures and configuration errors are NOT bugs in our code. Never write code to "handle" a 402 by falling back to a different provider silently. Never write code to "handle" a missing env var by using a default. These mask real problems. Surface them to the user.
 

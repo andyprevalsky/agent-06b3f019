@@ -510,6 +510,9 @@ model BrowserSession {
   // 'residential' | 'mobile' after a rotation. See docs/plans/active/rotate-ip-tool.md.
   proxyRotationCount     Int                  @default(0)
   proxyTier              String?
+  // The managed Kernel proxy that actually resolved. Resume must keep its tier
+  // and location specificity even if a more specific proxy becomes available.
+  kernelProxySource      String?
   context                BrowserContext       @relation(fields: [contextId], references: [id], onDelete: Cascade)
 
   @@index([contextId])

@@ -203,13 +203,11 @@ echo "PASS: cold isolated seed validates and caps retry delays"
 
 find_free_port() {
     local port
-    # 61000-61999 only. kill-services.test.sh scans 62000-63000 and this gate now
-    # runs concurrently with it, so an inclusive upper bound of 62000 let both
-    # gates hand out the same port. Bind-probe instead of lsof-only so a
-    # concurrent claim between check and use cannot hand out a taken port.
-    for port in $(seq 61000 61999); do
+    # 61000-61999 only. kill-services.test.sh scans 62000-63000 and this gate
+    # runs concurrently with it. Overrides allow a focused TIME_WAIT regression.
+    for port in $(seq "${TEST_PORT_RANGE_START:-61000}" "${TEST_PORT_RANGE_END:-61999}"); do
         if python3 -c 'import socket,sys
-s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s=socket.socket()
 try:
     s.bind(("127.0.0.1", int(sys.argv[1])))
 except OSError:
@@ -221,8 +219,45 @@ finally:
         fi
     done
     echo "FAIL: could not find a free test port" >&2
-    exit 1
+    return 1
 }
+
+# A closed HTTP listener can leave its local port in TIME_WAIT. A bind probe
+# with SO_REUSEADDR may call it free, while this test's outbound socket (which
+# has no reuse option) then fails with EADDRINUSE. Keep the two socket contracts
+# aligned so find_free_port cannot return a port the fixture cannot use.
+time_wait_port="$(python3 - <<'PY'
+import socket
+
+listener = socket.socket()
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(('127.0.0.1', 0))
+listener.listen()
+port = listener.getsockname()[1]
+client = socket.create_connection(('127.0.0.1', port))
+accepted, _ = listener.accept()
+accepted.close()
+client.recv(1)
+client.close()
+listener.close()
+ordinary = socket.socket()
+try:
+    ordinary.bind(('127.0.0.1', port))
+except OSError:
+    pass
+else:
+    raise SystemExit('TIME_WAIT fixture did not block an ordinary bind')
+finally:
+    ordinary.close()
+print(port)
+PY
+)"
+if TEST_PORT_RANGE_START="$time_wait_port" TEST_PORT_RANGE_END="$time_wait_port" \
+    find_free_port >/dev/null 2>&1; then
+    echo "FAIL: TIME_WAIT port was reported free for an outbound socket" >&2
+    exit 1
+fi
+echo "PASS: TIME_WAIT port is unavailable to an outbound socket"
 
 wait_for_port() {
     local port="$1"
