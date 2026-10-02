@@ -10,17 +10,9 @@ const SESSION_VALIDATION_TIMEOUT = 10000;
 const WS_BACKOFF_DELAYS = [100, 400, 800];
 type CdpConnector = (wsUrl: string) => Promise<Browser>;
 
-async function defaultCdpConnector(wsUrl: string): Promise<Browser> {
-  const { chromium } = await import('playwright');
-  return chromium.connectOverCDP(wsUrl);
-}
+export type BrowserValidation =
+  { browser: Browser; failure: null } | { browser: null; failure: string };
 
-/**
- * Connect to the session via CDP and validate it, returning the OPEN browser
- * connection on success (null on failure). Callers that keep the connection
- * (e.g. to reuse it for user-data injection, saving a second 3-5s CDP
- * handshake) are responsible for closing it.
- */
 export type SteelConnectionValidationResult =
   | { valid: true }
   | {
@@ -48,23 +40,88 @@ function safeValidationFailureReason(
   return 'Session validation failed';
 }
 
-export async function connectValidatedBrowser(
+/** The provider's terminal verdict for a session, or null while it may still accept CDP. */
+export type SessionStartupProbe = () => Promise<string | null>;
+
+class SessionStartupFailedError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = 'SessionStartupFailedError';
+  }
+}
+
+async function connectSteelCdp(wsUrl: string): Promise<Browser> {
+  const { chromium } = await import('playwright');
+  return chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
+}
+
+/**
+ * Steel marks a session whose browser never booted `failed` (release reason
+ * `startup_failed`) a few seconds after creation, and that session never
+ * accepts CDP. A failed status lookup returns null so validation keeps trying.
+ */
+export function steelStartupProbe(
+  sessionId: string,
+  retrieve: (id: string) => Promise<{ status: string; releaseReason?: unknown }>
+): SessionStartupProbe {
+  return async () => {
+    try {
+      const session = await retrieve(sessionId);
+      if (session.status !== 'failed') return null;
+      const reason =
+        typeof session.releaseReason === 'string' && session.releaseReason !== ''
+          ? session.releaseReason
+          : 'no release reason';
+      return `Steel reported session ${sessionId} failed (${reason})`;
+    } catch (error) {
+      log.warn('Steel session status lookup failed during validation', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  };
+}
+
+/**
+ * Connect to the session via CDP and validate it. On success the OPEN browser
+ * connection is returned; callers that keep it (e.g. to reuse it for user-data
+ * injection, saving a second 3-5s CDP handshake) are responsible for closing it.
+ *
+ * `startupProbe` runs before each retry: once the provider has declared the
+ * session dead, the remaining connect timeouts are skipped and its verdict is
+ * returned as the failure.
+ */
+export async function validateBrowserConnection(
   wsUrl: string,
-  onFailure?: (error: unknown) => void,
-  connectBrowser: CdpConnector = defaultCdpConnector
-): Promise<Browser | null> {
+  options: {
+    startupProbe?: SessionStartupProbe;
+    connect?: (wsUrl: string) => Promise<Browser>;
+  } = {}
+): Promise<BrowserValidation> {
+  const connect = options.connect ?? connectSteelCdp;
+  let attempts = 0;
+  let connected: Browser | undefined;
   try {
-    let connected: Browser | undefined;
     await retryWithBackoff(
       async () => {
+        attempts += 1;
+        if (attempts > 1 && options.startupProbe !== undefined) {
+          const startupFailure = await options.startupProbe();
+          if (startupFailure !== null) throw new SessionStartupFailedError(startupFailure);
+        }
         let browser: Browser | undefined;
+        let connectTimer: NodeJS.Timeout | undefined;
         try {
           browser = await Promise.race([
-            connectBrowser(steelCdpConnectionUrl(wsUrl)),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error('Connection timeout')), SESSION_VALIDATION_TIMEOUT)
-            ),
-          ]);
+            connect(wsUrl),
+            new Promise<never>((_, reject) => {
+              connectTimer = setTimeout(
+                () => reject(new Error('Connection timeout')),
+                SESSION_VALIDATION_TIMEOUT
+              );
+            }),
+          ]).finally(() => clearTimeout(connectTimer));
           const contexts = browser.contexts();
           if (contexts.length === 0) {
             throw new Error('No browser contexts available');
@@ -83,39 +140,46 @@ export async function connectValidatedBrowser(
         maxRetries: 3,
         fixedDelays: WS_BACKOFF_DELAYS,
         component: 'Steel session validation',
-        isRetryable: (error) => safeValidationFailureReason(error) !== 'Authentication rejected',
+        isRetryable: (error) =>
+          !(error instanceof SessionStartupFailedError) &&
+          safeValidationFailureReason(error) !== 'Authentication rejected',
       }
     );
-    return connected ?? null;
   } catch (error) {
-    onFailure?.(error);
-    log.info('  Session validation failed', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
+    const failure = error instanceof Error ? error.message : String(error);
+    log.info('  Session validation failed', { error: failure });
+    return { browser: null, failure };
   }
+  return connected === undefined
+    ? { browser: null, failure: 'CDP validation returned no browser' }
+    : { browser: connected, failure: null };
+}
+
+export async function connectValidatedBrowser(wsUrl: string): Promise<Browser | null> {
+  return (await validateBrowserConnection(wsUrl)).browser;
 }
 
 export async function validateSessionConnectionWithReason(
   wsUrl: string,
   connectBrowser?: CdpConnector
 ): Promise<SteelConnectionValidationResult> {
-  let failureReason: Exclude<SteelConnectionValidationResult, { valid: true }>['failureReason'] =
-    'Session validation failed';
-  const browser = await connectValidatedBrowser(
-    wsUrl,
-    (error) => {
-      failureReason = safeValidationFailureReason(error);
-    },
-    connectBrowser
-  );
-  if (browser === null) return { valid: false, failureReason };
-  await browser.close().catch(() => {});
+  const validation = await validateBrowserConnection(wsUrl, {
+    ...(connectBrowser && {
+      connect: (url: string) => connectBrowser(steelCdpConnectionUrl(url)),
+    }),
+  });
+  if (validation.browser === null) {
+    return { valid: false, failureReason: safeValidationFailureReason(validation.failure) };
+  }
+  await validation.browser.close().catch(() => {});
   return { valid: true };
 }
 
 export async function validateSessionConnection(wsUrl: string): Promise<boolean> {
-  return (await validateSessionConnectionWithReason(wsUrl)).valid;
+  const browser = await connectValidatedBrowser(wsUrl);
+  if (browser === null) return false;
+  await browser.close().catch(() => {});
+  return true;
 }
 
 export async function createLocalBrowserSession(

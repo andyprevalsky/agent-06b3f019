@@ -8,6 +8,8 @@ import json
 import time
 from typing import Any, Dict
 
+import structlog
+
 from helpers.trace_archive import (
     decrypt_and_validate_artifact,
     encrypt_artifact,
@@ -15,7 +17,14 @@ from helpers.trace_archive import (
     store_encrypted_artifact,
 )
 
+logger = structlog.get_logger()
+
 _INLINE_LIMIT_BYTES = 1_000_000
+# Pause results ride through workflow history and, when a deploy lands while
+# the browser task is parked, through continue_as_new arguments that share the
+# 2MB payload cap with the conversation. Snapshots above this size go to the
+# archive when it is reachable so the parked task stays small enough to carry.
+_PREFERRED_INLINE_BYTES = 64_000
 _PART_BYTES = 4_000_000
 _MAX_PARTS = 128
 
@@ -63,8 +72,24 @@ def _load_part(agent_id: str, path: str) -> bytes:
 async def persist_resume_context(*, agent_id: str, task_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Return the exact state inline, or a verified encrypted snapshot pointer."""
     body = _encoded_snapshot(state)
-    if len(body) <= _INLINE_LIMIT_BYTES:
+    if len(body) <= _PREFERRED_INLINE_BYTES:
         return state
+    try:
+        return await _store_snapshot(agent_id, task_id, body)
+    except Exception as exc:
+        if len(body) > _INLINE_LIMIT_BYTES:
+            raise
+        logger.warning(
+            "Browser resume archive unavailable; keeping snapshot inline",
+            agent_id=agent_id,
+            task_id=task_id,
+            snapshot_bytes=len(body),
+            error=str(exc),
+        )
+        return state
+
+
+async def _store_snapshot(agent_id: str, task_id: str, body: bytes) -> Dict[str, Any]:
     digest = hashlib.sha256(body).hexdigest()
     parts = [body[offset : offset + _PART_BYTES] for offset in range(0, len(body), _PART_BYTES)]
     if len(parts) > _MAX_PARTS:

@@ -99,7 +99,7 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
             proxySource: 'steel',
           };
         },
-        validateConnection: async () => true,
+        validateConnection: async () => null,
       }
     );
     assert(
@@ -128,7 +128,7 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
             debugUrl: 'https://steel.example/debug',
             profileId: null,
           }),
-          validateConnection: async () => ({ valid: false, failureReason: 'Connection timeout' }),
+          validateConnection: async () => 'Connection timeout',
           releaseSession: async () => {
             releasedSessions += 1;
           },

@@ -6432,6 +6432,12 @@ async function testClaudeCodeBillingFailure_backsOffFundedApiKey() {
     await restoreAnthropicApiKeyCooldown(previousCooldown);
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'anthropic',
+      onCooldown: cooldownIsLive(previousCooldown),
+    });
   }
 }
 
@@ -6466,6 +6472,12 @@ async function testClaudeCodeBillingFailure_marksSharedAnthropicCooldown() {
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
     await __resetAnthropicApiKeyCooldown();
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'anthropic',
+      onCooldown: false,
+    });
   }
 }
 
