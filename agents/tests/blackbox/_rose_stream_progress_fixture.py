@@ -300,31 +300,33 @@ async def assert_progress_case(
         patch("providers.rose.client._safe_heartbeat", lambda message: None),
         patch("providers.rose.transport.httpx.AsyncClient", offline_client),
     ):
-        from contextlib import nullcontext
+        async with offline_client() as stream_client:
+            with patch("providers.rose.transport.get_streaming_http_client", return_value=stream_client):
+                from contextlib import nullcontext
 
-        with (
-            patch("providers.rose.client.waterfall_complete", parsed_waterfall)
-            if protocol != "openai"
-            else nullcontext()
-        ):
-            try:
-                async for chunk in RoseClient(openrouter_key="offline-fake").complete(
-                    pool="rose-1-flash",
-                    messages=[{"role": "user", "content": "Offline fixture"}],
-                    tools=[{"name": "fixture_tool", "parameters": {"type": "object"}}],
-                    request_id="offline-progress",
-                    call_site="explore_agent",
-                    max_tokens=8192,
-                    deadline_s=590.0,
-                    ttft_timeout_s=90.0,
-                    idle_timeout_s=idle_timeout_s,
-                    dump_context=False,
+                with (
+                    patch("providers.rose.client.waterfall_complete", parsed_waterfall)
+                    if protocol != "openai"
+                    else nullcontext()
                 ):
-                    chunks.append(chunk)
-                    if len(chunks) == 1 and consumer_pause:
-                        clock.now += consumer_pause
-            except (RoseDeadlineError, RoseStallError) as exc:
-                error = str(exc)
+                    try:
+                        async for chunk in RoseClient(openrouter_key="offline-fake").complete(
+                            pool="rose-1-flash",
+                            messages=[{"role": "user", "content": "Offline fixture"}],
+                            tools=[{"name": "fixture_tool", "parameters": {"type": "object"}}],
+                            request_id="offline-progress",
+                            call_site="explore_agent",
+                            max_tokens=8192,
+                            deadline_s=590.0,
+                            ttft_timeout_s=90.0,
+                            idle_timeout_s=idle_timeout_s,
+                            dump_context=False,
+                        ):
+                            chunks.append(chunk)
+                            if len(chunks) == 1 and consumer_pause:
+                                clock.now += consumer_pause
+                    except (RoseDeadlineError, RoseStallError) as exc:
+                        error = str(exc)
     assert error == expected_error, (mode, protocol, error, clock.now)
     if expected_time is not None:
         assert abs(clock.now - expected_time) < 0.000001, (clock.now, expected_time)
@@ -434,22 +436,24 @@ async def assert_concurrent_progress_and_cancellation():
         patch("providers.rose.client._safe_heartbeat", lambda message: None),
         patch("providers.rose.transport.httpx.AsyncClient", offline_client),
     ):
-        productive, silent = await asyncio.gather(collect("productive"), collect("silent"), return_exceptions=True)
-        assert isinstance(silent, RoseDeadlineError) and "idle" in str(silent), silent
-        assert isinstance(productive, list) and productive[-1].kind == "done", productive
-        tool = next(chunk for chunk in productive if chunk.kind == "tool_call")
-        assert json.loads(tool.data["arguments"]) == {"payload": "x" * 70}
-        task = asyncio.create_task(collect("cancelled"))
-        await feeds["cancelled"].entered.wait()
-        # Let the productive normalized chunk reach the consumer, then cancel
-        # the next pending read. Closure must finish before cancellation returns.
-        await asyncio.sleep(0.005)
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        else:
-            raise AssertionError("cancellation was swallowed")
+        async with offline_client() as stream_client:
+            with patch("providers.rose.transport.get_streaming_http_client", return_value=stream_client):
+                productive, silent = await asyncio.gather(collect("productive"), collect("silent"), return_exceptions=True)
+                assert isinstance(silent, RoseDeadlineError) and "idle" in str(silent), silent
+                assert isinstance(productive, list) and productive[-1].kind == "done", productive
+                tool = next(chunk for chunk in productive if chunk.kind == "tool_call")
+                assert json.loads(tool.data["arguments"]) == {"payload": "x" * 70}
+                task = asyncio.create_task(collect("cancelled"))
+                await feeds["cancelled"].entered.wait()
+                # Let the productive normalized chunk reach the consumer, then cancel
+                # the next pending read. Closure must finish before cancellation returns.
+                await asyncio.sleep(0.005)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                else:
+                    raise AssertionError("cancellation was swallowed")
     assert all(feed.closed for feed in feeds.values())
     assert _stream_progress.get() is None

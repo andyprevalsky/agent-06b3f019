@@ -50,7 +50,11 @@ const CODEX_CREDIT_EXHAUSTION_PATTERN =
 export function detectCodexCreditExhaustion(output: string, events: unknown[]): string | null {
   const haystacks: string[] = [output];
   for (const event of events) {
-    const typed = event as { message?: unknown; reason?: unknown; error?: unknown };
+    const typed = event as {
+      message?: unknown;
+      reason?: unknown;
+      error?: unknown;
+    };
     // `error` arrives as a bare string on some providers and as
     // `{ message }` on others; only reading the string form let a nested
     // out-of-funds message slip past the detector and hard-fail the deploy.
@@ -77,6 +81,29 @@ export function codexSmokeCreditSkipReason(output: string, events: unknown[]): s
   return detectCodexCreditExhaustion(output, events);
 }
 
+const CODEX_CREATE_UNAVAILABLE_BODY =
+  'Code agent credentials are unavailable; the session could not be started';
+
+/**
+ * Create-time 500 with a generic "credentials unavailable" body is a hard
+ * failure when a credential path still exists. When the funded GPT key is
+ * already on its out-of-credits/bad-key cooldown and create still cannot
+ * start a session, every Codex path is unusable — same deploy-approved SKIP
+ * as mid-run exhaustion. Observed 2026-10-02: leftover cooldown from a prior
+ * coverage process plus no synced OAuth/pool token hard-failed Step 4a.
+ */
+export function codexCreateUnavailableSkipReason(
+  createBody: string,
+  onCooldown: boolean
+): string | null {
+  const exhaustion = detectCodexCreditExhaustion(createBody, []);
+  if (exhaustion) return exhaustion;
+  if (onCooldown && createBody.includes(CODEX_CREATE_UNAVAILABLE_BODY)) {
+    return 'funded GPT key on out-of-credits/bad-key cooldown and session create reported credentials unavailable';
+  }
+  return null;
+}
+
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
@@ -92,7 +119,10 @@ export function testDetectCreditExhaustion_positive(): void {
   // Exhaustion surfaced only in structured events (message/reason fields).
   assert(
     detectCodexCreditExhaustion('normal output', [
-      { type: 'error', message: 'Quota exceeded. Check your plan and billing details.' },
+      {
+        type: 'error',
+        message: 'Quota exceeded. Check your plan and billing details.',
+      },
     ]) !== null,
     'quota-exceeded event message must be detected'
   );
@@ -240,4 +270,59 @@ export function testCreditExhaustion_neverOverridesSuccessSentinel(): void {
     codexSmokeCreditSkipReason('all credentials returned insufficient_quota', []) !== null,
     'no success sentinel + exhaustion must yield a skip reason'
   );
+}
+
+export function testCreateUnavailableSkip_cooldownOnly(): void {
+  const createBody =
+    '{"error":"Code agent credentials are unavailable; the session could not be started"}';
+  assert(
+    codexCreateUnavailableSkipReason(createBody, true) !== null,
+    'credentials-unavailable create body + cooldown must skip'
+  );
+  assert(
+    codexCreateUnavailableSkipReason(createBody, false) === null,
+    'credentials-unavailable create body without cooldown must not skip'
+  );
+  assert(
+    codexCreateUnavailableSkipReason(
+      '{"error":"403: team is blocked: missing payment method"}',
+      false
+    ) !== null,
+    'existing create-time funding wording still skips without a cooldown flag'
+  );
+}
+
+export interface TestResult {
+  name: string;
+  passed: boolean;
+  skipped?: boolean;
+  skipReason?: string;
+  error?: string;
+  duration: number;
+}
+
+export async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
+  const start = Date.now();
+  try {
+    await fn();
+    return { name, passed: true, duration: Date.now() - start };
+  } catch (error) {
+    if (error instanceof CredentialExhaustionSkip) {
+      // Not a failure: the third-party account is out of credits/quota. Report
+      // as a loud SKIP so the deploy gate is not blocked by external funding.
+      return {
+        name,
+        passed: true,
+        skipped: true,
+        skipReason: error.message,
+        duration: Date.now() - start,
+      };
+    }
+    return {
+      name,
+      passed: false,
+      error: error instanceof Error ? error.message : String(error),
+      duration: Date.now() - start,
+    };
+  }
 }

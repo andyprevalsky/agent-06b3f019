@@ -2,6 +2,7 @@ import { type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import { cancelAuthorizedHold } from '../../providers/stripe';
 import { type WalletFundingProvider } from '../../providers/wallet-funding';
+import { findSameAgentHeldCart } from './agentCartReuse';
 import { tryGetLiveCardDetails } from './cardLiveness';
 import {
   benchmarkPurchaseKycRequired,
@@ -240,6 +241,16 @@ async function recoverStaleChargingPurchase(purchase: PurchaseSpend): Promise<vo
   });
 }
 
+async function reuseSameAgentHeldCart(
+  input: MintPurchaseInput,
+  cardProvider: CardProvider | undefined,
+  now: Date
+): Promise<MintPurchaseResult | null> {
+  const since = new Date(now.getTime() - PURCHASE_APPROVAL_CACHE_HOURS * 60 * 60 * 1000);
+  const held = await findSameAgentHeldCart(input, since);
+  return held === null ? null : tryReuseExistingPurchase(held, cardProvider, now, input.agentId);
+}
+
 /** Open a PENDING_APPROVAL purchase row for this fingerprint. */
 async function openPendingPurchase(input: MintPurchaseInput) {
   const receipt = purchaseReceipt(input);
@@ -294,6 +305,10 @@ export async function mintPurchaseCard(
       input.fingerprint,
       input.agentId
     );
+  }
+  if (!existing) {
+    const sameCart = await reuseSameAgentHeldCart(input, cardProvider, now);
+    if (sameCart) return sameCart;
   }
   let resumedPurchase: PurchaseSpend | null = null;
   if (existing) {

@@ -51,6 +51,7 @@ def test_oai_demo_requires_readable_files_and_forbids_browser_calls():
 
 
 def test_google_oauth_demo_uses_cached_fixture_without_subagents_or_google_io():
+    from benchmarks.long_horizon import RUNTIME_STATIC_CHECK_TYPES
     from domains.api_request.google_oauth_demo_fixture import (
         DEMO_LABEL,
         matches_demo_goal,
@@ -69,6 +70,13 @@ def test_google_oauth_demo_uses_cached_fixture_without_subagents_or_google_io():
     assert task.tags == ["DEMO"]
     assert task.production_only is False
     assert task.fast_cache == "on"
+    demo_evaluator = next(item for item in task.evaluators if item["id"] == "google-demo-tool-sequence")
+    assert demo_evaluator["method"] == "static_check"
+    assert [check["type"] for check in demo_evaluator["checks"]] == [
+        "google_oauth_demo_trace", "fully_cached_agent"
+    ]
+    assert "google_oauth_demo_trace" in RUNTIME_STATIC_CHECK_TYPES
+    assert "fully_cached_agent" in RUNTIME_STATIC_CHECK_TYPES
     assert task.requires_browser_agent is False
     assert task.requires_claude_code is False
     assert task.expected_tool_counts == {"google_oauth_demo": 1}

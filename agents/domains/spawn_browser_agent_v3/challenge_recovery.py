@@ -22,7 +22,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
 from urllib.parse import urlparse
 
 StorageState = Dict[str, Any]

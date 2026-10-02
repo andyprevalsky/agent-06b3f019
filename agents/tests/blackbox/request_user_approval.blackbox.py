@@ -418,6 +418,267 @@ async def test_direct_approval_ignores_unscoped_trailing_messages():
     assert result["response"] == "ok"
 
 
+async def test_direct_generation_handoff_stashes_request_without_resolving():
+    """Cooperative cutover must keep the original attn_id, not fence the row.
+
+    DEPLOY_INTERRUPTED on the row is the dead-generation fence. A live
+    continue_as_new has to re-wait that same id so SMS approve still works.
+    """
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+    from domains.request_user_approval.service import request_user_approval_direct
+    from tools.base import MessageStatus
+
+    wf = _WFInstance()
+
+    async def _handoff_queue():
+        return "navi-agent-tasks-live"
+
+    wf._check_generation_handoff = _handoff_queue
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-stale-prod",
+            "notify_sms_event_activity": None,
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    raised = False
+    try:
+        try:
+            await request_user_approval_direct(
+                workflow_instance=wf,
+                question="Make a phone call to +1 (415) 800-8345?",
+                metadata={"toolApproval": True},
+            )
+        except GenerationHandoffRequested as exc:
+            raised = True
+            assert exc.task_queue == "navi-agent-tasks-live"
+    finally:
+        restore()
+
+    assert raised is True
+    resolve_calls = [c for c in fake.activity_calls if c["name"] == "resolve_attention_request_activity"]
+    assert not resolve_calls, "live continue_as_new must not fence the approval row"
+    assert wf._pending_approval_resume == {
+        "request_id": "req-stale-prod",
+        "question": "Make a phone call to +1 (415) 800-8345?",
+    }
+    finished = [ev for ev, _, _ in wf.handled_events if ev.status == MessageStatus.FINISHED]
+    assert finished
+    assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+
+async def test_direct_retry_after_handoff_reuses_request_and_consumes_late_signal():
+    """After continue_as_new, retry the tool against the original attn_id.
+
+    Prod agent 262669d8 created cmuq98lzx after cutover; SMS approved
+    cmuq8f9bo and the live wait ignored it. A late signal on the original
+    id must complete the resumed wait without creating a second row.
+    """
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from domains.request_user_approval.service import request_user_approval_direct
+
+    wf = _WFInstance()
+
+    async def _handoff_queue():
+        return "navi-agent-tasks-live"
+
+    wf._check_generation_handoff = _handoff_queue
+    create_ids = ["req-stale-prod", "req-new-must-not-be-created"]
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": lambda: create_ids.pop(0),
+            "notify_sms_event_activity": None,
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        try:
+            await request_user_approval_direct(
+                workflow_instance=wf,
+                question="Make a phone call to +1 (415) 800-8345?",
+                metadata={"toolApproval": True},
+            )
+        except GenerationHandoffRequested:
+            pass
+
+        # Late SMS approve of the original id, then the replacement run retries.
+        wf._check_generation_handoff = None
+        wf._signal_responses["req-stale-prod"] = "Approved. Go ahead and make the call."
+        result = await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Make a phone call to +1 (415) 800-8345?",
+            metadata={"toolApproval": True},
+        )
+    finally:
+        restore()
+
+    create_calls = [c for c in fake.activity_calls if c["name"] == "create_approval_request_activity"]
+    assert len(create_calls) == 1
+    assert result["attention_request_id"] == "req-stale-prod"
+    assert result["response"] == "Approved. Go ahead and make the call."
+    assert wf._pending_approval_resume is None
+
+
+async def test_pending_approval_request_to_resume_reads_interrupted_chip():
+    from domains.request_user_approval.service import pending_approval_request_to_resume
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+    assert (
+        pending_approval_request_to_resume(
+            [
+                {
+                    "role": "TOOL",
+                    "text": DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    "metadata": {
+                        "toolStatus": "FINISHED",
+                        "requestUserApproval": {"attentionRequestId": "cmuq8f9bo"},
+                    },
+                }
+            ]
+        )
+        == "cmuq8f9bo"
+    )
+    assert (
+        pending_approval_request_to_resume(
+            [
+                {
+                    "role": "TOOL",
+                    "text": DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    "metadata": {
+                        "toolStatus": "FINISHED",
+                        "requestUserApproval": {"attentionRequestId": "cmuq8f9bo"},
+                    },
+                },
+                {
+                    "role": "TOOL",
+                    "text": "Approval request:\ncall\n\nUser response:\nApproved",
+                    "metadata": {
+                        "toolStatus": "FINISHED",
+                        "requestUserApproval": {"attentionRequestId": "cmuq8f9bo"},
+                    },
+                },
+            ]
+        )
+        is None
+    )
+
+
+async def test_sibling_approvals_match_question_and_do_not_steal_id():
+    """Two parked waits reuse only the matching question; a third action is new."""
+    from domains.request_user_approval.service import (
+        request_user_approval_direct,
+        stash_pending_approvals_from_context,
+    )
+
+    wf = _WFInstance()
+    wf.context = [
+        {
+            "role": "TOOL",
+            "text": "Call the restaurant?",
+            "metadata": {
+                "toolStatus": "IN_PROGRESS",
+                "attentionMessage": "Call the restaurant?",
+                "requestUserApproval": {"attentionRequestId": "attn-call"},
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Send the email?",
+            "metadata": {
+                "toolStatus": "IN_PROGRESS",
+                "attentionMessage": "Send the email?",
+                "requestUserApproval": {"attentionRequestId": "attn-email"},
+            },
+        },
+    ]
+    stash_pending_approvals_from_context(wf)
+    assert wf._pending_approval_resume == {
+        "requests": [
+            {"request_id": "attn-call", "question": "Call the restaurant?"},
+            {"request_id": "attn-email", "question": "Send the email?"},
+        ]
+    }
+
+    create_ids = ["attn-new-must-not", "attn-stolen-must-not"]
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": lambda: create_ids.pop(0),
+            "notify_sms_event_activity": None,
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        wf._signal_responses["attn-email"] = "Approved. Send it."
+        email = await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Send the email?",
+        )
+        wf._signal_responses["attn-new-must-not"] = "Approved. Book a hotel."
+        hotel = await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Book a hotel?",
+        )
+    finally:
+        restore()
+
+    create_calls = [c for c in fake.activity_calls if c["name"] == "create_approval_request_activity"]
+    assert email["attention_request_id"] == "attn-email"
+    assert hotel["attention_request_id"] == "attn-new-must-not"
+    assert len(create_calls) == 1
+    assert wf._pending_approval_resume == {
+        "request_id": "attn-call",
+        "question": "Call the restaurant?",
+    }
+
+
+async def test_manager_generation_handoff_stashes_request_without_resolving():
+    """LLM-facing execute_tool handoff must stash the same attn_id for reuse."""
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+    from domains.request_user_approval.service import RequestUserApprovalManager
+    from tools.base import MessageStatus
+
+    wf = _WFInstance()
+
+    async def _handoff_queue():
+        return "navi-agent-tasks-live"
+
+    wf._check_generation_handoff = _handoff_queue
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-mgr-stale",
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    manager = RequestUserApprovalManager()
+    events = []
+    raised = False
+    try:
+        try:
+            async for event in manager.execute_tool(
+                workflow_instance=wf,
+                tool_call={"question": "Approve sending this email?"},
+                tool_call_id="tc-handoff",
+            ):
+                events.append(event)
+        except GenerationHandoffRequested:
+            raised = True
+    finally:
+        restore()
+
+    assert raised is True
+    resolve_calls = [c for c in fake.activity_calls if c["name"] == "resolve_attention_request_activity"]
+    assert not resolve_calls
+    assert wf._pending_approval_resume == {
+        "request_id": "req-mgr-stale",
+        "question": "Approve sending this email?",
+    }
+    finished = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert finished
+    assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+
 async def test_direct_create_failure_propagates():
     """Create-request failure posts error event and re-raises."""
     from domains.request_user_approval.service import request_user_approval_direct
@@ -658,6 +919,139 @@ async def test_direct_subagent_attention_sms_sends_notify():
     assert notify_call["args"][1] == "agentcard_setup"
 
 
+async def test_direct_cancel_preserves_unanswered_resume_only():
+    """Canceled unanswered chips retain their row; consumed decisions never rearm."""
+    from copy import deepcopy
+
+    from domains.request_user_approval.config import REJECTION_SENTINEL
+    from domains.request_user_approval.service import (
+        request_user_approval_direct,
+        stash_pending_approvals_from_context,
+    )
+    from tools.base import MessageStatus
+
+    class PersistedWF(_WFInstance):
+        def __init__(self, blocked_status):
+            super().__init__()
+            self.blocked_status = blocked_status
+            self.persisted = asyncio.Event()
+            self.blocked_once = False
+
+        async def _handle_tool_event(self, event, tool_call_id, tool_name):
+            await super()._handle_tool_event(deepcopy(event), tool_call_id, tool_name)
+            self.context.append(
+                {
+                    "role": "TOOL",
+                    "text": event.message,
+                    "metadata": {
+                        **(event.metadata or {}),
+                        "toolStatus": event.status.name,
+                    },
+                }
+            )
+            if event.status == self.blocked_status and not self.blocked_once:
+                self.blocked_once = True
+                self.persisted.set()
+                await asyncio.Event().wait()
+
+    for decision in (None, "Approved", REJECTION_SENTINEL):
+        request_id = "req-cancel-resume"
+        question = "Approve the existing request?"
+        wf = PersistedWF(
+            MessageStatus.IN_PROGRESS if decision is None else MessageStatus.FINISHED
+        )
+        if decision is not None:
+            wf._pending_approval_resume = {
+                "request_id": request_id,
+                "question": question,
+            }
+            wf._signal_responses[request_id] = decision
+        fake = _FakeWFModule(
+            activity_results={
+                "create_approval_request_activity": request_id,
+                "notify_sms_event_activity": None,
+            }
+        )
+        restore = _patch_service_workflow(fake)
+        task = asyncio.create_task(
+            request_user_approval_direct(wf, question, close_on_cancel=True)
+        )
+        try:
+            await asyncio.wait_for(wf.persisted.wait(), timeout=1)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("The original caller must remain canceled")
+            stash_pending_approvals_from_context(wf)
+            assert request_id not in wf._signal_responses
+            assert not any(
+                c["name"] == "resolve_attention_request_activity"
+                for c in fake.activity_calls
+            )
+            if decision is None:
+                assert getattr(wf, "_pending_approval_resume", None) == {
+                    "request_id": request_id,
+                    "question": question,
+                }, "Canceled unanswered approval lost its original attention request"
+                closed = wf.handled_events[-1][0]
+                assert closed.title == "Approval interrupted"
+                assert closed.metadata["excludeFromModel"] is True
+                wf._signal_responses[request_id] = "Approved"
+                resumed = await request_user_approval_direct(
+                    wf, question, close_on_cancel=True
+                )
+                assert resumed["attention_request_id"] == request_id
+                assert resumed["response"] == "Approved"
+                assert wf._pending_approval_resume is None
+                assert (
+                    sum(
+                        c["name"] == "create_approval_request_activity"
+                        for c in fake.activity_calls
+                    )
+                    == 1
+                )
+                assert (
+                    sum(
+                        c["name"] == "notify_sms_event_activity"
+                        for c in fake.activity_calls
+                    )
+                    == 1
+                )
+            else:
+                assert wf._pending_approval_resume is None, (
+                    "Consumed decisions must never be re-stashed"
+                )
+                terminal_events = [
+                    e
+                    for e, _, _ in wf.handled_events
+                    if e.status == MessageStatus.FINISHED
+                ]
+                assert len(terminal_events) == 2
+                assert terminal_events[0] == terminal_events[1]
+                expected_title = (
+                    "✗ User rejected action"
+                    if decision == REJECTION_SENTINEL
+                    else "✓ User approval received"
+                )
+                assert terminal_events[-1].title == expected_title
+                assert not any(
+                    c["name"] == "create_approval_request_activity"
+                    for c in fake.activity_calls
+                )
+                assert not any(
+                    c["name"] == "notify_sms_event_activity"
+                    for c in fake.activity_calls
+                )
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            restore()
+
+
 async def run_all_tests():
     print("request-user-approval blackbox tests:")
     r = BlackboxResult()
@@ -678,6 +1072,26 @@ async def run_all_tests():
         "direct_approval_scoped_signal",
         test_direct_approval_ignores_unscoped_trailing_messages,
     )
+    await r.record_async(
+        "direct_handoff_stashes_request",
+        test_direct_generation_handoff_stashes_request_without_resolving,
+    )
+    await r.record_async(
+        "direct_retry_reuses_request",
+        test_direct_retry_after_handoff_reuses_request_and_consumes_late_signal,
+    )
+    await r.record_async(
+        "pending_approval_resume_scan",
+        test_pending_approval_request_to_resume_reads_interrupted_chip,
+    )
+    await r.record_async(
+        "manager_handoff_stashes_request",
+        test_manager_generation_handoff_stashes_request_without_resolving,
+    )
+    await r.record_async(
+        "sibling_approvals_match_question",
+        test_sibling_approvals_match_question_and_do_not_steal_id,
+    )
     await r.record_async("direct_create_fail", test_direct_create_failure_propagates)
     await r.record_async("direct_sms_notify", test_direct_sms_source_attempts_sms_notify)
     await r.record_async("direct_web_notify", test_direct_web_source_also_fires_sms_notify)
@@ -687,6 +1101,10 @@ async def run_all_tests():
     await r.record_async(
         "direct_subagent_attention_sms",
         test_direct_subagent_attention_sms_sends_notify,
+    )
+    await r.record_async(
+        "direct_cancel_preserves_unanswered_resume_only",
+        test_direct_cancel_preserves_unanswered_resume_only,
     )
     teardown_mock()
     return r.all_passed

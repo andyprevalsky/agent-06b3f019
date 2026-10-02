@@ -66,6 +66,13 @@ class StructuralGateDocumentationTests(unittest.TestCase):
         stale = sorted(documented - registry)
         self.assertEqual(stale, [], f"deploy.md names gate(s) absent from the registry: {stale}")
 
+    def test_agents_blackbox_registration_guard_is_a_deploy_gate(self) -> None:
+        self.assertIn(
+            "python3 agents/tests/structural/structural_test_registration.py",
+            _registry_commands(),
+            "agents blackbox registration must stay in /deploy; scripts/test.sh alone let dead tests land",
+        )
+
     def test_cloudbench_blackbox_is_not_duplicated_with_agents_coverage(self) -> None:
         deploy_md = DEPLOY_MD.read_text()
         step = deploy_md.split("## Step 4cb:", 1)[1].split("## Step 4c:", 1)[0]
@@ -73,44 +80,6 @@ class StructuralGateDocumentationTests(unittest.TestCase):
         self.assertIn("./venv/bin/python scripts/run_blackbox_tests.py benchmark", step)
         self.assertIn("Step 4g's agents coverage already runs it", step)
         self.assertIn("wait for Step 4g to finish before starting", step)
-
-
-class StructuralGatePortIsolationTests(unittest.TestCase):
-    """Concurrent gates must not be able to hand out the same port.
-
-    These suites allocate with check-then-bind (`lsof` probe, then bind), which
-    is not parallel-safe: two gates that scan overlapping ranges can both see the
-    same port as free and race for it. Because Step 4s runs every gate
-    concurrently, overlapping ranges are a latent flake, not a theoretical one --
-    `run-port-collision` scanned 61000-62000 while `kill-services` scanned
-    62000-63000, so both could claim 62000.
-    """
-
-    def test_concurrent_gate_port_ranges_are_disjoint(self) -> None:
-        ranges: dict[str, list[tuple[int, int]]] = {}
-        for command in _registry_commands():
-            script = ROOT / command.split()[-1]
-            if not script.exists():
-                continue
-            for low, high in re.findall(r"seq\s+(\d{4,5})\s+(\d{4,5})", script.read_text()):
-                ranges.setdefault(script.name, []).append((int(low), int(high)))
-
-        overlaps = []
-        names = sorted(ranges)
-        for i, first in enumerate(names):
-            for second in names[i + 1 :]:
-                for low_a, high_a in ranges[first]:
-                    for low_b, high_b in ranges[second]:
-                        if low_a <= high_b and low_b <= high_a:
-                            overlaps.append(
-                                f"{first} [{low_a}-{high_a}] overlaps {second} [{low_b}-{high_b}]"
-                            )
-        self.assertEqual(
-            overlaps,
-            [],
-            "concurrently-run gates share a port range; check-then-bind will race:\n"
-            + "\n".join(overlaps),
-        )
 
 
 class StructuralGatePortIsolationTests(unittest.TestCase):

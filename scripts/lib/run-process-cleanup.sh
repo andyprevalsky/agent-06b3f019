@@ -56,6 +56,17 @@ run_publish_stack_cleanup_status() {  # <state>
   printf 'version=1\ntoken=%s\nstate=%s\nstack_pid=%s\nstack_birth=%s\n' "$RUN_STACK_CLEANUP_TOKEN" "$state" "$$" "$birth" > "$temporary" \
     && mv -f "$temporary" "$path"
 }
+# pgrep -f matches its regex anywhere in argv, so every service token must stop
+# at an argument boundary: an unbounded `node_modules/.bin/vite` also matches
+# `.bin/vitest` and `worker\.py` matches `test_worker.py`, which let stack
+# startup kill same-worktree test runs.
+RUN_STALE_BENCHMARK_STACK_PATTERN='scripts/run\.sh --benchmark|(^|[[:space:]/])worker\.py([[:space:]]|$)|tsx.*src/server\.ts|node_modules/\.bin/vite([[:space:]]|$)|ngrok http|cloudflared tunnel|localtunnel --port'
+RUN_CLOUD_SERVICE_KILL_PATTERNS=(
+  '(^|[[:space:]/])worker\.py([[:space:]]|$)'
+  'tsx.*server\.ts'
+  'npx vite([[:space:]]|$)'
+  'run_local_worker'
+)
 
 run_required_service_exit_code() {
   local exit_code="$1"

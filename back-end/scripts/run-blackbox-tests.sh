@@ -465,6 +465,7 @@ if [[ "$BACKEND_PENDING_SIGNAL" != 0 ]]; then
   exit "$BACKEND_PENDING_SIGNAL"
 fi
 
+
 READY=0
 for _ in $(seq 1 120); do
   if curl -fsS -m 2 "$TEST_BASE_URL/health" >/dev/null 2>&1; then

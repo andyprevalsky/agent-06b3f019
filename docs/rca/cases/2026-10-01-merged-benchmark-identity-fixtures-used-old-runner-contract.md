@@ -65,3 +65,20 @@ unnecessary campaign resets. Integrate and verify main before binding the final
 
 After merging runner changes, make fixture inputs and result shapes match the
 real call boundary before trusting their behavioral assertions.
+
+## October 2 integration recurrence: cleanup context import
+
+A later pinned-main merge replaced the imported `ContextVar` alias with the
+`contextvars` module while retaining the exact cleanup-owner variable. Four
+existing benchmark identity/cleanup controls failed at module import with
+`NameError: name 'ContextVar' is not defined`; the four Hub transport controls
+passed. Syntax parsing alone did not catch this runtime name lookup.
+
+Qualifying the retained declaration as `contextvars.ContextVar` restored the
+existing cleanup-owner → task-user → environment → default precedence without
+changing task behavior or deadlines. The unchanged compact control set then
+passed all 18 cases: eight benchmark controls, nine Rose stream/cooldown
+controls, and the cleanup cancellation fixture. These controls already run in
+the canonical `/deploy` agents coverage gate; no additional suite was added.
+The original failed launch remains archived. This merge seam result does not
+claim a new fleet pass or resolve any unrelated latency cause.

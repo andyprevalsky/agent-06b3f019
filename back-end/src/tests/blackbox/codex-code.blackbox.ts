@@ -20,16 +20,22 @@ import {
   testCodexCreditSkip_successStillWins,
   testCodexCreditSkip_authRevocationStillFailsHard,
   testCodexCreditSkip_matchesE2bTeamBlockedWording,
+  testCodexCreditSkip_createUnavailableOnCooldownIsSkip,
 } from './codex-credit-skip.case';
 import {
   CredentialExhaustionSkip,
+  runTest,
+  type TestResult,
+  codexCreateUnavailableSkipReason,
   codexSmokeCreditSkipReason,
   detectCodexCreditExhaustion,
+  testCreateUnavailableSkip_cooldownOnly,
   testCreditExhaustion_neverOverridesSuccessSentinel,
   testDetectCreditExhaustion_negative,
   testDetectCreditExhaustion_observedOpenAiWording,
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
+import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -37,15 +43,6 @@ const API_KEY = process.env.BACKEND_API_KEY || '';
 const DEV_USER_ID = process.env.CODEX_BLACKBOX_USER_ID || '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
 const ErrorResponse = z.object({ error: z.string() });
-
-interface TestResult {
-  name: string;
-  passed: boolean;
-  skipped?: boolean;
-  skipReason?: string;
-  error?: string;
-  duration: number;
-}
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -76,32 +73,6 @@ async function request(
 
 function apiKeyHeaders(): Record<string, string> {
   return { 'X-API-Key': API_KEY };
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    if (error instanceof CredentialExhaustionSkip) {
-      // Not a failure: the third-party account is out of credits/quota. Report
-      // as a loud SKIP so the deploy gate is not blocked by external funding.
-      return {
-        name,
-        passed: true,
-        skipped: true,
-        skipReason: error.message,
-        duration: Date.now() - start,
-      };
-    }
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
 }
 
 async function testCreate_noAuth() {
@@ -137,63 +108,62 @@ async function waitForCodexOutput(
   let connected = false;
   let exitSeen = false;
 
-  return await new Promise<{ output: string; events: unknown[]; exitCode?: number }>(
-    (resolve, reject) => {
-      const ws = new WebSocket(wsUrl);
-      const timeout = setTimeout(() => {
-        ws.close();
-        reject(
-          new Error(
-            `Timed out waiting for Codex smoke. connected=${connected}, exit=${exitSeen}, output=${output.slice(-1200)}`
-          )
-        );
-      }, timeoutMs);
+  return await new Promise<{
+    output: string;
+    events: unknown[];
+    exitCode?: number;
+  }>((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(
+        new Error(
+          `Timed out waiting for Codex smoke. connected=${connected}, exit=${exitSeen}, output=${output.slice(-1200)}`
+        )
+      );
+    }, timeoutMs);
 
-      ws.on('open', () => {
-        connected = true;
-      });
-      ws.on('message', (data: Buffer) => {
-        const raw = data.toString();
-        try {
-          const msg = JSON.parse(raw);
-          if (
-            (msg.type === 'stdout' || msg.type === 'stderr' || msg.type === 'buffer') &&
-            msg.data
-          ) {
-            output += msg.data;
-          }
-          if (msg.type === 'code_agent_event' && msg.data) {
-            events.push(msg.data);
-          }
-          if (msg.type === 'code_agent_events' && Array.isArray(msg.data)) {
-            events.push(...msg.data);
-          }
-          if (msg.type === 'exit') {
-            exitSeen = true;
-            clearTimeout(timeout);
-            ws.close();
-            resolve({
-              output,
-              events,
-              exitCode: typeof msg.code === 'number' ? msg.code : undefined,
-            });
-          }
-        } catch {
-          output += raw;
+    ws.on('open', () => {
+      connected = true;
+    });
+    ws.on('message', (data: Buffer) => {
+      const raw = data.toString();
+      try {
+        const msg = JSON.parse(raw);
+        if ((msg.type === 'stdout' || msg.type === 'stderr' || msg.type === 'buffer') && msg.data) {
+          output += msg.data;
         }
-      });
-      ws.on('error', (err: Error) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
-      ws.on('close', () => {
-        if (!exitSeen && output.includes('CODEX_E2B_DONE')) {
+        if (msg.type === 'code_agent_event' && msg.data) {
+          events.push(msg.data);
+        }
+        if (msg.type === 'code_agent_events' && Array.isArray(msg.data)) {
+          events.push(...msg.data);
+        }
+        if (msg.type === 'exit') {
+          exitSeen = true;
           clearTimeout(timeout);
-          resolve({ output, events });
+          ws.close();
+          resolve({
+            output,
+            events,
+            exitCode: typeof msg.code === 'number' ? msg.code : undefined,
+          });
         }
-      });
-    }
-  );
+      } catch {
+        output += raw;
+      }
+    });
+    ws.on('error', (err: Error) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+    ws.on('close', () => {
+      if (!exitSeen && output.includes('CODEX_E2B_DONE')) {
+        clearTimeout(timeout);
+        resolve({ output, events });
+      }
+    });
+  });
 }
 
 async function testPromptBuilder_sharedContractMentionsOutputRules() {
@@ -326,6 +296,12 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
         name: 'gpt_api_key_cooldown',
       },
     });
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: false,
+    });
   }
 }
 
@@ -370,6 +346,24 @@ async function testSmoke_codexCompletesE2bTask() {
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
+  const sharedCooldown = await prisma.integration.findUnique({
+    where: {
+      userId_name_accountId: {
+        userId: '00000000-0000-0000-0000-000000000000',
+        name: 'gpt_api_key_cooldown',
+        accountId: '',
+      },
+    },
+    select: { rateLimitedUntil: true },
+  });
+  if (!cooldownIsLive(sharedCooldown)) {
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: false,
+    });
+  }
 
   try {
     const createRes = await request(`${BASE_URL}/api/codex-code-session/create`, {
@@ -386,7 +380,17 @@ async function testSmoke_codexCompletesE2bTask() {
     if (createRes.status !== 200) {
       const createBody =
         typeof createRes.data === 'string' ? createRes.data : JSON.stringify(createRes.data ?? {});
-      const createSkip = detectCodexCreditExhaustion(createBody, []);
+      let createSkip = detectCodexCreditExhaustion(createBody, []);
+      if (!createSkip) {
+        const cooldownRes = await request(
+          `${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`,
+          {
+            headers: apiKeyHeaders(),
+          }
+        );
+        const onCooldown = (cooldownRes.data as { onCooldown?: boolean }).onCooldown === true;
+        createSkip = codexCreateUnavailableSkipReason(createBody, onCooldown);
+      }
       if (createSkip) {
         throw new CredentialExhaustionSkip(
           `Codex/E2B session create blocked by external funding/billing (${createRes.status}); smoke SKIPPED without failing the deploy gate. Signal: ${createSkip}. Body: ${createBody.slice(0, 400)}`
@@ -395,7 +399,11 @@ async function testSmoke_codexCompletesE2bTask() {
     }
     assertStatus(createRes.status, 200, createRes.data);
 
-    const body = createRes.data as { ws_url?: string; task_id?: string; sandbox_id?: string };
+    const body = createRes.data as {
+      ws_url?: string;
+      task_id?: string;
+      sandbox_id?: string;
+    };
     assert(!!body.ws_url, 'Missing ws_url');
     assert(!!body.task_id, 'Missing task_id');
     assert(!!body.sandbox_id, 'Missing sandbox_id');
@@ -463,8 +471,12 @@ async function testSmoke_codexCompletesE2bTask() {
     }
 
     const { Sandbox } = await import('e2b');
-    const sandbox = await Sandbox.connect(sandboxId!, { apiKey: process.env.E2B_API_KEY });
-    const promptFile = await sandbox.files.read('/home/user/AGENTS.md', { format: 'text' });
+    const sandbox = await Sandbox.connect(sandboxId!, {
+      apiKey: process.env.E2B_API_KEY,
+    });
+    const promptFile = await sandbox.files.read('/home/user/AGENTS.md', {
+      format: 'text',
+    });
     assert(
       String(promptFile).includes('/home/user/output') &&
         String(promptFile).includes('Do not return the original attachment path'),
@@ -508,7 +520,10 @@ async function runAll() {
   }
   tests.push(
     { name: 'POST /create -- no auth -> 401', fn: testCreate_noAuth },
-    { name: 'POST /create -- missing user_id -> 500', fn: testCreate_missingUserId },
+    {
+      name: 'POST /create -- missing user_id -> 500',
+      fn: testCreate_missingUserId,
+    },
     {
       name: 'prompt -- shared code-agent contract includes output rules',
       fn: testPromptBuilder_sharedContractMentionsOutputRules,
@@ -554,6 +569,10 @@ async function runAll() {
       fn: async () => testCodexCreditSkip_matchesE2bTeamBlockedWording(),
     },
     {
+      name: 'credit-skip -- create unavailable + funded-key cooldown is recognized',
+      fn: async () => testCodexCreditSkip_createUnavailableOnCooldownIsSkip(),
+    },
+    {
       name: 'auth -- throws when no credential and no funded key',
       fn: async () => testResolveCodexAuthEnvs_noCredsNoKeyThrows(),
     },
@@ -592,6 +611,10 @@ async function runAll() {
     {
       name: 'smoke-skip -- success sentinel is never overridden by exhaustion',
       fn: async () => testCreditExhaustion_neverOverridesSuccessSentinel(),
+    },
+    {
+      name: 'smoke-skip -- create unavailable + cooldown is a funding skip',
+      fn: async () => testCreateUnavailableSkip_cooldownOnly(),
     }
   );
 

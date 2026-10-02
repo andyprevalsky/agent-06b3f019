@@ -429,6 +429,7 @@ export async function postOpenRouterStream(
 ): Promise<StreamResponse> {
   const timeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const upstream = options.abortSignal ?? new AbortController().signal;
+  const startedAt = Date.now();
   log.info('openrouter.start', {
     request_id: options.requestId,
     call_site: options.callSite,
@@ -442,6 +443,13 @@ export async function postOpenRouterStream(
       signal,
     })
   );
+  log.info('openrouter.headers', {
+    request_id: options.requestId,
+    call_site: options.callSite,
+    model: options.body.model,
+    status: response.status,
+    headers_ms: Date.now() - startedAt,
+  });
 
   let errorBody: string | undefined;
   if (!response.ok) {

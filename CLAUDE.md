@@ -935,6 +935,11 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
 
    Functionality is only guaranteed if a test measures it and that test is cemented in a consistently-run path. Any behavior that lacks a cemented test is assumed broken until proven otherwise, and any bug we fix per RCA MUST land its reproduction test in the deploy process so the regression can never silently return.
 
+   Every quick regression must run through the normal `/deploy` gates. Verify
+   its registration and execution; a test file alone is not coverage. Extend
+   the existing owning suite instead of adding a separate verification system.
+   Adding larger tests or verification suites requires human approval.
+
 2. **TDD loop** - Don't return until tests pass:
 
    ```

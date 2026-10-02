@@ -1376,6 +1376,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf.child_last_tokens = {"child-1": {"tokens_in": 220, "tokens_out": 80, "token_count": 300}}
     wf.iteration_offset = 41
     wf._signal_responses = {"approval-1": "APPROVED"}
+    wf._pending_approval_resume = {"request_id": "approval-1"}
     wf._last_signal_response = "continue"
     wf._has_new_messages = True
     wf._response_schema_feedback = ["add total"]
@@ -1431,6 +1432,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert (restored.token_count, restored.tokens_in, restored.tokens_out) == (950, 680, 270)
     assert (restored.tree_tokens_in, restored.tree_tokens_out) == (900, 350)
     assert restored._signal_responses == {"approval-1": "APPROVED"}
+    assert restored._pending_approval_resume == {"request_id": "approval-1", "question": ""}
     assert restored._response_schema_revision == 3
     assert restored.pending_children == {"child-1"}
     assert restored.child_workflow_ids == {"child-1": "child-workflow"}
@@ -4459,6 +4461,8 @@ async def test_subscription_credit_recheck_preserves_concurrent_pause():
             return "https://roselabs.ai/s/free-credit"
         return None
 
+    fake.execute_activity = fake_exec
+
     async def fake_raise_gate(workflow_instance, gate, gate_key):
         return "resolved"
 
@@ -4467,6 +4471,7 @@ async def test_subscription_credit_recheck_preserves_concurrent_pause():
     workflow_module.raise_gate_direct = fake_raise_gate
     try:
         await wf._check_credits()
+        assert checks == 2
         assert wf._has_credits is True
         assert wf.is_paused is True
     finally:
@@ -8024,6 +8029,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_check_credits_free_credit_checkout_failure_pauses",
         test_workflow_check_credits_free_credit_checkout_failure_pauses,
+    )
+    await r.record_async(
+        "wf_subscription_credit_recheck_preserves_concurrent_pause",
+        test_subscription_credit_recheck_preserves_concurrent_pause,
     )
     await r.record_async("wf_check_credits_has_credits", test_workflow_check_credits_has_credits_no_pause)
     await r.record_async("wf_check_credits_exception", test_workflow_check_credits_on_exception_continues)

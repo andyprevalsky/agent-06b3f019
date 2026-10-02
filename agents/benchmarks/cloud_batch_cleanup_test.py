@@ -952,7 +952,7 @@ async def test_cleanup_identity_isolated_and_reset_after_cancellation():
 
     with (
         patch.dict(os.environ, {"BENCHMARK_RUN_USER_ID": ambient}),
-        patch.object(bench, "_task_benchmark_user_id", ContextVar("fixture_task_user", default=task_user)),
+        patch.object(bench, "_task_run_user_id", ContextVar("fixture_task_user", default=task_user)),
         patch.object(cleanup, "exact_root_sessions", return_value=before),
         patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
         patch.object(bench, "_refresh_browser_archive_snapshot", snapshot),

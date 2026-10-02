@@ -2041,7 +2041,7 @@ def test_timeout_early_fail_pauses_agent_before_payment_cleanup():
 
     import benchmarks.run_benchmark as bench
 
-    source = inspect.getsource(bench.run_single_task)
+    source = inspect.getsource(bench._run_single_task_as_run_user)
     # Preparation and polling now share the creation-time execution deadline.
     poll_index = source.index("await _run_with_agent_execution_backstop(")
     cleanup_index = source.index("ensure_payment_lifecycle_cleanup", poll_index)
@@ -2165,7 +2165,7 @@ async def test_payment_abandonment_seals_browser_before_hub_archive():
     assert unsealed is open_data
     assert error == "Failed to pause payment-abandonment agent before Hub archive"
 
-    source = inspect.getsource(bench.run_single_task)
+    source = inspect.getsource(bench._run_single_task_as_run_user)
     cleanup_index = source.index("ensure_payment_lifecycle_cleanup")
     seal_index = source.index("_seal_payment_abandonment_browser_for_archive", cleanup_index)
     archive_index = source.index("finalize_archive_and_score_world_model", cleanup_index)
@@ -3006,7 +3006,7 @@ async def test_run_record_tool_usage_waits_for_late_subagent_cost():
     assert usage["llm_call_count"] == settled["llm_call_count"]
     assert reads > 1
     # The run record itself must consume the settled read, not a raw single fetch.
-    assert "_get_settled_tool_usage(" in inspect.getsource(bench.run_single_task)
+    assert "_get_settled_tool_usage(" in inspect.getsource(bench._run_single_task_as_run_user)
 
 
 async def test_settled_tool_usage_returns_promptly_and_stays_bounded():
@@ -8825,12 +8825,78 @@ def test_tamy_identity_fixture_declaration_drives_the_run_user():
     )
     assert bench._live_fixture_run_user_id(catalog_task) == TAMY_IDENTITY_USER_ID
     assert catalog_task.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES, (
-        "the fixture changes BENCHMARK_RUN_USER_ID process-wide and must not overlap siblings"
+        "the identity fixture overlays shared DB rows and must not overlap siblings"
     )
     assert catalog_task.environment["required_injectable_cookie_domains"] == [
         "amazon.com.mx",
         "amazon.com",
     ]
+
+
+async def test_sibling_task_cleanup_cannot_revert_a_concurrent_run_identity():
+    """A sibling finishing mid-run must not swap another task's run user.
+
+    Regression (agent-payment-new-user-journey, pre-deploy smoke): chat-mode
+    started first with no override, the payment task then switched the run user
+    to its synthetic new user, and chat-mode's cleanup restored its stale
+    "unset" snapshot. The payment task's attention polling fell back to the dev
+    user, never saw its own payment_approval, and the tree stalled for 515s.
+    """
+    import copy
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    base = get_task_by_name("chat-mode")
+    owner = copy.copy(base)
+    owner.name = "run-identity-owner"
+    sibling = copy.copy(base)
+    sibling.name = "run-identity-sibling"
+    scoped_user = "5f0c2a7e-0000-4000-8000-0000000000aa"
+
+    owner_started = asyncio.Event()
+    sibling_finished = asyncio.Event()
+    observed: dict[str, str] = {}
+
+    async def fake_apply_live_fixtures(task, _base_url):
+        if task.name == owner.name:
+            owner_started.set()
+            await sibling_finished.wait()
+            observed["owner"] = bench._current_benchmark_user_id()
+            raise RuntimeError("owner observed its run user")
+        await owner_started.wait()
+        raise RuntimeError("sibling finished")
+
+    original_apply = bench._apply_live_fixtures
+    original_user_for_task = bench._benchmark_user_id_for_task
+    original_env = os.environ.pop("BENCHMARK_RUN_USER_ID", None)
+    try:
+        bench._apply_live_fixtures = fake_apply_live_fixtures
+        bench._benchmark_user_id_for_task = lambda name, base_url=None: (
+            scoped_user if name == owner.name else None
+        )
+        base_url = "http://localhost:54121"
+        sibling_run = asyncio.create_task(bench.run_single_task(base_url, sibling))
+        await asyncio.sleep(0)
+        owner_run = asyncio.create_task(bench.run_single_task(base_url, owner))
+        sibling_result = await sibling_run
+        sibling_finished.set()
+        owner_result = await owner_run
+    finally:
+        bench._apply_live_fixtures = original_apply
+        bench._benchmark_user_id_for_task = original_user_for_task
+        leaked = os.environ.pop("BENCHMARK_RUN_USER_ID", None)
+        if original_env is not None:
+            os.environ["BENCHMARK_RUN_USER_ID"] = original_env
+
+    assert sibling_result.failure_reason.startswith("sibling finished")
+    assert owner_result.failure_reason.startswith("owner observed its run user")
+    assert observed.get("owner") == scoped_user, (
+        "the owner task must keep its own run user after a sibling finishes; "
+        f"got {observed.get('owner')!r}"
+    )
+    assert leaked is None, "a task-scoped run user must not leak into the process environment"
+    assert bench._current_benchmark_user_id() == bench.USER_ID
 
 
 def test_live_fixture_fails_when_live_auth_refresh_fails():
@@ -20691,6 +20757,10 @@ async def run_all_tests():
     r.record(
         "tamy_identity_fixture_declaration_drives_run_user",
         test_tamy_identity_fixture_declaration_drives_the_run_user,
+    )
+    await r.record_async(
+        "sibling_cleanup_cannot_revert_run_identity",
+        test_sibling_task_cleanup_cannot_revert_a_concurrent_run_identity,
     )
     r.record(
         "live_fixture_auth_failure_is_fatal",

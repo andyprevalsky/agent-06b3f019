@@ -43,6 +43,29 @@ The runner starts its backend as `npx tsx src/bootstrap.ts &` and records `BACKE
 
 None recorded.
 
+## Integration verification — 2026-10-02
+
+PR #1299 independently repaired this boundary with the existing
+`cloudbench_terminate_tree_and_wait` helper. Its merge retains that exact-owner
+cleanup, the cancellation fence around launch/PID capture, one backend launch,
+and failure propagation when descendant retirement cannot be verified. The
+port lock is released only after verified cleanup. The incoming real
+npx/tsx/Node regression now executes the retained runner's actual cleanup
+function; the TERM-resistant control still checks its original grace bounds.
+Those controls passed in 2.641 seconds, including a four-process launcher tree
+and escalation after 1.137 seconds. This does not replace the final integrated
+canonical coverage gate.
+
+The incoming stale-stack shell regression exposed a Mac fixture mismatch:
+`mktemp` returned a logical directory while `lsof` reported its physical path.
+The sweep correctly rejected that nonmatching path, so the fixture worker
+survived and the original assertion failed. A captured decision trace confirms
+that the physical paths match and the logical paths do not. Canonicalizing the
+fixture root with `pwd -P` preserves every assertion and makes the same shell
+suite pass in 22.373 seconds. No production cleanup rule was changed for this
+test setup correction. Original failures and the passing run remain private
+under `.context/acceptance/proof111-main-integration/`.
+
 ## Reusable lesson
 
 `$!` for `npx …` / `npm exec …` / `tsx …` is a launcher, not the service. Signalling it alone orphans the real process, which keeps its port and memory. Stop the whole process tree (TERM, bounded wait, KILL), and check for leftovers by run ID or port instead of trusting the launcher's exit.

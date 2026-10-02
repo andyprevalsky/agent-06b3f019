@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -380,6 +389,11 @@ assert.ok(
   'coverage must install migration-owned database triggers after Prisma schema sync'
 );
 assert.match(
+  localRuntimeSqlHooks,
+  /pg_advisory_xact_lock\(hashtext\('rose-local-runtime-sql-hooks'\)\)[\s\S]*psql "\$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction/,
+  'concurrent runners sharing one local database must apply the trigger hooks in one advisory-locked transaction'
+);
+assert.match(
   coverageScript,
   /DATABASE_URL="\$LOCAL_PSQL_URL" DIRECT_URL="\$LOCAL_PSQL_URL"[\s\\]+bash "\$SCRIPT_DIR\/apply-local-runtime-sql-hooks\.sh"/,
   'the psql-backed runtime hook installer must receive the plain libpq URL'
@@ -399,6 +413,102 @@ assert.match(
   /20260723000000_add_workflow_iteration_offset[\s\S]*20260724002500_temporal_cleanup_utc_grace/,
   'the shared SQL-hook installer must retain both migration-owned trigger sources'
 );
+
+const START_MARKER = '-- Protect the rolling-deploy window';
+const END_MARKER = '-- Prefer explicit logical-iteration checkpoints';
+function runSqlHooks(workflowMigration: string): {
+  status: number | null;
+  psqlInput: string;
+  stderr: string;
+} {
+  const root = mkdtempSync(join(tmpdir(), 'runtime-sql-hooks-'));
+  try {
+    const backend = join(root, 'back-end');
+    const migrations = join(backend, 'prisma', 'migrations');
+    mkdirSync(join(backend, 'scripts'), { recursive: true });
+    mkdirSync(join(migrations, '20260723000000_add_workflow_iteration_offset'), {
+      recursive: true,
+    });
+    mkdirSync(join(migrations, '20260724002500_temporal_cleanup_utc_grace'), { recursive: true });
+    copyFileSync(
+      join(process.cwd(), 'scripts', 'apply-local-runtime-sql-hooks.sh'),
+      join(backend, 'scripts', 'apply-local-runtime-sql-hooks.sh')
+    );
+    writeFileSync(
+      join(migrations, '20260723000000_add_workflow_iteration_offset', 'migration.sql'),
+      workflowMigration
+    );
+    writeFileSync(
+      join(migrations, '20260724002500_temporal_cleanup_utc_grace', 'migration.sql'),
+      'SELECT utc_cleanup;\n'
+    );
+    const fakeBin = join(root, 'bin');
+    const psqlInput = join(root, 'psql-input.sql');
+    mkdirSync(fakeBin);
+    writeFileSync(join(fakeBin, 'psql'), `#!/bin/sh\ncat > '${psqlInput}'\n`);
+    chmodSync(join(fakeBin, 'psql'), 0o755);
+    const result = spawnSync(
+      'bash',
+      [join(backend, 'scripts', 'apply-local-runtime-sql-hooks.sh')],
+      {
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+          DATABASE_URL: 'postgresql://postgres:postgres@localhost:5432/victoria',
+        },
+        encoding: 'utf8',
+      }
+    );
+    return {
+      status: result.status,
+      psqlInput: existsSync(psqlInput) ? readFileSync(psqlInput, 'utf8') : '',
+      stderr: result.stderr,
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const appliedHooks = runSqlHooks(
+  `SELECT before;\n${START_MARKER}\nCREATE TRIGGER workflow_guard;\n${END_MARKER}\nSELECT after;\n`
+);
+assert.equal(appliedHooks.status, 0, 'a well-formed workflow migration must apply');
+assert.match(
+  appliedHooks.psqlInput,
+  /pg_advisory_xact_lock[\s\S]*CREATE TRIGGER workflow_guard;[\s\S]*SELECT utc_cleanup;/,
+  'the advisory lock, the marked workflow block, and the UTC cleanup must reach psql in order'
+);
+assert.doesNotMatch(
+  appliedHooks.psqlInput,
+  /SELECT (before|after);/,
+  'only the marked workflow block may be applied from the iteration-offset migration'
+);
+const MARKER_REASON = /workflow markers must each appear exactly once, in order/;
+const EMPTY_REASON = /no workflow SQL between the markers/;
+for (const [label, migration, reason] of [
+  ['a missing end marker', `${START_MARKER}\nCREATE TRIGGER workflow_guard;\n`, MARKER_REASON],
+  [
+    'a duplicated start marker',
+    `${START_MARKER}\nCREATE TRIGGER a;\n${START_MARKER}\nCREATE TRIGGER b;\n${END_MARKER}\n`,
+    MARKER_REASON,
+  ],
+  [
+    'markers in the wrong order',
+    `${END_MARKER}\nCREATE TRIGGER a;\n${START_MARKER}\nCREATE TRIGGER b;\n`,
+    MARKER_REASON,
+  ],
+  ['an empty marked block', `${START_MARKER}\n\n${END_MARKER}\n`, EMPTY_REASON],
+  [
+    'a comment-only marked block',
+    `${START_MARKER}\n  -- nothing to apply\n${END_MARKER}\n`,
+    EMPTY_REASON,
+  ],
+] as const) {
+  const rejected = runSqlHooks(migration);
+  assert.equal(rejected.status, 2, `${label} must be rejected before psql runs`);
+  assert.equal(rejected.psqlInput, '', `${label} must not apply any SQL`);
+  assert.match(rejected.stderr, reason, `${label} must report why it was rejected`);
+}
 assert.doesNotMatch(
   coverageScript,
   /ENV_DATABASE_URL=.*DATABASE_URL/,

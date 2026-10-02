@@ -1112,6 +1112,8 @@ mkdir -p "$INVESTIGATOR_REPO/scripts/tests" "$INVESTIGATOR_CONTEXT" \
   git init -q -b main
   git config user.name test
   git config user.email test@example.com
+  git config commit.gpgsign false
+  git config tag.gpgsign false
   printf '.context/\n' > .gitignore
   printf 'broken\n' > behavior.txt
   printf '#!/usr/bin/env bash\n' > scripts/test.sh
@@ -1215,6 +1217,8 @@ cp "$FAKE_BIN/sudo" "$SUDO_ONLY_BIN/sudo"
   git init -q -b main
   git config user.name test
   git config user.email test@example.com
+  git config commit.gpgsign false
+  git config tag.gpgsign false
   printf '.context/\n' > .gitignore
   printf 'broken\n' > behavior.txt
   cat > scripts/tests/unchanged-repro.test.sh <<'SH'

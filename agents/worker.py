@@ -65,12 +65,12 @@ from domains.request_user_approval.repo import (
     resolve_attention_request_activity,
 )
 from domains.spawn_agent.oai_demo_report_files import materialize_oai_demo_report_files_activity
+from domains.spawn_agent.repo import fetch_explore_tool_evidence
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     fetch_full_network_metadata,
     spawn_explore_agent_activity,
 )
-from domains.spawn_agent.repo import fetch_explore_tool_evidence
 from domains.spawn_browser_agent_v3.config import HEARTBEAT_KEEPALIVE_SECONDS
 from domains.spawn_browser_agent_v3.handler import (
     drain_background_browser_cleanups,

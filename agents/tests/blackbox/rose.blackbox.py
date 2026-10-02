@@ -5258,60 +5258,62 @@ async def _assert_cerebras_successful_quota_headers_do_not_wait_for_shared_mark(
         patch("providers.rose.client.load_config", lambda: SimpleNamespace(anthropic=SimpleNamespace(api_key=""))),
         patch("providers.rose.client._cerebras_api_key", return_value="offline-provider-key"),
     ):
-        source = (
-            RoseClient(openrouter_key="offline-fake").complete(
-                pool="rose-1-flash",
-                messages=[{"role": "user", "content": "unchanged request"}],
-                request_id="offline-success-quota",
-                dump_context=False,
-            )
-            if public
-            else cb.cerebras_complete(
-                pool_spec=get_pool("rose-1-flash"),
-                messages=[{"role": "user", "content": "unchanged request"}],
-                cerebras_key="offline-provider-key",
-                request_id="offline-success-quota",
-            )
-        )
-        next_content = asyncio.create_task(first_content(source))
-        finish_stream = None
-        try:
-            await asyncio.wait_for(mark_entered.wait(), timeout=0.3)
-            chunk = await asyncio.wait_for(asyncio.shield(next_content), timeout=0.1)
-            assert chunk.data["text"] == "ready"
-            scope, key = cb._cooldown_scope("offline-provider-key", get_pool("rose-1-flash").cerebras_model)
-            assert await cb._cerebras_on_cooldown(scope, key) is True
-            assert not mark_finished.is_set()
-            assert [request.method for request in requests] == ["GET", "POST", "POST"]
-            if finish == "close":
-                await source.aclose()
-            else:
-                finish_stream = asyncio.create_task(_drain(source))
-                await asyncio.sleep(0)
-                await asyncio.sleep(0)
-                assert not finish_stream.done(), "stream exited before joining its shared mark"
-                if finish == "cancel":
-                    finish_stream.cancel()
-                    await asyncio.gather(finish_stream, return_exceptions=True)
-                    assert finish_stream.cancelled(), "stream cancellation was swallowed"
-                else:
+        async with offline_client() as stream_client:
+            with patch("providers.rose.transport.get_streaming_http_client", return_value=stream_client):
+                source = (
+                    RoseClient(openrouter_key="offline-fake").complete(
+                        pool="rose-1-flash",
+                        messages=[{"role": "user", "content": "unchanged request"}],
+                        request_id="offline-success-quota",
+                        dump_context=False,
+                    )
+                    if public
+                    else cb.cerebras_complete(
+                        pool_spec=get_pool("rose-1-flash"),
+                        messages=[{"role": "user", "content": "unchanged request"}],
+                        cerebras_key="offline-provider-key",
+                        request_id="offline-success-quota",
+                    )
+                )
+                next_content = asyncio.create_task(first_content(source))
+                finish_stream = None
+                try:
+                    await asyncio.wait_for(mark_entered.wait(), timeout=0.3)
+                    chunk = await asyncio.wait_for(asyncio.shield(next_content), timeout=0.1)
+                    assert chunk.data["text"] == "ready"
+                    scope, key = cb._cooldown_scope("offline-provider-key", get_pool("rose-1-flash").cerebras_model)
+                    assert await cb._cerebras_on_cooldown(scope, key) is True
+                    assert not mark_finished.is_set()
+                    assert [request.method for request in requests] == ["GET", "POST", "POST"]
+                    if finish == "close":
+                        await source.aclose()
+                    else:
+                        finish_stream = asyncio.create_task(_drain(source))
+                        await asyncio.sleep(0)
+                        await asyncio.sleep(0)
+                        assert not finish_stream.done(), "stream exited before joining its shared mark"
+                        if finish == "cancel":
+                            finish_stream.cancel()
+                            await asyncio.gather(finish_stream, return_exceptions=True)
+                            assert finish_stream.cancelled(), "stream cancellation was swallowed"
+                        else:
+                            mark_release.set()
+                            await asyncio.wait_for(finish_stream, timeout=0.3)
+                    assert mark_finished.is_set(), "stream exit abandoned the shared mark"
+                    assert mark_tasks and all(task.done() for task in mark_tasks)
+                    assert all(task.cancelled() == (finish != "complete") for task in mark_tasks)
+                finally:
                     mark_release.set()
-                    await asyncio.wait_for(finish_stream, timeout=0.3)
-            assert mark_finished.is_set(), "stream exit abandoned the shared mark"
-            assert mark_tasks and all(task.done() for task in mark_tasks)
-            assert all(task.cancelled() == (finish != "complete") for task in mark_tasks)
-        finally:
-            mark_release.set()
-            if not next_content.done():
-                next_content.cancel()
-            await asyncio.gather(next_content, return_exceptions=True)
-            if finish_stream is not None:
-                if not finish_stream.done():
-                    finish_stream.cancel()
-                await asyncio.gather(finish_stream, return_exceptions=True)
-            await source.aclose()
-            await asyncio.gather(*mark_tasks, return_exceptions=True)
-            cb._reset_cerebras_cooldown_cache()
+                    if not next_content.done():
+                        next_content.cancel()
+                    await asyncio.gather(next_content, return_exceptions=True)
+                    if finish_stream is not None:
+                        if not finish_stream.done():
+                            finish_stream.cancel()
+                        await asyncio.gather(finish_stream, return_exceptions=True)
+                    await source.aclose()
+                    await asyncio.gather(*mark_tasks, return_exceptions=True)
+                    cb._reset_cerebras_cooldown_cache()
 
 
 async def test_client_collect_preserves_multiple_unstructured_text_items():
@@ -8019,6 +8021,10 @@ async def run_all_tests():
         test_rose_client_preserves_native_tools_for_waterfall,
     )
 
+    r.record(
+        "anthropic_body_omits_effort_for_haiku",
+        test_build_anthropic_body_omits_effort_for_haiku,
+    )
     teardown_mock()
     r.record("build_anthropic_body_omits_effort_for_haiku", test_build_anthropic_body_omits_effort_for_haiku)
 
