@@ -3576,6 +3576,9 @@ fi
 stage_explicit_codex_auth() {  # <controller-staged guest helper>
     [ -n "$CODEX_AUTH_SOURCE" ] || return 0
     local helper="$1" deadline=$((SECONDS + 270)) remaining command staged=0 stage_log stage_reply stage_status
+    local probe_timeout="${CLOUDBENCH_SSH_PROBE_TIMEOUT_SECONDS:-10}"
+    case "$probe_timeout" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$probe_timeout" -gt 0 ] || return 1
     case "$RUN_LOG_TOKEN" in ''|*[!a-zA-Z0-9._-]*) return 1 ;; esac
     [[ "$mid" =~ ^[0-9a-f]{14,16}$ ]] || return 1
     stage_log="$OUT_DIR/cloudbench-codex-stage.log"
@@ -3584,7 +3587,7 @@ stage_explicit_codex_auth() {  # <controller-staged guest helper>
     command="test \"\$(head -n 1 /data/bench.log)\" = RUNSTAMP-$RUN_LOG_TOKEN && export CLOUDBENCH_RUN_TOKEN=$RUN_LOG_TOKEN && python3 $helper stage --run-token $RUN_LOG_TOKEN --machine-id $mid --sha256 $CODEX_AUTH_SHA256"
     while [ "$SECONDS" -lt "$deadline" ]; do
         remaining=$((deadline - SECONDS))
-        [ "$remaining" -le 5 ] || remaining=5
+        [ "$remaining" -le "$probe_timeout" ] || remaining="$probe_timeout"
         if _with_timeout "$remaining" flyctl ssh console -a "$APP" --machine "$mid" \
             -C "bash -lc $(printf '%q' "$command")" > "$stage_reply" 2>&1; then
             cat "$stage_reply" >> "$stage_log"
@@ -4246,7 +4249,7 @@ STAGED_LOCAL_FILES+=("$stage_err")
 STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
 for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     : > "$stage_err"
-    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-install-ngrok.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-exact-session-cleanup.py /data/cloudbench-guest-recovery.py /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
+    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-codex-auth.py /data/cloudbench-install-ngrok.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-exact-session-cleanup.py /data/cloudbench-guest-recovery.py /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
     provenance_stage_ok=1
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
         FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
@@ -5266,6 +5269,10 @@ fi
 mkdir -p "$OUT_DIR/remote-logs"
 cp -f "$SSH_LOG" "$OUT_DIR/remote-logs/cloudbench-driver.log" 2>/dev/null || true
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_teardown_race; then
+    if [ "$TIMED_OUT" = "1" ] && [ "${GUEST_SHUTDOWN_RESULT:-1}" != "0" ]; then
+        echo "❌ timed-out guest shutdown unconfirmed; retaining runtime evidence owner -- infrastructure failure" >&2
+        exit 70
+    fi
     # The driver waits for run.sh's stopped/clean receipt before ACK; the boot
     # supervisor then seals exited. Read raw logs only across that boundary,
     # through the existing data plane, before the EXIT trap destroys the guest.

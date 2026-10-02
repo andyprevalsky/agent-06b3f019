@@ -33,6 +33,7 @@ import structlog
 from pydantic import BaseModel
 
 from config import load_config
+from helpers.activity_heartbeat import safe_heartbeat
 from helpers.http_client import get_http_client
 from providers.rose.browser_use import (
     build_browser_use_messages,
@@ -398,10 +399,7 @@ async def _mark_direct_auth_stalled(
 def _safe_heartbeat(message: str) -> None:
     """Emit a Temporal activity heartbeat if we're inside an activity,
     otherwise silently skip. Matches the pattern in `helpers/llm.py`."""
-    with contextlib.suppress(Exception):
-        from temporalio import activity
-
-        activity.heartbeat(message)
+    safe_heartbeat(message)
 
 
 def _cache_input_accounting(

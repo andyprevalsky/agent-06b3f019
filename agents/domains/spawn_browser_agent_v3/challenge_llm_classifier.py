@@ -25,6 +25,8 @@ from urllib.parse import urlparse
 import structlog
 from pydantic import BaseModel, Field
 
+from domains.spawn_browser_agent_v3.challenge_urls import urls_cited_in_recovery_reason
+
 logger = structlog.get_logger()
 
 CHALLENGE_LLM_MODEL = "rose-labs/rose-1-mini"
@@ -174,8 +176,6 @@ def _truncate_body(text: str, cap: int = _NETWORK_BODY_CHAR_CAP) -> tuple[str, b
 
 
 def cited_network_hosts(recovery_reason: str | None) -> tuple[str, ...]:
-    from domains.spawn_browser_agent_v3.challenge_recovery import urls_cited_in_recovery_reason
-
     hosts: List[str] = []
     seen: set[str] = set()
     for url in urls_cited_in_recovery_reason(recovery_reason):
@@ -212,8 +212,6 @@ def select_network_entries_for_classifier(
     cap: int = _NETWORK_ENTRY_CAP,
 ) -> List[Dict[str, Any]]:
     """Prefer network rows that match hosts/URLs cited in the recovery reason."""
-    from domains.spawn_browser_agent_v3.challenge_recovery import urls_cited_in_recovery_reason
-
     if not entries:
         return []
     cited_urls = urls_cited_in_recovery_reason(recovery_reason)

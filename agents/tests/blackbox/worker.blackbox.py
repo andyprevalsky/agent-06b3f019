@@ -1260,10 +1260,14 @@ async def test_worker_metrics_stop_prevents_later_peer_and_provider_requests():
                 stopped.set()
             return SimpleNamespace(
                 status_code=200,
-                text="machine_memory_used_percent 30\nactivity_admission_open 1\n",
+                text="machine_memory_used_percent 30\nactivity_admission_open 1\nactivity_slots_used 0\n",
                 raise_for_status=lambda: None,
                 json=lambda: [
-                    {"id": f"fixture-{index}", "state": "stopped" if phase == "start" else "started"}
+                    {
+                        "id": f"fixture-{index}",
+                        "state": "stopped" if phase == "start" else "started",
+                        "private_ip": f"fdaa::{index + 1}",
+                    }
                     for index in range(4)
                 ],
             )
@@ -1297,9 +1301,59 @@ async def test_worker_metrics_stop_prevents_later_peer_and_provider_requests():
                 )
             else:
                 await worker._scale_fleet(4 if phase == "start" else 0, http, stopped)
-        assert [method for method, _ in calls] == (["get", "post"] if phase in ("start", "stop") else ["get"]), (
+        expected = ["get"] * 5 + ["post"] if phase == "stop" else (["get", "post"] if phase == "start" else ["get"])
+        assert [method for method, _ in calls] == expected, (
             f"{phase}: another fleet request began after shutdown"
         )
+
+
+async def test_autoscaler_scale_down_never_stops_machines_with_in_flight_activities():
+    """Scale-down must only stop idle peers.
+
+    Fly `machines stop` SIGTERMs the worker; anything still running after the 5m
+    shutdown grace is os._exit'd and surfaces as an activity heartbeat timeout
+    (agent 3efa7cae: a 30m browser activity died ~10m after a cutover while the
+    new generation scaled down). Busy and unscrapeable peers must be kept.
+    """
+    import os
+    from unittest.mock import patch
+
+    import httpx
+
+    os.environ.setdefault("TEMPORAL_ADDRESS", "localhost:7233")
+    os.environ.setdefault("TEMPORAL_TASK_QUEUE", "test")
+    import worker
+
+    machines = [
+        {"id": "leader", "state": "started", "private_ip": "fdaa::1", "config": {"env": {}}},
+        {"id": "busy-browser", "state": "started", "private_ip": "fdaa::2", "config": {"env": {}}},
+        {"id": "unknown", "state": "started", "private_ip": "fdaa::3", "config": {"env": {}}},
+        {"id": "idle", "state": "started", "private_ip": "fdaa::4", "config": {"env": {}}},
+        {"id": "nan-slots", "state": "started", "private_ip": "fdaa::5", "config": {"env": {}}},
+    ]
+    slots_by_ip = {"fdaa::2": "1", "fdaa::4": "0", "fdaa::5": "NaN"}
+    stopped: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.machines.dev":
+            if request.method == "GET":
+                return httpx.Response(200, json=machines)
+            if request.url.path.endswith("/stop"):
+                stopped.append(request.url.path.split("/")[-2])
+                return httpx.Response(200, json={"ok": True})
+        slots = slots_by_ip.get(request.url.host)
+        if slots is None:
+            raise httpx.ConnectError("peer unreachable", request=request)
+        return httpx.Response(200, text=f"machine_memory_used_percent 40\nactivity_slots_used {slots}\n")
+
+    env = {"FLY_APP_NAME": "app", "FLY_API_TOKEN": "tok", "FLY_MACHINE_ID": "leader"}
+    with patch.dict(os.environ, env):
+        os.environ.pop("TEMPORAL_WORKER_SURFACE_HASH", None)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            await worker._scale_fleet(desired=2, http=http)
+
+    assert stopped == ["idle"], f"scale-down stopped {stopped}; only the idle peer may be stopped"
+
 
 
 async def run_all_tests():
@@ -1373,6 +1427,10 @@ async def run_all_tests():
         "worker_startup_bound_ports", test_worker_startup_publishes_bound_ports_before_temporal_connect
     )
     await r.record_async("worker_health_bind_failure", test_worker_health_bind_failure_stops_before_temporal_connect)
+    await r.record_async(
+        "autoscaler_scale_down_never_stops_machines_with_in_flight_activities",
+        test_autoscaler_scale_down_never_stops_machines_with_in_flight_activities,
+    )
     teardown_mock()
     return r.summary()
 

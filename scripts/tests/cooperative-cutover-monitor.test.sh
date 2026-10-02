@@ -68,6 +68,18 @@ got="$(extract_open_with_status $'0' 1)"
 got="$(extract_open_with_status $'0' 0)"
 [ "$got" = "0" ] || fail "successful count-script status must keep integer (got: $got)"
 
+# Same-surface deploys must not stop live-generation machines by position:
+# `machines stop` SIGTERMs workers mid-activity (30m browser runs die after the
+# 5m grace). Only the idle-aware autoscaler may scale the live generation down,
+# and the only `machines stop` left is old-gen retirement after drain.
+same_surface_block="$(awk '/CURRENT_HASH" = "\$SURFACE_HASH"/{p=1} p{print} p&&/^fi$/{exit}' "$CUTOVER")"
+[ -n "$same_surface_block" ] || fail "could not locate the same-surface rolling deploy block"
+if printf '%s\n' "$same_surface_block" | grep -q 'machines stop'; then
+  fail "same-surface rolling deploy must not stop live-generation machines (autoscaler owns idle-only scale-down)"
+fi
+stop_calls="$(grep -c 'flyctl machines stop' "$CUTOVER" || true)"
+[ "$stop_calls" = "1" ] || fail "cutover must only stop old-gen machines during retirement (found $stop_calls stop calls)"
+
 WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
 require_text "$CUTOVER" 'timeout --kill-after=30s 120' \
   "old-gen retire must SIGKILL-follow hung flyctl stop/destroy"

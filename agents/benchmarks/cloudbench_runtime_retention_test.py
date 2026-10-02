@@ -667,3 +667,106 @@ def test_forensic_running_stack_requires_exact_provider_cleanup() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("fleet", [False, True])
+def test_boot_timeout_unconfirmed_shutdown_skips_normal_capture(tmp_path: Path, fleet: bool) -> None:
+    """Actual 409/alive status traffic must not admit the ordinary 7200s capture phase."""
+    import signal
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    cloud = Path(os.environ.get("CLOUDBENCH_CODEX_AUTH_TEST_CLOUD", str(ROOT / "scripts/run-bench-cloud"))).read_text()
+    collector = _extract_fleet_function(cloud, "cloudbench_collect_runtime_evidence() {")
+    retirement = _extract_fleet_function(cloud, "stop_on_exit() {")
+    begin = cloud.index("# Preserve the complete remote driver")
+    end = cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ]; then', begin)
+    collection = cloud[begin:end]
+    out = tmp_path / "out"
+    out.mkdir()
+    owner = {"version": 1, "run_token": "fixture-run", "machine_id": "abcdef12345678"}
+    for name in ["runtime-evidence.pending", "runtime-evidence.owner.json"]:
+        (out / name).write_text(json.dumps(owner))
+    (tmp_path / "driver.log").write_text("fixture driver alive\n")
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            requests.append(self.path)
+            self.send_response(200 if self.path == "/driver-health" else 409)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    budget = tmp_path / "capture-budgets"
+    retained = tmp_path / "retired-controller"
+    script = "set -eu\n" + collector.replace(
+        "cloudbench_collect_runtime_evidence()", "actual_cloudbench_collect_runtime_evidence()", 1
+    ) + retirement
+    script += f"""
+OUT_DIR={shlex.quote(str(out))}
+SSH_LOG={shlex.quote(str(tmp_path / 'driver.log'))}
+RUN_LOG_TOKEN=fixture-run
+mid=abcdef12345678
+FLEET_MACHINE_ID={'abcdef12345678' if fleet else "''"}
+LOCAL_STATUS_PORT={server.server_port}
+CLOUDBENCH_BARRIER_TOKEN=fixture-only-token
+export CLOUDBENCH_BARRIER_TOKEN
+CLOUDBENCH_BOOT_LAUNCH=1
+CLOUDBENCH_CHILD_TERM_SECONDS=30
+TIMED_OUT=1
+STOP_DONE=0
+LOCK_ACQUIRED=0
+cloudbench_skip_held_driver_teardown_race() {{ return 1; }}
+confirm_guest_shutdown() {{ [ -z "$FLEET_MACHINE_ID" ]; }}
+cloudbench_collect_runtime_evidence() {{
+  printf '%s\\n' "$5" >> {shlex.quote(str(budget))}
+  # A retirement transfer failure stays fail-closed. Only the normal phase
+  # exercises the live, unsealed status server in this admission fixture.
+  [ "$5" -gt 30 ] || return 1
+  actual_cloudbench_collect_runtime_evidence "$@"
+}}
+release_boot_config_update_slot() {{ :; }}
+stop_proxy() {{ printf retired > {shlex.quote(str(retained))}; }}
+release_local_port_leases() {{ :; }}
+stop_live_archive_frontend() {{ :; }}
+stop_all_local_viewers() {{ :; }}
+stop_machine() {{ echo 'pending runtime owner must not be stopped' >&2; exit 99; }}
+trap stop_on_exit EXIT
+{collection}
+"""
+    process = subprocess.Popen(
+        ["bash", "-c", script], env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    timed_out = False
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            os.killpg(process.pid, signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=2)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert not timed_out, "unconfirmed boot timeout entered ordinary runtime collection"
+    assert process.returncode == (125 if fleet else 70), (process.returncode, stdout, stderr)
+    assert retained.is_file(), "existing bounded EXIT retirement did not run"
+    assert not requests, "normal capture read the still-live unsealed driver"
+    budgets = [int(value) for value in budget.read_text().splitlines()] if budget.exists() else []
+    assert all(0 < value <= 28 for value in budgets)
+    assert len(budgets) == (0 if fleet else 1)
+    assert (out / "runtime-evidence.pending").is_file()
+    assert (out / "runtime-evidence.owner.json").is_file()
+    assert not (out / "remote-logs/runtime-evidence").exists()

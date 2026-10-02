@@ -111,3 +111,29 @@ prompts, models, evaluators, workload or the five-minute proof limit.
 ## Reusable lesson
 
 Carry explicit private credential authority through every isolated seed refresh and bind its transport and retirement to the exact guest driver lifetime.
+
+
+### October 2 review recurrence: connection and retry admission
+
+Findings 4169024106 and 4169024115 reproduced two controller handoff gaps.
+The actual timeout owner killed an otherwise valid 5.2-second local SSH
+connection because each attempt was capped at five seconds, ignoring the
+existing configured probe budget. Exclusive SFTP destination creation also
+failed on a warm helper and after a later upload fault: the existing retry
+removal list omitted the code-only `cloudbench-codex-auth.py` destination.
+
+The handoff now uses the existing positive SSH probe setting, bounded by its
+remaining 270-second ceiling. The existing removal list includes that exact
+helper path before each attempt. Credential payload handling, authority and
+retirement remain unchanged. Three probe-budget controls and two warm/retry
+controls run in the existing registered Codex-auth suite; they add no provider
+or model calls and preserve ordinary execution limits.
+
+The complete seven-case owning batch, including the boot-retirement controls
+below, failed on the retained original source in 13.543 seconds and passed
+unchanged after the repairs in 10.210 seconds. Test bytes and commands match,
+and recorded native owners are absent. Independent root review of the
+agent-authored patch passed. Private paired evidence and archive searches live
+under `.context/acceptance/proof114-cloud-*`; the review receipt is
+`proof114-root-repair-review/review.private.json`. These are causal fixture
+proofs; historical guest failures and the 100-task fleet outcome remain open.

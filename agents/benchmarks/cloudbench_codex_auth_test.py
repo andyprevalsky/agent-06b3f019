@@ -721,6 +721,155 @@ def test_explicit_codex_driver_wait_owns_spawn_signal_boundary(tmp_path, handoff
     assert not module.directory(owner).exists(), stderr
 
 
+def _cloud_controller_source():
+    from pathlib import Path
+
+    return Path(
+        os.environ.get("CLOUDBENCH_CODEX_AUTH_TEST_CLOUD", str(rb.REPO_ROOT / "scripts/run-bench-cloud"))
+    ).read_text()
+
+
+@pytest.mark.parametrize("probe_timeout,delay,expected", [(None, 0, 10), ("8", 5.2, 8), ("999", 0, 270)])
+def test_explicit_codex_stage_uses_owned_probe_budget(tmp_path, probe_timeout, delay, expected):
+    """Exercise the actual timeout owner, including a valid connection beyond five seconds."""
+    import shlex
+    import signal
+    import sys
+    import re
+
+    cloud = _cloud_controller_source()
+    stage = re.search(r"(?ms)^stage_explicit_codex_auth\(\).*?^}\n", cloud).group()
+    timeout = re.search(r"(?ms)^_with_timeout\(\).*?^}\n", cloud).group()
+    fake = tmp_path / "flyctl"
+    fake.write_text("""#!/usr/bin/env python3
+import json,os,shlex,sys,time
+args=sys.argv[1:]
+assert args[:2] in (['ssh','console'],['ssh','sftp'])
+assert args[args.index('--machine')+1]=='abcdef12345678'
+with open(os.environ['FLY_CALLS'],'a') as output:
+ output.write(json.dumps({'pid':os.getpid(),'transport':args[1]})+'\\n')
+if args[1]=='console' and ' stage ' in shlex.split(args[-1])[-1]:
+ time.sleep(float(os.environ['CONNECT_DELAY']))
+ print('stage-ready')
+""")
+    fake.chmod(0o755)
+    auth = tmp_path / "auth.json"
+    auth.write_text('{"synthetic":true}')
+    auth.chmod(0o600)
+    env = {
+        **os.environ,
+        "PATH": str(tmp_path) + os.pathsep + os.path.dirname(sys.executable) + os.pathsep + os.environ["PATH"],
+        "FLY_CALLS": str(tmp_path / "calls.jsonl"),
+        "CONNECT_DELAY": str(delay),
+    }
+    env.pop("CLOUDBENCH_SSH_PROBE_TIMEOUT_SECONDS", None)
+    if probe_timeout is not None:
+        env["CLOUDBENCH_SSH_PROBE_TIMEOUT_SECONDS"] = probe_timeout
+    # Stop this fixture after its first real failed connection, rather than
+    # spending the production retry ceiling repeating the same deterministic fault.
+    script = "set -eu\n" + timeout.replace("_with_timeout()", "_actual_with_timeout()", 1) + stage
+    script += f"""
+_with_timeout() {{
+  printf '%s\\n' "$1" >> {shlex.quote(str(tmp_path / 'budgets'))}
+  local status=0
+  _actual_with_timeout "$@" || status=$?
+  [ "$status" = 0 ] || exit "$status"
+}}
+APP=owned-fixture-app
+mid=abcdef12345678
+RUN_LOG_TOKEN=owned-fixture-run
+OUT_DIR={shlex.quote(str(tmp_path))}
+CODEX_AUTH_SOURCE={shlex.quote(str(auth))}
+CODEX_AUTH_SHA256={'a' * 64}
+stage_explicit_codex_auth /cloudbench-codex-auth.py
+"""
+    process = subprocess.Popen(
+        ["bash", "-c", script], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=10)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+    assert process.returncode == 0, (process.returncode, stdout, stderr)
+    budgets = [int(value) for value in (tmp_path / "budgets").read_text().splitlines()]
+    assert budgets[0] == expected
+    assert len(budgets) == 3 and all(0 < value <= 270 for value in budgets)
+    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert [call["transport"] for call in calls] == ["console", "sftp", "console"]
+    for call in calls:
+        with pytest.raises(ProcessLookupError):
+            os.kill(call["pid"], 0)
+
+
+@pytest.mark.parametrize("mode", ["warm", "later-upload-failure"])
+def test_explicit_codex_legacy_sftp_retry_clears_code_destination(tmp_path, mode):
+    """Real exclusive file creation models Fly SFTP's no-overwrite destination contract."""
+    import re
+    import shlex
+    import sys
+
+    cloud = _cloud_controller_source()
+    start = cloud.index('_ok=0\nstage_err="$(mktemp)"')
+    stop = cloud.index('\n[ "$_ok" = 1 ] ||', start)
+    staging = cloud[start:stop]
+    guest = tmp_path / "guest"
+    guest.mkdir()
+    helper = tmp_path / "helper"
+    helper.write_text("cloudbench-run\n")
+    if mode == "warm":
+        (guest / "cloudbench-codex-auth.py").write_text("old helper\n")
+    fake = tmp_path / "fly.py"
+    fake.write_text("""import os,pathlib,shlex,sys
+root=pathlib.Path(os.environ['GUEST'])
+args=sys.argv[1:]
+if args[0]=='read':
+ command=args[2]
+ if command.startswith('rm -f '):
+  for name in shlex.split(command)[2:]:
+   assert name.startswith(('/data/','/tmp/'))
+   (root/pathlib.Path(name).name).unlink(missing_ok=True)
+ elif command.startswith('test -x '):
+  assert (root/'cloudbench-run.sh').is_file()
+  assert 'cloudbench-run' in (root/'wrapper').read_text()
+  print('WROTE')
+ else:raise AssertionError('unexpected fixture command')
+else:
+ assert args[:3]==['ssh','sftp','put']
+ assert args[args.index('--machine')+1]=='abcdef12345678'
+ dest=root/pathlib.Path(args[-1]).name
+ if os.environ['MODE']=='later-upload-failure' and dest.name=='cloudbench-fetch-ref.sh' and not (root/'fault-fired').exists():
+  (root/'fault-fired').write_text('once')
+  raise SystemExit(23)
+ with dest.open('xb') as output:output.write(pathlib.Path(args[-2]).read_bytes())
+ dest.chmod(0o755)
+""")
+    env = {**os.environ, "GUEST": str(guest), "MODE": mode, "CLOUDBENCH_STAGE_ATTEMPTS": "2", "TMPDIR": str(tmp_path)}
+    script = "set -eu\nSTAGED_LOCAL_FILES=()\nAPP=owned-fixture-app\nmid=abcdef12345678\n"
+    for variable in sorted(set(re.findall(r"\$(CLOUDBENCH_GUEST_[A-Z_]+)", staging))):
+        script += variable + "=" + shlex.quote(str(helper)) + "\n"
+    script += f"""
+REMOTE_TMP_SCRIPT=/tmp/wrapper
+WRAPPER_LOCAL={shlex.quote(str(helper))}
+LOCAL_PATCH_FILE=''
+CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=0
+FLY() {{ {shlex.quote(sys.executable)} {shlex.quote(str(fake))} "$@"; }}
+ssh_read() {{ {shlex.quote(sys.executable)} {shlex.quote(str(fake))} read "$@"; }}
+sleep() {{ :; }}
+trap 'rm -f "${{stage_err:-}}"' EXIT
+{staging}
+cp "$stage_err" {shlex.quote(str(tmp_path / 'stage-errors.private.log'))}
+[ "$_ok" = 1 ]
+"""
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr + (tmp_path / "stage-errors.private.log").read_text()
+    assert (guest / "cloudbench-codex-auth.py").read_bytes() == helper.read_bytes()
+    assert (guest / "wrapper").read_bytes() == helper.read_bytes()
+    assert (guest / "fault-fired").exists() == (mode == "later-upload-failure")
+
+
 @pytest.mark.parametrize("label,expected", [("credential-handoff", 143), ("benchmark", 0)])
 def test_explicit_codex_pending_shutdown_survives_successful_child(tmp_path, label, expected):
     import shlex

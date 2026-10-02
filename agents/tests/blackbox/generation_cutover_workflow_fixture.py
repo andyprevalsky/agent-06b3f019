@@ -13,6 +13,13 @@ from typing import Any
 
 from temporalio import workflow
 
+with workflow.unsafe.imports_passed_through():
+    from domains.gate.service import build_subscription_gate, raise_gate_direct
+    from domains.request_user_approval.service import request_user_approval_direct
+    from domains.request_user_signup.handler import request_user_signup
+    from domains.wait_seconds.handler import wait_seconds
+    from helpers.generation_handoff import GenerationHandoffRequested, should_handoff_to_generation
+
 
 def _event_payload(event: Any, tool_call_id: str, tool_name: str) -> dict[str, str]:
     status = getattr(event, "status", None)
@@ -42,8 +49,6 @@ class InToolCutoverWorkflow:
 
     async def _check_generation_handoff(self) -> str | None:
         """Same contract as AgentWorkflow._check_generation_handoff."""
-        from helpers.generation_handoff import should_handoff_to_generation
-
         try:
             pointer = await workflow.execute_activity(
                 "fetch_agent_queue_pointer",
@@ -63,23 +68,15 @@ class InToolCutoverWorkflow:
     async def _run_park(self, spec: dict[str, Any]) -> None:
         park = spec.get("park")
         if park == "wait_seconds":
-            from domains.wait_seconds.handler import wait_seconds
-
             await wait_seconds(self, {"seconds": int(spec.get("seconds", 90))}, "tc-wait")
             return
         if park == "approval":
-            from domains.request_user_approval.service import request_user_approval_direct
-
             await request_user_approval_direct(self, str(spec.get("question") or "Approve?"))
             return
         if park == "gate":
-            from domains.gate.service import build_subscription_gate, raise_gate_direct
-
             await raise_gate_direct(self, build_subscription_gate(), "subscription")
             return
         if park == "signup":
-            from domains.request_user_signup.handler import request_user_signup
-
             await request_user_signup(self, {"reason": "Need signup"}, "tc-signup")
             return
         raise RuntimeError(f"unknown park {park!r}")
@@ -95,8 +92,6 @@ class InToolCutoverWorkflow:
                 "park": spec.get("park"),
                 "events": list(spec.get("events") or []),
             }
-
-        from helpers.generation_handoff import GenerationHandoffRequested
 
         try:
             await self._run_park(spec)

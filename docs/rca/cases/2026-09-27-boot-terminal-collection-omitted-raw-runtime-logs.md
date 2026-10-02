@@ -680,3 +680,28 @@ Independent review verified the owning production boundary, unchanged RED/GREEN 
 new validation stage or model calls: each capture retains its own existing
 deadline and polling interval at 10,000 agents. Historical receipts and fleet
 acceptance remain unchanged; final source-bound review and proof are separate.
+
+
+### October 2 review recurrence: unconfirmed timeout entered normal capture
+
+Finding 4169024133 reproduced normal evidence collection after a boot timeout
+without a confirmed guest shutdown. The actual collection block entered its
+ordinary 7,200-second collector against an owned HTTP server reporting a live
+driver and an unsealed manifest. Both standalone and fleet controls failed.
+
+A timed-out boot whose shutdown is unconfirmed now rejects normal collection
+before that phase. Its existing bounded EXIT retirement still runs, retaining
+the exact pending evidence owner when capture cannot finish; it grants no
+benchmark credit or permission to destroy retained evidence. The standalone
+and fleet controls verify prompt rejection, bounded cleanup, preserved owner
+markers and absence of a fabricated complete capture. They run in the existing
+registered runtime-retention suite.
+
+The same frozen seven-case batch failed on original source in 13.543 seconds
+and passed after the three controller repairs in 10.210 seconds. Commands and
+test bytes are identical; original native owners are absent. Independent root
+review passed. Searches for the exact staging/evidence deadline symptoms and
+warm-upload/timeout behavior identified these existing cases as recurrences.
+Paired private evidence is under `.context/acceptance/proof114-cloud-*`. The
+normal 7,200-second backstop, temporary 300-second execution limit and separate
+1,800-second allocation cutoff are unchanged. Fresh fleet outcome remains open.

@@ -102,7 +102,14 @@ export function mcpResultRows(result: unknown, field: string): Record<string, un
   const record = mcpResultRecord(result);
   const values = record[field];
   if (!Array.isArray(values)) {
-    throw new TestPaymentError(`AgentCard lifecycle response missing ${field}`, 502);
+    // Throttled/errored list calls come back as a bare message with no rows; keep it so the
+    // 502 names the provider cause instead of only the absent field.
+    const providerMessage =
+      typeof record.message === 'string' ? record.message.trim().slice(0, 200) : '';
+    throw new TestPaymentError(
+      `AgentCard lifecycle response missing ${field}${providerMessage ? `: ${providerMessage}` : ''}`,
+      502
+    );
   }
   return values.map((value, index) => {
     const row = asRecord(value);

@@ -478,6 +478,7 @@ their assertions or test counts:
 `bash scripts/tests/publish_evidence_links_composite.test.sh`,
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
 `bash scripts/tests/cooperative-cutover-monitor.test.sh`,
+`bash scripts/tests/agents-structural.test.sh`,
 `bash scripts/tests/deploy-agent-clone-recovery.test.sh`,
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
@@ -533,6 +534,11 @@ cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox --reus
 This one command runs all 91 deterministic back-end blackbox domains plus unit
 tests under V8 coverage. It must both pass every test and meet
 `back-end/.c8rc.json`; the real provider credential probe runs once in Step 4c.
+After coverage passes it runs `scripts/tests/blackbox-backend-teardown.test.sh`,
+which drives the isolated-backend runner through a normal exit and a SIGTERM and
+fails if either leaves its backend or port lock behind. It runs here, after the
+coverage server stops, rather than in Step 4s because it boots a real backend
+and regenerates the Prisma client.
 
 ## Step 4b: Front-end coverage + blackbox (skip if no front-end/ changes)
 
@@ -1122,6 +1128,11 @@ These four real-mode payment tasks never use the simulated World Model Harness.
 The explicit opt-out prevents every fresh deploy workspace from downloading the
 full trace archive and running a first-time GEPA build before the payment gate.
 
+`BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0` keeps these active-worktree attempts
+out of the canary pass-streak history, exactly like `run-predeploy-local`. Without
+it an unmerged branch's AgentCard failure (or a provider blip) evicted the payment
+canaries from the smoke floor of every later deploy until three fresh passes.
+
 The bootstrap must report an AgentCard sandbox pool of at least $500. This is
 test-only float provisioned through the authenticated admin session; it does not
 bypass Organization MCP in the purchase path. All four tasks must pass with
@@ -1474,6 +1485,7 @@ Inspect the newest CodeRabbit-authored content from all three endpoints. Treat C
 - The check is missing, failed, or timed out.
 - The newest bot output contains `Review limit reached`, `rate limited`, `usage spending cap`, `review skipped`, or a service/internal error.
 - The check is green but there is no substantive review result for `REVIEW_HEAD`. A quota/error comment is not a review.
+- The `@coderabbitai review` comment was posted by a bot account (for example `cursor[bot]` when a Cloud Agent comments through its PR tool). CodeRabbit silently ignores bot-authored commands, so the push only produces `Review skipped: incremental reviews are disabled` and no review follows. Go straight to the fallback instead of re-requesting.
 
 Do not repeatedly request more CodeRabbit reviews during a quota window. Trigger exactly one Claude review for `REVIEW_HEAD` by toggling the opt-in label. The fallback remains part of the already-open lifecycle; it does not consume another review cycle:
 

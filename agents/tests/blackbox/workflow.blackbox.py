@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from _test_utils import BlackboxResult, teardown_mock
@@ -301,6 +302,20 @@ from temporalio import activity
 
 WORKFLOW_ENV_ACTIVITY_COUNTS: Dict[str, Dict[str, int]] = {}
 
+# Cooperative-cutover e2e state. Opted in per agent id / workflow id so every
+# other workflow test keeps the fixed mock behavior below.
+CUTOVER_POINTER: Dict[str, str] = {}  # workflow_id -> live task queue
+CUTOVER_POINTER_FETCHES: Dict[str, List[str]] = {}  # workflow_id -> queues that read the pointer
+CUTOVER_MESSAGES: Dict[str, List[Dict[str, Any]]] = {}  # agent_id -> durable message rows
+CUTOVER_LLM_SCRIPTS: Dict[str, List[Dict[str, Any]]] = {}  # agent_id -> scripted LLM responses
+CUTOVER_LLM_QUEUES: Dict[str, List[str]] = {}
+CUTOVER_VERIFIER_CONTEXTS: Dict[str, List[List[Dict[str, Any]]]] = {}
+CUTOVER_SMS: Dict[str, List[str]] = {}
+CUTOVER_USAGE: Dict[str, List[Dict[str, Any]]] = {}
+CUTOVER_APPROVAL_REQUESTS: Dict[str, List[str]] = {}
+CUTOVER_BROWSER: Dict[str, Dict[str, Any]] = {}  # agent_id -> scenario + recorded calls
+CUTOVER_CODE: Dict[str, Dict[str, Any]] = {}  # agent_id -> scenario + recorded code-agent calls
+
 
 def _record_workflow_env_activity(agent_id: Optional[str], activity_name: str) -> None:
     if not agent_id:
@@ -368,6 +383,8 @@ async def mock_notify_sms_event_activity(
     payload: dict,
     world_model_mode: str | None = None,
 ) -> None:
+    if agent_id in CUTOVER_SMS:
+        CUTOVER_SMS[agent_id].append(event_type)
     return None
 
 
@@ -440,6 +457,18 @@ async def mock_post_agent_message(
     file_pointer: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     _record_workflow_env_activity(agent_id, "post_agent_message")
+    if agent_id in CUTOVER_MESSAGES:
+        rows = CUTOVER_MESSAGES[agent_id]
+        row = {
+            "id": f"msg-{agent_id}-{len(rows) + 1}",
+            "role": role,
+            "text": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": dict(metadata or {}),
+            "task_queue": activity.info().task_queue,
+        }
+        rows.append(row)
+        return {"id": row["id"], "message": text, "role": role, "metadata": metadata}
     return {"id": "msg-mock-1", "message": text, "role": role, "metadata": metadata}
 
 
@@ -450,6 +479,10 @@ async def mock_poll_new_messages(
     include_internal_subagent: bool = False,
 ) -> List[Dict[str, Any]]:
     _record_workflow_env_activity(agent_id, "poll_new_messages")
+    if agent_id in CUTOVER_MESSAGES:
+        # Time-skipping moves workflow time ahead of wall time, so return every
+        # durable row; run_agent dedupes by message id exactly as in prod.
+        return [{key: value for key, value in row.items() if key != "task_queue"} for row in CUTOVER_MESSAGES[agent_id]]
     return []
 
 
@@ -466,6 +499,8 @@ async def mock_save_tool_usage(
     usage_items: list,
     accounting_checkpoint: Optional[Dict[str, Any]] = None,
 ) -> None:
+    if agent_id in CUTOVER_USAGE:
+        CUTOVER_USAGE[agent_id].append({"tool_name": tool_name, "usage_items": list(usage_items)})
     return None
 
 
@@ -497,6 +532,10 @@ async def mock_generate_completion_summary(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_step: int = 0,
 ) -> Dict[str, Any]:
     return {"summary": "Test summary", "usage": {}, "tool_counts": {}}
 
@@ -513,6 +552,7 @@ async def mock_mark_finished(
     summary: str = "",
     structured_response: Optional[Dict] = None,
     iteration_offset: Optional[int] = None,
+    root_agent_id: Optional[str] = None,
 ) -> Dict:
     return {"summary": summary or "Done", "status": "completed"}
 
@@ -546,7 +586,7 @@ async def mock_resolve_fast_cache_goal_activity(
 ) -> Optional[dict[str, Optional[str]]]:
     RESOLVE_FAST_CACHE_GOAL_CALLS.append(agent_id)
     if agent_id == LEFTOVER_CHILD_AGENT_ID:
-        from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+        from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
 
         return {"goal": LEFTOVER_CHILD_GOAL, "root_goal": OAI_DEMO_ROOT_GOAL_PREFIX}
     # DEMO-tagged mass-agent root prompt (stable cache namespace).
@@ -597,6 +637,21 @@ async def mock_call_llm_activity(
     """
     activity_agent_id = agent_id or (messages_or_agent_id if isinstance(messages_or_agent_id, str) else None)
     _record_workflow_env_activity(activity_agent_id, "call_llm_activity")
+    if activity_agent_id in CUTOVER_LLM_SCRIPTS:
+        CUTOVER_LLM_QUEUES.setdefault(activity_agent_id, []).append(activity.info().task_queue)
+        script = CUTOVER_LLM_SCRIPTS[activity_agent_id]
+        tool_calls = script.pop(0) if script else [{"tool": "attempt_completion"}]
+        return {
+            "response": "",
+            "tool_calls": tool_calls,
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "actual_model": "mock-model",
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        }
     if agent_id:
         FAST_MODE_GOAL_CAPTURE.setdefault(agent_id, []).append(fast_mode_goal)
         FAST_MODE_ENABLED_CAPTURE.setdefault(agent_id, []).append(fast_mode_cache_enabled)
@@ -649,6 +704,8 @@ async def mock_check_progress(
     gpt_token_user_id: Optional[str] = None,
     *additional_args: Any,
 ) -> Dict[str, Any]:
+    if agent_id in CUTOVER_VERIFIER_CONTEXTS:
+        CUTOVER_VERIFIER_CONTEXTS[agent_id].append(list(context))
     return {
         "score": 1.0,
         "reasoning": "Complete",
@@ -755,7 +812,215 @@ async def mock_send_direct_sms_activity(user_id: str, message: str) -> Dict:
 @activity.defn(name="fetch_agent_queue_pointer")
 async def mock_fetch_agent_queue_pointer() -> Dict[str, Any]:
     """Return the test worker queue so cooperative handoff stays idle in Temporal tests."""
+    info = activity.info()
+    if info.workflow_id in CUTOVER_POINTER:
+        CUTOVER_POINTER_FETCHES.setdefault(info.workflow_id, []).append(info.task_queue)
+        return {"task_queue": CUTOVER_POINTER[info.workflow_id], "surface_hash": "cutover-e2e"}
     return {"task_queue": TASK_QUEUE, "surface_hash": "testgen"}
+
+
+@activity.defn(name="create_approval_request_activity")
+async def mock_create_approval_request_activity(
+    user_id: str,
+    agent_id: str,
+    workflow_id: str,
+    question: str,
+    image_url: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    requests = CUTOVER_APPROVAL_REQUESTS.setdefault(agent_id, [])
+    request_id = f"attn-{agent_id}-{len(requests) + 1}"
+    requests.append(request_id)
+    scenario = CUTOVER_BROWSER.get(agent_id) or {}
+    flip_to = scenario.get("flip_pointer_on_approval")
+    if flip_to:
+        # A deploy lands while the user has not answered yet.
+        CUTOVER_POINTER[workflow_id] = flip_to
+    return request_id
+
+
+def _cutover_browser_usage(model: str, tokens_in: int, tokens_out: int, service_cents: float) -> List[Dict[str, Any]]:
+    return [
+        {"type": "llm", "model": model, "provider": model, "input_tokens": tokens_in, "output_tokens": tokens_out},
+        {"type": "service", "provider": "Steel.dev Browser", "cost_cents": service_cents},
+    ]
+
+
+@activity.defn(name="spawn_browser_agent_activity_v3")
+async def mock_spawn_browser_agent_activity_v3(
+    user_id: str,
+    agent_id: str,
+    goal: str,
+    tool_call_id: str,
+    task_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    cdp_url: Optional[str] = None,
+    is_resume: bool = False,
+    output_schema: Optional[Dict[str, Any]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+    write_lock_enabled: bool = True,
+    start_url: str = "",
+    write_lock_resume_state: Optional[Dict[str, Any]] = None,
+    system_name: str = "Rose",
+    use_claude_mode: bool = True,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    world_model_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Browser task that checkpoints once (drain yield or write approval), then completes.
+
+    Returns the same payload shapes the real activity returns at those
+    boundaries; the manager/workflow under test are production code.
+    """
+    info = activity.info()
+    scenario = CUTOVER_BROWSER[agent_id]
+    calls = scenario["calls"]
+    calls.append(
+        {
+            "task_queue": info.task_queue,
+            "workflow_run_id": info.workflow_run_id,
+            "tool_call_id": tool_call_id,
+            "task_id": task_id,
+            "session_id": session_id,
+            "cdp_url": cdp_url,
+            "is_resume": is_resume,
+            "start_url": start_url,
+            "write_lock_resume_state": dict(write_lock_resume_state or {}),
+        }
+    )
+    continuity = {
+        "action_history": [{"step": 1, "action": "click", "params": {"index": 3}}],
+        "visited_urls": ["https://shop.example.com/cart"],
+        "browser_turn_messages": [{"role": "assistant", "content": "clicked checkout"}],
+        "reasoning_messages": ["cart has the item"],
+        "action_summary": ["Opened cart"],
+    }
+    if len(calls) == 1:
+        if scenario["mode"] == "drain":
+            from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+            from helpers.activity_generation_drain import GENERATION_SUPERSEDED
+
+            # The deploy moved the live pointer while this step ran; the real
+            # activity sees GENERATION_SUPERSEDED at the next step boundary.
+            CUTOVER_POINTER[info.workflow_id] = scenario["new_queue"]
+            return {
+                "status": BROWSER_DRAIN_YIELD_STATUS,
+                "yield_reason": GENERATION_SUPERSEDED,
+                "current_url": "https://shop.example.com/cart",
+                "write_lock_approvals": {},
+                "step_count": 7,
+                "session_id": "steel-session-1",
+                "cdp_url": "wss://steel.example/cdp/1",
+                "task_id": task_id,
+                "browser_url": "https://live.example/1",
+                "auth_realm": "shop.example.com",
+                "recorded_passkey_credential_ids": [],
+                "usage_items": _cutover_browser_usage("mock-browser-gen1", 1200, 300, 2.0),
+                **continuity,
+            }
+        return {
+            "status": "awaiting_write_approval",
+            "approval_type": "purchase",
+            "question": "Place the $12 order on shop.example.com?",
+            "current_url": "https://shop.example.com/checkout",
+            "pending_action": {"action": "click", "params": {"index": 9}},
+            "write_lock_approvals": {},
+            "step_count": 7,
+            "session_id": "steel-session-1",
+            "cdp_url": "wss://steel.example/cdp/1",
+            "task_id": task_id,
+            "auth_realm": "shop.example.com",
+            "recorded_passkey_credential_ids": [],
+            **continuity,
+        }
+    return {
+        "success": True,
+        "status": "completed",
+        "message": "Order placed: confirmation SHOP-4242",
+        "structured_response": {"confirmation": "SHOP-4242"},
+        "task_id": task_id,
+        "session_id": "steel-session-1",
+        "usage_items": _cutover_browser_usage("mock-browser-gen2", 800, 200, 1.0),
+    }
+
+
+@activity.defn(name="resolve_code_agent_provider_activity")
+async def mock_resolve_code_agent_provider_activity(default_provider: str) -> str:
+    return default_provider
+
+
+CUTOVER_CODE_SESSION = {
+    "task_id": "cc-task-1",
+    "sandbox_id": "sb-1",
+    "ws_url": "wss://3000-sb-1.e2b.example",
+    "code_provider": "claude",
+    "started_at": 1000.0,
+    "loop_started_at": 1005.0,
+}
+
+
+@activity.defn(name="spawn_claude_code_activity")
+async def mock_spawn_claude_code_activity(
+    user_id: str,
+    agent_id: str,
+    goal: str,
+    tool_call_id: str,
+    output_schema: Optional[Dict[str, Any]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+    model: str = "rose-labs/rose-1-flash",
+    github_repo_url: Optional[str] = None,
+    _legacy_claude_token: Optional[str] = None,
+    code_provider: str = "claude",
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    resume_session: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Claude Code run that a deploy drains once mid-run, then finishes in the same sandbox.
+
+    Returns the payloads the real activity returns at those boundaries; the
+    manager/workflow under test are production code.
+    """
+    info = activity.info()
+    scenario = CUTOVER_CODE[agent_id]
+    scenario["calls"].append(
+        {
+            "task_queue": info.task_queue,
+            "workflow_run_id": info.workflow_run_id,
+            "tool_call_id": tool_call_id,
+            "code_provider": code_provider,
+            "resume_session": dict(resume_session) if resume_session else None,
+        }
+    )
+    if len(scenario["calls"]) == 1:
+        from domains.spawn_claude_code_agent.config import CODE_AGENT_DRAIN_YIELD_STATUS
+        from helpers.activity_generation_drain import GENERATION_SUPERSEDED
+
+        # The deploy moved the live pointer while Claude Code was working; the
+        # real activity detaches from the sandbox at its next drain check.
+        CUTOVER_POINTER[info.workflow_id] = scenario["new_queue"]
+        return {
+            "status": CODE_AGENT_DRAIN_YIELD_STATUS,
+            "yield_reason": GENERATION_SUPERSEDED,
+            "code_session": dict(CUTOVER_CODE_SESSION),
+            "task_id": CUTOVER_CODE_SESSION["task_id"],
+            "code_provider": code_provider,
+        }
+    return {
+        "status": "completed",
+        "success": True,
+        "message": "answer.txt contains 42",
+        "task_id": (resume_session or {}).get("task_id"),
+        "structured_response": {"answer": "42"},
+        "output_files": [],
+        "code_provider": code_provider,
+        "usage_items": [{"type": "service", "provider": "E2B Sandbox", "cost_cents": 3.0}],
+    }
 
 
 # Collect all mock activities for Worker registration
@@ -796,6 +1061,10 @@ MOCK_ACTIVITIES = [
     mock_set_response_schema_activity,
     mock_send_direct_sms_activity,
     mock_resolve_fast_cache_goal_activity,
+    mock_create_approval_request_activity,
+    mock_spawn_browser_agent_activity_v3,
+    mock_resolve_code_agent_provider_activity,
+    mock_spawn_claude_code_activity,
 ]
 
 
@@ -809,13 +1078,9 @@ from temporalio import workflow
 with workflow.unsafe.imports_passed_through():
     from workflows.agent_workflow import AgentWorkflow
 
-# Sandbox config: bypass all module restrictions so structlog/rich/etc. work.
-from temporalio.worker.workflow_sandbox import (
-    SandboxedWorkflowRunner,
-    SandboxRestrictions,
-)
+from helpers.workflow_sandbox import production_workflow_runner
 
-_WORKFLOW_RUNNER = SandboxedWorkflowRunner(restrictions=SandboxRestrictions.default.with_passthrough_all_modules())
+_WORKFLOW_RUNNER = production_workflow_runner()
 
 # Default workflow args matching AgentWorkflow.run() signature
 DEFAULT_WF_ARGS: list = [
@@ -1235,6 +1500,311 @@ async def _run_all_workflow_tests() -> List[tuple]:
     return results
 
 
+CUTOVER_OLD_QUEUE = "cutover-e2e-old"
+CUTOVER_NEW_QUEUE = "cutover-e2e-new"
+CUTOVER_BROWSER_GOAL = "Buy the $12 item on shop.example.com and report the confirmation number"
+
+
+CUTOVER_CODE_TOOL_CALL = {
+    "tool": "spawn_agent",
+    "type": "code",
+    "goal": "Write answer.txt containing the answer to the puzzle",
+    "output_schema": {"fields": [{"name": "answer", "type": "str", "required": True}]},
+}
+
+
+def _opt_in_cutover_agent(
+    agent_id: str,
+    workflow_id: str,
+    scenario: Dict[str, Any],
+    tool_call: Optional[Dict[str, Any]] = None,
+) -> None:
+    CUTOVER_POINTER[workflow_id] = CUTOVER_OLD_QUEUE
+    CUTOVER_POINTER_FETCHES[workflow_id] = []
+    CUTOVER_MESSAGES[agent_id] = []
+    CUTOVER_LLM_QUEUES[agent_id] = []
+    CUTOVER_VERIFIER_CONTEXTS[agent_id] = []
+    CUTOVER_SMS[agent_id] = []
+    CUTOVER_USAGE[agent_id] = []
+    CUTOVER_APPROVAL_REQUESTS[agent_id] = []
+    CUTOVER_BROWSER[agent_id] = {**scenario, "calls": []}
+    CUTOVER_CODE[agent_id] = {**scenario, "calls": []}
+    CUTOVER_LLM_SCRIPTS[agent_id] = [
+        [
+            tool_call
+            or {
+                "tool": "spawn_agent",
+                "type": "browser",
+                "goal": CUTOVER_BROWSER_GOAL,
+                "start_url": "https://shop.example.com",
+                "output_schema": {"fields": [{"name": "confirmation", "type": "str", "required": True}]},
+            }
+        ]
+    ]
+
+
+async def _start_cutover_workflow(client, agent_id: str, workflow_id: str):
+    return await client.start_workflow(
+        AgentWorkflow.run,
+        args=[
+            agent_id,
+            "user-test-1",
+            "Order the item on shop.example.com",
+            "rose-labs/rose-1-flash",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,  # context
+            None,  # parent_workflow_id
+            None,  # parent_agent_id
+            0,  # depth
+            None,  # bus_id
+            "execute",  # start_phase
+        ],
+        id=workflow_id,
+        task_queue=CUTOVER_OLD_QUEUE,
+    )
+
+
+def _assert_browser_resumed_on_new_generation(agent_id: str) -> tuple:
+    calls = CUTOVER_BROWSER[agent_id]["calls"]
+    assert len(calls) == 2, f"expected one interrupted + one resumed browser activity, got {len(calls)}"
+    first, second = calls
+    assert first["task_queue"] == CUTOVER_OLD_QUEUE and first["is_resume"] is False, first
+    assert second["task_queue"] == CUTOVER_NEW_QUEUE, f"resumed browser ran on {second['task_queue']}"
+    assert second["workflow_run_id"] != first["workflow_run_id"], "resume must run in the continued generation"
+    assert second["tool_call_id"] == first["tool_call_id"], "resume must re-enter the same tool call"
+    assert second["task_id"] == first["task_id"], "resume must keep the browser task identity"
+    assert second["is_resume"] is True, "second browser activity must resume, not start fresh"
+    assert second["session_id"] == "steel-session-1", second
+    assert second["cdp_url"] == "wss://steel.example/cdp/1", second
+    resume = second["write_lock_resume_state"]
+    assert resume.get("step_count") == 7, f"resume must continue from step 7, got {resume.get('step_count')}"
+    assert resume.get("action_history") == [{"step": 1, "action": "click", "params": {"index": 3}}], resume
+    assert resume.get("visited_urls") == ["https://shop.example.com/cart"], resume
+    assert resume.get("browser_turn_messages") == [{"role": "assistant", "content": "clicked checkout"}], resume
+    assert resume.get("reasoning_messages") == ["cart has the item"], resume
+    assert resume.get("action_summary") == ["Opened cart"], resume
+    return first, second
+
+
+def _assert_single_browser_chip_completed(agent_id: str, tool_call_id: str) -> None:
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+    rows = CUTOVER_MESSAGES[agent_id]
+    assert not any(DEPLOY_INTERRUPTED_TOOL_MESSAGE in (row["text"] or "") for row in rows), (
+        "a parked tool must never be closed with DEPLOY_INTERRUPTED"
+    )
+    tool_rows = [row for row in rows if row["metadata"].get("toolCallId") == tool_call_id]
+    starting = [row for row in tool_rows if row["metadata"].get("title") == "Starting up a browser"]
+    assert len(starting) == 1, f"browser startup chip posted {len(starting)} times"
+    assert starting[0]["task_queue"] == CUTOVER_OLD_QUEUE
+    complete = [row for row in tool_rows if row["metadata"].get("title") == "Browser automation complete"]
+    assert len(complete) == 1, f"browser completion posted {len(complete)} times"
+    assert complete[0]["metadata"].get("toolStatus") == "FINISHED", complete[0]["metadata"]
+    assert complete[0]["task_queue"] == CUTOVER_NEW_QUEUE
+    assert "SHOP-4242" in complete[0]["text"], complete[0]["text"]
+    assert complete[0]["metadata"].get("structured_response") == {"confirmation": "SHOP-4242"}
+
+    llm_queues = CUTOVER_LLM_QUEUES[agent_id]
+    assert llm_queues == [CUTOVER_OLD_QUEUE, CUTOVER_NEW_QUEUE], (
+        f"expected one LLM turn per generation (spawn, then complete), got {llm_queues}"
+    )
+    verifier_contexts = CUTOVER_VERIFIER_CONTEXTS[agent_id]
+    assert verifier_contexts, "verifier never ran on the continued generation"
+    assert any(
+        row.get("role") == "TOOL"
+        and (row.get("metadata") or {}).get("toolCallId") == tool_call_id
+        and (row.get("metadata") or {}).get("toolStatus") == "FINISHED"
+        and "SHOP-4242" in (row.get("text") or "")
+        for row in verifier_contexts[-1]
+    ), "the continued generation's context must contain the resumed browser result"
+
+
+async def _run_parked_tool_cutover_tests() -> List[tuple]:
+    """Real AgentWorkflow crossing a deploy cutover while a browser/code task is in flight.
+
+    Two workers stand in for the old and new code generations. The fetched
+    queue pointer moves to the new generation mid-task; the tool must park,
+    ride continue_as_new, and finish on the new generation from the same
+    browser step / approval request / code sandbox instead of DEPLOY_INTERRUPTED.
+    """
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Worker
+
+    results: List[tuple] = []
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with (
+            Worker(
+                env.client,
+                task_queue=CUTOVER_OLD_QUEUE,
+                workflows=[AgentWorkflow],
+                activities=MOCK_ACTIVITIES,
+                workflow_runner=_WORKFLOW_RUNNER,
+            ),
+            Worker(
+                env.client,
+                task_queue=CUTOVER_NEW_QUEUE,
+                workflows=[AgentWorkflow],
+                activities=MOCK_ACTIVITIES,
+                workflow_runner=_WORKFLOW_RUNNER,
+            ),
+        ):
+            name = "wf_cutover_drained_browser_resumes_same_step_on_new_generation"
+            agent_id = "agent-cutover-drain"
+            workflow_id = _next_wf_id("cutover-drain")
+            handle = None
+            try:
+                _opt_in_cutover_agent(agent_id, workflow_id, {"mode": "drain", "new_queue": CUTOVER_NEW_QUEUE})
+                handle = await _start_cutover_workflow(env.client, agent_id, workflow_id)
+                outcome = await asyncio.wait_for(handle.result(), timeout=60)
+                assert isinstance(outcome, dict) and outcome.get("status") == "completed", outcome
+
+                first, _second = _assert_browser_resumed_on_new_generation(agent_id)
+                resume = CUTOVER_BROWSER[agent_id]["calls"][1]["write_lock_resume_state"]
+                assert resume.get("pending_action") is None, resume
+                assert "generation_yield" not in resume, "the live generation must be allowed to yield again"
+                _assert_single_browser_chip_completed(agent_id, first["tool_call_id"])
+
+                billed_models = [
+                    item.get("model")
+                    for record in CUTOVER_USAGE[agent_id]
+                    for item in record["usage_items"]
+                    if item.get("type") == "llm"
+                ]
+                assert billed_models.count("mock-browser-gen1") == 1, (
+                    f"pre-drain browser tokens must be billed exactly once, got {billed_models}"
+                )
+                assert billed_models.count("mock-browser-gen2") == 1, (
+                    f"post-resume browser tokens must be billed exactly once, got {billed_models}"
+                )
+                results.append((name, None))
+            except Exception as e:
+                if handle is not None:
+                    await _cancel_workflow(handle)
+                results.append((name, e))
+
+            name = "wf_cutover_parked_write_approval_rewaits_same_request_on_new_generation"
+            agent_id = "agent-cutover-approval"
+            workflow_id = _next_wf_id("cutover-approval")
+            handle = None
+            try:
+                _opt_in_cutover_agent(
+                    agent_id,
+                    workflow_id,
+                    {"mode": "write_approval", "flip_pointer_on_approval": CUTOVER_NEW_QUEUE},
+                )
+                handle = await _start_cutover_workflow(env.client, agent_id, workflow_id)
+                for _ in range(400):
+                    if CUTOVER_NEW_QUEUE in CUTOVER_POINTER_FETCHES.get(workflow_id, []):
+                        break
+                    await asyncio.sleep(0.05)
+                assert CUTOVER_NEW_QUEUE in CUTOVER_POINTER_FETCHES.get(workflow_id, []), (
+                    "workflow never reached the new generation while the approval was pending"
+                )
+                request_id = f"attn-{agent_id}-1"
+                await handle.signal(
+                    AgentWorkflow.receive_user_response,
+                    json.dumps({"request_id": request_id, "response": "approve"}),
+                )
+                outcome = await asyncio.wait_for(handle.result(), timeout=60)
+                assert isinstance(outcome, dict) and outcome.get("status") == "completed", outcome
+
+                assert CUTOVER_APPROVAL_REQUESTS[agent_id] == [request_id], (
+                    f"resume must re-wait on the original request, got {CUTOVER_APPROVAL_REQUESTS[agent_id]}"
+                )
+                assert CUTOVER_SMS[agent_id].count("write_lock") == 1, (
+                    f"the user must be texted once per approval, got {CUTOVER_SMS[agent_id]}"
+                )
+                first, second = _assert_browser_resumed_on_new_generation(agent_id)
+                resume = second["write_lock_resume_state"]
+                assert resume.get("pending_action") == {"action": "click", "params": {"index": 9}}, resume
+                assert resume.get("approval_type") == "purchase", resume
+
+                rows = CUTOVER_MESSAGES[agent_id]
+                approval_rows = [
+                    row
+                    for row in rows
+                    if ((row["metadata"].get("requestUserApproval") or {}).get("attentionRequestId") == request_id)
+                ]
+                pending = [row for row in approval_rows if row["metadata"].get("toolStatus") == "IN_PROGRESS"]
+                received = [row for row in approval_rows if row["metadata"].get("title") == "✓ User approval received"]
+                assert len(pending) == 1 and pending[0]["task_queue"] == CUTOVER_OLD_QUEUE, pending
+                assert len(received) == 1 and received[0]["task_queue"] == CUTOVER_NEW_QUEUE, received
+                assert received[0]["metadata"].get("toolCallId") == pending[0]["metadata"].get("toolCallId"), (
+                    "the approval chip must close on the same tool call it opened"
+                )
+                granted = [row for row in rows if row["metadata"].get("title") == "✓ Write permission granted"]
+                assert len(granted) == 1 and granted[0]["task_queue"] == CUTOVER_NEW_QUEUE, granted
+                _assert_single_browser_chip_completed(agent_id, first["tool_call_id"])
+                results.append((name, None))
+            except Exception as e:
+                if handle is not None:
+                    await _cancel_workflow(handle)
+                results.append((name, e))
+
+            name = "wf_cutover_drained_code_agent_reattaches_same_sandbox_on_new_generation"
+            agent_id = "agent-cutover-code"
+            workflow_id = _next_wf_id("cutover-code")
+            handle = None
+            try:
+                _opt_in_cutover_agent(
+                    agent_id, workflow_id, {"new_queue": CUTOVER_NEW_QUEUE}, tool_call=CUTOVER_CODE_TOOL_CALL
+                )
+                handle = await _start_cutover_workflow(env.client, agent_id, workflow_id)
+                outcome = await asyncio.wait_for(handle.result(), timeout=60)
+                assert isinstance(outcome, dict) and outcome.get("status") == "completed", outcome
+                _assert_code_agent_reattached_on_new_generation(agent_id)
+                results.append((name, None))
+            except Exception as e:
+                if handle is not None:
+                    await _cancel_workflow(handle)
+                results.append((name, e))
+
+    return results
+
+
+def _assert_code_agent_reattached_on_new_generation(agent_id: str) -> None:
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+    calls = CUTOVER_CODE[agent_id]["calls"]
+    assert len(calls) == 2, f"expected one drained + one reattached code-agent activity, got {calls}"
+    first, second = calls
+    assert first["task_queue"] == CUTOVER_OLD_QUEUE and first["resume_session"] is None, first
+    assert second["task_queue"] == CUTOVER_NEW_QUEUE, f"reattach ran on {second['task_queue']}"
+    assert second["workflow_run_id"] != first["workflow_run_id"], "reattach must run in the continued generation"
+    assert second["tool_call_id"] == first["tool_call_id"], "reattach must re-enter the same tool call"
+    assert second["resume_session"] == CUTOVER_CODE_SESSION, (
+        f"the live generation must reattach to the drained sandbox (and may yield again), got {second}"
+    )
+    assert second["code_provider"] == first["code_provider"], second
+
+    rows = CUTOVER_MESSAGES[agent_id]
+    assert not any(DEPLOY_INTERRUPTED_TOOL_MESSAGE in (row["text"] or "") for row in rows), (
+        "a parked code agent must never be closed with DEPLOY_INTERRUPTED"
+    )
+    tool_rows = [row for row in rows if row["metadata"].get("toolCallId") == first["tool_call_id"]]
+    titles = [row["metadata"].get("title") for row in tool_rows]
+    starting = [row for row in tool_rows if row["metadata"].get("title") == "Starting Claude Code sandbox"]
+    assert len(starting) == 1 and starting[0]["task_queue"] == CUTOVER_OLD_QUEUE, titles
+    complete = [row for row in tool_rows if row["metadata"].get("title") == "✓ Task Completed"]
+    assert len(complete) == 1 and complete[0]["task_queue"] == CUTOVER_NEW_QUEUE, titles
+    assert complete[0]["metadata"].get("task_id") == CUTOVER_CODE_SESSION["task_id"], complete[0]["metadata"]
+    assert complete[0]["metadata"].get("structured_response") == {"answer": "42"}, complete[0]["metadata"]
+    assert not any(title in {"Task Incomplete", "Code session failed"} for title in titles), titles
+
+    assert CUTOVER_LLM_QUEUES[agent_id] == [CUTOVER_OLD_QUEUE, CUTOVER_NEW_QUEUE], (
+        f"expected one LLM turn per generation (spawn, then complete), got {CUTOVER_LLM_QUEUES[agent_id]}"
+    )
+    verifier_contexts = CUTOVER_VERIFIER_CONTEXTS[agent_id]
+    assert verifier_contexts and any(
+        row.get("role") == "TOOL"
+        and (row.get("metadata") or {}).get("toolCallId") == first["tool_call_id"]
+        and (row.get("metadata") or {}).get("toolStatus") == "FINISHED"
+        for row in verifier_contexts[-1]
+    ), "the continued generation's context must contain the reattached code-agent result"
+
+
 # ===========================================================================
 # Test runner
 # ===========================================================================
@@ -1471,6 +2041,101 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     }
     restored.max_iterations = 80
     assert restored._iteration_resume_kwargs()["max_iterations"] == 80
+
+
+def test_pending_tool_records_copy_args_and_respect_the_handoff_budget():
+    from helpers.generation_handoff import (
+        PENDING_TOOL_RESUME_MAX_BYTES,
+        pending_tool_record,
+        pending_tool_resumes_fit,
+    )
+
+    tool_args = {"goal": "Buy socks"}
+    record = pending_tool_record("spawn_browser_agent", tool_args, "tc-1", {"phase": "activity"})
+    tool_args["goal"] = "mutated after parking"
+    assert record == {
+        "tool_name": "spawn_browser_agent",
+        "tool_args": {"goal": "Buy socks"},
+        "tool_call_id": "tc-1",
+        "resume": {"phase": "activity"},
+    }
+    assert pending_tool_resumes_fit([record]) is True
+    oversized = pending_tool_record("spawn_browser_agent", {}, "tc-2", {"blob": "x" * PENDING_TOOL_RESUME_MAX_BYTES})
+    assert pending_tool_resumes_fit([oversized]) is False
+    assert pending_tool_resumes_fit([{"resume": object()}]) is False, "unserializable records must never park"
+
+
+def test_workflow_parks_only_live_run_agent_tool_calls_within_budget():
+    """Parking is opt-in per turn, scoped to running calls, and bounded by the 2MB carry."""
+    from unittest.mock import patch
+
+    with patch("workflows.agent_workflow.workflow.logger"):
+        _assert_workflow_parks_only_live_run_agent_tool_calls_within_budget()
+
+
+def _assert_workflow_parks_only_live_run_agent_tool_calls_within_budget():
+    from helpers.generation_handoff import (
+        PENDING_TOOL_RESUME_MAX_BYTES,
+        park_pending_tool,
+        take_tool_resume,
+    )
+
+    wf = _bare_workflow_instance()
+    wf._active_tool_calls = {"tc-1": ("spawn_browser_agent", {"goal": "Buy socks"})}
+    resume = {"phase": "activity", "resume_state": {"step_count": 4}}
+
+    assert park_pending_tool(wf, "tc-1", resume) is False, "DAG turns treat any tool return as completion"
+    assert wf._pending_tool_resumes == []
+
+    wf._tool_parking_enabled = True
+    assert park_pending_tool(wf, "tc-unknown", resume) is False, "only a running call can be re-entered"
+    assert park_pending_tool(wf, "tc-1", {"phase": "activity"}) is True
+    assert park_pending_tool(wf, "tc-1", resume) is True
+    assert wf._pending_tool_resumes == [
+        {
+            "tool_name": "spawn_browser_agent",
+            "tool_args": {"goal": "Buy socks"},
+            "tool_call_id": "tc-1",
+            "resume": resume,
+        }
+    ], "re-parking the same call keeps only its latest checkpoint"
+
+    wf._active_tool_calls["tc-2"] = ("spawn_browser_agent", {"goal": "Huge"})
+    huge = {"blob": "x" * PENDING_TOOL_RESUME_MAX_BYTES}
+    assert park_pending_tool(wf, "tc-2", huge) is False, "over-budget calls take DEPLOY_INTERRUPTED instead"
+    assert [record["tool_call_id"] for record in wf._pending_tool_resumes] == ["tc-1"]
+
+    assert park_pending_tool(SimpleNamespace(), "tc-1", resume) is False
+    wf._tool_resume_hints = {"tc-1": resume}
+    assert take_tool_resume(wf, "tc-1") == resume
+    assert take_tool_resume(wf, "tc-1") is None, "a parked resume is consumed exactly once"
+    assert take_tool_resume(SimpleNamespace(), "tc-1") is None
+
+
+def test_workflow_continuation_carries_parked_tools_and_drops_malformed_records():
+    wf = _bare_workflow_instance()
+    wf.max_iterations = None
+    wf.context_gates = {}
+    parked = {
+        "tool_name": "spawn_browser_agent",
+        "tool_args": {"goal": "Buy socks"},
+        "tool_call_id": "tc-1",
+        "resume": {"phase": "write_approval", "attention_request_id": "attn-1"},
+    }
+    wf._pending_tool_resumes = [parked]
+
+    state = wf._continuation_resume_state([{"role": "USER", "text": "buy socks"}])
+    assert state["runtime_state"]["pending_tool_resumes"] == [parked]
+
+    state["runtime_state"]["pending_tool_resumes"] += [
+        "not-a-record",
+        {**parked, "tool_call_id": 7},
+        {**parked, "tool_args": "goal=Buy socks"},
+        {key: value for key, value in parked.items() if key != "resume"},
+    ]
+    restored = _bare_workflow_instance()
+    restored._restore_deployment_state(state)
+    assert restored._pending_tool_resumes == [parked]
 
 
 def test_restart_safe_child_tool_counts_survive_memory_loss_without_duplication():
@@ -4229,7 +4894,7 @@ async def test_workflow_handle_incomplete_max_iterations():
 
 async def test_workflow_handle_incomplete_max_iterations_fast_mode_completes():
     """Demo Fast Mode + 100% verifier after a cached trajectory must COMPLETE, not FAIL."""
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
 
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
@@ -6129,7 +6794,7 @@ async def test_workflow_mark_complete_never_persists_raw_tool_envelope_for_any_t
 
 async def test_workflow_mark_complete_materializes_oai_demo_root_report_files():
     """Root OAI demo Task Complete outputs become HTML/CSV file_pointers."""
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
 
     wf = _bare_workflow_instance()
     wf.agent_id = "oai-demo-root"
@@ -6217,7 +6882,7 @@ async def test_workflow_mark_complete_materializes_oai_demo_root_report_files():
 
 async def test_workflow_mark_complete_skips_report_files_for_oai_demo_child():
     """Per-creator children keep structured fields; only the root report becomes files."""
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
 
     wf = _bare_workflow_instance()
     wf.agent_id = "oai-demo-child"
@@ -7667,7 +8332,7 @@ async def test_workflow_query_parent_state_skips_throttle_when_paused_by_parent(
 
 async def test_workflow_fast_mode_post_message_does_not_block_loop():
     """Demo Fast Mode replay must not await each post_message activity."""
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
 
     wf = _bare_workflow_instance()
     wf.agent_id = "fm-child"
@@ -7696,7 +8361,7 @@ async def test_workflow_post_message_throttles_tree_updates():
     """Per-message tree broadcasts under 50-way demo fan-out must coalesce."""
     from datetime import timedelta
 
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
     from workflows.agent_workflow import _TREE_STATE_EMIT_MIN_INTERVAL
 
     wf = _bare_workflow_instance()
@@ -7768,6 +8433,12 @@ async def run_all_tests():
     r.record(
         "wf_continuation_state_round_trip",
         test_workflow_continuation_state_round_trips_complete_runtime,
+    )
+    r.record("pending_tool_records_budget", test_pending_tool_records_copy_args_and_respect_the_handoff_budget)
+    r.record("wf_parks_only_live_run_agent_calls", test_workflow_parks_only_live_run_agent_tool_calls_within_budget)
+    r.record(
+        "wf_continuation_carries_parked_tools",
+        test_workflow_continuation_carries_parked_tools_and_drops_malformed_records,
     )
     r.record(
         "wf_restart_safe_child_counts",
@@ -8027,6 +8698,10 @@ async def run_all_tests():
         test_workflow_check_credits_free_credits_exhausted_raises_subscription_gate,
     )
     await r.record_async(
+        "wf_subscription_credit_recheck_preserves_concurrent_pause",
+        test_subscription_credit_recheck_preserves_concurrent_pause,
+    )
+    await r.record_async(
         "wf_check_credits_free_credit_checkout_failure_pauses",
         test_workflow_check_credits_free_credit_checkout_failure_pauses,
     )
@@ -8244,6 +8919,7 @@ async def run_all_tests():
 
     # Temporal workflow tests (all run inside one shared environment)
     wf_results = await _run_all_workflow_tests()
+    wf_results += await _run_parked_tool_cutover_tests()
     for test_name, err in wf_results:
         if err is None:
             r.passed += 1

@@ -27,8 +27,6 @@ from providers.fast_cache.context import cache_writes_disabled, current_context
 from providers.fast_cache.normalize import (
     GOOGLE_OAUTH_DEMO_PROMPT_PREFIX,
     google_oauth_demo_goal_hash,
-    is_oai_demo_bound_child_goal,
-    is_oai_demo_goal_text,
     rewrite_oai_demo_display_names,
 )
 from providers.fast_cache.normalize import (
@@ -36,6 +34,7 @@ from providers.fast_cache.normalize import (
 )
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import get_pool
+from utils.oai_demo import is_oai_demo_bound_child_goal, is_oai_demo_goal
 
 if TYPE_CHECKING:
     from providers.rose.types import StreamChunk
@@ -210,7 +209,7 @@ async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     stored = coerce_cached_llm_payload(stored)
     ctx = current_context()
     if ctx is not None and (
-        is_oai_demo_goal_text(ctx.goal or "") or is_oai_demo_goal_text(ctx.root_goal or "")
+        is_oai_demo_goal(ctx.goal or "") or is_oai_demo_goal(ctx.root_goal or "")
     ):
         stored = rewrite_oai_demo_display_names(stored)
     yield SimpleNamespace(
@@ -645,7 +644,7 @@ def is_july_explore_site(ctx: Any, call_site: str) -> bool:
     """
     if (call_site or "").strip() != "explore_agent":
         return False
-    from domains.spawn_agent.oai_demo_july import (
+    from utils.oai_demo_july import (
         extract_oai_demo_creator_name,
         july_explore_goal_hash_for_goal,
     )
@@ -663,7 +662,7 @@ def is_july_gp_execute_site(ctx: Any, call_site: str) -> bool:
     """
     if (call_site or "").strip() not in {"execute_loop", "plan_loop"}:
         return False
-    from domains.spawn_agent.oai_demo_july import july_gp_goal_hash_for_goal
+    from utils.oai_demo_july import july_gp_goal_hash_for_goal
 
     goal = getattr(ctx, "goal", None) or ""
     return is_oai_demo_bound_child_goal(goal) and bool(july_gp_goal_hash_for_goal(goal))
@@ -867,7 +866,7 @@ async def july_explore_resolve(
     """
     if (call_site or "").strip() != "explore_agent":
         return stored, hit_key
-    from domains.spawn_agent.oai_demo_july import july_explore_goal_hash_for_goal
+    from utils.oai_demo_july import july_explore_goal_hash_for_goal
 
     hashes = [ctx.goal_hash]
     alt = july_explore_goal_hash_for_goal(getattr(ctx, "goal", None) or "")

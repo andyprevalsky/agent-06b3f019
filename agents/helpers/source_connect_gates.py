@@ -1,8 +1,9 @@
 """Shared source_connect gate raising.
 
-Lives in utils because both spawn_agent and wait_for raise these gates; a
-direct cross-domain import of the private helper violated the layering rule
-and the structural guard that enforces it.
+Shared because both spawn_agent and wait_for raise these gates; a direct
+cross-domain import of the private helper violated the layering rule and the
+structural guard that enforces it. It lives in helpers rather than utils
+because it depends on tools.gate, and utils must not import project code.
 """
 
 from typing import Dict, List

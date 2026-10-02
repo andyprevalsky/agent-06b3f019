@@ -253,7 +253,10 @@ isolated benchmark. For an infrastructure streak, use
 `scripts/run-bench stability-proof -k 10 --concurrency 10 --seed <integer>
 --exclude-file <prior-successful-names.json> --min-successful-llm 3`;
 the exclusion file is a JSON array of task names already used in accepted
-earlier runs. Capability slices
+earlier runs. For the requested daily/Polar campaign, rebuild the eligible pool
+on every return to slice zero. Keep all 100 tasks distinct within that campaign;
+accepted and failed task names from earlier campaigns remain eligible.
+Capability slices
 are sampled without replacement across that command, and the command stops at
 the first infrastructure failure. Add `--dry-sample` first to review all task
 names and check smoke/non-Polar coverage; `--pool-file <ready-names.json>`
@@ -290,6 +293,9 @@ still satisfy an infrastructure proof; a missing result, missing successful
 model responses, stale/foreign evidence, or unverified teardown cannot. Stop
 only the exact controller PID/owner recorded for your run and let its traps
 recover resources; use its exact stale-owner recovery path if needed.
+Review the complete rejected slice together: the fleet waits for every child
+before aggregating results. Batch independent infrastructure repairs and their
+owning regression checks before freezing the source for a fresh streak.
 For shell process ownership, capture births with `cloudbench_pid_start_time`;
 its reader uses the same whitespace normalization. Raw `ps lstart` pads
 single-digit days and can otherwise reject the live owner during cancellation.
