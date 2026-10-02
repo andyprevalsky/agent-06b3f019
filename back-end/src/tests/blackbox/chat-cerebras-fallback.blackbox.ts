@@ -43,6 +43,9 @@ const FALLBACK_SSE = [
   '',
 ];
 
+/** Past the 500ms rate-cap spill delay in exclusiveCerebrasChatRoute. */
+const FAST_REPLY_AFTER_SPILL_START_MS = 700;
+
 function sseResponse(lines: string[]): Response {
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -282,7 +285,12 @@ async function runRateLimitedCerebrasWithSlowSpill(): Promise<void> {
         });
         return stallingCerebrasResponse(init?.signal);
       }
-      if (model === OPENROUTER_FAST_CHAT_MODEL) return sseResponse(FALLBACK_SSE);
+      if (model === OPENROUTER_FAST_CHAT_MODEL) {
+        // Outlast the rate-cap spill delay so the slow same-model spill starts
+        // and must then be cancelled when the fast reply wins.
+        await new Promise((resolve) => setTimeout(resolve, FAST_REPLY_AFTER_SPILL_START_MS));
+        return sseResponse(FALLBACK_SSE);
+      }
       return new Response(`Unexpected fallback model: ${model}`, { status: 503 });
     }
     return originalFetch(input, init);
