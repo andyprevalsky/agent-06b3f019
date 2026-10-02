@@ -86,6 +86,20 @@ including snapshot re-entry and direct fleet invocation. It adds no per-agent
 work or shared coordination at 10,000 agents. The accompanying startup cleanup
 failure is tracked in `2026-09-11-failed-stability-proof-abandoned-retained-fleet`.
 
+## October 1 deploy verification environment recurrence
+
+The PR #1299 integration check used a private launcher whose PATH selected
+Homebrew Python 3.13 for nested structural checks. Two evidence-publication
+checks failed with `ModuleNotFoundError: No module named 'markdown_it'`; the
+existing project Python 3.11 virtualenv already contained the declared package.
+The other 31 structural checks passed. Selecting the existing agents virtualenv
+for every nested Python process made the exact two failed checks pass unchanged
+in 2.335 seconds. No dependency installation, source repair, relaxed assertion,
+or timeout adjustment was needed. The original failed receipt remains retained;
+the final result combines its 31 passes with only the two corrected reruns.
+Independent review bound all 232 inputs and confirmed every owned launcher had
+exited. This was a private verification launch error, not a fleet runtime defect.
+
 ## Human feedback
 
 None recorded.

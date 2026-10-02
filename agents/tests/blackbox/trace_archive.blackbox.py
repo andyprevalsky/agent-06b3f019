@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 
 import structlog.contextvars
@@ -1081,6 +1081,8 @@ async def test_async_archive_burst_is_bounded_without_blocking_event_loop():
         old_flag = os.environ.get("TRACE_ARCHIVE_ASYNC_WRITES")
         os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = "1"
         original_store = trace_archive.store_encrypted_artifact
+        original_executor = trace_archive._ARCHIVE_EXECUTOR
+        executor = ThreadPoolExecutor(max_workers=4)
         try:
 
             def _slow_store(**kwargs):
@@ -1088,6 +1090,7 @@ async def test_async_archive_burst_is_bounded_without_blocking_event_loop():
                 return original_store(**kwargs)
 
             trace_archive.store_encrypted_artifact = _slow_store
+            trace_archive._ARCHIVE_EXECUTOR = executor
             count = 96
             accepted = 0
             started = time_mod.monotonic()
@@ -1114,6 +1117,8 @@ async def test_async_archive_burst_is_bounded_without_blocking_event_loop():
             assert len(list(bundle.glob("burst-*.json.gz.enc"))) == accepted
             assert len(list(bundle.glob("burst-*.json.gz.enc.meta.json"))) == accepted
         finally:
+            executor.shutdown(wait=True)
+            trace_archive._ARCHIVE_EXECUTOR = original_executor
             trace_archive.store_encrypted_artifact = original_store
             if old_flag is None:
                 os.environ.pop("TRACE_ARCHIVE_ASYNC_WRITES", None)
@@ -1207,6 +1212,41 @@ async def test_backend_failure_spools_encrypted_outbox_and_async_drain():
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+            restore()
+
+
+async def test_async_archive_burst_retires_jobs_after_assertion():
+    """A failed admission assertion must not leak writes into the next fixture."""
+    import helpers.trace_archive as archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        original_json = archive.archive_json
+        admitted = 0
+        failure = AssertionError("controlled failure after archive admission")
+
+        def fail_after_admission(**kwargs):
+            nonlocal admitted
+            if admitted == 8:
+                raise failure
+            result = original_json(**kwargs)
+            admitted += result is not None
+            return result
+
+        try:
+            archive.archive_json = fail_after_admission
+            caught = None
+            try:
+                await test_async_archive_burst_is_bounded_without_blocking_event_loop()
+            except Exception as exc:
+                caught = exc
+            pending = archive._pending_archive_futures("agent-burst")
+            assert not pending, "failed fixture restored its globals with archive jobs still alive"
+            assert caught is failure, "fixture cleanup replaced the original assertion"
+        finally:
+            archive.archive_json = original_json
+            # Keep this outer safety fixture alive even when testing broken cleanup.
+            await asyncio.to_thread(wait, archive._pending_archive_futures("agent-burst"))
             restore()
 
 
@@ -1586,6 +1626,10 @@ async def run_all_tests():
     await r.record_async(
         "async_archive_burst_bounded_nonblocking",
         test_async_archive_burst_is_bounded_without_blocking_event_loop,
+    )
+    await r.record_async(
+        "async_archive_burst_retires_jobs_after_assertion",
+        test_async_archive_burst_retires_jobs_after_assertion,
     )
     await r.record_async(
         "backend_failure_spools_encrypted_outbox_and_async_drain",
