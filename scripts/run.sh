@@ -436,10 +436,13 @@ is_current_process_family() {
 
 process_cwd_in_this_worktree() {
     local pid=$1
-    local cwd
+    local cwd physical_worktree
     cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
+    # macOS reports /var as /private/var in lsof, while $PWD keeps the logical
+    # path used to start the process. Compare both spellings before reaping it.
+    physical_worktree=$(pwd -P)
     case "$cwd" in
-        "$PWD"|"$PWD"/*) return 0 ;;
+        "$PWD"|"$PWD"/*|"$physical_worktree"|"$physical_worktree"/*) return 0 ;;
     esac
     return 1
 }
