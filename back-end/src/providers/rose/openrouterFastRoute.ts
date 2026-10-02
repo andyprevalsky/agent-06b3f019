@@ -25,6 +25,22 @@ export const OPENROUTER_FAST_CHAT_MODEL = 'z-ai/glm-5.3-flash';
 export const OPENROUTER_FAST_CHAT_POOL = 'openrouter-fast-chat';
 export const DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS = 2_000;
 
+/**
+ * Chat fallbacks must finish a whole structured reply inside the 3s router
+ * bound. OpenRouter's default price-weighted balancing lands on slow fp4 hosts,
+ * and a static `order` list silently degrades to the first listed endpoint when
+ * its hosts cannot serve the request (OpenRouter's Cerebras Qwen host lacks
+ * `response_format`/`tools`). Rank hosts by OpenRouter's live 5-minute TTFT
+ * percentiles instead, preferring hosts fast enough to stream the JSON, and
+ * only among hosts that honor the strict schema/tool parameters.
+ */
+export const OPENROUTER_CHAT_LATENCY_PROVIDER = {
+  sort: 'latency',
+  preferred_min_throughput: { p50: 80 },
+  allow_fallbacks: true,
+  require_parameters: true,
+} as const;
+
 function chatIdleTimeoutMs(): number {
   const configured = Number(process.env.OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS);
   return Number.isFinite(configured) && configured > 0
@@ -50,6 +66,7 @@ export function buildOpenRouterFastChatBody(options: CompletionOptions): Record<
     // Callers (chat router/generator) may pass effort:'minimal' for latency;
     // omit → xhigh to match the rest of the Rose surface.
     reasoning: { effort: normalizeOpenRouterFastChatEffort(options.effort) },
+    provider: OPENROUTER_CHAT_LATENCY_PROVIDER,
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),
     ...(options.response_format ? { response_format: options.response_format } : {}),
