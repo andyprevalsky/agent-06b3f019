@@ -436,10 +436,12 @@ is_current_process_family() {
 
 process_cwd_in_this_worktree() {
     local pid=$1
-    local cwd
+    local cwd physical_pwd
     cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
+    # lsof reports the physical cwd; $PWD keeps symlinks (macOS /var -> /private/var).
+    physical_pwd=$(pwd -P)
     case "$cwd" in
-        "$PWD"|"$PWD"/*) return 0 ;;
+        "$PWD"|"$PWD"/*|"$physical_pwd"|"$physical_pwd"/*) return 0 ;;
     esac
     return 1
 }
