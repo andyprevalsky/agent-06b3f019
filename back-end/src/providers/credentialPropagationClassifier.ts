@@ -143,6 +143,8 @@ function normalizeKind(kind: string): CredentialKind | null {
     return 'email_otp';
   }
   if (normalized === 'passkey' || normalized === 'webauthn') return 'passkey';
+  // The browser agent records the minted identity as `minted_account`.
+  if (normalized === 'minted_account') return 'minted';
   return CREDENTIAL_KINDS.has(normalized as CredentialKind) ? (normalized as CredentialKind) : null;
 }
 
@@ -523,7 +525,11 @@ export async function classifyCredentialOutcomesBestEffort(
   if (credentialRefs.length === 0) {
     return { reason: 'no_credentials_used', rawError: fallback.rawError, decisions: [] };
   }
-  if (agent.status === 'COMPLETED' || process.env.CREDENTIAL_PROPAGATION_DISABLE_LLM === '1') {
+  // A completed run that used one credential needs no judge: that credential
+  // worked. One that tried several does: the run's success says nothing about
+  // which of them the site rejected on the way.
+  const oneCredentialWorked = agent.status === 'COMPLETED' && credentialRefs.length === 1;
+  if (oneCredentialWorked || process.env.CREDENTIAL_PROPAGATION_DISABLE_LLM === '1') {
     return { reason: fallback.reason, rawError: fallback.rawError, decisions: fallbackDecisions };
   }
 
@@ -537,6 +543,10 @@ export async function classifyCredentialOutcomesBestEffort(
       agent_id: agent.id,
       error: error instanceof Error ? error.message : String(error),
     });
+    if (agent.status === 'COMPLETED') {
+      // No judge, no per-credential verdict: keep what a completed run always meant.
+      return { reason: fallback.reason, rawError: fallback.rawError, decisions: fallbackDecisions };
+    }
     const unavailable = classifierUnavailableDecision(agent, messages);
     return {
       reason: unavailable.reason,

@@ -85,6 +85,7 @@ export async function createUser(name: string | null = null): Promise<string> {
 
 export async function cleanup(userId: string) {
   await prisma.browserPassword.deleteMany({ where: { userId } });
+  await prisma.agentPhoneMessage.deleteMany({ where: { userId } });
   await prisma.cookie.deleteMany({ where: { userId } });
   await prisma.cookieBundle.deleteMany({ where: { userId } });
   await prisma.passkeyCredential.deleteMany({ where: { userId } });
@@ -169,6 +170,7 @@ export async function withLocalSite(
     PRIMITIVE_BASE_URL: process.env.PRIMITIVE_BASE_URL,
     PRIMITIVE_DOMAIN: process.env.PRIMITIVE_DOMAIN,
     SURGE_API_KEY: process.env.SURGE_API_KEY,
+    BLACKBOX_TEST_FAKE_AGENTPHONE: process.env.BLACKBOX_TEST_FAKE_AGENTPHONE,
   };
   try {
     process.env.PRIMITIVE_BASE_URL = await listen(relay);
@@ -176,6 +178,8 @@ export async function withLocalSite(
     process.env.PRIMITIVE_DOMAIN = STUB_MAIL_DOMAIN;
     // No text may leave the test: without a key the site's SMS send fails closed.
     delete process.env.SURGE_API_KEY;
+    // As on a benchmark stack: agent phone numbers are mocks with a local inbox.
+    process.env.BLACKBOX_TEST_FAKE_AGENTPHONE = '1';
     await fn({ base: await listen(site), sentMail });
   } finally {
     for (const [key, value] of Object.entries(previous)) {

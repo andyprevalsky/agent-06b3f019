@@ -33,6 +33,7 @@ import {
   type Manifest,
 } from './auth-test-site.testkit';
 import './auth-test-site.signin.cases';
+import './auth-test-site.codes.cases';
 import './auth-test-site.signup-shop.cases';
 
 test('fixture management requires the internal API key and unknown sites 404', async () => {

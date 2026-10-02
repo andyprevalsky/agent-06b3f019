@@ -57,6 +57,7 @@ from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import format_browser_state_for_tool
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
+from utils.attention_requests import REJECTION_SENTINEL
 from utils.error_utils import extract_error_message
 from utils.payment_card import (
     MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
@@ -181,6 +182,7 @@ from .service_crypto import (
     format_otp_user_message,
     has_payment_card_secret_refs,
     is_usable_email_otp,
+    mask_secret_values,
 )
 from .step_timing import StepPhaseTimer
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
@@ -195,6 +197,9 @@ from .visible_result_completion import (
 )
 
 logger = structlog.get_logger()
+
+# Resume marker for a sign-in-help request the user declined.
+AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 
 
@@ -6081,6 +6086,28 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     browser_task_paused_for_resume = False
 
     try:
+        if (write_lock_resume_state or {}).get("approval_type") == AUTH_ASSISTANCE_DECLINED:
+            # The user said no, so nothing is left to try. Release the browser
+            # that was kept alive for them and end the task; ``finally`` posts
+            # the terminal event that closes the FE chip.
+            declined_session_id = (write_lock_resume_state or {}).get("session_id") or session_id
+            if declined_session_id:
+                await close_browser_session(config, declined_session_id, pause=False)
+            logger.info("User declined auth assistance; ending browser task", task_id=task_id)
+            return {
+                "status": "completed",
+                "success": False,
+                "user_declined_auth": True,
+                "message": f"User declined to sign in to {auth_realm or 'the site'}; sign-in is still required.",
+                "browser_url": browser_url,
+                "task_id": task_id,
+                "usage_items": [],
+                "execution_time_ms": 0,
+                "session_id": declined_session_id,
+                "structured_response": None,
+                "output_files": [],
+            }
+
         # ===== SETUP TIMING TRACKER =====
         setup_origin = time.monotonic()
         timing_events: list[tuple[str, float, float]] = []
@@ -9355,6 +9382,8 @@ Based on this feedback, I need to continue working on the task and address the i
                     "supervisor_recovered": True,
                 }
             step_timer.mark("execute_action")
+            # Nothing a tool read back from the page may carry a secret the tool typed.
+            result = mask_secret_values(result, secret_refs)
             if isinstance(result, dict) and result.get("current_url"):
                 current_url = str(result.get("current_url") or "")
                 if current_url and (not visited_urls or current_url != visited_urls[-1]):
@@ -11115,8 +11144,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         workflow_instance,
                         workflow_mod=workflow,
                     )
+                    user_declined = False
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
-                        workflow_instance._signal_responses.pop(request_id, None)
+                        signal_response = workflow_instance._signal_responses.pop(request_id, None)
+                        # A decline used to be read as "the user signed in": the
+                        # task resumed on a signed-out page and asked again.
+                        user_declined = (
+                            isinstance(signal_response, str) and signal_response.strip() == REJECTION_SENTINEL
+                        )
                         workflow_instance.is_paused = False
                         if hasattr(workflow_instance, "_update_tree_state"):
                             await workflow_instance._update_tree_state(status="ACTIVE")
@@ -11125,7 +11160,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     write_lock_resume_state = {
                         "pending_action": None,
                         "write_lock_approvals": result.get("write_lock_approvals", {}),
-                        "approval_type": "auth_assistance",
+                        "approval_type": AUTH_ASSISTANCE_DECLINED if user_declined else "auth_assistance",
                         "step_count": result.get("step_count", 0),
                         "session_id": result.get("session_id"),
                         "cdp_url": result.get("cdp_url"),
@@ -11145,7 +11180,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
-                        title="User Assistance Received",
+                        title="User Declined To Sign In" if user_declined else "User Assistance Received",
                         message="",
                         status=MessageStatus.FINISHED,
                         metadata={
@@ -11172,9 +11207,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             # Soft-accepted verifier rejects complete with success=False but still
             # terminate cleanly (FINISHED + structured_response) so the parent can
             # decide — do not surface ERROR (which historically triggered respawns).
+            # A user declining sign-in help is likewise a clean end, not a tool
+            # error: the parent reports it instead of respawning the browser.
             final_status = (
                 MessageStatus.FINISHED
-                if result.get("success", True) or result.get("verifier_soft_accepted")
+                if result.get("success", True)
+                or result.get("verifier_soft_accepted")
+                or result.get("user_declined_auth")
                 else MessageStatus.ERROR
             )
             # Declare terminality explicitly. The front-end must never have to
@@ -11183,6 +11222,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             final_metadata = {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
             if result.get("verifier_soft_accepted"):
                 final_metadata["verifierSoftAccepted"] = True
+            if result.get("user_declined_auth"):
+                final_metadata["authAssistanceDeclined"] = True
             for key in (
                 "task_id",
                 "world_model_simulated",

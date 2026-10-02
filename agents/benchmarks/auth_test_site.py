@@ -79,22 +79,6 @@ NO_SESSION_SCENARIOS = (
     "signup_fails",
     "signup_fails_purchase",
 )
-# Scenarios whose codes land in the one inbox / phone the user's agent identity
-# owns. Concurrent lanes of these would read each other's codes, so the runner
-# runs them one at a time.
-SHARED_INBOX_SCENARIOS = (
-    "minted_otp",
-    "password_email_2fa",
-    "code_never_arrives",
-    "expired_code",
-    "minted_sms_otp",
-    "magic_link",
-    "email_otp",
-    "signup",
-    "signup_already_registered",
-    "signup_purchase",
-    "created_account_reused",
-)
 USER_RESPONSES = ("sign_in", "decline")
 # Scenarios whose manifest carries the password only the user knows.
 USER_SIGN_IN_SCENARIOS = ("user_signs_in",)
@@ -209,8 +193,17 @@ def declared_scenario(environment: Optional[dict]) -> Optional[str]:
     return None if block is None else block["scenario"]
 
 
-def uses_shared_inbox(environment: Optional[dict]) -> bool:
-    return declared_scenario(environment) in SHARED_INBOX_SCENARIOS
+def shares_agent_inbox(environment: Optional[dict]) -> bool:
+    """True for every hosted-auth task: they must run one at a time on a stack.
+
+    Codes and links a site sends land in the one inbox and phone the user's
+    agent identity owns, and every running browser agent of that user is handed
+    whatever arrives there. Two hosted-auth lanes at once therefore see each
+    other's codes — including lanes whose own site never sends one, which then
+    try a stranger's code. (Seen in the first concurrent batch: lanes typed
+    codes issued by other lanes' sites and never asked the user for help.)
+    """
+    return declared_scenario(environment) is not None
 
 
 def _validate_patterns(patterns: Any, item_id: str, field: str, counted: bool = False) -> None:

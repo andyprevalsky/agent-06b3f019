@@ -71,14 +71,16 @@ export async function getAuthOptions(
     throw new Error('realm query parameter is required');
   }
 
-  const [steelAuth, bundles, passwordsAll, passkeysAll, minted, agentIdentity] = await Promise.all([
-    repo.findSteelSessionAuth(userId, realm, scope.steelContextId),
-    repo.findCookieBundles(userId, realm),
-    repo.findBrowserPasswords(userId),
-    repo.findPasskeys(userId, realm),
-    repo.findMintedAccount(userId, realm),
-    repo.findAgentIdentity(userId),
-  ]);
+  const [steelAuth, bundles, passwordsAll, passkeysAll, minted, agentIdentity, readableInboxes] =
+    await Promise.all([
+      repo.findSteelSessionAuth(userId, realm, scope.steelContextId),
+      repo.findCookieBundles(userId, realm),
+      repo.findBrowserPasswords(userId),
+      repo.findPasskeys(userId, realm),
+      repo.findMintedAccount(userId, realm),
+      repo.findAgentIdentity(userId),
+      repo.findReadableInboxEmails(userId),
+    ]);
 
   const hideSavedBrowserAuth = benchmarkSavedBrowserAuthDisabled();
   const cookieBundles = await resolveCookieBundles(userId, realm, bundles, hideSavedBrowserAuth);
@@ -91,8 +93,11 @@ export async function getAuthOptions(
     credentialId: pk.credentialId,
     disabled: pk.disabledAt !== null,
   }));
-  const emailOtpEmails: string[] = [];
-  const emailOtpAvailable = false;
+  // A code a site emails to one of the user's connected inboxes is read by the
+  // one-time-code poller and handed to the agent, so those inboxes are a real
+  // sign-in path and the agent has to know which addresses they are.
+  const emailOtpEmails = hideSavedBrowserAuth ? [] : readableInboxes;
+  const emailOtpAvailable = emailOtpEmails.length > 0;
   const enabledSteelSession =
     steelAuth !== null && steelAuth.disabledAt === null && !hideSavedBrowserAuth;
   const enabledCookieBundles = cookieBundles.filter((bundle) => !bundle.disabled);
@@ -102,8 +107,7 @@ export async function getAuthOptions(
     !enabledSteelSession &&
     enabledCookieBundles.length === 0 &&
     enabledPasswordOptions.length === 0 &&
-    enabledPasskeys.length === 0 &&
-    !emailOtpAvailable;
+    enabledPasskeys.length === 0;
   const mintedIdentity = shouldExposeMinted
     ? await ensureMintedIdentity(userId, agentIdentity, minted)
     : agentIdentity;

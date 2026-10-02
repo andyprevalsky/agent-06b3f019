@@ -342,7 +342,12 @@ const PLANNERS: Record<AuthTestSiteScenario, (ctx: PlanContext) => ScenarioPlan>
   passkey_rejected: (ctx) => passkeyPlan(ctx, 'reject'),
   password_email_2fa: passwordEmail2faPlan,
   account_locked: accountLockedPlan,
-  code_never_arrives: (ctx) => mintedAccountPlan(ctx, { emailSignIn: 'code_withheld' }),
+  // The account exists but cannot be reached: its only way in is a code that never comes.
+  code_never_arrives: (ctx) => ({
+    ...mintedAccountPlan(ctx, { emailSignIn: 'code_withheld' }),
+    expectedSignInEmail: null,
+    expectedMemberNumber: null,
+  }),
   expired_code: (ctx) => mintedAccountPlan(ctx, { emailSignIn: 'code_first_expired' }),
   minted_sms_otp: (ctx) =>
     mintedAccountPlan(ctx, { passwordSignIn: false, emailSignIn: 'off', smsSignIn: 'code' }),

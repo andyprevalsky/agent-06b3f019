@@ -175,23 +175,25 @@ def test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts() ->
         assert get_task_by_name(name).expected_approval_count == 1, name
 
 
-async def test_tasks_that_share_the_agent_inbox_never_overlap() -> None:
-    """Sites email codes to the one inbox the user's agent owns; lanes must not read each other's."""
-    from benchmarks.auth_test_site import uses_shared_inbox
+async def test_hosted_auth_tasks_never_overlap_on_one_stack() -> None:
+    """Every browser agent of a user is handed the codes sent to that user's agent inbox."""
+    from benchmarks.auth_test_site import shares_agent_inbox
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _parallel_task_runners
 
-    inbox_tasks = [name for name in TASK_SCENARIOS if uses_shared_inbox(get_task_by_name(name).environment)]
-    assert "browser-auth-minted-email-otp" in inbox_tasks and "browser-auth-signup-purchase" in inbox_tasks
-    assert "browser-auth-saved-password-retry" not in inbox_tasks
+    assert all(shares_agent_inbox(get_task_by_name(name).environment) for name in TASK_SCENARIOS)
+    assert not shares_agent_inbox(get_task_by_name("whatsapp-history-recall").environment)
 
     running: list[str] = []
     overlaps: list[tuple[str, ...]] = []
+    peak_other = 0
 
     async def runner(task):
+        nonlocal peak_other
         running.append(task.name)
-        if sum(1 for name in running if name in inbox_tasks) > 1:
+        if sum(1 for name in running if name in TASK_SCENARIOS) > 1:
             overlaps.append(tuple(running))
+        peak_other = max(peak_other, len(running))
         await asyncio.sleep(0.01)
         running.remove(task.name)
         return task.name
@@ -199,8 +201,9 @@ async def test_tasks_that_share_the_agent_inbox_never_overlap() -> None:
     tasks = [
         get_task_by_name("browser-auth-minted-email-otp"),
         get_task_by_name("browser-auth-minted-email-otp"),
-        get_task_by_name("browser-auth-expired-code-retry"),
         get_task_by_name("browser-auth-saved-password-retry"),
+        get_task_by_name("browser-auth-assistance-user-signs-in"),
+        get_task_by_name("whatsapp-history-recall"),
     ]
     previous = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
     os.environ["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "1"
@@ -211,7 +214,8 @@ async def test_tasks_that_share_the_agent_inbox_never_overlap() -> None:
             os.environ.pop("BENCHMARK_ISOLATED_BROWSER_PROFILES", None)
         else:
             os.environ["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = previous
-    assert len(results) == 4 and not overlaps, f"inbox tasks overlapped: {overlaps}"
+    assert len(results) == 5 and not overlaps, f"hosted-auth tasks overlapped: {overlaps}"
+    assert peak_other >= 2, "unrelated work must still run alongside a hosted-auth task"
 
 
 def test_hosted_auth_tasks_never_get_the_guest_checkout_kill_switch() -> None:
@@ -825,8 +829,8 @@ async def run_all_tests():
         test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts,
     )
     await runner.record_async(
-        "tasks_that_share_the_agent_inbox_never_overlap",
-        test_tasks_that_share_the_agent_inbox_never_overlap,
+        "hosted_auth_tasks_never_overlap_on_one_stack",
+        test_hosted_auth_tasks_never_overlap_on_one_stack,
     )
     runner.record(
         "hosted_auth_tasks_never_get_the_guest_checkout_kill_switch",

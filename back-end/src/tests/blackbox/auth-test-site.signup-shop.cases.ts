@@ -180,7 +180,10 @@ test('signup_fails and created_account_reused: sign-up errors, or leaves a passw
         email: minted.email,
         password: 'correct-horse-7',
       });
-      assert((await refused.text()).includes('create new Rose Shop accounts right now'), 'sign-up must error');
+      assert(
+        (await refused.text()).includes('create new Rose Shop accounts right now'),
+        'sign-up must error'
+      );
       const failingReport = await fetchReport(base, failing.siteId);
       assert(
         failingReport.accounts.length === 0 && failingReport.sessions.length === 0,
@@ -343,7 +346,10 @@ test('signup_fails_purchase: with sign-up down nothing is ordered or charged', a
           },
           cart
         );
-        assert((await refused.text()).includes('create new Rose Shop accounts right now'), 'sign-up must error');
+        assert(
+          (await refused.text()).includes('create new Rose Shop accounts right now'),
+          'sign-up must error'
+        );
         await postForm(base, pagePath(manifest, '/checkout'), CARD, cart);
         const report = await fetchReport(base, manifest.siteId);
         assert(report.orders.length === 0 && charges.length === 0, 'no order and no charge');

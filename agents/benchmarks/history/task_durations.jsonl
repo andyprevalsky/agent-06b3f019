@@ -3919,3 +3919,12 @@
 {"task": "browser-auth-saved-password-retry", "duration_seconds": 307.1, "cost_cents": 7.0, "timestamp": "2026-10-02T17:31:54.117545+00:00", "agent_id": "3bc05316-0886-4e5f-baff-51c6507ddc52"}
 {"task": "browser-auth-saved-password-retry", "duration_seconds": 338.3, "cost_cents": 8.0, "timestamp": "2026-10-02T17:31:54.117545+00:00", "agent_id": "9d903496-b481-421d-859e-30746ac5c44f"}
 {"task": "browser-auth-minted-email-otp", "duration_seconds": 227.5, "cost_cents": 5.0, "timestamp": "2026-10-02T17:39:56.523862+00:00", "agent_id": "47c51baf-da80-482a-ac36-e3cc06fcbe8d"}
+{"task": "browser-auth-named-account", "duration_seconds": 170.3, "cost_cents": 2.0, "timestamp": "2026-10-02T18:19:57.444003+00:00", "agent_id": "ae73026c-f964-425a-b9c5-9f3b5977fc28"}
+{"task": "browser-auth-passkey-rejected-password", "duration_seconds": 207.5, "cost_cents": 6.0, "timestamp": "2026-10-02T18:19:57.444003+00:00", "agent_id": "ddcb9d57-5220-4999-a8e5-b3dca85aa923"}
+{"task": "browser-auth-minted-email-otp", "duration_seconds": 207.6, "cost_cents": 6.0, "timestamp": "2026-10-02T18:19:57.444003+00:00", "agent_id": "e5679fb0-15d9-46fb-976e-69830cb363ea"}
+{"task": "browser-auth-passkey-preferred", "duration_seconds": 237.8, "cost_cents": 2.0, "timestamp": "2026-10-02T18:19:57.444003+00:00", "agent_id": "daa73cc6-08f6-446e-80e2-95e41cb476f8"}
+{"task": "browser-auth-expired-code-retry", "duration_seconds": 261.7, "cost_cents": 7.0, "timestamp": "2026-10-02T18:19:57.444003+00:00", "agent_id": "d9ff5eaf-ba0d-4bb9-a860-bd3cf24d67c2"}
+{"task": "browser-auth-account-locked", "duration_seconds": 576.4, "cost_cents": 2.0, "timestamp": "2026-10-02T18:19:57.444003+00:00", "agent_id": "73c307bd-ba61-462c-a1f8-d9e37642ad2e"}
+{"task": "browser-auth-minted-signup", "duration_seconds": 200.3, "cost_cents": 3.0, "timestamp": "2026-10-02T18:19:57.444003+00:00", "agent_id": "55e7236c-737b-4d9c-bedb-746b63ab4e48"}
+{"task": "browser-auth-signup-already-registered", "duration_seconds": 295.6, "cost_cents": 5.0, "timestamp": "2026-10-02T18:19:57.444003+00:00", "agent_id": "ed043849-5ed9-4c3a-8f0a-787aca41b2cd"}
+{"task": "browser-auth-password-email-2fa", "duration_seconds": 187.2, "cost_cents": 5.0, "timestamp": "2026-10-02T18:19:57.444003+00:00", "agent_id": "d3f80b9e-6640-4309-af37-a5f94b76b9b0"}

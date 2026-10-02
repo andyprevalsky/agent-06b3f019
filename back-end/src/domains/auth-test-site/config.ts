@@ -21,6 +21,8 @@ export const SESSION_COOKIE_NAME = 'rose_shop_session';
 export const CART_COOKIE_NAME = 'rose_shop_cart';
 
 export const SIGN_IN_EMAIL_SENDER_LOCAL_PART = 'rose-shop';
+/** The short code the shop's texts appear to come from on a benchmark stack. */
+export const SHOP_SMS_SENDER = '+15555550100';
 /** Marks every credential row the fixture seeds, so teardown removes exactly those. */
 export const SAVED_PASSWORD_BROWSER_SOURCE = 'auth-test-site';
 

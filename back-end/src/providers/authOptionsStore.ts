@@ -86,6 +86,34 @@ export async function upsertAgentIdentityEmail(userId: string, email: string) {
 }
 
 /**
+ * The user's connected inboxes whose mail the backend can read right now: the
+ * same credentials the one-time-code poller fetches from. A code emailed to
+ * any of these reaches the agent.
+ */
+export async function findReadableInboxEmails(userId: string): Promise<string[]> {
+  const rows = await prisma.emailIntegrationCredential.findMany({
+    where: {
+      userId,
+      provider: 'GMAIL',
+      state: { not: 'needs_reconnect' },
+      integration: { name: 'gmail', status: 'CONNECTED' },
+    },
+    select: { email: true, accessToken: true, refreshToken: true },
+    orderBy: { updatedAt: 'desc' },
+  });
+  const readable = rows.filter(
+    (row) =>
+      row.email !== null &&
+      row.email !== '' &&
+      row.accessToken !== null &&
+      row.accessToken !== '' &&
+      row.refreshToken !== null &&
+      row.refreshToken !== ''
+  );
+  return [...new Set(readable.map((row) => (row.email as string).toLowerCase()))];
+}
+
+/**
  * First writer wins: when two callers mint an inbox for the same user at once,
  * both get the row that landed first, never two different identities.
  */

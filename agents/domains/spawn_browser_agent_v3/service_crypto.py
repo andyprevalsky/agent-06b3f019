@@ -9,7 +9,7 @@ import base64
 import html
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
@@ -309,6 +309,8 @@ class ExtractedOTP:
     subject: str = ""
     credential_kind: str = "email_otp"
     channel: str = "email"
+    # Set instead of a code when the mail carries sign-in / verification links.
+    links: List[str] = field(default_factory=list)
 
 
 # Keyword groups shared across OTP patterns. Kept broad so we catch the common
@@ -397,8 +399,31 @@ def _format_duration(seconds: int) -> str:
     return f"{int(seconds / 60)}m"
 
 
+MAX_EMAIL_LINKS = 5
+MINTED_INBOX_LABEL = "primitive"
+
+
+def extract_email_links(email: Dict) -> List[str]:
+    """Distinct http(s) links of a mail, in reading order (anchors first, then plain text)."""
+    body_html = str(email.get("bodyHtml") or "")
+    body_text = str(email.get("bodyText") or "")
+    found = [html.unescape(url) for url in re.findall(r"href=[\"'](https?://[^\"']+)[\"']", body_html)]
+    found += [url.rstrip(".,;)") for url in re.findall(r"https?://[^\s<>\"']+", body_text)]
+    return list(dict.fromkeys(found))[:MAX_EMAIL_LINKS]
+
+
 def format_otp_user_message(otp: ExtractedOTP) -> str:
     """Format one OTP as a USER-role message for the browser-use conversation."""
+    if otp.links:
+        links = "\n".join(f"  - {link}" for link in otp.links)
+        return (
+            "Recently received email with no code:\n"
+            f"- From: {otp.sender}\n"
+            f"- Subject: {otp.subject}\n"
+            f"- Received: {_format_duration(max(0, otp.age_seconds))} ago\n"
+            f"- Links:\n{links}\n\n"
+            "Open a link only if the current site said it emailed you one."
+        )
     channel_label = "SMS" if otp.channel == "sms" else "email"
     preference = (
         "Use this code only if the current site requested an SMS or phone OTP."
@@ -443,6 +468,13 @@ async def fetch_recent_otps(user_id: str, api_url: str, api_key: str) -> List[Ex
                 continue
 
             code = extract_otp_from_text(body_text)
+            # A mail to the agent's own inbox that carries no code may carry the
+            # sign-in link a site sent instead; it is keyed by its message id.
+            links: List[str] = []
+            if not code and MINTED_INBOX_LABEL in (email.get("labels") or []):
+                links = extract_email_links(email)
+                if links:
+                    code = f"link:{email.get('id') or email.get('messageId') or links[0]}"
             if code:
                 if code in seen_codes:
                     continue
@@ -482,6 +514,7 @@ async def fetch_recent_otps(user_id: str, api_url: str, api_key: str) -> List[Ex
                             or email.get("threadId")
                         ),
                         subject=email.get("subject", ""),
+                        links=links,
                     )
                 )
 
@@ -532,6 +565,45 @@ async def fetch_recent_otps(user_id: str, api_url: str, api_key: str) -> List[Ex
     except Exception as e:
         logger.warning("Failed to fetch OTPs from email/SMS", error=str(e))
     return []
+
+
+def _is_masked_secret_ref(ref: str) -> bool:
+    """Saved passwords and the card number; short or public refs (cvv, name) are left alone."""
+    return ref.startswith("pwd:") or ref == "card_number"
+
+
+def mask_secret_values(value: Any, secret_refs: Optional[Dict[str, str]]) -> Any:
+    """Return ``value`` with any secret plaintext replaced by the ref that names it.
+
+    Secrets are typed into the page by the browser tool, never by the model. A
+    tool result that reads the page back (``evaluate`` on a form, a network
+    capture of the sign-in request) would otherwise hand the model the
+    plaintext, which then lands in its reasoning and the saved transcript.
+    """
+    secrets = sorted(
+        (
+            (plaintext, ref)
+            for ref, plaintext in (secret_refs or {}).items()
+            if _is_masked_secret_ref(ref) and isinstance(plaintext, str) and plaintext
+        ),
+        key=lambda pair: -len(pair[0]),
+    )
+    if not secrets:
+        return value
+
+    def mask(item: Any) -> Any:
+        if isinstance(item, str):
+            for plaintext, ref in secrets:
+                if plaintext in item:
+                    item = item.replace(plaintext, ref)
+            return item
+        if isinstance(item, dict):
+            return {key: mask(entry) for key, entry in item.items()}
+        if isinstance(item, list):
+            return [mask(entry) for entry in item]
+        return item
+
+    return mask(value)
 
 
 # ========================================

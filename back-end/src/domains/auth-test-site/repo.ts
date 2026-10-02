@@ -216,3 +216,19 @@ export async function deleteFixtureCredentials(params: {
     cookieBundles: cookieBundles.count,
   };
 }
+
+/**
+ * Delivers a text to a mock agent phone number. On a benchmark stack the number
+ * is fake and the SMS provider is faked too, so this table is the number's inbox.
+ */
+export async function deliverTextToMockPhone(params: {
+  userId: string;
+  externalId: string;
+  from: string;
+  to: string;
+  body: string;
+}): Promise<void> {
+  await prisma.agentPhoneMessage.create({
+    data: { ...params, channel: 'sms', receivedAt: new Date() },
+  });
+}

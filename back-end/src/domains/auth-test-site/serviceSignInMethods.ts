@@ -12,10 +12,13 @@
 import { createHash, randomBytes, verify } from '../../providers/crypto';
 import { primitiveDomain, sendPrimitiveEmail } from '../../providers/primitive';
 import { sendSms } from '../../providers/smsQueue';
+import { isLocalBenchmarkAgentPhoneMockEnabled } from '../../providers/smsTransportMock';
+import * as repo from './repo';
 import {
   AUTH_TEST_SITE_NAME,
   PASSKEY_CHALLENGE_TTL_MS,
   SIGN_IN_CODE_TTL_MS,
+  SHOP_SMS_SENDER,
   SIGN_IN_EMAIL_SENDER_LOCAL_PART,
 } from './config';
 import {
@@ -125,14 +128,22 @@ export async function requestSmsCode(site: AuthTestSite, rawPhone: string): Prom
     expiresAtMs: Date.now() + SIGN_IN_CODE_TTL_MS,
     consumed: false,
   });
-  const sent = await sendSms(account.phone, `Your ${AUTH_TEST_SITE_NAME} sign-in code is ${code}`, {
-    archiveContext: { source: 'auth-test-site' },
-  });
+  const body = `Your ${AUTH_TEST_SITE_NAME} sign-in code is ${code}`;
+  const sent = await sendSms(account.phone, body, { archiveContext: { source: 'auth-test-site' } });
+  if (isLocalBenchmarkAgentPhoneMockEnabled()) {
+    await repo.deliverTextToMockPhone({
+      userId: site.userId,
+      externalId: `rose-shop-${randomBytes(12).toString('hex')}`,
+      from: SHOP_SMS_SENDER,
+      to: account.phone,
+      body,
+    });
+  }
   recordAttempt(
     site,
     'sms_request',
     account.email,
-    sent.success ? 'code_sent' : 'code_delivery_failed',
+    sent.success || isLocalBenchmarkAgentPhoneMockEnabled() ? 'code_sent' : 'code_delivery_failed',
     null
   );
 }

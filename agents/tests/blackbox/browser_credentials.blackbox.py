@@ -14,6 +14,36 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from _test_utils import BlackboxResult, assert_captured_call, setup_mock
 
 
+def test_tool_results_never_echo_a_saved_password_or_card_number() -> None:
+    """A page-script result that reads a typed password back must not put it in the model's context.
+
+    Seen in a hosted-auth benchmark lane: the agent ran `evaluate` on the sign-in
+    form, the result carried the decrypted password, and the plaintext then
+    appeared in the agent's reasoning and transcript.
+    """
+    from domains.spawn_browser_agent_v3.service_crypto import mask_secret_values
+
+    secret_refs = {
+        "pwd:avery@example.com": "hunter2-correct#7a",
+        "card_number": "4242424242424242",
+        "card_cvv": "123",
+        "card_name": "Avery Ross",
+    }
+    result = {
+        "success": True,
+        "result": 'email=avery@example.com password="hunter2-correct#7a"',
+        "nested": [{"value": "card 4242424242424242 cvv 123 for Avery Ross"}],
+        "count": 3,
+    }
+    masked = mask_secret_values(result, secret_refs)
+    assert masked["result"] == 'email=avery@example.com password="pwd:avery@example.com"', masked
+    assert masked["nested"][0]["value"] == "card card_number cvv 123 for Avery Ross", masked
+    assert masked["count"] == 3 and masked["success"] is True
+    assert result["result"].endswith('hunter2-correct#7a"'), "the caller's result is not mutated"
+    assert mask_secret_values("nothing secret here", secret_refs) == "nothing secret here"
+    assert mask_secret_values({"result": "x"}, None) == {"result": "x"}
+
+
 def test_steel_cdp_key_is_materialized_only_at_connection_boundary() -> None:
     from domains.spawn_browser_agent_v3.cdp_urls import steel_cdp_connection_url
 
@@ -1150,6 +1180,10 @@ async def run_all_tests():
     await runner.record_async(
         "native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site",
         test_native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site,
+    )
+    runner.record(
+        "tool_results_never_echo_a_saved_password_or_card_number",
+        test_tool_results_never_echo_a_saved_password_or_card_number,
     )
     await runner.record_async(
         "ceremony_capable_actions_arm_the_live_target_before_running",

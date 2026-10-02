@@ -106,12 +106,19 @@ COLD_SEED_SERVICE_START_TIMEOUT_SECONDS = 1200
 DOCKER_CLEANUP_TIMEOUT_SECONDS = 5
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 NEW_USER_PAYMENT_JOURNEY_TASK_NAME = "agent-payment-new-user-journey"
+# Hosted Rose Shop purchases settle through the same sandbox AgentCard fixture
+# as the test-payment portal, as the same seeded user.
+ROSE_SHOP_PAYMENT_TASK_NAMES = {
+    "browser-auth-guest-purchase",
+    "browser-auth-signup-purchase",
+    "browser-auth-session-expires-at-checkout",
+}
 AGENT_PAYMENT_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
     "agent-payment-idempotent-abandonment",
     "agent-payment-abandonment",
     "agent-payment-setup-resume",
-}
+} | ROSE_SHOP_PAYMENT_TASK_NAMES
 BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     NEW_USER_PAYMENT_JOURNEY_TASK_NAME,

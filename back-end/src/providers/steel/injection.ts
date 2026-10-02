@@ -4,7 +4,7 @@
 
 import { prisma } from '../database';
 import { isAuthCredentialCookieName } from '../authCookies';
-import { canonicalAuthRealm } from '../authRealm';
+import { canonicalAuthRealm, cookieDomainForStartUrl } from '../authRealm';
 import { cookieSelectionWhere } from '../browserCookies';
 import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
 import { type FingerprintData, log } from './types';
@@ -123,7 +123,7 @@ async function getSteelSessionRealmCookieSummary(
 
 async function cookieSummaryForBundle(params: {
   userId: string;
-  authRealm: string;
+  cookieDomain: string;
   browserSource: string;
   browserProfile: string;
 }) {
@@ -137,7 +137,7 @@ async function cookieSummaryForBundle(params: {
       userId: params.userId,
       browserSource: params.browserSource,
       browserProfile: params.browserProfile,
-      ...cookieDomainWhere(params.authRealm),
+      ...cookieDomainWhere(params.cookieDomain),
     },
     select: { name: true, creationUtc: true },
   });
@@ -158,6 +158,7 @@ async function cookieSummaryForBundle(params: {
 async function selectTopCookieBundle(params: {
   userId: string;
   authRealm: string;
+  cookieDomain: string;
 }): Promise<CookieBundleCandidate | null> {
   const bundles = await prisma.cookieBundle.findMany({
     where: { userId: params.userId, authRealm: params.authRealm },
@@ -170,7 +171,7 @@ async function selectTopCookieBundle(params: {
       .map(async (bundle) => {
         const summary = await cookieSummaryForBundle({
           userId: params.userId,
-          authRealm: params.authRealm,
+          cookieDomain: params.cookieDomain,
           browserSource: bundle.browserSource,
           browserProfile: bundle.browserProfile,
         });
@@ -206,6 +207,8 @@ export async function resolveBrowserAuthCredentialSource(params: {
   userId: string;
   authRealm: string;
   steelContextId: string | null;
+  /** Where the realm's cookies are stored; differs from the realm only under an ?authRealm= override. */
+  cookieDomain?: string;
   steelSessionHasRealmCookies?: boolean;
   // Pass the already-fetched SteelSessionAuth row (or explicit null) to skip
   // re-querying it — injectUserData looks it up moments earlier.
@@ -252,6 +255,7 @@ export async function resolveBrowserAuthCredentialSource(params: {
     const topBundle = await selectTopCookieBundle({
       userId: params.userId,
       authRealm: params.authRealm,
+      cookieDomain: params.cookieDomain ?? params.authRealm,
     });
     if (topBundle !== null) {
       return {
@@ -299,6 +303,7 @@ export async function injectUserData(
   }
   const hostname = new URL(url).hostname;
   const authRealm = canonicalAuthRealm(url);
+  const cookieDomain = cookieDomainForStartUrl(url);
   // Match the exact host plus the canonical auth realm. Never infer a
   // registrable domain by taking the last two labels: for example.co.uk that
   // would become co.uk and cross a credential boundary.
@@ -384,6 +389,7 @@ export async function injectUserData(
     userId,
     authRealm,
     steelContextId,
+    cookieDomain,
     steelSessionHasRealmCookies: steelCookieSummary?.hasRealmCookies,
     preloadedSteelAuth: steelAuthForVerification,
   });
@@ -418,7 +424,7 @@ export async function injectUserData(
     cookies = await prisma.cookie.findMany({
       where: {
         userId,
-        ...cookieDomainWhere(authRealm),
+        ...cookieDomainWhere(cookieDomain),
         browserSource: authSource.browserSource,
         browserProfile: authSource.browserProfile,
       },

@@ -5,19 +5,17 @@
  */
 
 import { prisma } from '../../providers/database';
-import { IntegrationStatus, IntegrationType, EmailProvider } from '@prisma/client';
+import { cookieDomainForStartUrl } from '../../providers/authRealm';
+import { resolveBrowserAuthCredentialSource } from '../../providers/steel/injection';
 import { AUTH_TEST_SITE_BASE_PATH } from '../../domains/auth-test-site/config';
-import { findSite } from '../../domains/auth-test-site/service';
 import {
   API_KEY,
   assert,
   cleanup,
   createFixture,
-  createMintedIdentity,
   createUser,
   fetchReport,
   getPage,
-  lastMailTo,
   pagePath,
   postForm,
   postJson,
@@ -67,6 +65,31 @@ test('saved_session: the saved browser session opens the account with no sign-in
         'auth options must list the bundle'
       );
       const cookie = await savedSessionCookie(userId, manifest);
+      // The browser session injects whatever this resolves, keyed by the page's real
+      // host: the realm is only a label the URL carries on dev hosts.
+      assert(
+        cookieDomainForStartUrl(manifest.entryUrl) === '127.0.0.1',
+        `cookies of an overridden realm live on the page host, got ${cookieDomainForStartUrl(manifest.entryUrl)}`
+      );
+      const source = await resolveBrowserAuthCredentialSource({
+        userId,
+        authRealm: manifest.realm,
+        steelContextId: null,
+        cookieDomain: cookieDomainForStartUrl(manifest.entryUrl),
+      });
+      assert(
+        source.kind === 'cookie_bundle' && source.browserProfile === manifest.siteId,
+        `the saved session must be the injected credential source, got ${source.kind}`
+      );
+      const byRealmLabel = await resolveBrowserAuthCredentialSource({
+        userId,
+        authRealm: manifest.realm,
+        steelContextId: null,
+      });
+      assert(
+        byRealmLabel.kind === 'none',
+        'no cookie is stored under the realm label itself; selecting by it is what left the session uninjected'
+      );
       const home = await getPage(base, pagePath(manifest, '/'), cookie);
       assert(home.status === 303, `a live session must skip the welcome page, got ${home.status}`);
       const account = await getPage(base, pagePath(manifest, '/account'), cookie);
@@ -265,7 +288,10 @@ test('all_fail: every rung the user has is offered and fails, and minted stays h
         email: manifest.savedPasswordUsernames[1] ?? '',
         password: 'a-new-password-1',
       });
-      assert((await signUp.text()).includes('create new Rose Shop accounts right now'), 'sign-up must be unavailable');
+      assert(
+        (await signUp.text()).includes('create new Rose Shop accounts right now'),
+        'sign-up must be unavailable'
+      );
       const guest = await getPage(base, pagePath(manifest, '/guest'));
       assert((await guest.text()).includes('only shown to signed-in members'), 'guest page');
       assert(sentMail.length === 0, 'no mail may leave for addresses we cannot receive');
@@ -316,227 +342,6 @@ test('account_locked: the saved password and a code request both hit the lock', 
       assert(report.sessions.length === 0, 'a locked account never signs in');
     });
   } finally {
-    await cleanup(userId);
-  }
-});
-
-test('password_email_2fa: the saved password needs the code emailed to the agent inbox', async () => {
-  const userId = await createUser();
-  try {
-    const minted = await createMintedIdentity(userId);
-    await withLocalSite(async ({ base, sentMail }) => {
-      const manifest = await seed(base, userId, 'password_email_2fa');
-      assert(
-        JSON.stringify(manifest.savedPasswordUsernames) === JSON.stringify([minted.email]),
-        `the saved login must be the agent's own inbox: ${manifest.savedPasswordUsernames}`
-      );
-      assert(manifest.authOptionsPreview.mintedEmail === null, 'a saved password hides minted');
-      const [saved] = await savedPasswordsInListedOrder(userId, manifest);
-      assert(saved, 'one saved login expected');
-      const first = await postForm(base, pagePath(manifest, '/login'), {
-        email: saved.username,
-        password: saved.password,
-      });
-      assert(
-        (first.headers.get('location') ?? '').includes('/login/verify'),
-        `password must lead to the code page: ${first.headers.get('location')}`
-      );
-      assert(sessionCookie(first) === '', 'no session before the code');
-      const code =
-        /verification code is (\d{6})/.exec(lastMailTo(sentMail, minted.email))?.[1] ?? '';
-      assert(code !== '', 'second-factor code must be emailed');
-      const wrong = await postForm(base, pagePath(manifest, '/login/verify'), {
-        email: saved.username,
-        code: code === '000000' ? '111111' : '000000',
-      });
-      assert((await wrong.text()).includes('incorrect'), 'wrong code must be refused');
-      const verified = await postForm(base, pagePath(manifest, '/login/verify'), {
-        email: saved.username,
-        code,
-      });
-      assert(verified.status === 303, 'the emailed code must finish the sign-in');
-      const report = await fetchReport(base, manifest.siteId);
-      assert(
-        report.sessions.length === 1 && report.sessions[0]?.method === 'password_email_2fa',
-        `one two-factor session expected: ${JSON.stringify(report.sessions)}`
-      );
-    });
-  } finally {
-    await cleanup(userId);
-  }
-});
-
-test('code_never_arrives: every request is accepted and nothing is ever sent', async () => {
-  const userId = await createUser();
-  try {
-    const minted = await createMintedIdentity(userId);
-    await withLocalSite(async ({ base, sentMail }) => {
-      const manifest = await seed(base, userId, 'code_never_arrives');
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const requested = await postForm(base, pagePath(manifest, '/login/code'), {
-          email: minted.email,
-        });
-        assert(requested.status === 303, 'the site must look like it sent a code');
-      }
-      assert(sentMail.length === 0, 'no code may be sent');
-      const report = await fetchReport(base, manifest.siteId);
-      assert(
-        JSON.stringify(trail(report)) ===
-          JSON.stringify(['code_request:code_withheld', 'code_request:code_withheld']),
-        `unexpected trail ${trail(report)}`
-      );
-    });
-  } finally {
-    await cleanup(userId);
-  }
-});
-
-test('expired_code: the first code is already expired and a fresh one signs in', async () => {
-  const userId = await createUser();
-  try {
-    const minted = await createMintedIdentity(userId);
-    await withLocalSite(async ({ base, sentMail }) => {
-      const manifest = await seed(base, userId, 'expired_code');
-      const codeFromMail = () =>
-        /sign-in code is (\d{6})/.exec(lastMailTo(sentMail, minted.email))?.[1] ?? '';
-      await postForm(base, pagePath(manifest, '/login/code'), { email: minted.email });
-      const stale = await postForm(base, pagePath(manifest, '/login/code/verify'), {
-        email: minted.email,
-        code: codeFromMail(),
-      });
-      assert((await stale.text()).includes('has expired'), 'the first code must be expired');
-      await postForm(base, pagePath(manifest, '/login/code'), { email: minted.email });
-      const verified = await postForm(base, pagePath(manifest, '/login/code/verify'), {
-        email: minted.email,
-        code: codeFromMail(),
-      });
-      assert(verified.status === 303, 'a fresh code must sign in');
-      const report = await fetchReport(base, manifest.siteId);
-      assert(
-        JSON.stringify(trail(report)) ===
-          JSON.stringify([
-            'code_request:code_sent',
-            'code_verify:rejected:expired_code',
-            'code_request:code_sent',
-            'code_verify:signed_in',
-          ]),
-        `unexpected trail ${trail(report)}`
-      );
-    });
-  } finally {
-    await cleanup(userId);
-  }
-});
-
-test('magic_link: the emailed link signs in once', async () => {
-  const userId = await createUser();
-  try {
-    const minted = await createMintedIdentity(userId);
-    await withLocalSite(async ({ base, sentMail }) => {
-      const manifest = await seed(base, userId, 'magic_link');
-      const requested = await postForm(base, pagePath(manifest, '/login/code'), {
-        email: minted.email,
-      });
-      assert(
-        (requested.headers.get('location') ?? '').includes('/login/link/sent'),
-        'a link site must not show a code form'
-      );
-      const body = lastMailTo(sentMail, minted.email);
-      assert(!/\b\d{6}\b/.test(body.replace(/https?:\S+/g, '')), 'the mail must carry no code');
-      const link = /https?:\S+/.exec(body)?.[0] ?? '';
-      assert(
-        link.startsWith(`${base}${AUTH_TEST_SITE_BASE_PATH}/${manifest.siteId}/login/link?`),
-        `link ${link}`
-      );
-      const opened = await fetch(link, { redirect: 'manual' });
-      assert(opened.status === 303 && sessionCookie(opened) !== '', 'the link must sign in');
-      const again = await fetch(link, { redirect: 'manual' });
-      assert(again.status === 200, 'a used link must not sign in again');
-      const report = await fetchReport(base, manifest.siteId);
-      assert(
-        report.sessions.length === 1 && report.sessions[0]?.method === 'magic_link',
-        `one link session expected: ${JSON.stringify(report.sessions)}`
-      );
-    });
-  } finally {
-    await cleanup(userId);
-  }
-});
-
-test('minted_sms_otp: the texted code signs in the account on the agent phone', async () => {
-  const userId = await createUser();
-  try {
-    const minted = await createMintedIdentity(userId, '+15555550142');
-    await withLocalSite(async ({ base }) => {
-      const manifest = await seed(base, userId, 'minted_sms_otp');
-      assert(manifest.mintedPhone === minted.phone, `minted phone ${manifest.mintedPhone}`);
-      const login = await (await getPage(base, pagePath(manifest, '/login'))).text();
-      assert(!login.includes('type="password"'), 'a phone-only site has no password form');
-      assert(login.includes('Text me a sign-in code'), 'text option expected');
-      const requested = await postForm(base, pagePath(manifest, '/login/sms'), {
-        phone: '(555) 555-0142',
-      });
-      assert(requested.status === 303, 'a text request redirects to code entry');
-      const code = findSite(manifest.siteId)?.codes.find(
-        (issued) => issued.purpose === 'sms'
-      )?.code;
-      assert(code !== undefined, 'a code must be issued for the phone on the account');
-      const verified = await postForm(base, pagePath(manifest, '/login/sms/verify'), {
-        phone: '+1 555 555 0142',
-        code,
-      });
-      assert(verified.status === 303, 'the texted code must sign in');
-      const report = await fetchReport(base, manifest.siteId);
-      assert(report.sessions[0]?.method === 'sms_code', 'sms session expected');
-      assert(report.attempts[0]?.kind === 'sms_request', 'the request is logged');
-    });
-  } finally {
-    await cleanup(userId);
-  }
-});
-
-test('email_otp: the code goes to the inbox the user connected', async () => {
-  const userId = await createUser('Avery Ross');
-  const inbox = `avery.${userId.slice(-8)}@inbox.example`;
-  try {
-    await createMintedIdentity(userId);
-    const integration = await prisma.integration.create({
-      data: {
-        userId,
-        name: 'gmail',
-        type: IntegrationType.TOOL_SETUP,
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-      },
-    });
-    await prisma.emailIntegrationCredential.create({
-      data: {
-        userId,
-        integrationId: integration.id,
-        provider: EmailProvider.GMAIL,
-        email: inbox,
-        accessToken: 'access-token',
-        refreshToken: 'refresh-token',
-      },
-    });
-    await withLocalSite(async ({ base, sentMail }) => {
-      const manifest = await seed(base, userId, 'email_otp');
-      assert(manifest.expectedSignInEmail === inbox, `account must live under the user's inbox`);
-      assert(manifest.authOptionsPreview.passwordUsernames.length === 0, 'nothing is saved');
-      await postForm(base, pagePath(manifest, '/login/code'), { email: inbox });
-      const code = /sign-in code is (\d{6})/.exec(lastMailTo(sentMail, inbox))?.[1] ?? '';
-      assert(code !== '', 'the code must be mailed to the connected inbox');
-      const verified = await postForm(base, pagePath(manifest, '/login/code/verify'), {
-        email: inbox,
-        code,
-      });
-      assert(verified.status === 303, 'the code must sign in');
-      const report = await fetchReport(base, manifest.siteId);
-      assert(report.sessions[0]?.email === inbox, 'signed in as the connected inbox account');
-    });
-  } finally {
-    await prisma.emailIntegrationCredential.deleteMany({ where: { userId } });
-    await prisma.integration.deleteMany({ where: { userId } });
     await cleanup(userId);
   }
 });

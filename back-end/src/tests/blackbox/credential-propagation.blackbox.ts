@@ -20,6 +20,7 @@ import {
   tryCreatePropagationMarker,
 } from '../../domains/credential-propagation/repo';
 import { propagateBrowserRunCredentials } from '../../providers/credentialPropagation';
+import { retryCases } from './credential-propagation.retry.cases';
 
 config();
 
@@ -577,7 +578,7 @@ test('provider browser-run propagation disables a failed passkey end to end', as
 
 async function main() {
   const results: Array<{ name: string; passed: boolean; error?: string; duration: number }> = [];
-  for (const { name, fn } of tests) {
+  for (const { name, fn } of [...tests, ...retryCases]) {
     const start = Date.now();
     try {
       await fn();
@@ -592,7 +593,7 @@ async function main() {
     }
   }
 
-  console.log(`Credential Propagation Black-box Tests (${tests.length} cases, runId=${RUN_ID})`);
+  console.log(`Credential Propagation Black-box Tests (${results.length} cases, runId=${RUN_ID})`);
   for (const result of results) {
     const status = result.passed ? 'PASS' : 'FAIL';
     console.log(

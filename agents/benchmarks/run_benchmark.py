@@ -14102,9 +14102,10 @@ def _parallel_task_runners(
     # The cross-process lock is held by the task runner below. Keep a local
     # semaphore too so one batch does not spin many waiters on the file lock.
     payment_surface = asyncio.Semaphore(1)
-    # The user's agent identity owns one inbox and one phone. Hosted-auth sites
-    # that send codes there cannot tell lanes apart, so concurrent lanes would
-    # read (and burn) each other's codes. One at a time; other work overlaps.
+    # The user's agent identity owns one inbox and one phone, and every browser
+    # agent of that user is handed the codes that arrive there. Hosted-auth
+    # lanes therefore run one at a time; other work overlaps. Run several
+    # stacks side by side for parallelism: each stack mints its own identity.
     agent_inbox = asyncio.Semaphore(1)
 
     async def run_with_batch_limit(task: BenchmarkTask) -> TaskResult:
@@ -14127,7 +14128,7 @@ def _parallel_task_runners(
         return await run_with_batch_limit(task)
 
     async def run_with_inbox_limit(task: BenchmarkTask) -> TaskResult:
-        if auth_test_site.uses_shared_inbox(getattr(task, "environment", None)):
+        if auth_test_site.shares_agent_inbox(getattr(task, "environment", None)):
             async with agent_inbox:
                 return await run_with_other_surface_limits(task)
         return await run_with_other_surface_limits(task)
