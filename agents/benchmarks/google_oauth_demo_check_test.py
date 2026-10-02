@@ -2,7 +2,7 @@ import copy
 import json
 
 from benchmarks.google_oauth_demo_check import check_google_oauth_demo_trace
-from domains.api_request.google_oauth_demo_fixture import run_fixture
+from providers.fast_cache.google_oauth_demo_fixture import run_fixture
 
 
 def _transcript():

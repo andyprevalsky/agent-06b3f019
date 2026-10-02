@@ -7,6 +7,7 @@ import os
 from typing import Any, Mapping, Optional
 
 from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
+from utils.oai_demo import is_oai_demo_goal, is_oai_demo_mass_agent_task
 
 # External service keys
 STEEL_API_KEY = os.environ.get("STEEL_API_KEY", "")
@@ -51,8 +52,6 @@ def browser_start_to_close_timeout_minutes(
     Polar / high BROWSER_MAX_ITERATIONS runs scale the ceiling with the step
     budget (~30m per 100 steps, matching Odysseys Opus wall-clock at 100 steps).
     """
-    from domains.spawn_agent.config import is_oai_demo_goal, is_oai_demo_mass_agent_task
-
     demo = is_oai_demo_goal(goal)
     if workflow_instance is not None:
         demo = demo or is_oai_demo_mass_agent_task(workflow_instance)
@@ -67,9 +66,9 @@ def browser_start_to_close_timeout_minutes(
 
 def skip_browser_network_recording(*, fast_mode: bool, goal: str = "") -> bool:
     """Skip CDP Network.enable only on the demo Fast Mode tree."""
-    from domains.spawn_agent.config import is_oai_demo_goal
-
     return bool(fast_mode and is_oai_demo_goal(goal))
+
+
 HEARTBEAT_TIMEOUT_SECONDS = 120
 # A background task heartbeats at this cadence independent of the main loop, so a
 # CPU-bound bot-challenge that freezes the page renderer (and every CDP call) for
@@ -80,6 +79,12 @@ HEARTBEAT_KEEPALIVE_SECONDS = 15
 # restart from scratch and can duplicate those writes, so each activity gets one
 # attempt within the full timeout.
 MAX_ACTIVITY_ATTEMPTS = 1
+# Activity return when a deploy drains its worker (graceful shutdown) or
+# supersedes its generation, or the reused provider session is about to expire:
+# the browser task checkpointed at a step boundary and the manager restarts it
+# from the same step on a live worker/generation/session.
+BROWSER_DRAIN_YIELD_STATUS = "yielded_for_deploy_drain"
+BROWSER_SESSION_EXPIRING = "browser_session_expiring"
 BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS = int(os.getenv("BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS", "45"))
 # Terminal disconnect before payment/write-lock return must not block the
 # workflow forever when CDP/session.stop() hangs after a dead Kernel session.
@@ -161,6 +166,11 @@ BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS = int(
     os.getenv("BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS", str(NAVIGATE_TO_URL_TIMEOUT_SECONDS + 30))
 )
 BROWSER_SUPERVISOR_MAX_RECOVERIES = int(os.getenv("BROWSER_SUPERVISOR_MAX_RECOVERIES", "8"))
+# A resumed task may reuse a live provider session only while it outlives one
+# more supervised step plus teardown (recording finalize + disconnect); the
+# provider releases it at its absolute lifetime even with CDP attached. Mirrors
+# back-end/src/providers/steel/sessionLifetime.ts BROWSER_SESSION_MIN_REMAINING_MS.
+BROWSER_SESSION_MIN_REMAINING_SECONDS = 420
 BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS = float(os.getenv("BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS", "5"))
 
 # Soft/optional get_browser_state budget (post-verifier reject screenshot, etc.).

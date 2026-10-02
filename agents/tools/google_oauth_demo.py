@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from domains.api_request.google_oauth_demo_fixture import matches_demo_goal, run_fixture
+from providers.fast_cache.google_oauth_demo_fixture import matches_demo_goal, run_fixture
 from tools.base import EventType, MessageStatus, ToolEvent
 
 
