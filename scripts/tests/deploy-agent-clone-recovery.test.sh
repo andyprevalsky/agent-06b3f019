@@ -54,6 +54,14 @@ elif args[:2] == ['machine', 'clone']:
     print(f'Machine {new_id} has been created...')
 elif args[:2] == ['machine', 'update']:
     assert '--skip-start' in args and '--skip-health-checks' in args
+    failures = Path(os.environ['FAKE_FLY_UPDATE_FAILURES'])
+    remaining = int(failures.read_text())
+    if remaining > 0:
+        failures.write_text(str(remaining - 1))
+        journal.write_text(journal.read_text() + 'update-408\n')
+        print(f'Error: could not update machine {args[2]}: failed to update VM {args[2]}: '
+              'request returned non-2xx status: 408:  (Request ID: fake-iad)', file=sys.stderr)
+        sys.exit(1)
     machine = next(m for m in machines if m['id'] == args[2])
     for pos, arg in enumerate(args):
         if arg == '--env':
@@ -71,9 +79,10 @@ else:
 PY
 chmod +x "$TMP/bin/"*
 
-run_case() {
+seed_state() {
   local orphans="$1"
-  local previous_hash="${2:-old}"
+  local previous_hash="$2"
+  printf '%s' "$3" > "$TMP/update-failures"
   python3 - "$TMP/state.json" "$orphans" "$previous_hash" <<'PY'
 import json, sys
 orphans = int(sys.argv[2])
@@ -88,20 +97,34 @@ for i in range(orphans):
 open(sys.argv[1], 'w').write(json.dumps(machines))
 PY
   : > "$TMP/journal"
+}
+
+run_cutover() {
   PATH="$TMP/bin:$PATH" FAKE_FLY_STATE="$TMP/state.json" \
-    FAKE_FLY_JOURNAL="$TMP/journal" FLY_API_TOKEN=fake APP=test \
+    FAKE_FLY_JOURNAL="$TMP/journal" FAKE_FLY_UPDATE_FAILURES="$TMP/update-failures" \
+    FLY_API_TOKEN=fake APP=test \
     SURFACE_HASH=abc GENERATION_QUEUE=navi-agent-tasks@abc \
     BUILD_ID=build DEPLOYMENT_TOKEN=token \
-    bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/output"
-  python3 - "$TMP/state.json" "$TMP/journal" "$orphans" <<'PY'
+    bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/output" 2>&1
+}
+
+run_case() {
+  local orphans="$1"
+  local update_failures="${3:-0}"
+  seed_state "$orphans" "${2:-old}" "$update_failures"
+  run_cutover || { cat "$TMP/output" >&2; echo "FAIL: cutover exited non-zero" >&2; exit 1; }
+  python3 - "$TMP/state.json" "$TMP/journal" "$orphans" "$update_failures" <<'PY'
 import json, sys
 machines = json.load(open(sys.argv[1]))
 journal = open(sys.argv[2]).read()
 orphans = int(sys.argv[3])
+update_failures = int(sys.argv[4])
 new = [m for m in machines if m['config']['env'].get('TEMPORAL_WORKER_SURFACE_HASH') == 'abc']
 assert len(new) == 8 and all(m['state'] == 'started' for m in new), (len(new), new, journal)
+assert len(machines) == 9, ('a retried update must not clone extra machines', machines)
 assert journal.count('clone\n') == 8 - orphans, journal
 assert journal.count('update ') == 8, journal
+assert journal.count('update-408\n') == update_failures, journal
 assert journal.count('flip\n') == 1, journal
 PY
 }
@@ -109,4 +132,17 @@ PY
 run_case 8 # retry adopts every clone created by a previous failed attempt
 run_case 8 abc # retry restarts machines already updated to the target hash
 run_case 0 # fresh rollout clones with --detach and configures every machine
+run_case 0 old 2 # Fly Machines API 408s on update are retried in-run, not fatal
+
+seed_state 0 old 4
+if run_cutover; then
+  echo "FAIL: cutover succeeded although every machine update attempt failed" >&2
+  exit 1
+fi
+grep -q 'failed after 4 attempts' "$TMP/output" ||
+  { cat "$TMP/output" >&2; echo "FAIL: exhausted update retries were not reported" >&2; exit 1; }
+if grep -q '^flip$' "$TMP/journal"; then
+  echo "FAIL: queue pointer flipped although a new-generation machine never configured" >&2
+  exit 1
+fi
 echo 'PASS: cooperative Fly clone recovery and fresh generation provisioning'

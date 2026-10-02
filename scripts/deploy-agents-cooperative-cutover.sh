@@ -77,15 +77,29 @@ candidate_ids_for_hash() {
   '
 }
 
+# The Machines API intermittently answers an update with 408/5xx (run
+# 36958270333). The update is safe to repeat — image and env are fixed for this
+# rollout — so retry it in-run instead of failing the whole cutover.
+MACHINE_UPDATE_ATTEMPTS="${MACHINE_UPDATE_ATTEMPTS:-4}"
 configure_new_machine() {
-  local id="$1"
-  flyctl machine update "$id" -a "$APP" --image "$IMAGE_REF" --yes \
-    --skip-start --skip-health-checks \
-    --env "TEMPORAL_WORKER_BUILD_ID=$BUILD_ID" \
-    --env "TEMPORAL_WORKER_SURFACE_HASH=$SURFACE_HASH" \
-    --env "TEMPORAL_WORKER_DEPLOYMENT_TOKEN=$DEPLOYMENT_TOKEN" \
-    --env "TEMPORAL_WORKER_REQUIRE_ACTIVATION=0"
-  flyctl machines start "$id" -a "$APP" || true
+  local id="$1" attempt
+  for ((attempt = 1; attempt <= MACHINE_UPDATE_ATTEMPTS; attempt++)); do
+    if flyctl machine update "$id" -a "$APP" --image "$IMAGE_REF" --yes \
+      --skip-start --skip-health-checks \
+      --env "TEMPORAL_WORKER_BUILD_ID=$BUILD_ID" \
+      --env "TEMPORAL_WORKER_SURFACE_HASH=$SURFACE_HASH" \
+      --env "TEMPORAL_WORKER_DEPLOYMENT_TOKEN=$DEPLOYMENT_TOKEN" \
+      --env "TEMPORAL_WORKER_REQUIRE_ACTIVATION=0"; then
+      flyctl machines start "$id" -a "$APP" || true
+      return 0
+    fi
+    if [ "$attempt" -lt "$MACHINE_UPDATE_ATTEMPTS" ]; then
+      echo "⚠️  machine update $id failed (attempt $attempt/$MACHINE_UPDATE_ATTEMPTS); retrying in $((attempt * 15))s" >&2
+      sleep $((attempt * 15))
+    fi
+  done
+  echo "❌ machine update $id failed after $MACHINE_UPDATE_ATTEMPTS attempts" >&2
+  return 1
 }
 
 all_started_ids() {
