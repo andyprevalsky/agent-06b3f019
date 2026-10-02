@@ -1432,7 +1432,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert (restored.token_count, restored.tokens_in, restored.tokens_out) == (950, 680, 270)
     assert (restored.tree_tokens_in, restored.tree_tokens_out) == (900, 350)
     assert restored._signal_responses == {"approval-1": "APPROVED"}
-    assert restored._pending_approval_resume == {"request_id": "approval-1"}
+    assert restored._pending_approval_resume == {"request_id": "approval-1", "question": ""}
     assert restored._response_schema_revision == 3
     assert restored.pending_children == {"child-1"}
     assert restored.child_workflow_ids == {"child-1": "child-workflow"}

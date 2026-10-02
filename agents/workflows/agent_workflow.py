@@ -96,7 +96,11 @@ with workflow.unsafe.imports_passed_through():
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
-    from tools.request_user_approval import UserRejectedError, request_user_approval_direct
+    from tools.request_user_approval import (
+        UserRejectedError,
+        request_user_approval_direct,
+        stash_pending_approvals_from_context,
+    )
     from tools.request_user_signup import request_user_signup
     from tools.send_message_to_user import send_message_to_user
     from tools.set_plan import set_plan
@@ -673,6 +677,25 @@ def _structured_from_payload(payload: Any, names: List[str]) -> Dict[str, Any]:
     return found
 
 
+def _canonical_pending_approval_resume(pending_approval: Any) -> Optional[Dict[str, Any]]:
+    """Normalize approval resume so serialize and restore stay symmetric."""
+    if isinstance(pending_approval, dict):
+        raw_requests = pending_approval.get("requests")
+        if isinstance(raw_requests, list):
+            return {"requests": list(raw_requests)}
+        request_id = pending_approval.get("request_id")
+        if isinstance(request_id, str) and request_id:
+            question = pending_approval.get("question")
+            return {
+                "request_id": request_id,
+                "question": question if isinstance(question, str) else "",
+            }
+        return None
+    if isinstance(pending_approval, str) and pending_approval:
+        return {"request_id": pending_approval, "question": ""}
+    return None
+
+
 @workflow.defn
 class AgentWorkflow:
     """
@@ -942,14 +965,9 @@ class AgentWorkflow:
         )
         if isinstance(runtime.get("signal_responses"), dict):
             self._signal_responses = dict(runtime["signal_responses"])
-        pending_approval = runtime.get("pending_approval_resume")
-        if isinstance(pending_approval, dict):
-            request_id = pending_approval.get("request_id")
-            self._pending_approval_resume = (
-                {"request_id": request_id} if isinstance(request_id, str) and request_id else None
-            )
-        elif isinstance(pending_approval, str) and pending_approval:
-            self._pending_approval_resume = {"request_id": pending_approval}
+        self._pending_approval_resume = _canonical_pending_approval_resume(
+            runtime.get("pending_approval_resume")
+        )
         if isinstance(runtime.get("response_schema_feedback"), list):
             self._response_schema_feedback = [
                 value for value in runtime["response_schema_feedback"] if isinstance(value, str)
@@ -1157,10 +1175,8 @@ class AgentWorkflow:
                 "has_new_messages": self._has_new_messages,
                 "last_signal_response": self._last_signal_response,
                 "signal_responses": dict(self._signal_responses),
-                "pending_approval_resume": (
-                    dict(self._pending_approval_resume)
-                    if isinstance(self._pending_approval_resume, dict)
-                    else None
+                "pending_approval_resume": _canonical_pending_approval_resume(
+                    self._pending_approval_resume
                 ),
                 "response_schema_feedback": list(self._response_schema_feedback),
                 "response_schema_revision": self._response_schema_revision,
@@ -4660,6 +4676,9 @@ class AgentWorkflow:
         if result["status"] == "generation_handoff":
             # Cooperative cutover: current tools/LLM finished; move to the live
             # generation queue before the next LLM call. Do NOT terminate.
+            # Cancelled sibling approval waits never enter GenerationHandoffRequested,
+            # so re-arm every still-open approval chip from the transcript.
+            stash_pending_approvals_from_context(self)
             handoff_queue = result.get("handoff_task_queue")
             if not isinstance(handoff_queue, str) or not handoff_queue.strip():
                 workflow.logger.error("generation_handoff missing handoff_task_queue; failing open")

@@ -48,14 +48,19 @@ def _attention_request_id_from_metadata(metadata: Dict[str, Any]) -> Optional[st
     return None
 
 
-def pending_approval_request_to_resume(messages: list[Dict[str, Any]]) -> Optional[str]:
-    """Return the attn_id of an approval wait that must be re-armed after cutover.
+def pending_approval_requests_to_resume(messages: list[Dict[str, Any]]) -> list[Dict[str, str]]:
+    """Return every approval wait that must be re-armed after cutover.
 
     ``wait_for`` already resumes its original target across continue_as_new.
     Approval waits did not: the replacement run created a new row, SMS approved
     the original attn_id, and the live wait (keyed on the new id) ignored it.
+
+    DAG cutover can cancel sibling approval waits without entering
+    ``GenerationHandoffRequested``. Those rows stay in the transcript as
+    in-progress chips and must be stashed too, or SMS can approve an id the
+    continued workflow is no longer waiting on.
     """
-    groups: Dict[str, Dict[str, bool]] = {}
+    groups: Dict[str, Dict[str, Any]] = {}
     order: list[str] = []
     for msg in messages:
         if msg.get("role") != "TOOL":
@@ -68,13 +73,36 @@ def pending_approval_request_to_resume(messages: list[Dict[str, Any]]) -> Option
             continue
         group = groups.get(request_id)
         if group is None:
-            group = {"completed": False, "interrupted": False, "in_progress": False}
+            group = {
+                "completed": False,
+                "interrupted": False,
+                "in_progress": False,
+                "question": "",
+            }
             groups[request_id] = group
             order.append(request_id)
 
         status = str(metadata.get("toolStatus") or "").upper()
         error_code = metadata.get("errorCode")
         text = str(msg.get("text") or msg.get("message") or "")
+        attention_message = metadata.get("attentionMessage")
+        nested = metadata.get("requestUserApproval")
+        nested_question = ""
+        if isinstance(nested, dict):
+            raw_question = nested.get("question")
+            if isinstance(raw_question, str):
+                nested_question = raw_question
+        if isinstance(attention_message, str) and attention_message:
+            group["question"] = attention_message
+        elif nested_question:
+            group["question"] = nested_question
+        elif (
+            status == "IN_PROGRESS"
+            and text
+            and text != DEPLOY_INTERRUPTED_TOOL_MESSAGE
+            and not group["question"]
+        ):
+            group["question"] = text
         if error_code == DEPLOY_INTERRUPTED_ERROR_CODE or text == DEPLOY_INTERRUPTED_TOOL_MESSAGE:
             group["interrupted"] = True
         elif status in ("FINISHED", "SUCCESS", "COMPLETED"):
@@ -82,38 +110,127 @@ def pending_approval_request_to_resume(messages: list[Dict[str, Any]]) -> Option
         elif status == "IN_PROGRESS":
             group["in_progress"] = True
 
-    for request_id in reversed(order):
+    pending: list[Dict[str, str]] = []
+    for request_id in order:
         group = groups[request_id]
         if group["completed"]:
-            return None
+            continue
         if group["interrupted"] or group["in_progress"]:
-            return request_id
+            pending.append(
+                {
+                    "request_id": request_id,
+                    "question": str(group.get("question") or ""),
+                }
+            )
+    return pending
+
+
+def pending_approval_request_to_resume(messages: list[Dict[str, Any]]) -> Optional[str]:
+    """Return the newest still-open approval attn_id, or None."""
+    pending = pending_approval_requests_to_resume(messages)
+    if not pending:
         return None
+    return pending[-1]["request_id"]
+
+
+def _resume_entries(pending: Any) -> list[Dict[str, str]]:
+    if isinstance(pending, dict):
+        raw_requests = pending.get("requests")
+        if isinstance(raw_requests, list):
+            entries: list[Dict[str, str]] = []
+            for item in raw_requests:
+                if not isinstance(item, dict):
+                    continue
+                request_id = item.get("request_id")
+                if isinstance(request_id, str) and request_id:
+                    question = item.get("question")
+                    entries.append(
+                        {
+                            "request_id": request_id,
+                            "question": question if isinstance(question, str) else "",
+                        }
+                    )
+            return entries
+        request_id = pending.get("request_id")
+        if isinstance(request_id, str) and request_id:
+            question = pending.get("question")
+            return [
+                {
+                    "request_id": request_id,
+                    "question": question if isinstance(question, str) else "",
+                }
+            ]
+    if isinstance(pending, str) and pending:
+        return [{"request_id": pending, "question": ""}]
+    return []
+
+
+def _set_resume_entries(workflow_instance: Any, entries: list[Dict[str, str]]) -> None:
+    if not entries:
+        workflow_instance._pending_approval_resume = None
+        return
+    if len(entries) == 1:
+        workflow_instance._pending_approval_resume = {
+            "request_id": entries[0]["request_id"],
+            "question": entries[0]["question"],
+        }
+        return
+    workflow_instance._pending_approval_resume = {"requests": list(entries)}
+
+
+def _stashed_approval_request_id(
+    workflow_instance: Any, question: Optional[str] = None
+) -> Optional[str]:
+    entries = _resume_entries(getattr(workflow_instance, "_pending_approval_resume", None))
+    if not entries:
+        entries = pending_approval_requests_to_resume(
+            getattr(workflow_instance, "context", None) or []
+        )
+        if entries:
+            _set_resume_entries(workflow_instance, entries)
+    if not entries:
+        return None
+    if question:
+        for entry in entries:
+            if entry["question"] == question:
+                return entry["request_id"]
+        return None
+    if len(entries) == 1:
+        return entries[0]["request_id"]
     return None
 
 
-def _stashed_approval_request_id(workflow_instance: Any) -> Optional[str]:
-    pending = getattr(workflow_instance, "_pending_approval_resume", None)
-    if isinstance(pending, dict):
-        request_id = pending.get("request_id")
-        if isinstance(request_id, str) and request_id:
-            return request_id
-    if isinstance(pending, str) and pending:
-        return pending
-    return pending_approval_request_to_resume(getattr(workflow_instance, "context", None) or [])
-
-
-def _stash_approval_resume(workflow_instance: Any, request_id: str) -> None:
-    if request_id:
-        workflow_instance._pending_approval_resume = {"request_id": request_id}
+def _stash_approval_resume(
+    workflow_instance: Any, request_id: str, question: str = ""
+) -> None:
+    if not request_id:
+        return
+    entries = _resume_entries(getattr(workflow_instance, "_pending_approval_resume", None))
+    for entry in entries:
+        if entry["request_id"] == request_id:
+            if question and not entry["question"]:
+                entry["question"] = question
+            _set_resume_entries(workflow_instance, entries)
+            return
+    entries.append({"request_id": request_id, "question": question})
+    _set_resume_entries(workflow_instance, entries)
 
 
 def _clear_approval_resume(workflow_instance: Any, request_id: str) -> None:
-    pending = getattr(workflow_instance, "_pending_approval_resume", None)
-    if isinstance(pending, dict) and pending.get("request_id") == request_id:
-        workflow_instance._pending_approval_resume = None
-    elif pending == request_id:
-        workflow_instance._pending_approval_resume = None
+    entries = [
+        entry
+        for entry in _resume_entries(getattr(workflow_instance, "_pending_approval_resume", None))
+        if entry["request_id"] != request_id
+    ]
+    _set_resume_entries(workflow_instance, entries)
+
+
+def stash_pending_approvals_from_context(workflow_instance: Any) -> None:
+    """Re-arm every still-open approval wait found in the transcript."""
+    for item in pending_approval_requests_to_resume(
+        getattr(workflow_instance, "context", None) or []
+    ):
+        _stash_approval_resume(workflow_instance, item["request_id"], item["question"])
 
 
 def _build_approval_completion_message(question: str, response_text: str) -> str:
@@ -162,7 +279,7 @@ class RequestUserApprovalManager(ToolManager):
             user_id = workflow_instance.user_id
             agent_id = workflow_instance.agent_id
 
-            request_id = _stashed_approval_request_id(workflow_instance)
+            request_id = _stashed_approval_request_id(workflow_instance, question)
             if not request_id:
                 request_id = await workflow.execute_activity(
                     create_approval_request_activity,
@@ -220,7 +337,7 @@ class RequestUserApprovalManager(ToolManager):
             _clear_approval_resume(workflow_instance, request_id)
 
         except GenerationHandoffRequested:
-            _stash_approval_resume(workflow_instance, request_id)
+            _stash_approval_resume(workflow_instance, request_id, question)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="🔐 Requesting user approval",
@@ -299,7 +416,7 @@ async def request_user_approval_direct(
     # after continue_as_new so a late SMS approve of the original attn_id
     # still unblocks this wait.
     try:
-        request_id = _stashed_approval_request_id(workflow_instance)
+        request_id = _stashed_approval_request_id(workflow_instance, question)
         reused_request = bool(request_id)
         if not request_id:
             request_id = await workflow.execute_activity(
@@ -397,7 +514,7 @@ async def request_user_approval_direct(
             workflow_mod=workflow,
         )
     except GenerationHandoffRequested:
-        _stash_approval_resume(workflow_instance, request_id)
+        _stash_approval_resume(workflow_instance, request_id, question)
         interrupt_event = ToolEvent(
             type=EventType.POST_MESSAGE,
             title="🔐 Requesting user approval",

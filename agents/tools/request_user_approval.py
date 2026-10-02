@@ -14,6 +14,7 @@ from domains.request_user_approval.service import (
     get_manager,
     request_user_approval_direct,
     request_user_attention_direct,
+    stash_pending_approvals_from_context,
 )
 from domains.request_user_approval.types import UserRejectedError
 
@@ -26,4 +27,5 @@ __all__ = [
     "request_user_attention_direct",
     "request_user_approval",
     "request_user_approval_direct",
+    "stash_pending_approvals_from_context",
 ]
