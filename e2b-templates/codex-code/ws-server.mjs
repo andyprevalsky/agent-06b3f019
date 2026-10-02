@@ -51,6 +51,11 @@ let stdoutLineBuffer = "";
 // surfaces mid-run — a null-credential fallback in the backend cannot catch it.
 let oauthFallbackReason = null;
 const clients = new Set();
+// After Codex exits the server keeps serving its final buffer so an agent
+// activity that detached for a deploy (or crashed and is retried after its 5m
+// heartbeat timeout) can reattach and read the result. Closing the session
+// (SIGTERM / sandbox kill) still exits immediately.
+const REATTACH_LINGER_MS = 15 * 60 * 1000;
 
 function classifyOAuthFallbackReason(message) {
   // Restricted to explicit ChatGPT/OpenAI plan-exhaustion wording. Broad terms
@@ -622,4 +627,4 @@ appendEvent({
 });
 log("info", "Codex exited", { code: exitCode, signal });
 broadcast("exit", exitCode);
-setTimeout(() => shutdown(exitCode ?? 0), 120000);
+setTimeout(() => shutdown(exitCode ?? 0), REATTACH_LINGER_MS);

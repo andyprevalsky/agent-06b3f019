@@ -23,7 +23,7 @@ async def api_request_activity(
     url = str(request_payload.get("url") or "")
     activity.heartbeat(f"{method} {url[:80]}")
 
-    from domains.api_request.google_oauth_demo_fixture import DEMO_URL, matches_demo_goal, run_fixture
+    from providers.fast_cache.google_oauth_demo_fixture import DEMO_URL, matches_demo_goal, run_fixture
 
     if url == DEMO_URL:
         from providers.fast_cache.client import resolve_agent_fast_mode

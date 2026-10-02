@@ -2593,7 +2593,7 @@ def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
     andy_goal = aman_goal.replace("Aman Gottumukkala", "Andy Prevalsky")
     assert "Andy Prevalsky" in andy_goal
     assert normalize.goal_hash(andy_goal) == normalize.goal_hash(aman_goal)
-    from domains.spawn_agent.oai_demo_july import JULY_GP_GOAL_HASHES
+    from utils.oai_demo_july import JULY_GP_GOAL_HASHES
 
     assert normalize.goal_hash(andy_goal) == JULY_GP_GOAL_HASHES["Eric Topol"]
     sahil = andy_goal.replace("Dr. Eric Topol", "Sahil Bloom")
@@ -3486,7 +3486,7 @@ def _july_explore_casey_goal() -> str:
 
 
 def test_extract_oai_demo_creator_from_rank_template_and_free_text():
-    from domains.spawn_agent.oai_demo_july import (
+    from utils.oai_demo_july import (
         extract_oai_demo_creator_name,
         july_explore_goal_hash_for_goal,
     )

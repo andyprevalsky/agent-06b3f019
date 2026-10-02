@@ -1,7 +1,73 @@
 import assert from 'node:assert/strict';
+import type { Response } from 'express';
 import { TestPaymentError } from '../../domains/test-payment/errors';
 import { classifyLifecycleError } from '../../domains/test-payment/lifecycle-errors';
+import { respondTestPaymentError } from '../../domains/test-payment/routes.guards';
 import { AgentCardOrgRuntimeError } from '../../providers/agentcard/org-runtime';
+
+function fakeResponse(): { res: Response; sent: { status?: number; body?: unknown } } {
+  const sent: { status?: number; body?: unknown } = {};
+  const res = {
+    status(code: number) {
+      sent.status = code;
+      return res;
+    },
+    json(body: unknown) {
+      sent.body = body;
+      return res;
+    },
+    setHeader() {
+      return res;
+    },
+  };
+  return { res: res as unknown as Response, sent };
+}
+
+function captureStderr(run: () => void): string {
+  const original = process.stderr.write.bind(process.stderr);
+  let captured = '';
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    captured += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    run();
+  } finally {
+    process.stderr.write = original;
+  }
+  return captured;
+}
+
+// A 5xx TestPaymentError wraps an upstream failure; its cause must reach the backend log, not only
+// the client. The 2026-10-02 AgentCard "Invalid or expired organization token" 502s left a bare
+// `status=502` HTTP line and nothing else.
+{
+  const { res, sent } = fakeResponse();
+  const upstream =
+    'Benchmark AgentCard cardholder resolution failed: AgentCard Organization MCP ' +
+    'list_cardholders failed: Invalid or expired organization token';
+  const logged = captureStderr(() =>
+    respondTestPaymentError(
+      res,
+      new TestPaymentError(upstream, 502),
+      'Failed to configure benchmark AgentCard setup'
+    )
+  );
+  assert.equal(sent.status, 502);
+  assert.deepEqual(sent.body, { error: upstream });
+  assert.match(logged, /Failed to configure benchmark AgentCard setup/);
+  assert.match(logged, /Invalid or expired organization token/);
+}
+
+// A 4xx TestPaymentError is a validation outcome the client already sees; it stays out of the log.
+{
+  const { res, sent } = fakeResponse();
+  const logged = captureStderr(() =>
+    respondTestPaymentError(res, new TestPaymentError('userId is required', 400), 'fallback')
+  );
+  assert.equal(sent.status, 400);
+  assert.equal(logged, '');
+}
 
 // A domain error keeps its own status.
 {

@@ -19,7 +19,6 @@ from temporalio.worker import (
     Worker,
     WorkerTuner,
 )
-from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 # Load .env file — override=False ensures env vars inherited from run.sh
 # (e.g. TEMPORAL_TASK_QUEUE derived from CONDUCTOR_WORKSPACE_NAME) take
@@ -76,6 +75,7 @@ from domains.spawn_browser_agent_v3.handler import (
     spawn_browser_agent_activity_v3,
 )
 from domains.spawn_claude_code_agent.service import (
+    close_detached_code_session_activity,
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
 )
@@ -140,6 +140,7 @@ from helpers.summarize import summarize_and_filter_links
 from helpers.update_tokens import update_agent_tree_cost_activity
 from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.worker_generation import resolve_production_task_queue
+from helpers.workflow_sandbox import production_workflow_runner
 from helpers.world_model_runtime import world_model_step_activity
 from temporal_connection import temporal_connect_options
 from tools.people_search import people_search_activity  # not yet refactored into domains/
@@ -567,6 +568,40 @@ def _activity_admission_scale_threshold(current_machines: int) -> int:
     return max(2, math.ceil(current_machines * 0.20))
 
 
+async def _machine_in_flight_activities(machine: dict, http: httpx.AsyncClient) -> int | None:
+    """Return the activity slots in use on a peer machine, or None when unknown."""
+    ip = str(machine.get("private_ip") or "").strip()
+    if not ip:
+        return None
+    try:
+        resp = await http.get(f"http://[{ip}]:{HEALTH_CHECK_PORT}/metrics", timeout=1.0)
+        if resp.status_code != 200:
+            return None
+        value = _extract_metric_value(resp.text, "activity_slots_used")
+    except Exception as e:
+        logger.debug("Failed to scrape peer activity slots", machine_id=machine.get("id"), error=str(e))
+        return None
+    if value is None or math.isnan(value):
+        return None
+    return int(value)
+
+
+async def _idle_stop_candidates(candidates: list[dict], http: httpx.AsyncClient) -> tuple[list[dict], list[dict]]:
+    """Split stop candidates into (idle, busy_or_unknown).
+
+    Stopping a machine SIGTERMs its worker, and in-flight activities that
+    outlive the 5m shutdown grace (30m browser, claude-code) die with a
+    heartbeat timeout. Only machines that report zero in-flight activities are
+    safe to stop; an unknown count is treated as busy.
+    """
+    counts = await asyncio.gather(*(_machine_in_flight_activities(m, http) for m in candidates))
+    idle: list[dict] = []
+    busy: list[dict] = []
+    for machine, count in zip(candidates, counts, strict=True):
+        (idle if count == 0 else busy).append(machine)
+    return idle, busy
+
+
 async def _scale_fleet(desired: int, http: httpx.AsyncClient):
     """Start/stop Fly machines to reach desired count. Called by leader only.
 
@@ -619,7 +654,15 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient):
         elif desired < current:
             to_stop = current - desired
             candidates = [m for m in started if m["id"] != my_machine_id]
-            for m in candidates[:to_stop]:
+            idle, busy = await _idle_stop_candidates(candidates, http)
+            if len(idle) < to_stop:
+                logger.info(
+                    "Autoscaler: deferring scale-down of busy machines",
+                    wanted_to_stop=to_stop,
+                    idle_machines=len(idle),
+                    busy_machine_ids=[m["id"] for m in busy],
+                )
+            for m in idle[:to_stop]:
                 try:
                     await http.post(
                         f"{FLY_MACHINES_API}/apps/{fly_app}/machines/{m['id']}/stop",
@@ -994,26 +1037,6 @@ async def main():
     # Make client available to query_parent_state_activity
     set_temporal_client(client)
 
-    # Configure workflow sandbox to passthrough logging libraries
-    # These libraries use threading.local which isn't allowed in the sandbox,
-    # but they're only used in activities, not workflows
-    sandbox_restrictions = SandboxRestrictions.default.with_passthrough_modules(
-        "rich",
-        "rich.console",
-        "structlog.dev",
-        "markdown_it",
-        "markdown_it_py",
-        "pygments",
-        "httpx",
-        "sniffio",
-        # helpers.llm uses threading.Lock via OpenAI/instructor clients
-        # but workflow only calls activities via execute_activity, not directly
-        "helpers.llm",
-        # helpers.attachments downloads files from storage using httpx
-        # called from build_llm_messages when resolving file attachments
-        "helpers.attachments",
-    )
-
     activity_admission_snapshot = ActivityAdmissionSnapshot(
         maximum_slots=config.temporal.max_concurrent_activities,
         close_memory_percent=config.temporal.activity_admission_close_memory_percent,
@@ -1067,6 +1090,7 @@ async def main():
         spawn_browser_agent_activity_v3,
         resolve_code_agent_provider_activity,
         spawn_claude_code_activity,
+        close_detached_code_session_activity,
         web_search_activity,
         people_search_activity,
         web_fetch_activity,
@@ -1155,7 +1179,7 @@ async def main():
             task_queue=validation_task_queue,
             workflows=[AgentWorkflow],
             activities=registered_activities,
-            workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
+            workflow_runner=production_workflow_runner(),
         )
         set_worker_status(True, phase="standby", build_id=build_id)
         logger.info(
@@ -1232,7 +1256,7 @@ async def main():
         max_concurrent_activity_task_polls=config.temporal.max_concurrent_activity_task_polls,
         max_concurrent_workflow_task_polls=config.temporal.max_concurrent_workflow_task_polls,
         nonsticky_to_sticky_poll_ratio=config.temporal.nonsticky_to_sticky_poll_ratio,
-        workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
+        workflow_runner=production_workflow_runner(),
         # Stop polling on shutdown; let in-flight activities (incl. 30m browser) finish.
         graceful_shutdown_timeout=timedelta(seconds=shutdown_grace_seconds),
     )
