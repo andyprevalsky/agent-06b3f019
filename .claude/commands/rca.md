@@ -14,16 +14,6 @@ Read it completely immediately before composing the request. The automated
 production-alert mode remains non-interactive and therefore emits no chat
 approval request.
 
-For every user-facing `/RCA` report, including an approval request, use this
-order exactly: **FE LINK** first, then **TL;DR**, **Before Behavior**,
-**After Behavior**, **Downstream Implications**, and **Detail**. Place the
-required What failed, LLM dump, local reproduction, evaluator, fixture, and
-task-prompt evidence inside Detail. Do not add a separate Evidence section.
-The shared approval format's evidence and inline-diff requirements still apply.
-Use these exact Markdown section headings in that order: `## FE LINK`,
-`## TL;DR`, `## Before Behavior`, `## After Behavior`,
-`## Downstream Implications`, `## Detail`.
-
 **Prompt / LLM-visible text:** the approval message must paste the **exact
 diff inline** (unified diff or before→after with every added/removed line). A
 `path:line` link alone is incomplete — see the "MUST paste the exact diff
@@ -275,21 +265,21 @@ teaches the archive to lie.
 ## Output
 
 When the correct generalizable fix requires an approval-gated change, present
-which archive searches you ran and whether this is a
+the evidence, which archive searches you ran and whether this is a
 recurrence/relative/novel, a one-sentence root cause at the first-bad boundary,
 exact local repro command + recorded failure, and proposed generalizable fix.
 If that fix is a prompt edit, also present the Step 5b climb: the class you
 stopped at, the **next-deeper class** you tried, and why the more general
 solution failed to be coherent.
-Then stop at that approval boundary using the `/RCA` order above and the
-evidence requirements from `.claude/shared/approval-format.md`. Put the durable FE link
-first, then include a task-framed `What failed:` sentence in Detail
+Then stop at that approval boundary using the canonical approval narrative from
+`.claude/shared/approval-format.md`. Evidence must include a task-framed `What failed:` sentence, the durable FE link
 (`https://www.roselabs.ai/?agent-id=…` after
 `python3 scripts/publish_evidence_links.py`), last-call rendered LLM dump under
 `/opt/cursor/artifacts/rca_evidence/…`, numbered local-repro steps with a
 `Tests:` assertion and measured wall-clock, and Environment (evaluators with
 how they are checked, fixtures, task prompt). Put the unchanged repro's current
-failing result in Detail and the expected post-fix assertion in After Behavior.
+failing result in Evidence and Detail, and the expected post-fix assertion in
+After Behavior.
 
 When the fix is not approval-gated, do not produce an intermediate RCA-only
 handoff. Implement and verify it, archive the case, run `/deploy` to completion,
