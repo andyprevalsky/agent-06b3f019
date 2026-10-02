@@ -6,6 +6,7 @@ import {
 } from '../../providers/browser/kernelProxy';
 import { retryWithBackoff } from '../../providers/retry';
 import { browserUseEnabled } from '../../providers/browser/config';
+import { readBrowserUseSessionFile } from '../../providers/browser/browserUse';
 import { computeGrantBrowserProvider } from '../../domains/compute-grants/config';
 import { storedBrowserProvider } from '../../providers/browser/types';
 
@@ -37,6 +38,80 @@ export function assertStoredProviderFallback(): void {
   assert(storedBrowserProvider('kernel') === 'kernel', 'Kernel routing changed');
   assert(storedBrowserProvider('browser-use') === 'browser-use', 'Browser Use routing changed');
   assert(storedBrowserProvider('legacy') === 'steel', 'legacy browser row must use Steel');
+}
+
+/**
+ * A signed download URL that accepts the connection and never answers must be
+ * aborted by a bounded signal instead of pinning the session file read forever.
+ * `AbortSignal.timeout` is swapped for a controller the test fires, so the
+ * deadline elapses instantly without waiting out the real bound.
+ */
+export async function assertBrowserUseDownloadFetchIsBounded(): Promise<void> {
+  const previousFetch = globalThis.fetch;
+  const previousTimeout = AbortSignal.timeout;
+  const previousKey = process.env.BROWSER_USE_API_KEY;
+  const deadline = new AbortController();
+  const requestedTimeouts: number[] = [];
+  let downloadSignal: AbortSignal | undefined;
+  let markDownloadStarted = () => {};
+  const downloadStarted = new Promise<void>((resolve) => {
+    markDownloadStarted = resolve;
+  });
+  process.env.BROWSER_USE_API_KEY = 'test-browser-use-key';
+  AbortSignal.timeout = (ms: number) => {
+    requestedTimeouts.push(ms);
+    return deadline.signal;
+  };
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input));
+    if (url.hostname !== 'download.example') {
+      return Response.json({
+        files: [
+          {
+            path: 'stalled.pdf',
+            size: 1,
+            lastModified: '2026-10-01T00:00:00Z',
+            url: 'https://download.example/stalled.pdf',
+          },
+        ],
+        hasMore: false,
+        nextCursor: null,
+      });
+    }
+    downloadSignal = init?.signal ?? undefined;
+    markDownloadStarted();
+    const signal = init?.signal;
+    if (!signal) throw new Error('signed download fetch has no abort signal');
+    return new Promise<Response>((_resolve, reject) => {
+      if (signal.aborted) reject(signal.reason);
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  }) as typeof fetch;
+  try {
+    const outcome = readBrowserUseSessionFile('browser-use-session', 'stalled.pdf').then(
+      () => new Error('stalled download unexpectedly resolved'),
+      (error: unknown) => error
+    );
+    await Promise.race([downloadStarted, outcome]);
+    deadline.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+    const error = await outcome;
+    assert(
+      error instanceof Error && error.name === 'TimeoutError',
+      `stalled Browser Use download was not aborted: ${String(error)}`
+    );
+    assert(downloadSignal === deadline.signal, 'download fetch ignored the bounded signal');
+    assert(
+      requestedTimeouts.length === 1 &&
+        requestedTimeouts[0] > 0 &&
+        requestedTimeouts[0] <= 5 * 60_000,
+      `download fetch deadline is not a bounded timeout: ${JSON.stringify(requestedTimeouts)}`
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    AbortSignal.timeout = previousTimeout;
+    if (previousKey === undefined) delete process.env.BROWSER_USE_API_KEY;
+    else process.env.BROWSER_USE_API_KEY = previousKey;
+  }
 }
 
 export function assert(condition: unknown, message: string): void {

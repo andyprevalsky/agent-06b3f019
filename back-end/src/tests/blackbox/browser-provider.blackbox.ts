@@ -13,6 +13,7 @@ import {
 import { steel } from '../../providers/steel/session';
 import {
   assert,
+  assertBrowserUseDownloadFetchIsBounded,
   assertBrowserUseRolloutOptIn,
   assertKernelCityInventoryFallback,
   assertStoredProviderFallback,
@@ -147,6 +148,10 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     assertStoredProviderFallback,
   ],
   [
+    'Browser Use signed download fetch is aborted by a bounded deadline',
+    assertBrowserUseDownloadFetchIsBounded,
+  ],
+  [
     'Browser Use provisioning is blocked before any provider request when disabled',
     async () => {
       process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'false';
@@ -182,6 +187,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
           createBrowserUse: async (contextId, agentId, location, url, options) => {
             calls++;
             assert(contextId === 'context-1' && agentId === 'agent-1', 'wrong Browser Use owner');
+            if (location === undefined) throw new Error('Browser Use proxy location was lost');
             assert(
               location.country === 'US' && url === 'https://example.com',
               'wrong session input'
@@ -370,7 +376,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     'explicit Kernel proxy ID bypasses managed location proxies',
     () => {
       const mode = resolveKernelProxyMode('proxy-123');
-      assert(mode.kind === 'explicit', 'expected explicit proxy mode');
+      if (mode.kind !== 'explicit') throw new Error('expected explicit proxy mode');
       assert(mode.proxyId === 'proxy-123', 'expected configured proxy ID');
     },
   ],

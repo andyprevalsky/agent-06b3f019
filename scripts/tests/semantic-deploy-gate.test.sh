@@ -351,6 +351,31 @@ bash "$DESCEND_COMMAND_TEST"
 bash "$AUTO_RCA_WORKFLOW_TEST"
 node --test "$PROD_SESSION_TEST"
 
+# Local semantic workers follow measured host capacity (RCA
+# 2026-10-02-semantic-renderer-stall-consumed-chip-poll-budget): at load ~56 on
+# 14 cores, four Chromium workers left one renderer frozen for 34s and a 30s
+# chip poll failed without ever observing a value. Other workspaces' load may
+# never drop, so the runner sizes concurrency (floor 1) instead of waiting.
+eval "$(sed -n '/^semantic_workers_for_capacity() {/,/^}/p' "$RUNNER")"
+[ "$(semantic_workers_for_capacity 4 14 56.20 44)" = 1 ] || fail "an overloaded host must drop semantic workers to one"
+[ "$(semantic_workers_for_capacity 4 14 1.50 60)" = 4 ] || fail "an idle host must keep the requested semantic workers"
+[ "$(semantic_workers_for_capacity 4 14 11.50 60)" = 2 ] || fail "partial headroom must cap semantic workers at whole idle cores"
+[ "$(semantic_workers_for_capacity 4 14 1.50 10)" = 1 ] || fail "low free memory must drop semantic workers to one"
+[ "$(semantic_workers_for_capacity 1 14 0.10 90)" = 1 ] || fail "host capacity must never raise semantic workers above the request"
+[ "$(semantic_workers_for_capacity 4 '' '' '')" = 4 ] || fail "unknown host capacity must not cap semantic workers"
+eval "$(sed -n '/^probe_semantic_host_capacity() {/,/^}/p' "$RUNNER")"
+IFS='|' read -r probe_cpus probe_load probe_mem <<< "$(probe_semantic_host_capacity)"
+[[ "$probe_cpus" =~ ^[1-9][0-9]*$ ]] || fail "host capacity probe must report the CPU count"
+[[ "$probe_load" =~ ^[0-9]+\.[0-9]{2}$ ]] || fail "host capacity probe must report the 1-minute load average"
+[[ -z "$probe_mem" || "$probe_mem" =~ ^[0-9]+$ ]] || fail "host capacity probe must report free memory as a whole percentage"
+require_text "$RUNNER" 'SEMANTIC_WORKERS=$(semantic_workers_for_capacity "$REQUESTED_SEMANTIC_WORKERS"' "local semantic runs must size Playwright workers to measured host capacity"
+require_text "$RUNNER" 'echo "  Semantic workers: requested=$REQUESTED_SEMANTIC_WORKERS effective=$SEMANTIC_WORKERS' "semantic runner must log the capacity inputs behind its worker count"
+validate_line=$(grep -n 'SEMANTIC_WORKERS must be a positive integer' "$RUNNER" | head -1 | cut -d: -f1)
+capacity_line=$(grep -n 'SEMANTIC_WORKERS=$(semantic_workers_for_capacity' "$RUNNER" | head -1 | cut -d: -f1)
+first_launch_line=$(grep -n 'run_playwright test' "$RUNNER" | head -1 | cut -d: -f1)
+[ -n "$capacity_line" ] && [ "$validate_line" -lt "$capacity_line" ] && [ "$capacity_line" -lt "$first_launch_line" ] \
+  || fail "semantic worker sizing must run after request validation and before Playwright launches"
+
 # LOCAL_DB_PORT + unset DATABASE + set DIRECT must not clobber the caller URL.
 eval "$(sed -n '/^apply_local_semantic_db_urls() {/,/^}/p' "$RUNNER")"
 LOCAL_DB_PORT=4205

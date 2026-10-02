@@ -13166,6 +13166,78 @@ async def test_browser_use_navigation_download_survives_missing_initial_chrome_e
     assert listing.await_count == 2
 
 
+async def test_browser_use_oversized_page_fetch_only_blocks_missing_native_download():
+    """The size cap gates re-materializing credentialed bytes, never a native download."""
+    from domains.spawn_browser_agent_v3.download_persist import (
+        _MAX_PERSIST_BYTES,
+        persist_navigation_download_via_page_fetch,
+    )
+
+    def harness():
+        expressions = []
+
+        async def evaluate(*, params, session_id):
+            expressions.append(params["expression"])
+            if len(expressions) == 1:
+                return {
+                    "result": {
+                        "value": {
+                            "ok": True,
+                            "size": _MAX_PERSIST_BYTES + 1,
+                            "base64": base64.b64encode(b"BIG!").decode(),
+                            "filename": "export.zip",
+                            "contentType": "application/zip",
+                            "disposition": 'attachment; filename="export.zip"',
+                        }
+                    }
+                }
+            return {"result": {"value": True}}
+
+        cdp = SimpleNamespace(
+            session_id="cdp",
+            cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=evaluate))),
+        )
+        return expressions, SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp))
+
+    native = {"path": "/tmp/downloads/export.zip", "size": _MAX_PERSIST_BYTES + 1, "filename": "export.zip"}
+
+    # No native download: the oversized payload must not be pushed back through
+    # an in-page blob click, even if that click would have produced a file.
+    expressions, session = harness()
+    with patch(
+        "domains.spawn_browser_agent_v3.download_persist.wait_for_browser_use_download",
+        new=AsyncMock(side_effect=[None, native]),
+    ) as listing:
+        rejected = await persist_navigation_download_via_page_fetch(
+            session=session,
+            url="https://example.com/export.zip",
+            session_id="browser-use-session",
+            config=_fake_config(),
+            provider="browser-use",
+        )
+    assert rejected is None
+    assert len(expressions) == 1, "oversized payload was re-triggered as a blob download"
+    assert listing.await_count == 1
+
+    # Native download present: the size cap must not hide the provider's file.
+    expressions, session = harness()
+    with patch(
+        "domains.spawn_browser_agent_v3.download_persist.wait_for_browser_use_download",
+        new=AsyncMock(return_value=native),
+    ) as listing:
+        kept = await persist_navigation_download_via_page_fetch(
+            session=session,
+            url="https://example.com/export.zip",
+            session_id="browser-use-session",
+            config=_fake_config(),
+            provider="browser-use",
+        )
+    assert kept is not None and kept["path"] == native["path"]
+    assert kept["content_type"] == "application/zip"
+    assert kept["source_url"] == "https://example.com/export.zip"
+    assert len(expressions) == 1 and listing.await_count == 1
+
+
 async def test_materialize_prefers_provider_file_path_before_page_fetch():
     """CDP filePath should be read via provider Files API before page-fetch fallback."""
     from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
@@ -23907,6 +23979,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_use_navigation_download_recovery",
         test_browser_use_navigation_download_survives_missing_initial_chrome_event,
+    )
+    await r.record_async(
+        "browser_use_oversized_page_fetch_only_blocks_missing_native",
+        test_browser_use_oversized_page_fetch_only_blocks_missing_native_download,
     )
     await r.record_async(
         "materialize_prefers_provider_file_path",
