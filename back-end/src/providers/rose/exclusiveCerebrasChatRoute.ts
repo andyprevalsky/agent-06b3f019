@@ -80,12 +80,12 @@ function withBranchAbort(options: CompletionOptions, branchSignal: AbortSignal):
 }
 
 /**
- * Race the same-model OpenRouter Cerebras spill against a paid, low-latency
- * Gemini model. This branch is entered only after direct Cerebras has remained
- * silent long enough to arm the outer hedge, so the normal fast path still
- * makes one provider request. The former Gemini 3.5 fallback took 6–10s to
- * first token under burst; this route's dedicated model keeps the same
- * schema/tool contract with a measured sub-1.4s first-token tail.
+ * Race the paid, low-latency fast chat model against the same-model OpenRouter
+ * spill. This branch is entered only after direct Cerebras has failed or stayed
+ * silent, so the normal fast path still makes one provider request. The fast
+ * model leads: off Cerebras the same Qwen model streams at GPU-host speed
+ * (measured 1.6–7.6s to first token), which alone overruns the 3s router bound.
+ * Structured generator responses use the first completed answer as the winner.
  */
 export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   poolSpec: PoolSpec;
@@ -104,7 +104,19 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   let winnerName = '';
   const raced = hedgeStreams<RoseStreamChunk>({
     primary: {
-      name: 'openrouter-qwen',
+      name: 'openrouter-fast-chat',
+      produce: (signal) =>
+        requireCompletedContent(
+          exclusiveOpenRouterFastChatCompletion({
+            options: withBranchAbort(params.options, signal),
+            openrouterKey,
+            requestId: params.requestId,
+            callSite: params.callSite,
+          })
+        ),
+    },
+    hedge: {
+      name: 'openrouter-same-model',
       produce: (signal) =>
         requireCompletedContent(
           exclusiveOpenRouterCerebrasCompletion({
@@ -116,23 +128,13 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
           })
         ),
     },
-    hedge: {
-      name: 'openrouter-fast-chat',
-      produce: (signal) =>
-        exclusiveOpenRouterFastChatCompletion({
-          options: withBranchAbort(params.options, signal),
-          openrouterKey,
-          requestId: params.requestId,
-          callSite: params.callSite,
-        }),
-    },
     // The silent-stream path starts both together. A fast direct 429 uses a
-    // short delay so the same-model spill can win without an extra request.
+    // short delay so a prompt fast reply wins without an extra request; a fast
+    // model that is itself capped hands off to the spill without that wait.
     hedgeAfter: () => (params.hedgeDelayMs ? sleep(params.hedgeDelayMs) : Promise.resolve()),
-    // The generator's structured JSON is not usable until its final chunk.
-    // A fast first token from a slow provider must not cancel a provider that
-    // would finish the answer sooner. Router tool calls still stream at first
-    // content, so their latency contract stays unchanged.
+    hedgeOnPrimaryFailure: true,
+    // A generator answer is usable only after its final chunk. Router tool
+    // calls continue streaming at their first content chunk.
     isContent: (chunk) =>
       params.latchOnComplete ? chunk.kind === 'done' : clearsChatStallGuard(chunk.kind),
     onWinner: (name) => {
@@ -291,8 +293,8 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
     }
   }
 
-  // A direct 402/429 first tries the same model via OpenRouter. If that host
-  // remains silent, start the measured fast model too. A fast quota error can
+  // A direct 402/429 first tries the fast chat model via OpenRouter. If it
+  // remains silent, start the same-model spill too. A fast quota error can
   // otherwise bypass the outer hedge and serialize an unbounded OpenRouter
   // wait (55.8s in production) before the chat has shown any answer.
   const openrouterKey = process.env.OPENROUTER_API_KEY;

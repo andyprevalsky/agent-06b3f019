@@ -65,7 +65,7 @@ function makeBranch(): {
   };
 }
 
-function harness(): {
+function harness(options: { hedgeOnPrimaryFailure?: boolean } = {}): {
   primary: ReturnType<typeof makeBranch>;
   hedge: ReturnType<typeof makeBranch>;
   fireHedge: () => void;
@@ -85,6 +85,7 @@ function harness(): {
       }),
     isContent,
     onWinner: (name) => winners.push(name),
+    hedgeOnPrimaryFailure: options.hedgeOnPrimaryFailure,
   });
   const collect = async (): Promise<{ items: Chunk[]; error: unknown }> => {
     const items: Chunk[] = [];
@@ -200,6 +201,38 @@ async function main(): Promise<void> {
     const { items, error } = await result;
     assert.equal(error, null);
     assert.deepEqual(items, [{ kind: 'content', text: 'hedge fills the silence' }]);
+  }
+
+  // 4d. With hedgeOnPrimaryFailure, a pre-hedge primary failure starts the
+  //     hedge at once instead of surfacing, and the hedge can still win.
+  {
+    const h = harness({ hedgeOnPrimaryFailure: true });
+    const result = h.collect();
+    await tick();
+    h.primary.fail(new Error('fast model 429'));
+    await tick();
+    assert.equal(h.hedge.started(), true, 'a declared fallover hedge must start on failure');
+    h.hedge.push({ kind: 'content', text: 'spill answers' });
+    h.hedge.end();
+    const { items, error } = await result;
+    assert.equal(error, null);
+    assert.deepEqual(items, [{ kind: 'content', text: 'spill answers' }]);
+    assert.deepEqual(h.winners, ['waterfall']);
+  }
+
+  // 4e. With hedgeOnPrimaryFailure and both branches failing, the primary's
+  //     failure still surfaces for the caller's classified fallover.
+  {
+    const h = harness({ hedgeOnPrimaryFailure: true });
+    const result = h.collect();
+    await tick();
+    const primaryError = new Error('fast model 402');
+    h.primary.fail(primaryError);
+    await tick();
+    h.hedge.fail(new Error('spill 429'));
+    const { items, error } = await result;
+    assert.deepEqual(items, []);
+    assert.equal(error, primaryError);
   }
 
   // 5. Every branch fails pre-latch: the primary's failure surfaces to the caller.
