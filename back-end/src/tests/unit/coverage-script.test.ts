@@ -185,7 +185,10 @@ const listener = spawn(
       'sock.listen()',
       "with open(sys.argv[1], 'w', encoding='utf-8') as handle:",
       '    handle.write(str(sock.getsockname()[1]))',
-      'time.sleep(30)',
+      // Hold the port until the finally block kills the fixture; a fixed
+      // lifetime freed it mid-test on a loaded host.
+      'while True:',
+      '    time.sleep(3600)',
     ].join('\n'),
     occupiedPortFile,
   ],
