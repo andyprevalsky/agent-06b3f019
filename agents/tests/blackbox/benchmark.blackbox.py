@@ -2172,6 +2172,37 @@ async def test_abandonment_timeout_surfaces_the_last_durable_mismatch():
         )
 
 
+async def test_abandonment_timeout_names_the_provider_rows_it_waited_on():
+    """A closed card whose AgentCard transfer never releases must read as provider-side in the failure."""
+    import pytest
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    lifecycle = {
+        "purchase": {"status": "HELD"},
+        "walletFunding": {"status": "RECLAIMING"},
+        "agentCard": {"status": "CLOSED", "balanceCents": 0},
+        "orgTransfer": {"status": "consumed", "transferredCents": 4396, "releasedCents": 0},
+    }
+
+    with pytest.raises(RuntimeError) as raised:
+        await _wait_for_expected_payment_lifecycle(
+            "http://localhost:55120",
+            "agent-123",
+            get_task_by_name("agent-payment-abandonment"),
+            lifecycle,
+            timeout_seconds=0,
+            poll_interval_seconds=0,
+        )
+
+    message = str(raised.value)
+    assert "purchase.status mismatch: expected 'VOIDED', got 'HELD'" in message
+    assert "walletFunding(status='RECLAIMING')" in message
+    assert "agentCard(status='CLOSED', balanceCents=0)" in message
+    assert "orgTransfer(status='consumed', transferredCents=4396, releasedCents=0)" in message
+
+
 async def test_abandonment_waits_between_funding_reclaim_and_purchase_void():
     """The reconciler persists RECLAIMED before its refund and purchase-status updates."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -19277,6 +19308,10 @@ async def run_all_tests():
     await r.record_async(
         "abandonment_timeout_surfaces_durable_mismatch",
         test_abandonment_timeout_surfaces_the_last_durable_mismatch,
+    )
+    await r.record_async(
+        "abandonment_timeout_names_provider_rows",
+        test_abandonment_timeout_names_the_provider_rows_it_waited_on,
     )
     await r.record_async(
         "abandonment_waits_between_reclaim_and_void",

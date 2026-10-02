@@ -2683,6 +2683,28 @@ async def _get_initial_payment_lifecycle_with_retry(
     ) from last_error
 
 
+_PAYMENT_LIFECYCLE_SNAPSHOT_FIELDS = (
+    ("purchase", ("status",)),
+    ("walletFunding", ("status",)),
+    ("agentCard", ("status", "balanceCents")),
+    ("orgTransfer", ("status", "transferredCents", "releasedCents")),
+)
+
+
+def _payment_lifecycle_snapshot(lifecycle: object) -> str:
+    """Name every ledger's last state, so a timeout tells our reconciler apart from the provider."""
+    if not isinstance(lifecycle, dict):
+        return "no lifecycle snapshot"
+    parts = []
+    for key, fields in _PAYMENT_LIFECYCLE_SNAPSHOT_FIELDS:
+        row = lifecycle.get(key)
+        if not isinstance(row, dict):
+            parts.append(f"{key}=none")
+            continue
+        parts.append(f"{key}(" + ", ".join(f"{field}={row.get(field)!r}" for field in fields) + ")")
+    return "; ".join(parts)
+
+
 async def _wait_for_expected_payment_lifecycle(
     base_url: str,
     agent_id: str,
@@ -2739,7 +2761,10 @@ async def _wait_for_expected_payment_lifecycle(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {last_fetch_error}"
                 ) from last_fetch_error
-            raise RuntimeError(f"Payment lifecycle did not reach the expected terminal state before timeout: {error}")
+            raise RuntimeError(
+                f"Payment lifecycle did not reach the expected terminal state before timeout: {error}"
+                f" | last snapshot: {_payment_lifecycle_snapshot(lifecycle)}"
+            )
         await asyncio.sleep(poll_interval_seconds)
         try:
             lifecycle = await (recover_lifecycle or fetch_lifecycle)(base_url, agent_id)
