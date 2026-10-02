@@ -77,6 +77,14 @@ distinct per-call identities, error attribution, restored context and no
 payload logging. Existing connection-retry and ambiguous-timeout controls also
 pass. This is causal proof for the attribution defect only.
 
+The full agents gate exposed a structural-test gap: the generation-header
+checker rejected the tracing spread as unknown, despite the generation header
+remaining present. Its focused reproduction failed before the checker recognized
+the canonical helper. The correction verifies that helper's disjoint tracing
+keys, rejects local shadowing and untrusted helpers, and preserves every existing
+unknown-spread and case-insensitive overwrite rejection. This changes test
+recognition only; production header and timeout behavior remain unchanged.
+
 The remaining latency investigation must recover the concurrent condition that
 caused the stall. A fast payload-only replay or another clean live run cannot
 close that gap. Original and diagnostic logs, payload candidates, profiles and
