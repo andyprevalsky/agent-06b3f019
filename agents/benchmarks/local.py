@@ -1244,7 +1244,9 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
     # TEMPORARY: strip api_request from explore tool injection + prompt context
     # so coding-agent GitHub ranking benches are not steered onto that route.
     # Override with ROSE_DISABLE_API_REQUEST=0.
-    if os.environ.get("ROSE_DISABLE_API_REQUEST", "1").strip().lower() not in {
+    if selected == {"google-oauth"}:
+        os.environ["ROSE_DISABLE_API_REQUEST"] = "0"
+    elif os.environ.get("ROSE_DISABLE_API_REQUEST", "1").strip().lower() not in {
         "0",
         "false",
         "no",
@@ -1654,7 +1656,12 @@ def start_services(
                 )
             env["FAST_MODE_CACHE_DATABASE_URL"] = shared_url
             env.pop("FAST_MODE_CACHE_USE_LOCAL", None)
-            env["FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"] = "1"
+            # This exact, synthetic DEMO needs one live seed run before it can
+            # replay its own tool trajectory. Other shared-cache benches stay read-only.
+            if set(tasks) == {"google-oauth"}:
+                env.pop("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", None)
+            else:
+                env["FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"] = "1"
         else:
             env.pop("FAST_MODE_CACHE_DATABASE_URL", None)
             env["FAST_MODE_CACHE_USE_LOCAL"] = "1"

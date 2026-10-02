@@ -8,6 +8,7 @@ import assert from 'node:assert';
 import type Kernel from '@onkernel/sdk';
 import { rotateProxySchema } from '../../domains/browser-session/types';
 import {
+  createSessionOnKernelProxyLadder,
   getOrCreateKernelProxy,
   kernelProxyCandidates,
   selectReusableKernelProxy,
@@ -234,6 +235,145 @@ async function testPaginatedProxyReuseAndConcurrentOwnership(): Promise<void> {
   }
 }
 
+type CachedProxyRow = { proxyKey: string; proxyId: string };
+
+async function withProxyCache<T>(rows: Map<string, string>, run: () => Promise<T>): Promise<T> {
+  const model = prisma.browserProviderProxy;
+  const originalFind = model.findUnique;
+  const originalCreate = model.create;
+  const originalDeleteMany = model.deleteMany;
+  model.findUnique = (async ({
+    where,
+  }: {
+    where: { provider_proxyKey: { proxyKey: string } };
+  }): Promise<CachedProxyRow | null> => {
+    const proxyKey = where.provider_proxyKey.proxyKey;
+    const proxyId = rows.get(proxyKey);
+    return proxyId === undefined ? null : { proxyKey, proxyId };
+  }) as unknown as typeof model.findUnique;
+  model.create = (async ({ data }: { data: CachedProxyRow }) => {
+    rows.set(data.proxyKey, data.proxyId);
+    return data;
+  }) as unknown as typeof model.create;
+  model.deleteMany = (async ({ where }: { where: { proxyKey: string } }) => {
+    const count = rows.delete(where.proxyKey) ? 1 : 0;
+    return { count };
+  }) as unknown as typeof model.deleteMany;
+  try {
+    return await run();
+  } finally {
+    model.findUnique = originalFind;
+    model.create = originalCreate;
+    model.deleteMany = originalDeleteMany;
+  }
+}
+
+function ladderClient(listedIds: Record<string, string>): {
+  client: Kernel;
+  created: string[];
+} {
+  const created: string[] = [];
+  const client = {
+    proxies: {
+      list: async ({ query }: { query: string }) => ({
+        items:
+          listedIds[query] === undefined
+            ? []
+            : [
+                {
+                  id: listedIds[query],
+                  name: query,
+                  type: 'residential',
+                  status: 'available',
+                  config: kernelProxyCandidates({
+                    country: 'US',
+                    state: 'CA',
+                    city: 'SAN FRANCISCO',
+                  }).find((c) => c.name === query)?.config,
+                },
+              ],
+        hasNextPage: () => false,
+      }),
+      create: async ({ name }: { name: string }) => {
+        created.push(name);
+        return { id: `created-${name}` };
+      },
+    },
+  } as unknown as Kernel;
+  return { client, created };
+}
+
+// Another run's cleanup (or Kernel) can delete a shared geo proxy after this
+// database cached its ID. That proves the ID is stale, not that the city is out
+// of inventory, so resume must keep the city instead of downgrading to state.
+async function testDeletedCachedProxyKeepsLocation(): Promise<void> {
+  const candidates = kernelProxyCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
+  const [city, state] = candidates;
+  const rows = new Map([[city!.proxyKey, 'deleted-by-another-run']]);
+  const { client, created } = ladderClient({ [city!.name]: 'live-city-proxy' });
+  const relaxed: string[] = [];
+  const attempted: string[] = [];
+
+  const session = await withProxyCache(rows, () =>
+    createSessionOnKernelProxyLadder(
+      client,
+      candidates,
+      async (proxy) => {
+        attempted.push(proxy.proxyId);
+        if (proxy.proxyId === 'deleted-by-another-run') {
+          throw new Error('400 proxy not found');
+        }
+        return proxy;
+      },
+      { onRelax: (candidate) => relaxed.push(candidate.proxyKey) }
+    )
+  );
+
+  assert.strictEqual(session.source, 'kernel_residential_city', 'resume lost the city proxy');
+  assert.deepStrictEqual(session.location, city!.location);
+  assert.strictEqual(session.proxyId, 'live-city-proxy');
+  assert.deepStrictEqual(attempted, ['deleted-by-another-run', 'live-city-proxy']);
+  assert.deepStrictEqual(relaxed, [], 'a stale proxy ID must not relax location specificity');
+  assert.strictEqual(rows.get(city!.proxyKey), 'live-city-proxy', 'stale cache row was kept');
+  assert.strictEqual(rows.has(state!.proxyKey), false);
+  assert.deepStrictEqual(created, [], 'a listed live proxy must be reused, not re-created');
+
+  // A refreshed ID that is also missing is refreshed once, then relaxes.
+  const missingRows = new Map([[city!.proxyKey, 'deleted-by-another-run']]);
+  const missing = ladderClient({});
+  const relaxedAfterRefresh: string[] = [];
+  const cityAttempts: string[] = [];
+  const fallback = await withProxyCache(missingRows, () =>
+    createSessionOnKernelProxyLadder(
+      missing.client,
+      candidates,
+      async (proxy) => {
+        if (proxy.source === 'kernel_residential_city') {
+          cityAttempts.push(proxy.proxyId);
+          throw new Error('400 proxy not found');
+        }
+        return proxy;
+      },
+      { onRelax: (candidate) => relaxedAfterRefresh.push(candidate.proxyKey) }
+    )
+  );
+  assert.deepStrictEqual(cityAttempts, ['deleted-by-another-run', `created-${city!.name}`]);
+  assert.deepStrictEqual(relaxedAfterRefresh, [city!.proxyKey]);
+  assert.strictEqual(fallback.source, 'kernel_residential_state');
+
+  // A transport timeout does not prove the proxy is gone: keep the row, relax.
+  const timeoutRows = new Map([[city!.proxyKey, 'healthy-city-proxy']]);
+  const timeout = ladderClient({});
+  const timedOut = await withProxyCache(timeoutRows, () =>
+    createSessionOnKernelProxyLadder(timeout.client, candidates, async (proxy) => {
+      if (proxy.source === 'kernel_residential_city') throw new Error('Request timed out.');
+      return proxy;
+    })
+  );
+  assert.strictEqual(timedOut.source, 'kernel_residential_state');
+  assert.strictEqual(timeoutRows.get(city!.proxyKey), 'healthy-city-proxy');
+}
+
 function testRotationTierLadder(): void {
   assert.strictEqual(ROTATION_CAP, 4);
   assert.deepStrictEqual(selectRotationStep(1, 'kernel'), {
@@ -379,6 +519,7 @@ async function main(): Promise<void> {
   testBenchmarkProxyReuseRequiresSameLocationAndTier();
   testRestoredProxyReuse();
   await testPaginatedProxyReuseAndConcurrentOwnership();
+  await testDeletedCachedProxyKeepsLocation();
   testRotationTierLadder();
   testRotationRequestSchema();
   testSteelOutageDetector();

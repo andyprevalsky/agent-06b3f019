@@ -98,6 +98,19 @@ trap cleanup_all EXIT INT TERM
 export NO_PROXY="*" no_proxy="*"
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 
+# A deploy box that has not run a benchmark yet has no cached dump. Measure the
+# same reviewed canonical base an isolated benchmark restores. System Postgres
+# can only restore archives written by its own pg_dump major; the Docker path
+# picks its image from the archive header, so the pinned pg16 publication works.
+if [ -z "$DUMP" ]; then
+    CANONICAL_PG_MAJOR=16
+    if $USE_SYSTEM_PG; then
+        CANONICAL_PG_MAJOR="$(pg_dump --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/')"
+    fi
+    echo "   no cached dump; pulling the canonical base fixture (pg${CANONICAL_PG_MAJOR})…" | tee -a "$SUMMARY"
+    DUMP="$(bash "../scripts/benchmark-seed-cache" pull-canonical prisma/schema.prisma \
+        ../.context/benchmarks/seed-cache "$CANONICAL_PG_MAJOR")" || DUMP=""
+fi
 [ -n "$DUMP" ] || { echo "❌ no cached prod dump in .context/benchmarks/seed-cache" | tee -a "$SUMMARY"; exit 1; }
 echo "🧪 seed memory measurement: $RUNS run(s), target :$PORT_REQUESTED, source :$SRC_PORT_REQUESTED" | tee -a "$SUMMARY"
 echo "   source dump: $(basename "$DUMP")" | tee -a "$SUMMARY"

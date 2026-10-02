@@ -55,6 +55,7 @@ for (const variable of [
   'SLACK_ERROR_CHANNEL_ID',
   'GITHUB_DISPATCH_TOKEN',
   'STRIPE_SECRET_KEY',
+  'BENCHMARK_SHARE_SECRET',
   'WHATSAPP_PHONE_NUMBER_ID',
   'WHATSAPP_ACCESS_TOKEN',
   'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
@@ -80,6 +81,10 @@ for (const [name, harness] of [
       harness.indexOf('node "$SCRIPT_DIR/assert-prisma-client-current.mjs"') <
         harness.indexOf('npx prisma db push'),
     `${name} launcher must verify Prisma freshness before syncing or starting test children`
+  );
+  assert.ok(
+    !harness.includes('npx prisma generate'),
+    `${name} launcher must not regenerate a fresh Prisma client under concurrent lint/type checks`
   );
   assert.doesNotMatch(harness, /prisma generate/, `${name} must not rewrite shared dependencies`);
 }

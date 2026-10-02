@@ -25,9 +25,14 @@ import structlog
 from providers.fast_cache import client as cache_client
 from providers.fast_cache.context import cache_writes_disabled, current_context
 from providers.fast_cache.normalize import (
+    GOOGLE_OAUTH_DEMO_PROMPT_PREFIX,
+    google_oauth_demo_goal_hash,
     is_oai_demo_bound_child_goal,
     is_oai_demo_goal_text,
     rewrite_oai_demo_display_names,
+)
+from providers.fast_cache.normalize import (
+    goal_hash as normalize_goal_hash,
 )
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import get_pool
@@ -979,6 +984,16 @@ async def cached_complete(
         complete_kwargs = {**complete_kwargs, "provider_fast_mode": bool(ctx.provider_fast_mode)}
 
     key = ctx.llm_key(call_site, request_key_material(complete_kwargs))
+    seed_google_oauth_demo = False
+    if ctx.should_write and (
+        ctx.goal.startswith(GOOGLE_OAUTH_DEMO_PROMPT_PREFIX)
+        or (ctx.root_goal or "").startswith(GOOGLE_OAUTH_DEMO_PROMPT_PREFIX)
+    ):
+        demo_goal_hash = google_oauth_demo_goal_hash()
+        seed_google_oauth_demo = ctx.goal_hash == demo_goal_hash or (
+            ctx.root_goal is not None
+            and normalize_goal_hash(ctx.root_goal) == demo_goal_hash
+        )
     if ctx.read_enabled:
         lookup_failed = False
         try:
@@ -1046,7 +1061,7 @@ async def cached_complete(
                         async for chunk in replay_stream:
                             yield chunk
                     return
-            if site in {"completion_summary", "context_compression"}:
+            if site in {"completion_summary", "context_compression"} and not seed_google_oauth_demo:
                 terminal = soft_complete_on_miss(site)
                 if terminal is not None and ctx.soft_complete_allowed:
                     logger.info(
@@ -1071,6 +1086,7 @@ async def cached_complete(
             if (
                 soft is not None
                 and ctx.soft_complete_allowed
+                and not seed_google_oauth_demo
                 and await cache_client.trajectory_prior_exists(ctx.goal_hash, call_site, ctx.base_step)
             ):
                 # True warm end-of-trajectory: July namespace has no p:N+1.
@@ -1105,6 +1121,7 @@ async def cached_complete(
             if (
                 soft is not None
                 and ctx.soft_complete_allowed
+                and not seed_google_oauth_demo
                 and not is_july_gp_execute_site(ctx, call_site)
                 and not is_july_explore_site(ctx, call_site)
             ):

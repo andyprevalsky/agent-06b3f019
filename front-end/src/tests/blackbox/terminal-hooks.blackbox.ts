@@ -404,7 +404,7 @@ describe('useMessageSending', () => {
     });
   });
 
-  it('handleSendMessage resumes a PAUSED agent then posts message', async () => {
+  it('handleSendMessage to a PAUSED agent only posts the message; the backend resumes', async () => {
     server.use(
       http.get(`${API_BASE}/attention-requests`, () => HttpResponse.json({ requests: [] })),
       http.post(`${API_BASE}/agents/:agentId/resume`, () => HttpResponse.json({ success: true })),
@@ -427,11 +427,11 @@ describe('useMessageSending', () => {
       await result.current.handleSendMessage();
     });
     await waitFor(() => {
-      const resumeReq = capturedRequests.find(
-        (r) => r.method === 'POST' && r.url.includes('/resume'),
-      );
-      expect(resumeReq).toBeDefined();
+      const req = capturedRequests.find((r) => r.method === 'POST' && r.url.includes('/messages'));
+      expect(req).toBeDefined();
     });
+    expect(capturedRequests.some((r) => r.url.includes('/resume'))).toBe(false);
+    expect(result.current.messageInput).toBe('');
   });
 
   it('handleSendMessage error triggers error toast path (401)', async () => {
