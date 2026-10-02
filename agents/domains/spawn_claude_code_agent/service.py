@@ -50,7 +50,6 @@ from helpers.activity_heartbeat import heartbeat_resume_details, safe_heartbeat
 from helpers.claude_code_ws_client import ClaudeCodeWsClient, ws_endpoint_reachable
 from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
-from helpers.llm import _safe_heartbeat
 from helpers.tracing import traced
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message

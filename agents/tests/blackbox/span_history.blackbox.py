@@ -58,14 +58,8 @@ def test_recent_window_follows_timestamps_not_file_order():
     from benchmarks import span_history
 
     base = datetime(2026, 10, 1, tzinfo=timezone.utc)
-    newer = [
-        {"duration_ms": 100.0, "timestamp": (base + timedelta(hours=1, seconds=i)).isoformat()}
-        for i in range(3)
-    ]
-    older = [
-        {"duration_ms": 9000.0, "timestamp": (base + timedelta(seconds=i)).isoformat()}
-        for i in range(3)
-    ]
+    newer = [{"duration_ms": 100.0, "timestamp": (base + timedelta(hours=1, seconds=i)).isoformat()} for i in range(3)]
+    older = [{"duration_ms": 9000.0, "timestamp": (base + timedelta(seconds=i)).isoformat()} for i in range(3)]
     summary = span_history.summarize_records(newer + older, window=3)
     assert summary is not None
     assert summary["count"] == 6
