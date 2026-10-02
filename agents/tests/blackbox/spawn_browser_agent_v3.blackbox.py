@@ -6166,7 +6166,7 @@ def test_payment_card_approval_finishes_original_browser_tool_result():
 def test_large_payment_request_resumes_with_parseable_finished_tool_result():
     from domains.spawn_browser_agent_v3.handler import (
         _append_browser_turn_messages,
-        _compact_browser_turn_messages_for_resume,
+        _browser_turn_messages_for_resume,
         _resolve_payment_card_tool_result_for_resume,
         _simulated_browser_resume_payload,
     )
@@ -6184,7 +6184,7 @@ def test_large_payment_request_resumes_with_parseable_finished_tool_result():
         result={"success": True, "status": "awaiting_payment_card_approval", "payment_request": request},
         tool_call_id="payment-call-large",
     )
-    real_turns = _compact_browser_turn_messages_for_resume(turns)
+    real_turns = _browser_turn_messages_for_resume(turns)
     simulated_turns = _simulated_browser_resume_payload(
         browser_state={},
         action_entries=[],
@@ -23537,6 +23537,14 @@ async def run_all_tests():
     r.record(
         "browser_tool_events_declare_action_type",
         test_browser_tool_events_declare_action_type,
+    )
+    r.record(
+        "large_payment_request_resumes_with_parseable_result",
+        test_large_payment_request_resumes_with_parseable_finished_tool_result,
+    )
+    await r.record_async(
+        "browser_agent_yields_when_ownership_is_already_user",
+        test_browser_agent_yields_when_ownership_is_already_user,
     )
     return r.all_passed
 

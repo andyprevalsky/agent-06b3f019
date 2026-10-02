@@ -19865,4 +19865,24 @@ async def run_all_tests():
         "agent_latency_baseline_lookup_dedupes_immature_keys",
         test_agent_latency_baseline_lookup_deduplicates_immature_span_keys,
     )
+    r.record(
+        "payment_setup_resume_exclusive_beside_event_ticket",
+        test_payment_setup_resume_stays_exclusive_beside_event_ticket,
+    )
+    r.record(
+        "browser_hub_archive_waits_for_recording",
+        test_agent_messages_ready_for_browser_hub_archive_waits_for_recording,
+    )
+    r.record(
+        "no_browser_agents_static_ignores_skipped_spawn",
+        test_no_browser_agents_static_ignores_skipped_spawn_and_walks_tree,
+    )
+    r.record(
+        "local_port_range_excludes_ephemeral_window",
+        test_local_automatic_port_range_excludes_reported_ephemeral_window,
+    )
+    r.record(
+        "code_agent_sdk_evidence_chips_are_grounded_steps",
+        test_code_agent_sdk_evidence_chips_count_as_grounded_steps,
+    )
     return r.all_passed
