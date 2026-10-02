@@ -210,6 +210,89 @@ case "$age_dead" in
   *) echo "FAIL: process_age_seconds returned garbage for a dead pid: [$age_dead]" >&2; exit 1 ;;
 esac
 
+# ── Service-kill patterns stop at argument boundaries ──
+#
+# pgrep -f matches its regex anywhere in argv. An unbounded
+# `node_modules/.bin/vite` also matched `node_modules/.bin/vitest`, so bringing
+# up the /deploy Step 5 stack SIGTERMed the frontend-coverage lane running in
+# the same worktree (npm exit 143). Exercise the real sweep from run.sh against
+# real processes so the patterns and the kill path are pinned together.
+sweep_ws="$TMP_ROOT/sweep-ws"
+mkdir -p "$sweep_ws/front-end" "$sweep_ws/agents"
+
+SWEEP_FIXTURE_PID=""
+spawn_sweep_fixture() {
+  local dir="$1"
+  shift
+  ( cd "$dir" && exec python3 -c 'import signal; signal.pause()' "$@" ) &
+  SWEEP_FIXTURE_PID="$!"
+  PIDS+=("$SWEEP_FIXTURE_PID")
+  wait_for_process "$SWEEP_FIXTURE_PID"
+}
+
+spawn_sweep_fixture "$sweep_ws/front-end" "$sweep_ws/node_modules/.bin/vitest" run --coverage --maxWorkers=3
+vitest_pid="$SWEEP_FIXTURE_PID"
+spawn_sweep_fixture "$sweep_ws/front-end" "$sweep_ws/node_modules/.bin/vite" preview --port 1 --strictPort
+vite_pid="$SWEEP_FIXTURE_PID"
+spawn_sweep_fixture "$sweep_ws/agents" -m pytest tests/unit/test_worker.py
+pytest_pid="$SWEEP_FIXTURE_PID"
+spawn_sweep_fixture "$sweep_ws/agents" worker.py
+worker_pid="$SWEEP_FIXTURE_PID"
+spawn_sweep_fixture "$sweep_ws/front-end" npx vitest run
+npx_vitest_pid="$SWEEP_FIXTURE_PID"
+spawn_sweep_fixture "$sweep_ws/front-end" npx vite preview
+npx_vite_pid="$SWEEP_FIXTURE_PID"
+
+pattern_matches_pid() {
+  local pattern="$1" pid="$2"
+  pgrep -f "$pattern" 2>/dev/null | grep -qx "$pid"
+}
+
+assert_cloud_kill_pattern() {
+  local expected="$1" pid="$2" label="$3" pattern
+  for pattern in "${RUN_CLOUD_SERVICE_KILL_PATTERNS[@]}"; do
+    if pattern_matches_pid "$pattern" "$pid"; then
+      [ "$expected" = match ] && { echo "PASS: $label"; return 0; }
+      echo "FAIL: $label: cloud kill pattern '$pattern' matched PID $pid" >&2
+      exit 1
+    fi
+  done
+  [ "$expected" = none ] && { echo "PASS: $label"; return 0; }
+  echo "FAIL: $label: no cloud kill pattern matched PID $pid" >&2
+  exit 1
+}
+
+assert_cloud_kill_pattern none "$vitest_pid" "cloud kill patterns spare node_modules/.bin/vitest"
+assert_cloud_kill_pattern none "$npx_vitest_pid" "cloud kill patterns spare npx vitest"
+assert_cloud_kill_pattern none "$pytest_pid" "cloud kill patterns spare pytest on test_worker.py"
+assert_cloud_kill_pattern match "$npx_vite_pid" "cloud kill patterns match npx vite"
+assert_cloud_kill_pattern match "$worker_pid" "cloud kill patterns match worker.py"
+
+sweep_harness="$TMP_ROOT/stale-stack-sweep.sh"
+{
+  printf 'set -uo pipefail\n'
+  printf '. %q\n' "$ROOT_DIR/scripts/lib/run-process-cleanup.sh"
+  for fn in is_current_process_family process_cwd_in_this_worktree kill_stale_tree \
+    process_age_seconds pid_belongs_to_active_isolated_benchmark \
+    kill_stale_same_worktree_benchmark_stack; do
+    awk -v start="^${fn}\\\\(\\\\) \\\\{" '$0 ~ start {p=1} p {print} p && /^\}/ {exit}' "$ROOT_DIR/scripts/run.sh"
+  done
+  printf 'BENCHMARK_MODE=true\n'
+  printf 'cd %q\n' "$sweep_ws"
+  printf 'kill_stale_same_worktree_benchmark_stack\n'
+} > "$sweep_harness"
+grep -q '^kill_stale_same_worktree_benchmark_stack() {' "$sweep_harness" || {
+  echo "FAIL: could not extract kill_stale_same_worktree_benchmark_stack from run.sh" >&2
+  exit 1
+}
+# A separate shell keeps the fixtures out of the sweep's own process family.
+bash "$sweep_harness" > "$TMP_ROOT/stale-stack-sweep.log" 2>&1
+
+assert_dead "$vite_pid" "stale-stack sweep reaps a same-worktree vite server"
+assert_dead "$worker_pid" "stale-stack sweep reaps a same-worktree worker.py"
+assert_alive "$vitest_pid" "stale-stack sweep spares a same-worktree vitest coverage run"
+assert_alive "$pytest_pid" "stale-stack sweep spares a same-worktree pytest run of test_worker.py"
+
 # ── run_kill_tree: a wrapper's grandchildren die with it ──
 #
 # The isolated blackbox backend is `npx tsx src/bootstrap.ts`: npx -> tsx -> node.
