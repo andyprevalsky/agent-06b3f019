@@ -106,8 +106,18 @@ trap 'cleanup 143' TERM
 fail() {
     TEST_FAILED=1
     echo "FAIL: $1" >&2
-    for log in "$TMP_ROOT"/controller-*.log; do
+    # Controller logs report only the autoscaler's verdict; its own log and
+    # terminal markers live in the per-bench run dir and explain intermittent
+    # finalization failures. Dump the three newest so they outlive TMP_ROOT.
+    local autoscaler_logs
+    autoscaler_logs="$(find "$TMP_ROOT" -name autoscaler.log -type f -print 2>/dev/null |
+        xargs ls -t 2>/dev/null | head -3)"
+    for log in "$TMP_ROOT"/controller-*.log $autoscaler_logs; do
         [ -f "$log" ] || continue
+        if [ "$(basename "$log")" = "autoscaler.log" ]; then
+            echo "── $(dirname "$log") autoscaler markers: $(cd "$(dirname "$log")" &&
+                ls -1 autoscaler.* 2>/dev/null | tr '\n' ' ') ──" >&2
+        fi
         echo "── $log (tail) ──" >&2
         # Bound each dump: a wedged filesystem or special file must not
         # prevent EXIT cleanup from reaping hubs and releasing ports.
