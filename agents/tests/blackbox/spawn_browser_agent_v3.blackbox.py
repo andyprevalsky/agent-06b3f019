@@ -24194,6 +24194,31 @@ async def run_all_tests():
         test_manager_finishes_on_current_generation_when_parking_is_unavailable,
     )
     await r.record_async(
+        "manager_handoff_during_payment_card_approval_task_scoped",
+        test_manager_generation_handoff_during_payment_card_approval_is_task_scoped,
+    )
+    await r.record_async(
+        "manager_handoff_during_write_approval_task_scoped",
+        test_manager_generation_handoff_during_write_approval_is_task_scoped,
+    )
+    await r.record_async(
+        "manager_handoff_terminal_falls_back_to_preallocated_task_id",
+        test_manager_generation_handoff_terminal_falls_back_to_preallocated_task_id,
+    )
+    await r.record_async("manager_failure_terminal_task_scoped", test_manager_failure_terminal_is_task_scoped)
+    await r.record_async(
+        "manager_failure_before_activity_start_names_no_task",
+        test_manager_failure_before_activity_start_names_no_task,
+    )
+    await r.record_async(
+        "manager_write_lock_rejection_terminal_task_scoped",
+        test_manager_write_lock_rejection_terminal_is_task_scoped,
+    )
+    await r.record_async(
+        "manager_auth_assistance_failure_terminal_task_scoped",
+        test_manager_auth_assistance_failure_terminal_is_task_scoped,
+    )
+    await r.record_async(
         "manager_passes_fast_mode_cache",
         test_manager_passes_fast_mode_cache_for_browser_activity,
     )
