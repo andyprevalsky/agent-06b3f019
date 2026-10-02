@@ -524,13 +524,23 @@ if before_owner_ready:
         handle.write(f"{pid}\n")
     while before_owner_release and not os.path.exists(before_owner_release):
         time.sleep(0.01)
-pid_start = " ".join(
-    subprocess.check_output(
-        ["ps", "-p", str(pid), "-o", "lstart="],
-        text=True,
-        stderr=subprocess.DEVNULL,
-    ).split()
-)
+if os.path.exists("/proc/self/stat"):
+    with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as handle:
+        boot_id = handle.read().strip()
+    with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+        stat = handle.read()
+    stat_fields = stat[stat.rfind(")") + 2 :].split()
+    if not boot_id or len(stat_fields) <= 19 or not stat_fields[19].isdigit():
+        raise SystemExit("FATAL: could not read the detached process birth identity")
+    pid_start = f"proc-start:{boot_id}:{stat_fields[19]}"
+else:
+    pid_start = " ".join(
+        subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).split()
+    )
 fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
 os.dup2(fd, 1)
 os.dup2(fd, 2)
@@ -1177,17 +1187,104 @@ cloudbench_terminate_and_wait() {
   done
 }
 
-cloudbench_pid_start_time() {
+# Process birth identity must stay fixed for one process incarnation. Linux
+# ps(1) renders lstart as the kernel's *current* boot-time estimate plus the
+# start tick, so every wall-clock step (observed: +143s after a VM snapshot
+# fork) rewrites the lstart of every live process and turns live owners into
+# "replaced" PIDs. Linux therefore uses the boot-relative /proc start tick,
+# qualified by boot_id. macOS has no /proc and records lstart once at fork.
+# Matching dispatches on the recorded format, so lstart records written by an
+# older controller keep their original meaning.
+cloudbench_legacy_pid_start_time() {
   local pid="$1"
   ps -p "$pid" -o lstart= 2>/dev/null |
     awk '{$1=$1; print}'
 }
 
+cloudbench_proc_pid_observation() {  # <pid> -> "<proc-start identity>\t<state>"
+  local pid="$1" boot_id="" stat_line="" rest
+  local -a fields=()
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  { IFS= read -r boot_id < /proc/sys/kernel/random/boot_id; } 2>/dev/null || return 1
+  { IFS= read -r stat_line < "/proc/$pid/stat"; } 2>/dev/null || return 1
+  case "$stat_line" in *') '*) ;; *) return 1 ;; esac
+  rest="${stat_line##*) }"
+  read -r -a fields <<< "$rest"
+  [ -n "$boot_id" ] && [ "${#fields[@]}" -gt 19 ] || return 1
+  case "${fields[19]}" in ''|*[!0-9]*) return 1 ;; esac
+  printf 'proc-start:%s:%s\t%s\n' "$boot_id" "${fields[19]}" "${fields[0]}"
+}
+
+cloudbench_pid_start_time() {
+  local pid="$1" observation
+  if [ -r /proc/self/stat ]; then
+    observation="$(cloudbench_proc_pid_observation "$pid")" || return 0
+    printf '%s\n' "${observation%%$'\t'*}"
+    return 0
+  fi
+  cloudbench_legacy_pid_start_time "$pid"
+}
+
+cloudbench_pid_start_time_like() {  # <pid> <recorded-identity>
+  case "$2" in
+    proc-start:*)
+      [ -r /proc/self/stat ] || return 0
+      cloudbench_pid_start_time "$1"
+      ;;
+    *) cloudbench_legacy_pid_start_time "$1" ;;
+  esac
+}
+
+cloudbench_pid_observation_like() {  # <pid> <recorded-identity> -> "<identity>\t<state>"
+  case "$2" in
+    proc-start:*)
+      [ -r /proc/self/stat ] || return 0
+      cloudbench_proc_pid_observation "$1" || true
+      ;;
+    *)
+      ps -p "$1" -o lstart= -o stat= 2>/dev/null |
+        awk 'NF >= 6 {state=$NF; NF--; $1=$1; print $0 "\t" state}'
+      ;;
+  esac
+}
+
 cloudbench_pid_matches_start() {
   local pid="$1" expected_start="$2" actual_start
   [ -n "$expected_start" ] || return 1
-  actual_start="$(cloudbench_pid_start_time "$pid")"
+  actual_start="$(cloudbench_pid_start_time_like "$pid" "$expected_start")"
   [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ]
+}
+
+cloudbench_process_birth_table() {  # -> "<pid> <ppid> <birth identity>" per live process
+  if [ -r /proc/self/stat ]; then
+    python3 - <<'PY'
+import os
+import sys
+
+with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as handle:
+    boot_id = handle.read().strip()
+if not boot_id:
+    raise SystemExit(1)
+rows = []
+for name in os.listdir("/proc"):
+    if not name.isdigit():
+        continue
+    try:
+        with open(f"/proc/{name}/stat", encoding="utf-8", errors="replace") as handle:
+            stat = handle.read()
+    except OSError:
+        continue
+    fields = stat[stat.rfind(")") + 2 :].split()
+    if len(fields) <= 19 or not fields[1].isdigit() or not fields[19].isdigit():
+        raise SystemExit(1)
+    rows.append(f"{name} {fields[1]} proc-start:{boot_id}:{fields[19]}")
+if not rows:
+    raise SystemExit(1)
+sys.stdout.write("\n".join(rows) + "\n")
+PY
+    return
+  fi
+  ps -axo pid=,ppid=,lstart= 2>/dev/null
 }
 
 cloudbench_terminate_tree_and_wait() {
@@ -1229,7 +1326,7 @@ cloudbench_terminate_tree_and_wait() {
   # any signal. Capture ps(1) and parser status synchronously: process
   # substitution discards both exit codes and can turn an unavailable process
   # table into an empty, falsely successful teardown.
-  if ! process_table="$(ps -axo pid=,ppid=,lstart= 2>/dev/null)"; then
+  if ! process_table="$(cloudbench_process_birth_table)"; then
     echo "Could not capture the process table for owned tree teardown" >&2
     return 1
   fi
@@ -1378,10 +1475,7 @@ for pid, start in ordered:
       fi
     done
     [ -n "$expected_start" ] || continue
-    observation="$(
-      ps -p "$pid" -o lstart= -o stat= 2>/dev/null |
-        awk 'NF >= 6 {state=$NF; NF--; $1=$1; print $0 "\t" state}'
-    )" || observation=""
+    observation="$(cloudbench_pid_observation_like "$pid" "$expected_start")" || observation=""
     case "$observation" in
       *$'\t'*)
         actual_start="${observation%$'\t'*}"
@@ -1406,10 +1500,8 @@ for pid, start in ordered:
     unresolved=0
     target_states=()
     for ((i = 0; i < ${#targets[@]}; i++)); do
-      observation="$(
-        ps -p "${targets[$i]}" -o lstart= -o stat= 2>/dev/null |
-          awk 'NF >= 6 {state=$NF; NF--; $1=$1; print $0 "\t" state}'
-      )" || observation=""
+      observation="$(cloudbench_pid_observation_like "${targets[$i]}" "${target_starts[$i]}")" ||
+        observation=""
       case "$observation" in
         *$'\t'*)
           actual_start="${observation%$'\t'*}"

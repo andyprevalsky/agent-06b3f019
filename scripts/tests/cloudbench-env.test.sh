@@ -1786,4 +1786,7 @@ set -e
 grep -qiF "parallel-safe" "$single_box_log" ||
   fail "--single-box rejection must explain the parallel-safety hazard without requiring agents/"
 
+bash "$ROOT_DIR/scripts/tests/cloudbench-pid-identity.test.sh" ||
+  fail "cloudbench PID birth identities must survive a wall-clock step"
+
 echo "All cloud benchmark environment checks passed."

@@ -1457,9 +1457,11 @@ context_dir = runs_root / "_hub"
 command = repo_root / "agents/benchmarks/agent_link_server.py"
 if os.getpgrp() != os.getpid():
     os.setsid()
-pid_start = " ".join(subprocess.check_output(
-    ["ps", "-p", str(os.getpid()), "-o", "lstart="], text=True
-).split())
+import importlib.util
+_link_spec = importlib.util.spec_from_file_location("agent_link_server_identity", command)
+_link_module = importlib.util.module_from_spec(_link_spec)
+_link_spec.loader.exec_module(_link_module)
+pid_start = _link_module._pid_start_time(os.getpid())
 argv_sha256 = hashlib.sha256(
     b"\0".join(os.fsencode(argument) for argument in sys.argv)
 ).hexdigest()
@@ -2571,7 +2573,11 @@ neighbor_token="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 neighbor_registry="$SANDBOX/.git/cloudbench-fleet-ownership/$neighbor_token"
 neighbor_volume="vol_neighbor_unattached"
 neighbor_host="$(hostname 2>/dev/null || uname -n)"
-neighbor_pid_start="$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+if [ -r /proc/self/stat ]; then
+    neighbor_pid_start="$(cloudbench_pid_start_time $$)"
+else
+    neighbor_pid_start="$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+fi
 mkdir -p "$neighbor_registry/clones"
 cat > "$neighbor_registry/meta" <<EOF
 version=1
