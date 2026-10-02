@@ -1,5 +1,14 @@
-import type { AgentStatus } from '@prisma/client';
+import { Prisma, type AgentStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
+
+/** Per-run artifacts that must not survive a terminal → new-chat-run cutover. */
+export const DERIVED_RUN_STATE_RESET = {
+  responseSchema: Prisma.DbNull,
+  structuredResponse: Prisma.DbNull,
+  progress: 0,
+  toolsInUse: [] as string[],
+  statusMessage: null,
+} as const;
 
 /** Update an agent's fields. */
 export async function updateAgent(agentId: string, data: Record<string, unknown>) {
@@ -46,6 +55,7 @@ export async function clearWorkflowForTerminalAgent(
       temporalWorkflowId: null,
       temporalFirstExecutionRunId: null,
       status: 'ACTIVE',
+      ...DERIVED_RUN_STATE_RESET,
     },
   });
 }

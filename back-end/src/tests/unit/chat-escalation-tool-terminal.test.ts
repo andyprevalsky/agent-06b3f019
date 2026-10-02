@@ -83,6 +83,14 @@ assert.ok(
   'rejected acceptance must use retried terminate helper'
 );
 assert.ok(
+  startHelper.includes('DERIVED_RUN_STATE_RESET'),
+  'follow-up escalation must clear prior-run schema/progress before Temporal start'
+);
+assert.ok(
+  /structuredResponse !== null \|\| agent\.progress > 0/.test(startHelper),
+  'first-run escalation must keep create-time schema; only prior-run artifacts reset'
+);
+assert.ok(
   /UNACCEPTED_TERMINATE_ATTEMPTS\s*=\s*3/.test(handler),
   'unaccepted workflow cleanup must use a bounded retry budget'
 );

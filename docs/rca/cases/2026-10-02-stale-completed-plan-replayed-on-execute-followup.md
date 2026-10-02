@@ -96,15 +96,23 @@ completed DAG; execute_dag was called 1 time(s)`. Post-fix: PASS.
 `plan_superseded_by_new_user_instruction` in `agents/loop/dag_executor.py`
 treats a plan as not-live when either `completion_summary isFinalSummary`
 already posted, or a real (non-hidden) USER instruction arrived after
-`set_plan`. The EXECUTE skip-plan path then drops that plan and falls
-through to `run_agent`, which polls the DB (including the follow-up). The
-same predicate regenerates `output_schema` from the latest real USER
-instruction only (not `Agent.goal`, not "preserve current fields"). A
-live plan with no later USER and no Task Complete still runs `execute_dag`
-and keeps the persisted schema. Cemented by
-`wf_execute_skips_stale_plan_after_completion_followup`,
-`wf_execute_skips_plan_after_user_followup_without_summary`, and the helper
-tests in `dag_executor.blackbox.py`.
+`set_plan`. A fresh `plan`/`execute` start (no `resume_state`) then drops
+that plan (`plan_data = None`) and falls through to `run_agent`. Terminal
+reactivation (`clearWorkflowForTerminalAgent`) and follow-up Temporal start
+immediately null `responseSchema`, `structuredResponse`, `progress`,
+`toolsInUse`, and `statusMessage` on the Agent row so the new run never
+observes the old contract. Startup must not rebuild the schema from
+`Agent.goal`; it generates from the latest real USER instruction only.
+`continue_as_new` / deploy resume keep the live schema and plan. A live
+plan with no later USER and no Task Complete still runs `execute_dag`.
+A later root run on the same Agent row must resume the latest
+`context_reset` checkpoint (compressed context + tail), not re-ingest the
+raw first-run dump.
+Cemented by `wf_execute_skips_stale_plan_after_completion_followup`,
+`wf_execute_nulled_schema_does_not_regenerate_from_old_goal`,
+`wf_plan_followup_does_not_regenerate_schema_from_old_goal`,
+`wf_execute_skips_plan_after_user_followup_without_summary`, and
+`clearWorkflowForTerminalAgent` in `workflow-terminal-cleanup.test.ts`.
 
 Siblings this also prevents: post-completion "cancel that" / "also get X" /
 "do it for a different address" replaying the original book/order/send DAG;

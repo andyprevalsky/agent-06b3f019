@@ -52,6 +52,7 @@ import {
 import { CLOUD_AGENT_TOOL_NAME, CREATING_CLOUD_AGENT_TITLE } from './cloudAgentLifecycleTool';
 import { withChatEscalationDeadline } from './chatEscalationDeadline';
 import { createLogger } from '../logger';
+import { DERIVED_RUN_STATE_RESET } from '../../domains/agents/repoAgentMutations';
 import {
   createEarlyDirectGeneratorCoordinator,
   shouldStartEarlyDirectGenerator,
@@ -467,6 +468,16 @@ async function startTemporalWorkflowForChat(
     throw new Error(`Agent ${agentId} has no verifier`);
   }
   if (agent.temporalWorkflowId !== null || agent.status !== 'ACTIVE') return false;
+
+  // A follow-up after a finished run must not inherit that run's derived
+  // artifacts. First-run escalation has progress 0 and no structuredResponse,
+  // so it keeps a schema generated at create time.
+  if (agent.structuredResponse !== null || agent.progress > 0) {
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { ...DERIVED_RUN_STATE_RESET },
+    });
+  }
 
   // Start Temporal workflow (existing function)
   const execution = await startAgentWorkflowExecution(

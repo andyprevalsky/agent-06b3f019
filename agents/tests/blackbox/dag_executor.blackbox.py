@@ -322,6 +322,91 @@ def test_latest_real_user_instruction_empty():
     assert latest_real_user_instruction([{"role": "TOOL", "text": "done", "metadata": {}}]) is None
 
 
+def _raw_history_with_compaction_checkpoint(*, followup: str) -> list[dict]:
+    """First-run history that compacted, then completed, then a new USER.
+
+    The huge raw tool dump must not re-enter the next root run. Polling
+    projects from the latest context_reset and keeps the post-checkpoint tail.
+    """
+    from helpers.context_compaction import build_context_compaction_metadata
+
+    compressed = [
+        {"role": "USER", "text": "order me glide floss from doordash", "metadata": {}},
+        {
+            "role": "USER",
+            "text": "Compaction summary: ordered Oral-B Glide floss on DoorDash; confirmation dff187de.",
+            "metadata": {"compactionSummary": True},
+        },
+        {
+            "role": "TOOL",
+            "text": "Plan created",
+            "metadata": {
+                "toolName": "set_plan",
+                "toolStatus": "FINISHED",
+                "data": {
+                    "type": "plan_artifact",
+                    "join": "all",
+                    "tasks": [
+                        {
+                            "goal": "Research the public DoorDash shopping route for ordering floss.",
+                            "tool_name": "spawn_explore_agent",
+                        }
+                    ],
+                    "dependencies": {},
+                },
+            },
+        },
+    ]
+    return [
+        {"role": "USER", "text": "order me glide floss from doordash", "metadata": {}},
+        {
+            "role": "TOOL",
+            "text": "Very large raw tool output from the first DoorDash order run",
+            "metadata": {},
+        },
+        {
+            "role": "TOOL",
+            "text": "Context compressed — continuing with summarized history.",
+            "metadata": {
+                "toolName": "context_reset",
+                "toolStatus": "FINISHED",
+                "contextCompaction": build_context_compaction_metadata(compressed),
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Your DoorDash order is confirmed.",
+            "metadata": {
+                "toolName": "completion_summary",
+                "toolStatus": "FINISHED",
+                "isFinalSummary": True,
+            },
+        },
+        {"role": "USER", "text": followup, "metadata": None},
+    ]
+
+
+def test_followup_after_compaction_projects_last_checkpoint_and_stales_plan():
+    """A later root run must resume the last compression, not the raw first-run dump."""
+    from helpers.context_compaction import project_model_context_after_compaction
+    from loop.dag_executor import (
+        extract_plan_from_context,
+        latest_real_user_instruction,
+        plan_superseded_by_new_user_instruction,
+    )
+
+    followup = "get a refund, the doordasher delivered to the wrong location"
+    raw = _raw_history_with_compaction_checkpoint(followup=followup)
+    projected = project_model_context_after_compaction(raw)
+
+    assert all(m.get("text") != "Very large raw tool output from the first DoorDash order run" for m in projected)
+    assert any((m.get("metadata") or {}).get("compactionSummary") for m in projected)
+    assert any((m.get("metadata") or {}).get("contextCompactionBoundary") for m in projected)
+    assert latest_real_user_instruction(projected) == followup
+    assert extract_plan_from_context(projected) is not None
+    assert plan_superseded_by_new_user_instruction(projected)
+
+
 def test_tool_aliases_constants():
     """TOOL_ALIASES and ALIAS_TYPE_OVERRIDES are correctly defined."""
     from loop.dag_executor import ALIAS_TYPE_OVERRIDES, TOOL_ALIASES
@@ -1515,6 +1600,10 @@ async def run_all_tests():
         test_latest_real_user_instruction_skips_hidden_schema_updates,
     )
     r.record("latest_real_user_instruction_empty", test_latest_real_user_instruction_empty)
+    r.record(
+        "followup_after_compaction_projects_last_checkpoint_and_stales_plan",
+        test_followup_after_compaction_projects_last_checkpoint_and_stales_plan,
+    )
     r.record("tool_aliases_constants", test_tool_aliases_constants)
     r.record(
         "dag_foreach_alias_override_passes_spawn_agent_validation",
