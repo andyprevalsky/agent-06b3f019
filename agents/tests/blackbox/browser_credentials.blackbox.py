@@ -69,7 +69,7 @@ async def test_minted_account_is_offered_a_new_password_ref_that_is_saved_when_t
     )
     assert MINTED_NEW_PASSWORD_REF == "pwd:new"
     assert (
-        "- Minted account: Email -> rose.cedar11@mail.example | Sign-up password ref: pwd:new | enabled" in section
+        "- Minted account: Email -> rose.cedar11@mail.example | Sign-up password ref (new accounts only): pwd:new | enabled" in section
     ), section
     assert encrypted_refs == {"pwd:new": "envelope"}, "the worker decrypts the ref like any saved password"
     assert credential_refs["pwd:new"] == {"kind": "minted_account", "id": "minted-row-1"}

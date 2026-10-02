@@ -917,7 +917,7 @@ def build_auth_options_prompt_section(
                     "id": str(minted_id or minted_email),
                 }
                 # "Sign-up": a first run typed the ref into sign-in forms when it read "New password".
-                password_clause = f" | Sign-up password ref: {new_password_ref}"
+                password_clause = f" | Sign-up password ref (new accounts only): {new_password_ref}"
             lines.append(
                 f"- Minted account: Email -> {minted_email}{phone_clause}{password_clause} | {_disabled_label(minted)}"
             )
