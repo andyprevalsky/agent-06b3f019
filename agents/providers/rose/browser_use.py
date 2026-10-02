@@ -230,11 +230,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     "recover_from_challenge": {
         "description": (
             "Relatively expensive recovery to forcefully open a page or service blocked by a CAPTCHA, bot "
-            "challenge, access-denied interstitial, unusual-traffic page, repeated 429, or a first-party "
-            "proxy/tunnel failure. Do not use when "
+            "challenge, access-denied interstitial, unusual-traffic page, or repeated 429. Do not use when "
             "an alternate path can complete the goal without clearing this blocker. Do not drag sliders, "
             "click verify buttons, or otherwise try to solve the widget yourself. Never use for bad "
-            "credentials, a 404, out-of-stock, form validation, or a load failure without that evidence. When invoked, "
+            "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
             "the tool waits for Kernel or Steel's native automatic CAPTCHA solver, then tests isolated "
             "copies of browser state: known challenge cookies, all target-site cookies, then parallel "
             "cookie-group reductions. Set auth_cookies_are_preserved=true when the current session is logged "
@@ -253,8 +252,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                 "description": (
                     "One line of concrete evidence that this page or service must be force-opened and no "
                     "alternate goal path exists (e.g. 'Bot or Not interstitial blocks only path to search', "
-                    "'captcha wall blocks checkout with no other route', 'repeated 429s on required API'). "
-                    "For a proxy/tunnel failure, cite the failed first-party URL and error."
+                    "'captcha wall blocks checkout with no other route', 'repeated 429s on required API')."
                 ),
                 "required": True,
             },
