@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -1074,6 +1075,72 @@ class ApprovalLifecycleTest(unittest.TestCase):
         self.assertEqual(values["Production verify"].durations, (240.0,))
         self.assertEqual(values["Runtime blackbox"].durations, (30.0,))
         self.assertEqual(FACTORY_REVIEW.deploy_measurement_mode(turn), "instrumented")
+
+    def test_nested_cooperative_cutover_stage_keeps_deploy_instrumented(
+        self,
+    ) -> None:
+        def invocation(
+            identifier: str, event: str, value: str, started: float
+        ) -> object:
+            return FACTORY_REVIEW.Invocation(
+                identifier,
+                "Bash",
+                "python3 scripts/record_factory_event.py deploy " f"{event} {value}",
+                factory_event_output("deploy", event, value),
+                started,
+                started + 0.1,
+                False,
+            )
+
+        invocations = (
+            invocation("review-start", "stage-start", "code-review", 10.0),
+            invocation("review-finish", "stage-finish", "code-review", 20.0),
+            invocation("production-start", "stage-start", "production-verify", 30.0),
+            invocation("cutover-start", "stage-start", "cooperative-cutover", 40.0),
+            invocation("cutover-finish", "stage-finish", "cooperative-cutover", 90.0),
+            invocation("production-finish", "stage-finish", "production-verify", 120.0),
+            invocation("outcome", "outcome", "completed", 130.0),
+        )
+        turn = FACTORY_REVIEW.Turn(
+            "deploy",
+            "fixture-workspace",
+            "session",
+            "instrumented-deploy-with-cutover",
+            "2026-10-02T00:00:00Z",
+            131.0,
+            "completed",
+            "completed",
+            invocations,
+        )
+
+        values = FACTORY_REVIEW.deploy_cycle_timings(invocations)
+        self.assertEqual(values["Production verify"].durations, (90.0,))
+        self.assertEqual(FACTORY_REVIEW.deploy_measurement_mode(turn), "instrumented")
+
+    def test_workflow_command_factory_events_are_accepted_by_recorder(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "record_factory_event", ROOT / "scripts/record_factory_event.py"
+        )
+        assert spec and spec.loader
+        recorder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(recorder)
+        invocation_re = re.compile(
+            r"record_factory_event\.py\s+([a-z][a-z-]*)\s+([a-z][a-z-]*)\s+"
+            r"([A-Za-z][A-Za-z0-9_-]*)"
+        )
+        checked = 0
+        for command_file in sorted((ROOT / ".claude").rglob("*.md")):
+            for workflow, event, value in invocation_re.findall(
+                command_file.read_text()
+            ):
+                checked += 1
+                with self.subTest(
+                    file=str(command_file.relative_to(ROOT)),
+                    invocation=f"{workflow} {event} {value}",
+                ):
+                    self.assertIn(workflow, recorder.VALID_EVENTS)
+                    recorder.validate_event(workflow, event, value)
+        self.assertGreater(checked, 30)
 
     def test_instrumented_deploy_does_not_require_historical_review_duration(
         self,

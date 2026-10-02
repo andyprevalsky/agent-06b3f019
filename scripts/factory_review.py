@@ -186,6 +186,11 @@ DEPLOY_GROUP_SUMMARIES = {
         "Semantic tests",
     ),
 }
+# Sub-stages such as cooperative-cutover nest inside production-verify, so only
+# these top-level lifecycles must pair back-to-back for an instrumented deploy.
+DEPLOY_LIFECYCLE_STAGES = frozenset(
+    {"runtime-blackbox", "code-review", "production-verify"}
+)
 HISTORICAL_UNSPLIT_LABEL = "Historical unsplit calls"
 DUAL_ATTRIBUTION_LABEL = "Combined coverage-blackbox attribution"
 DEPLOY_VALUE_LABELS = [
@@ -1246,6 +1251,7 @@ def deploy_measurement_mode(turn: Turn) -> str:
         (event[1], event[2])
         for event in events
         if event[1] in {"stage-start", "stage-finish"}
+        and event[2] in DEPLOY_LIFECYCLE_STAGES
     ]
     ordered_pairs: list[str] = []
     if len(stage_events) % 2 == 0:

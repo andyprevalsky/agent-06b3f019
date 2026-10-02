@@ -1157,36 +1157,27 @@ async def test_browser_verifier_context_grounds_in_final_state():
     assert screenshot_msg["metadata"]["screenshot_b64"] == "ZmFrZS1iNjQ="
 
 
-async def test_evaluate_always_preserves_browser_evidence_checkpoint():
-    """Every successful evaluate snapshots live DOM for the verifier — no flag."""
-    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
-    from domains.spawn_browser_agent_v3.handler import (
-        _append_bounded_verifier_checkpoint,
-        _capture_preserved_evidence_after_evaluate,
-    )
+def test_evaluate_does_not_snapshot_dom_behind_the_model():
+    """The browser LLM owns its context: evaluate returns only its JS result."""
+    import inspect
 
-    class _FakeDom:
-        async def get_browser_state(self, include_screenshot=False):
-            assert include_screenshot is False
-            return {
-                "url": "https://shop.example/item/cable",
-                "title": "Cable",
-                "dom_tree": "<main>Six-foot cable; supports 100 watts; $19.99</main>",
-            }
+    from domains.spawn_browser_agent_v3 import handler
+
+    assert not hasattr(handler, "_capture_preserved_evidence_after_evaluate")
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    assert 'kind="preserved_evidence"' not in source
+    after_action = source[source.index('step_timer.mark("execute_action")') :]
+    success_branch = after_action[after_action.index('if result.get("success", True):') :]
+    success_branch = success_branch[: success_branch.index('step_timer.mark("post_action_bookkeeping")')]
+    assert 'action_name == "evaluate"' not in success_branch
+    assert "get_browser_state" not in success_branch
+
+
+def test_verifier_checkpoints_stay_bounded():
+    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+    from domains.spawn_browser_agent_v3.handler import _append_bounded_verifier_checkpoint
 
     checkpoints: list = []
-    state = await _capture_preserved_evidence_after_evaluate(
-        dom_service=_FakeDom(),
-        verifier_checkpoints=checkpoints,
-        current_url="https://shop.example/item/cable",
-    )
-    assert state is not None
-    assert len(checkpoints) == 1
-    assert checkpoints[0]["kind"] == "preserved_evidence"
-    assert "100 watts" in checkpoints[0]["dom_tree"]
-    assert "preserve_evidence" not in str(checkpoints)
-
-    # Cap retains the most recent VERIFIER_CHECKPOINT_MAX distinct snapshots.
     for i in range(VERIFIER_CHECKPOINT_MAX + 5):
         _append_bounded_verifier_checkpoint(
             checkpoints,
@@ -1208,24 +1199,26 @@ def test_evaluate_tool_schema_has_no_preserve_evidence_flag():
 
     fields = EvaluateTool.model_fields
     assert "preserve_evidence" not in fields
-    assert "always retains" in fields["code"].description.lower() or "snapshot" in fields["code"].description.lower()
+    assert "snapshot" not in (EvaluateTool.__doc__ or "").lower()
+    assert "snapshot" not in fields["code"].description.lower()
 
     evaluate_desc = BROWSER_USE_TOOLS["evaluate"]["description"]
     assert "preserve_evidence" not in evaluate_desc
-    assert "bounded browser-extracted DOM snapshot" in evaluate_desc
+    assert "snapshot" not in evaluate_desc.lower()
     assert "use `extract`" not in evaluate_desc
     assert "NOT for extracting visible content" not in evaluate_desc
 
     tools = build_browser_use_tools(["evaluate"])
     assert len(tools) == 1
     assert "preserve_evidence" not in tools[0]["input_schema"].get("properties", {})
-    assert "bounded browser-extracted DOM snapshot" in tools[0]["description"]
+    assert "snapshot" not in tools[0]["description"].lower()
     assert "use `extract`" not in tools[0]["description"]
 
     prompt = build_browser_use_system_prompt([])
     assert "# Evidence Retention" in prompt
-    assert "preserve flag" in prompt.lower() or "do not pass a preserve flag" in prompt
+    assert "preserve flag" not in prompt.lower()
     assert "preserve_evidence=true" not in prompt
+    assert "after a successful `evaluate`" not in prompt
 
 
 def test_action_history_restores_across_activity_boundary():
@@ -1289,7 +1282,7 @@ def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state
     # Keep a tight window around the fetch so a distant unused assignment cannot
     # satisfy the positive asserts while a nearby UnboundLocalError regresses.
     start = src.index(marker)
-    block = src[start : start + 1200]
+    block = src[start : start + 2000]
     assert (
         "auth_runtime_state.observe_page_text(observe_page_state.get(\"title\")"
         in block
@@ -1545,15 +1538,14 @@ async def test_browser_agent_recording_marks_do_not_block_on_slow_screenshots():
             )
             recorder.frames_dir.mkdir(parents=True)
             recorder._loop_task = asyncio.create_task(asyncio.sleep(60))
-            await asyncio.wait_for(
-                recorder.mark("Submit started", action="click", metadata={"step": 1, "phase": "start"}),
-                timeout=0.5,
-            )
-            await asyncio.wait_for(
-                recorder.mark("Submit finished", action="click", metadata={"step": 1, "phase": "finish"}),
-                timeout=0.5,
-            )
-            assert page.screenshot_calls == 2
+            for label, phase in (("Submit started", "start"), ("Submit finished", "finish")):
+                started = time_module.monotonic()
+                await recorder.mark(label, action="click", metadata={"step": 1, "phase": phase})
+                # Marks run twice per step; the bounded 200ms capture must not
+                # be on the step's critical path.
+                assert time_module.monotonic() - started < 0.05
+            await recorder.flush_marks()
+            assert page.screenshot_calls >= 1
             assert recorder.frames == []
             await recorder.record_observation(
                 iteration=1,
@@ -1804,6 +1796,7 @@ async def test_browser_agent_recording_mark_survives_wiped_frames_dir():
 
             # Must not raise — this is the Place-order finish mark path.
             await recorder.mark("Clicked <button \"Place order $1.00\">", action="click")
+            await recorder.flush_marks()
 
             assert recorder.frames_dir.exists()
             assert len(recorder.frames) == frames_before_wipe + 1
@@ -2191,6 +2184,7 @@ async def test_browser_agent_recording_survives_kernel_to_steel_recovery():
                     session_metadata={"provider": "steel"},
                 )
                 await recorder.mark("post-recovery checkout", action="recovery")
+                await recorder.flush_marks()
 
                 assert any(frame["label"] == "post-recovery checkout" for frame in recorder.frames), (
                     "the promoted Steel half of the recording was dropped"
@@ -3521,6 +3515,38 @@ def test_mouse_input_synthesis_rejects_unrealistic_sample_jumps():
         ]
         assert max(steps) <= 62
         assert max(velocities) <= MIMIC_MAX_VELOCITY_PX_PER_S + 60
+
+
+def test_mouse_path_duration_tracks_request_within_velocity_cap():
+    """A stroke takes about as long as its peak-velocity bound allows, not a
+    slow linear crawl, and long moves stay near human Fitts'-law times
+    (350px used to take ~1.85s at p50, 800px ~1.9s)."""
+    import math
+    import random
+    import statistics
+
+    from browser_tools.input_synthesis import MIMIC_MAX_VELOCITY_PX_PER_S, synthesize_mouse_path
+
+    for distance, p50_ceiling_s in ((60, 0.2), (350, 0.55), (800, 1.1)):
+        requested = max(0.08, min(0.95, 0.05 + distance / 1100))
+        totals = []
+        for seed in range(120):
+            path = synthesize_mouse_path(
+                (100, 300),
+                (100 + distance, 300),
+                screen=(1280, 800),
+                frequency_hz=105,
+                duration_s=requested,
+                rng=random.Random(seed),
+            )
+            totals.append(sum(sample.delay_s for sample in path))
+            velocities = [
+                math.hypot(b.x - a.x, b.y - a.y) / b.delay_s for a, b in zip(path, path[1:])
+            ]
+            assert max(velocities) <= MIMIC_MAX_VELOCITY_PX_PER_S + 1e-6
+            halfway = next(i for i, s in enumerate(path) if s.x - 100 >= distance / 2)
+            assert sum(s.delay_s for s in path[: halfway + 1]) < 0.75 * totals[-1] or distance < 100
+        assert statistics.median(totals) <= p50_ceiling_s, (distance, statistics.median(totals))
 
 def test_idle_mouse_drift_stays_near_anchor_and_inside_viewport():
     import random
@@ -7628,7 +7654,7 @@ def test_passkeys_rearmed_before_each_step_state_observe():
     window = source[start : observe + 120]
     assert "ensure_browser_overlays_suppressed()" in window
     assert window.index("ensure_browser_overlays_suppressed()") < window.index(
-        "get_browser_state("
+        "_observe_step_page("
     )
 
 async def test_provider_handoff_replaces_humanizer_without_leaking_idle_work():
@@ -19076,6 +19102,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
         async def get_browser_state(self, include_screenshot=False):
             return {"url": "https://example.com/login", "screenshot": None}
 
+        async def get_page_identity(self):
+            return {"url": "https://example.com/login", "title": ""}
+
         async def get_current_url(self, *, fallback: str = ""):
             return fallback or "https://example.com/login"
 
@@ -21408,8 +21437,9 @@ def test_handoff_autofill_invalidates_observe_page_state_prefetch():
         "observe_page_state = {}",
         autofill,
     )
-    prefetch = source.index("prefetched_browser_state=observe_page_state", autofill)
+    prefetch = source.index("prefetched_browser_state = observe_page_state", autofill)
     assert invalidate < prefetch
+    assert autofill < source.index("state_prefetch.start(dom_service)", autofill) < prefetch
 
 
 def test_browser_tool_events_declare_action_type():
@@ -21684,10 +21714,8 @@ async def run_all_tests():
     await r.record_async(
         "browser_verifier_context_grounds_final_state", test_browser_verifier_context_grounds_in_final_state
     )
-    await r.record_async(
-        "evaluate_always_preserves_browser_evidence_checkpoint",
-        test_evaluate_always_preserves_browser_evidence_checkpoint,
-    )
+    r.record("evaluate_does_not_snapshot_dom", test_evaluate_does_not_snapshot_dom_behind_the_model)
+    r.record("verifier_checkpoints_stay_bounded", test_verifier_checkpoints_stay_bounded)
     r.record(
         "evaluate_tool_schema_has_no_preserve_evidence_flag",
         test_evaluate_tool_schema_has_no_preserve_evidence_flag,
@@ -23136,6 +23164,7 @@ async def run_all_tests():
         "mouse_input_synthesis_velocity_guard",
         test_mouse_input_synthesis_rejects_unrealistic_sample_jumps,
     )
+    r.record("mouse_path_duration_tracks_request", test_mouse_path_duration_tracks_request_within_velocity_cap)
     r.record("idle_mouse_drift", test_idle_mouse_drift_stays_near_anchor_and_inside_viewport)
     r.record(
         "mouse_click_synthesis_duration",
