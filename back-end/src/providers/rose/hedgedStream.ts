@@ -23,6 +23,17 @@ export interface HedgeParams<T> {
   /** First chunk for which this is true latches its branch as the winner. */
   isContent: (item: T) => boolean;
   onWinner?: (name: string) => void;
+  /**
+   * A branch failed before any branch latched (and not because the race
+   * aborted it). Pre-latch failures are otherwise swallowed, so this is the
+   * only record of which guard ended a branch.
+   */
+  onBranchFailure?: (name: string, error: unknown) => void;
+  /**
+   * Start the hedge at once when the primary fails before it, instead of
+   * rethrowing. Use when the hedge is itself the fallover for primary errors.
+   */
+  hedgeOnPrimaryFailure?: boolean;
 }
 
 interface BranchState<T> {
@@ -36,9 +47,9 @@ interface BranchState<T> {
 /**
  * Race primary against a delayed hedge; yield only the winning branch's chunks.
  * A primary failure BEFORE the hedge starts is rethrown immediately (fast
- * provider errors belong to the caller's classified fallover chain); once the
- * hedge is racing, the race plays out and an all-fail outcome prefers the
- * primary's failure.
+ * provider errors belong to the caller's classified fallover chain) unless
+ * `hedgeOnPrimaryFailure` is set; once the hedge is racing, the race plays out
+ * and an all-fail outcome prefers the primary's failure.
  */
 export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T> {
   const states: BranchState<T>[] = [];
@@ -68,6 +79,9 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
       // Post-latch winner failures surface via state.failure in the consumer
       // loop; rethrowing here would be an unobserved promise rejection.
       state.failure = error ?? new Error(`${state.name} failed`);
+      if (winner === null && !state.controller.signal.aborted) {
+        params.onBranchFailure?.(state.name, state.failure);
+      }
     } finally {
       state.done = true;
       notify();
@@ -128,12 +142,15 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
       // A primary that fails BEFORE the hedge exists exits the race
       // immediately: fast provider errors (402 quota, 429, 5xx) must reach the
       // caller's error-classified fallover chain (e.g. same-model GLM-4.7 via
-      // OpenRouter for quota) rather than silently racing the generic hedge.
+      // OpenRouter for quota) rather than silently racing the generic hedge,
+      // unless the caller declared the hedge to be that fallover.
       // A primary that ends CLEANLY empty can never win, so the hedge starts
       // right away instead of waiting out the delay. Once racing, the race is
       // played out.
       if (primary.state.done && states.length === 1) {
-        if (primary.state.failure !== null) throw primary.state.failure;
+        if (primary.state.failure !== null && !params.hedgeOnPrimaryFailure) {
+          throw primary.state.failure;
+        }
         armHedge();
       }
       if (states.length > 1 && states.every((state) => state.done)) {

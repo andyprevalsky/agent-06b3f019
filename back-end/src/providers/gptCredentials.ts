@@ -282,7 +282,11 @@ export async function markGptIntegrationRateLimited(
   log.info(`GPT integration ${integrationId} rate-limited until ${until.toISOString()}`);
 }
 
-/** True when the shared funded GPT_API_KEY is currently backed off. */
+/**
+ * True when the shared funded GPT_API_KEY is currently backed off. The shared
+ * row is re-read at most once per recheck interval in both states, so a
+ * cooldown cleared in the DB is honored by every instance within that interval.
+ */
 export async function isGptApiKeyOnCooldown(): Promise<boolean> {
   const now = Date.now();
   // A local mark must remain effective while its DB upsert is in flight.
@@ -318,6 +322,8 @@ export async function markGptApiKeyOnCooldown(reason: string): Promise<void> {
   gptKeyCooldownCacheRevision++;
   cachedGptKeyCooldownUntilMs = until.getTime();
   pendingGptKeyCooldownWrites++;
+  // A read issued before the upsert commits must not drop the local mark.
+  lastGptKeyCooldownDbCheckMs = Date.now();
   try {
     await prisma.integration.upsert({
       where: {

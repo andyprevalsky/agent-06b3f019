@@ -89,6 +89,29 @@ export function codexSmokeCreditSkipReason(output: string, events: unknown[]): s
   return detectCodexCreditExhaustion(output, events);
 }
 
+const CODEX_CREATE_UNAVAILABLE_BODY =
+  'Code agent credentials are unavailable; the session could not be started';
+
+/**
+ * Create-time 500 with a generic "credentials unavailable" body is a hard
+ * failure when a credential path still exists. When the funded GPT key is
+ * already on its out-of-credits/bad-key cooldown and create still cannot
+ * start a session, every Codex path is unusable — same deploy-approved SKIP
+ * as mid-run exhaustion. Observed 2026-10-02: leftover cooldown from a prior
+ * coverage process plus no synced OAuth/pool token hard-failed Step 4a.
+ */
+export function codexCreateUnavailableSkipReason(
+  createBody: string,
+  onCooldown: boolean
+): string | null {
+  const exhaustion = detectCodexCreditExhaustion(createBody, []);
+  if (exhaustion) return exhaustion;
+  if (onCooldown && createBody.includes(CODEX_CREATE_UNAVAILABLE_BODY)) {
+    return 'funded GPT key on out-of-credits/bad-key cooldown and session create reported credentials unavailable';
+  }
+  return null;
+}
+
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
@@ -251,5 +274,25 @@ export function testCreditExhaustion_neverOverridesSuccessSentinel(): void {
   assert(
     codexSmokeCreditSkipReason('all credentials returned insufficient_quota', []) !== null,
     'no success sentinel + exhaustion must yield a skip reason'
+  );
+}
+
+export function testCreateUnavailableSkip_cooldownOnly(): void {
+  const createBody =
+    '{"error":"Code agent credentials are unavailable; the session could not be started"}';
+  assert(
+    codexCreateUnavailableSkipReason(createBody, true) !== null,
+    'credentials-unavailable create body + cooldown must skip'
+  );
+  assert(
+    codexCreateUnavailableSkipReason(createBody, false) === null,
+    'credentials-unavailable create body without cooldown must not skip'
+  );
+  assert(
+    codexCreateUnavailableSkipReason(
+      '{"error":"403: team is blocked: missing payment method"}',
+      false
+    ) !== null,
+    'existing create-time funding wording still skips without a cooldown flag'
   );
 }

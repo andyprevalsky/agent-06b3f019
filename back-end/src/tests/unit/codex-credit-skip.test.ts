@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  codexCreateUnavailableSkipReason,
   codexSmokeCreditSkipReason,
   detectCodexCreditExhaustion,
 } from '../blackbox/codex-credit-skip';
@@ -96,4 +97,19 @@ test('success always wins — a completed run can never skip', () => {
 
 test('a bare version number containing 402 is not a payment error', () => {
   assert.equal(detectCodexCreditExhaustion('codex-cli v1.402.0 started', []), null);
+});
+
+test('create-time credentials-unavailable skips only while the funded key is cooled', () => {
+  // Verbatim 2026-10-02 coverage fail: leftover out-of-credits cooldown plus
+  // no OAuth/pool token produced this 500 and hard-failed Step 4a.
+  const createBody =
+    '{"error":"Code agent credentials are unavailable; the session could not be started"}';
+  assert.ok(codexCreateUnavailableSkipReason(createBody, true) !== null);
+  assert.equal(codexCreateUnavailableSkipReason(createBody, false), null);
+  assert.ok(
+    codexCreateUnavailableSkipReason(
+      '{"error":"403: team is blocked: missing payment method"}',
+      false
+    ) !== null
+  );
 });

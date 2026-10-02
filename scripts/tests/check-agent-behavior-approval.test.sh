@@ -20,6 +20,12 @@ new_repo() {
     git init -q -b main
     git config user.email "test@example.com"
     git config user.name "Agent Behavior Guard Test"
+    # Isolated test repos must not inherit the host's commit.gpgsign.
+    # Cloud VMs often have ssh signing on and no live agent, which makes
+    # later commits fail with "communication with agent failed" (exit 128)
+    # after the guard assertions already passed.
+    git config commit.gpgsign false
+    git config tag.gpgsign false
     mkdir -p agents/loop agents/workflows agents/tests/blackbox
     # Seed the watched files so later edits are MODIFICATIONS (hunks), matching
     # how a real regression flips existing control flow.
@@ -184,5 +190,16 @@ if (cd "$failclosed_repo" && bash scripts/check-agent-behavior-approval.sh --bas
   exit 1
 fi
 echo "PASS: an unresolvable base ref fails closed"
+
+# Isolated repos must commit even when the host requires signing. Cloud VMs
+# inherit commit.gpgsign=true with no live ssh-agent; without a local override
+# later commits fail with "communication with agent failed" (exit 128).
+sign_repo="$(new_repo sign-isolation)"
+if [ "$(git -C "$sign_repo" config --get commit.gpgsign)" != "false" ]; then
+  echo "FAIL: isolated repo inherited host commit.gpgsign" >&2
+  exit 1
+fi
+git -C "$sign_repo" commit --allow-empty -q -m "unsigned empty"
+echo "PASS: isolated repo commits without host signing"
 
 echo "All agent-behavior guard tests passed."

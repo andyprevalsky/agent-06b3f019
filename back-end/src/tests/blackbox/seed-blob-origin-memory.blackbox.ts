@@ -36,6 +36,11 @@
 import { spawn } from 'child_process';
 import { PrismaClient } from '@prisma/client';
 import { assertLocalDatabase } from './assertLocalDatabase';
+import {
+  BLOB_FIXTURE_BACKEND_PEAK_MB,
+  blobOriginDatabasesSql,
+  measureBackendPeak,
+} from './blob-origin-fixture.helpers';
 import { createScopedBrowserAuthReaders } from '../../../scripts/cookie-domain-scope';
 import {
   ORIGIN_META_SELECT,
@@ -173,34 +178,23 @@ async function createOriginTable(schema: string): Promise<void> {
   );
 }
 
+let seedBackendPeakMb = 0;
+
 /**
  * Built entirely server-side: the test process must never hold the blob either,
  * or the fixture would be its own OOM.
  */
 async function seedSource(): Promise<void> {
-  await prisma.$executeRawUnsafe(
-    `INSERT INTO "${SRC_SCHEMA}"."IndexedDBOrigin" (id, "userId", origin, databases, hash, "updatedAt")
-     SELECT 'blob-big', $1, $2,
-       jsonb_build_array(jsonb_build_object(
-         'name', 'DocsErrors',
-         'objectStores', jsonb_build_array(jsonb_build_object(
-           'name', 'Errors',
-           'records', (
-             SELECT jsonb_agg(jsonb_build_object(
-               'key', 'record-key-' || i,
-               'value', jsonb_build_object(
-                 'key', 'record-key-' || i,
-                 'value', md5(i::text) || md5((i * 7)::text)
-               )
-             ))
-             FROM generate_series(1, ${BLOB_RECORDS}) i
-           )
-         ))
-       )),
-       'blob-big-hash', now()`,
-    USER_ID,
-    BIG_ORIGIN
+  const { backendPeakMb } = await measureBackendPeak((client) =>
+    client.$executeRawUnsafe(
+      `INSERT INTO "${SRC_SCHEMA}"."IndexedDBOrigin" (id, "userId", origin, databases, hash, "updatedAt")
+       SELECT 'blob-big', $1, $2, databases::jsonb, 'blob-big-hash', now()
+       FROM (${blobOriginDatabasesSql(BLOB_RECORDS)}) blob`,
+      USER_ID,
+      BIG_ORIGIN
+    )
   );
+  seedBackendPeakMb = backendPeakMb;
   for (const [index, origin] of SMALL_ORIGINS.entries()) {
     await prisma.$executeRawUnsafe(
       `INSERT INTO "${SRC_SCHEMA}"."IndexedDBOrigin" (id, "userId", origin, databases, hash, "updatedAt")
@@ -256,6 +250,15 @@ async function runChildProcess(): Promise<void> {
     });
   });
 }
+
+test(`seeding the source blob keeps one Postgres backend under ${BLOB_FIXTURE_BACKEND_PEAK_MB}MB`, async () => {
+  assert(
+    seedBackendPeakMb > 0 && seedBackendPeakMb <= BLOB_FIXTURE_BACKEND_PEAK_MB,
+    `seeding the source blob peaked the Postgres backend at ${seedBackendPeakMb}MB (budget ` +
+      `${BLOB_FIXTURE_BACKEND_PEAK_MB}MB). Build it as text: nested jsonb_build_* levels each ` +
+      'keep a full copy of the blob.'
+  );
+});
 
 test(`a ~40MB origin blob transfers inside a ${CHILD_HEAP_MB}MB heap`, async () => {
   assert(
@@ -319,6 +322,7 @@ async function main(): Promise<void> {
     await createOriginTable(SRC_SCHEMA);
     await createOriginTable(DST_SCHEMA);
     await seedSource();
+    console.log(`source blob seeded (Postgres backend peak ${seedBackendPeakMb}MB)`);
     await runChildProcess();
 
     for (const { name, fn } of tests) {

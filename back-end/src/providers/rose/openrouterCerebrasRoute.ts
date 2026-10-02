@@ -8,8 +8,8 @@
  *
  * Model note (2026-09-29): Align with direct Cerebras chat (`qwen-3.8-27b` /
  * rose-fast). OpenRouter id `qwen/qwen3.8-27b` matches the rose-1-flash
- * waterfall first hop. Prefer Cerebras; on org rate-cap fallover, prefer
- * Cerebras then Groq before any other host of the same model.
+ * waterfall first hop. On org rate-cap fallover the same model may spill to
+ * whichever host OpenRouter currently measures fastest.
  */
 
 import {
@@ -20,6 +20,7 @@ import {
   RoseServerError,
   RoseStallError,
 } from './errors';
+import { OPENROUTER_CHAT_LATENCY_PROVIDER } from './openrouterFastRoute';
 import { parseOpenAISSE } from './streaming';
 import { postOpenRouterStream } from './transport';
 import { coerceLeadingOnlySystemMessages, normalizeOpenAiToolCalls } from './transforms';
@@ -42,12 +43,10 @@ export function buildOpenRouterCerebrasBody(
     reasoning: { effort: 'low', exclude: true },
     // Default (exclusive route): pin to Cerebras — OpenRouter must not silently
     // serve the chat model from another host. Fallback mode
-    // (`allowProviderFallback`): prefer Cerebras then Groq (`order`), but let
-    // OpenRouter spill to another host of the same model when both hit their
-    // org rate cap. Same model, just not stuck on the capped provider —
-    // never a generic waterfall model.
+    // (`allowProviderFallback`): same model, ranked by live latency across its
+    // hosts — never a generic waterfall model.
     provider: opts.allowProviderFallback
-      ? { order: ['cerebras', 'groq'], allow_fallbacks: true, require_parameters: true }
+      ? OPENROUTER_CHAT_LATENCY_PROVIDER
       : { only: ['cerebras'], allow_fallbacks: false, require_parameters: true },
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),

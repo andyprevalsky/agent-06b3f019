@@ -537,9 +537,7 @@ FAST_MODE_GOAL_CAPTURE: Dict[str, List[Optional[str]]] = {}
 FAST_MODE_ENABLED_CAPTURE: Dict[str, List[bool]] = {}
 RESOLVE_FAST_CACHE_GOAL_CALLS: List[str] = []
 LEFTOVER_CHILD_AGENT_ID = "agent-test-leftover-child"
-LEFTOVER_CHILD_GOAL = (
-    "Produce fresh tool-grounded evidence for Andy Prevalsky's brand task."
-)
+LEFTOVER_CHILD_GOAL = "Produce fresh tool-grounded evidence for Andy Prevalsky's brand task."
 
 
 @activity.defn(name="resolve_fast_cache_goal_activity")
@@ -1138,9 +1136,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
             try:
                 fc_agent_id = "agent-test-fastcache"
                 FAST_MODE_GOAL_CAPTURE.pop(fc_agent_id, None)
-                demo_prefix = (
-                    "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
-                )
+                demo_prefix = "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
                 persisted_goal = f"{demo_prefix} — persisted DB goal"
                 handle = await env.client.start_workflow(
                     AgentWorkflow.run,
@@ -1229,8 +1225,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 enabled = FAST_MODE_ENABLED_CAPTURE.get(leftover_id)
                 assert enabled, "leftover child never reached an LLM call"
                 assert enabled[0] is True, (
-                    "leftover child must inherit DEMO cache from root_goal, "
-                    f"got fast_mode_cache_enabled={enabled[0]!r}"
+                    f"leftover child must inherit DEMO cache from root_goal, got fast_mode_cache_enabled={enabled[0]!r}"
                 )
                 await _cancel_workflow(handle)
                 results.append((name, None))
@@ -1381,6 +1376,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf.child_last_tokens = {"child-1": {"tokens_in": 220, "tokens_out": 80, "token_count": 300}}
     wf.iteration_offset = 41
     wf._signal_responses = {"approval-1": "APPROVED"}
+    wf._pending_approval_resume = {"request_id": "approval-1"}
     wf._last_signal_response = "continue"
     wf._has_new_messages = True
     wf._response_schema_feedback = ["add total"]
@@ -1436,6 +1432,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert (restored.token_count, restored.tokens_in, restored.tokens_out) == (950, 680, 270)
     assert (restored.tree_tokens_in, restored.tree_tokens_out) == (900, 350)
     assert restored._signal_responses == {"approval-1": "APPROVED"}
+    assert restored._pending_approval_resume == {"request_id": "approval-1", "question": ""}
     assert restored._response_schema_revision == 3
     assert restored.pending_children == {"child-1"}
     assert restored.child_workflow_ids == {"child-1": "child-workflow"}
@@ -1881,9 +1878,7 @@ def test_workflow_coalesce_fills_gp_outputs_from_row_item_and_explore():
         {
             "role": "USER",
             "text": (
-                "You are analyzing ONE creator for Andy Prevalsky.\n"
-                "Row item:\n"
-                '{"name": "Casey Winters", "rank": 22}'
+                'You are analyzing ONE creator for Andy Prevalsky.\nRow item:\n{"name": "Casey Winters", "rank": 22}'
             ),
         },
         {
@@ -1961,11 +1956,11 @@ def test_card_summary_from_evidence_rejects_long_cached_search_envelope():
     from workflows.agent_workflow import card_summary_from_evidence, is_ablated_completion_summary
 
     cached_search = (
-        '- **query**: Figure robot White House F.03 Brett Adcock interview\n\n'
-        '**Result:** Search result snippets and ranking metadata repeated from the prior '
-        'web_search trajectory. This intentionally exceeds two hundred characters so it '
-        'covers the bug where length alone made raw tool evidence look like a real Task '
-        'Complete summary even though the card exposed query and result plumbing.'
+        "- **query**: Figure robot White House F.03 Brett Adcock interview\n\n"
+        "**Result:** Search result snippets and ranking metadata repeated from the prior "
+        "web_search trajectory. This intentionally exceeds two hundred characters so it "
+        "covers the bug where length alone made raw tool evidence look like a real Task "
+        "Complete summary even though the card exposed query and result plumbing."
     )
     real_report = (
         "Brett Adcock's creator analysis was completed with verified channel URLs, a "
@@ -1994,9 +1989,7 @@ def test_card_summary_from_evidence_rejects_long_cached_search_envelope():
     ]
 
     assert is_ablated_completion_summary(cached_search)
-    assert not is_ablated_completion_summary(
-        "Fast Mode cache trajectory ended; prior tool evidence is sufficient."
-    )
+    assert not is_ablated_completion_summary("Fast Mode cache trajectory ended; prior tool evidence is sufficient.")
     summary = card_summary_from_evidence(context, {"creator_name": "Brett Adcock"})
     assert not is_ablated_completion_summary(summary)
     assert "Brett Adcock" in summary
@@ -2398,6 +2391,24 @@ async def test_workflow_signal_receive_user_response_plain_string():
         assert wf._has_new_messages is True
         assert wf._response_schema_feedback == ["hello plain"]
         assert wf._response_schema_revision == 1
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_user_message_alone_never_lifts_a_pause():
+    """The backend must follow a user's message with `resume` (prod agent 5c8b0ca4)."""
+    wf = _bare_workflow_instance()
+    wf.goal = "g"
+    wf.is_paused = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response("Skip DoorDash entirely. Buy from Amazon instead.")
+        assert wf.is_paused is True
+        assert wf._has_new_messages is True
+        await wf.resume()
+        assert wf.is_paused is False
+        assert wf._has_new_messages is True
     finally:
         _restore_workflow(original)
 
@@ -4248,9 +4259,7 @@ async def test_workflow_handle_incomplete_max_iterations_fast_mode_completes():
                 "status": "max_iterations",
                 "context": [],
                 "verifier_progress": 1.0,
-                "verifier_reasoning": (
-                    "Fast Mode cache trajectory ended; prior tool evidence is sufficient"
-                ),
+                "verifier_reasoning": ("Fast Mode cache trajectory ended; prior tool evidence is sufficient"),
             },
             phase="EXECUTE",
         )
@@ -4290,9 +4299,7 @@ async def test_workflow_handle_incomplete_max_iterations_fast_mode_fails_outside
                 "status": "max_iterations",
                 "context": [],
                 "verifier_progress": 1.0,
-                "verifier_reasoning": (
-                    "Fast Mode cache trajectory ended; prior tool evidence is sufficient"
-                ),
+                "verifier_reasoning": ("Fast Mode cache trajectory ended; prior tool evidence is sufficient"),
             },
             phase="EXECUTE",
         )
@@ -4454,6 +4461,8 @@ async def test_subscription_credit_recheck_preserves_concurrent_pause():
             return "https://roselabs.ai/s/free-credit"
         return None
 
+    fake.execute_activity = fake_exec
+
     async def fake_raise_gate(workflow_instance, gate, gate_key):
         return "resolved"
 
@@ -4462,6 +4471,7 @@ async def test_subscription_credit_recheck_preserves_concurrent_pause():
     workflow_module.raise_gate_direct = fake_raise_gate
     try:
         await wf._check_credits()
+        assert checks == 2
         assert wf._has_credits is True
         assert wf.is_paused is True
     finally:
@@ -4764,7 +4774,6 @@ async def test_workflow_caches_missing_cloud_agent_tool():
         _restore_workflow(original)
 
 
-
 async def test_workflow_run_covers_chat_agent_startup_and_completion():
     """Direct run() smoke covers startup lifecycle, context gates, schema generation, and completion."""
     wf = _bare_workflow_instance()
@@ -4995,15 +5004,9 @@ async def test_workflow_run_deployment_resume_skips_startup_replay_and_restores_
             if call[0] == "post_agent_message" and (call[1][3] or {}).get("isCustomSystemPrompt")
         ]
         startup_status = next(
-            call
-            for call in fake.activity_calls
-            if call[0] == "finalize_workflow_replacement_bootstrap"
+            call for call in fake.activity_calls if call[0] == "finalize_workflow_replacement_bootstrap"
         )
-        persisted_startup = next(
-            call
-            for call in fake.activity_calls
-            if call[0] == "update_agent_status"
-        )
+        persisted_startup = next(call for call in fake.activity_calls if call[0] == "update_agent_status")
         assert startup_status[1][1] == "ACTIVE"
         assert startup_status[1][2] == 0.4
         assert startup_status[1][4:9] == [950, 42_000, 73, 680, 270]
@@ -5699,8 +5702,7 @@ async def test_workflow_mark_complete_happy_path():
         signal_names = [s[1] for s in fake.signal_calls]
         assert "child_completed" in signal_names
         assert not any(
-            name == "notify_sms_event_activity" and args[1] == "completion"
-            for name, args in fake.activity_calls
+            name == "notify_sms_event_activity" and args[1] == "completion" for name, args in fake.activity_calls
         )
     finally:
         _restore_workflow(original)
@@ -5921,10 +5923,7 @@ async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summ
     fake = _FakeWorkflowModule()
     fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
     fake.activity_returns["generate_completion_summary"] = {
-        "summary": (
-            "Fast Mode cache trajectory ended; the task completed successfully "
-            "based on prior tool evidence."
-        ),
+        "summary": ("Fast Mode cache trajectory ended; the task completed successfully based on prior tool evidence."),
         "tool_counts": {"spawn_agent": 3},
         "usage": {
             "prompt_tokens": 0,
@@ -5991,9 +5990,7 @@ async def test_workflow_mark_complete_strips_fast_mode_prefix_from_long_extracte
         "building a brand at the intersection of health, longevity, technology, "
         "and founder journey. Last 90 days are 2026-04-04 through 2026-07-03."
     )
-    wf.root_goal = (
-        "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"
-    )
+    wf.root_goal = "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"
     wf.model = "rose-1-flash"
     wf.parent_workflow_id = "root-demo"
     wf.agent_source = "WEB"
@@ -6195,9 +6192,7 @@ async def test_workflow_mark_complete_materializes_oai_demo_root_report_files():
         names = [name for name, _args in fake.activity_calls]
         assert "materialize_oai_demo_report_files_activity" in names
         materialize_args = next(
-            args
-            for name, args in fake.activity_calls
-            if name == "materialize_oai_demo_report_files_activity"
+            args for name, args in fake.activity_calls if name == "materialize_oai_demo_report_files_activity"
         )
         assert materialize_args[0] == "u-demo"
         assert materialize_args[3] == "oai-demo-root"
@@ -6447,9 +6442,7 @@ async def test_workflow_check_cost_limit_skipped_after_finished():
     original = _patch_workflow(fake)
     try:
         await wf._check_cost_limit()
-        assert wf._cost_limit_reached is False, (
-            "_check_cost_limit flipped a finished agent to cost-limited"
-        )
+        assert wf._cost_limit_reached is False, "_check_cost_limit flipped a finished agent to cost-limited"
         assert wf.is_paused is False, "_check_cost_limit paused a finished agent"
         for fn_name, args in fake.activity_calls:
             if (
@@ -6505,8 +6498,7 @@ async def test_workflow_mark_complete_summary_cost_does_not_cost_limit_root():
                 and args[1] == "COST_LIMIT_REACHED"
             ):
                 raise AssertionError(
-                    "the completion summary's own cost flipped the completing root "
-                    "to COST_LIMIT_REACHED"
+                    "the completion summary's own cost flipped the completing root to COST_LIMIT_REACHED"
                 )
         assert wf._cost_limit_reached is False
     finally:
@@ -7021,9 +7013,7 @@ async def test_workflow_attempt_completion_drains_fast_mode_explores():
             return _inner().__await__()
 
     pending = _Pending()
-    wf._fm_explore_handles = [
-        {"handle": pending, "task_id": "t1", "tool_call_id": "tc", "ui_goal": "g"}
-    ]
+    wf._fm_explore_handles = [{"handle": pending, "task_id": "t1", "tool_call_id": "tc", "ui_goal": "g"}]
 
     async def fake_complete(**_kwargs):
         return {"result": "done"}
@@ -7418,9 +7408,7 @@ async def test_workflow_rotate_compute_token_releases_lineage_and_refetches():
         assert wf.gpt_code_token == "fresh-gpt"
         activity_names = [c[0] for c in fake.activity_calls]
         assert "release_compute_token_lineage_activity" in activity_names
-        release_call = next(
-            c for c in fake.activity_calls if c[0] == "release_compute_token_lineage_activity"
-        )
+        release_call = next(c for c in fake.activity_calls if c[0] == "release_compute_token_lineage_activity")
         assert release_call[1] == ["agent:agent-rotate"]
         fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
         assert fetch_call[1][-1] == "gpt"
@@ -7869,6 +7857,10 @@ async def run_all_tests():
         test_workflow_out_of_credits_resume_requires_fresh_credits,
     )
     await r.record_async("wf_signal_recv_user_plain", test_workflow_signal_receive_user_response_plain_string)
+    await r.record_async(
+        "wf_user_message_alone_never_lifts_pause",
+        test_workflow_user_message_alone_never_lifts_a_pause,
+    )
     await r.record_async("wf_signal_recv_user_req_id", test_workflow_signal_receive_user_response_with_request_id)
     await r.record_async(
         "wf_signal_recv_user_json_no_req", test_workflow_signal_receive_user_response_json_without_request_id
@@ -8037,6 +8029,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_check_credits_free_credit_checkout_failure_pauses",
         test_workflow_check_credits_free_credit_checkout_failure_pauses,
+    )
+    await r.record_async(
+        "wf_subscription_credit_recheck_preserves_concurrent_pause",
+        test_subscription_credit_recheck_preserves_concurrent_pause,
     )
     await r.record_async("wf_check_credits_has_credits", test_workflow_check_credits_has_credits_no_pause)
     await r.record_async("wf_check_credits_exception", test_workflow_check_credits_on_exception_continues)

@@ -478,6 +478,7 @@ their assertions or test counts:
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
 `bash scripts/tests/cooperative-cutover-monitor.test.sh`,
 `bash scripts/tests/agent-surface-hash.test.sh`,
+`bash scripts/tests/deploy-agent-clone-recovery.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
@@ -490,8 +491,9 @@ their assertions or test counts:
 `bash scripts/tests/run-seed-exit-code.test.sh`,
 `bash scripts/tests/run-public-tunnel-routing.test.sh`,
 `bash scripts/tests/setup-db-concurrency.test.sh`,
-`bash scripts/tests/run-port-collision.test.sh`, and
-`bash scripts/tests/run-cloud-benchmark-workers.test.sh`.
+`bash scripts/tests/run-port-collision.test.sh`,
+`bash scripts/tests/run-cloud-benchmark-workers.test.sh`, and
+`python3 agents/tests/structural/structural_test_registration.py`.
 
 This list is deliberately explicit, not a registry pointer: several of these
 suites assert that their own command still appears here, which is how a gate
@@ -642,15 +644,30 @@ repeats only this focused probe—not the complete coverage suite.
 
 ## Step 4p: Concurrent focused live probes
 
-The credential and Amplitude probes are independent and both read-only. Launch
-them under one foreground supervisor so a failing lane cannot interrupt or hide
-the sibling's evidence:
+The credential and Amplitude probes are independent and both read-only, so they
+run concurrently under one foreground supervisor; a failing lane cannot
+interrupt or hide the sibling's evidence. The chat-router-failover live probe
+starts after the Amplitude probe exits, because both boot the blackbox
+runner's db push and trigger hooks:
 
 ```bash
 python3 scripts/run_deploy_live_probes.py
 ```
 
-Both stage records must pass before closing the `runtime-blackbox` boundary.
+All three stage records must pass before closing the `runtime-blackbox`
+boundary.
+
+`chat-router-failover-live` replays the e8f2279b address-correction follow-up
+on its exact 30-message router context during a simulated Cerebras-wide
+stall, with the real OpenRouter GLM failover as the only path that can serve.
+It must run on the OpenRouter account `back-end/.env` configures, escalate on
+router attempt 1, and start the workflow with a goal anchored on the corrected
+address and not on the rejected one. A miss OpenRouter caused (the connection
+opened but no response headers came, or no first content within the 14.2s
+pre-content budget) is re-probed once 60s later. A second miss, or any other
+failure, blocks the deploy. A block means the failover could not serve that
+turn at that moment: diagnose it from the printed host, connect, and response
+timings and the `openrouter_fast_chat.end` records before rerunning.
 
 ## Step 4r: Cold-seed memory ratchet (no skip)
 
@@ -1120,7 +1137,7 @@ SEMANTIC_WORKERS=1 LOCAL_DB_PORT=$LOCAL_DB_PORT BACKEND_PORT=$CONDUCTOR_PORT FRO
   bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh chat-lifecycle-latency
 ```
 
-The runner generates one authenticated session per Playwright invocation. UI specs run on four workers with the latency ratchet excluded (`SEMANTIC_GREP_INVERT`). The latency ratchet then runs alone on one worker so renderer contention cannot become part of the product latency measurement — the same split as `chat-lifecycle-ratchet.yml`. Inside the lifecycle spec, `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` each take five independent samples; every sample must complete the full browser lifecycle in under five seconds.
+The runner generates one authenticated session per Playwright invocation. UI specs run on four workers with the latency ratchet excluded (`SEMANTIC_GREP_INVERT`). The latency ratchet then runs alone on one worker so renderer contention cannot become part of the product latency measurement — the same split as `chat-lifecycle-ratchet.yml`. Inside the lifecycle spec, `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` each take five independent samples; every sample must complete the full browser lifecycle in under six seconds.
 
 This runs every `.spec.ts` under `front-end/tests-e2e/` via headless Chromium. To run a single test:
 
@@ -1277,7 +1294,7 @@ bash scripts/run-deploy-stage --finish
 
 # ║ Includes four concurrent chat paths × five full-lifecycle samples, ║
 
-# ║ with every sample below the five-second ratchet. ║
+# ║ with every sample below the six-second ratchet.  ║
 
 # ║ 6c. Claude Code E2B sandbox smoke: PASS on every /deploy; never ║
 

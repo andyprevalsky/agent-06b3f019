@@ -13,15 +13,12 @@ import { installCaptchaSolveIndicator } from './captchaSolveIndicator';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import { persistBrowserSessionRow } from './sessionPersist';
 import {
-  forgetKernelProxy,
-  getOrCreateKernelProxy,
-  isKernelProxyAvailabilityError,
+  createSessionOnKernelProxyLadder,
   KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
   kernelRecreateProxySelection,
   resolveKernelProxyMode,
   type KernelProxyType,
-  type ResolvedKernelProxy,
 } from './kernelProxy';
 import {
   BrowserProviderRateLimitError,
@@ -328,54 +325,32 @@ async function createRemoteSession(
       }
     );
 
-  const createWithManagedProxy = async (
-    candidates: ReturnType<typeof kernelProxyCandidates>,
-    index: number
-  ): ReturnType<typeof createValidatedSession> => {
-    const candidate = candidates[index];
-    if (candidate === undefined) {
-      const proxyType = options.forceManagedProxyType ?? candidates[0]?.type ?? 'residential';
-      throw new Error(`Kernel has no available ${proxyType} proxy for ${proxyLocation.country}`);
-    }
-
-    let resolved: ResolvedKernelProxy | undefined;
-    try {
-      resolved = await getOrCreateKernelProxy(client, candidate);
-      return await createValidatedSession({
-        proxyId: resolved.proxyId,
-        proxyKey: resolved.proxyKey,
-        proxySource: resolved.source,
-        proxyLocation: resolved.location,
-      });
-    } catch (error) {
-      if (!isKernelProxyAvailabilityError(error) || index + 1 >= candidates.length) throw error;
-
-      // Only drop a cache row when the error proves this proxy_id is bad.
-      // A browsers.create transport timeout does not mean the remote proxy is
-      // gone — forgetting it would recreate orphans for the same geo key.
-      const message =
-        error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-      const stickyProxyKey =
-        resolved?.proxyKey !== undefined &&
-        (message.includes('proxy not found') ||
-          message.includes('invalid proxy') ||
-          message.includes('proxy unavailable') ||
-          message.includes('proxy is unavailable') ||
-          message.includes('no_peer') ||
-          message.includes('no peer'))
-          ? resolved.proxyKey
-          : undefined;
-      if (stickyProxyKey !== undefined) {
-        await forgetKernelProxy(stickyProxyKey).catch(() => {});
+  const createWithManagedProxy = (
+    candidates: ReturnType<typeof kernelProxyCandidates>
+  ): ReturnType<typeof createValidatedSession> =>
+    createSessionOnKernelProxyLadder(
+      client,
+      candidates,
+      (resolved) =>
+        createValidatedSession({
+          proxyId: resolved.proxyId,
+          proxyKey: resolved.proxyKey,
+          proxySource: resolved.source,
+          proxyLocation: resolved.location,
+        }),
+      {
+        onRefresh: (candidate, error) =>
+          log.warn('Kernel proxy was deleted; re-resolving the same location', {
+            proxyKey: candidate.proxyKey,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        onRelax: (candidate, error) =>
+          log.warn('Kernel proxy location unavailable; relaxing location specificity', {
+            proxyKey: candidate.proxyKey,
+            error: error instanceof Error ? error.message : String(error),
+          }),
       }
-
-      log.warn('Kernel proxy location unavailable; relaxing location specificity', {
-        proxyKey: candidate.proxyKey,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return createWithManagedProxy(candidates, index + 1);
-    }
-  };
+    );
 
   try {
     let remote;
@@ -393,11 +368,10 @@ async function createRemoteSession(
           `Kernel ${options.exactManagedProxy.type} ${options.exactManagedProxy.specificity} proxy is unavailable for the requested location`
         );
       }
-      remote = await createWithManagedProxy([exact], 0);
+      remote = await createWithManagedProxy([exact]);
     } else if (options.forceManagedProxyType !== undefined) {
       remote = await createWithManagedProxy(
-        kernelProxyCandidates(proxyLocation, options.forceManagedProxyType),
-        0
+        kernelProxyCandidates(proxyLocation, options.forceManagedProxyType)
       );
     } else {
       const proxyMode = resolveKernelProxyMode();
@@ -413,7 +387,7 @@ async function createRemoteSession(
           proxyLocation,
         });
       } else {
-        remote = await createWithManagedProxy(kernelProxyCandidates(proxyLocation), 0);
+        remote = await createWithManagedProxy(kernelProxyCandidates(proxyLocation));
       }
     }
     // Do not mark the profile bound here — persistBrowserSessionRow (or the

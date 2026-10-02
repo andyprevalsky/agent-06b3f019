@@ -65,17 +65,19 @@ function makeBranch(): {
   };
 }
 
-function harness(): {
+function harness(options: { hedgeOnPrimaryFailure?: boolean } = {}): {
   primary: ReturnType<typeof makeBranch>;
   hedge: ReturnType<typeof makeBranch>;
   fireHedge: () => void;
   winners: string[];
+  branchFailures: Array<[string, unknown]>;
   collect: () => Promise<{ items: Chunk[]; error: unknown }>;
 } {
   const primary = makeBranch();
   const hedge = makeBranch();
   let fire: () => void = () => undefined;
   const winners: string[] = [];
+  const branchFailures: Array<[string, unknown]> = [];
   const stream = hedgeStreams<Chunk>({
     primary: { name: 'cerebras', produce: primary.produce },
     hedge: { name: 'waterfall', produce: hedge.produce },
@@ -85,6 +87,8 @@ function harness(): {
       }),
     isContent,
     onWinner: (name) => winners.push(name),
+    onBranchFailure: (name, error) => branchFailures.push([name, error]),
+    hedgeOnPrimaryFailure: options.hedgeOnPrimaryFailure,
   });
   const collect = async (): Promise<{ items: Chunk[]; error: unknown }> => {
     const items: Chunk[] = [];
@@ -95,7 +99,7 @@ function harness(): {
       return { items, error };
     }
   };
-  return { primary, hedge, fireHedge: () => fire(), winners, collect };
+  return { primary, hedge, fireHedge: () => fire(), winners, branchFailures, collect };
 }
 
 async function main(): Promise<void> {
@@ -176,7 +180,8 @@ async function main(): Promise<void> {
     await tick();
     h.fireHedge();
     await tick();
-    h.primary.fail(new Error('cerebras died mid-race'));
+    const midRaceError = new Error('cerebras died mid-race');
+    h.primary.fail(midRaceError);
     await tick();
     h.hedge.push({ kind: 'content', text: 'rescued' });
     h.hedge.end();
@@ -184,6 +189,11 @@ async function main(): Promise<void> {
     assert.equal(error, null);
     assert.deepEqual(items, [{ kind: 'content', text: 'rescued' }]);
     assert.deepEqual(h.winners, ['waterfall']);
+    assert.deepEqual(
+      h.branchFailures,
+      [['cerebras', midRaceError]],
+      'a swallowed pre-latch branch failure must still be reported'
+    );
   }
 
   // 4c. Primary ends CLEANLY empty pre-latch: it can never win, so the hedge
@@ -202,6 +212,38 @@ async function main(): Promise<void> {
     assert.deepEqual(items, [{ kind: 'content', text: 'hedge fills the silence' }]);
   }
 
+  // 4d. With hedgeOnPrimaryFailure, a pre-hedge primary failure starts the
+  //     hedge at once instead of surfacing, and the hedge can still win.
+  {
+    const h = harness({ hedgeOnPrimaryFailure: true });
+    const result = h.collect();
+    await tick();
+    h.primary.fail(new Error('fast model 429'));
+    await tick();
+    assert.equal(h.hedge.started(), true, 'a declared fallover hedge must start on failure');
+    h.hedge.push({ kind: 'content', text: 'spill answers' });
+    h.hedge.end();
+    const { items, error } = await result;
+    assert.equal(error, null);
+    assert.deepEqual(items, [{ kind: 'content', text: 'spill answers' }]);
+    assert.deepEqual(h.winners, ['waterfall']);
+  }
+
+  // 4e. With hedgeOnPrimaryFailure and both branches failing, the primary's
+  //     failure still surfaces for the caller's classified fallover.
+  {
+    const h = harness({ hedgeOnPrimaryFailure: true });
+    const result = h.collect();
+    await tick();
+    const primaryError = new Error('fast model 402');
+    h.primary.fail(primaryError);
+    await tick();
+    h.hedge.fail(new Error('spill 429'));
+    const { items, error } = await result;
+    assert.deepEqual(items, []);
+    assert.equal(error, primaryError);
+  }
+
   // 5. Every branch fails pre-latch: the primary's failure surfaces to the caller.
   {
     const h = harness();
@@ -214,6 +256,11 @@ async function main(): Promise<void> {
     const { items, error } = await result;
     assert.deepEqual(items, []);
     assert.equal(error, primaryError, 'primary failure is preferred for fallover classification');
+    assert.deepEqual(
+      h.branchFailures.map(([name]) => name),
+      ['cerebras'],
+      'the hedge never started, so only the primary failure is reported'
+    );
   }
 
   // 6. Winner failing AFTER content surfaces the failure (post-content contract).
@@ -227,6 +274,28 @@ async function main(): Promise<void> {
     const { items, error } = await result;
     assert.deepEqual(items, [{ kind: 'content', text: 'partial' }]);
     assert.equal(error, midStreamError);
+    assert.deepEqual(
+      h.branchFailures,
+      [],
+      'a post-latch failure is the caller error, not a report'
+    );
+  }
+
+  // 7. A loser aborted by the race is not reported as a branch failure.
+  {
+    const h = harness();
+    const result = h.collect();
+    await tick();
+    h.fireHedge();
+    await tick();
+    h.hedge.push({ kind: 'content', text: 'hedge wins' });
+    h.hedge.end();
+    await result;
+    await tick();
+    assert.equal(h.primary.aborted(), true);
+    h.primary.fail(new Error('lost chat hedge race'));
+    await tick();
+    assert.deepEqual(h.branchFailures, [], 'a race-aborted loser is not a branch failure');
   }
 }
 

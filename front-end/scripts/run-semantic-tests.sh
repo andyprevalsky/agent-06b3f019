@@ -164,6 +164,14 @@ else
   # Postgres the running backend uses (LOCAL_DB_PORT on isolated deploy stacks).
   apply_local_semantic_db_urls
 
+  # Isolated benchmark runs in this worktree (the /deploy smoke and AgentCard
+  # lanes) drain the shared Cerebras quota; its 429s push router decisions past
+  # the 5s ratchet. Wait before generating the session so it cannot expire.
+  if [[ "${1:-}" == "chat-lifecycle-latency" ]]; then
+    . "$REPO_DIR/scripts/lib/isolated-benchmarks.sh"
+    wait_for_isolated_benchmarks "$REPO_DIR" "${SEMANTIC_LATENCY_BENCH_WAIT_S:-3600}" 30
+  fi
+
   if ! curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
     echo "FAIL: Backend not healthy at http://localhost:$BACKEND_PORT/health" >&2
     exit 1
@@ -232,7 +240,7 @@ if [[ -x "$FRONTEND_DIR/node_modules/.bin/playwright" ]]; then
 fi
 PLAYWRIGHT_CLI=""
 if [[ -z "$PLAYWRIGHT_BIN" ]]; then
-  PLAYWRIGHT_CLI="$(cd "$FRONTEND_DIR" && node -e "
+  PLAYWRIGHT_CLI="$(cd "$FRONTEND_DIR" 2>/dev/null || exit 0; node -e "
     const path = require('path');
     const pkgPath = require.resolve('@playwright/test/package.json');
     const bin = require(pkgPath).bin;
