@@ -20,6 +20,8 @@ new_repo() {
     git init -q -b main
     git config user.email "test@example.com"
     git config user.name "Trajectory Injection Guard Test"
+    git config commit.gpgsign false
+    git config tag.gpgsign false
     mkdir -p agents/domains/spawn_browser_agent_v3
     echo "# browser handler" > agents/domains/spawn_browser_agent_v3/handler.py
     echo "base" > README.md
