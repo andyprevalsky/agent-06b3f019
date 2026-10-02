@@ -226,3 +226,48 @@ abandonment`. This is a recurrence of the receipt fingerprint drift already
 recorded above, not another sandbox cardholder closure. Human feedback for this
 recurrence: the operator directed the agent to fix the runtime issue without
 raising timeouts, weakening tests, or touching the separate Explore issue.
+
+## 2026-10-02 recurrence: pool-funded fixture not established
+
+The required backend coverage run on `aa76b7bf` failed treasury-rails in
+161.308 seconds. Its exact unused 1,300-cent card transfer ended `reclaimed`
+with 1,300 cents released but zero cents transferred from the pool. The strict
+pool-funding assertion correctly rejected that run; release alone does not
+prove the pool-to-card leg. The original issuance transfer was not captured.
+
+The pre-mint sweep did not exhaust its 60-second limit: the first and last logged
+post-close recoveries span about 151 seconds, leaving at most about 10.2 seconds
+for setup, sweeping, issuance, and closure. Two idle recovery rounds prove
+zero returned recovery yield, not zero cardholder headroom. AgentCard's
+[current recovery contract](https://docs.agentcard.sh/tools/mcp/org/recover_funds)
+explicitly permits closed-card balances to fund later cards through netting.
+This is consistent with the observed transfer, but the uncaptured issuance
+state prevents attributing the original zero to a particular external actor.
+
+One instrumented execution kept the original assertions and limits and ran
+all funding, closure, and recovery checks in 150.259 seconds. On the same
+shared cardholder, its own transfer showed 1,300 cents transferred before
+closure and still 1,300 after reclaim, with 1,300 released. This rules out
+claiming that reclaim necessarily resets the transferred field. It does not
+establish fixture isolation or close the original cause. An earlier 3.218-second
+diagnostic skipped before issuance because its environment did not reproduce
+the canonical credentials; it provides no funding proof.
+
+Retain the exact pool-funding and release assertions and owned-card-only
+cleanup. The fixture now captures the newly issued card's numeric transfer before
+closure, including explicit not-found or unavailable observations. It does not
+assert immediate visibility: the provider contract makes no such guarantee.
+The original post-reclaim 1,300-cent assertion still decides the result. Do not invent a
+force-funding flag, close foreign cards, raise the mint amount or deadlines,
+or retry mints until one passes. The original failed coverage remains failed;
+the next canonical backend gate must execute the complete real flow.
+
+A private offline replay executes the actual fixture body against netted,
+partial, initially absent then visible, and fully funded own-card responses,
+with a separate foreign transfer present. The original source lacks the
+pre-close observation; the same replay passes with the capture added. Netted
+and partial transfers still fail the original pool assertion; delayed visibility
+and fully funded transfers pass only with the original final funding and
+release checks. This is an observability correction, not a causal fix for the
+original provider state. Independent review and final canonical coverage are
+required before reporting this candidate gate as passed.

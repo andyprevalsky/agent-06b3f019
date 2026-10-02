@@ -238,18 +238,33 @@ expect_eq "$(read_cloud_env "$boot_only_env" CONDUCTOR_WORKSPACE_NAME)" "cloud-b
 expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$boot_only_env' agent-id")" "bc-late" "a late agent store id is recorded for later reboots"
 
 # /run is on the snapshotted disk: a store id is trusted only while its daemon runs.
-fake_store="$TMP_ROOT/agent-store"
-mkdir -p "$fake_store"
-printf 'bc-live' >"$fake_store/self-store-id"
-bash -c 'exec -a cursor-agent-store-fuse sleep 60' &
-store_pid=$!
-printf 'pid=%s\n' "$store_pid" >"$fake_store/ready"
-expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "bc-live" "a running store daemon's id is the agent id"
-kill "$store_pid" 2>/dev/null || true
-wait "$store_pid" 2>/dev/null || true
-expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "" "a stale store id without its daemon is ignored"
-printf 'pid=%s\n' "$$" >"$fake_store/ready"
-expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "" "a reused pid that is not the store daemon is ignored"
+(
+  store_pid=''
+  cleanup_agent_store_fixture() {
+    if [ -n "$store_pid" ]; then
+      kill "$store_pid" 2>/dev/null || true
+      wait "$store_pid" 2>/dev/null || true
+    fi
+  }
+  trap cleanup_agent_store_fixture EXIT
+  fake_store="$TMP_ROOT/agent-store"
+  mkdir -p "$fake_store"
+  printf 'bc-live' >"$fake_store/self-store-id"
+  bash -c 'exec -a cursor-agent-store-fuse sleep 60' &
+  store_pid=$!
+  printf 'pid=%s\n' "$store_pid" >"$fake_store/ready"
+  if [ -r /proc/self/cmdline ]; then
+    expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "bc-live" "a running store daemon's id is the agent id"
+  else
+    expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "" "a host without procfs does not trust the store id"
+  fi
+  kill "$store_pid" 2>/dev/null || true
+  wait "$store_pid" 2>/dev/null || true
+  store_pid=''
+  expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "" "a stale store id without its daemon is ignored"
+  printf 'pid=%s\n' "$$" >"$fake_store/ready"
+  expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "" "a reused pid that is not the store daemon is ignored"
+)
 
 explicit_queue="$(
   TEMPORAL_TASK_QUEUE=semantic-sentinel \

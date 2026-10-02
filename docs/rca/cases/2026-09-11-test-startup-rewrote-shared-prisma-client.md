@@ -11,6 +11,7 @@ symptoms:
   - "segment '__TEXT' load command content extends beyond end of file"
   - "Unable to require libquery_engine-darwin-arm64.dylib.node"
   - "browser-take-control failed in seedBrowserControlSession"
+  - "run-blackbox-tests.sh: scripts/lib/run-process-cleanup.sh: No such file or directory"
 tags:
   - prisma
   - race-condition
@@ -80,11 +81,42 @@ tests in 54.6 seconds while the real E2B blackbox ran concurrently and passed
 in 20.2 seconds. Both launchers started at 12:39:45 UTC; the after-run logs are
 `.context/acceptance/prisma-readonly-{semantic,e2b}-after.log`.
 
+### 2026-10-02: Keep the real-launcher fixture's sourced libraries complete
+
+After integrating main, backend coverage failed three of this regression's six
+cases before reaching the Prisma boundary. The shipped blackbox launcher now
+sources `scripts/lib/run-process-cleanup.sh`; its disposable fixture copied only
+`workspace-env.sh`. Fresh-client execution exited 1 instead of reaching the
+fixture's exit-77 boundary, and stale/missing-client cases never reached their
+required freshness diagnostic. The coverage-launcher cases still passed.
+
+Copy the additional shipped library into the same disposable fixture. This is
+one fixture line: all six assertions, launchers, freshness checks and deadlines
+remain unchanged. The identical command,
+`python scripts/tests/prisma-test-launcher-readonly.test.py`, reproduced three
+failures and three passes before the correction (4.042 seconds), then passed
+all six cases afterward (9.899 seconds). The fixture uses the installed Prisma
+formatter with disposable schemas and fake DB/process boundaries; it makes no
+database, provider or model calls. Original output and process receipts are
+retained privately under `.context/acceptance/proof105-prisma-fixture-rca/`.
+
+This repairs this case's regression fixture; the shared-client mutation did not
+recur. Archive searches also identified the July 21 sourced-helper extraction
+case as a related fixture-dependency failure. Keep the real launcher's sourced
+dependency graph available in its test instead of weakening the downstream
+behavioral assertion. Independent review confirmed that every original assertion
+and runtime helper is unchanged. The owning TypeScript coverage-script unit also
+passed in 6.409 seconds. The full backend coverage gate still requires a fresh
+report after its separate treasury failure is resolved; unaffected passing gates
+do not require repetition for this test-only change.
+
 ## Human feedback
 
 The user requires completion without repeated permission requests, normal
 120-minute execution backstops, and a temporary five-minute limit for this
 validation. This fix changes no task, timeout, recording, or cleanup bounds.
+For the fixture follow-up, the user requested compact regression coverage and
+avoiding unnecessary proof resets. The six existing cases remain the coverage.
 
 ## Reusable lesson
 

@@ -64,6 +64,7 @@ console.log(JSON.stringify({client, prisma: dirname(backend.resolve('prisma/pack
             lib = fixture / "scripts/lib"
             lib.mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/lib/workspace-env.sh", lib)
+            shutil.copy2(ROOT / "scripts/lib/run-process-cleanup.sh", lib)
             dependencies = fixture / "back-end/node_modules"
             client = dependencies / "@prisma/client"
             client.mkdir(parents=True)
