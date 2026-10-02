@@ -211,6 +211,7 @@ export async function searchAndPromoteBrowserConfig(
             status: 'ACTIVE',
             closedAt: null,
             provider: config.provider,
+            kernelProxySource: config.provider === 'kernel' ? session.proxySource : null,
             providerProfileId: session.profileId,
             providerProfileSource: session.profileSource,
             providerProfilePersist: false,

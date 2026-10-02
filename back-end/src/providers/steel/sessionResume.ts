@@ -265,6 +265,7 @@ export async function recreateSession(
           status: 'ACTIVE',
           closedAt: null,
           provider: 'steel',
+          kernelProxySource: null,
           providerProfileId: session.profileId ?? profile.profileId ?? null,
           providerProfileSource: profile.profileSource,
           providerProfilePersist: profile.persistProfile,

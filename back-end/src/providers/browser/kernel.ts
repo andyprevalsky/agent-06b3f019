@@ -16,6 +16,7 @@ import {
   createSessionOnKernelProxyLadder,
   KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
+  kernelRecreateProxySelection,
   resolveKernelProxyMode,
   type KernelProxyType,
 } from './kernelProxy';
@@ -431,6 +432,7 @@ export async function createKernelSessionWithContext(
       wsUrl: remote.wsUrl,
       startUrl: _startUrl || undefined,
       provider: 'kernel',
+      kernelProxySource: remote.proxySource,
       ...providerProfileData(remote.profileId, remote.profileSource, true),
       releaseRemoteSession: releaseKernelRemoteSession,
     });
@@ -515,23 +517,7 @@ export async function closeKernelSession(
   if (releaseError !== null) throw releaseError;
 }
 
-/**
- * Recreate a Kernel browser session on the SAME persistent profile (cookies/login
- * survive), re-navigating to the last URL. Shared by resume (paused → active) and
- * rotate_ip (swap the egress IP mid-run). `forceManagedProxyType` pins the new
- * session to a residential/mobile tier; `proxyTier` records that on the row.
- */
-function persistedKernelProxyOptions(proxyTier: string | null): KernelRemoteSessionOptions {
-  if (proxyTier === 'none') return { omitManagedProxy: true };
-  const match = /^(residential|mobile|isp)(?:_(city|state|country))?$/.exec(proxyTier ?? '');
-  if (match === null) return {};
-  const type = match[1] as KernelProxyType;
-  const specificity = match[2] as KernelRecoveryProxySpecificity | undefined;
-  return specificity === undefined
-    ? { forceManagedProxyType: type }
-    : { exactManagedProxy: { type, specificity } };
-}
-
+/** Recreate on the persisted Kernel proxy choice and provider-scoped profile. */
 async function recreateKernelSession(
   taskId: string,
   opts: { forceManagedProxyType?: KernelProxyType; proxyTier?: string } = {}
@@ -561,9 +547,11 @@ async function recreateKernelSession(
     oldSession.agentId,
     proxyLocation,
     {
-      ...(opts.forceManagedProxyType === undefined
-        ? persistedKernelProxyOptions(oldSession.proxyTier)
-        : { forceManagedProxyType: opts.forceManagedProxyType }),
+      ...kernelRecreateProxySelection(
+        oldSession.kernelProxySource,
+        oldSession.proxyTier,
+        opts.forceManagedProxyType
+      ),
       // Provider profile IDs are scoped to their remote provider. A Browser
       // Use session returning to Kernel after the rollout switch is disabled
       // must use its Kernel profile, never the Browser Use profile ID.
@@ -582,6 +570,7 @@ async function recreateKernelSession(
       status: 'ACTIVE',
       closedAt: null,
       provider: 'kernel',
+      kernelProxySource: remote.proxySource,
       ...providerProfileData(remote.profileId, remote.profileSource, true),
       ...(opts.proxyTier !== undefined ? { proxyTier: opts.proxyTier } : {}),
     },

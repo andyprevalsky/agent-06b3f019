@@ -21,12 +21,11 @@ export function findLocalClaudeCodeWsServer(): string | null {
 }
 
 export function findLocalCodexCodeWsServer(): string | null {
-  // Directory name matches the E2B template id (set via env; no hardcoded secret).
-  const templateDir = process.env.E2B_CODEX_CODE_TEMPLATE_ID?.trim();
-  if (!templateDir) return null;
+  // The template ID names a remote E2B image. The local source directory is
+  // fixed, including when the default ID is used or an image ID is overridden.
   const candidates = [
-    join(process.cwd(), '..', 'e2b-templates', templateDir, 'ws-server.mjs'),
-    join(process.cwd(), 'e2b-templates', templateDir, 'ws-server.mjs'),
+    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'ws-server.mjs'),
+    join(process.cwd(), 'e2b-templates', 'codex-code', 'ws-server.mjs'),
   ];
   return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }

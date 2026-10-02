@@ -15,6 +15,7 @@ import type Kernel from '@onkernel/sdk';
 import {
   KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
+  managedKernelProxyFromSource,
 } from '../../providers/browser/kernelProxy';
 import { prisma } from '../../providers/database';
 import type { ProxyGeoLocation } from '../../providers/geoip';
@@ -34,9 +35,11 @@ export async function assertResumeReprovisionsDeletedProxy(options: {
   post: (path: string, body?: unknown) => Promise<BrowserApiResponse>;
 }): Promise<string> {
   const { kernel, taskId, sessionId, agentLocation, proxySource, proxyLocation, post } = options;
-  const candidate = (['residential', 'mobile', 'isp'] as const)
-    .flatMap((type) => kernelProxyCandidates(agentLocation, type))
-    .find((c) => c.source === proxySource);
+  const mode = managedKernelProxyFromSource(proxySource ?? null);
+  assert(mode !== undefined, `no managed proxy mode for source ${String(proxySource)}`);
+  const candidate = kernelProxyCandidates(agentLocation, mode.type).find(
+    (c) => c.source === proxySource
+  );
   assert(candidate !== undefined, `no managed proxy candidate for source ${String(proxySource)}`);
 
   const doomed = await kernel.proxies.create(

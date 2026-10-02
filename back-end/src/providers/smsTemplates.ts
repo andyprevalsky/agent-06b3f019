@@ -33,32 +33,34 @@ export const SMS_TEMPLATES = {
     `Sorry, we don't recognize this phone number. Please sign up at roselabs.ai first.`,
 
   /* c8 ignore start -- SMS Supervisor templates only called from excluded smsSupervisor module */
-  // SMS Supervisor templates. Every lifecycle SMS carries the per-agent deep
-  // link (getAgentUrl → roselabs.ai?agent-id=…) so the user can open the exact
-  // run from their phone. `url` is the deep link, not the bare site root.
+  // SMS Supervisor templates. Templates with a `url` argument receive the
+  // per-agent deep link (getAgentUrl → roselabs.ai?agent-id=…).
   agentStarted: (_prefix: string, goal: string, url: string) =>
-    `Started: "${goal}"\nView agent: ${url || ROSE_LABS_URL}`,
+    `I'm on it: ${goal}\nFollow along: ${url || ROSE_LABS_URL}`,
 
-  plannerQuestion: (_prefix: string, question: string) => `Rose asks: ${question}`,
+  plannerQuestion: (_prefix: string, question: string) =>
+    `I need your input to keep going: ${question}`,
 
-  plannerFyi: (_prefix: string, message: string) => `FYI: ${message}`,
+  plannerFyi: (_prefix: string, message: string) => `Here's an update: ${message}`,
 
   writeLock: (_prefix: string, question: string, _shortcode?: string) =>
-    `Approval needed: ${question}`,
+    `I need your approval before I continue:\n${question}`,
 
   authAssistance: (_prefix: string, authRealm: string, url: string) =>
-    `Login needed for ${authRealm}.\nOpen Rose to sign in: ${url || ROSE_LABS_URL}`,
+    `I need you to sign in to ${authRealm} so I can continue.\nSign in here: ${url || ROSE_LABS_URL}`,
 
   agentCardSetup: (_prefix: string, setupUrl: string) =>
-    `One Time Agent Payment Setup needed before I can issue this payment card.\nOpen: ${setupUrl || ROSE_LABS_URL}`,
+    `I need you to finish your one-time AgentCard setup before I can pay for this.\nSet it up: ${setupUrl || ROSE_LABS_URL}`,
 
   agentCompleted: (_prefix: string, summary: string, url: string, outputLines: string[] = []) =>
-    [`Done: ${summary}`, ...outputLines.slice(0, 6), `View agent: ${url || ROSE_LABS_URL}`].join(
-      '\n'
-    ),
+    [
+      `I finished the task: ${summary}`,
+      ...outputLines.slice(0, 6),
+      `See the details: ${url || ROSE_LABS_URL}`,
+    ].join('\n'),
 
   costLimit: (_prefix: string, taskLabel: string, costCents: number, limitCents: number) =>
-    `I hit the $${(limitCents / 100).toFixed(2)} budget limit for "${taskLabel}". Reply with the amount to add if you want me to continue.`,
+    `I've paused "${taskLabel}" at the $${(limitCents / 100).toFixed(2)} budget limit. Reply with the amount you'd like to add, and I'll keep going.`,
 
   onboardingWelcome: (name: string) =>
     `Hi ${name}! Welcome to Rose.\n\nText this number anytime you want something done and our superintelligence will ensure the task gets resolved optimally and quickly.\n\nI'll text you updates and ask for approval when needed.`,
