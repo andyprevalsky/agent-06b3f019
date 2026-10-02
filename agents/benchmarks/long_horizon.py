@@ -55,8 +55,6 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "no_synthetic_agent_skip_messages",
     "plan_shape",
     "principal_user_andy",
-    "google_oauth_demo_trace",
-    "fully_cached_agent",
     "agent_task_title",
     "root_deliverable_markers",
     "tree_agent_status",
@@ -70,6 +68,8 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "claude_code_session_output",
     "explore_research_not_reject_loop",
     "explore_completion_summary",
+    "google_oauth_demo_trace",
+    "fully_cached_agent",
     # runner="sms" — trajectory checks over the literal outbound text thread.
     # Implemented in benchmarks/sms_runner.py:run_sms_static_check.
     "sms_no_forbidden_phrases",

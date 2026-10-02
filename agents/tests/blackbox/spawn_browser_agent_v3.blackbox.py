@@ -19805,6 +19805,227 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
         "task_id": expected_task_id,
     }
 
+
+async def _run_manager_with_parked_activity(
+    activity_result, *, approval_error=None, start_activity_error=None
+):
+    """Drive one browser tool call whose activity returns ``activity_result``.
+
+    The approval/attention wait raises ``approval_error``; ``start_activity_error``
+    fails the manager before any browser activity starts.
+    """
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+
+    class _DoneActivityHandle:
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("done activity should not be cancelled")
+
+        def __await__(self):
+            async def _result():
+                return dict(activity_result)
+
+            return _result().__await__()
+
+    async def fake_execute_activity(activity_name, *args, **kwargs):
+        if activity_name == "lookup_purchase_activity":
+            return {"found": False, "reusable": False, "purchase": None}
+        raise AssertionError(f"unexpected activity: {activity_name}")
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="22222222-2222-4222-8222-222222222222",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+    )
+    start_activity = (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            side_effect=start_activity_error,
+        )
+        if start_activity_error is not None
+        else patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            return_value=_DoneActivityHandle(),
+        )
+    )
+    events = []
+    raised = None
+    with (
+        start_activity,
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.wait_condition",
+            AsyncMock(return_value=None),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.execute_activity",
+            side_effect=fake_execute_activity,
+        ),
+        patch(
+            "tools.request_user_approval.request_user_approval_direct",
+            AsyncMock(side_effect=approval_error),
+        ),
+    ):
+        try:
+            async for event in SpawnBrowserAgentManagerV3().execute_tool(
+                workflow_instance, {"goal": "Buy one probe item"}, "tool-1"
+            ):
+                events.append(event)
+        except Exception as exc:
+            raised = exc
+    return workflow_instance, events, raised
+
+
+_PARKED_BROWSER_ROW = {
+    "current_url": "https://roselabs.ai/test_payment",
+    "write_lock_approvals": {},
+    "step_count": 4,
+    "session_id": "session-1",
+    "browser_url": "https://kernel.example/live",
+    "task_id": "task-1",
+}
+_AWAITING_PURCHASE_WRITE_APPROVAL = {
+    **_PARKED_BROWSER_ROW,
+    "status": "awaiting_write_approval",
+    "approval_type": "purchase",
+    "question": "Approve checkout?",
+    "pending_action": {"action": "click", "index": 7, "params": {}},
+}
+_AWAITING_PAYMENT_CARD_APPROVAL = {
+    **_PARKED_BROWSER_ROW,
+    "status": "awaiting_payment_card_approval",
+    "payment_request": {
+        "merchant": "Rose Labs Test Store",
+        "line_items": [
+            {
+                "name": "Probe item",
+                "product_url": "https://roselabs.ai/test_payment",
+                "rating": "4.7 stars",
+                "review_count": "84 reviews",
+                "quantity": 1,
+                "line_total_cents": 100,
+            }
+        ],
+        "subtotal_cents": 100,
+        "total_cents": 100,
+    },
+}
+_TASK_SCOPED_TERMINAL = {
+    "toolName": "spawn_browser_agent",
+    "action_type": "task_complete",
+    "task_id": "task-1",
+    "browser_url": "https://kernel.example/live",
+    "session_id": "session-1",
+}
+
+
+async def _assert_generation_handoff_terminal_is_task_scoped(parked_result):
+    from helpers.generation_handoff import (
+        DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+        GenerationHandoffRequested,
+    )
+    from tools.base import MessageStatus
+
+    _, events, raised = await _run_manager_with_parked_activity(
+        parked_result, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
+    )
+
+    assert isinstance(raised, GenerationHandoffRequested)
+    terminal = events[-1]
+    assert terminal.message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+    assert terminal.status == MessageStatus.FINISHED
+    assert terminal.metadata == _TASK_SCOPED_TERMINAL
+
+
+async def test_manager_generation_handoff_during_payment_card_approval_is_task_scoped():
+    """A deploy handoff mid-browser-call must close that browser task durably.
+
+    Production agent f2e7166d (2026-10-02, agent-payment-production-abandonment)
+    was parked on its payment-card approval when a cooperative cutover raised
+    GenerationHandoffRequested. The manager posted task_complete with no
+    task_id, so the browser's task-scoped rows never got the publisher's
+    terminal and the durable-evidence seal failed before Hub archive.
+    """
+    await _assert_generation_handoff_terminal_is_task_scoped(_AWAITING_PAYMENT_CARD_APPROVAL)
+
+
+async def test_manager_generation_handoff_during_write_approval_is_task_scoped():
+    await _assert_generation_handoff_terminal_is_task_scoped(_AWAITING_PURCHASE_WRITE_APPROVAL)
+
+
+async def test_manager_generation_handoff_terminal_falls_back_to_preallocated_task_id():
+    from domains.spawn_browser_agent_v3.handler import _stable_browser_task_id
+    from helpers.generation_handoff import GenerationHandoffRequested
+
+    result_without_task_id = {
+        key: value for key, value in _AWAITING_PURCHASE_WRITE_APPROVAL.items() if key != "task_id"
+    }
+    workflow_instance, events, raised = await _run_manager_with_parked_activity(
+        result_without_task_id, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
+    )
+
+    assert isinstance(raised, GenerationHandoffRequested)
+    assert events[-1].metadata["action_type"] == "task_complete"
+    assert events[-1].metadata["task_id"] == _stable_browser_task_id(
+        workflow_instance.agent_id, "tool-1"
+    )
+
+
+async def test_manager_failure_terminal_is_task_scoped():
+    from tools.base import MessageStatus
+
+    _, events, raised = await _run_manager_with_parked_activity(
+        _AWAITING_PURCHASE_WRITE_APPROVAL, approval_error=RuntimeError("approval service unavailable")
+    )
+
+    assert raised is None
+    terminal = events[-1]
+    assert terminal.status == MessageStatus.ERROR
+    assert terminal.message == "approval service unavailable"
+    assert terminal.metadata == _TASK_SCOPED_TERMINAL
+
+
+async def test_manager_failure_before_activity_start_names_no_task():
+    """No browser activity ran, so no task posted rows the terminal could close."""
+    _, events, raised = await _run_manager_with_parked_activity(
+        _AWAITING_PURCHASE_WRITE_APPROVAL, start_activity_error=RuntimeError("worker unavailable")
+    )
+
+    assert raised is None
+    assert events[-1].title == "Browser automation failed"
+    assert events[-1].metadata == {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
+
+
+async def test_manager_write_lock_rejection_terminal_is_task_scoped():
+    from tools.request_user_approval import UserRejectedError
+
+    _, events, raised = await _run_manager_with_parked_activity(
+        _AWAITING_PURCHASE_WRITE_APPROVAL,
+        approval_error=UserRejectedError(rejection_message="not now"),
+    )
+
+    assert raised is None
+    terminal = events[-1]
+    assert terminal.title == "Action blocked by user"
+    assert terminal.metadata == {**_TASK_SCOPED_TERMINAL, "code": "write_lock_rejected"}
+
+
+async def test_manager_auth_assistance_failure_terminal_is_task_scoped():
+    from tools.base import MessageStatus
+
+    _, events, raised = await _run_manager_with_parked_activity(
+        {**_PARKED_BROWSER_ROW, "status": "awaiting_auth_assistance", "base_site": "Example"}
+    )
+
+    assert raised is None
+    terminal = events[-1]
+    assert terminal.title == "Authentication assistance failed"
+    assert terminal.status == MessageStatus.ERROR
+    assert terminal.metadata == {**_TASK_SCOPED_TERMINAL, "code": "auth_assistance_failed"}
+
 async def test_manager_passes_fast_mode_cache_for_browser_activity():
     """Browser activities must receive the workflow Fast Mode flag (re-enabled).
 
@@ -20861,6 +21082,13 @@ async def test_manager_payment_gate_agentcard_setup_required_prompts_and_retries
     assert "Agent payment setup complete" in setup_titles
     # Second mint still setup_required → prompt once more and stop (no card issued).
     assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+    final = events[-1]
+    assert final.title == "One Time Agent Payment Setup"
+    assert final.metadata["action_type"] == "task_complete"
+    assert final.metadata["code"] == "agentcard_user_setup_required"
+    assert final.metadata["task_id"] == "task-1"
+    first_setup = next(e for e in events if getattr(e, "title", "") == "One Time Agent Payment Setup")
+    assert first_setup.metadata["action_type"] == "agentcard_user_setup_required"
 
 async def test_manager_payment_gate_agentcard_setup_times_out_when_never_connected():
     events, activity_calls, _, _ = await _drive_payment_card_gate(
@@ -20872,6 +21100,13 @@ async def test_manager_payment_gate_agentcard_setup_times_out_when_never_connect
     assert "resolve_attention_request_activity" not in activity_calls
     assert any(getattr(e, "title", "") == "One Time Agent Payment Setup" for e in events)
     assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+    final = events[-1]
+    assert final.title == "Agent payment setup not completed"
+    assert final.metadata["action_type"] == "task_complete"
+    assert final.metadata["code"] == "agentcard_setup_timed_out"
+    assert final.metadata["task_id"] == "task-1"
+    # FE/evidence terminal only: the setup request stays the parent's tool result.
+    assert final.metadata["excludeFromModel"] is True
 
 async def test_manager_payment_gate_subscription_rejected_cancels_purchase():
     events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
@@ -20880,7 +21115,9 @@ async def test_manager_payment_gate_subscription_rejected_cancels_purchase():
     )
     assert gate_keys == ["subscription"]
     cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
-    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+    assert cancelled.metadata["action_type"] == "task_complete"
+    assert cancelled.metadata["code"] == "purchase_cancelled"
+    assert cancelled.metadata["task_id"] == "task-1"
     assert activity_calls.count("mint_purchase_card_activity") == 1
 
 async def test_manager_payment_gate_subscription_still_inactive_after_retry_blocks():
@@ -20890,7 +21127,9 @@ async def test_manager_payment_gate_subscription_still_inactive_after_retry_bloc
     )
     assert gate_keys == ["subscription"]
     blocked = next(e for e in events if getattr(e, "title", "") == "Subscription still inactive")
-    assert blocked.metadata["action_type"] == "purchase_blocked"
+    assert blocked.metadata["action_type"] == "task_complete"
+    assert blocked.metadata["code"] == "purchase_blocked"
+    assert blocked.metadata["task_id"] == "task-1"
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 async def test_manager_payment_gate_subscription_checkout_failure_still_raises_gate():
@@ -20905,7 +21144,9 @@ async def test_manager_payment_gate_subscription_checkout_failure_still_raises_g
     assert gate_payloads[0]["action"]["url"] == "https://roselabs.ai/subscribe"
     assert "mint_subscription_checkout_activity" in activity_calls
     cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
-    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+    assert cancelled.metadata["action_type"] == "task_complete"
+    assert cancelled.metadata["code"] == "purchase_cancelled"
+    assert cancelled.metadata["task_id"] == "task-1"
 
 async def test_manager_payment_gate_above_max_limit_errors_without_subscribe_gate():
     from tools.base import MessageStatus
@@ -20938,7 +21179,9 @@ async def test_manager_payment_gate_kyc_rejected_cancels_purchase():
     )
     assert gate_keys == ["kyc"]
     cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
-    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+    assert cancelled.metadata["action_type"] == "task_complete"
+    assert cancelled.metadata["code"] == "purchase_cancelled"
+    assert cancelled.metadata["task_id"] == "task-1"
 
 async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
     events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
@@ -20947,7 +21190,9 @@ async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
     )
     assert gate_keys == ["kyc"]
     blocked = next(e for e in events if getattr(e, "title", "") == "Identity verification still incomplete")
-    assert blocked.metadata["action_type"] == "purchase_blocked"
+    assert blocked.metadata["action_type"] == "task_complete"
+    assert blocked.metadata["code"] == "purchase_blocked"
+    assert blocked.metadata["task_id"] == "task-1"
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 async def test_manager_payment_gate_retries_company_funding_and_mints():
@@ -20991,7 +21236,9 @@ async def test_manager_payment_gate_reports_company_funding_deadline():
     )
     assert activity_calls.count("mint_purchase_card_activity") == 2
     delayed = next(e for e in events if getattr(e, "title", "") == "Payment funding is delayed")
-    assert delayed.metadata["action_type"] == "purchase_funding_delayed"
+    assert delayed.metadata["action_type"] == "task_complete"
+    assert delayed.metadata["code"] == "purchase_funding_delayed"
+    assert delayed.metadata["task_id"] == "task-1"
 
 # ========================================
 # Runner
@@ -21720,6 +21967,14 @@ def test_browser_tool_events_declare_action_type():
     untyped_lines = []
     typed_count = 0
     for node in ast.walk(tree):
+        # The shared terminal producer always declares action_type=task_complete.
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_browser_task_terminal_metadata"
+        ):
+            typed_count += 1
+            continue
         if not isinstance(node, ast.Dict):
             continue
         literal_items = {

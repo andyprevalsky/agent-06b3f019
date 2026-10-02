@@ -209,6 +209,36 @@ def _stable_browser_task_id(agent_id: str, tool_call_id: str) -> str:
     )
 
 
+def _browser_task_terminal_metadata(
+    result: Any,
+    started_task_id: Optional[str],
+    *,
+    code: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Task-scoped ``task_complete`` metadata for a manager-side browser end.
+
+    Durable evidence (``publish_evidence_links``, the payment-abandonment seal)
+    requires every browser task that posted rows to close with ``task_complete``
+    under its own task_id. When the activity returns parked (awaiting approval,
+    payment, or auth) it posts no terminal, so every manager exit after that —
+    pause, rejection, purchase outcome, deploy handoff, failure — owns it.
+    ``started_task_id`` is the id the manager handed the activity; ``None``
+    before any activity starts, so a pre-activity failure never names a task
+    that posted no rows. ``code`` preserves the specific outcome.
+    """
+    source = result if isinstance(result, dict) else {}
+    metadata: Dict[str, Any] = {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
+    task_id = source.get("task_id") or started_task_id
+    if task_id:
+        metadata["task_id"] = task_id
+    for key in ("browser_url", "session_id"):
+        if source.get(key):
+            metadata[key] = source[key]
+    if code:
+        metadata["code"] = code
+    return metadata
+
+
 _background_browser_cleanup_tasks: set[asyncio.Task] = set()
 
 
@@ -10440,6 +10470,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             metadata={"toolName": "spawn_browser_agent", "action_type": "session_starting"},
         )
 
+        result = None
+        activity_task_id: Optional[str] = None
         try:
             write_lock_enabled = getattr(workflow_instance, "write_lock_enabled", True)
             system_name = getattr(workflow_instance, "system_name", "Rose")
@@ -10471,7 +10503,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
             write_lock_resume_state = None
             current_start_url = start_url
-            result = None
 
             while True:
                 known_task_id = (
@@ -10527,6 +10558,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
                         retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS),
                     )
+                    activity_task_id = known_task_id
 
                     was_cancelled = False
                     # The workflow allocates task_id before starting the activity,
@@ -10556,25 +10588,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                 if was_cancelled or (result and result.get("status") == "cancelled"):
                     logger.info("\U0001f534 Browser agent cancelled")
-                    pause_metadata = {
-                        "toolName": "spawn_browser_agent",
-                        "action_type": "task_complete",
-                    }
-                    if result:
-                        if result.get("task_id"):
-                            pause_metadata["task_id"] = result["task_id"]
-                        elif known_task_id:
-                            pause_metadata["task_id"] = known_task_id
-                        if result.get("browser_url"):
-                            pause_metadata["browser_url"] = result["browser_url"]
-                        if result.get("session_id"):
-                            pause_metadata["session_id"] = result["session_id"]
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
                         title="Browser Session Paused",
                         message="User paused the browser agent",
                         status=MessageStatus.ERROR,
-                        metadata=pause_metadata,
+                        metadata=_browser_task_terminal_metadata(result, activity_task_id),
                     )
                     return
 
@@ -10694,11 +10713,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             title="Action blocked by user",
                             message=error_msg,
                             status=MessageStatus.FINISHED,
-                            metadata={
-                                "toolName": "spawn_browser_agent",
-                                "action_type": "write_lock_rejected",
-                                "task_id": result.get("task_id"),
-                            },
+                            metadata=_browser_task_terminal_metadata(
+                                result, activity_task_id, code="write_lock_rejected"
+                            ),
                         )
                         return
 
@@ -10890,31 +10907,38 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             setup_action=setup_info["setup_action"],
                             attention_request_id=setup_info["setup_attention"].get("attention_request_id"),
                         )
+                        setup_metadata: Dict[str, Any] = {
+                            "toolName": "spawn_browser_agent",
+                            "task_id": result.get("task_id"),
+                            "action_type": f"agentcard_user_{setup_info['agentcard_status']}",
+                            "agentCardSetup": {
+                                "status": setup_info["agentcard_status"],
+                                "setupAction": setup_info["setup_action"],
+                                "connectUrl": setup_info["connect_url"],
+                                "setupUrl": setup_info["primary_setup_url"],
+                                "setupTool": card.get("setupTool"),
+                                "setupStatus": card.get("setupStatus"),
+                                "setupSessionId": card.get("setupSessionId"),
+                            },
+                            "agentCardSetupAttentionRequestId": setup_info["setup_attention"].get(
+                                "attention_request_id"
+                            ),
+                            "previousPaymentApprovalAttentionRequestId": approval_response.get(
+                                "attention_request_id"
+                            ),
+                        }
+                        if waited_for_agentcard_setup:
+                            setup_metadata.update(
+                                _browser_task_terminal_metadata(
+                                    result, activity_task_id, code=setup_metadata["action_type"]
+                                )
+                            )
                         yield ToolEvent(
                             type=EventType.POST_MESSAGE,
                             title=setup_info["setup_title"],
                             message=setup_info["setup_question"],
                             status=MessageStatus.FINISHED,
-                            metadata={
-                                "toolName": "spawn_browser_agent",
-                                "task_id": result.get("task_id"),
-                                "action_type": f"agentcard_user_{setup_info['agentcard_status']}",
-                                "agentCardSetup": {
-                                    "status": setup_info["agentcard_status"],
-                                    "setupAction": setup_info["setup_action"],
-                                    "connectUrl": setup_info["connect_url"],
-                                    "setupUrl": setup_info["primary_setup_url"],
-                                    "setupTool": card.get("setupTool"),
-                                    "setupStatus": card.get("setupStatus"),
-                                    "setupSessionId": card.get("setupSessionId"),
-                                },
-                                "agentCardSetupAttentionRequestId": setup_info["setup_attention"].get(
-                                    "attention_request_id"
-                                ),
-                                "previousPaymentApprovalAttentionRequestId": approval_response.get(
-                                    "attention_request_id"
-                                ),
-                            },
+                            metadata=setup_metadata,
                         )
 
                         if waited_for_agentcard_setup:
@@ -10941,6 +10965,19 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "Timed out waiting for AgentCard setup",
                                 agentcard_status=setup_info["agentcard_status"],
                                 attention_request_id=setup_info["setup_attention"].get("attention_request_id"),
+                            )
+                            yield ToolEvent(
+                                type=EventType.POST_MESSAGE,
+                                title="Agent payment setup not completed",
+                                message="",
+                                status=MessageStatus.FINISHED,
+                                metadata={
+                                    **_browser_task_terminal_metadata(
+                                        result, activity_task_id, code="agentcard_setup_timed_out"
+                                    ),
+                                    # The setup request above stays the parent's tool result.
+                                    "excludeFromModel": True,
+                                },
                             )
                             return
 
@@ -11050,10 +11087,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 title="Purchase cancelled",
                                 message="A subscription is required to complete purchases — cancelled for now.",
                                 status=MessageStatus.FINISHED,
-                                metadata={
-                                    "toolName": "spawn_browser_agent",
-                                    "action_type": "purchase_cancelled",
-                                },
+                                metadata=_browser_task_terminal_metadata(
+                                    result, activity_task_id, code="purchase_cancelled"
+                                ),
                             )
                             return
 
@@ -11065,10 +11101,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 title="Subscription still inactive",
                                 message="I couldn't confirm an active subscription yet, so I can't complete the purchase.",
                                 status=MessageStatus.FINISHED,
-                                metadata={
-                                    "toolName": "spawn_browser_agent",
-                                    "action_type": "purchase_blocked",
-                                },
+                                metadata=_browser_task_terminal_metadata(
+                                    result, activity_task_id, code="purchase_blocked"
+                                ),
                             )
                             return
 
@@ -11095,10 +11130,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 title="Purchase cancelled",
                                 message="Identity verification is required to issue a card — cancelled for now.",
                                 status=MessageStatus.FINISHED,
-                                metadata={
-                                    "toolName": "spawn_browser_agent",
-                                    "action_type": "purchase_cancelled",
-                                },
+                                metadata=_browser_task_terminal_metadata(
+                                    result, activity_task_id, code="purchase_cancelled"
+                                ),
                             )
                             return
 
@@ -11109,10 +11143,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 title="Identity verification still incomplete",
                                 message="I couldn't confirm completed identity verification yet, so I can't issue the card.",
                                 status=MessageStatus.FINISHED,
-                                metadata={
-                                    "toolName": "spawn_browser_agent",
-                                    "action_type": "purchase_blocked",
-                                },
+                                metadata=_browser_task_terminal_metadata(
+                                    result, activity_task_id, code="purchase_blocked"
+                                ),
                             )
                             return
 
@@ -11126,11 +11159,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "creating another charge."
                             ),
                             status=MessageStatus.FINISHED,
-                            metadata={
-                                "toolName": "spawn_browser_agent",
-                                "task_id": result.get("task_id"),
-                                "action_type": "purchase_funding_delayed",
-                            },
+                            metadata=_browser_task_terminal_metadata(
+                                result, activity_task_id, code="purchase_funding_delayed"
+                            ),
                         )
                         return
 
@@ -11267,10 +11298,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             title="Authentication assistance failed",
                             message="Backend did not return an auth assistance request id.",
                             status=MessageStatus.ERROR,
-                            metadata={
-                                "toolName": "spawn_browser_agent",
-                                "action_type": "auth_assistance",
-                            },
+                            metadata=_browser_task_terminal_metadata(
+                                result, activity_task_id, code="auth_assistance_failed"
+                            ),
                         )
                         return
 
@@ -11414,14 +11444,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 title="Browser automation interrupted",
                 message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
                 status=MessageStatus.FINISHED,
-                metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete"},
+                metadata=_browser_task_terminal_metadata(result, activity_task_id),
             )
             raise
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):
                 raise
 
-            last_result = locals().get("result")
+            last_result = result
             logger.error(
                 "Browser manager failed",
                 agent_id=agent_id,
@@ -11444,7 +11474,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 title="Browser automation failed",
                 message=extract_error_message(e),
                 status=MessageStatus.ERROR,
-                metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete"},
+                metadata=_browser_task_terminal_metadata(result, activity_task_id),
             )
 
 
