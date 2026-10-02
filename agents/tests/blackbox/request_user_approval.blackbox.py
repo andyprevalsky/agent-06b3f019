@@ -418,6 +418,267 @@ async def test_direct_approval_ignores_unscoped_trailing_messages():
     assert result["response"] == "ok"
 
 
+async def test_direct_generation_handoff_stashes_request_without_resolving():
+    """Cooperative cutover must keep the original attn_id, not fence the row.
+
+    DEPLOY_INTERRUPTED on the row is the dead-generation fence. A live
+    continue_as_new has to re-wait that same id so SMS approve still works.
+    """
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+    from domains.request_user_approval.service import request_user_approval_direct
+    from tools.base import MessageStatus
+
+    wf = _WFInstance()
+
+    async def _handoff_queue():
+        return "navi-agent-tasks-live"
+
+    wf._check_generation_handoff = _handoff_queue
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-stale-prod",
+            "notify_sms_event_activity": None,
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    raised = False
+    try:
+        try:
+            await request_user_approval_direct(
+                workflow_instance=wf,
+                question="Make a phone call to +1 (415) 800-8345?",
+                metadata={"toolApproval": True},
+            )
+        except GenerationHandoffRequested as exc:
+            raised = True
+            assert exc.task_queue == "navi-agent-tasks-live"
+    finally:
+        restore()
+
+    assert raised is True
+    resolve_calls = [c for c in fake.activity_calls if c["name"] == "resolve_attention_request_activity"]
+    assert not resolve_calls, "live continue_as_new must not fence the approval row"
+    assert wf._pending_approval_resume == {
+        "request_id": "req-stale-prod",
+        "question": "Make a phone call to +1 (415) 800-8345?",
+    }
+    finished = [ev for ev, _, _ in wf.handled_events if ev.status == MessageStatus.FINISHED]
+    assert finished
+    assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+
+async def test_direct_retry_after_handoff_reuses_request_and_consumes_late_signal():
+    """After continue_as_new, retry the tool against the original attn_id.
+
+    Prod agent 262669d8 created cmuq98lzx after cutover; SMS approved
+    cmuq8f9bo and the live wait ignored it. A late signal on the original
+    id must complete the resumed wait without creating a second row.
+    """
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from domains.request_user_approval.service import request_user_approval_direct
+
+    wf = _WFInstance()
+
+    async def _handoff_queue():
+        return "navi-agent-tasks-live"
+
+    wf._check_generation_handoff = _handoff_queue
+    create_ids = ["req-stale-prod", "req-new-must-not-be-created"]
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": lambda: create_ids.pop(0),
+            "notify_sms_event_activity": None,
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        try:
+            await request_user_approval_direct(
+                workflow_instance=wf,
+                question="Make a phone call to +1 (415) 800-8345?",
+                metadata={"toolApproval": True},
+            )
+        except GenerationHandoffRequested:
+            pass
+
+        # Late SMS approve of the original id, then the replacement run retries.
+        wf._check_generation_handoff = None
+        wf._signal_responses["req-stale-prod"] = "Approved. Go ahead and make the call."
+        result = await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Make a phone call to +1 (415) 800-8345?",
+            metadata={"toolApproval": True},
+        )
+    finally:
+        restore()
+
+    create_calls = [c for c in fake.activity_calls if c["name"] == "create_approval_request_activity"]
+    assert len(create_calls) == 1
+    assert result["attention_request_id"] == "req-stale-prod"
+    assert result["response"] == "Approved. Go ahead and make the call."
+    assert wf._pending_approval_resume is None
+
+
+async def test_pending_approval_request_to_resume_reads_interrupted_chip():
+    from domains.request_user_approval.service import pending_approval_request_to_resume
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+    assert (
+        pending_approval_request_to_resume(
+            [
+                {
+                    "role": "TOOL",
+                    "text": DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    "metadata": {
+                        "toolStatus": "FINISHED",
+                        "requestUserApproval": {"attentionRequestId": "cmuq8f9bo"},
+                    },
+                }
+            ]
+        )
+        == "cmuq8f9bo"
+    )
+    assert (
+        pending_approval_request_to_resume(
+            [
+                {
+                    "role": "TOOL",
+                    "text": DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    "metadata": {
+                        "toolStatus": "FINISHED",
+                        "requestUserApproval": {"attentionRequestId": "cmuq8f9bo"},
+                    },
+                },
+                {
+                    "role": "TOOL",
+                    "text": "Approval request:\ncall\n\nUser response:\nApproved",
+                    "metadata": {
+                        "toolStatus": "FINISHED",
+                        "requestUserApproval": {"attentionRequestId": "cmuq8f9bo"},
+                    },
+                },
+            ]
+        )
+        is None
+    )
+
+
+async def test_sibling_approvals_match_question_and_do_not_steal_id():
+    """Two parked waits reuse only the matching question; a third action is new."""
+    from domains.request_user_approval.service import (
+        request_user_approval_direct,
+        stash_pending_approvals_from_context,
+    )
+
+    wf = _WFInstance()
+    wf.context = [
+        {
+            "role": "TOOL",
+            "text": "Call the restaurant?",
+            "metadata": {
+                "toolStatus": "IN_PROGRESS",
+                "attentionMessage": "Call the restaurant?",
+                "requestUserApproval": {"attentionRequestId": "attn-call"},
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Send the email?",
+            "metadata": {
+                "toolStatus": "IN_PROGRESS",
+                "attentionMessage": "Send the email?",
+                "requestUserApproval": {"attentionRequestId": "attn-email"},
+            },
+        },
+    ]
+    stash_pending_approvals_from_context(wf)
+    assert wf._pending_approval_resume == {
+        "requests": [
+            {"request_id": "attn-call", "question": "Call the restaurant?"},
+            {"request_id": "attn-email", "question": "Send the email?"},
+        ]
+    }
+
+    create_ids = ["attn-new-must-not", "attn-stolen-must-not"]
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": lambda: create_ids.pop(0),
+            "notify_sms_event_activity": None,
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        wf._signal_responses["attn-email"] = "Approved. Send it."
+        email = await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Send the email?",
+        )
+        wf._signal_responses["attn-new-must-not"] = "Approved. Book a hotel."
+        hotel = await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Book a hotel?",
+        )
+    finally:
+        restore()
+
+    create_calls = [c for c in fake.activity_calls if c["name"] == "create_approval_request_activity"]
+    assert email["attention_request_id"] == "attn-email"
+    assert hotel["attention_request_id"] == "attn-new-must-not"
+    assert len(create_calls) == 1
+    assert wf._pending_approval_resume == {
+        "request_id": "attn-call",
+        "question": "Call the restaurant?",
+    }
+
+
+async def test_manager_generation_handoff_stashes_request_without_resolving():
+    """LLM-facing execute_tool handoff must stash the same attn_id for reuse."""
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+    from domains.request_user_approval.service import RequestUserApprovalManager
+    from tools.base import MessageStatus
+
+    wf = _WFInstance()
+
+    async def _handoff_queue():
+        return "navi-agent-tasks-live"
+
+    wf._check_generation_handoff = _handoff_queue
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-mgr-stale",
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    manager = RequestUserApprovalManager()
+    events = []
+    raised = False
+    try:
+        try:
+            async for event in manager.execute_tool(
+                workflow_instance=wf,
+                tool_call={"question": "Approve sending this email?"},
+                tool_call_id="tc-handoff",
+            ):
+                events.append(event)
+        except GenerationHandoffRequested:
+            raised = True
+    finally:
+        restore()
+
+    assert raised is True
+    resolve_calls = [c for c in fake.activity_calls if c["name"] == "resolve_attention_request_activity"]
+    assert not resolve_calls
+    assert wf._pending_approval_resume == {
+        "request_id": "req-mgr-stale",
+        "question": "Approve sending this email?",
+    }
+    finished = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert finished
+    assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+
 async def test_direct_create_failure_propagates():
     """Create-request failure posts error event and re-raises."""
     from domains.request_user_approval.service import request_user_approval_direct
@@ -677,6 +938,26 @@ async def run_all_tests():
     await r.record_async(
         "direct_approval_scoped_signal",
         test_direct_approval_ignores_unscoped_trailing_messages,
+    )
+    await r.record_async(
+        "direct_handoff_stashes_request",
+        test_direct_generation_handoff_stashes_request_without_resolving,
+    )
+    await r.record_async(
+        "direct_retry_reuses_request",
+        test_direct_retry_after_handoff_reuses_request_and_consumes_late_signal,
+    )
+    await r.record_async(
+        "pending_approval_resume_scan",
+        test_pending_approval_request_to_resume_reads_interrupted_chip,
+    )
+    await r.record_async(
+        "manager_handoff_stashes_request",
+        test_manager_generation_handoff_stashes_request_without_resolving,
+    )
+    await r.record_async(
+        "sibling_approvals_match_question",
+        test_sibling_approvals_match_question_and_do_not_steal_id,
     )
     await r.record_async("direct_create_fail", test_direct_create_failure_propagates)
     await r.record_async("direct_sms_notify", test_direct_sms_source_attempts_sms_notify)

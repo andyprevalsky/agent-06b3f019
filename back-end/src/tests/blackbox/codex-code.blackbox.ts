@@ -20,11 +20,14 @@ import {
   testCodexCreditSkip_successStillWins,
   testCodexCreditSkip_authRevocationStillFailsHard,
   testCodexCreditSkip_matchesE2bTeamBlockedWording,
+  testCodexCreditSkip_createUnavailableOnCooldownIsSkip,
 } from './codex-credit-skip.case';
 import {
   CredentialExhaustionSkip,
+  codexCreateUnavailableSkipReason,
   codexSmokeCreditSkipReason,
   detectCodexCreditExhaustion,
+  testCreateUnavailableSkip_cooldownOnly,
   testCreditExhaustion_neverOverridesSuccessSentinel,
   testDetectCreditExhaustion_negative,
   testDetectCreditExhaustion_observedOpenAiWording,
@@ -386,7 +389,17 @@ async function testSmoke_codexCompletesE2bTask() {
     if (createRes.status !== 200) {
       const createBody =
         typeof createRes.data === 'string' ? createRes.data : JSON.stringify(createRes.data ?? {});
-      const createSkip = detectCodexCreditExhaustion(createBody, []);
+      let createSkip = detectCodexCreditExhaustion(createBody, []);
+      if (!createSkip) {
+        const cooldownRes = await request(
+          `${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`,
+          {
+            headers: apiKeyHeaders(),
+          }
+        );
+        const onCooldown = (cooldownRes.data as { onCooldown?: boolean }).onCooldown === true;
+        createSkip = codexCreateUnavailableSkipReason(createBody, onCooldown);
+      }
       if (createSkip) {
         throw new CredentialExhaustionSkip(
           `Codex/E2B session create blocked by external funding/billing (${createRes.status}); smoke SKIPPED without failing the deploy gate. Signal: ${createSkip}. Body: ${createBody.slice(0, 400)}`
@@ -554,6 +567,10 @@ async function runAll() {
       fn: async () => testCodexCreditSkip_matchesE2bTeamBlockedWording(),
     },
     {
+      name: 'credit-skip -- create unavailable + funded-key cooldown is recognized',
+      fn: async () => testCodexCreditSkip_createUnavailableOnCooldownIsSkip(),
+    },
+    {
       name: 'auth -- throws when no credential and no funded key',
       fn: async () => testResolveCodexAuthEnvs_noCredsNoKeyThrows(),
     },
@@ -592,6 +609,10 @@ async function runAll() {
     {
       name: 'smoke-skip -- success sentinel is never overridden by exhaustion',
       fn: async () => testCreditExhaustion_neverOverridesSuccessSentinel(),
+    },
+    {
+      name: 'smoke-skip -- create unavailable + cooldown is a funding skip',
+      fn: async () => testCreateUnavailableSkip_cooldownOnly(),
     }
   );
 

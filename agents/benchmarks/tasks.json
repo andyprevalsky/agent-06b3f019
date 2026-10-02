@@ -3064,9 +3064,7 @@
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\") to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI. If subscription signup is required, wait for the user to finish it, then continue. Obtain a payment card through request_payment_card and wait for approval. Report the test portal confirmation order ID after the order is placed.",
     "timeout_seconds": 1200,
     "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_agent"
-    ],
+    "expected_tools": ["spawn_agent"],
     "tags": [
       "browser",
       "payment",
@@ -3079,10 +3077,7 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": "auto_approve",
-    "expected_attention_kinds": [
-      "gate:subscription",
-      "payment_approval"
-    ],
+    "expected_attention_kinds": ["gate:subscription", "payment_approval"],
     "require_attention_order": true,
     "expected_gate": {
       "type": "subscription",
@@ -3165,9 +3160,7 @@
     "start_phase": "execute",
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": [
-        "exhausted_new_user_without_subscription_v1"
-      ],
+      "db_fixtures": ["exhausted_new_user_without_subscription_v1"],
       "base_images": [],
       "services": [
         "browser_agent",
@@ -3203,10 +3196,7 @@
           },
           {
             "type": "attention_kind_sequence",
-            "value": [
-              "gate:subscription",
-              "payment_approval"
-            ]
+            "value": ["gate:subscription", "payment_approval"]
           },
           {
             "type": "subscription_checkout_completed"
@@ -5437,8 +5427,7 @@
       "rca:cuda-kernel-github-ranking-used-explore-verifiers"
     ],
     "group": "rose-bench"
-  }
-,
+  },
   {
     "name": "planner-memory-blue-bottle-off",
     "title": "Blue Bottle planner A/B \u2014 memory OFF",
@@ -5446,14 +5435,8 @@
     "prompt": "Order a 16oz iced vanilla bean shakerato with almond or oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. Confirm order total and pickup time.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": [
-      "set_plan"
-    ],
-    "tags": [
-      "planner",
-      "memory",
-      "plan-only"
-    ],
+    "expected_tools": ["set_plan"],
+    "tags": ["planner", "memory", "plan-only"],
     "group": "daily",
     "price_limit_cents": 100,
     "requires_browser_agent": false,
@@ -5472,9 +5455,7 @@
     "environment": {
       "mode": "live",
       "db_fixtures": [],
-      "base_images": [
-        "base:victoria-prod-sync-v1"
-      ],
+      "base_images": ["base:victoria-prod-sync-v1"],
       "memory_fixtures": [],
       "services": [],
       "secrets": [],
@@ -5492,10 +5473,7 @@
         "checks": [
           {
             "type": "plan_shape",
-            "require_tools": [
-              "spawn_explore_agent",
-              "spawn_browser_agent"
-            ]
+            "require_tools": ["spawn_explore_agent", "spawn_browser_agent"]
           },
           {
             "type": "plan_shape",
@@ -5526,14 +5504,8 @@
     "prompt": "Order a 16oz iced vanilla bean shakerato with almond or oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. Confirm order total and pickup time.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": [
-      "set_plan"
-    ],
-    "tags": [
-      "planner",
-      "memory",
-      "plan-only"
-    ],
+    "expected_tools": ["set_plan"],
+    "tags": ["planner", "memory", "plan-only"],
     "group": "daily",
     "price_limit_cents": 100,
     "requires_browser_agent": false,
@@ -5552,12 +5524,8 @@
     "environment": {
       "mode": "live",
       "db_fixtures": [],
-      "base_images": [
-        "base:victoria-prod-sync-v1"
-      ],
-      "memory_fixtures": [
-        "blue-bottle-ferry-pickup-v1"
-      ],
+      "base_images": ["base:victoria-prod-sync-v1"],
+      "memory_fixtures": ["blue-bottle-ferry-pickup-v1"],
       "services": [],
       "secrets": [],
       "live_targets": [],
@@ -5574,9 +5542,7 @@
         "checks": [
           {
             "type": "plan_shape",
-            "no_tools": [
-              "spawn_explore_agent"
-            ]
+            "no_tools": ["spawn_explore_agent"]
           },
           {
             "type": "plan_shape",
@@ -5585,10 +5551,7 @@
             },
             "any_goal_contains": {
               "tool_name": "spawn_browser_agent",
-              "any": [
-                "order.online",
-                "bluebottlecoffee.com"
-              ]
+              "any": ["order.online", "bluebottlecoffee.com"]
             }
           }
         ]
@@ -5614,12 +5577,8 @@
     "prompt": "DEMO FIXTURE ONLY. Produce the Rose agent segment for a Google OAuth review video. Call google_oauth_demo exactly once, then answer from its result. The tool emits twelve visible mock cards in order: google_connection_status, gmail_list_unread, gmail_create_reply_draft, gmail_approve_draft, gmail_send_draft, gmail_archive, calendar_list_tomorrow, calendar_create_event, drive_search, drive_read, drive_append_line, google_disconnect. All operations use in-memory data; the fixture makes no database request. Do not spawn any subagent, coding agent, or browser agent. Do not use a website, real credentials, or a real Google API. The fixed fixture date is 2026-10-01 in America/Los_Angeles; tomorrow and next Friday are both 2026-10-02. Show these seven requests in order: summarize unread email; reply to Sam with \"Thursday works.\" including draft, approval, and Sent verification; archive the Acme newsletter and confirm it left Inbox; show tomorrow's Project Sync; create Lunch with Alex next Friday at noon; find Lease and state its end date; append \"Renew by Dec 1\" once to Lease. Include connected account test@gmail.com, final disconnected state, and the exact label \"DEMO fixture, no live Google data changed\". Ground every answer in the twelve DEMO cards. If the tool fails, report the failure. Fill all required response-schema fields, including the exact unread summary and final_disconnected=true.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": [
-      "google_oauth_demo"
-    ],
-    "tags": [
-      "DEMO"
-    ],
+    "expected_tools": ["google_oauth_demo"],
+    "tags": ["DEMO"],
     "group": "demo",
     "price_limit_cents": 400,
     "requires_browser_agent": false,
@@ -5693,9 +5652,7 @@
     ],
     "enforce_declared_evaluators": true,
     "label_eval": "One root-only mock tool emits twelve visible synthetic cards without subagents, coding agents, browser agents, or Google API requests.",
-    "source": [
-      "user-request:google-oauth-video-demo"
-    ],
+    "source": ["user-request:google-oauth-video-demo"],
     "response_schema": {
       "fields": [
         {
