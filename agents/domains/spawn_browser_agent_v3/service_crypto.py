@@ -5,6 +5,7 @@ Payment decryption, password handling, and OTP extraction.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import html
 import json
@@ -424,9 +425,19 @@ async def fetch_recent_otps(user_id: str, api_url: str, api_key: str) -> List[Ex
     """Fetch recent email/SMS messages and extract OTP codes as structured records."""
     try:
         since = (datetime.utcnow() - timedelta(minutes=10)).isoformat() + "Z"
-        emails = await fetch_recent_emails(user_id, api_url, api_key, since, limit=20)
-        agentphone_messages = await fetch_recent_sms_messages(user_id, api_url, api_key, since, limit=20)
-        imessages = await fetch_recent_imessages(user_id, api_url, api_key, since, limit=20)
+        sources = ("email", "agentphone_sms", "imessage")
+        results = await asyncio.gather(
+            fetch_recent_emails(user_id, api_url, api_key, since, limit=20),
+            fetch_recent_sms_messages(user_id, api_url, api_key, since, limit=20),
+            fetch_recent_imessages(user_id, api_url, api_key, since, limit=20),
+            return_exceptions=True,
+        )
+        for source, result in zip(sources, results):
+            if isinstance(result, BaseException):
+                logger.warning("OTP source fetch failed", source=source, error=str(result)[:200])
+        emails, agentphone_messages, imessages = (
+            [] if isinstance(result, BaseException) else result for result in results
+        )
         # Treat agent-phone SMS and inbound iMessages as one SMS-style source.
         # Agent-phone is listed first so it wins on duplicate codes (the loop
         # below dedups by code via ``seen_codes``).
