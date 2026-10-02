@@ -379,6 +379,15 @@ override those infrastructure budgets. Origin-payload SQL uses the configured
 state budget too. This approved 20% headroom does not change benchmark execution
 backstops, the fleet E2E cutoff, or evidence and teardown requirements.
 
+Browser-action message saves carry a unique `browser.save_action_message` span
+through the existing HTTP tracing headers. Join its worker error to the backend
+request's `parent_span_id`; an enclosing browser activity alone can contain many
+saves. A five-second save acknowledgment timeout during execution is distinct
+from teardown. Verify durable message identity separately: a row appearing later
+does not erase the failed acknowledgment. The browser-agent blackbox covers
+per-call correlation, failure attribution, context restoration and payload-free
+logs while retaining the existing timeout and retry behavior.
+
 Run durable publication with the agents environment, for example
 `agents/venv/bin/python scripts/publish_evidence_links.py --run-json <run.json> --agent-id <id>`.
 Transcript verification must follow both root-message ownership and the actual

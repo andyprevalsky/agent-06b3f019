@@ -6559,6 +6559,59 @@ async def test_save_browser_action_message_posts_metadata():
     assert body["metadata"]["total_steps"] == 30
     assert body["metadata"]["output_schema"] == {"fields": []}
 
+async def test_browser_action_save_correlates_each_http_call_and_failure_without_payload_logs():
+    import httpx
+    import structlog.contextvars
+    from structlog.testing import capture_logs
+    from _test_utils import setup_mock_fn
+    from domains.spawn_browser_agent_v3.repo import save_browser_action_message
+    from tools.base import MessageStatus
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if len(requests) == 1:
+            raise httpx.ReadTimeout("acknowledgment unavailable", request=request)
+        return httpx.Response(201, json={"ok": True})
+
+    setup_mock_fn(respond)
+    private_values = ["private-action-title", "private-message-body", "https://private.invalid/action"]
+    with (
+        patch("config.load_config", return_value=_fake_config()),
+        structlog.contextvars.bound_contextvars(span_id="browser-activity", agent_id="ag1", request_id=None),
+        capture_logs(processors=[structlog.contextvars.merge_contextvars]) as events,
+    ):
+        results = []
+        for _ in range(2):
+            results.append(
+                await save_browser_action_message(
+                    agent_id="ag1",
+                    title=private_values[0],
+                    message=private_values[1],
+                    status=MessageStatus.FINISHED,
+                    task_id="browser-task",
+                    browser_url=private_values[2],
+                    action_type="goto",
+                    tool_call_id="browser-tool",
+                )
+            )
+        assert structlog.contextvars.get_contextvars()["span_id"] == "browser-activity"
+
+    assert results == [False, True]
+    assert len(requests) == 2, "an ambiguous timeout must not replay the POST"
+    parents = [request.headers.get("x-parent-span-id") for request in requests]
+    assert all(parents), "every save must propagate its own trace parent to the backend"
+    assert len(set(parents)) == 2 and "browser-activity" not in parents
+    for parent in parents:
+        starts = [event for event in events if event.get("event") == "span.start" and event.get("span_id") == parent]
+        assert len(starts) == 1 and starts[0]["parent_span_id"] == "browser-activity"
+    failures = [event for event in events if event.get("event") == "Failed to save browser action message"]
+    assert len(failures) == 1 and failures[0]["span_id"] == parents[0]
+    assert failures[0]["agent_id"] == "ag1"
+    assert all(value not in json.dumps(events) for value in private_values)
+
+
 async def test_save_browser_action_message_init_no_subagent():
     from tools.base import MessageStatus
     from domains.spawn_browser_agent_v3.repo import save_browser_action_message
@@ -22931,6 +22984,10 @@ async def run_all_tests():
     await r.record_async(
         "save_browser_action_message_metadata",
         test_save_browser_action_message_posts_metadata,
+    )
+    await r.record_async(
+        "browser_action_save_correlates_each_http_call_and_failure_without_payload_logs",
+        test_browser_action_save_correlates_each_http_call_and_failure_without_payload_logs,
     )
     await r.record_async(
         "save_browser_action_message_tool_name_override",

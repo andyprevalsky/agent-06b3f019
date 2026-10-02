@@ -20,13 +20,14 @@ from domains.spawn_browser_agent_v3.config import (
     EXTRACT_MAX_CONTENT_LENGTH,
     MIME_TYPE_MAP,
 )
-from tools.base import MessageStatus
-from utils.error_utils import extract_error_message
+from helpers.tracing import traced, tracing_headers
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
     raise_if_generation_sealed,
     workflow_generation_headers,
 )
+from tools.base import MessageStatus
+from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 
@@ -129,6 +130,7 @@ async def report_claude_token_rate_limited(
 # ========================================
 
 
+@traced("browser.save_action_message")
 async def save_browser_action_message(
     agent_id: str,
     title: str,
@@ -207,6 +209,7 @@ async def save_browser_action_message(
             headers = {
                 "x-api-key": config.backend.api_key or "",
                 "Content-Type": "application/json",
+                **tracing_headers(),
                 **workflow_generation_headers(),
             }
             attempts = 3 if action_type == "recording" and status == MessageStatus.FINISHED else 1
