@@ -19,8 +19,15 @@ async function main(): Promise<void> {
   const scanR2 = args.includes('--scan-r2');
   const concurrency = concurrencyArg >= 0 ? Number(args[concurrencyArg + 1]) : 4;
   const scopeCount = Number(rootArg >= 0) + Number(userArg >= 0) + Number(allUsers);
+  const badOperand = (index: number) =>
+    index >= 0 && (!args[index + 1] || args[index + 1].startsWith('-'));
+  const flags = ['--root-agent-id', '--user-id', '--all-users', '--scan-r2', '--concurrency'];
   if (
     scopeCount !== 1 ||
+    badOperand(rootArg) ||
+    badOperand(userArg) ||
+    badOperand(concurrencyArg) ||
+    flags.some((flag) => args.filter((arg) => arg === flag).length > 1) ||
     !Number.isInteger(concurrency) ||
     concurrency < 1 ||
     concurrency > 32 ||

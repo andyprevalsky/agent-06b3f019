@@ -1007,7 +1007,9 @@ async def spawn_explore_agent_activity(
         # shielded posts must finish before a final drain or activity return.
         drain_error: BaseException | None = None
         if _inflight_fe_drains:
-            results = await asyncio.gather(*_inflight_fe_drains, return_exceptions=True)
+            results = await asyncio.shield(
+                asyncio.gather(*_inflight_fe_drains, return_exceptions=True)
+            )
             drain_error = next((item for item in results if isinstance(item, BaseException)), None)
         # Flush posts queued after the last threshold drain as well.
         try:

@@ -8,12 +8,13 @@ import { steelCdpConnectionUrl } from './urls';
 
 const SESSION_VALIDATION_TIMEOUT = 10000;
 const WS_BACKOFF_DELAYS = [100, 400, 800];
+export const STEEL_CDP_TIMEOUT_MESSAGE = 'Steel CDP connection timeout';
 
 function safeCdpFailure(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
   // Playwright errors may include the credential-bearing CDP URL. Preserve the
   // transport category without echoing that URL into logs or API responses.
-  if (/timeout|timed out/i.test(message)) return new Error('Steel CDP connection timeout');
+  if (/timeout|timed out/i.test(message)) return new Error(STEEL_CDP_TIMEOUT_MESSAGE);
   if (/connection|ECONN|ENOTFOUND|EAI_AGAIN|socket/i.test(message)) {
     return new Error('Steel CDP connection error');
   }

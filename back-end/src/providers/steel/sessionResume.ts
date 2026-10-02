@@ -21,7 +21,7 @@ import {
   steelCdpUrl,
   steelDebugUrl,
 } from './session';
-import { validateSessionConnectionOrThrow } from './sessionConnection';
+import { STEEL_CDP_TIMEOUT_MESSAGE, validateSessionConnectionOrThrow } from './sessionConnection';
 import { steelCdpConnectionUrl } from './urls';
 
 function hasValue(value: string | null | undefined): value is string {
@@ -317,7 +317,7 @@ export async function recreateSession(
       lastError = error instanceof Error ? error : new Error('Unknown error');
       log.info(`  Steel session attempt ${attempt} failed: ${lastError.message}`);
       consecutiveCdpTimeouts =
-        lastError.message === 'Steel CDP connection timeout' ? consecutiveCdpTimeouts + 1 : 0;
+        lastError.message === STEEL_CDP_TIMEOUT_MESSAGE ? consecutiveCdpTimeouts + 1 : 0;
       // Each timeout already includes three CDP handshakes against a distinct
       // new session. Two in a row indicate a provider transport outage; leave
       // the old session intact and let browser recovery try another provider.

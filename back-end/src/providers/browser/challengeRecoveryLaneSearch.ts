@@ -234,19 +234,24 @@ export async function runLaneConfigSearch(
 
   return await new Promise<SuccessfulRecoveryCandidate>((resolve, reject) => {
     let settled = false;
+    let deadlineExpired = false;
     const laneErrors: string[] = [];
     let pendingLanes = lanes.length;
+    const failDeadline = () => {
+      if (settled) return;
+      settled = true;
+      abort.abort();
+      log.error('Challenge recovery search deadline exceeded', {
+        candidateCount: configs.length,
+        laneCount: lanes.length,
+        searchDeadlineMs: options.searchDeadlineMs,
+      });
+      reject(new Error('Challenge recovery search deadline exceeded'));
+    };
     const searchDeadlineTimer = options.searchDeadlineMs
       ? setTimeout(() => {
-          if (settled || claimLock.claimed) return;
-          settled = true;
-          abort.abort();
-          log.error('Challenge recovery search deadline exceeded', {
-            candidateCount: configs.length,
-            laneCount: lanes.length,
-            searchDeadlineMs: options.searchDeadlineMs,
-          });
-          reject(new Error('Challenge recovery search deadline exceeded'));
+          deadlineExpired = true;
+          if (!claimLock.claimed) failDeadline();
         }, options.searchDeadlineMs)
       : undefined;
 
@@ -282,7 +287,6 @@ export async function runLaneConfigSearch(
             return;
           }
           claimLock.claimed = true;
-          clearSearchDeadline();
           abort.abort();
           log.info('Challenge recovery promoting lane winner', {
             laneKey: lane.key,
@@ -299,8 +303,10 @@ export async function runLaneConfigSearch(
           } catch (error) {
             await dependencies.release(candidate.config, candidate.session).catch(() => {});
             claimLock.claimed = false;
+            if (deadlineExpired) failDeadline();
             throw error;
           }
+          clearSearchDeadline();
           if (!settled) {
             settled = true;
             resolve(candidate);

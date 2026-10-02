@@ -104,6 +104,31 @@ async function testTransportSearchDeadlineCancelsAllLanesBeforeHttpTimeout(): Pr
   assert.deepStrictEqual(released, [configs[0]!.key]);
 }
 
+async function testFailedPromotionHonorsExpiredSearchDeadline(): Promise<void> {
+  const config = browserRecoveryCandidates({ country: 'US' })[0]!;
+  const released: string[] = [];
+  await assert.rejects(
+    runLaneConfigSearch(
+      [config],
+      [{ key: 'default', storageState: {} }],
+      {
+        create: async () => fakeSession(config),
+        probe: async () => ({ stablePasses: 1, attempts: 1, latencyMs: 1 }),
+        promote: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          throw new Error('promotion failed');
+        },
+        release: async (_config, session) => {
+          released.push(session.sessionId);
+        },
+      },
+      { searchDeadlineMs: 5 }
+    ),
+    /Challenge recovery search deadline exceeded/
+  );
+  assert.deepStrictEqual(released, [fakeSession(config).sessionId]);
+}
+
 function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
   return {
     provider: config.provider,
@@ -459,6 +484,7 @@ async function main(): Promise<void> {
   await testUnfinishedNetworkBodyDoesNotBlockRecoveryProbe();
   await testTransportCandidateDeadlineReachesNextProvider();
   await testTransportSearchDeadlineCancelsAllLanesBeforeHttpTimeout();
+  await testFailedPromotionHonorsExpiredSearchDeadline();
   testPaymentCdnFocusedSearchPlanSkipsAvoidAndKernelsFirst();
   await testRequirePaymentCdnHardFilterIsIgnoredForLlmOnlyGate();
   await testCfOnlyAvoidPicksFastestNonAvoided();
