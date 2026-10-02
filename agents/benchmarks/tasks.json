@@ -4080,9 +4080,9 @@
   },
   {
     "name": "browser-auth-signup-fails-assistance",
-    "title": "Hosted Sign-Up: Sign-Up Fails",
-    "description": "Sign-up errors and there is no account; the browser agent must ask the user for sign-in help.",
-    "prompt": "Create an account for me at {auth_test_site_url} and tell me my member number",
+    "title": "Hosted Sign-In: New Account Cannot Be Created",
+    "description": "Nothing is saved for the site and it refuses new accounts; the browser agent must ask the user for sign-in help.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -4122,7 +4122,7 @@
       "auth_test_site": {
         "scenario": "signup_fails"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials and no site account. The sign-up form always answers that new accounts cannot be created right now. The correct end state is one auth_assistance request with no account and no session."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials and no account under the agent's own identity. The sign-up form answers that the site is not accepting new accounts. The task needs a signed-in member, so the correct end state is one auth_assistance request with no account and no session."
     },
     "evaluators": [
       {
