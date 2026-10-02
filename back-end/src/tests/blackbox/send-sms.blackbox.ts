@@ -1151,7 +1151,7 @@ async function testBoundary_notifyCostLimitIncludesTaskGoal() {
     const body = JSON.parse(call.requestBody!);
     assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
     assert(
-      body.body.includes(`budget limit for "${goal}"`),
+      body.body.includes(`"${goal}" at the $1.50 budget limit`),
       `Expected cost-limit message to include task goal, got: ${body.body.substring(0, 160)}`
     );
     assert(
@@ -1272,7 +1272,7 @@ async function testBoundary_notifyWriteLockStripsMarkdownAndKeepsFullDraft() {
       `Expected no markdown asterisks in SMS body, got: ${body.body}`
     );
     assert(
-      body.body.includes('Rose wants to send an Email'),
+      body.body.includes("I'm ready to send an Email"),
       `Expected plain Email label, got: ${body.body}`
     );
     assert(
@@ -1308,7 +1308,7 @@ async function testBoundary_notifyAgentCardSetupIncludesSetupLink() {
     });
     assertStatus(res.status, 200, res.data);
     const calls = await readCapturesForToken(token);
-    const surgeCalls = filterSurgeCalls(calls, 'One Time Agent Payment Setup');
+    const surgeCalls = filterSurgeCalls(calls, 'one-time AgentCard setup');
     if (surgeCalls.length === 0) {
       console.log('    [skipped] No Surge calls -- Surge may not be configured');
       return;
@@ -1319,7 +1319,7 @@ async function testBoundary_notifyAgentCardSetupIncludesSetupLink() {
     const body = JSON.parse(call.requestBody!);
     assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
     assert(
-      body.body.includes('One Time Agent Payment Setup'),
+      body.body.includes('one-time AgentCard setup'),
       `Expected setup label, got: ${body.body}`
     );
     assert(body.body.includes(setupUrl), `Expected setup link in SMS, got: ${body.body}`);
@@ -1394,11 +1394,7 @@ async function testBoundary_notifyWriteLockStructuredMms() {
     };
     assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
     assert(
-      body.body?.includes('Approval needed') === true,
-      `Expected approval header: ${body.body}`
-    );
-    assert(
-      body.body?.includes('Rose needs your approval for Amazon checkout.') === true,
+      body.body?.includes('I need your approval to check out at Amazon.') === true,
       `Expected carrier-safe checkout approval copy: ${body.body}`
     );
     assert(
@@ -1487,9 +1483,8 @@ async function testBoundary_notifyWriteLockGenericWriteReturn() {
     const body = JSON.parse(call.requestBody!) as { to?: string; body?: string };
     assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
     const text = body.body ?? '';
-    assert(text.includes('Approval needed'), `Expected approval header: ${text}`);
     assert(
-      text.includes('Rose wants to confirm Amazon return for Carhartt beanie on Amazon.'),
+      text.includes('I need your approval to confirm Amazon return for Carhartt beanie on Amazon.'),
       `Expected return action header: ${text}`
     );
     assert(!/checkout/i.test(text), `Expected no purchase checkout wording: ${text}`);
@@ -1563,7 +1558,7 @@ async function testBoundary_notifyWriteLockPaymentCardEnriched() {
     assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
     const text = body.body ?? '';
     assert(
-      text.includes('Rose needs your approval for Nopa Fish checkout.'),
+      text.includes('I need your approval to check out at Nopa Fish.'),
       `Expected merchant in payment-card SMS: ${text}`
     );
     assert(text.includes(itemName), `Expected item name: ${text}`);
@@ -1672,7 +1667,8 @@ async function testBoundary_notifyCompletionPreviewForBenchmark() {
     const lines = result.messagePreview?.split('\n') ?? [];
     assert(lines.length === 8, `Expected an 8-line completion preview, got ${lines.length}`);
     assert(
-      lines[0] === 'Done: Blue Bottle order was completed with the requested pickup configuration.',
+      lines[0] ===
+        'I finished the task: Blue Bottle order was completed with the requested pickup configuration.',
       `Expected normalized completion summary, got: ${lines[0] ?? ''}`
     );
     for (let index = 1; index <= 6; index += 1) {

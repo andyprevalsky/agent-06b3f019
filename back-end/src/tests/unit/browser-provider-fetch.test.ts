@@ -11,6 +11,7 @@ import {
 import { prisma } from '../../providers/database';
 
 const PROVIDER_TIMEOUT_MS = 15_000;
+const BODY_READ_WATCHDOG_MS = 5_000;
 
 async function main(): Promise<void> {
   const originalFindUnique = prisma.browserSession.findUnique;
@@ -70,15 +71,26 @@ async function main(): Promise<void> {
       () => captureScreenshot('steel-session'),
     ];
     for (const operation of operations) {
-      await assert.rejects(
-        Promise.race([
-          operation(),
-          new Promise<never>((_resolve, reject) =>
-            originalSetTimeout(() => reject(new Error('body read remained pending')), 100)
-          ),
-        ]),
-        (error: unknown) => error instanceof DOMException && error.name === 'AbortError'
-      );
+      // The operation resolves its session before fetching. Under concurrent
+      // coverage load, that setup can outlast a 100ms test-only watchdog even
+      // though the provider's 20ms abort timer is working correctly.
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await assert.rejects(
+          Promise.race([
+            operation(),
+            new Promise<never>((_resolve, reject) => {
+              watchdog = originalSetTimeout(
+                () => reject(new Error('body read remained pending')),
+                BODY_READ_WATCHDOG_MS
+              );
+            }),
+          ]),
+          (error: unknown) => error instanceof DOMException && error.name === 'AbortError'
+        );
+      } finally {
+        if (watchdog !== undefined) clearTimeout(watchdog);
+      }
     }
     console.log('PASS provider timeout remains active through binary and JSON body consumption');
   } finally {

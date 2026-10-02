@@ -15,6 +15,7 @@ to the required runner contract.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 from pathlib import Path
@@ -36,6 +37,7 @@ if str(_AGENTS_ROOT) not in sys.path:
 DEFAULT_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 DEFAULT_HUB_URL = "https://navi-j9a9.onrender.com"
 DURABLE_OPEN_AGENT_ORIGIN = "https://www.roselabs.ai"
+HUB_GZIP_THRESHOLD_BYTES = 8 * 1024 * 1024
 
 
 class HubVisibilityError(RuntimeError):
@@ -50,7 +52,7 @@ def upload_timeout_for_payload(payload_bytes: int, *, base_timeout: float = 30.0
     at ``base_timeout``, grow ~2s per MB, and cap at 300s.
     """
     size = max(0, int(payload_bytes))
-    derived = float(base_timeout) + (size / (512 * 1024))
+    derived = float(base_timeout) + (size // (512 * 1024))
     return min(300.0, max(float(base_timeout), derived))
 
 
@@ -239,6 +241,9 @@ def _post_run_bundle(
     body.setdefault("source", "manual-run")
     payload = json.dumps(body, default=str).encode("utf-8")
     effective_timeout = upload_timeout_for_payload(len(payload), base_timeout=timeout)
+    if len(payload) >= HUB_GZIP_THRESHOLD_BYTES:
+        payload = gzip.compress(payload)
+        headers["Content-Encoding"] = "gzip"
     suffix = "?live=1" if live else ""
     request = urllib.request.Request(
         f"{base.rstrip('/')}/api/benchmarks/runs{suffix}",

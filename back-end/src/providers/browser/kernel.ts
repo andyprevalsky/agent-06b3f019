@@ -16,6 +16,7 @@ import {
   createSessionOnKernelProxyLadder,
   KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
+  kernelRecreateProxySelection,
   resolveKernelProxyMode,
   type KernelProxyType,
 } from './kernelProxy';
@@ -432,6 +433,7 @@ export async function createKernelSessionWithContext(
       wsUrl: remote.wsUrl,
       startUrl: _startUrl || undefined,
       provider: 'kernel',
+      kernelProxySource: remote.proxySource,
       ...providerProfileData(remote.profileId, remote.profileSource, true),
       releaseRemoteSession: releaseKernelRemoteSession,
     });
@@ -551,7 +553,11 @@ async function recreateKernelSession(
     oldSession.agentId,
     proxyLocation,
     {
-      forceManagedProxyType: opts.forceManagedProxyType,
+      ...kernelRecreateProxySelection(
+        oldSession.kernelProxySource,
+        oldSession.proxyTier,
+        opts.forceManagedProxyType
+      ),
       boundProfile: recordedProviderProfileBinding(oldSession),
     }
   );
@@ -566,6 +572,7 @@ async function recreateKernelSession(
       status: 'ACTIVE',
       closedAt: null,
       provider: 'kernel',
+      kernelProxySource: remote.proxySource,
       ...providerProfileData(remote.profileId, remote.profileSource, true),
       ...(opts.proxyTier !== undefined ? { proxyTier: opts.proxyTier } : {}),
     },

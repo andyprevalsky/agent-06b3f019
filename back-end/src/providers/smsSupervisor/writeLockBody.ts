@@ -287,7 +287,7 @@ function appendAgentLink(body: string, agentUrl: string | null): string {
   if (!agentUrl) {
     return body;
   }
-  return `${body}\n\nView agent: ${agentUrl}`;
+  return `${body}\n\nReview in Rose: ${agentUrl}`;
 }
 
 export function getRequestPaymentCard(metadata: unknown): PaymentCard | null {
@@ -320,7 +320,7 @@ export function getPaymentCardMediaUrl(card: PaymentCard | null): string | null 
 function formatPaymentCardBody(card: PaymentCard): string {
   const currency = asString(card.currency) ?? 'USD';
   const merchant = asString(card.merchant) ?? 'the merchant';
-  const lines = [`Approval needed`, `Rose needs your approval for ${merchant} checkout.`];
+  const lines = [`I need your approval to check out at ${merchant}.`];
   const items = getPaymentCardItems(card);
 
   if (items.length === 1) {
@@ -555,8 +555,8 @@ function formatWriteLockNotificationBody(
 
   const lines: string[] =
     triggerType === 'purchase'
-      ? [`Approval needed`, `Rose needs your approval for ${serviceName} checkout.`]
-      : [`Approval needed`, `Rose wants to ${sentenceCaseAction(action)} on ${serviceName}.`];
+      ? [`I need your approval to check out at ${serviceName}.`]
+      : [`I need your approval to ${sentenceCaseAction(action)} on ${serviceName}.`];
 
   let detailCount = 0;
   if (triggerType === 'purchase') {
@@ -606,7 +606,10 @@ export function formatPaymentApprovalBody(
   // Markdown labels meant for the web UI. Strip them at the SMS sink so iMessage
   // never shows literal asterisks. Payment-card / structured bodies are already
   // plain text.
-  const plainQuestion = stripMarkdownForSms(fallbackQuestion);
+  const plainQuestion = stripMarkdownForSms(fallbackQuestion)
+    .replace(/^Approval Needed:?[\t ]*(?:\r?\n)+/i, '')
+    .replace(/^Rose wants to\b/i, "I'm ready to")
+    .replace(/^Rose needs your\b/i, 'I need your');
   if (card && getPaymentCardItems(card).length > 0) {
     return appendAgentLink(formatPaymentCardBody(card), agentUrl);
   }
