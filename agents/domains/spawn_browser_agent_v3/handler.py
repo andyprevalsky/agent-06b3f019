@@ -1856,7 +1856,23 @@ async def _drain_otp_poll(task: Optional["asyncio.Task[int]"], *, grace_s: float
     task.add_done_callback(_harvest_otp_poll)
 
 
-def _step_observe_needs_dom(*, fast_mode_replay: bool, browser_recorder: Any) -> bool:
+def _restored_indexes_unresolved(dom_service: Any, *, transcript_restored: bool) -> bool:
+    """Whether a resumed transcript cites [index] values this connection cannot resolve.
+
+    An activity that resumes a browser task (write approval, payment card,
+    deploy drain) restores the model's transcript, including the [index]
+    values of the last read_browser_state, but connects a new DOMService whose
+    selector map is empty until its first DOM build.
+    """
+    return transcript_restored and not getattr(dom_service, "selector_map", None)
+
+
+def _step_observe_needs_dom(
+    *,
+    fast_mode_replay: bool,
+    browser_recorder: Any,
+    restored_indexes_unresolved: bool = False,
+) -> bool:
     """Whether the per-step observe must build the full DOM.
 
     The browser LLM never receives page state implicitly (it calls
@@ -1864,9 +1880,11 @@ def _step_observe_needs_dom(*, fast_mode_replay: bool, browser_recorder: Any) ->
     only needs URL/title. Two consumers still need the full tree every step:
     Fast Mode replay remaps cached targets against the live selector map, and
     file-based recorders persist per-iteration DOM observations for the world
-    model corpus (Kernel replay recorders ignore observations).
+    model corpus (Kernel replay recorders ignore observations). A resumed
+    activity needs it once, so the indexes its restored transcript already
+    cites resolve against this connection's selector map.
     """
-    if fast_mode_replay:
+    if fast_mode_replay or restored_indexes_unresolved:
         return True
     return browser_recorder is not None and not getattr(browser_recorder, "uses_kernel_replay", False)
 
@@ -7329,6 +7347,8 @@ async def _spawn_browser_agent_activity_v3_real(
             return True
 
         observe_page_state: Dict[str, Any] = {}
+        # Cleared by the first step observe; see _restored_indexes_unresolved.
+        restored_transcript_unobserved = bool(browser_turn_messages)
         consecutive_budget_free = 0
         consecutive_keystroke_free = 0
         allow_generation_yield = (write_lock_resume_state or {}).get("generation_yield") is not False
@@ -7559,11 +7579,16 @@ async def _spawn_browser_agent_activity_v3_real(
                 observe_needs_dom = _step_observe_needs_dom(
                     fast_mode_replay=bool(fast_mode_cache_enabled),
                     browser_recorder=browser_recorder,
+                    restored_indexes_unresolved=_restored_indexes_unresolved(
+                        dom_service,
+                        transcript_restored=restored_transcript_unobserved,
+                    ),
                 )
                 observe_page_state = await asyncio.wait_for(
                     _observe_step_page(dom_service, needs_dom=observe_needs_dom),
                     timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                 )
+                restored_transcript_unobserved = False
                 step_timer.annotate(observe_dom=observe_needs_dom)
                 current_url = str(observe_page_state.get("url") or current_url)
                 step_timer.mark("observe_state")
