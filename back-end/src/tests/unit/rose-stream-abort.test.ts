@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 
 import { createStreamingCompletion } from '../../providers/rose';
 import { postOpenAIResponsesStream, postOpenRouterStream } from '../../providers/rose/transport';
+import { withIsolatedFundedKeyCooldowns } from '../blackbox/funded-key-cooldown.support';
 
 async function testAbortRemainsConnectedWhileBodyIsConsumed(): Promise<void> {
   const originalFetch = globalThis.fetch;
@@ -243,11 +244,12 @@ async function testCompletionAbortReachesWaterfall(): Promise<void> {
   );
 }
 
-void testAbortRemainsConnectedWhileBodyIsConsumed()
-  .then(testCompletionAbortReachesPriorityOpenAiBody)
-  .then(testOpenRouterAbortRemainsConnectedAfterHeaders)
-  .then(testCompletionAbortReachesDefaultOpenAiKeyRoute)
-  .then(testCompletionAbortReachesWaterfall)
-  .then(() => {
-    process.stdout.write('rose-stream-abort tests passed\n');
-  });
+void withIsolatedFundedKeyCooldowns(async () => {
+  await testAbortRemainsConnectedWhileBodyIsConsumed();
+  await testCompletionAbortReachesPriorityOpenAiBody();
+  await testOpenRouterAbortRemainsConnectedAfterHeaders();
+  await testCompletionAbortReachesDefaultOpenAiKeyRoute();
+  await testCompletionAbortReachesWaterfall();
+}).then(() => {
+  process.stdout.write('rose-stream-abort tests passed\n');
+});

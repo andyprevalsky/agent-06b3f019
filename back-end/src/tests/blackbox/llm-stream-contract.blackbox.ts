@@ -20,6 +20,7 @@ import {
 } from '../../providers/rose/streaming';
 import type { RoseStreamChunk } from '../../providers/rose/types';
 import { OPENAI_RESPONSES_API_URL } from '../../providers/rose/transport';
+import { withIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
 
 type ProviderFormat = 'anthropic' | 'openai_chat' | 'openai_responses';
 
@@ -189,7 +190,7 @@ async function testCompletionClientPreservesItemProvenance(): Promise<void> {
 async function main(): Promise<void> {
   await testSharedFixtures();
   testAmbiguousFinalItemsFailTyped();
-  await testCompletionClientPreservesItemProvenance();
+  await withIsolatedFundedKeyCooldowns(testCompletionClientPreservesItemProvenance);
   console.log(`PASS llm-stream-contract (${fixtures.cases.length} shared provider fixtures)`);
 }
 
