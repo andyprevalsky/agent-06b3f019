@@ -1045,7 +1045,6 @@ async def run_agent(
         ):
             llm_context = _context_with_plan_fsm_labels(context)
 
-        llm_context_version = None
         if build_messages:
             async with span(
                 "run_loop.build_messages_custom",
@@ -1074,16 +1073,11 @@ async def run_agent(
                 except Exception as e:
                     logger.warning(f"File resolution failed (continuing without pre-resolved files): {e}")
             # Store context in shared memory — call_llm_activity will build messages inside
-            # A replayed workflow activation can leave an older snapshot in
-            # another worker process under the same agent ID. Bind this slot to
-            # the exact turn so the activity cannot read that stale snapshot.
-            llm_context_version = f"{resolved_cache_sequence_id}:{iteration}:{_safe_now().isoformat()}"
             _pending_llm_context[agent_id] = (
                 llm_context,
                 current_system_prompt,
                 pre_resolved_ids,
                 user_id,
-                llm_context_version,
             )
             messages = None  # Signals to use shared state path below
         else:
@@ -1462,7 +1456,6 @@ async def run_agent(
                         # Temporal history, so a new parameter may only be added at the end, where
                         # an older replayed history falls back to the default.
                         exclude_anthropic_family_on_llm_retry,
-                        llm_context_version,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),

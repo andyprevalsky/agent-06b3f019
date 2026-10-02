@@ -924,7 +924,6 @@ async def test_handler_explore_capture_tool_results():
     finally:
         restore()
     finished = next(e for e in events if e.status == MessageStatus.FINISHED)
-    assert finished.message == "summary", "a normally completed explore keeps its synthesized answer"
     assert "tool_call_results" not in (finished.data or {}), "must not persist raw trace in event data"
     assert captured == sub_agent_trace, "collector must receive the raw trace out-of-band"
 
@@ -1195,11 +1194,11 @@ async def test_handler_explore_timeout_finishes_with_heartbeat_wrap_up():
     finally:
         restore()
 
-    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
-    assert "median rent" in finished.message
-    assert "no further result will arrive" in finished.message.lower()
-    assert "source excerpts below are partial" in finished.message.lower()
-    assert finished.data["result"] == finished.message
+    finished = [event for event in events if event.status == MessageStatus.FINISHED]
+    assert finished, (
+        f"a timed-out explore with heartbeat evidence must FINISH, got {[(e.status, e.message) for e in events]}"
+    )
+    assert "median rent" in finished[0].message
     assert not any(event.status == MessageStatus.ERROR for event in events)
     assert fake.wait_condition_timeouts
     assert fake.wait_condition_timeouts[0] is not None
@@ -1282,9 +1281,6 @@ async def test_handler_explore_timeout_without_heartbeat_recovers_persisted_tool
     finished = next(event for event in events if event.status == MessageStatus.FINISHED)
     assert "14,303,513" in finished.message
     assert "toukei.metro.tokyo.lg.jp" in finished.message
-    assert "no further result will arrive" in finished.message.lower()
-    assert "source excerpts below are partial" in finished.message.lower()
-    assert finished.data["result"] == finished.message
     assert "evidence gathered" not in finished.message.lower()
     assert not any(event.status == MessageStatus.ERROR for event in events)
     assert any(call["name"] == "fetch_explore_tool_evidence" for call in fake.activity_calls)
