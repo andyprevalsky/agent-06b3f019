@@ -7017,6 +7017,10 @@ async def _retrieve_planner_memories(
         return await retrieve_memories(goal, user_id=user_id, exclude_root_agent_id=agent_id, agent_id=agent_id)
 
 
+# Must fit at least twice inside set_plan's PLANNER_ACTIVITY_HEARTBEAT_TIMEOUT_SECONDS.
+PLANNER_ACTIVITY_HEARTBEAT_INTERVAL_SECONDS = 10
+
+
 @activity.defn
 @traced("call_planner_llm_activity")
 async def call_planner_llm_activity(
@@ -7068,7 +7072,6 @@ async def call_planner_llm_activity(
     """
     import time
 
-    from domains.set_plan.config import PLANNER_ACTIVITY_HEARTBEAT_INTERVAL_SECONDS
     from providers.rose.pools import PLANNER_MODEL
     from utils.prompts import build_planner_system_prompt
     from utils.tool_schemas import get_planner_response_model
