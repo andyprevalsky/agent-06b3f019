@@ -445,6 +445,11 @@ before provisioning. Cached-only mass-agent/demo replays cannot establish live
 model progress; keep their normal cache and evaluator contracts intact. They
 remain available for ordinary benchmark and infrastructure-probe runs without
 that live-query requirement. Choose compatible smoke tasks for the proof.
+Shared asynchronous cache requests have one HTTP owner. A cancelled waiter must
+not cancel the shared result; owner cancellation must release the exact entry so
+live followers can retry. Keep actual request failures typed and visible, and
+account for settled shared exceptions. Existing Fast Cache regressions cover
+waiter/owner cancellation and HTTP-error propagation without longer deadlines.
 The existing `BENCHMARK_FAST_MODE_CACHE` A/B setting controls the Fast Mode provider-speed button;
 it does not disable DEMO cache replay. Catalog `fast_cache: on/off` declarations
 still win at request construction, and simulation forces provider Fast Mode off.

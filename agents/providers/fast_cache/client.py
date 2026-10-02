@@ -517,9 +517,17 @@ async def _fetch_position_http(
     cached = _position_memo_get(goal_hash, call_site, step)
     if cached is not None:
         return cached
-    existing = _position_inflight.get(memo_key)
-    if existing is not None:
-        return await existing
+    while True:
+        existing = _position_inflight.get(memo_key)
+        if existing is None:
+            break
+        try:
+            return await asyncio.shield(existing)
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if caller is None or caller.cancelling() or not existing.cancelled():
+                raise
+            # The HTTP owner was cancelled; a live sibling can claim a new fetch.
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future[tuple[Optional[Any], Optional[str]]] = loop.create_future()
@@ -595,9 +603,15 @@ async def _fetch_position_http(
         if not future.done():
             future.set_exception(error)
         raise error
+    except asyncio.CancelledError:
+        if not future.done():
+            future.cancel()
+        raise
     finally:
         if _position_inflight.get(memo_key) is future:
             _position_inflight.pop(memo_key, None)
+        if future.done() and not future.cancelled():
+            future.exception()
 
 
 async def cache_get_position_fallback(

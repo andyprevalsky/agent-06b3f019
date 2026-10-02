@@ -226,4 +226,36 @@ if run_wait_owned_agent_shutdown "$current_pid" "" 1; then
 fi
 assert_alive "$current_pid" "live worker with unknown birth is not signalled"
 
+# ── run_kill_tree: a wrapper's grandchildren die with it ──
+#
+# The isolated blackbox backend is `npx tsx src/bootstrap.ts`: npx -> tsx -> node.
+# Its cleanup used to signal only the npx PID, so every passing run left the tsx
+# launcher and the server alive under init, holding their port and DB pool.
+grandchild_pid_file="$TMP_ROOT/grandchild.pid"
+bash -c 'bash -c "sleep 300 & echo \$! >\"\$1\"; wait" _ "$1" & wait' _ "$grandchild_pid_file" &
+wrapper_pid=$!
+PIDS+=("$wrapper_pid")
+for _ in $(seq 1 100); do
+  [ -s "$grandchild_pid_file" ] && break
+  sleep 0.05
+done
+grandchild_pid="$(cat "$grandchild_pid_file")"
+run_kill_tree "$wrapper_pid"
+wait "$wrapper_pid" 2>/dev/null || true
+for _ in $(seq 1 40); do
+  kill -0 "$grandchild_pid" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$grandchild_pid" 2>/dev/null; then
+  echo "FAIL: run_kill_tree left grandchild $grandchild_pid alive" >&2
+  exit 1
+fi
+echo "PASS: run_kill_tree reaps a wrapper's grandchildren"
+
+blackbox_runner="$ROOT_DIR/back-end/scripts/run-blackbox-tests.sh"
+grep -qF 'source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"' "$blackbox_runner" \
+  && grep -qF 'cloudbench_terminate_tree_and_wait 5 "$BACKEND_PID"' "$blackbox_runner" \
+  || { echo "FAIL: run-blackbox-tests.sh cleanup must reap the npx backend tree with verified cloudbench ownership cleanup" >&2; exit 1; }
+echo "PASS: run-blackbox-tests.sh cleanup reaps the whole backend tree"
+
 echo "All run process cleanup tests passed."

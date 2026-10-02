@@ -112,3 +112,44 @@ first miss, and the other chat error cases were on the same incorrect path.
 A transient empty or unparseable chat/SMS/agent structured stream must
 regenerate in place. Do not fail the agent, and do not apologize until the
 bounded regenerate budget is exhausted.
+
+## Related open latency observation (2026-10-02)
+
+The earlier cardinality/FAILED defect remains the fixed case above. A later
+semantic gate on source `bc1806459838b8bc7e31282f3fc637f5e2106577`
+failed direct-answer sample 4 at the existing 3-second router deadline.
+Nineteen of 20 measured samples stayed below the unchanged 5-second lifecycle
+bound; this sample missed its canonical route and answer milestones at
+15 seconds. The complete gate exited 1 after 603.920 seconds with source
+unchanged and its outer wall guard unexceeded. This is infrastructure failure,
+not a successful answer or a genuine task failure.
+
+Correlated requests at 03:44:55 UTC show both direct Cerebras calls returning
+HTTP 429 after approximately 140 ms. The router's same-model OpenRouter
+fallback starts immediately; its fast GLM hedge starts another 501 ms later.
+The generator finishes a valid answer at approximately 1.55 seconds. The
+router has no logged first chunk before its deadline; the handler records a
+deadline miss and persists the failure notice. Its final dump contains valid
+`direct_answer` JSON, but records consumer closure and no finish reason.
+The dump was finalized approximately 100 ms after the deadline. That timestamp
+is not a raw network arrival timestamp and provides no in-budget success.
+
+Archive searches for `chat lifecycle latency direct_answer 15000 first-response`
+and `chat fallback provider stream route completion timeout semantic` found
+this quota-to-router-deadline case and
+`2026-07-21-serial-fallback-after-cerebras-stall-left-latency-unbounded`.
+They identify related boundaries, not proof of an identical root cause.
+Original SSE arrival timings, the selected OpenRouter provider endpoint and
+generation identifier were not captured. The exact latency cause remains
+open. Incoming main `be9aa53d` changes fallback order and host preference;
+it has not been shown to resolve this original failure.
+
+Preserve this live gate as the actual RED. No additional standalone model
+calls or source fix were made for this observation. After source adoption,
+required canonical backend coverage must cover the existing provider-route,
+quota-fallback, hedge and router-boundary controls, followed by the unchanged
+`chat-lifecycle-latency` semantic gate (four paths, five measured samples each).
+Keep the 3/5/15-second bounds and existing assertions unchanged. A later GREEN
+validates the adopted source; it does not establish the missing original
+provider cause. The evidence and archive-search hashes are retained privately
+under `.context/acceptance/proof103-semantic-latency-rca/`.

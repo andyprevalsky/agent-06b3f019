@@ -25,7 +25,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
-    from domains.api_request.google_oauth_demo_fixture import normalize_completion_notice
+    from domains.api_request.google_oauth_demo_fixture import matches_demo_goal, normalize_completion_notice
     from domains.param_populator.config import PARAM_POPULATOR_MODEL
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
@@ -93,6 +93,7 @@ with workflow.unsafe.imports_passed_through():
 
     # Tool executors (map tool name → workflow helper)
     from tools.grep import grep
+    from tools.google_oauth_demo import google_oauth_demo
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
@@ -170,6 +171,7 @@ def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
 
 # Tool name → executor function mapping
 TOOL_EXECUTORS = {
+    "google_oauth_demo": google_oauth_demo,
     "spawn_agent": spawn_agent,  # Unified: browser/code/general_purpose/explore
     "wait_for": wait_for,
     "send_message_to_user": send_message_to_user,
@@ -1979,7 +1981,11 @@ class AgentWorkflow:
         # Tool lists from centralized source of truth
         # =====================================================================
         plan_tools = PLAN_PHASE_TOOLS
-        execute_tools = EXECUTE_PHASE_TOOLS
+        execute_tools = (
+            ["google_oauth_demo", "attempt_completion"]
+            if matches_demo_goal(self.goal)
+            else EXECUTE_PHASE_TOOLS
+        )
 
         # Determine whether to skip PLAN phase and/or DAG. ``execute_dag_resume``
         # is a local checkpoint/debug phase: it keeps the persisted plan, marks

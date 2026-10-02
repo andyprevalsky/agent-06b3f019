@@ -481,4 +481,9 @@ require_file "$ROOT/back-end/scripts/monitor-cooperative-cutover.ts" \
 require_file "$ROOT/back-end/src/domains/agent-queue-pointer/routes.ts" \
   "live pointer HTTP route must exist for run_agent checkpoints"
 
+# Behavioral: run the real cutover script against Fly fakes (clone adoption,
+# fresh provisioning, transient Machines API update failures).
+bash "$ROOT/scripts/tests/deploy-agent-clone-recovery.test.sh" ||
+  fail "cooperative cutover must recover clones and retry transient Fly machine-update failures"
+
 

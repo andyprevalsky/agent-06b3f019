@@ -23,15 +23,21 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
 PIDS=()
+FIXTURE_PORTS=()
 
-cleanup() {
+stop_fixtures() {
     local pid
     for pid in "${PIDS[@]:-}"; do
-        kill "$pid" 2>/dev/null || true
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
     done
     for pid in "${PIDS[@]:-}"; do
-        wait "$pid" 2>/dev/null || true
+        [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
     done
+    PIDS=()
+}
+
+cleanup() {
+    stop_fixtures
     rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
@@ -275,6 +281,7 @@ printf '%s\n' 'ready' > "$wait_for_frontend_test_root/test_payment"
 ) &
 frontend_test_pid=$!
 PIDS+=("$frontend_test_pid")
+FIXTURE_PORTS+=("$wait_for_frontend_test_port")
 
 if ! FRONTEND_START_READY_ATTEMPTS=30 RUN_SERVICE_READY_SLEEP_SECONDS=0.1 \
     wait_for_frontend_ready "$frontend_test_pid" "$wait_for_frontend_test_port" "$wait_for_frontend_test_log"; then
@@ -329,6 +336,7 @@ foreign_port="$(find_free_port)"
     exec python3 -m http.server "$foreign_port" --bind 127.0.0.1 >/dev/null 2>&1
 ) &
 PIDS+=("$!")
+FIXTURE_PORTS+=("$foreign_port")
 wait_for_port "$foreign_port"
 assert_listener_owned "${PIDS[${#PIDS[@]}-1]}" "$foreign_port"
 
@@ -350,6 +358,7 @@ own_port="$(find_free_port)"
     exec python3 -m http.server "$own_port" --bind 127.0.0.1 >/dev/null 2>&1
 ) &
 PIDS+=("$!")
+FIXTURE_PORTS+=("$own_port")
 wait_for_port "$own_port"
 assert_listener_owned "${PIDS[${#PIDS[@]}-1]}" "$own_port"
 
@@ -362,6 +371,7 @@ echo "PASS: current-worktree listener does not require reassignment"
 remote_port="$(find_free_port)"
 python3 -m http.server "$remote_port" --bind 127.0.0.1 >/dev/null 2>&1 &
 PIDS+=("$!")
+FIXTURE_PORTS+=("$remote_port")
 wait_for_port "$remote_port"
 
 outbound_port_file="$TMP_ROOT/outbound-port"
@@ -427,5 +437,23 @@ if port_range_can_reassign >/dev/null 2>&1; then
     exit 1
 fi
 echo "PASS: bundled benchmark stacks reject port reassignment across shell boundaries"
+
+# A fixture PID that is only a wrapper subshell orphans its http.server to PID 1
+# on kill, and every deploy then leaks listeners in the shared 61000-61999 range.
+stop_fixtures
+for port in "${FIXTURE_PORTS[@]}"; do
+    if python3 -c 'import socket,sys
+s=socket.socket(); s.settimeout(0.2)
+try:
+    s.connect(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    raise SystemExit(1)
+finally:
+    s.close()' "$port" 2>/dev/null; then
+        echo "FAIL: fixture listener on port $port outlived its tracked PID" >&2
+        exit 1
+    fi
+done
+echo "PASS: fixture listeners stop with their tracked PIDs"
 
 echo "All run.sh port collision tests passed."

@@ -14,4 +14,5 @@ export BENCHMARK_SHARE_SECRET=blackbox-benchmark-share-secret
 export WHATSAPP_PHONE_NUMBER_ID=blackbox-whatsapp-phone-number-id
 export WHATSAPP_ACCESS_TOKEN=blackbox-whatsapp-access-token
 export WHATSAPP_WEBHOOK_VERIFY_TOKEN=blackbox-whatsapp-verify-token
+export BENCHMARK_SHARE_SECRET=blackbox-benchmark-share-secret
 export BLACKBOX_TEST_FAKE_WHATSAPP=1

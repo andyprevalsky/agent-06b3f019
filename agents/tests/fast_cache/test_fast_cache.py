@@ -2801,6 +2801,179 @@ def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
     assert normalize.goal_hash(other_andy) != normalize.goal_hash(other_aman)
 
 
+@pytest.mark.parametrize("cancelled_party", ["waiter", "owner", "owner_and_waiter"])
+def test_position_fallback_cancellation_preserves_singleflight_ownership(monkeypatch, cancelled_party):
+    """Waiter cancellation stays local; live followers retry a cancelled HTTP owner."""
+    import httpx
+
+    import providers.fast_cache.client as cache_client
+
+    async def body():
+        cache_client.clear_position_memo()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        joined = asyncio.Event()
+        requests = []
+        cancelled_http = []
+        tasks = []
+        expected_body = {"goalHash": "cancel-goal", "callSite": "explore_agent", "step": 7}
+        expected_result = ({"step": 7}, "cancel-key")
+
+        async def handle(request):
+            assert request.url.path == "/api/fast-cache/get-position"
+            assert json.loads(request.content) == expected_body
+            requests.append(request)
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled_http.append(request)
+                raise
+            return httpx.Response(
+                200,
+                json={"hit": True, "value": expected_result[0], "key": expected_result[1]},
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            monkeypatch.setattr(cache_client, "_backend", lambda: ("http://cache.test", "test-key"))
+            monkeypatch.setattr(cache_client, "_shared_client", lambda: client)
+            monkeypatch.setattr(cache_client, "_POSITION_PREFETCH_AHEAD", 0)
+
+            async def lookup(waiter=False):
+                if waiter:
+                    joined.set()
+                return await cache_client.cache_get_position_fallback("cancel-goal", "explore_agent", 7)
+
+            try:
+                owner = asyncio.create_task(lookup())
+                tasks.append(owner)
+                await asyncio.wait_for(started.wait(), 1.0)
+                shared = cache_client._position_inflight[("cancel-goal", "explore_agent", 7)]
+                waiter = asyncio.create_task(lookup(waiter=True))
+                tasks.append(waiter)
+                await asyncio.wait_for(joined.wait(), 1.0)
+                target = waiter if cancelled_party == "waiter" else owner
+                target.cancel()
+                if cancelled_party == "owner_and_waiter":
+                    waiter.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await target
+
+                if cancelled_party == "waiter":
+                    assert not shared.cancelled(), "waiter cancellation poisoned the shared result"
+                    assert not owner.done()
+                    assert not cancelled_http
+                    joined.clear()
+                    later = asyncio.create_task(lookup(waiter=True))
+                    tasks.append(later)
+                    await asyncio.wait_for(joined.wait(), 1.0)
+                    release.set()
+                    results = await asyncio.wait_for(asyncio.gather(owner, later), 1.0)
+                    assert results == [expected_result, expected_result]
+                    assert len(requests) == 1
+                else:
+                    assert shared.cancelled(), "owner cancellation left a pending shared result"
+                    assert len(cancelled_http) == 1
+                    assert cache_client._position_inflight.get(("cancel-goal", "explore_agent", 7)) is not shared
+                    release.set()
+                    if cancelled_party == "owner_and_waiter":
+                        with pytest.raises(asyncio.CancelledError):
+                            await waiter
+                        assert len(requests) == 1
+                        assert await lookup() == expected_result
+                    else:
+                        assert await asyncio.wait_for(waiter, 1.0) == expected_result
+                    assert len(requests) == 2
+
+                assert await lookup() == expected_result
+                assert len(requests) == (1 if cancelled_party == "waiter" else 2)
+                assert not cache_client._position_inflight
+            finally:
+                release.set()
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                cache_client.clear_position_memo()
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("with_follower", [False, True])
+def test_position_fallback_failure_is_owned_and_propagated(monkeypatch, with_follower):
+    """The shared promise adds no unhandled error; real HTTP failures still propagate."""
+    import gc
+
+    import httpx
+
+    import providers.fast_cache.client as cache_client
+
+    async def body():
+        loop = asyncio.get_running_loop()
+        original_handler = loop.get_exception_handler()
+        unhandled = []
+        loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+
+        async def exercise():
+            cache_client.clear_position_memo()
+            started, release, joined = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            requests, tasks = [], []
+
+            async def handle(request):
+                assert request.url.path == "/api/fast-cache/get-position"
+                assert json.loads(request.content) == {
+                    "goalHash": "failure-goal",
+                    "callSite": "explore_agent",
+                    "step": 8,
+                }
+                requests.append(request)
+                started.set()
+                await release.wait()
+                raise httpx.ReadTimeout("owned fixture timeout", request=request)
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+                monkeypatch.setattr(cache_client, "_backend", lambda: ("http://cache.test", "test-key"))
+                monkeypatch.setattr(cache_client, "_shared_client", lambda: client)
+                monkeypatch.setattr(cache_client, "_POSITION_PREFETCH_AHEAD", 0)
+
+                async def lookup(follower=False):
+                    if follower:
+                        joined.set()
+                    return await cache_client.cache_get_position_fallback("failure-goal", "explore_agent", 8)
+
+                try:
+                    tasks.append(asyncio.create_task(lookup()))
+                    await asyncio.wait_for(started.wait(), 1.0)
+                    if with_follower:
+                        tasks.append(asyncio.create_task(lookup(follower=True)))
+                        await asyncio.wait_for(joined.wait(), 1.0)
+                    release.set()
+                    results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 1.0)
+                    assert all(isinstance(result, httpx.ReadTimeout) for result in results)
+                    assert all(result is results[0] for result in results)
+                    assert len(requests) == 3
+                    assert not cache_client._position_inflight
+                    assert cache_client._position_memo_get("failure-goal", "explore_agent", 8) is None
+                finally:
+                    release.set()
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    cache_client.clear_position_memo()
+
+        try:
+            await exercise()
+            await asyncio.sleep(0)
+            gc.collect()
+            await asyncio.sleep(0)
+            assert not unhandled, "shared HTTP failure leaked an unowned Future error"
+        finally:
+            loop.set_exception_handler(original_handler)
+
+    asyncio.run(body())
+
+
 def test_position_fallback_memos_and_single_flights_http(monkeypatch):
     """Sibling Fast Mode agents must share one get-position HTTP per durable slot."""
     import providers.fast_cache.client as cache_client
