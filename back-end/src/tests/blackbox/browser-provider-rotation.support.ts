@@ -151,9 +151,14 @@ export function assertFixedRotationLadder(): void {
   );
 }
 
-export async function deleteKernelResource(path: string): Promise<void> {
+/**
+ * Profiles are per-test resources. Managed proxies have no delete helper on
+ * purpose: they are shared by geo name with prod and every concurrent run.
+ */
+export async function deleteKernelProfile(profileId: string): Promise<void> {
   const apiKey = process.env.KERNEL_API_KEY?.trim();
   if (!apiKey) return;
+  const path = `/profiles/${encodeURIComponent(profileId)}`;
   const response = await fetch(`https://api.onkernel.com${path}`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },

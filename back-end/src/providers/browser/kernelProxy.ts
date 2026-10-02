@@ -217,6 +217,62 @@ export async function forgetKernelProxy(proxyKey: string): Promise<void> {
   });
 }
 
+const STICKY_PROXY_ERRORS = [
+  'proxy not found',
+  'invalid proxy',
+  'proxy unavailable',
+  'proxy is unavailable',
+  'no_peer',
+  'no peer',
+];
+
+export interface KernelProxyLadderEvents {
+  onRefresh?: (candidate: KernelProxyCandidate, error: unknown) => void;
+  onRelax?: (candidate: KernelProxyCandidate, error: unknown) => void;
+}
+
+/**
+ * Create a session on the most specific managed proxy that works, relaxing
+ * city → state → country only when a location is unavailable.
+ *
+ * Geo proxies are shared project-wide, so a cached ID can be deleted by another
+ * actor. `proxy not found` proves the ID is stale, not that the location lacks
+ * inventory: the same candidate is re-resolved once before relaxing.
+ */
+export async function createSessionOnKernelProxyLadder<T>(
+  client: Kernel,
+  candidates: readonly KernelProxyCandidate[],
+  createSession: (proxy: ResolvedKernelProxy) => Promise<T>,
+  events: KernelProxyLadderEvents = {}
+): Promise<T> {
+  for (const [index, candidate] of candidates.entries()) {
+    for (let refreshed = false; ; refreshed = true) {
+      let resolved: ResolvedKernelProxy | undefined;
+      try {
+        resolved = await getOrCreateKernelProxy(client, candidate);
+        return await createSession(resolved);
+      } catch (error) {
+        // Only drop a cache row when the error proves this proxy_id is bad.
+        // A browsers.create transport timeout does not mean the remote proxy is
+        // gone — forgetting it would recreate orphans for the same geo key.
+        const message =
+          error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+        if (resolved !== undefined && STICKY_PROXY_ERRORS.some((f) => message.includes(f))) {
+          await forgetKernelProxy(resolved.proxyKey).catch(() => {});
+        }
+        if (resolved !== undefined && !refreshed && message.includes('proxy not found')) {
+          events.onRefresh?.(candidate, error);
+          continue;
+        }
+        if (!isKernelProxyAvailabilityError(error) || index + 1 >= candidates.length) throw error;
+        events.onRelax?.(candidate, error);
+        break;
+      }
+    }
+  }
+  throw new Error('Kernel proxy ladder needs at least one candidate');
+}
+
 export function isKernelProxyAvailabilityError(error: unknown): boolean {
   // SDK request timeouts (city proxy allocate / session create hung) are
   // transient location-capacity failures — fall back to a coarser geo key.

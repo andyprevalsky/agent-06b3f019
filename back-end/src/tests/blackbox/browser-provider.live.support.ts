@@ -17,9 +17,12 @@ import {
   retryBackendFetch,
 } from './browser-provider.helpers';
 import {
-  deleteKernelResource,
+  deleteKernelProfile,
   runCrossProviderRotationLadderOrSkipOnSteelOutage,
 } from './browser-provider-rotation.support';
+import { assertResumeReprovisionsDeletedProxy } from './browser-provider-stale-proxy.support';
+
+const AGENT_LOCATION = { country: 'US', state: 'CA', city: 'San Francisco' } as const;
 
 export async function runLiveProviderParity(): Promise<void> {
   const baseUrl = process.env.TEST_BASE_URL?.replace(/\/$/, '');
@@ -77,9 +80,9 @@ export async function runLiveProviderParity(): Promise<void> {
       id: agentId,
       userId,
       goal: 'Validate Kernel browser provider parity',
-      proxyCountry: 'US',
-      proxyState: 'CA',
-      proxyCity: 'San Francisco',
+      proxyCountry: AGENT_LOCATION.country,
+      proxyState: AGENT_LOCATION.state,
+      proxyCity: AGENT_LOCATION.city,
     },
   });
 
@@ -437,6 +440,17 @@ export async function runLiveProviderParity(): Promise<void> {
     const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
     assert(secondRemote.proxy_id === proxyId, 'resume did not reuse the managed proxy ID');
 
+    const resumedAfterDeletion = await assertResumeReprovisionsDeletedProxy({
+      kernel,
+      taskId: String(init.task_id),
+      sessionId: liveSessionId,
+      agentLocation: AGENT_LOCATION,
+      proxySource: metadata.proxy_source,
+      proxyLocation: metadata.proxy_location,
+      post: postWithKernelConnectionRetry,
+    });
+    liveSessionId = resumedAfterDeletion;
+
     // A Steel infra outage returns null (skips the Steel legs) while Kernel is
     // healthy; real rotation defects still throw. See the wrapper's doc comment.
     const crossProvider = await runCrossProviderRotationLadderOrSkipOnSteelOutage({
@@ -474,10 +488,8 @@ export async function runLiveProviderParity(): Promise<void> {
       if (sessionId === liveSessionId) continue;
       await post('/close', { session_id: sessionId, pause: false }).catch(() => {});
     }
-    if (profileId) await deleteKernelResource(`/profiles/${profileId}`).catch(() => {});
-    if (proxyId) await deleteKernelResource(`/proxies/${proxyId}`).catch(() => {});
+    if (profileId) await deleteKernelProfile(profileId).catch(() => {});
     await prisma.browserSession.deleteMany({ where: { agentId } });
-    if (proxyId) await prisma.browserProviderProxy.deleteMany({ where: { proxyId } });
     await prisma.browserContext.deleteMany({ where: { userId } });
     await prisma.agent.deleteMany({ where: { id: agentId } });
     await prisma.user.deleteMany({ where: { userId } });
