@@ -266,7 +266,11 @@ def test_every_tool_model_appears_in_at_least_one_phase_list():
         | set(PLANNER_ASSIGNABLE_TOOLS)
     )
 
-    orphans = set(TOOL_MODELS.keys()) - union
+    # This exact-goal benchmark tool is injected into the root workflow's
+    # execute list only for the Google OAuth video task. Adding it to a shared
+    # phase list would expose the fixture to unrelated agents.
+    exact_goal_tools = {"google_oauth_demo"}
+    orphans = set(TOOL_MODELS.keys()) - union - exact_goal_tools
     assert not orphans, (
         f"Tool model(s) {sorted(orphans)} are registered in TOOL_MODELS but "
         f"do not appear in any phase list (PLAN_PHASE_TOOLS, "
