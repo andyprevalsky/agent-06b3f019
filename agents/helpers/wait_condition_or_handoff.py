@@ -27,7 +27,11 @@ from helpers.generation_handoff import GenerationHandoffRequested
 HANDOFF_POLL_SECONDS = 30.0
 
 
-async def _live_handoff_queue(workflow_instance: Any) -> str | None:
+async def live_handoff_queue(workflow_instance: Any) -> str | None:
+    """Return the live generation queue when this workflow must hand off, else None.
+
+    Fails open (None) when the workflow cannot check or the pointer read fails.
+    """
     checker = getattr(workflow_instance, "_check_generation_handoff", None)
     if checker is None:
         return None
@@ -64,7 +68,7 @@ async def wait_condition_or_generation_handoff(
     while True:
         if predicate():
             return
-        handoff_queue = await _live_handoff_queue(workflow_instance)
+        handoff_queue = await live_handoff_queue(workflow_instance)
         if handoff_queue:
             raise GenerationHandoffRequested(handoff_queue)
         slice_timeout = timedelta(seconds=poll_seconds)
@@ -94,7 +98,7 @@ async def sleep_or_generation_handoff(
     wf = _workflow_mod(workflow_mod)
     remaining = float(seconds)
     while remaining > 0:
-        handoff_queue = await _live_handoff_queue(workflow_instance)
+        handoff_queue = await live_handoff_queue(workflow_instance)
         if handoff_queue:
             raise GenerationHandoffRequested(handoff_queue)
         slice_seconds = min(poll_seconds, remaining)

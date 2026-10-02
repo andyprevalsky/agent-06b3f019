@@ -70,6 +70,22 @@ SDK_POST_RESULT_EXIT_GRACE_S: Final[float] = 180.0
 # code-agent path finishes CC in ~15m; 30m fails hung sessions with headroom.
 MAX_RUNTIME_S: Final[int] = 1800  # 30 minutes (matches E2B SANDBOX_TIMEOUT_MS)
 
+# ── Deploy drain / reattach ──
+# Same value as BROWSER_DRAIN_YIELD_STATUS: the activity detached from a sandbox
+# that is still running and returned the session for the next attempt.
+CODE_AGENT_DRAIN_YIELD_STATUS: Final[str] = "yielded_for_deploy_drain"
+# Heartbeat detail key carrying the attached session, so a Temporal retry after
+# a dead worker reattaches instead of creating a second sandbox.
+CODE_SESSION_HEARTBEAT_KEY: Final[str] = "code_session"
+DRAIN_CHECK_INTERVAL_S: Final[float] = 1.0
+# The retry after a dead worker starts once this passes without a heartbeat, so
+# the sandbox ws-servers' REATTACH_LINGER_MS must outlast it.
+CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S: Final[int] = 300
+# A reattaching attempt closes the previous sandbox and starts over only after
+# this many failed handshakes, so one network blip does not discard a live run.
+REATTACH_PROBE_ATTEMPTS: Final[int] = 3
+REATTACH_PROBE_BACKOFF_S: Final[float] = 2.0
+
 # Fatal error patterns in Claude Code output that should immediately abort the session.
 # These are unrecoverable inside a headless sandbox (e.g., OAuth login can't be completed).
 FATAL_ERROR_PATTERNS: Final[list[tuple[str, str]]] = [

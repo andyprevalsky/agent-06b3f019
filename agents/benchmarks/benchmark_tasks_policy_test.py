@@ -56,7 +56,7 @@ def test_google_oauth_demo_uses_cached_fixture_without_subagents_or_google_io():
         load_raw_catalog,
         validate_task_contract,
     )
-    from domains.api_request.google_oauth_demo_fixture import (
+    from providers.fast_cache.google_oauth_demo_fixture import (
         DEMO_LABEL,
         matches_demo_goal,
         normalize_completion_notice,
@@ -121,7 +121,7 @@ def test_google_oauth_demo_uses_cached_fixture_without_subagents_or_google_io():
 def test_google_oauth_demo_cache_is_available_without_catalog_in_worker_image():
     from unittest.mock import patch
 
-    from domains.api_request.google_oauth_demo_fixture import matches_demo_goal
+    from providers.fast_cache.google_oauth_demo_fixture import matches_demo_goal
     from providers.fast_cache.normalize import demo_cache_goal_hashes, google_oauth_demo_goal_hash
 
     goal = get_task_by_name("google-oauth").prompt

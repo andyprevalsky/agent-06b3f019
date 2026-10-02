@@ -17,7 +17,10 @@ import {
 } from '../../providers/steel/session';
 import { navigateToSavedUrl, recreateSession } from '../../providers/steel/sessionResume';
 import type { FingerprintData } from '../../providers/steel/types';
-import { testConnectionErrorRetriesOnReplacement } from './steel-fingerprint.connection-retry.behavior';
+import {
+  testConnectionErrorRetriesOnReplacement,
+  testRawCdpFailureClassification,
+} from './steel-fingerprint.connection-retry.behavior';
 import {
   testSavedSteelProfileIsReadOnlyDuringBenchmarkIsolation,
   testSavedSteelProfilePersistenceByEnvironment,
@@ -227,7 +230,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
             proxySource: 'steel',
           };
         },
-        validateConnection: async () => true,
+        validateConnection: async () => null,
       }
     );
 
@@ -281,7 +284,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
             profileId: 'steel-auth-profile',
           };
         },
-        validateConnection: async () => true,
+        validateConnection: async () => null,
       }
     );
     assert(
@@ -315,7 +318,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
               profileId: 'steel-force-fresh-profile',
             };
           },
-          validateConnection: async () => true,
+          validateConnection: async () => null,
         }
       );
     } finally {
@@ -361,7 +364,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
               profileId: 'wrong-profile',
             };
           },
-          validateConnection: async () => true,
+          validateConnection: async () => null,
           releaseSession: async () => {
             mismatchReleaseCount += 1;
           },
@@ -395,7 +398,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
               profileId: null,
             };
           },
-          validateConnection: async () => false,
+          validateConnection: async () => 'Connection timeout',
           releaseSession: async () => {
             throw new Error('release unavailable after bounded retries');
           },
@@ -514,6 +517,10 @@ async function main(): Promise<void> {
     {
       name: 'Steel replacement retries transient Connection error',
       fn: testConnectionErrorRetriesOnReplacement,
+    },
+    {
+      name: 'raw Steel CDP failures retain timeout and authentication categories',
+      fn: testRawCdpFailureClassification,
     },
     {
       name: 'saved URL navigation closes its browser after failure',

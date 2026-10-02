@@ -2216,7 +2216,7 @@ async def test_set_response_schema_activity_cache_lookup_error_falls_through_to_
 
 async def test_set_response_schema_activity_mass_agent_title_when_generation_fails():
     """Mass-agent root still PATCHes Creator Brand Strategy if schema generation throws."""
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX, OAI_DEMO_ROOT_TITLE
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX, OAI_DEMO_ROOT_TITLE
 
     setup_mock(
         {
@@ -8869,6 +8869,22 @@ async def run_all_tests():
     await r.record_async(
         "heartbeat_compute_token_lineage_activity_posts_lineage_key",
         test_heartbeat_compute_token_lineage_activity_posts_lineage_key,
+    )
+    await r.record_async(
+        "set_response_schema_cache_lookup_error_falls_through",
+        test_set_response_schema_activity_cache_lookup_error_falls_through_to_live,
+    )
+    r.record(
+        "verifier_file_evidence_caps_nondeliverable_shortlist",
+        test_verifier_file_evidence_caps_nondeliverable_shortlist_small,
+    )
+    r.record(
+        "verifier_file_evidence_keeps_full_top100_deliverable",
+        test_verifier_file_evidence_keeps_full_top100_deliverable_json,
+    )
+    r.record(
+        "verifier_context_skips_budget_for_declared_evaluator",
+        test_build_verifier_context_messages_skips_budget_for_declared_evaluator,
     )
     return r.summary()
 

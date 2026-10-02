@@ -157,6 +157,9 @@ const lateExclusiveDomainNames = new Set([
   'benchmarks-hub',
   'benchmarks-hub.part2',
   'benchmarks-test-prompts',
+  // Its feedback cases deliberately set a process-wide funded-key cooldown.
+  // Keep that mutation after every other domain that may need the key.
+  'codex-code',
 ]);
 const domainWeights = new Map<string, number>([
   ['benchmarks-hub-pipeline', 90],

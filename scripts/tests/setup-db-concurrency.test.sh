@@ -60,16 +60,37 @@ set -uo pipefail
 EVENTS="$EVENTS"
 stamp() { printf '%s %s %s\n' "\$(date +%s%N)" "\${SETUP_DB_TEST_TAG:-?}" "\$1" >> "\$EVENTS"; }
 case "\$1" in
-  ps)   exit 0 ;;                       # daemon reachable; no container listed
+  ps)
+    if [ "\${SETUP_DB_TEST_CONFLICT:-}" = 1 ] && [[ "\$*" == *--format* ]]; then
+      printf '%s\n' 'victoria-db-sibling 0.0.0.0:59005->5432/tcp'
+      if [[ "\$*" == *-a* ]]; then printf '%s\n' 'victoria-db-fake-repo'; fi
+    fi
+    exit 0 ;;                           # daemon reachable
+  inspect)
+    if [ "\${SETUP_DB_TEST_CONFLICT:-}" = 1 ]; then printf '%s\n' 'postgres:16-alpine'; fi
+    exit 0 ;;
   run)  stamp CREATE_CONTAINER; exit 0 ;;
-  start|rm) exit 0 ;;
-  port) exit 1 ;;
+  start) exit 0 ;;
+  rm) stamp RM_CONTAINER; exit 0 ;;
+  port) printf '%s\n' '0.0.0.0:59006'; exit 0 ;;
   exec)
     if printf '%s\n' "\$@" | grep -q 'pg_isready'; then exit 0; fi
     if printf '%s\n' "\$@" | grep -q 'DROP SCHEMA'; then stamp RESET; exit 0; fi
     exit 0 ;;
   *) exit 0 ;;
 esac
+STUB
+
+# If a buggy setup-db falls back to system Postgres on a port collision, keep
+# this hermetic test from touching the host's shared database.
+cat > "$TMP/bin/pg_isready" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+cat > "$TMP/bin/psql" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' SYSTEM_PG >> "$EVENTS"
+exit 1
 STUB
 
 # ── Stub npx ──────────────────────────────────────────────────────────────────
@@ -472,3 +493,26 @@ setup_db_pid_matches_record "$detached_record" || case10_fail \
 case10_cleanup
 
 echo "PASS: setup-db.sh serializes its destructive reset/push/seed per workspace database"
+
+# Case 11: a foreign port owner must stop setup before stale-image migration
+# removes the workspace container or the fallback resets shared system PG.
+: > "$EVENTS"
+collision_status=0
+(
+  cd "$TMP/fake-repo"
+  PATH="$TMP/bin:$PATH" \
+  SETUP_DB_TEST_CONFLICT=1 \
+  CONDUCTOR_PORT=59000 \
+  CONDUCTOR_WORKSPACE_NAME=fake-repo \
+  CONDUCTOR_WORKSPACE_PATH="$TMP/fake-repo" \
+  ROSE_USE_SYSTEM_PG=false \
+    bash "$TMP/fake-repo/scripts/setup-db.sh"
+) > "$TMP/collision.out" 2>&1 || collision_status=$?
+[ "$collision_status" -eq 42 ] || fail "case 11: collision exited $collision_status, expected 42
+$(cat "$TMP/collision.out")"
+grep -q "already bound by container 'victoria-db-sibling'" "$TMP/collision.out" || \
+  fail "case 11: error did not name the foreign port owner"
+if grep -Eq 'RM_CONTAINER|CREATE_CONTAINER|SYSTEM_PG|RESET|PUSH|SEED_START' "$EVENTS"; then
+  fail "case 11: collision changed a database: $(cat "$EVENTS")"
+fi
+echo "PASS: setup-db.sh preserves the workspace DB and shared system PG on a port collision"

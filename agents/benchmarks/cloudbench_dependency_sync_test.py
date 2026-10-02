@@ -6905,11 +6905,17 @@ FLY() {{
       mv "$VOLUMES.tmp" "$VOLUMES"
       return 0 ;;
     "volumes list")
-      python3 - "$VOLUMES" <<'PY'
-import json
-import sys
-print(json.dumps([{{"id": line.strip()}} for line in open(sys.argv[1]) if line.strip()]))
-PY
+      # Keep the fake provider in-process: launching Python on every poll can
+      # exhaust this test's 10-second subprocess bound on a shared deploy host.
+      first=1
+      printf '['
+      while IFS= read -r volume_id; do
+        [ -n "$volume_id" ] || continue
+        if [ "$first" = 0 ]; then printf ','; fi
+        printf '{{"id":"%s"}}' "$volume_id"
+        first=0
+      done < "$VOLUMES"
+      printf ']\n'
       return 0 ;;
   esac
   return 0
@@ -8318,8 +8324,8 @@ def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> No
     child_dir.mkdir()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    fake_npx = bin_dir / "npx"
-    fake_npx.write_text(
+    fake_node = bin_dir / "node"
+    fake_node.write_text(
         "#!/usr/bin/env bash\n"
         'count=$(cat "$LAUNCHES")\n'
         "count=$((count + 1))\n"
@@ -8327,14 +8333,14 @@ def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> No
         'echo "$count" > "$LAUNCHES"\n'
         'exec python3 "$LAUNCHER" "$CHILD_DIR/child-$count"\n'
     )
-    fake_npx.chmod(0o755)
+    fake_node.chmod(0o755)
     script = f"""set -eo pipefail
 BACKEND_PORT=3001
 BACKEND_LOG_FILE="$CHILD_DIR/backend.log"
 FAIL_DIR="$CHILD_DIR/fail"
 mkdir -p "$FAIL_DIR"
 # Keep this below the production warm-start budget (60), but large enough to
-# cover the deterministic delayed second launch in the fake npx wrapper.
+# cover the deterministic delayed second launch in the fake Node wrapper.
 CLOUDBENCH_BACKEND_START_READY_ATTEMPTS=10
 BACKEND_INDEX=0
 PIDS=("")

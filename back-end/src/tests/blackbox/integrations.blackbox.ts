@@ -71,6 +71,7 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import {
   processGoogleDataPurge,
   runGoogleDataPurgeJob,
@@ -90,6 +91,7 @@ import {
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
+import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
 import { generateSupabaseSession } from '../../providers/sessionTokens';
 config();
 
@@ -718,6 +720,12 @@ async function testAnthropicApiKeyCooldown_markThenOnCooldown() {
     );
   } finally {
     await restoreAnthropicApiKeyCooldown(previous);
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'anthropic',
+      onCooldown: cooldownIsLive(previous),
+    });
   }
 }
 
@@ -776,6 +784,36 @@ async function testGptApiKeyCooldown_markThenOnCooldown() {
     // Resets only this process's cache; the backend under test keeps the funded GPT key cooled for
     // the full window, so real-credential smokes on a shared backend must run before this case.
     __clearGptApiKeyCooldownCache();
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: cooldownIsLive(previous),
+    });
+  }
+  if (previous === null) {
+    // The API runs in a different process. Removing the fixture row must make
+    // that process observe the restored funded-key availability too.
+    const status = await retryWithBackoff(
+      async () => {
+        const status = await request(`${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`, {
+          headers: apiKeyHeaders(),
+        });
+        assertStatus(status.status, 200, status.data);
+        return status;
+      },
+      {
+        maxRetries: 73,
+        fixedDelays: Array(72).fill(250),
+        shouldRetryResult: (result) =>
+          (result.data as { onCooldown?: boolean }).onCooldown === true,
+        component: 'funded GPT key cooldown cleanup',
+      }
+    );
+    assert(
+      (status.data as { onCooldown?: boolean }).onCooldown !== true,
+      'backend retained the fixture funded-key cooldown after DB cleanup'
+    );
   }
 }
 
@@ -6394,6 +6432,12 @@ async function testClaudeCodeBillingFailure_backsOffFundedApiKey() {
     await restoreAnthropicApiKeyCooldown(previousCooldown);
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'anthropic',
+      onCooldown: cooldownIsLive(previousCooldown),
+    });
   }
 }
 
@@ -6428,6 +6472,12 @@ async function testClaudeCodeBillingFailure_marksSharedAnthropicCooldown() {
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
     await __resetAnthropicApiKeyCooldown();
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'anthropic',
+      onCooldown: false,
+    });
   }
 }
 

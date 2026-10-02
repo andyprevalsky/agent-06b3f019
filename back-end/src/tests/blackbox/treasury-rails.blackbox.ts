@@ -121,10 +121,14 @@ async function waitForUnusedMintSettled(
   cardId: string,
   minReleasedCents: number,
   timeoutMs = 240_000
-): Promise<{ status: string; releasedCents: number }> {
+): Promise<MintTransferObservation & { transferredCents: number }> {
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
-  let last: MintTransferObservation = { status: 'not_found', releasedCents: 0 };
+  let last: MintTransferObservation & { transferredCents: number } = {
+    status: 'not_found',
+    releasedCents: 0,
+    transferredCents: 0,
+  };
   for (;;) {
     attempt += 1;
     try {
@@ -133,6 +137,7 @@ async function waitForUnusedMintSettled(
       if (transfer !== undefined) last = transfer;
       const outcome = unusedMintSettleOutcome(transfer, minReleasedCents);
       if (outcome.done) {
+        assert.ok(transfer !== undefined, `no org-wallet transfer found for ${cardId}`);
         if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
           console.log(
             `  (transfer ${outcome.status} with ${usd(outcome.settledCents)} on attempt ${attempt}; ` +
@@ -144,7 +149,7 @@ async function waitForUnusedMintSettled(
               `recover_funds not needed)`
           );
         }
-        return { status: outcome.status, releasedCents: outcome.settledCents };
+        return transfer;
       }
       if (Date.now() >= deadline) {
         console.error(
@@ -278,7 +283,22 @@ async function main(): Promise<void> {
       }
     ).structuredContent?.cardholders ?? [];
   assert.ok(cardholders.length > 0, 'sandbox org has no cardholders to test with');
-  const cardholderId = cardholders[0].id;
+  // An open card owned by another workspace holds this cardholder's recoverable headroom.
+  // Use an idle cardholder so the unused mint can reclaim without touching foreign cards.
+  let cardholderId: string | undefined;
+  for (const cardholder of cardholders) {
+    const cards =
+      (
+        (await callOrgTool('list_cards', { cardholder_id: cardholder.id, limit: 100 })) as {
+          structuredContent?: { cards?: Array<{ status: string }> };
+        }
+      ).structuredContent?.cards ?? [];
+    if (cards.every((card) => card.status !== 'OPEN')) {
+      cardholderId = cardholder.id;
+      break;
+    }
+  }
+  assert.ok(cardholderId !== undefined, 'sandbox org has no idle cardholder for reclaim proof');
 
   const preSweepCents = await sweepResidualHeadroom();
   if (preSweepCents > 0) {
@@ -315,8 +335,6 @@ async function main(): Promise<void> {
 
       // Keep recovering while this exact card's transfer settles.
       const settled = await waitForUnusedMintSettled(cardId, mintCents);
-      const transfer = await readCardTransfer(cardId);
-      assert.ok(transfer !== undefined, `no org-wallet transfer found for ${cardId}`);
       assert.ok(
         settled.status === 'reclaimed' || settled.status === 'released',
         `transfer for ${cardId} ended in "${settled.status}" — an unused card must reclaim/release, ` +
@@ -331,16 +349,16 @@ async function main(): Promise<void> {
         `transfer ${settled.status} in full: released ${usd(settled.releasedCents)} of ${usd(mintCents)}`
       );
       assert.ok(
-        transfer.transferredCents >= 0 && transfer.transferredCents <= mintCents,
-        `transfer for ${cardId} reported an invalid pool debit ${transfer.transferredCents}`
+        settled.transferredCents >= 0 && settled.transferredCents <= mintCents,
+        `transfer for ${cardId} reported an invalid pool debit ${settled.transferredCents}`
       );
-      if (transfer.transferredCents === mintCents) {
+      if (settled.transferredCents === mintCents) {
         provedPoolMint = true;
         record('mint drew from the pool');
         break;
       }
       record(
-        `mint drew ${usd(transfer.transferredCents)} from the pool and netted remaining cardholder headroom; retrying direct pool proof`
+        `mint drew ${usd(settled.transferredCents)} from the pool and netted remaining cardholder headroom; retrying direct pool proof`
       );
     } finally {
       try {

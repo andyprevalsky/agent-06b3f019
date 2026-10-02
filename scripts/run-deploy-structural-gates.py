@@ -82,6 +82,7 @@ GATES = (
         "agent-surface-hash",
         ("bash", "scripts/tests/agent-surface-hash.test.sh"),
     ),
+    Gate("agents-structural", ("bash", "scripts/tests/agents-structural.test.sh")),
     Gate(
         "deploy-agent-clone-recovery",
         ("bash", "scripts/tests/deploy-agent-clone-recovery.test.sh"),
@@ -120,6 +121,13 @@ GATES = (
     Gate(
         "run-cloud-benchmark-workers",
         ("bash", "scripts/tests/run-cloud-benchmark-workers.test.sh"),
+    ),
+    # Agents blackbox files are not auto-discovered: an unregistered test_* never
+    # runs while its domain still reports green, and no other /deploy lane runs
+    # the agents structural suites.
+    Gate(
+        "agents-blackbox-registration",
+        ("python3", "agents/tests/structural/structural_test_registration.py"),
     ),
 )
 

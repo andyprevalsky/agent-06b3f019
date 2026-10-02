@@ -22,6 +22,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from config import load_config
+from helpers.activity_heartbeat import safe_heartbeat
 from helpers.attachments import (
     FilePointer,
     build_attachment_metadata_text,
@@ -243,8 +244,7 @@ def _add_cache_breakpoint_before_extra_user_message(messages: List[Dict[str, Any
 
 def _safe_heartbeat(message: str) -> None:
     """Call activity.heartbeat() if we're in an activity context, otherwise silently skip."""
-    with contextlib.suppress(Exception):
-        activity.heartbeat(message)
+    safe_heartbeat(message)
 
 
 def _safe_time() -> float:
@@ -6345,7 +6345,7 @@ async def _persist_mass_agent_root_title(
     api_key: str,
 ) -> None:
     """Best-effort PATCH of the mass-agent root title after schema generation fails."""
-    from domains.spawn_agent.config import mass_agent_root_title
+    from utils.oai_demo import mass_agent_root_title
 
     title = mass_agent_root_title(goal, include_title, None)
     if not title:
@@ -6420,7 +6420,7 @@ async def set_response_schema_activity(
         logger.error("No user messages provided for schema generation", agent_id=agent_id)
         return None
 
-    from domains.spawn_agent.config import mass_agent_root_title
+    from utils.oai_demo import mass_agent_root_title
 
     _safe_heartbeat(
         "Generating response schema and title via Rose" if include_title else "Generating response schema via Rose"
@@ -7017,6 +7017,10 @@ async def _retrieve_planner_memories(
         return await retrieve_memories(goal, user_id=user_id, exclude_root_agent_id=agent_id, agent_id=agent_id)
 
 
+# Must fit at least twice inside set_plan's PLANNER_ACTIVITY_HEARTBEAT_TIMEOUT_SECONDS.
+PLANNER_ACTIVITY_HEARTBEAT_INTERVAL_SECONDS = 10
+
+
 @activity.defn
 @traced("call_planner_llm_activity")
 async def call_planner_llm_activity(
@@ -7068,7 +7072,7 @@ async def call_planner_llm_activity(
     """
     import time
 
-    from domains.set_plan.config import PLANNER_MODEL
+    from providers.rose.pools import PLANNER_MODEL
     from utils.prompts import build_planner_system_prompt
     from utils.tool_schemas import get_planner_response_model
 
@@ -7083,6 +7087,20 @@ async def call_planner_llm_activity(
 
     activity_start = time.perf_counter()
     _safe_heartbeat("Calling planner LLM")
+    # Heartbeat on a timer, not only on LLM chunks. TTFT can be silent for
+    # up to ttft_timeout_s; without this loop heartbeat_timeout cannot be
+    # shorter than that silence and a dead worker burns the StartToClose budget.
+    liveness_stop = asyncio.Event()
+
+    async def _planner_liveness_heartbeat() -> None:
+        while not liveness_stop.is_set():
+            _safe_heartbeat("planner liveness")
+            try:
+                await asyncio.wait_for(liveness_stop.wait(), timeout=PLANNER_ACTIVITY_HEARTBEAT_INTERVAL_SECONDS)
+            except TimeoutError:
+                continue
+
+    liveness_task = asyncio.create_task(_planner_liveness_heartbeat())
 
     # Fast Mode: set the cache context so the planner's Rose call (via
     # call_llm_structured_streaming → cached_complete) records/replays by canonical
@@ -7264,3 +7282,8 @@ async def call_planner_llm_activity(
     except Exception as e:
         logger.error("Planner LLM failed", error=extract_error_message(e))
         raise
+    finally:
+        liveness_stop.set()
+        liveness_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await liveness_task

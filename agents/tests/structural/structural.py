@@ -269,6 +269,31 @@ def test_no_cross_domain_imports():
     assert not violations, f"Cross-domain imports found:\n" + "\n".join(f"  - {v}" for v in violations)
 
 
+def _runner_bodies(by_name: dict[str, ast.FunctionDef | ast.AsyncFunctionDef]) -> list[ast.AST]:
+    """run_all_tests plus the private helpers it delegates registration to.
+
+    Suites wrap registration in a helper (e.g. ``run_all_tests`` patches env and
+    awaits ``_run_all_tests()``); tests registered there run on every execution.
+    ``test_*`` callees are excluded so calling one test does not register its
+    neighbours.
+    """
+    pending = ["run_all_tests"]
+    seen: set[str] = set()
+    bodies: list[ast.AST] = []
+    while pending:
+        name = pending.pop()
+        if name in seen or name not in by_name:
+            continue
+        seen.add(name)
+        bodies.append(by_name[name])
+        for node in ast.walk(by_name[name]):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                callee = node.func.id
+                if callee.startswith("_") and not callee.startswith("test_"):
+                    pending.append(callee)
+    return bodies
+
+
 def test_every_blackbox_test_is_registered():
     """Every test_* in a blackbox suite must be referenced by that suite's run_all_tests.
 
@@ -287,12 +312,12 @@ def test_every_blackbox_test_is_registered():
         if not defined:
             continue
 
-        runner = next((node for node in top_level if node.name == "run_all_tests"), None)
-        if runner is None:
+        by_name = {node.name: node for node in top_level}
+        if "run_all_tests" not in by_name:
             violations.append(f"[{test_file.name}] defines {len(defined)} tests but has no run_all_tests()")
             continue
-
-        referenced = {node.id for node in ast.walk(runner) if isinstance(node, ast.Name)}
+        runners = _runner_bodies(by_name)
+        referenced = {node.id for runner in runners for node in ast.walk(runner) if isinstance(node, ast.Name)}
 
         # A sync `test_x` may exist purely as a pytest entry point that delegates
         # to an async `_x_case` helper, with the runner registering the helper.
@@ -300,7 +325,6 @@ def test_every_blackbox_test_is_registered():
         # registered — this recognizes the delegation rather than demanding a
         # second registration, which would double-run the case (and, for a
         # wrapper calling asyncio.run, blow up inside the running loop).
-        by_name = {node.name: node for node in top_level}
 
         def _delegates_to_registered_case(name: str) -> bool:
             node = by_name.get(name)
@@ -325,7 +349,7 @@ def test_every_blackbox_test_is_registered():
         async_tests = {
             node.name for node in top_level if isinstance(node, ast.AsyncFunctionDef) and node.name.startswith("test_")
         }
-        for call in (node for node in ast.walk(runner) if isinstance(node, ast.Call)):
+        for call in (node for runner in runners for node in ast.walk(runner) if isinstance(node, ast.Call)):
             func = call.func
             if not isinstance(func, ast.Attribute) or func.attr not in ("record", "record_async"):
                 continue

@@ -125,6 +125,18 @@ psql_db() {
     PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d "$database" "$@"
 }
 
+wait_for_seed_memory_host_postgres() {
+    local port="$1" database="$2" diagnostic="$3" attempt
+    for attempt in $(seq 1 30); do
+        if PGCONNECT_TIMEOUT=2 PGPASSWORD=postgres psql -h localhost -p "$port" -U postgres -d "$database" \
+            -tAc 'SELECT 1' >"$diagnostic" 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 # ── Source db: restored ONCE and reused across runs (it is read-only here) ──
 if $USE_SYSTEM_PG; then
     if ! pg_isready -h localhost -p 5432 -U postgres -q 2>/dev/null; then
@@ -358,11 +370,22 @@ for i in $(seq 1 "$RUNS"); do
             sleep 1
         done
 
+        HOST_PROBE_LOG="$OUT_DIR/host-postgres-$i.log"
+        if ! wait_for_seed_memory_host_postgres "$PORT" victoria "$HOST_PROBE_LOG"; then
+            echo "❌ run $i: host Postgres probe failed on port $PORT (diagnostic: $HOST_PROBE_LOG)" | tee -a "$SUMMARY"
+            tail -n 12 "$HOST_PROBE_LOG" | tee -a "$SUMMARY"
+            continue
+        fi
+
         export DATABASE_URL="postgresql://postgres:postgres@localhost:$PORT/victoria"
         export DIRECT_URL="$DATABASE_URL"
     fi
-    npx prisma db push --accept-data-loss --skip-generate >/dev/null 2>&1 || {
-        echo "❌ run $i: schema push failed" | tee -a "$SUMMARY"; continue; }
+    SCHEMA_PUSH_LOG="$OUT_DIR/schema-push-$i.log"
+    if ! npx prisma db push --accept-data-loss --skip-generate >"$SCHEMA_PUSH_LOG" 2>&1; then
+        echo "❌ run $i: schema push failed (diagnostic: $SCHEMA_PUSH_LOG)" | tee -a "$SUMMARY"
+        tail -n 12 "$SCHEMA_PUSH_LOG" | tee -a "$SUMMARY"
+        continue
+    fi
 
     report="$OUT_DIR/run-$i.json"
     log="$OUT_DIR/run-$i.log"
@@ -382,11 +405,13 @@ for i in $(seq 1 "$RUNS"); do
     fi
     if [ "$(uname -s)" = "Darwin" ]; then
         SEED_PEAK_RSS_REPORT="$report" \
+            NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
             "$TIME_BIN" -l npx tsx scripts/seed-local.ts > "$log" 2>&1
         rc=$?
         os_peak_bytes="$(grep -oE '[0-9]+ +maximum resident set size' "$log" | grep -oE '^[0-9]+' | tail -1)"
     else
         SEED_PEAK_RSS_REPORT="$report" \
+            NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
             "$TIME_BIN" -v npx tsx scripts/seed-local.ts > "$log" 2>&1
         rc=$?
         os_peak_kb="$(grep -oE 'Maximum resident set size \(kbytes\):[[:space:]]*[0-9]+' "$log" | grep -oE '[0-9]+$' | tail -1)"

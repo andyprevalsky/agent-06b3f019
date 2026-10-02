@@ -1,11 +1,10 @@
 #!/usr/bin/env tsx
 import { config } from 'dotenv';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
 import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
+import { testCodexWsServerOverlayUsesLocalSource } from './codex-code-overlay.case';
 import {
   testResolveCodexAuthEnvs_apiKeyFallback,
   testResolveCodexAuthEnvs_cooldownExcludesFundedKey,
@@ -23,6 +22,11 @@ import {
   testCodexCreditSkip_createUnavailableOnCooldownIsSkip,
 } from './codex-credit-skip.case';
 import {
+  testPromptBuilder_sharedContractMentionsOutputRules,
+  testRuntimeFallback_recognizesRevokedOAuthRefreshToken,
+  testTemplate_pinsCodexCliForGpt56,
+} from './codex-template-contract.case';
+import {
   CredentialExhaustionSkip,
   codexCreateUnavailableSkipReason,
   codexSmokeCreditSkipReason,
@@ -33,6 +37,8 @@ import {
   testDetectCreditExhaustion_observedOpenAiWording,
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
+import * as fundedKeyCooldown from './funded-key-cooldown.support';
+import { waitForCodexOutput } from './codex-smoke-output.support';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -130,129 +136,6 @@ async function testCreate_missingUserId() {
   ErrorResponse.parse(res.data);
 }
 
-async function waitForCodexOutput(
-  wsUrl: string,
-  timeoutMs = 240_000
-): Promise<{ output: string; events: unknown[]; exitCode?: number }> {
-  const WebSocket = (await import('ws')).default;
-  let output = '';
-  const events: unknown[] = [];
-  let connected = false;
-  let exitSeen = false;
-
-  return await new Promise<{ output: string; events: unknown[]; exitCode?: number }>(
-    (resolve, reject) => {
-      const ws = new WebSocket(wsUrl);
-      const timeout = setTimeout(() => {
-        ws.close();
-        reject(
-          new Error(
-            `Timed out waiting for Codex smoke. connected=${connected}, exit=${exitSeen}, output=${output.slice(-1200)}`
-          )
-        );
-      }, timeoutMs);
-
-      ws.on('open', () => {
-        connected = true;
-      });
-      ws.on('message', (data: Buffer) => {
-        const raw = data.toString();
-        try {
-          const msg = JSON.parse(raw);
-          if (
-            (msg.type === 'stdout' || msg.type === 'stderr' || msg.type === 'buffer') &&
-            msg.data
-          ) {
-            output += msg.data;
-          }
-          if (msg.type === 'code_agent_event' && msg.data) {
-            events.push(msg.data);
-          }
-          if (msg.type === 'code_agent_events' && Array.isArray(msg.data)) {
-            events.push(...msg.data);
-          }
-          if (msg.type === 'exit') {
-            exitSeen = true;
-            clearTimeout(timeout);
-            ws.close();
-            resolve({
-              output,
-              events,
-              exitCode: typeof msg.code === 'number' ? msg.code : undefined,
-            });
-          }
-        } catch {
-          output += raw;
-        }
-      });
-      ws.on('error', (err: Error) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
-      ws.on('close', () => {
-        if (!exitSeen && output.includes('CODEX_E2B_DONE')) {
-          clearTimeout(timeout);
-          resolve({ output, events });
-        }
-      });
-    }
-  );
-}
-
-async function testPromptBuilder_sharedContractMentionsOutputRules() {
-  const { buildCodeAgentSystemPrompt, CODE_AGENT_INSTRUCTIONS_VERSION } =
-    await import('../../providers/codeAgentPrompt');
-
-  const prompt = buildCodeAgentSystemPrompt({
-    githubRepoUrl: 'https://github.com/acme/widgets.git',
-    workDir: '/home/user/workspace',
-  });
-
-  assert(prompt.includes(CODE_AGENT_INSTRUCTIONS_VERSION), 'Prompt version missing');
-  assert(prompt.includes('/home/user/attachments'), 'Attachments directory missing');
-  assert(prompt.includes('/home/user/output'), 'Output directory missing');
-  assert(
-    prompt.includes('Files outside this directory are not returned to the user'),
-    'Output directory return contract missing'
-  );
-  assert(
-    prompt.includes('verify each requested artifact exists in /home/user/output'),
-    'Output artifact verification rule missing'
-  );
-  assert(prompt.includes('Do not return the original attachment path'), 'Transform rule missing');
-  assert(
-    prompt.includes('Do not launch a separate claude/Claude Code CLI'),
-    'Nested Claude CLI guard missing'
-  );
-  assert(prompt.includes('/home/user/workspace'), 'Repo workDir missing');
-}
-
-async function testTemplate_pinsCodexCliForGpt56() {
-  const dockerfile = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'e2b.Dockerfile'),
-    'utf8'
-  );
-  assert(
-    dockerfile.includes('ARG CODEX_VERSION=0.144.1') &&
-      dockerfile.includes('npm install -g "@openai/codex@$CODEX_VERSION"') &&
-      !dockerfile.includes('ubuntu.mirror.constant.com'),
-    'Codex E2B template must pin the GPT-5.6-compatible Codex CLI and use reliable Ubuntu sources'
-  );
-}
-
-async function testRuntimeFallback_recognizesRevokedOAuthRefreshToken() {
-  const wsServer = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'ws-server.mjs'),
-    'utf8'
-  );
-  assert(
-    wsServer.includes('refresh_token_invalidated') &&
-      wsServer.includes('oauth_refresh_invalid') &&
-      wsServer.includes('oauthFallbackReason ??= classifyOAuthFallbackReason(message)'),
-    'Codex ws-server must classify revoked refresh tokens for funded-key fallback'
-  );
-}
-
 async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
   const userId = crypto.randomUUID();
   const integration = await prisma.integration.create({
@@ -329,6 +212,12 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
         name: 'gpt_api_key_cooldown',
       },
     });
+    await fundedKeyCooldown.waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: false,
+    });
   }
 }
 
@@ -373,6 +262,7 @@ async function testSmoke_codexCompletesE2bTask() {
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
+  await fundedKeyCooldown.waitForUnusedFundedGptKeyCooldown(BASE_URL, API_KEY);
 
   try {
     const createRes = await request(`${BASE_URL}/api/codex-code-session/create`, {
@@ -529,6 +419,10 @@ async function runAll() {
     {
       name: 'template -- pins GPT-5.6-compatible Codex CLI',
       fn: testTemplate_pinsCodexCliForGpt56,
+    },
+    {
+      name: 'template -- overlays the local Codex fallback server for default and custom IDs',
+      fn: testCodexWsServerOverlayUsesLocalSource,
     },
     {
       name: 'auth -- revoked OAuth refresh token triggers funded-key fallback',

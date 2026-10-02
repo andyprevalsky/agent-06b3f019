@@ -67,9 +67,18 @@ require_text "$MEASUREMENT" \
 require_text "$MEASUREMENT" \
     'docker rm -fv "$SRC_CONTAINER"' \
     "cold source cleanup must remove its postgres anonymous volume"
+require_text "$MEASUREMENT" \
+    'wait_for_seed_memory_host_postgres "$PORT" victoria "$HOST_PROBE_LOG"' \
+    "cold target schema push must wait for the published host port"
+require_text "$MEASUREMENT" \
+    'PGCONNECT_TIMEOUT=2 PGPASSWORD=postgres psql -h localhost' \
+    "host readiness must probe the same hostname Prisma uses with bounded connection attempts"
+require_text "$MEASUREMENT" \
+    'SCHEMA_PUSH_LOG="$OUT_DIR/schema-push-$i.log"' \
+    "schema push failures must retain the Prisma diagnostic"
 require_text "$BUDGET" \
-    'SEED_PEAK_RSS_BUDGET_MB = 230' \
-    "budget must remain cemented to ceil(191MB * 1.20)"
+    'SEED_PEAK_RSS_BUDGET_MB = 228' \
+    "budget must remain cemented to ceil(190MB * 1.20)"
 require_text "$BUDGET" \
     'SEED_RSS_HEADROOM_RATIO = 0.2' \
     "headroom ratio must remain exactly 20%"
@@ -132,4 +141,22 @@ require_text "$MEASUREMENT" \
     'restore that original mode before measuring' \
     "restore validation must not leave errexit enabled for the measured seed"
 
-echo "PASS: /deploy enforces five fidelity-verified cold seeds at the measured 230MB ratchet"
+# The container can report ready before Docker publishes its host port. Exercise
+# the exact host readiness helper with mocked psql failures followed by success.
+eval "$(sed -n '/^wait_for_seed_memory_host_postgres() {/,/^}/p' "$MEASUREMENT")"
+probe_diagnostic="$(mktemp)"
+trap 'rm -f "$probe_diagnostic"' EXIT
+attempts=0
+psql() { attempts=$((attempts + 1)); [ "$attempts" -ge 3 ]; }
+sleep() { :; }
+wait_for_seed_memory_host_postgres 55175 victoria "$probe_diagnostic" || fail "host readiness must retry a delayed published port"
+[ "$attempts" -eq 3 ] || fail "host readiness must wait for the successful published-port probe"
+attempts=0
+psql() { attempts=$((attempts + 1)); echo 'simulated connection refusal' >&2; return 1; }
+if wait_for_seed_memory_host_postgres 55175 victoria "$probe_diagnostic"; then
+    fail "host readiness must reject an unreachable published port"
+fi
+[ "$attempts" -eq 30 ] || fail "host readiness must stop after its bounded retry window"
+grep -Fq 'simulated connection refusal' "$probe_diagnostic" || fail "host readiness must retain the last probe diagnostic"
+
+echo "PASS: /deploy enforces five fidelity-verified cold seeds at the measured 228MB ratchet"

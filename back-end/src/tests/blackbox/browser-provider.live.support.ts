@@ -8,7 +8,16 @@ import jwt from 'jsonwebtoken';
 import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
-import { steel, steelCdpConnectionUrl } from '../../providers/steel/session';
+import {
+  releaseSteelRemoteSession,
+  steel,
+  steelCdpConnectionUrl,
+  steelCdpUrl,
+} from '../../providers/steel/session';
+import {
+  steelStartupProbe,
+  validateBrowserConnection,
+} from '../../providers/steel/sessionConnection';
 import {
   assert,
   type BrowserApiResponse,
@@ -23,6 +32,23 @@ import {
 import { assertResumeReprovisionsDeletedProxy } from './browser-provider-stale-proxy.support';
 
 const AGENT_LOCATION = { country: 'US', state: 'CA', city: 'San Francisco' } as const;
+
+/** Create, validate, and release a Steel session that uses only Steel's defaults. */
+async function steelDefaultSessionBoots(): Promise<boolean> {
+  const session = await steel.sessions.create({});
+  try {
+    const validation = await validateBrowserConnection(steelCdpUrl(session.id), {
+      startupProbe: steelStartupProbe(session.id, (id) => steel.sessions.retrieve(id)),
+    });
+    await validation.browser?.close().catch(() => {});
+    console.warn(
+      `[rotate_ip repro] Steel default control session ${session.id}: ${validation.failure ?? 'booted'}`
+    );
+    return validation.browser !== null;
+  } finally {
+    await releaseSteelRemoteSession(session.id).catch(() => {});
+  }
+}
 
 export async function runLiveProviderParity(): Promise<void> {
   const baseUrl = process.env.TEST_BASE_URL?.replace(/\/$/, '');
@@ -284,6 +310,10 @@ export async function runLiveProviderParity(): Promise<void> {
       'residential session was not evicted before the mobile-band rotation'
     );
     liveSessionId = String(mobileRotated.session_id);
+    const mobileRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
+    const mobileProxyId = mobileRemote.proxy_id;
+    assert(Boolean(mobileProxyId), 'mobile rotation did not retain its managed proxy ID');
+    const mobileMetadata = mobileRotated.browser_session_metadata ?? {};
     const mobileIp = await readDifferentExitIp(String(mobileRotated.ws_url), residentialIp);
     // Ground truth comes from ipify, not from response metadata alone.
     assert(
@@ -432,21 +462,22 @@ export async function runLiveProviderParity(): Promise<void> {
     assert(resumedMetadata.provider === 'kernel', 'resume changed providers');
     assert(resumedMetadata.profile_id === profileId, 'resume did not reuse the Kernel profile');
     assert(
-      resumedMetadata.proxy_source === metadata.proxy_source &&
-        JSON.stringify(resumedMetadata.proxy_location) === JSON.stringify(metadata.proxy_location),
-      'resume lost resolved proxy fallback metadata'
+      resumedMetadata.proxy_source === mobileMetadata.proxy_source &&
+        JSON.stringify(resumedMetadata.proxy_location) ===
+          JSON.stringify(mobileMetadata.proxy_location),
+      `resume lost the rotated proxy choice: before=${JSON.stringify(mobileMetadata)} after=${JSON.stringify(resumedMetadata)}`
     );
 
     const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
-    assert(secondRemote.proxy_id === proxyId, 'resume did not reuse the managed proxy ID');
+    assert(secondRemote.proxy_id === mobileProxyId, 'resume did not reuse the rotated proxy ID');
 
     const resumedAfterDeletion = await assertResumeReprovisionsDeletedProxy({
       kernel,
       taskId: String(init.task_id),
       sessionId: liveSessionId,
       agentLocation: AGENT_LOCATION,
-      proxySource: metadata.proxy_source,
-      proxyLocation: metadata.proxy_location,
+      proxySource: mobileMetadata.proxy_source,
+      proxyLocation: mobileMetadata.proxy_location,
       post: postWithKernelConnectionRetry,
     });
     liveSessionId = resumedAfterDeletion;
@@ -464,6 +495,7 @@ export async function runLiveProviderParity(): Promise<void> {
       retrieveKernelBrowser: (sessionId) =>
         kernel.browsers.retrieve(sessionId, { include_deleted: true }),
       retrieveSteelBrowser: (sessionId) => steel.sessions.retrieve(sessionId),
+      steelControlSessionBoots: steelDefaultSessionBoots,
       allocatedSessionIds,
     });
     if (crossProvider === null) return;

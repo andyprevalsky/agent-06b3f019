@@ -478,6 +478,7 @@ their assertions or test counts:
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
 `bash scripts/tests/cooperative-cutover-monitor.test.sh`,
 `bash scripts/tests/agent-surface-hash.test.sh`,
+`bash scripts/tests/agents-structural.test.sh`,
 `bash scripts/tests/deploy-agent-clone-recovery.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
@@ -491,8 +492,9 @@ their assertions or test counts:
 `bash scripts/tests/run-seed-exit-code.test.sh`,
 `bash scripts/tests/run-public-tunnel-routing.test.sh`,
 `bash scripts/tests/setup-db-concurrency.test.sh`,
-`bash scripts/tests/run-port-collision.test.sh`, and
-`bash scripts/tests/run-cloud-benchmark-workers.test.sh`.
+`bash scripts/tests/run-port-collision.test.sh`,
+`bash scripts/tests/run-cloud-benchmark-workers.test.sh`, and
+`python3 agents/tests/structural/structural_test_registration.py`.
 
 This list is deliberately explicit, not a registry pointer: several of these
 suites assert that their own command still appears here, which is how a gate
@@ -529,6 +531,11 @@ cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox --reus
 This one command runs all 91 deterministic back-end blackbox domains plus unit
 tests under V8 coverage. It must both pass every test and meet
 `back-end/.c8rc.json`; the real provider credential probe runs once in Step 4c.
+After coverage passes it runs `scripts/tests/blackbox-backend-teardown.test.sh`,
+which drives the isolated-backend runner through a normal exit and a SIGTERM and
+fails if either leaves its backend or port lock behind. It runs here, after the
+coverage server stops, rather than in Step 4s because it boots a real backend
+and regenerates the Prisma client.
 
 ## Step 4b: Front-end coverage + blackbox (skip if no front-end/ changes)
 
@@ -643,15 +650,30 @@ repeats only this focused probe—not the complete coverage suite.
 
 ## Step 4p: Concurrent focused live probes
 
-The credential and Amplitude probes are independent and both read-only. Launch
-them under one foreground supervisor so a failing lane cannot interrupt or hide
-the sibling's evidence:
+The credential and Amplitude probes are independent and both read-only, so they
+run concurrently under one foreground supervisor; a failing lane cannot
+interrupt or hide the sibling's evidence. The chat-router-failover live probe
+starts after the Amplitude probe exits, because both boot the blackbox
+runner's db push and trigger hooks:
 
 ```bash
 python3 scripts/run_deploy_live_probes.py
 ```
 
-Both stage records must pass before closing the `runtime-blackbox` boundary.
+All three stage records must pass before closing the `runtime-blackbox`
+boundary.
+
+`chat-router-failover-live` replays the e8f2279b address-correction follow-up
+on its exact 30-message router context during a simulated Cerebras-wide
+stall, with the real OpenRouter GLM failover as the only path that can serve.
+It must run on the OpenRouter account `back-end/.env` configures, escalate on
+router attempt 1, and start the workflow with a goal anchored on the corrected
+address and not on the rejected one. A miss OpenRouter caused (the connection
+opened but no response headers came, or no first content within the 14.2s
+pre-content budget) is re-probed once 60s later. A second miss, or any other
+failure, blocks the deploy. A block means the failover could not serve that
+turn at that moment: diagnose it from the printed host, connect, and response
+timings and the `openrouter_fast_chat.end` records before rerunning.
 
 ## Step 4r: Cold-seed memory ratchet (no skip)
 
@@ -1080,6 +1102,7 @@ billing state.
 cd "$(git rev-parse --show-toplevel)"
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
   BENCHMARK_SKIP_WMH_BUILD=1 \
+  BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0 \
   bash scripts/run-deploy-stage agentcard-lifecycle -- \
   bash scripts/run-bench --local agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment --bootstrap --max-concurrency 1 --no-dashboard
 ```
@@ -1087,6 +1110,11 @@ CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
 These four real-mode payment tasks never use the simulated World Model Harness.
 The explicit opt-out prevents every fresh deploy workspace from downloading the
 full trace archive and running a first-time GEPA build before the payment gate.
+
+`BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0` keeps these active-worktree attempts
+out of the canary pass-streak history, exactly like `run-predeploy-local`. Without
+it an unmerged branch's AgentCard failure (or a provider blip) evicted the payment
+canaries from the smoke floor of every later deploy until three fresh passes.
 
 The bootstrap must report an AgentCard sandbox pool of at least $500. This is
 test-only float provisioned through the authenticated admin session; it does not
@@ -1121,7 +1149,7 @@ SEMANTIC_WORKERS=1 LOCAL_DB_PORT=$LOCAL_DB_PORT BACKEND_PORT=$CONDUCTOR_PORT FRO
   bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh chat-lifecycle-latency
 ```
 
-The runner generates one authenticated session per Playwright invocation. UI specs run on four workers with the latency ratchet excluded (`SEMANTIC_GREP_INVERT`). The latency ratchet then runs alone on one worker so renderer contention cannot become part of the product latency measurement — the same split as `chat-lifecycle-ratchet.yml`. Inside the lifecycle spec, `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` each take five independent samples; every sample must complete the full browser lifecycle in under five seconds.
+The runner generates one authenticated session per Playwright invocation. UI specs run on four workers with the latency ratchet excluded (`SEMANTIC_GREP_INVERT`). The latency ratchet then runs alone on one worker so renderer contention cannot become part of the product latency measurement — the same split as `chat-lifecycle-ratchet.yml`. Inside the lifecycle spec, `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` each take five independent samples; every sample must complete the full browser lifecycle in under six seconds.
 
 This runs every `.spec.ts` under `front-end/tests-e2e/` via headless Chromium. To run a single test:
 
@@ -1161,23 +1189,25 @@ Step 4a's coverage run deliberately keeps `BLACKBOX_SMOKE` unset and never spins
 real sandbox. Do NOT downgrade this to WARN, gate it behind a change classifier,
 or skip it because "claude-code wasn't touched."
 
-With the full stack from Step 5 still running (backend on `$CONDUCTOR_PORT`, DB on
-`$LOCAL_DB_PORT`), create the separate local database required by the standalone
-blackbox runner, then run the claude-code blackbox with the smoke phase enabled:
+With the full stack from Step 5 still running, resolve its actual backend and
+database ports from the live service manifest. Create the separate local
+database required by the standalone blackbox runner. This command runs in a
+fresh shell and chooses the runtime port for Docker or system Postgres:
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-source scripts/lib/workspace-env.sh
+. scripts/lib/workspace-env.sh
 normalize_conductor_workspace_env
-CONDUCTOR_PORT=$(jq -er '.ports.backend' .context/services.json)
-LOCAL_DB_PORT=$(jq -er '.database.runtime_port' .context/services.json)
+STACK_PORTS=$(bash scripts/resolve-deploy-stack-db.sh) || exit 1
+read -r CONDUCTOR_PORT SMOKE_DB_PORT <<< "$STACK_PORTS"
+export CONDUCTOR_PORT
 E2B_DB_NAME="victoria_$CONDUCTOR_WORKSPACE_NAME"
-if ! psql "postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$E2B_DB_NAME" \
+if ! psql "postgresql://postgres:postgres@localhost:$SMOKE_DB_PORT/$E2B_DB_NAME" \
   -At -c 'SELECT 1' >/dev/null 2>&1; then
-  PGPASSWORD=postgres createdb -h localhost -p "$LOCAL_DB_PORT" -U postgres "$E2B_DB_NAME"
+  PGPASSWORD=postgres createdb -h localhost -p "$SMOKE_DB_PORT" -U postgres "$E2B_DB_NAME"
 fi
 cd back-end && BLACKBOX_SMOKE=1 \
-  BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$E2B_DB_NAME" \
+  BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$SMOKE_DB_PORT/victoria_$CONDUCTOR_WORKSPACE_NAME" \
   bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- \
   bash scripts/run-blackbox-tests.sh claude-code
 ```
@@ -1276,7 +1306,7 @@ bash scripts/run-deploy-stage --finish
 
 # ║ Includes four concurrent chat paths × five full-lifecycle samples, ║
 
-# ║ with every sample below the five-second ratchet. ║
+# ║ with every sample below the six-second ratchet.  ║
 
 # ║ 6c. Claude Code E2B sandbox smoke: PASS on every /deploy; never ║
 
@@ -1440,6 +1470,7 @@ Inspect the newest CodeRabbit-authored content from all three endpoints. Treat C
 - The check is missing, failed, or timed out.
 - The newest bot output contains `Review limit reached`, `rate limited`, `usage spending cap`, `review skipped`, or a service/internal error.
 - The check is green but there is no substantive review result for `REVIEW_HEAD`. A quota/error comment is not a review.
+- The `@coderabbitai review` comment was posted by a bot account (for example `cursor[bot]` when a Cloud Agent comments through its PR tool). CodeRabbit silently ignores bot-authored commands, so the push only produces `Review skipped: incremental reviews are disabled` and no review follows. Go straight to the fallback instead of re-requesting.
 
 Do not repeatedly request more CodeRabbit reviews during a quota window. Trigger exactly one Claude review for `REVIEW_HEAD` by toggling the opt-in label. The fallback remains part of the already-open lifecycle; it does not consume another review cycle:
 

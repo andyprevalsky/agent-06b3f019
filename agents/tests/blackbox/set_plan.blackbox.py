@@ -863,6 +863,101 @@ async def test_handler_planner_exception_yields_error():
 # the production code.
 
 
+def _patch_service_workflow(fake_workflow):
+    import domains.set_plan.service as svc
+
+    original = svc.workflow
+    svc.workflow = fake_workflow
+
+    def restore():
+        svc.workflow = original
+
+    return restore
+
+
+async def test_run_planner_attempt_redelivers_after_dead_worker():
+    """Planner activity must be stealable if the assigned worker dies.
+
+    Production agent 292022e4 sat on Generating Plan for 241s because
+    call_planner_llm_activity was scheduled with only start_to_close=240s
+    and heartbeat_timeout=0. Temporal recorded attempt 1 as
+    `activity StartToClose timeout` with no STARTED event, then attempt 2
+    completed the same plan in 22s on a different worker. The 240s budget
+    is for LLM work, not worker liveness.
+    """
+    from datetime import timedelta
+
+    from domains.set_plan.config import (
+        PLANNER_ACTIVITY_HEARTBEAT_TIMEOUT_SECONDS,
+        PLANNER_ACTIVITY_TIMEOUT_SECONDS,
+    )
+    from domains.set_plan.service import run_planner_attempt
+
+    captured: dict = {}
+
+    class _CaptureWorkflow(_FakeWorkflowModule):
+        async def execute_activity(self, fn, *args, **kwargs):
+            captured["fn"] = getattr(fn, "__name__", str(fn))
+            captured.update(kwargs)
+            return {
+                "result": {
+                    "title": "t",
+                    "join": "all",
+                    "tasks": [{"task_idx": "0", "goal": "A", "tool_name": "reasoning", "depends_on": []}],
+                },
+                "usage": {},
+            }
+
+    fake_wf = _CaptureWorkflow()
+    restore = _patch_service_workflow(fake_wf)
+    try:
+        await run_planner_attempt(
+            workflow_instance=_FakeWFInstance(),
+            messages=[{"role": "user", "content": "goal"}],
+            tools_description="tools",
+            user_context="",
+            response_schema=None,
+            claude_max_token=None,
+            gpt_token=None,
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            user_messages=["goal"],
+            tool_call_id="tc-1",
+            attempt=0,
+        )
+    finally:
+        restore()
+
+    assert captured.get("fn") == "call_planner_llm_activity"
+    start_to_close = captured.get("start_to_close_timeout")
+    heartbeat = captured.get("heartbeat_timeout")
+    assert start_to_close == timedelta(seconds=PLANNER_ACTIVITY_TIMEOUT_SECONDS)
+    assert heartbeat == timedelta(seconds=PLANNER_ACTIVITY_HEARTBEAT_TIMEOUT_SECONDS), (
+        "heartbeat_timeout must be 30s so a StartToClose-started assignment that "
+        "never heartbeats is redelivered instead of burning the 240s LLM budget"
+    )
+    assert heartbeat < start_to_close
+    assert captured.get("schedule_to_start_timeout") is None, (
+        "A short schedule_to_start with max_attempts=2 can fail a healthy pickup "
+        "that would have succeeded inside the 240s StartToClose budget"
+    )
+    retry = captured.get("retry_policy")
+    assert retry is not None
+    assert retry.maximum_attempts == 2
+
+    import inspect
+
+    from helpers.llm import PLANNER_ACTIVITY_HEARTBEAT_INTERVAL_SECONDS, call_planner_llm_activity
+
+    source = inspect.getsource(call_planner_llm_activity)
+    assert "_planner_liveness_heartbeat" in source
+    assert "planner liveness" in source
+    assert PLANNER_ACTIVITY_HEARTBEAT_INTERVAL_SECONDS * 2 < PLANNER_ACTIVITY_HEARTBEAT_TIMEOUT_SECONDS, (
+        "the activity's liveness beat must fit at least twice inside the scheduled heartbeat_timeout"
+    )
+
+
 async def run_all_tests():
     print("set-plan blackbox tests:")
     r = BlackboxResult()
@@ -924,6 +1019,10 @@ async def run_all_tests():
     await r.record_async("handler_retries_emit_event", test_handler_retries_emit_retry_event)
     await r.record_async("handler_fails_after_retries", test_handler_fails_after_all_retries)
     await r.record_async("handler_planner_exception", test_handler_planner_exception_yields_error)
+    await r.record_async(
+        "planner_activity_redelivers_after_dead_worker",
+        test_run_planner_attempt_redelivers_after_dead_worker,
+    )
     teardown_mock()
     return r.all_passed
 
