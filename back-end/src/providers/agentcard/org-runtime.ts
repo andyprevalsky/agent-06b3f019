@@ -148,7 +148,17 @@ function shouldRetryOrgMcpError(error: unknown): boolean {
   return looksLikeRateLimitError(error) || looksLikeTransientUnavailableError(error);
 }
 
-function mcpStructuredResultIsTransientlyUnavailable(result: unknown): string | undefined {
+/**
+ * AgentCard reports both a sandbox outage and the org throttle as an HTTP 200 tools/call result
+ * (`{status:"error", message:"…temporarily unavailable"}` /
+ * `{status:"error", message:"…API key rate limit exceeded…"}`), not as a transport error. Lift
+ * either into the matching thrown error so the bounded retry below owns it; returned as a value it
+ * reaches callers as a successful read with no payload.
+ */
+function mcpStructuredResultRetryableError(
+  toolName: string,
+  result: unknown
+): AgentCardOrgRuntimeError | undefined {
   if (typeof result !== 'object' || result === null) return undefined;
   const record = result as Record<string, unknown>;
   const structured =
@@ -157,11 +167,22 @@ function mcpStructuredResultIsTransientlyUnavailable(result: unknown): string | 
       : record;
   const message = typeof structured.message === 'string' ? structured.message : '';
   const status = structured.status;
-  if (
-    (status === 'error' || status === 'unavailable') &&
-    /temporarily unavailable|service unavailable/i.test(message)
-  ) {
-    return message;
+  if (status !== 'error' && status !== 'unavailable') return undefined;
+  if (looksLikeRateLimitError(message)) {
+    return new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP ${toolName} rate limit exceeded: ${message}`,
+      429,
+      'agentcard_org_mcp_rate_limited',
+      { tool: toolName, message }
+    );
+  }
+  if (/temporarily unavailable|service unavailable/i.test(message)) {
+    return new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP ${toolName} is temporarily unavailable: ${message}`,
+      503,
+      'agentcard_org_mcp_unavailable',
+      { tool: toolName, message }
+    );
   }
   return undefined;
 }
@@ -390,8 +411,8 @@ export class AgentCardOrgRuntime {
    * Calls an organization MCP tool, transparently recovering from the failure modes that are
    * expected on a healthy provider: a flaky MCP 401/403 on `tools/call` (retry once), a throttled
    * request window (wait for the window to refill, bounded), and a structured
-   * `{status:"error", message:"…temporarily unavailable"}` tools/call result (HTTP 200 with a
-   * sandbox outage). Everything else propagates untouched.
+   * `{status:"error"}` tools/call result (HTTP 200) carrying a sandbox outage or the throttle.
+   * Everything else propagates untouched.
    *
    * A throttle used to escape as a raw transport error, so every caller that lacked its own
    * rate-limit handling turned a few seconds of provider backpressure into a hard failure.
@@ -426,15 +447,8 @@ export class AgentCardOrgRuntime {
     for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
       try {
         const result = await this.callToolOnce(toolName, args);
-        const transient = mcpStructuredResultIsTransientlyUnavailable(result);
-        if (transient !== undefined) {
-          throw new AgentCardOrgRuntimeError(
-            `AgentCard Organization MCP ${toolName} is temporarily unavailable: ${transient}`,
-            503,
-            'agentcard_org_mcp_unavailable',
-            { tool: toolName, message: transient }
-          );
-        }
+        const retryable = mcpStructuredResultRetryableError(toolName, result);
+        if (retryable !== undefined) throw retryable;
         return result;
       } catch (error) {
         if (!shouldRetryOrgMcpError(error)) throw error;

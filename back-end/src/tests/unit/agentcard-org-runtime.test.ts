@@ -271,6 +271,57 @@ async function main(): Promise<void> {
     );
     assert.equal(stuckUnavailableCalls, 3, 'transient-unavailable retries must stay bounded');
 
+    // The org throttle also arrives as an HTTP 200 tools/call result (observed verbatim on a
+    // 150-read burst). Returned as a value, it reached the wallet parser as "no structured wallet"
+    // and failed both concurrent benchmark payment seeders without ever entering the throttle retry.
+    const structuredThrottle = {
+      content: [
+        {
+          type: 'text',
+          text: 'get_company_wallet failed: API key rate limit exceeded, please try again later',
+        },
+      ],
+      structuredContent: {
+        message: 'get_company_wallet failed: API key rate limit exceeded, please try again later',
+        status: 'error',
+      },
+    };
+    let structuredThrottledCalls = 0;
+    const throttledThenOkRuntime = new AgentCardOrgRuntime(async () => {
+      structuredThrottledCalls += 1;
+      if (structuredThrottledCalls === 1) return structuredThrottle;
+      return {
+        structuredContent: {
+          wallet: { livemode: false, balance_cents: 100, committed_cents: 0, available_cents: 100 },
+        },
+      };
+    });
+    assert.deepEqual(await throttledThenOkRuntime.callTool('get_company_wallet', {}), {
+      structuredContent: {
+        wallet: { livemode: false, balance_cents: 100, committed_cents: 0, available_cents: 100 },
+      },
+    });
+    assert.equal(
+      structuredThrottledCalls,
+      2,
+      'a structured MCP throttle must be retried, not returned'
+    );
+
+    let stuckStructuredThrottledCalls = 0;
+    const stuckStructuredThrottledRuntime = new AgentCardOrgRuntime(async () => {
+      stuckStructuredThrottledCalls += 1;
+      return structuredThrottle;
+    });
+    await assert.rejects(
+      () => stuckStructuredThrottledRuntime.callTool('get_company_wallet', {}),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 429 &&
+        error.code === 'agentcard_org_mcp_rate_limited' &&
+        /API key rate limit exceeded/.test(error.message)
+    );
+    assert.equal(stuckStructuredThrottledCalls, 3, 'structured throttle retries must stay bounded');
+
     // AbortSignal.timeout on tools/call throws "The operation was aborted due to timeout" before
     // any HTTP/RPC body exists. Under coverage concurrency that mid-poll stall used to escape as a
     // hard fail (treasury-rails 2026-09-12: unused-card settle died on attempt 3). It is the same
