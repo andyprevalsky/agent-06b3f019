@@ -310,6 +310,7 @@ You do not receive:
 - 1.0: every required output schema field can be populated accurately from grounded tool evidence in a single transformation pass (parse, compute, format).
 - 0.5: some fields populatable, but at least one is unverifiable from current evidence; the agent should produce more evidence.
 - 0.0: no fields populatable from evidence; the agent has not produced usable output.
+- User refusal: if a tool result shows the user declined a step the goal requires, score 1.0 and leave the blocked fields empty.
 
 Cosmetic issues (rounding, formatting, prose-style) are NOT grounds to drop
 below 1.0 when the underlying data is present. Pick the most precise value
