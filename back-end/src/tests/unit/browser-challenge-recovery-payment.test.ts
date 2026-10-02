@@ -7,14 +7,102 @@ import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import type { Browser } from 'playwright';
 import {
+  boundedRecoveryResponseText,
   browserRecoveryCandidates,
   paymentCdnFocusedCandidates,
   probeCandidateBrowser,
   recoverySearchPlan,
+  runLaneConfigSearch,
   runParallelBrowserConfigSearch,
   type BrowserRecoveryConfig,
   type RecoveryCandidateSession,
 } from '../../providers/browser/challengeRecovery';
+import { alternateProviderFirst } from '../../providers/browser/challengeRecoveryCandidates';
+
+function testTransportFailureTriesAlternateProviderBeforeSameProviderTiers(): void {
+  const configs = browserRecoveryCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
+  const reordered = alternateProviderFirst(configs, 'kernel');
+  assert.deepStrictEqual(
+    reordered.map((config) => config.key),
+    [
+      'steel_fixed',
+      'steel_managed',
+      ...configs.filter((config) => config.provider === 'kernel').map((config) => config.key),
+    ]
+  );
+  assert.deepStrictEqual(
+    [...reordered].sort((a, b) => a.key.localeCompare(b.key)),
+    [...configs].sort((a, b) => a.key.localeCompare(b.key))
+  );
+}
+
+async function testUnfinishedNetworkBodyDoesNotBlockRecoveryProbe(): Promise<void> {
+  const stuck = new Promise<string>(() => undefined);
+  assert.strictEqual(await boundedRecoveryResponseText({ text: () => stuck }, 5), undefined);
+  assert.strictEqual(await boundedRecoveryResponseText({ text: async () => 'ready' }, 5), 'ready');
+}
+
+async function testTransportCandidateDeadlineReachesNextProvider(): Promise<void> {
+  const configs = browserRecoveryCandidates({ country: 'US' }).slice(0, 2);
+  const released: string[] = [];
+  let firstSignal: AbortSignal | undefined;
+  const winner = await runLaneConfigSearch(
+    configs,
+    [{ key: 'default', storageState: {} }],
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (config, _session, _lane, signal) => {
+        if (config.key === configs[0]!.key) {
+          firstSignal = signal;
+          await new Promise<void>(() => undefined);
+        }
+        return { stablePasses: 1, attempts: 1, latencyMs: 1, paymentCdnOk: true };
+      },
+      promote: async () => undefined,
+      release: async (config) => {
+        released.push(config.key);
+      },
+    },
+    { candidateDeadlineMs: 10 }
+  );
+  assert.strictEqual(winner.config.key, configs[1]!.key);
+  assert.strictEqual(firstSignal?.aborted, true);
+  assert.deepStrictEqual(released, [configs[0]!.key]);
+}
+
+async function testTransportSearchDeadlineCancelsAllLanesBeforeHttpTimeout(): Promise<void> {
+  const configs = browserRecoveryCandidates({ country: 'US' }).slice(0, 1);
+  const released: string[] = [];
+  const promoted: string[] = [];
+  let probeSignal: AbortSignal | undefined;
+  const started = Date.now();
+  await assert.rejects(
+    runLaneConfigSearch(
+      configs,
+      [{ key: 'default', storageState: {} }],
+      {
+        create: async (config) => fakeSession(config),
+        probe: async (_config, _session, _lane, signal) => {
+          probeSignal = signal;
+          await new Promise<void>(() => undefined);
+          return { stablePasses: 1, attempts: 1, latencyMs: 1, paymentCdnOk: true };
+        },
+        promote: async (winner) => {
+          promoted.push(winner.config.key);
+        },
+        release: async (config) => {
+          released.push(config.key);
+        },
+      },
+      { candidateDeadlineMs: 200, searchDeadlineMs: 10 }
+    ),
+    /Challenge recovery search deadline exceeded/
+  );
+  assert.ok(Date.now() - started < 150);
+  assert.strictEqual(probeSignal?.aborted, true);
+  assert.deepStrictEqual(promoted, []);
+  assert.deepStrictEqual(released, [configs[0]!.key]);
+}
 
 function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
   return {
@@ -367,6 +455,10 @@ function testPaymentCdnProbeUsesNoCorsForHostFetches(): void {
 }
 
 async function main(): Promise<void> {
+  testTransportFailureTriesAlternateProviderBeforeSameProviderTiers();
+  await testUnfinishedNetworkBodyDoesNotBlockRecoveryProbe();
+  await testTransportCandidateDeadlineReachesNextProvider();
+  await testTransportSearchDeadlineCancelsAllLanesBeforeHttpTimeout();
   testPaymentCdnFocusedSearchPlanSkipsAvoidAndKernelsFirst();
   await testRequirePaymentCdnHardFilterIsIgnoredForLlmOnlyGate();
   await testCfOnlyAvoidPicksFastestNonAvoided();

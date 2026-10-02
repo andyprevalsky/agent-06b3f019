@@ -93,6 +93,7 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   requestId: string;
   callSite?: string;
   hedgeDelayMs?: number;
+  latchOnComplete?: boolean;
 }): AsyncIterable<RoseStreamChunk> {
   const openrouterKey = process.env.OPENROUTER_API_KEY;
   if (!openrouterKey) {
@@ -103,15 +104,17 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   let winnerName = '';
   const raced = hedgeStreams<RoseStreamChunk>({
     primary: {
-      name: 'openrouter-glm',
+      name: 'openrouter-qwen',
       produce: (signal) =>
-        exclusiveOpenRouterCerebrasCompletion({
-          options: withBranchAbort(params.options, signal),
-          openrouterKey,
-          requestId: params.requestId,
-          callSite: params.callSite,
-          allowProviderFallback: true,
-        }),
+        requireCompletedContent(
+          exclusiveOpenRouterCerebrasCompletion({
+            options: withBranchAbort(params.options, signal),
+            openrouterKey,
+            requestId: params.requestId,
+            callSite: params.callSite,
+            allowProviderFallback: true,
+          })
+        ),
     },
     hedge: {
       name: 'openrouter-fast-chat',
@@ -126,7 +129,12 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
     // The silent-stream path starts both together. A fast direct 429 uses a
     // short delay so the same-model spill can win without an extra request.
     hedgeAfter: () => (params.hedgeDelayMs ? sleep(params.hedgeDelayMs) : Promise.resolve()),
-    isContent: (chunk) => clearsChatStallGuard(chunk.kind),
+    // The generator's structured JSON is not usable until its final chunk.
+    // A fast first token from a slow provider must not cancel a provider that
+    // would finish the answer sooner. Router tool calls still stream at first
+    // content, so their latency contract stays unchanged.
+    isContent: (chunk) =>
+      params.latchOnComplete ? chunk.kind === 'done' : clearsChatStallGuard(chunk.kind),
     onWinner: (name) => {
       winnerName = name;
     },
@@ -137,6 +145,19 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
     request_id: params.requestId,
     winner: winnerName,
   });
+}
+
+async function* requireCompletedContent(
+  stream: AsyncIterable<RoseStreamChunk>
+): AsyncIterable<RoseStreamChunk> {
+  let hasContent = false;
+  for await (const chunk of stream) {
+    if (clearsChatStallGuard(chunk.kind)) hasContent = true;
+    if (chunk.kind === 'done' && !hasContent) {
+      throw new Error('OpenRouter fallback completed without content');
+    }
+    yield chunk;
+  }
 }
 
 /**
@@ -290,6 +311,8 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
             requestId: params.requestId,
             callSite: params.callSite,
             hedgeDelayMs: 500,
+            latchOnComplete:
+              params.options.response_format?.json_schema?.name === 'generator_response',
           }),
         emit,
       });

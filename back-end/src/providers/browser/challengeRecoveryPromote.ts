@@ -14,6 +14,7 @@ import {
 } from './challengeRecoveryLaneSearch';
 import { buildPreferredBrowserConfig, closeValidationBrowser } from './challengeRecoverySupport';
 import {
+  alternateProviderFirst,
   bestSpecificity,
   browserRecoveryCandidates,
   shouldPreferSteelForChallengeTarget,
@@ -91,7 +92,15 @@ export async function searchAndPromoteBrowserConfig(
   const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, {
     requirePaymentCdn: false,
   });
-  const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
+  const candidates = browserRecoveryCandidates(proxyLocation, { preferSteel });
+  const transportFailure =
+    /^(?:critical third-party resource blocked|first-party request blocked by proxy tunnel)$/i.test(
+      (input.recoveryReason ?? '').trim()
+    ) || /\bERR_(?:TUNNEL|PROXY)_CONNECTION_(?:FAILED|REFUSED)\b/i.test(input.recoveryReason ?? '');
+  const configs =
+    transportFailure && (current.provider === 'kernel' || current.provider === 'steel')
+      ? alternateProviderFirst(candidates, current.provider)
+      : candidates;
   const blacklist = applyConfigBlacklist(configs, input.blockedConfigKeys);
   const searchableConfigs = blacklist.configs;
   if (blacklist.blacklistExpired) {
@@ -235,6 +244,10 @@ export async function searchAndPromoteBrowserConfig(
     winner = await runLaneConfigSearch(searchableConfigs, lanes, searchDependencies, {
       avoidConfigKey: sessionAvoidConfigKey,
       blockedConfigKeys: blacklist.blacklistExpired ? [] : input.blockedConfigKeys,
+      // Two transport-dead provider candidates get 90s each. The full search
+      // stops at 210s, leaving 90s under the worker's 300s HTTP read deadline
+      // for promotion, old-session release, and the response.
+      ...(transportFailure ? { candidateDeadlineMs: 90_000, searchDeadlineMs: 210_000 } : {}),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
