@@ -5951,13 +5951,16 @@
       },
       {
         "id": "google-demo-tool-sequence",
-        "method": "single_turn_llm_judge",
+        "method": "static_check",
         "criteria": [
           "The root tool transcript contains twelve separate DEMO fixture cards in the specified order, with exact args and results for Gmail, Calendar, Drive, and disconnect.",
           "The Gmail draft is approved before send, the reply appears in fixture Sent, Acme leaves fixture Inbox, Friday lunch is created on 2026-10-02, Lease end date is read, renewal line is appended once, and fixture connection ends false.",
           "The final completion card has the exact DEMO disclosure plus all seven answer fields and final disconnected state; no subagent, coding agent, browser agent, database request by the fixture, or Google API was used."
         ],
-        "judge_prompt": "Grade the actual root tool transcript, not root narrative alone. Pass only if the root called google_oauth_demo once, twelve separate visible DEMO operation cards appear in the required order, the cards show the asserted fixture state and all seven results, no spawn_agent or coding or browser agent ran, and the final completion card contains all seven answer fields, final disconnected state, and the exact disclosure DEMO fixture, no live Google data changed. Fail if any operation or answer is absent, any assertion failed, or a live Google mutation is claimed."
+        "checks": [
+          {"type": "google_oauth_demo_trace"},
+          {"type": "fully_cached_agent"}
+        ]
       }
     ],
     "enforce_declared_evaluators": true,

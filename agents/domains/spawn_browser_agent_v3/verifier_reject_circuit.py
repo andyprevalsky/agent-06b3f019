@@ -22,6 +22,7 @@ import os
 import re
 from typing import Any, Mapping, Optional
 
+
 def _read_max_identical_verifier_rejections() -> int:
     try:
         return int(os.getenv("BROWSER_MAX_IDENTICAL_VERIFIER_REJECTIONS", "3"))

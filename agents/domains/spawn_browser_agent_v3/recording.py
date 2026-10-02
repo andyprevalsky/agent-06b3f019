@@ -811,6 +811,7 @@ class BrowserAgentRecorder:
         self._consecutive_failures = 0
         self._capture_lock = asyncio.Lock()
         self._loop_task: Optional[asyncio.Task] = None
+        self._mark_tasks: set[asyncio.Task] = set()
         self._cursor: Optional[Dict[str, int]] = None
         self._last_label = "idle"
         self._last_metadata: Dict[str, Any] = {}
@@ -1031,6 +1032,9 @@ class BrowserAgentRecorder:
             )
             return
 
+        # Queued marks carry the outgoing session's label/metadata; let them
+        # capture the outgoing page before it is replaced.
+        await self.flush_marks()
         self.page = page
         self.session_id = session_id
         self.browser_url = browser_url
@@ -1270,12 +1274,26 @@ class BrowserAgentRecorder:
         if self._cursor and "cursor" not in next_metadata:
             next_metadata["cursor"] = dict(self._cursor)
         self._last_metadata = next_metadata
-        # Keep immediate frames when the page responds quickly, including after
-        # provider recovery. A slow diagnostic screenshot must not hold up the
-        # browser action; the background loop and observations cover those gaps.
+        if self.uses_kernel_replay or self._closed:
+            return
+        # Marks run twice per browser step. Awaiting even a bounded screenshot
+        # here added up to ~400ms to every step on screenshot-replay sessions,
+        # so the frame is captured alongside the action; the capture lock keeps
+        # frames in mark order and close() drains in-flight marks.
+        task = asyncio.create_task(self._bounded_mark_capture(label, action, next_metadata, force))
+        self._mark_tasks.add(task)
+        task.add_done_callback(self._mark_tasks.discard)
+
+    async def flush_marks(self) -> None:
+        if self._mark_tasks:
+            await asyncio.gather(*list(self._mark_tasks), return_exceptions=True)
+
+    async def _bounded_mark_capture(self, label: str, action: str, metadata: Dict[str, Any], force: bool) -> None:
+        # A slow diagnostic screenshot is dropped; the background loop and
+        # observations cover those gaps.
         with contextlib.suppress(Exception):
             await asyncio.wait_for(
-                self.capture(label, action=action, metadata=next_metadata, force=force),
+                self.capture(label, action=action, metadata=metadata, force=force),
                 timeout=0.2,
             )
 
@@ -1413,6 +1431,7 @@ class BrowserAgentRecorder:
         if self._closed:
             existing_path = self.output_dir / "index.html"
             return existing_path if existing_path.exists() else None
+        await self.flush_marks()
         if self._loop_task:
             self._loop_task.cancel()
             try:

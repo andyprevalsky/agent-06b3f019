@@ -7,11 +7,11 @@ Other helpers should import and use _fetch_agent_data_impl directly.
 from typing import Any, Dict, Optional
 from urllib.parse import quote
 
-import httpx
 import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.http_client import get_http_client
 
 logger = structlog.get_logger()
 
@@ -36,17 +36,12 @@ async def _fetch_agent_data_impl(agent_id: str, since: Optional[str] = None) -> 
     if since:
         url += f"?since={quote(since, safe='')}"
 
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            url,
-            headers={
-                "X-API-Key": config.backend.api_key,
-                "Content-Type": "application/json"
-            },
-            timeout=30.0
-        )
-        response.raise_for_status()
-        return response.json()
+    client = get_http_client()
+    response = await client.get(
+        url, headers={"X-API-Key": config.backend.api_key, "Content-Type": "application/json"}, timeout=30.0
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 @activity.defn

@@ -18,8 +18,6 @@ from temporalio import activity
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 
-from helpers.llm import _safe_heartbeat
-
 from domains.spawn_claude_code_agent.config import (
     E2B_COST_CENTS_PER_SECOND,
     ECHO_SUPPRESS_S,
@@ -45,6 +43,7 @@ from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
 from helpers.claude_code_ws_client import ClaudeCodeWsClient
 from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
+from helpers.llm import _safe_heartbeat
 from helpers.tracing import traced
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message

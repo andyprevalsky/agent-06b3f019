@@ -26,11 +26,13 @@ VALID_EVENTS = {
             "runtime-blackbox",
             "code-review",
             "production-verify",
+            "cooperative-cutover",
         },
         "stage-finish": {
             "runtime-blackbox",
             "code-review",
             "production-verify",
+            "cooperative-cutover",
         },
         "production-start": {
             "vercel",

@@ -16,7 +16,6 @@ import structlog.contextvars
 from temporalio import activity
 
 from domains.spawn_agent.config import (
-    EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
     LIVE_EXPLORE_PARENT_WAIT,
