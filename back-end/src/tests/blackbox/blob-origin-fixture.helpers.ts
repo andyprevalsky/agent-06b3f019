@@ -58,7 +58,15 @@ export async function measureBackendPeak<T>(
   try {
     let result: T;
     let peakKb: number;
-    if (process.platform === 'darwin') {
+    // The client can run on macOS while Postgres runs in a Linux container.
+    // Detect the server's filesystem instead of the Node process platform.
+    const [{ has_proc: hasProc }] = await client.$queryRawUnsafe<Array<{ has_proc: boolean }>>(
+      "SELECT pg_read_file('/proc/self/status', 0, 1, true) IS NOT NULL AS has_proc"
+    );
+    if (!hasProc) {
+      if (process.platform !== 'darwin') {
+        throw new Error('Postgres has no /proc/self/status and no platform RSS sampler');
+      }
       const [{ pid }] = await client.$queryRawUnsafe<Array<{ pid: number }>>(
         'SELECT pg_backend_pid() AS pid'
       );
