@@ -1,14 +1,9 @@
 #!/usr/bin/env tsx
 import { config } from 'dotenv';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
-import {
-  testPersistOutput_coolsBothCredentialsAfterFailedFallback,
-  testPersistOutput_coolsExhaustedOAuthCredential,
-} from './codex-code-oauth-feedback.case';
+import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
 import {
   testResolveCodexAuthEnvs_apiKeyFallback,
   testResolveCodexAuthEnvs_cooldownExcludesFundedKey,
@@ -25,6 +20,11 @@ import {
   testCodexCreditSkip_matchesE2bTeamBlockedWording,
   testCodexCreditSkip_createUnavailableOnCooldownIsSkip,
 } from './codex-credit-skip.case';
+import {
+  testPromptBuilder_sharedContractMentionsOutputRules,
+  testRuntimeFallback_recognizesRevokedOAuthRefreshToken,
+  testTemplate_pinsCodexCliForGpt56,
+} from './codex-template-contract.case';
 import {
   CredentialExhaustionSkip,
   codexCreateUnavailableSkipReason,
@@ -203,58 +203,89 @@ async function waitForCodexOutput(
   );
 }
 
-async function testPromptBuilder_sharedContractMentionsOutputRules() {
-  const { buildCodeAgentSystemPrompt, CODE_AGENT_INSTRUCTIONS_VERSION } =
-    await import('../../providers/codeAgentPrompt');
-
-  const prompt = buildCodeAgentSystemPrompt({
-    githubRepoUrl: 'https://github.com/acme/widgets.git',
-    workDir: '/home/user/workspace',
+async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
+  const userId = crypto.randomUUID();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gpt_code',
+      type: 'TOOL_SETUP',
+      status: 'CONNECTED',
+      isActive: true,
+    },
+  });
+  const taskId = crypto.randomUUID();
+  await prisma.claudeCodeSession.create({
+    data: {
+      id: taskId,
+      agentId: crypto.randomUUID(),
+      sandboxId: `codex-funded-exhaustion-${taskId}`,
+      goal: 'captured Codex OAuth-to-funded-key exhaustion replay',
+      status: 'ACTIVE',
+      claudeTokenSource: 'user',
+      claudeTokenIntegrationId: integration.id,
+    },
   });
 
-  assert(prompt.includes(CODE_AGENT_INSTRUCTIONS_VERSION), 'Prompt version missing');
-  assert(prompt.includes('/home/user/attachments'), 'Attachments directory missing');
-  assert(prompt.includes('/home/user/output'), 'Output directory missing');
-  assert(
-    prompt.includes('Files outside this directory are not returned to the user'),
-    'Output directory return contract missing'
-  );
-  assert(
-    prompt.includes('verify each requested artifact exists in /home/user/output'),
-    'Output artifact verification rule missing'
-  );
-  assert(prompt.includes('Do not return the original attachment path'), 'Transform rule missing');
-  assert(
-    prompt.includes('Do not launch a separate claude/Claude Code CLI'),
-    'Nested Claude CLI guard missing'
-  );
-  assert(prompt.includes('/home/user/workspace'), 'Repo workDir missing');
-}
+  try {
+    const output =
+      Array.from({ length: 650 }, (_, index) => `normal fallback output ${index}`).join('\n') +
+      '\n[Codex] Error code: insufficient_quota\n';
+    const res = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        output,
+        credential_feedback: [
+          {
+            source: 'oauth',
+            reason: 'Quota exceeded. Check your plan and billing details.',
+          },
+          { source: 'funded_api_key', reason: 'insufficient_quota' },
+        ],
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
 
-async function testTemplate_pinsCodexCliForGpt56() {
-  const dockerfile = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'e2b.Dockerfile'),
-    'utf8'
-  );
-  assert(
-    dockerfile.includes('ARG CODEX_VERSION=0.144.1') &&
-      dockerfile.includes('npm install -g "@openai/codex@$CODEX_VERSION"') &&
-      !dockerfile.includes('ubuntu.mirror.constant.com'),
-    'Codex E2B template must pin the GPT-5.6-compatible Codex CLI and use reliable Ubuntu sources'
-  );
-}
+    const persistedIntegration = await prisma.integration.findUnique({
+      where: { id: integration.id },
+    });
+    assert(
+      persistedIntegration?.rateLimitedUntil instanceof Date &&
+        persistedIntegration.rateLimitedUntil.getTime() > Date.now(),
+      'failed OAuth-to-funded-key fallback must cool the exact selected OAuth integration'
+    );
 
-async function testRuntimeFallback_recognizesRevokedOAuthRefreshToken() {
-  const wsServer = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'ws-server.mjs'),
-    'utf8'
-  );
-  assert(
-    wsServer.includes('refresh_token_invalidated') &&
-      wsServer.includes('oauth_refresh_invalid') &&
-      wsServer.includes('oauthFallbackReason ??= classifyOAuthFallbackReason(message)'),
-    'Codex ws-server must classify revoked refresh tokens for funded-key fallback'
-  );
+    const cooldown = await prisma.integration.findUnique({
+      where: {
+        userId_name_accountId: {
+          userId: '00000000-0000-0000-0000-000000000000',
+          name: 'gpt_api_key_cooldown',
+          accountId: '',
+        },
+      },
+    });
+    assert(
+      cooldown?.rateLimitedUntil instanceof Date &&
+        cooldown.rateLimitedUntil.getTime() > Date.now(),
+      'failed OAuth-to-funded-key fallback must cool the shared funded credential'
+    );
+  } finally {
+    await prisma.claudeCodeSession.deleteMany({ where: { id: taskId } });
+    await prisma.integration.deleteMany({ where: { id: integration.id } });
+    await prisma.integration.deleteMany({
+      where: {
+        userId: '00000000-0000-0000-0000-000000000000',
+        name: 'gpt_api_key_cooldown',
+      },
+    });
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: false,
+    });
+  }
 }
 
 async function testPersistOutput_rejectsInvalidCredentialFeedback() {
