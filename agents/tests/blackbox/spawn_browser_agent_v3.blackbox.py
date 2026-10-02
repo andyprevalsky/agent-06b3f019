@@ -18470,6 +18470,56 @@ async def test_append_new_otp_user_messages_dedupes_and_logs():
     assert credential_refs == {"123456": {"kind": "email_otp", "id": "email-cred-1"}}
     save_mock.assert_awaited_once()
 
+async def test_otp_received_before_the_task_started_is_not_handed_to_the_agent():
+    """A code mailed two minutes before this task began belongs to an earlier
+    task (the previous benchmark lane, or the user's last run). Presented as
+    'recently received' it sent the agent to the site with a code the site never
+    issued it, and the agent spent its whole budget on it."""
+    from domains.spawn_browser_agent_v3.handler import _append_new_otp_user_messages
+    from domains.spawn_browser_agent_v3.service_crypto import ExtractedOTP
+
+    def otp(code: str, age_seconds: int) -> ExtractedOTP:
+        return ExtractedOTP(
+            code=code,
+            sender="Rose Shop",
+            received_at="now",
+            age_seconds=age_seconds,
+            ttl_seconds=300 - age_seconds,
+            credential_id="email-cred-1",
+            source_message_id=f"m-{code}",
+        )
+
+    seen: set = set()
+    messages: list = []
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.save_browser_credential_ref_message",
+        AsyncMock(),
+    ):
+        count = await _append_new_otp_user_messages(
+            otps=[otp("646055", age_seconds=120), otp("778899", age_seconds=5)],
+            seen_otp_codes=seen,
+            otp_user_messages=messages,
+            credential_refs_by_secret_ref={},
+            agent_id="ag1",
+            task_id="task-1",
+            task_elapsed_seconds=20.0,
+        )
+    assert count == 1 and [m["content"] for m in messages if "778899" in m["content"]], messages
+    assert not any("646055" in m["content"] for m in messages), "the earlier task's code leaked"
+    assert "646055" in seen, "a pre-task code is never reconsidered on a later poll"
+
+    # Without a task clock (older call sites) nothing changes.
+    messages.clear()
+    count = await _append_new_otp_user_messages(
+        otps=[otp("111222", age_seconds=120)],
+        seen_otp_codes=set(),
+        otp_user_messages=messages,
+        agent_id="ag1",
+        task_id=None,
+    )
+    assert count == 1
+
+
 async def test_append_new_otp_user_messages_requires_email_credential_id_for_ref():
     from domains.spawn_browser_agent_v3.handler import _append_new_otp_user_messages
     from domains.spawn_browser_agent_v3.service_crypto import ExtractedOTP
@@ -23520,6 +23570,10 @@ async def run_all_tests():
     await r.record_async(
         "append_new_otp_user_messages",
         test_append_new_otp_user_messages_dedupes_and_logs,
+    )
+    await r.record_async(
+        "otp_received_before_the_task_started_is_not_handed_to_the_agent",
+        test_otp_received_before_the_task_started_is_not_handed_to_the_agent,
     )
     await r.record_async(
         "append_new_otp_user_messages_requires_email_credential_id",

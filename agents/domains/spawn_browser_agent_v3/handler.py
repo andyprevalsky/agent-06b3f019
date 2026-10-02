@@ -2053,6 +2053,10 @@ def _clear_browser_activity_memory_buffers(
     gc.collect()
 
 
+# Clock slack between the mail server's receipt time and this worker's clock.
+OTP_TASK_START_SLACK_SECONDS = 30
+
+
 async def _append_new_otp_user_messages(
     *,
     otps: List[ExtractedOTP],
@@ -2061,8 +2065,14 @@ async def _append_new_otp_user_messages(
     credential_refs_by_secret_ref: Optional[Dict[str, Dict[str, str]]] = None,
     agent_id: str,
     task_id: Optional[str],
+    task_elapsed_seconds: Optional[float] = None,
 ) -> int:
-    """Append unseen OTPs as USER messages and log credential refs."""
+    """Append unseen OTPs as USER messages and log credential refs.
+
+    A code that arrived before this task started was sent for something else
+    (an earlier task of the same user); handing it over as "recently received"
+    sends the agent to the site with a code the site never issued it.
+    """
     new_count = 0
     for otp in otps:
         if not is_usable_email_otp(otp):
@@ -2072,6 +2082,19 @@ async def _append_new_otp_user_messages(
                 source_message_id=otp.source_message_id,
                 ttl_seconds=otp.ttl_seconds,
             )
+            continue
+        if (
+            task_elapsed_seconds is not None
+            and otp.age_seconds > task_elapsed_seconds + OTP_TASK_START_SLACK_SECONDS
+        ):
+            logger.info(
+                "Skipping OTP that predates this browser task",
+                agent_id=agent_id,
+                source_message_id=otp.source_message_id,
+                age_seconds=otp.age_seconds,
+                task_elapsed_seconds=int(task_elapsed_seconds),
+            )
+            seen_otp_codes.add(otp.code)
             continue
 
         if otp.code in seen_otp_codes:
@@ -2119,6 +2142,7 @@ async def _fetch_and_append_recent_otp_user_messages(
     credential_refs_by_secret_ref: Dict[str, Dict[str, str]],
     agent_id: str,
     task_id: Optional[str],
+    task_elapsed_seconds: Optional[float] = None,
 ) -> int:
     otps = await fetch_recent_otps(user_id, api_url, api_key)
     return await _append_new_otp_user_messages(
@@ -2128,6 +2152,7 @@ async def _fetch_and_append_recent_otp_user_messages(
         credential_refs_by_secret_ref=credential_refs_by_secret_ref,
         agent_id=agent_id,
         task_id=task_id,
+        task_elapsed_seconds=task_elapsed_seconds,
     )
 
 
@@ -6001,6 +6026,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         )
     otp_user_messages: List[Dict[str, str]] = []
     seen_otp_codes: set[str] = set()
+    otp_task_started_monotonic = time.monotonic()
     available_file_paths: Dict[str, str] = {}
     passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
     # Every decrypted passkey we have ever seeded on the virtual authenticator,
@@ -7320,6 +7346,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     credential_refs_by_secret_ref=credential_refs_by_secret_ref,
                     agent_id=agent_id,
                     task_id=task_id,
+                    task_elapsed_seconds=time.monotonic() - otp_task_started_monotonic,
                 )
                 if new_otp_count:
                     logger.info("Appended OTP user messages", count=new_otp_count)
