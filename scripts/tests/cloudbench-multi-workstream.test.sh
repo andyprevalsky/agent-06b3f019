@@ -424,7 +424,14 @@ def run_fake_driver(mdir):
     barrier = rb_export(rb_text, "CLOUDBENCH_START_BARRIER")
     ref = rb_export(rb_text, "REF")
     patch_path = os.path.join(mdir, "cloudbench-local.patch")
-    patch_text = open(patch_path).read() if os.path.exists(patch_path) else ""
+    if rb_export(rb_text, "LOCAL_PATCH_COMPRESSION") == "gzip":
+        import gzip
+        patch_path += ".gz"
+        patch_text = (
+            gzip.open(patch_path, "rt").read() if os.path.exists(patch_path) else ""
+        )
+    else:
+        patch_text = open(patch_path).read() if os.path.exists(patch_path) else ""
     workspace_marker = next(
         (marker for marker in ("workstream-a", "workstream-b") if f"+{marker}" in patch_text),
         "",
@@ -1458,6 +1465,9 @@ command = repo_root / "agents/benchmarks/agent_link_server.py"
 if os.getpgrp() != os.getpid():
     os.setsid()
 import importlib.util
+# The workstream's untracked files are its shipped patch; a stray .pyc here
+# changes the patch the guest receives.
+sys.dont_write_bytecode = True
 _link_spec = importlib.util.spec_from_file_location("agent_link_server_identity", command)
 _link_module = importlib.util.module_from_spec(_link_spec)
 _link_spec.loader.exec_module(_link_module)
