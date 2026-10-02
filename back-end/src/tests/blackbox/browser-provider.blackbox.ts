@@ -19,6 +19,7 @@ import {
   assertFixedRotationLadder,
   isSteelCapacityRateLimit,
   isSteelProvisioningOutage,
+  isSteelSessionValidationFailure,
 } from './browser-provider-rotation.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
 
@@ -110,15 +111,18 @@ const tests: Array<[string, () => void]> = [
     },
   ],
   [
-    'live ladder recognizes only diagnosed Steel connectivity outages',
+    'live ladder checks a control session before classifying Steel validation failures',
     () => {
+      const cdpTimeout = new Error(
+        '/rotate-proxy 500: {"error":"Failed to create Steel replacement after 5 attempts: Session validation failed on attempt 5: Connection timeout"}'
+      );
       assert(
-        isSteelProvisioningOutage(
-          new Error(
-            '/rotate-proxy 500: {"error":"Failed to create Steel replacement after 5 attempts: Session validation failed on attempt 5: Connection timeout"}'
-          )
-        ),
-        'diagnosed CDP connection timeout should use the Steel outage path'
+        isSteelSessionValidationFailure(cdpTimeout),
+        'CDP connection timeout should require a Steel control-session check'
+      );
+      assert(
+        !isSteelProvisioningOutage(cdpTimeout),
+        'CDP validation failure must not bypass the control-session check'
       );
       assert(
         !isSteelProvisioningOutage(
