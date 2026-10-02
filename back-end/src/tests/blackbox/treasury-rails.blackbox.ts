@@ -89,9 +89,13 @@ async function sweepResidualHeadroom(timeoutMs = 60_000): Promise<number> {
  * AgentCard may reclaim the mint transfer directly on close without ever exposing cardholder
  * residual for `recover_funds`.
  */
-async function readCardTransfer(
-  cardId: string
-): Promise<(MintTransferObservation & { transferredCents: number }) | undefined> {
+async function readCardTransfer(cardId: string): Promise<
+  | (MintTransferObservation & {
+      transferredCents: number;
+      raw: Record<string, unknown>;
+    })
+  | undefined
+> {
   const transfers =
     (
       (await callOrgTool('list_transfers', { limit: 100 })) as {
@@ -104,6 +108,7 @@ async function readCardTransfer(
     status: String(mine.status ?? 'unknown'),
     releasedCents: Number(mine.released_cents ?? 0),
     transferredCents: Number(mine.transferred_cents ?? 0),
+    raw: mine,
   };
 }
 
@@ -126,12 +131,25 @@ async function waitForUnusedMintSettled(
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
   let last: MintTransferObservation = { status: 'not_found', releasedCents: 0 };
+  let lastRaw: Record<string, unknown> | undefined;
+  // A residual can be recovered while THIS transfer never flips. Keep every attempt's sweep yield
+  // and the provider's own transfer row so a timeout shows which side stalled.
+  const sweepYields: string[] = [];
   for (;;) {
     attempt += 1;
     try {
       const sweep = await recoverAllCardholderResiduals(callOrgTool);
+      if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
+        sweepYields.push(
+          `#${attempt} settled=${usd(sweep.settledCents)} pending=${usd(sweep.pendingCents)}`
+        );
+      }
       const transfer = await readCardTransfer(cardId);
-      if (transfer !== undefined) last = transfer;
+      if (transfer !== undefined) {
+        const { raw, ...observation } = transfer;
+        last = observation;
+        lastRaw = raw;
+      }
       const outcome = unusedMintSettleOutcome(transfer, minReleasedCents);
       if (outcome.done) {
         if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
@@ -150,7 +168,9 @@ async function waitForUnusedMintSettled(
       if (Date.now() >= deadline) {
         console.error(
           `  unused mint never reclaimed after ${attempt} attempts; transfer for ${cardId}: ` +
-            JSON.stringify(last)
+            JSON.stringify(last) +
+            `; provider row: ${JSON.stringify(lastRaw ?? null)}` +
+            `; recover_funds yields: ${sweepYields.join(', ') || 'none'}`
         );
         return last;
       }
