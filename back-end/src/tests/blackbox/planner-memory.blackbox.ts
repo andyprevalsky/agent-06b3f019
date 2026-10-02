@@ -13,8 +13,10 @@ import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../../providers/database';
 import {
+  PLANNER_MEMORY_EMBEDDING_DIM,
   PLANNER_MEMORY_INDEX_VERSION,
   plannerMemoryGoalHash,
+  writePlannerMemoryEmbedding,
 } from '../../providers/plannerMemoryEmbedding';
 import { retryWithBackoff } from '../../providers/retry';
 import { upsertPlannerMemoryFromRun } from '../../providers/plannerMemoryStore';
@@ -453,6 +455,51 @@ export async function runTests(): Promise<boolean> {
               where: { plannerMemoryId: id },
             });
             assert.strictEqual(gone, null, 'embedding must cascade with its memory row');
+          } finally {
+            await prisma.plannerMemory.deleteMany({ where: { id } });
+          }
+        }
+      )
+    );
+
+    results.push(
+      await runTest(
+        'a late detached embed write never rewrites a current goal or restores a superseded one',
+        async () => {
+          const id = randomUUID();
+          const original = `Order a USB-C cable on DoorDash ${RUN_ID}`;
+          // A drain that read the row before the synchronous embed (or a goal change) landed.
+          const lateVector = Array.from({ length: PLANNER_MEMORY_EMBEDDING_DIM }, (_, i) =>
+            i === 0 ? 1 : 0
+          );
+          const embeddingOf = () =>
+            prisma.plannerMemoryEmbedding.findUniqueOrThrow({ where: { plannerMemoryId: id } });
+          try {
+            await putFixture(id, { goal: original });
+            const current = await embeddingOf();
+            assert.strictEqual(
+              await writePlannerMemoryEmbedding(id, original, lateVector),
+              'current'
+            );
+            assert.strictEqual(
+              (await embeddingOf()).updatedAt.getTime(),
+              current.updatedAt.getTime(),
+              'a late write for an unchanged goal must not re-embed it'
+            );
+            const renamed = `Book a haircut near the Ferry Building ${RUN_ID}`;
+            await putFixture(id, { goal: renamed });
+            const replaced = await embeddingOf();
+            assert.strictEqual(
+              await writePlannerMemoryEmbedding(id, original, lateVector),
+              'superseded'
+            );
+            const after = await embeddingOf();
+            assert.strictEqual(
+              after.goalHash,
+              plannerMemoryGoalHash(renamed),
+              'a late write must not restore the superseded goal'
+            );
+            assert.strictEqual(after.updatedAt.getTime(), replaced.updatedAt.getTime());
           } finally {
             await prisma.plannerMemory.deleteMany({ where: { id } });
           }
