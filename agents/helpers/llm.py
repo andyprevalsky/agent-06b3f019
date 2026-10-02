@@ -5042,7 +5042,12 @@ def _structured_response_satisfies_schema(
         value = structured_response[name]
         if value is None and field.get("nullable") is True:
             continue
-        if not _has_schema_value(value, field.get("type")) and not explicitly_allows_empty_value(value, field):
+        # An optional field may be present and empty when its bounds allow it.
+        if (
+            field.get("required", True) is not False
+            and not _has_schema_value(value, field.get("type"))
+            and not explicitly_allows_empty_value(value, field)
+        ):
             return False
         if not value_satisfies_output_field_constraints(value, field):
             return False

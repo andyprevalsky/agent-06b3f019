@@ -53,6 +53,27 @@ def test_record_and_summarize_span_history():
         }
 
 
+def test_recent_window_follows_timestamps_not_file_order():
+    """Union-merged or overflow segments put older rows after newer ones on disk."""
+    from benchmarks import span_history
+
+    base = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    newer = [
+        {"duration_ms": 100.0, "timestamp": (base + timedelta(hours=1, seconds=i)).isoformat()}
+        for i in range(3)
+    ]
+    older = [
+        {"duration_ms": 9000.0, "timestamp": (base + timedelta(seconds=i)).isoformat()}
+        for i in range(3)
+    ]
+    summary = span_history.summarize_records(newer + older, window=3)
+    assert summary is not None
+    assert summary["count"] == 6
+    assert summary["max_ms"] == 100.0, summary
+    untimed_first = span_history.summarize_records([*newer, {"duration_ms": 5000.0}], window=3)
+    assert untimed_first is not None and untimed_first["max_ms"] == 100.0, untimed_first
+
+
 def test_default_span_history_rolls_over_before_git_blob_limit():
     import benchmarks.span_history as history
 

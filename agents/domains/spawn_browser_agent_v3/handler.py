@@ -8493,6 +8493,14 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
 
                 provider_exit_rejected = bool(recovery_params.get("provider_exit_rejected"))
+                # The recorder attaches in the background; the clean-page check
+                # needs it to see a cited first-party transport failure.
+                if browser_network_recorder is None and network_recorder_task is not None:
+                    with contextlib.suppress(Exception):
+                        browser_network_recorder = await asyncio.wait_for(
+                            asyncio.shield(network_recorder_task),
+                            timeout=10,
+                        )
                 # If the live tab is already clean and this was not a hard
                 # provider-exit rejection, skip — avoids recovery loops the model
                 # invents from third-party network noise on an otherwise fine page.

@@ -189,8 +189,21 @@ def load_records(
     return records
 
 
+def _in_recorded_order(records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Order rows by when they were recorded, not by where they sit on disk.
+
+    Segments are union-merged across branches and can hold overflow rows, so
+    file order is not time order. Rows without a timestamp sort first.
+    """
+    return sorted(records, key=lambda record: str(record.get("timestamp") or ""))
+
+
 def summarize_records(records: Sequence[Dict[str, Any]], *, window: int = RECENT_WINDOW) -> Optional[Dict[str, Any]]:
-    durations = [float(r["duration_ms"]) for r in records if isinstance(r.get("duration_ms"), (int, float))]
+    durations = [
+        float(r["duration_ms"])
+        for r in _in_recorded_order(records)
+        if isinstance(r.get("duration_ms"), (int, float))
+    ]
     if not durations:
         return None
     recent = durations[-window:]
