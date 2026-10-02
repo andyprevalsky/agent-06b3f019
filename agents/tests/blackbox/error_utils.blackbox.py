@@ -89,6 +89,54 @@ def test_pydantic_validation_error_omits_large_input():
     assert huge[:1000] not in result
 
 
+def test_tool_union_validation_feedback_names_selected_tool_field():
+    """A bad tool argument must not hide behind errors from other union branches."""
+    from pydantic import ValidationError
+    from utils.error_utils import extract_error_message
+    from utils.tool_schemas import create_agent_action_model
+
+    action = create_agent_action_model(
+        ["web_search", "people_search", "web_fetch", "grep", "attempt_completion_with_result"]
+    )
+    try:
+        action.model_validate(
+            {
+                "response": "",
+                "tool_calls": [
+                    {
+                        "tool": "web_fetch",
+                        "url": "https://catalog.data.metro.tokyo.lg.jp/dataset/t000003d2000001142",
+                        "objecive": "Extract the population and reference date",
+                    }
+                ],
+            }
+        )
+    except ValidationError as exc:
+        feedback = extract_error_message(exc)
+    else:
+        raise AssertionError("expected validation error")
+
+    assert "WebFetchTool.objective: Field required" in feedback, feedback
+    assert "WebSearchTool" not in feedback, feedback
+    assert "PeopleSearchTool" not in feedback, feedback
+
+
+def test_validation_feedback_covers_later_tool_call():
+    """An earlier malformed call cannot consume every useful retry detail."""
+    from pydantic import ValidationError
+    from utils.error_utils import extract_error_message
+
+    errors = [
+        {"type": "missing", "loc": ("tool_calls", 0, "FirstTool", f"field{i}"), "input": {}}
+        for i in range(5)
+    ]
+    errors.append(
+        {"type": "missing", "loc": ("tool_calls", 1, "SecondTool", "objective"), "input": {}}
+    )
+    feedback = extract_error_message(ValidationError.from_exception_data("AgentAction", errors))
+    assert "tool_calls.1.SecondTool.objective: Field required" in feedback, feedback
+
+
 async def run_all_tests():
     print("error-utils blackbox tests:")
     r = BlackboxResult()
@@ -98,6 +146,11 @@ async def run_all_tests():
     r.record("activity_task_failed_wrapper", test_activity_task_failed_wrapper)
     r.record("self_referential_cause_does_not_loop", test_self_referential_cause_does_not_loop)
     r.record("pydantic_validation_error_omits_large_input", test_pydantic_validation_error_omits_large_input)
+    r.record(
+        "tool_union_validation_feedback_names_selected_tool_field",
+        test_tool_union_validation_feedback_names_selected_tool_field,
+    )
+    r.record("validation_feedback_covers_later_tool_call", test_validation_feedback_covers_later_tool_call)
     teardown_mock()
     return r.all_passed
 

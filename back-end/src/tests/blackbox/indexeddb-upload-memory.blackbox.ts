@@ -24,7 +24,8 @@
  *              and round-trip databases by server-side md5
  */
 
-import { spawn } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -39,7 +40,10 @@ import { ingestIndexedDBUploadJson } from '../../domains/integrations/uploadServ
 
 assertLocalDatabase();
 
-const USER_ID = 'idb-upload-memory-user';
+const isChildMode = process.argv.includes('--child') || process.argv.includes('--control');
+const USER_ID =
+  (isChildMode ? process.env.IDB_UPLOAD_MEMORY_USER_ID : undefined) ??
+  `idb-upload-memory-${randomUUID()}`;
 const BIG_ORIGIN = 'https://drive.google.com';
 const SMALL_ORIGIN = 'https://idb-upload-small.test';
 /** ~50MB nested JSON — matches seed-blob-origin-memory density. */
@@ -59,9 +63,48 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-const payloadPath =
-  process.env.IDB_UPLOAD_MEMORY_PAYLOAD_PATH ??
-  path.join(os.tmpdir(), `idb-upload-memory-payload-${process.pid}.json`);
+const payloadFixture = (() => {
+  const inheritedPath = isChildMode ? process.env.IDB_UPLOAD_MEMORY_PAYLOAD_PATH : undefined;
+  if (inheritedPath !== undefined) return { payloadPath: inheritedPath, ownedDirectory: null };
+  const ownedDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'idb-upload-memory-'));
+  return { payloadPath: path.join(ownedDirectory, 'payload.json'), ownedDirectory };
+})();
+const { payloadPath, ownedDirectory: ownedPayloadDirectory } = payloadFixture;
+
+test('payload fixture path belongs to one run', async () => {
+  const env = {
+    ...process.env,
+    IDB_UPLOAD_MEMORY_PAYLOAD_PATH: path.join(os.tmpdir(), 'shared-idb-payload.json'),
+  };
+  const childPath = () =>
+    execFileSync(
+      process.execPath,
+      ['--import', 'tsx', new URL(import.meta.url).pathname, '--print-payload-path'],
+      { env, encoding: 'utf8' }
+    ).trim();
+  const first = childPath();
+  const second = childPath();
+  assert(
+    first !== second && first !== payloadPath && second !== payloadPath,
+    `independent runs shared the payload fixture: parent=${payloadPath} children=${first},${second}`
+  );
+});
+
+test('database fixture user ID belongs to one run', async () => {
+  const env = { ...process.env, IDB_UPLOAD_MEMORY_USER_ID: 'shared-idb-user' };
+  const childUserId = () =>
+    execFileSync(
+      process.execPath,
+      ['--import', 'tsx', new URL(import.meta.url).pathname, '--print-user-id'],
+      { env, encoding: 'utf8' }
+    ).trim();
+  const first = childUserId();
+  const second = childUserId();
+  assert(
+    first !== second && first !== USER_ID && second !== USER_ID,
+    `independent runs shared the database fixture user: parent=${USER_ID} children=${first},${second}`
+  );
+});
 
 async function runChildIngest(): Promise<void> {
   let peakRssMb = 0;
@@ -163,7 +206,11 @@ async function runChildProcess(mode: '--child' | '--control'): Promise<ChildResu
         mode,
       ],
       {
-        env: { ...process.env, IDB_UPLOAD_MEMORY_PAYLOAD_PATH: payloadPath },
+        env: {
+          ...process.env,
+          IDB_UPLOAD_MEMORY_PAYLOAD_PATH: payloadPath,
+          IDB_UPLOAD_MEMORY_USER_ID: USER_ID,
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
       }
     );
@@ -319,6 +366,14 @@ test('both origins land and the large blob round-trips by md5', async () => {
 });
 
 async function main(): Promise<void> {
+  if (process.argv.includes('--print-payload-path') || process.argv.includes('--print-user-id')) {
+    process.stdout.write(`${process.argv.includes('--print-user-id') ? USER_ID : payloadPath}\n`);
+    await prisma.$disconnect();
+    if (ownedPayloadDirectory !== null) {
+      fs.rmSync(ownedPayloadDirectory, { recursive: true, force: true });
+    }
+    return;
+  }
   if (process.argv.includes('--child')) {
     await runChildIngest();
     return;
@@ -352,12 +407,16 @@ async function main(): Promise<void> {
       }
     }
   } finally {
-    await cleanupUser();
-    await prisma.$disconnect();
     try {
-      fs.unlinkSync(payloadPath);
-    } catch {
-      // ignore
+      await cleanupUser();
+    } finally {
+      try {
+        await prisma.$disconnect();
+      } finally {
+        if (ownedPayloadDirectory !== null) {
+          fs.rmSync(ownedPayloadDirectory, { recursive: true, force: true });
+        }
+      }
     }
   }
 

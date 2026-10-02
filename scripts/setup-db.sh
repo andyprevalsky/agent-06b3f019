@@ -81,6 +81,17 @@ create_docker_postgres() {
         fi
     fi
 
+    # A port owned by another workspace is a configuration error. Detect it
+    # before stale-image migration removes this workspace's existing container
+    # and volume; a system-Postgres fallback must never hide this collision.
+    CONFLICT_OWNER="$(db_port_conflict_owner "$DB_CONTAINER" "$LOCAL_DB_PORT" "$(docker ps --format '{{.Names}} {{.Ports}}')")"
+    if [ -n "$CONFLICT_OWNER" ]; then
+        echo "❌ Target DB port $LOCAL_DB_PORT is already bound by container '$CONFLICT_OWNER' (a different workspace)." >&2
+        echo "   Refusing to change '$DB_CONTAINER' or fall back to shared system Postgres." >&2
+        echo "   Re-run from this workspace's own Conductor shell, or export its correct CONDUCTOR_PORT." >&2
+        return 42
+    fi
+
     # Create Postgres container (recreate if port mapping drifted)
     recreate_if_stale_pg_image "$DB_CONTAINER" "$DB_VOLUME"
     if docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
@@ -164,7 +175,13 @@ create_docker_postgres() {
 if [ "${ROSE_USE_SYSTEM_PG:-false}" = "true" ]; then
     use_system_postgres
     start_system_postgres
-elif ! create_docker_postgres; then
+elif create_docker_postgres; then
+    :
+else
+    DOCKER_SETUP_STATUS=$?
+    if [ "$DOCKER_SETUP_STATUS" -eq 42 ]; then
+        exit "$DOCKER_SETUP_STATUS"
+    fi
     # Cloud VMs often have a Docker daemon that cannot overlay-mount images.
     # Fall back to the same system Postgres path run.sh already uses.
     echo "⚠️  Docker Postgres unavailable — falling back to system Postgres (set ROSE_USE_SYSTEM_PG=true to skip Docker)."

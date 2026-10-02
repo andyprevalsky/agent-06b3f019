@@ -17,14 +17,16 @@ cloud_env_boot_id() {
 # until its own store daemon starts. Trust the id only while the daemon that
 # wrote it is running.
 cloud_env_agent_id() {
-  local dir="${CLOUD_ENV_AGENT_STORE_DIR:-/run/agent-store-fuse}" pid
+  local dir="${CLOUD_ENV_AGENT_STORE_DIR:-/run/agent-store-fuse}" pid cmd
   pid="$(sed -n 's/^pid=//p' "$dir/ready" 2>/dev/null || true)"
   case "$pid" in '' | *[!0-9]*) return 0 ;; esac
   if [ -r "/proc/$pid/cmdline" ]; then
-    tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | grep -q 'agent-store-fuse' || return 0
+    cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline")"
   else
-    ps -p "$pid" -o command= 2>/dev/null | grep -q 'agent-store-fuse' || return 0
+    # macOS has no /proc; keep the daemon-identity contract testable there.
+    cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
   fi
+  printf '%s\n' "$cmd" | grep -q 'agent-store-fuse' || return 0
   cat "$dir/self-store-id" 2>/dev/null || true
 }
 

@@ -6,7 +6,7 @@
  *
  * Fires for ROOT agents of any source (SMS, web, mac-app, API). Benchmark/eval
  * runs are suppressed centrally in the send-sms dispatcher (Agent.isBenchmark).
- * Every message carries the per-agent deep link via getAgentUrl.
+ * Events with a run link use the per-agent deep link from getAgentUrl.
  */
 
 import { createLogger } from '../logger';

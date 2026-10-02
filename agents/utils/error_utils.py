@@ -5,19 +5,72 @@ from typing import Any, Optional
 from pydantic import ValidationError
 
 
+def _selected_tool_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Discard errors from union branches whose tool discriminator did not match.
+
+    Pydantic reports every branch of a tool union, in declaration order. A
+    summary of the first few errors can otherwise omit the one field the chosen
+    tool actually needs, leaving a structured-output retry without useful
+    feedback. Keep all branches when the discriminator is absent or ambiguous.
+    """
+    branches: dict[int, set[str]] = {}
+    mismatched: set[tuple[int, str]] = set()
+    for item in errors:
+        loc = item.get("loc", ())
+        if len(loc) < 4 or loc[0] != "tool_calls" or not isinstance(loc[1], int):
+            continue
+        branch = str(loc[2])
+        branches.setdefault(loc[1], set()).add(branch)
+        if loc[-1] == "tool" and item.get("type") == "literal_error":
+            mismatched.add((loc[1], branch))
+
+    selected: dict[int, str] = {}
+    for index, names in branches.items():
+        matches = names - {branch for call_index, branch in mismatched if call_index == index}
+        if len(matches) == 1:
+            selected[index] = next(iter(matches))
+
+    return [
+        item
+        for item in errors
+        if not (
+            len(item.get("loc", ())) >= 4
+            and item["loc"][0] == "tool_calls"
+            and isinstance(item["loc"][1], int)
+            and item["loc"][1] in selected
+            and str(item["loc"][2]) != selected[item["loc"][1]]
+        )
+    ]
+
+
+def _prioritize_tool_call_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Show one error per tool call before spending the remaining summary slots."""
+    first_by_call: dict[int, dict[str, Any]] = {}
+    for item in errors:
+        loc = item.get("loc", ())
+        if len(loc) >= 2 and loc[0] == "tool_calls" and isinstance(loc[1], int):
+            first_by_call.setdefault(loc[1], item)
+    priority = list(first_by_call.values())
+    prioritized_ids = {id(item) for item in priority}
+    return priority + [item for item in errors if id(item) not in prioritized_ids]
+
+
 def _safe_error_text(e: BaseException) -> str:
     """Return a compact error string without recursively rendering huge inputs."""
     if isinstance(e, ValidationError):
+        errors = _prioritize_tool_call_errors(
+            _selected_tool_errors(e.errors(include_input=False, include_url=False))
+        )
         details: list[str] = []
-        for item in e.errors(include_input=False, include_url=False)[:5]:
+        for item in errors[:5]:
             loc = ".".join(str(part) for part in item.get("loc", ()))
             msg = item.get("msg") or item.get("type") or "validation error"
             details.append(f"{loc}: {msg}" if loc else str(msg))
         suffix = ""
-        remaining = e.error_count() - len(details)
+        remaining = len(errors) - len(details)
         if remaining > 0:
             suffix = f"; ... {remaining} more"
-        return f"{e.error_count()} validation error(s): " + "; ".join(details) + suffix
+        return f"{len(errors)} validation error(s): " + "; ".join(details) + suffix
 
     try:
         msg = str(e)

@@ -21,8 +21,37 @@ function safeCdpFailure(error: unknown): Error {
   return new Error(message.replace(/\b(?:wss?|https?):\/\/\S+/gi, '<redacted-url>'));
 }
 
+type CdpConnector = (wsUrl: string) => Promise<Browser>;
+
 export type BrowserValidation =
   { browser: Browser; failure: null } | { browser: null; failure: string };
+
+export type SteelConnectionValidationResult =
+  | { valid: true }
+  | {
+      valid: false;
+      failureReason:
+        | 'Connection timeout'
+        | 'Connection error'
+        | 'Authentication rejected'
+        | 'Session validation failed';
+    };
+
+function safeValidationFailureReason(
+  error: unknown
+): Exclude<SteelConnectionValidationResult, { valid: true }>['failureReason'] {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/\b401\b|\b403\b|unauthorized|forbidden/i.test(message)) {
+    return 'Authentication rejected';
+  }
+  if (/timeout|timed out|etimedout/i.test(message)) return 'Connection timeout';
+  if (
+    /econnrefused|econnreset|enotfound|eai_again|socket hang up|connection error/i.test(message)
+  ) {
+    return 'Connection error';
+  }
+  return 'Session validation failed';
+}
 
 /** The provider's terminal verdict for a session, or null while it may still accept CDP. */
 export type SessionStartupProbe = () => Promise<string | null>;
@@ -124,7 +153,9 @@ export async function validateBrowserConnection(
         maxRetries: 3,
         fixedDelays: WS_BACKOFF_DELAYS,
         component: 'Steel session validation',
-        isRetryable: (error) => !(error instanceof SessionStartupFailedError),
+        isRetryable: (error) =>
+          !(error instanceof SessionStartupFailedError) &&
+          safeValidationFailureReason(error) !== 'Authentication rejected',
       }
     );
   } catch (error) {
@@ -139,6 +170,22 @@ export async function validateBrowserConnection(
 
 export async function connectValidatedBrowser(wsUrl: string): Promise<Browser | null> {
   return (await validateBrowserConnection(wsUrl)).browser;
+}
+
+export async function validateSessionConnectionWithReason(
+  wsUrl: string,
+  connectBrowser?: CdpConnector
+): Promise<SteelConnectionValidationResult> {
+  const validation = await validateBrowserConnection(wsUrl, {
+    ...(connectBrowser && {
+      connect: (url: string) => connectBrowser(steelCdpConnectionUrl(url)),
+    }),
+  });
+  if (validation.browser === null) {
+    return { valid: false, failureReason: safeValidationFailureReason(validation.failure) };
+  }
+  await validation.browser.close().catch(() => {});
+  return { valid: true };
 }
 
 export async function validateSessionConnection(wsUrl: string): Promise<boolean> {

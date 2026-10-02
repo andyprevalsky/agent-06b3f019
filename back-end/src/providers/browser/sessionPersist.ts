@@ -24,7 +24,7 @@ export type BrowserSessionPersistInput = {
   providerProfileId?: string | null;
   providerProfileSource?: string | null;
   providerProfilePersist?: boolean;
-  initialProxyKey?: string | null;
+  kernelProxySource?: string | null;
   /**
    * Release a remote provider session that is no longer bound to the task row
    * (the previous remote on reclaim, or an orphaned remote after losing a race).
@@ -106,7 +106,7 @@ export async function persistBrowserSessionRow(
     providerProfileId: input.providerProfileId ?? null,
     providerProfileSource: input.providerProfileSource ?? null,
     providerProfilePersist: input.providerProfilePersist ?? true,
-    initialProxyKey: input.initialProxyKey ?? null,
+    kernelProxySource: input.kernelProxySource ?? null,
   };
 
   if (input.taskId === undefined || input.taskId === '') {

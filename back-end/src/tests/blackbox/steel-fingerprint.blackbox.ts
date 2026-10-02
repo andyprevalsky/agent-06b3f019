@@ -18,7 +18,10 @@ import {
 import { STEEL_CDP_TIMEOUT_MESSAGE } from '../../providers/steel/sessionConnection';
 import { navigateToSavedUrl, recreateSession } from '../../providers/steel/sessionResume';
 import type { FingerprintData } from '../../providers/steel/types';
-import { testConnectionErrorRetriesOnReplacement } from './steel-fingerprint.connection-retry.behavior';
+import {
+  testConnectionErrorRetriesOnReplacement,
+  testRawCdpFailureClassification,
+} from './steel-fingerprint.connection-retry.behavior';
 import {
   testSavedSteelProfileIsReadOnlyDuringBenchmarkIsolation,
   testSavedSteelProfilePersistenceByEnvironment,
@@ -576,6 +579,10 @@ async function main(): Promise<void> {
     {
       name: 'Steel replacement retries transient Connection error',
       fn: testConnectionErrorRetriesOnReplacement,
+    },
+    {
+      name: 'raw Steel CDP failures retain timeout and authentication categories',
+      fn: testRawCdpFailureClassification,
     },
     {
       name: 'saved URL navigation closes its browser after failure',

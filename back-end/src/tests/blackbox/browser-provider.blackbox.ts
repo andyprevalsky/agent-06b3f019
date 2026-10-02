@@ -3,7 +3,8 @@
 import { selectedBrowserProvider } from '../../providers/browser/config';
 import {
   kernelProxyCandidates,
-  preferKernelProxyCandidate,
+  kernelRecreateProxySelection,
+  managedKernelProxyFromSource,
   resolveKernelProxyMode,
 } from '../../providers/browser/kernelProxy';
 import { steel } from '../../providers/steel/session';
@@ -17,6 +18,8 @@ import {
 import {
   assertFixedRotationLadder,
   isSteelCapacityRateLimit,
+  isSteelProvisioningOutage,
+  isSteelSessionValidationFailure,
 } from './browser-provider-rotation.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
 
@@ -108,6 +111,38 @@ const tests: Array<[string, () => void]> = [
     },
   ],
   [
+    'live ladder checks a control session before classifying Steel validation failures',
+    () => {
+      const cdpTimeout = new Error(
+        '/rotate-proxy 500: {"error":"Failed to create Steel replacement after 5 attempts: Session validation failed on attempt 5: Connection timeout"}'
+      );
+      assert(
+        isSteelSessionValidationFailure(cdpTimeout),
+        'CDP connection timeout should require a Steel control-session check'
+      );
+      assert(
+        !isSteelProvisioningOutage(cdpTimeout),
+        'CDP validation failure must not bypass the control-session check'
+      );
+      assert(
+        !isSteelProvisioningOutage(
+          new Error(
+            '/rotate-proxy 500: {"error":"Failed to create Steel replacement after 5 attempts: Session validation failed on attempt 5"}'
+          )
+        ),
+        'unexplained validation failure must remain blocking'
+      );
+      assert(
+        !isSteelProvisioningOutage(
+          new Error(
+            '/rotate-proxy 403: {"error":"Failed to create Steel replacement: Authentication rejected"}'
+          )
+        ),
+        'Steel auth rejection must remain blocking'
+      );
+    },
+  ],
+  [
     'Kernel residential proxies fall back from city to state to country',
     () => {
       const candidates = kernelProxyCandidates({
@@ -123,23 +158,6 @@ const tests: Array<[string, () => void]> = [
     },
   ],
   [
-    'Kernel resume prefers its original state fallback even if city becomes available',
-    () => {
-      const candidates = kernelProxyCandidates({
-        country: 'US',
-        state: 'CA',
-        city: 'San Francisco',
-      });
-      const ordered = preferKernelProxyCandidate(candidates, 'residential:US:CA');
-      assert(ordered[0]?.proxyKey === 'residential:US:CA', 'resume changed its resolved proxy');
-      assert(
-        ordered.length === 3 &&
-          ordered.some((candidate) => candidate.proxyKey === 'residential:US'),
-        'resume dropped its lower-specificity fallback'
-      );
-    },
-  ],
-  [
     'Kernel proxy normalization drops non-US state targeting',
     () => {
       const candidates = kernelProxyCandidates({
@@ -150,6 +168,44 @@ const tests: Array<[string, () => void]> = [
       assert(candidates.length === 2, 'expected city and country candidates');
       assert(candidates[0]?.proxyKey === 'residential:GB:st_johns_wood', 'bad non-US city key');
       assert(candidates[0]?.config.state === undefined, 'non-US state should be omitted');
+    },
+  ],
+  [
+    'Kernel resume keeps the resolved proxy tier and fallback location',
+    () => {
+      const resolved = managedKernelProxyFromSource('kernel_mobile_state');
+      assert(
+        resolved?.type === 'mobile' && resolved.specificity === 'state',
+        'lost mobile state fallback'
+      );
+      assert(
+        managedKernelProxyFromSource('kernel_configured') === undefined,
+        'configured proxy must keep its configured selection'
+      );
+      const resume = kernelRecreateProxySelection('kernel_mobile_state', 'mobile');
+      assert(
+        resume.exactManagedProxy?.type === 'mobile' &&
+          resume.exactManagedProxy.specificity === 'state',
+        'resume must select the recorded mobile state proxy'
+      );
+      assert(
+        kernelRecreateProxySelection(null, 'mobile').forceManagedProxyType === 'mobile',
+        'legacy rotated sessions must stay on mobile'
+      );
+      assert(
+        kernelRecreateProxySelection(null, 'residential').forceManagedProxyType === 'residential',
+        'legacy rotated sessions must stay on residential'
+      );
+      assert(
+        kernelRecreateProxySelection('kernel_configured', 'mobile').forceManagedProxyType ===
+          undefined,
+        'configured proxy must not switch to managed mobile'
+      );
+      assert(
+        kernelRecreateProxySelection('kernel_mobile_state', 'mobile', 'residential')
+          .forceManagedProxyType === 'residential',
+        'a new rotation must override the recorded proxy choice'
+      );
     },
   ],
   [
