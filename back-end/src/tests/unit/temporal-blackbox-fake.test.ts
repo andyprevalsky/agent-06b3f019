@@ -5,6 +5,7 @@ import {
   WorkflowNotFoundError,
 } from '@temporalio/client';
 import {
+  blackboxTemporalSignals,
   createBlackboxTemporalClient,
   shouldUseBlackboxTemporalFake,
 } from '../../providers/temporalBlackboxFake';
@@ -62,6 +63,22 @@ async function main(): Promise<void> {
   assert.deepEqual(
     payloads.map((payload) => defaultPayloadConverter.fromPayload(payload)),
     ['agent-1', 'user-1']
+  );
+
+  await client.workflow.getHandle('agent-1').signal('receive_user_response', 'hello');
+  await client.workflow.getHandle('agent-1').signal('resume');
+  assert.deepEqual(blackboxTemporalSignals(client, 'agent-1'), [
+    { name: 'receive_user_response', args: ['hello'] },
+    { name: 'resume', args: [] },
+  ]);
+  await assert.rejects(
+    () => client.workflow.getHandle('missing').signal('resume'),
+    WorkflowNotFoundError
+  );
+  assert.deepEqual(blackboxTemporalSignals(client, 'missing'), []);
+  assert.throws(
+    () => blackboxTemporalSignals({} as typeof client, 'agent-1'),
+    /requires the in-memory blackbox Temporal client/
   );
 
   await client.workflow.getHandle('agent-1').terminate('test complete');
