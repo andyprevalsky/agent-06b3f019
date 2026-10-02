@@ -606,9 +606,9 @@ export async function markComputeTokenUnavailable(
 // column the OAuth pool tokens use — so every backend instance AND every Fly
 // worker shares one backoff instead of each independently hammering the key.
 //
-// A tiny in-memory write-through cache keeps the LLM hot path off the DB: a
-// known-cooled key short-circuits with no query, and a clear key is only
-// re-checked against the DB at most once per recheck interval.
+// A tiny in-memory write-through cache keeps the LLM hot path off the DB: the
+// row is re-read at most once per recheck interval, cooled or clear, so a
+// cooldown cleared in the DB is honored by every instance within that interval.
 const ANTHROPIC_API_KEY_COOLDOWN_MS = 30 * 60 * 1000; // 30 min (out-of-credits)
 const ANTHROPIC_API_KEY_COOLDOWN_DB_RECHECK_MS = 15 * 1000;
 // Sentinel singleton row. userId has no FK; name is outside the served
@@ -618,15 +618,16 @@ const ANTHROPIC_API_KEY_COOLDOWN_NAME = 'anthropic_api_key_cooldown';
 
 let cachedCooldownUntilMs = 0;
 let lastCooldownDbCheckMs = 0;
+let cooldownCacheRevision = 0;
 
 /** True when the shared Anthropic API key is currently backed off. */
 export async function isAnthropicApiKeyOnCooldown(): Promise<boolean> {
   const now = Date.now();
-  if (now < cachedCooldownUntilMs) return true; // fast path: known cooled
   if (now - lastCooldownDbCheckMs < ANTHROPIC_API_KEY_COOLDOWN_DB_RECHECK_MS) {
-    return false; // recently confirmed clear — skip the DB round-trip
+    return now < cachedCooldownUntilMs;
   }
   lastCooldownDbCheckMs = now;
+  const cacheRevision = cooldownCacheRevision;
   const row = await prisma.integration.findUnique({
     where: {
       userId_name_accountId: {
@@ -637,6 +638,9 @@ export async function isAnthropicApiKeyOnCooldown(): Promise<boolean> {
     },
     select: { rateLimitedUntil: true },
   });
+  if (cacheRevision !== cooldownCacheRevision) {
+    return Date.now() < cachedCooldownUntilMs;
+  }
   cachedCooldownUntilMs = row?.rateLimitedUntil ? row.rateLimitedUntil.getTime() : 0;
   return now < cachedCooldownUntilMs;
 }
@@ -644,7 +648,10 @@ export async function isAnthropicApiKeyOnCooldown(): Promise<boolean> {
 /** Back the shared Anthropic API key off for the cooldown window (DB + cache). */
 export async function markAnthropicApiKeyOnCooldown(reason: string): Promise<void> {
   const until = new Date(Date.now() + ANTHROPIC_API_KEY_COOLDOWN_MS);
+  cooldownCacheRevision++;
   cachedCooldownUntilMs = until.getTime();
+  // A read issued before the upsert below commits would drop this mark.
+  lastCooldownDbCheckMs = Date.now();
   await prisma.integration.upsert({
     where: {
       userId_name_accountId: {
@@ -668,6 +675,7 @@ export async function markAnthropicApiKeyOnCooldown(reason: string): Promise<voi
 
 /** Test-only: clear both the in-memory cache and the DB cooldown row. */
 export async function __resetAnthropicApiKeyCooldown(): Promise<void> {
+  cooldownCacheRevision++;
   cachedCooldownUntilMs = 0;
   lastCooldownDbCheckMs = 0;
   await prisma.integration.deleteMany({

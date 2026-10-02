@@ -1,5 +1,6 @@
 """api_request domain service."""
 
+import json
 import time
 from datetime import timedelta
 from typing import Any, Dict, Optional
@@ -87,10 +88,29 @@ async def execute_api_request(
     try:
         result = await execute_activity(
             api_request_activity,
-            args=[tool_call, user_id],
+            args=[tool_call, user_id, agent_id],
             start_to_close_timeout=timedelta(seconds=ACTIVITY_TIMEOUT_SECONDS),
             retry_policy=RetryPolicy(maximum_attempts=_activity_max_attempts(tool_call)),
         )
+
+        # The Google OAuth benchmark has one guarded, in-memory API fixture.
+        # Give its operations separate visible tool cards without any Google IO.
+        if result.get("demo_fixture") is True:
+            for index, row in enumerate(result["body"]["rows"], start=1):
+                await handle_tool_event(
+                    event=ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=f"DEMO · {row['tool']}",
+                        message=json.dumps(row, indent=2),
+                        status=MessageStatus.FINISHED,
+                        metadata={"demoFixture": True, "demoParentToolCallId": tool_call_id},
+                    ),
+                    agent_id=agent_id,
+                    tool_call_id=f"{tool_call_id}-demo-{index}",
+                    tool_name=row["tool"],
+                    execute_activity=execute_activity,
+                    user_id=user_id,
+                )
 
         elapsed_time = _safe_time() - start_time
         message = format_tool_message(

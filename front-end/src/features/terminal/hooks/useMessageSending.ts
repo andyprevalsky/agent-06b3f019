@@ -23,7 +23,7 @@ import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { getItem, removeItem } from '@/lib/storage';
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
-import { createAgent, postMessage, resumeAgent, checkAndRespondToAttention } from '../api';
+import { createAgent, postMessage, checkAndRespondToAttention } from '../api';
 import type { FilePointer, AgentDetail, PendingAgentCreationInput, TerminalView } from '../types';
 
 export interface UseMessageSendingArgs {
@@ -83,6 +83,7 @@ export function useMessageSending({
   const fastModeUserOverrideRef = useRef(false);
   const resolvedUser = user ?? (userId != null && userId !== '' ? { id: userId } : null);
   const userCanUseFastMode = canUseFastMode(resolvedUser);
+  const userDefaultsFastModeOn = defaultsFastModeOn(resolvedUser);
   const userCanUseSimulator =
     userId != null && userId !== '' && SIMULATOR_USER_IDS.includes(userId);
 
@@ -125,7 +126,7 @@ export function useMessageSending({
       setFastModeState(sessionOverride);
       return;
     }
-    setFastModeState(defaultsFastModeOn(resolvedUser));
+    setFastModeState(userDefaultsFastModeOn);
   }, [
     agentDetail?.agent_id,
     agentDetail?.fast_mode_cache_enabled,
@@ -134,6 +135,7 @@ export function useMessageSending({
     user?.id,
     user?.phone,
     userCanUseFastMode,
+    userDefaultsFastModeOn,
     userId,
   ]);
 
@@ -242,16 +244,16 @@ export function useMessageSending({
           return;
         }
 
+        // The backend lifts a user pause after delivering the message, so the
+        // woken workflow always has it; resuming here first would not.
+        await postMessage(selectedAgentId, messageInput, attachments);
+        setMessageInput('');
         if (agentDetail?.status === 'PAUSED') {
-          await resumeAgent(selectedAgentId);
           toast({
             title: 'Agent resuming',
             description: 'The agent will continue with your message',
           });
         }
-
-        await postMessage(selectedAgentId, messageInput, attachments);
-        setMessageInput('');
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : '';
         if (msg === 'Not authenticated' || msg.includes('401') || msg.includes('Unauthorized')) {

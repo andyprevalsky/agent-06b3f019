@@ -50,24 +50,67 @@ def test_oai_demo_requires_readable_files_and_forbids_browser_calls():
     assert goal == task.prompt
 
 
-def test_google_oauth_demo_uses_isolated_fixture_without_browser_or_cache():
-    from providers.fast_cache.normalize import demo_cache_allowed
+def test_google_oauth_demo_uses_cached_fixture_without_browser_or_code_agent():
+    from domains.api_request.google_oauth_demo_fixture import (
+        DEMO_LABEL,
+        matches_demo_goal,
+        normalize_completion_notice,
+        run_fixture,
+    )
+    from providers.fast_cache.normalize import (
+        demo_cache_allowed,
+        goal_hash,
+        google_oauth_demo_goal_hash,
+    )
 
     task = get_task_by_name("google-oauth")
     assert task.title == "Google OAuth"
     assert task.tags == ["DEMO"]
     assert task.production_only is False
-    assert task.fast_cache == "off"
+    assert task.fast_cache == "on"
     assert task.requires_browser_agent is False
-    assert task.expected_tool_counts == {"spawn_claude_code_agent": 1}
+    assert task.requires_claude_code is False
+    assert task.expected_tool_counts == {"spawn_agent": 1}
     assert "spawn_browser_agent" in task.forbidden_tools
+    assert "spawn_claude_code_agent" in task.forbidden_tools
     assert task.environment["mode"] == "synthetic"
     assert "gmail_create_reply_draft" in task.prompt
     assert "calendar_create_event" in task.prompt
     assert "drive_append_line" in task.prompt
+    assert {field["name"] for field in task.response_schema["fields"]} >= {
+        "demo_notice", "unread_email_summary", "final_disconnected"
+    }
     goal = _benchmark_goal_for_task(task, "https://navi-j9a9.onrender.com")
-    assert "{demo_run_nonce}" not in goal
-    assert not demo_cache_allowed(goal)
+    assert goal == task.prompt
+    assert google_oauth_demo_goal_hash() == goal_hash(goal)
+    assert demo_cache_allowed(goal)
+    assert matches_demo_goal(goal)
+    rows = run_fixture()["rows"]
+    assert len(rows) == 12
+    assert rows[1]["result"]["summary"] == "Sam asks whether Thursday works; Acme sent a newsletter."
+    assert rows[7]["result"]["event"]["date"] == "2026-10-02"
+    assert rows[-1]["result"]["connected"] is False
+    outputs, summary = normalize_completion_notice(goal, {"demo_notice": "Demo fixture; no live Google data changed."}, "Completed")
+    assert outputs["demo_notice"] == DEMO_LABEL
+    assert summary.startswith(DEMO_LABEL)
+    other, unchanged = normalize_completion_notice("other task", {"demo_notice": "Other"}, "Completed")
+    assert other["demo_notice"] == "Other" and unchanged == "Completed"
+
+
+def test_google_oauth_demo_cache_is_available_without_catalog_in_worker_image():
+    from unittest.mock import patch
+
+    from domains.api_request.google_oauth_demo_fixture import matches_demo_goal
+    from providers.fast_cache.normalize import demo_cache_goal_hashes, google_oauth_demo_goal_hash
+
+    goal = get_task_by_name("google-oauth").prompt
+    demo_cache_goal_hashes.cache_clear()
+    try:
+        with patch("providers.fast_cache.normalize.Path.open", side_effect=FileNotFoundError):
+            assert google_oauth_demo_goal_hash() in demo_cache_goal_hashes()
+            assert matches_demo_goal(goal)
+    finally:
+        demo_cache_goal_hashes.cache_clear()
 
 
 def test_agentcard_idempotency_task_terminates_after_reporting_results():

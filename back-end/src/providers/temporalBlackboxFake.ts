@@ -7,12 +7,32 @@ import {
   type WorkflowIdReusePolicy,
 } from '@temporalio/client';
 
+export interface BlackboxTemporalSignal {
+  name: string;
+  args: unknown[];
+}
+
 interface FakeExecution {
   workflowId: string;
   firstExecutionRunId: string;
   args: unknown[];
   status: 'RUNNING' | 'TERMINATED';
   startTime: Date;
+  signals: BlackboxTemporalSignal[];
+}
+
+const executionsByClient = new WeakMap<object, Map<string, FakeExecution>>();
+
+/** Signals delivered to a fake workflow, in delivery order. */
+export function blackboxTemporalSignals(
+  client: Client,
+  workflowId: string
+): readonly BlackboxTemporalSignal[] {
+  const executions = executionsByClient.get(client);
+  if (executions === undefined) {
+    throw new Error('blackboxTemporalSignals requires the in-memory blackbox Temporal client');
+  }
+  return executions.get(workflowId)?.signals ?? [];
 }
 
 interface BlackboxTemporalEnv {
@@ -67,8 +87,8 @@ export function createBlackboxTemporalClient(namespace = 'blackbox'): Client {
           },
         };
       },
-      async signal() {
-        getExecution(workflowId);
+      async signal(name: string, ...args: unknown[]) {
+        getExecution(workflowId).signals.push({ name, args });
       },
       async terminate() {
         const execution = getExecution(workflowId);
@@ -130,6 +150,7 @@ export function createBlackboxTemporalClient(namespace = 'blackbox'): Client {
           args: options.args ?? [],
           status: 'RUNNING',
           startTime: new Date(),
+          signals: [],
         };
         executions.set(options.workflowId, execution);
         return getHandle(options.workflowId, execution.firstExecutionRunId);
@@ -164,5 +185,6 @@ export function createBlackboxTemporalClient(namespace = 'blackbox'): Client {
     },
   };
 
+  executionsByClient.set(client, executions);
   return client as unknown as Client;
 }
