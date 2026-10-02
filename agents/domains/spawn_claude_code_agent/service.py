@@ -1527,6 +1527,10 @@ def _structured_response_satisfies_declared_schema(
     fields = output_schema.get("fields", []) if isinstance(output_schema, dict) else []
     if not fields:
         return True
+    if structured_response is None:
+        # No structured evidence at all: equivalent to an empty response, so a
+        # schema whose fields are all optional is still satisfied.
+        structured_response = {}
     if not isinstance(structured_response, dict):
         return False
     for field in fields:
@@ -1542,7 +1546,8 @@ def _structured_response_satisfies_declared_schema(
         value = structured_response[name]
         if value is None and field.get("nullable") is True:
             continue
-        # An optional field may be present and empty when its bounds allow it.
+        # A present empty value only satisfies a required field when its bounds
+        # explicitly allow it; an optional field may be present and empty.
         if (
             field.get("required", True) is not False
             and (value is None or value == "" or value == [] or value == {})

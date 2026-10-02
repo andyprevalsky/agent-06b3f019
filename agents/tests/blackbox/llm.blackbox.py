@@ -213,6 +213,18 @@ def test_structured_output_schema_respects_constraints():
         {"name": "summary", "type": "str", "maxLength": 0},
     ]}
     assert _structured_response_satisfies_schema({"items": [], "summary": ""}, zero_schema)
+    # Optional fields may be omitted or present-and-empty, but a present value
+    # must still have the declared shape.
+    optional_pointer = {"fields": [
+        {"name": "total", "type": "int"},
+        {"name": "report", "type": "file_pointer", "required": False},
+        {"name": "tags", "type": "list[str]", "required": False},
+    ]}
+    assert _structured_response_satisfies_schema({"total": 1}, optional_pointer)
+    assert _structured_response_satisfies_schema({"total": 1, "tags": []}, optional_pointer)
+    assert _structured_response_satisfies_schema({"total": 1, "report": {"path": "/out/r.md"}}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": "/out/r.md"}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": {"note": "x"}}, optional_pointer)
 
 
 async def test_live_schema_generation_chooses_file_for_large_goal():

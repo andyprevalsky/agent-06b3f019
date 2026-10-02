@@ -593,6 +593,10 @@ def test_declared_schema_fast_path_enforces_bounds_and_nullable_fields():
     assert _structured_response_satisfies_declared_schema(optional_empty, {"items": ["done"], "note": "", "tags": []})
     assert not _structured_response_satisfies_declared_schema(optional_empty, {"items": ["done"], "links": []})
     assert not _structured_response_satisfies_declared_schema(optional_empty, {"items": [], "note": ""})
+    all_optional = {"fields": [{"name": "note", "type": "str", "required": False}]}
+    assert _structured_response_satisfies_declared_schema(all_optional, None)
+    assert _structured_response_satisfies_declared_schema(all_optional, {})
+    assert not _structured_response_satisfies_declared_schema(optional_empty, None)
 
 
 def test_build_code_event_context_uses_json_and_extracted_files():
