@@ -25,7 +25,7 @@
  */
 
 import { execFileSync, spawn } from 'child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -148,55 +148,45 @@ function runChildJsonParseControl(): void {
 const prisma = new PrismaClient();
 
 async function buildPayloadFile(): Promise<number> {
-  // Prisma may lease a different pooled connection for every query. Build and
-  // read the fixture in one statement so its lifetime cannot depend on a
-  // connection-local TEMP table surviving between client calls.
-  const rows = await prisma.$queryRawUnsafe<Array<{ chars: number; doc: string }>>(`
-    WITH idb_upload_memory_fixture AS MATERIALIZED (
-      SELECT jsonb_build_object(
-        'batchIndex', 0,
-        'totalBatches', 1,
-        'hashes', jsonb_build_object(
-          ${sqlString(BIG_ORIGIN)}, 'big-hash',
-          ${sqlString(SMALL_ORIGIN)}, 'small-hash'
-        ),
-        'origins', jsonb_build_array(
-          jsonb_build_object(
-            'origin', ${sqlString(BIG_ORIGIN)},
-            'databases', jsonb_build_array(jsonb_build_object(
-              'name', 'DocsErrors',
-              'objectStores', jsonb_build_array(jsonb_build_object(
-                'name', 'Errors',
-                'records', (
-                  SELECT jsonb_agg(jsonb_build_object(
-                    'key', 'record-key-' || i,
-                    'value', jsonb_build_object(
-                      'key', 'record-key-' || i,
-                      'value', md5(i::text) || md5((i * 7)::text)
-                    )
-                  ))
-                  FROM generate_series(1, ${BLOB_RECORDS}) i
-                )
-              ))
-            ))
-          ),
-          jsonb_build_object(
-            'origin', ${sqlString(SMALL_ORIGIN)},
-            'databases', '[{"name":"tiny","objectStores":[]}]'::jsonb
-          )
-        )
-      ) AS doc
-    )
-    SELECT length(doc::text)::int AS chars, doc::text AS doc
-    FROM idb_upload_memory_fixture
-  `);
-  const chars = Number(rows[0]?.chars ?? 0);
-  fs.writeFileSync(payloadPath, rows[0]?.doc ?? '');
+  // Building 360,000 JSONB records in one PostgreSQL aggregate can exhaust
+  // the shared test container and abort unrelated blackboxes. Stream the same
+  // nested payload to a file in small batches; only the treatment may ingest it.
+  const md5 = (value: number) => createHash('md5').update(String(value)).digest('hex');
+  const fd = fs.openSync(payloadPath, 'w');
+  let chars = 0;
+  const write = (part: string) => {
+    fs.writeSync(fd, part);
+    chars += part.length;
+  };
+  try {
+    write(
+      `{"batchIndex":0,"totalBatches":1,"hashes":${JSON.stringify({
+        [BIG_ORIGIN]: 'big-hash',
+        [SMALL_ORIGIN]: 'small-hash',
+      })},"origins":[{"origin":${JSON.stringify(BIG_ORIGIN)},` +
+        '"databases":[{"name":"DocsErrors","objectStores":[{"name":"Errors","records":['
+    );
+    let batch = '';
+    for (let i = 1; i <= BLOB_RECORDS; i += 1) {
+      const key = `record-key-${i}`;
+      batch += `${i === 1 ? '' : ','}${JSON.stringify({
+        key,
+        value: { key, value: md5(i) + md5(i * 7) },
+      })}`;
+      if (batch.length >= 256_000) {
+        write(batch);
+        batch = '';
+      }
+    }
+    if (batch) write(batch);
+    write(
+      `]}]}]},{"origin":${JSON.stringify(SMALL_ORIGIN)},` +
+        '"databases":[{"name":"tiny","objectStores":[]}]}]}'
+    );
+  } finally {
+    fs.closeSync(fd);
+  }
   return chars;
-}
-
-function sqlString(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
 }
 
 async function cleanupUser(): Promise<void> {
