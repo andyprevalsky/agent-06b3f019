@@ -9,13 +9,30 @@ import { steelCdpConnectionUrl } from './urls';
 const SESSION_VALIDATION_TIMEOUT = 10000;
 const WS_BACKOFF_DELAYS = [100, 400, 800];
 
+function safeCdpFailure(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  // Playwright errors may include the credential-bearing CDP URL. Preserve the
+  // transport category without echoing that URL into logs or API responses.
+  if (/timeout|timed out/i.test(message)) return new Error('Steel CDP connection timeout');
+  if (/connection|ECONN|ENOTFOUND|EAI_AGAIN|socket/i.test(message)) {
+    return new Error('Steel CDP connection error');
+  }
+  if (message === 'No browser contexts available') {
+    return new Error('Steel CDP has no browser contexts');
+  }
+  return new Error('Steel CDP validation failed');
+}
+
 /**
  * Connect to the session via CDP and validate it, returning the OPEN browser
  * connection on success (null on failure). Callers that keep the connection
  * (e.g. to reuse it for user-data injection, saving a second 3-5s CDP
  * handshake) are responsible for closing it.
  */
-export async function connectValidatedBrowser(wsUrl: string): Promise<Browser | null> {
+export async function connectValidatedBrowser(
+  wsUrl: string,
+  options: { throwOnFailure?: boolean } = {}
+): Promise<Browser | null> {
   try {
     let connected: Browser | undefined;
     await retryWithBackoff(
@@ -23,12 +40,9 @@ export async function connectValidatedBrowser(wsUrl: string): Promise<Browser | 
         const { chromium } = await import('playwright');
         let browser: Browser | undefined;
         try {
-          browser = await Promise.race([
-            chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl)),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error('Connection timeout')), SESSION_VALIDATION_TIMEOUT)
-            ),
-          ]);
+          browser = await chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl), {
+            timeout: SESSION_VALIDATION_TIMEOUT,
+          });
           const contexts = browser.contexts();
           if (contexts.length === 0) {
             throw new Error('No browser contexts available');
@@ -40,7 +54,7 @@ export async function connectValidatedBrowser(wsUrl: string): Promise<Browser | 
           if (browser !== undefined) {
             await browser.close().catch(() => {});
           }
-          throw error;
+          throw safeCdpFailure(error);
         }
       },
       {
@@ -55,6 +69,7 @@ export async function connectValidatedBrowser(wsUrl: string): Promise<Browser | 
     log.info('  Session validation failed', {
       error: error instanceof Error ? error.message : String(error),
     });
+    if (options.throwOnFailure) throw error;
     return null;
   }
 }
@@ -62,6 +77,14 @@ export async function connectValidatedBrowser(wsUrl: string): Promise<Browser | 
 export async function validateSessionConnection(wsUrl: string): Promise<boolean> {
   const browser = await connectValidatedBrowser(wsUrl);
   if (browser === null) return false;
+  await browser.close().catch(() => {});
+  return true;
+}
+
+/** Replacement callers need the transport cause to fail over promptly. */
+export async function validateSessionConnectionOrThrow(wsUrl: string): Promise<boolean> {
+  const browser = await connectValidatedBrowser(wsUrl, { throwOnFailure: true });
+  if (browser === null) throw new Error('Steel CDP validation failed');
   await browser.close().catch(() => {});
   return true;
 }

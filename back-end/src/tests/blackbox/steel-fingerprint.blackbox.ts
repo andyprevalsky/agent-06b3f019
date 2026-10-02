@@ -380,6 +380,46 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       'profile mismatch wrote a replacement BrowserSession binding'
     );
 
+    const replacementWritesBeforeOutage = replacementWrites.length;
+    const createdDuringOutage: string[] = [];
+    const releasedDuringOutage: string[] = [];
+    let outageFailure: unknown;
+    try {
+      await recreateSession(
+        'replacement-city-retry-task',
+        { forceManagedRotation: true },
+        {
+          createSession: async () => {
+            const id = `steel-cdp-unreachable-${createdDuringOutage.length + 1}`;
+            createdDuringOutage.push(id);
+            return { id, debugUrl: 'https://steel.example/debug', profileId: 'steel-auth-profile' };
+          },
+          validateConnection: async () => {
+            throw new Error('Steel CDP connection timeout');
+          },
+          releaseSession: async (id) => {
+            releasedDuringOutage.push(id);
+          },
+        }
+      );
+    } catch (error) {
+      outageFailure = error;
+    }
+    assert(
+      outageFailure instanceof Error &&
+        outageFailure.message.includes('Steel CDP connection timeout'),
+      'replacement obscured the provider transport cause'
+    );
+    assert(
+      createdDuringOutage.length === 2 &&
+        JSON.stringify(releasedDuringOutage) === JSON.stringify(createdDuringOutage),
+      'replacement did not stop after two failed sessions and release both'
+    );
+    assert(
+      replacementWrites.length === replacementWritesBeforeOutage,
+      'CDP outage replaced the working BrowserSession binding'
+    );
+
     let cleanupCreateAttempts = 0;
     let cleanupFailure: unknown;
     try {

@@ -21,7 +21,7 @@ import {
   steelCdpUrl,
   steelDebugUrl,
 } from './session';
-import { validateSessionConnection } from './sessionConnection';
+import { validateSessionConnectionOrThrow } from './sessionConnection';
 import { steelCdpConnectionUrl } from './urls';
 
 function hasValue(value: string | null | undefined): value is string {
@@ -148,7 +148,7 @@ export interface SteelSessionReplacementDependencies {
 
 const defaultReplacementDependencies: SteelSessionReplacementDependencies = {
   createSession: async (input) => steel.sessions.create(input),
-  validateConnection: validateSessionConnection,
+  validateConnection: validateSessionConnectionOrThrow,
 };
 
 export async function recreateSession(
@@ -193,7 +193,10 @@ export async function recreateSession(
   let dropProxyCity = isKnownRejectedProxyCity(proxyGeo);
 
   let lastError: Error | null = null;
+  let attemptsMade = 0;
+  let consecutiveCdpTimeouts = 0;
   for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
+    attemptsMade = attempt;
     log.info(`  Steel session attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
     let createdSessionId: string | null = null;
     let committed = false;
@@ -313,6 +316,12 @@ export async function recreateSession(
       }
       lastError = error instanceof Error ? error : new Error('Unknown error');
       log.info(`  Steel session attempt ${attempt} failed: ${lastError.message}`);
+      consecutiveCdpTimeouts =
+        lastError.message === 'Steel CDP connection timeout' ? consecutiveCdpTimeouts + 1 : 0;
+      // Each timeout already includes three CDP handshakes against a distinct
+      // new session. Two in a row indicate a provider transport outage; leave
+      // the old session intact and let browser recovery try another provider.
+      if (consecutiveCdpTimeouts >= 2) break;
       if (!dropProxyCity && isInvalidSteelProxyConfiguration(error)) {
         dropProxyCity = true;
         rememberRejectedProxyCity(proxyGeo);
@@ -325,7 +334,7 @@ export async function recreateSession(
   }
 
   throw new Error(
-    `Failed to create Steel replacement after ${MAX_SESSION_RETRIES} attempts: ${lastError?.message}`
+    `Failed to create Steel replacement after ${attemptsMade} attempts: ${lastError?.message}`
   );
 }
 
