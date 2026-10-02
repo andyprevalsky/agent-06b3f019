@@ -53,15 +53,18 @@ write_cloud_env() {
 
 # Same instance: matching agent ids when both are known; otherwise the same boot
 # (a store daemon restart cannot tell a clone from a reboot, so it never re-keys
-# within a boot).
+# within a boot). Files from the earlier boot-id-only writer record the boot as
+# ROSE_CLOUD_BOOT_ID instead of a stamp.
 cloud_env_instance_matches() {
-  local file="$1" agent_id="$2" boot_id="$3" recorded_agent
+  local file="$1" agent_id="$2" boot_id="$3" recorded_agent recorded_boot
   recorded_agent="$(cloud_env_stamp "$file" agent-id)"
   if [ -n "$agent_id" ] && [ -n "$recorded_agent" ]; then
     [ "$agent_id" = "$recorded_agent" ]
     return
   fi
-  [ -n "$boot_id" ] && [ "$(cloud_env_stamp "$file" boot-id)" = "$boot_id" ]
+  recorded_boot="$(cloud_env_stamp "$file" boot-id)"
+  [ -n "$recorded_boot" ] || recorded_boot="$(cloud_env_value "$file" ROSE_CLOUD_BOOT_ID)"
+  [ -n "$boot_id" ] && [ "$recorded_boot" = "$boot_id" ]
 }
 
 cloud_env_stamps_current() {
@@ -162,6 +165,38 @@ normalize_conductor_workspace_env() {
     export CONDUCTOR_WORKSPACE_NAME="$actual_name"
   fi
   export CONDUCTOR_WORKSPACE_PATH="$workspace_physical"
+}
+
+# Usage: ensure_cloud_workspace_env <root> [port] [boot_id_file]
+# Provisions <root>/.cloud-env for cloud-build.sh: an existing file is re-keyed
+# only when another instance minted it, and native Conductor workspaces are
+# left alone. The `# rose-cloud-env` marker must be in this file, not only in
+# shell rc files: normalize_conductor_workspace_env trusts a synthetic name only
+# when it is present, and otherwise rewrites it to the checkout basename.
+ensure_cloud_workspace_env() {
+  local root="$1" port="${2:-3001}" boot_id_file="${3:-}"
+  local env_file="$root/.cloud-env" boot_id agent_id rc
+  local env_marker="# rose-cloud-env" source_line="[ -f $root/.cloud-env ] && . $root/.cloud-env"
+
+  if [ -n "$boot_id_file" ]; then
+    boot_id="$(tr -d '[:space:]' <"$boot_id_file" 2>/dev/null || true)"
+  else
+    boot_id="$(cloud_env_boot_id)"
+  fi
+  agent_id="$(cloud_env_agent_id)"
+  if [ -f "$env_file" ]; then
+    refresh_cloud_env_identity "$env_file" "$agent_id" "$boot_id"
+  elif [ -n "${CONDUCTOR_PORT:-}" ] && [ -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]; then
+    echo "✅ Native Conductor env detected — no .cloud-env needed"
+    return 0
+  else
+    write_cloud_env "$env_file" "$port" "$(new_cloud_workspace_name)" "$root" "$boot_id" "$agent_id"
+  fi
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    [ -f "$rc" ] || continue
+    grep -qF "$env_marker" "$rc" || printf '\n%s\n%s\n' "$env_marker" "$source_line" >>"$rc"
+  done
+  echo "✅ .cloud-env — CONDUCTOR_WORKSPACE_NAME=$(cloud_env_value "$env_file" CONDUCTOR_WORKSPACE_NAME) PORT=$(cloud_env_value "$env_file" CONDUCTOR_PORT)"
 }
 
 resolve_temporal_task_queue() {

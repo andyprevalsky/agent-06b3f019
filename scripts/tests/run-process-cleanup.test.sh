@@ -237,9 +237,9 @@ fi
 echo "PASS: run_kill_tree reaps a wrapper's grandchildren"
 
 blackbox_runner="$ROOT_DIR/back-end/scripts/run-blackbox-tests.sh"
-grep -qF 'source scripts/lib/run-process-cleanup.sh' "$blackbox_runner" \
-  && grep -qF 'run_kill_tree "$BACKEND_PID"' "$blackbox_runner" \
-  || { echo "FAIL: run-blackbox-tests.sh cleanup must reap the npx backend tree with run_kill_tree" >&2; exit 1; }
+grep -qF 'source "$ROOT_DIR/scripts/lib/process-tree.sh"' "$blackbox_runner" \
+  && grep -qF 'stop_process_tree "$BACKEND_PID"' "$blackbox_runner" \
+  || { echo "FAIL: run-blackbox-tests.sh cleanup must reap the npx backend tree with stop_process_tree" >&2; exit 1; }
 echo "PASS: run-blackbox-tests.sh cleanup reaps the whole backend tree"
 
 echo "All run process cleanup tests passed."

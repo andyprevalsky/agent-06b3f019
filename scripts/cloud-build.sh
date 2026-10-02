@@ -39,29 +39,7 @@ echo "✅ Git identity: Andy Prevalsky <andyprevalsky@yahoo.com>"
 
 # ── 1. Conductor-compatible env vars ─────────────────────────────────────
 . "$ROOT/scripts/lib/workspace-env.sh"
-if [ -f .cloud-env ]; then
-    refresh_cloud_env_identity .cloud-env
-    echo "✅ .cloud-env — CONDUCTOR_WORKSPACE_NAME=$(cloud_env_value .cloud-env CONDUCTOR_WORKSPACE_NAME)"
-elif [ -n "${CONDUCTOR_PORT:-}" ] && [ -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]; then
-    echo "✅ Native Conductor env detected — no .cloud-env needed"
-else
-    # The `# rose-cloud-env` marker write_cloud_env emits must appear in THIS
-    # file (not only in shell rc files): scripts/lib/workspace-env.sh trusts a
-    # synthetic cloud workspace name only when that marker is present, otherwise
-    # it rewrites CONDUCTOR_WORKSPACE_NAME to the checkout basename (e.g.
-    # `workspace`) and breaks ngrok domain reuse.
-    write_cloud_env .cloud-env "${CONDUCTOR_PORT:-3001}" "$(new_cloud_workspace_name)" "$ROOT" \
-        "$(cloud_env_boot_id)" "$(cloud_env_agent_id)"
-    echo "✅ Wrote .cloud-env — CONDUCTOR_WORKSPACE_NAME=$(cloud_env_value .cloud-env CONDUCTOR_WORKSPACE_NAME)"
-fi
-if [ -f .cloud-env ]; then
-    ENV_MARKER="# rose-cloud-env"
-    SOURCE_LINE="[ -f ${ROOT}/.cloud-env ] && . ${ROOT}/.cloud-env"
-    for RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-        [ -f "$RC" ] || continue
-        grep -qF "$ENV_MARKER" "$RC" || printf '\n%s\n%s\n' "$ENV_MARKER" "$SOURCE_LINE" >> "$RC"
-    done
-fi
+ensure_cloud_workspace_env "$ROOT" "${CONDUCTOR_PORT:-3001}"
 
 # Load env vars into THIS shell too, so subsequent steps in this script see them.
 [ -f .cloud-env ] && . ./.cloud-env

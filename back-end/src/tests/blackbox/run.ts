@@ -355,7 +355,9 @@ async function main(): Promise<void> {
       )
     );
   }
-  if (failed > 0) process.exit(1);
+  // process.exit() drops stdout still queued for the `tee` pipe, which cut the
+  // failed-domain FAILURES section out of runner.log after the first 64 KB.
+  if (failed > 0) process.exitCode = 1;
 }
 
 main().catch((error) => {

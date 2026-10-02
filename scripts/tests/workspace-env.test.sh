@@ -348,24 +348,89 @@ self_conflict="$(
 )"
 expect_eq "$self_conflict" "" "the workspace's own container is never treated as a conflict"
 
-# cloud-build.sh must write `# rose-cloud-env` into .cloud-env itself (not only
-# into shell rc files). Without that marker, normalize_conductor_workspace_env
-# rewrites the synthetic cloud name to the checkout basename and breaks ngrok
-# domain reuse on Cursor Cloud agents. It must also mint and re-key through the
-# shared helpers rather than keeping a snapshot-baked file or /etc/machine-id.
+# Cloud VMs boot from disk snapshots that carry /etc/machine-id and the
+# .cloud-env written while the snapshot was built. Every clone must still get
+# its own workspace name, or concurrent agents share one ngrok domain
+# (ERR_NGROK_334) and one run.sh Temporal queue. The `# rose-cloud-env` marker
+# must be in .cloud-env itself (not only in shell rc files), or
+# normalize_conductor_workspace_env rewrites the synthetic name to the checkout
+# basename and breaks ngrok domain reuse.
 cloud_build_script="$ROOT_DIR/scripts/cloud-build.sh"
 fresh_env="$TMP_ROOT/fresh.cloud-env"
 bash -c ". '$HELPER_SRC'; write_cloud_env '$fresh_env' 3001 \"\$(new_cloud_workspace_name)\" /workspace boot-fresh"
 grep -qx '# rose-cloud-env' "$fresh_env" \
   || { echo "FAIL: write_cloud_env must include the # rose-cloud-env marker" >&2; exit 1; }
-for required in 'refresh_cloud_env_identity .cloud-env' 'write_cloud_env .cloud-env'; do
-  grep -qF "$required" "$cloud_build_script" \
-    || { echo "FAIL: cloud-build.sh must call '$required'" >&2; exit 1; }
-done
+if ! grep -q 'ensure_cloud_workspace_env "\$ROOT"' "$cloud_build_script"; then
+  echo "FAIL: cloud-build.sh must provision .cloud-env through ensure_cloud_workspace_env" >&2
+  exit 1
+fi
 if grep -q 'machine-id' "$cloud_build_script"; then
   echo "FAIL: cloud-build.sh must not derive the workspace id from /etc/machine-id (shared by every snapshot clone)" >&2
   exit 1
 fi
-echo "PASS: cloud-build.sh mints and re-keys .cloud-env through the shared helpers"
+echo "PASS: cloud-build.sh provisions .cloud-env through ensure_cloud_workspace_env"
+
+# These cases exercise the boot-id path, so this VM's real agent store must not
+# leak in (a shared agent id would correctly keep one name across "clones").
+cloud_identity() {
+  local root="$1" boot_id_file="$2"
+  HOME="$TMP_ROOT/home" CLOUD_ENV_AGENT_STORE_DIR="$TMP_ROOT/no-agent-store" bash -c \
+    ". '$HELPER_SRC'; ensure_cloud_workspace_env \"\$1\" 3001 \"\$2\" >/dev/null && . \"\$1/.cloud-env\" && printf '%s\n' \"\$CONDUCTOR_WORKSPACE_NAME\"" \
+    _ "$root" "$boot_id_file"
+}
+mkdir -p "$TMP_ROOT/home" "$TMP_ROOT/snapshot-a" "$TMP_ROOT/native"
+printf 'build-boot\n' > "$TMP_ROOT/boot-build"
+printf 'clone-boot-a\n' > "$TMP_ROOT/boot-a"
+printf 'clone-boot-b\n' > "$TMP_ROOT/boot-b"
+build_name="$(cloud_identity "$TMP_ROOT/snapshot-a" "$TMP_ROOT/boot-build")"
+if [[ ! "$build_name" =~ ^cloud-[0-9a-f]{8}$ ]]; then
+  echo "FAIL: generated cloud workspace name '$build_name' is not cloud-<8 hex>" >&2
+  exit 1
+fi
+echo "PASS: a fresh instance gets a cloud-<8 hex> workspace name"
+expect_eq "$(grep -c '^# rose-cloud-env$' "$TMP_ROOT/snapshot-a/.cloud-env")" "1" \
+  "generated .cloud-env carries the # rose-cloud-env marker"
+expect_eq "$(cloud_identity "$TMP_ROOT/snapshot-a" "$TMP_ROOT/boot-build")" "$build_name" \
+  "the same boot keeps its workspace name across reruns"
+cp -p "$TMP_ROOT/snapshot-a/.cloud-env" "$TMP_ROOT/snapshot-a/.cloud-env.baked"
+mkdir -p "$TMP_ROOT/snapshot-b"
+cp -p "$TMP_ROOT/snapshot-a/.cloud-env.baked" "$TMP_ROOT/snapshot-b/.cloud-env"
+clone_a_name="$(CONDUCTOR_PORT=3001 CONDUCTOR_WORKSPACE_NAME="$build_name" \
+  cloud_identity "$TMP_ROOT/snapshot-a" "$TMP_ROOT/boot-a")"
+clone_b_name="$(CONDUCTOR_PORT=3001 CONDUCTOR_WORKSPACE_NAME="$build_name" \
+  cloud_identity "$TMP_ROOT/snapshot-b" "$TMP_ROOT/boot-b")"
+if [ "$clone_a_name" = "$build_name" ] || [ "$clone_b_name" = "$build_name" ] || [ "$clone_a_name" = "$clone_b_name" ]; then
+  echo "FAIL: snapshot clones share a workspace name: build=$build_name a=$clone_a_name b=$clone_b_name" >&2
+  exit 1
+fi
+echo "PASS: snapshot clones of one baked .cloud-env each mint their own workspace name"
+expect_eq "$(cloud_identity "$TMP_ROOT/snapshot-a" "$TMP_ROOT/boot-a")" "$clone_a_name" \
+  "a clone keeps its minted name for the rest of its boot"
+native_output="$(HOME="$TMP_ROOT/home" CONDUCTOR_PORT=3001 CONDUCTOR_WORKSPACE_NAME=lagos-v1 \
+  bash -c ". '$HELPER_SRC'; ensure_cloud_workspace_env \"\$1\" 3001 \"\$2\"" _ "$TMP_ROOT/native" "$TMP_ROOT/boot-a")"
+if [ -e "$TMP_ROOT/native/.cloud-env" ] || [[ "$native_output" != *"Native Conductor env detected"* ]]; then
+  echo "FAIL: a native Conductor workspace must not get a synthetic .cloud-env" >&2
+  exit 1
+fi
+echo "PASS: a native Conductor workspace keeps its own identity"
+
+# .cloud-env files minted by the earlier boot-id-only writer record the boot as
+# ROSE_CLOUD_BOOT_ID; the same boot must keep that name instead of re-keying.
+mkdir -p "$TMP_ROOT/boot-id-export"
+cat >"$TMP_ROOT/boot-id-export/.cloud-env" <<'ENV'
+# rose-cloud-env
+# Generated by scripts/cloud-build.sh — per-instance, gitignored.
+export CONDUCTOR_PORT=3001
+export CONDUCTOR_WORKSPACE_NAME=cloud-0badc0de
+export CONDUCTOR_ROOT_PATH=/workspace
+export ROSE_CLOUD_BOOT_ID=clone-boot-a
+ENV
+expect_eq "$(cloud_identity "$TMP_ROOT/boot-id-export" "$TMP_ROOT/boot-a")" "cloud-0badc0de" \
+  "a ROSE_CLOUD_BOOT_ID .cloud-env from the same boot keeps its workspace name"
+expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$TMP_ROOT/boot-id-export/.cloud-env' boot-id")" "clone-boot-a" \
+  "a kept ROSE_CLOUD_BOOT_ID identity is restamped with the boot id"
+[ "$(cloud_identity "$TMP_ROOT/boot-id-export" "$TMP_ROOT/boot-b")" != "cloud-0badc0de" ] \
+  || { echo "FAIL: a ROSE_CLOUD_BOOT_ID .cloud-env from another boot kept its name" >&2; exit 1; }
+echo "PASS: a ROSE_CLOUD_BOOT_ID .cloud-env from another boot is re-keyed"
 
 echo "All workspace env tests passed."
