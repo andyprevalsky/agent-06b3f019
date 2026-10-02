@@ -36,8 +36,11 @@ export function restoredTunnelCandidate(evidence: TunnelCandidateEvidence): bool
     return false;
   }
   if (
-    /captcha|cloudflare|human.verification|access.denied|checking your browser|interstitial|\b403\b|\b429\b|blank page|empty shell|missing.{0,30}(ui|content|product|checkout)|not loaded|unusable|not interactive/i.test(
+    /captcha|cloudflare challenge|human.verification|access.denied|checking your browser|interstitial|\b403\b|\b429\b|blank page|empty shell|missing.{0,30}(ui|content|product|checkout)|not loaded|unusable|not interactive/i.test(
       evidence.classifierReason
+    ) ||
+    /captcha|human.verification|access.denied|checking your browser|cloudflare challenge|attention required/i.test(
+      evidence.cleanedDom || ''
     )
   ) {
     return false;
