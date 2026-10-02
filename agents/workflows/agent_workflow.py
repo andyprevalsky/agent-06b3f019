@@ -25,6 +25,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
+    from domains.api_request.google_oauth_demo_fixture import normalize_completion_notice
     from domains.param_populator.config import PARAM_POPULATOR_MODEL
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
@@ -5232,6 +5233,9 @@ class AgentWorkflow:
             # summary is already observable.
             # Suppress the automatic tree broadcast here; otherwise _post_message
             # would emit its default ACTIVE state after we latched _is_finished.
+            structured_response, summary = normalize_completion_notice(
+                self.goal, structured_response, summary
+            )
             formatted_outputs = self._format_outputs(structured_response)
             await self._post_message(
                 "",
