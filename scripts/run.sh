@@ -436,10 +436,13 @@ is_current_process_family() {
 
 process_cwd_in_this_worktree() {
     local pid=$1
-    local cwd
+    local cwd root
     cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
+    # macOS reports /private/var/... in lsof while $PWD may be /var/....
+    # Compare physical paths so workers without a worktree path in argv are found.
+    root=$(pwd -P)
     case "$cwd" in
-        "$PWD"|"$PWD"/*) return 0 ;;
+        "$root"|"$root"/*) return 0 ;;
     esac
     return 1
 }

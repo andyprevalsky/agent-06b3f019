@@ -7,6 +7,7 @@ import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
 import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
 import { testCodexWsServerOverlayUsesLocalSource } from './codex-code-overlay.case';
+import { testPromptBuilder_sharedContractMentionsOutputRules } from './codex-code-prompt.case';
 import {
   testResolveCodexAuthEnvs_apiKeyFallback,
   testResolveCodexAuthEnvs_cooldownExcludesFundedKey,
@@ -199,34 +200,6 @@ async function waitForCodexOutput(
       });
     }
   );
-}
-
-async function testPromptBuilder_sharedContractMentionsOutputRules() {
-  const { buildCodeAgentSystemPrompt, CODE_AGENT_INSTRUCTIONS_VERSION } =
-    await import('../../providers/codeAgentPrompt');
-
-  const prompt = buildCodeAgentSystemPrompt({
-    githubRepoUrl: 'https://github.com/acme/widgets.git',
-    workDir: '/home/user/workspace',
-  });
-
-  assert(prompt.includes(CODE_AGENT_INSTRUCTIONS_VERSION), 'Prompt version missing');
-  assert(prompt.includes('/home/user/attachments'), 'Attachments directory missing');
-  assert(prompt.includes('/home/user/output'), 'Output directory missing');
-  assert(
-    prompt.includes('Files outside this directory are not returned to the user'),
-    'Output directory return contract missing'
-  );
-  assert(
-    prompt.includes('verify each requested artifact exists in /home/user/output'),
-    'Output artifact verification rule missing'
-  );
-  assert(prompt.includes('Do not return the original attachment path'), 'Transform rule missing');
-  assert(
-    prompt.includes('Do not launch a separate claude/Claude Code CLI'),
-    'Nested Claude CLI guard missing'
-  );
-  assert(prompt.includes('/home/user/workspace'), 'Repo workDir missing');
 }
 
 async function testTemplate_pinsCodexCliForGpt56() {
