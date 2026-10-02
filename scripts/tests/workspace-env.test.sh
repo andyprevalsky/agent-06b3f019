@@ -433,85 +433,90 @@ expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$TMP_ROOT/boot-id-export
   || { echo "FAIL: a ROSE_CLOUD_BOOT_ID .cloud-env from another boot kept its name" >&2; exit 1; }
 echo "PASS: a ROSE_CLOUD_BOOT_ID .cloud-env from another boot is re-keyed"
 
-# ensure-agents-venv.sh must resync an existing venv when requirements.txt
-# changes. The old cloud-build/run.sh probe ("does temporalio import?") kept a
-# browser-use 0.11 venv after main pinned >=0.13 and failed agents coverage.
-venv_root="$TMP_ROOT/venv-sync"
-mkdir -p "$venv_root/agents" "$venv_root/bin"
-printf 'browser-use>=0.11\n' >"$venv_root/agents/requirements.txt"
-cat >"$venv_root/bin/base-python" <<'PY'
-#!/usr/bin/env bash
-set -euo pipefail
-[ "$1 $2" = "-m venv" ] || exit 2
-mkdir -p "$3/bin"
-cat >"$3/bin/python" <<'VENV'
-#!/usr/bin/env bash
-case "$1" in
-  -c) exit 0 ;;
-  -m) printf '%s\n' "$*" >>"$VENV_SYNC_CALLS"; [ "${VENV_SYNC_FAIL_PIP:-0}" = 0 ] ;;
-  *) exit 2 ;;
-esac
-VENV
-chmod +x "$3/bin/python"
-PY
-chmod +x "$venv_root/bin/base-python"
-venv_calls="$venv_root/pip-calls"
-: >"$venv_calls"
-run_venv_sync() {
-  AGENTS_VENV_ROOT="$venv_root" AGENTS_VENV_PYTHON="$venv_root/bin/base-python" \
-    VENV_SYNC_CALLS="$venv_calls" bash "$ROOT_DIR/scripts/ensure-agents-venv.sh" >/dev/null
-}
-pip_install_count() { grep -c 'pip install -r' "$venv_calls" || true; }
+# Every agents/venv provisioner reinstalls when requirements.txt is no longer
+# satisfied. Gating on `import temporalio` alone kept browser-use 0.11 in a
+# provisioned Cloud venv after the pin moved to >=0.13.10, and the agents
+# coverage gate failed on the stale release.
+VENV_CHECKER="$ROOT_DIR/scripts/lib/agents_venv_satisfied.py"
+VENV_PYTHON="$ROOT_DIR/agents/venv/bin/python"
+[ -x "$VENV_PYTHON" ] || VENV_PYTHON="$(command -v python3)"
 
-run_venv_sync
-expect_eq "$(pip_install_count)" "1" "missing agents venv is created and installed"
-run_venv_sync
-expect_eq "$(pip_install_count)" "1" "unchanged requirements.txt skips reinstall"
-printf 'browser-use>=0.13.10,<0.14\n' >"$venv_root/agents/requirements.txt"
-run_venv_sync
-expect_eq "$(pip_install_count)" "2" "changed requirements.txt resyncs an importable venv"
-printf 'browser-use>=0.14\n' >"$venv_root/agents/requirements.txt"
-if VENV_SYNC_FAIL_PIP=1 run_venv_sync 2>/dev/null; then
-  echo "FAIL: failed pip install must fail the agents venv preflight" >&2
-  exit 1
-fi
-expect_eq "$(test -e "$venv_root/agents/venv/.requirements.sha256" && echo stamped || echo unstamped)" \
-  "unstamped" "failed pip install leaves the venv unstamped"
-run_venv_sync
-expect_eq "$(pip_install_count)" "4" "venv sync retries after a failed install"
-
-# The base interpreter comes from `asdf where python` when that lookup works and
-# from PATH's python3 otherwise. A failed lookup used to leave "/bin/python3" as
-# the candidate and build the venv on the system interpreter.
-asdf_root="$TMP_ROOT/venv-asdf"
-mkdir -p "$asdf_root/agents" "$asdf_root/bin" "$asdf_root/asdf-python/bin"
-printf 'browser-use>=0.13.10,<0.14\n' >"$asdf_root/agents/requirements.txt"
-printf '3.11\n' >"$asdf_root/agents/.python-version"
-printf '#!/usr/bin/env bash\n[ "${ASDF_PYTHON_ROOT:-}" ] || exit 1\nprintf "%%s\\n" "$ASDF_PYTHON_ROOT"\n' \
-  >"$asdf_root/bin/asdf"
-printf '#!/usr/bin/env bash\necho "$0 $*" >>"$BASE_PYTHON_CALLS"\nexec "%s" "$@"\n' "$venv_root/bin/base-python" \
-  | tee "$asdf_root/bin/python3" >"$asdf_root/asdf-python/bin/python3"
-chmod +x "$asdf_root/bin/asdf" "$asdf_root/bin/python3" "$asdf_root/asdf-python/bin/python3"
-run_asdf_venv_sync() { # run_asdf_venv_sync [asdf python root]
-  rm -rf "$asdf_root/agents/venv"
-  : >"$asdf_root/base-calls"
-  env -u AGENTS_VENV_PYTHON PATH="$asdf_root/bin:$PATH" AGENTS_VENV_ROOT="$asdf_root" \
-    ASDF_PYTHON_ROOT="${1:-}" PIP_NO_INDEX=1 BASE_PYTHON_CALLS="$asdf_root/base-calls" \
-    VENV_SYNC_CALLS="$asdf_root/pip-calls" bash "$ROOT_DIR/scripts/ensure-agents-venv.sh" >/dev/null 2>&1
-}
-run_asdf_venv_sync || { echo "FAIL: failed asdf lookup must fall back to PATH python3" >&2; exit 1; }
-expect_eq "$(cut -d' ' -f1 "$asdf_root/base-calls" | sort -u)" "$asdf_root/bin/python3" \
-  "failed asdf lookup builds the venv with PATH python3"
-run_asdf_venv_sync "$asdf_root/asdf-python" || { echo "FAIL: asdf python must build the venv" >&2; exit 1; }
-expect_eq "$(cut -d' ' -f1 "$asdf_root/base-calls" | sort -u)" "$asdf_root/asdf-python/bin/python3" \
-  "a working asdf lookup selects its python"
-
-for provisioner in scripts/cloud-build.sh scripts/run.sh; do
-  if ! grep -q 'ensure-agents-venv\.sh' "$ROOT_DIR/$provisioner"; then
-    echo "FAIL: $provisioner must provision agents/venv via ensure-agents-venv.sh" >&2
+expect_venv_check() {
+  local expected="$1" label="$2" requirements="$3"
+  printf '%s\n' "$requirements" >"$TMP_ROOT/requirements.txt"
+  local rc=0
+  "$VENV_PYTHON" "$VENV_CHECKER" "$TMP_ROOT/requirements.txt" >"$TMP_ROOT/venv-check.out" 2>&1 || rc=$?
+  if [ "$rc" -ne "$expected" ]; then
+    echo "FAIL: $label (expected rc=$expected, got rc=$rc)" >&2
+    cat "$TMP_ROOT/venv-check.out" >&2
     exit 1
   fi
-  echo "PASS: $provisioner delegates agents venv sync"
+  echo "PASS: $label"
+}
+
+expect_venv_check 0 "venv check: installed requirement within its specifier is satisfied" "pip>=1"
+expect_venv_check 0 "venv check: comments and blank lines are ignored" "# header
+
+pip>=1  # pinned for a reason"
+expect_venv_check 1 "venv check: installed release older than the pin is unsatisfied" "pip>=9999"
+expect_venv_check 1 "venv check: installed release above an upper bound is unsatisfied" "pip<1"
+expect_venv_check 1 "venv check: missing distribution is unsatisfied" "rose-not-a-real-distribution>=1"
+expect_venv_check 0 "venv check: a marker that excludes this interpreter is skipped" \
+  'rose-not-a-real-distribution>=1; python_version < "3"'
+expect_venv_check 0 "venv check: a direct URL requirement is satisfied by the installed distribution" \
+  "pip @ git+https://example.invalid/pip.git@0000000000000000000000000000000000000000"
+expect_venv_check 1 "venv check: pip option lines are never treated as satisfied" "-e ./somewhere"
+
+for venv_provisioner in scripts/cloud-build.sh scripts/run.sh scripts/prepare-deploy-worktree.sh; do
+  if ! grep -q 'scripts/lib/agents_venv_satisfied.py agents/requirements.txt' "$ROOT_DIR/$venv_provisioner"; then
+    echo "FAIL: $venv_provisioner must reinstall agents/venv when requirements.txt is unsatisfied" >&2
+    exit 1
+  fi
 done
+echo "PASS: every agents venv provisioner checks requirements.txt satisfaction"
+
+# run.sh builds a missing venv from asdf's pinned python when the lookup works
+# and from PATH's python3 otherwise. A failed lookup used to leave "/bin/python3"
+# (the system interpreter, 3.12 on Cloud VMs) as the candidate.
+run_venv_block="$TMP_ROOT/run-venv-block.sh"
+awk '/^# ── Pre-flight: ensure agents venv/{on=1} on{print} on&&/^fi$/{exit}' \
+  "$ROOT_DIR/scripts/run.sh" >"$run_venv_block"
+grep -q 'agents_venv_satisfied.py' "$run_venv_block" \
+  || { echo "FAIL: could not extract run.sh's agents venv preflight" >&2; exit 1; }
+asdf_root="$TMP_ROOT/venv-asdf"
+mkdir -p "$asdf_root/agents" "$asdf_root/bin" "$asdf_root/asdf-python/bin"
+printf '3.11\n' >"$asdf_root/agents/.python-version"
+: >"$asdf_root/agents/requirements.txt"
+printf '#!/usr/bin/env bash\n[ -n "${ASDF_PYTHON_ROOT:-}" ] || exit 1\nprintf "%%s\\n" "$ASDF_PYTHON_ROOT"\n' \
+  >"$asdf_root/bin/asdf"
+cat >"$asdf_root/bin/python3" <<'PY'
+#!/usr/bin/env bash
+printf '%s\n' "$0" >>"$BASE_PYTHON_CALLS"
+case "$1" in
+  --version) echo "Python 3.11.0" ;;
+  -m)
+    [ "$2" = venv ] || exit 2
+    mkdir -p "$3/bin"
+    printf 'PATH="%s/bin:$PATH"\n' "$(cd "$3" && pwd)" >"$3/bin/activate"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$3/bin/pip"
+    chmod +x "$3/bin/pip"
+    ;;
+  *) exit 2 ;;
+esac
+PY
+cp "$asdf_root/bin/python3" "$asdf_root/asdf-python/bin/python3"
+chmod +x "$asdf_root/bin/asdf" "$asdf_root/bin/python3" "$asdf_root/asdf-python/bin/python3"
+run_venv_preflight() { # run_venv_preflight [asdf python root]
+  rm -rf "$asdf_root/agents/venv"
+  : >"$asdf_root/base-calls"
+  (cd "$asdf_root" && PATH="$asdf_root/bin:$PATH" ASDF_PYTHON_ROOT="${1:-}" \
+    BASE_PYTHON_CALLS="$asdf_root/base-calls" bash "$run_venv_block" >/dev/null 2>&1)
+}
+run_venv_preflight || { echo "FAIL: run.sh venv preflight failed without asdf" >&2; exit 1; }
+expect_eq "$(sort -u "$asdf_root/base-calls")" "$asdf_root/bin/python3" \
+  "a failed asdf lookup builds the venv with PATH python3"
+run_venv_preflight "$asdf_root/asdf-python" || { echo "FAIL: run.sh venv preflight failed with asdf" >&2; exit 1; }
+expect_eq "$(sort -u "$asdf_root/base-calls")" "$asdf_root/asdf-python/bin/python3" \
+  "a working asdf lookup selects its python"
 
 echo "All workspace env tests passed."

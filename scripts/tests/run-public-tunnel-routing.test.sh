@@ -25,6 +25,9 @@
 #   case 6 — edge 000 then 502            → routing (recovers within the window)
 #   case 7 — run.sh actually recycles a dead tunnel and backs off
 #   case 8 — a missing ngrok authtoken is reported, not a bare exit
+#   case 9 — a reserved ngrok domain held by another session falls back
+#   case 10 — run-scoped ngrok fallback domains are bound, never reserved
+#   case 11 — a dropped fallback tunnel does not take the shared stack down
 #   case 12 — a record published after the host resolver cached NXDOMAIN routes
 #   case 13 — the public smoke certifies what a cloud browser sees
 set -euo pipefail
@@ -262,65 +265,6 @@ printf '%s\n' "$out" | grep -qx 'url=https://rose-held.ngrok.app' \
   || fail "case 9d: a healthy ngrok tunnel must not try fallbacks: $(tr '\n' ' ' < "$TMP/ctx/calls")"
 echo "PASS: a healthy reserved ngrok domain is used without fallback"
 
-# --- case 10: the ngrok fallback reserves one domain per worktree, not per run ---
-# RCA cement (2026-10-01). Isolated benchmark runs rename the workspace to
-# "<worktree>-bench-<run id>", and the fallback derived its reserved domain from
-# that name: 85 one-off rose-<worktree>-bench-<run id>-bench domains filled the
-# ngrok account roster (101 domains; nothing new reservable since 2026-09-01).
-{
-  awk '/^dns_label_from_workspace\(\) \{$/,/^\}$/' "$RUN_SH"
-  awk '/^start_ngrok_ephemeral_tunnel\(\) \{$/,/^\}$/' "$RUN_SH"
-} > "$TMP/ngrok_fallback.sh"
-cat > "$TMP/bin/ngrok" <<'STUB'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$STUB_NGROK_ARGS"
-domain=""
-while [ "$#" -gt 0 ]; do
-  [ "$1" = "--domain" ] && domain="$2"
-  shift
-done
-sleep 1
-printf '{"url":"https://%s"}\n' "${domain:-stub.ngrok-free.dev}"
-exec sleep 30
-STUB
-chmod +x "$TMP/bin/ngrok"
-
-fallback_domain_for() { # fallback_domain_for <workspace name>
-  rm -f "$TMP/ctx/ngrok-args" "$TMP/ctx/reserved"
-  PATH="$TMP/bin:$PATH" STUB_NGROK_ARGS="$TMP/ctx/ngrok-args" \
-    CONDUCTOR_WORKSPACE_NAME="$1" NGROK_AUTHTOKEN=stub NGROK_API_KEY=stub_key \
-    RUN_CONTEXT_DIR="$TMP/ctx" ROOT_DIR="$ROOT_DIR" FN_FILE="$TMP/ngrok_fallback.sh" \
-    bash -c '
-      set -euo pipefail
-      source "$ROOT_DIR/scripts/lib/ngrok-tunnel.sh"
-      source "$FN_FILE"
-      FRONTEND_PORT=3002
-      ALLOWED_ORIGINS="http://localhost:3002"
-      PIDS=(); NAMES=()
-      ensure_ngrok_domain_reserved() { printf "%s\n" "$1" >> "$RUN_CONTEXT_DIR/reserved"; }
-      cloudflare_tunnel_edge_is_routing() { return 0; }
-      # run.sh only calls this in a conditional, which suspends errexit for
-      # its URL poll; an unconditional call dies on the first empty poll.
-      start_ngrok_ephemeral_tunnel >&2 || exit 1
-      kill "$NGROK_PID" 2>/dev/null || true
-      echo "$PUBLIC_BASE_URL"
-    ' 2>"$TMP/ngrok_fallback.err"
-}
-
-out="$(fallback_domain_for cloud-44cb5599-bench-1788291482-530832-87704)" \
-  || fail "case 10: fallback tunnel failed to start ($(cat "$TMP/ngrok_fallback.err"); log: $(cat "$TMP/ctx/ngrok-fallback.log" 2>/dev/null))"
-[ "$out" = "https://rose-cloud-44cb5599-bench.ngrok.app" ] \
-  || fail "case 10: isolated run must bind the worktree fallback domain, got $out"
-[ "$(cat "$TMP/ctx/reserved")" = "rose-cloud-44cb5599-bench.ngrok.app" ] \
-  || fail "case 10: isolated run reserved a per-run domain: $(cat "$TMP/ctx/reserved")"
-grep -q -- '--domain rose-cloud-44cb5599-bench.ngrok.app' "$TMP/ctx/ngrok-args" \
-  || fail "case 10: ngrok was not bound to the worktree fallback domain: $(cat "$TMP/ctx/ngrok-args")"
-out="$(fallback_domain_for managua-v1)" \
-  || fail "case 10: plain worktree fallback failed ($(cat "$TMP/ngrok_fallback.err"))"
-[ "$out" = "https://rose-managua-v1-bench.ngrok.app" ] \
-  || fail "case 10: plain worktree fallback domain changed, got $out"
-echo "PASS: the ngrok fallback reuses one per-worktree domain across isolated runs"
-
 # --- case 11: a dropped fallback tunnel does not take the shared stack down ---
 # RCA cement (2026-10-01). After case 9's fallback, /deploy's Step 5 stack was
 # fronted by localtunnel. The client exited 1 two minutes in, and the monitor
@@ -508,5 +452,75 @@ fi
 grep -q 'not the app' "$TMP/smoke/out" \
   || fail "case 13c: the failure must say the page is not the app: $(cat "$TMP/smoke/out")"
 echo "PASS: a 200 interstitial page fails the smoke"
+
+# --- case 10: run-scoped ngrok fallback domains are bound, never reserved ----
+# Every isolated benchmark run has a unique "<worktree>-bench-<run id>" name.
+# Reserving its fallback domain left one permanent reservation per run until the
+# account's reserved-domain cap was full.
+awk '/^dns_label_from_workspace\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/ngrok_fallback.sh"
+awk '/^ensure_ngrok_domain_reserved\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/ngrok_fallback.sh"
+awk '/^start_ngrok_ephemeral_tunnel\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/ngrok_fallback.sh"
+for fn in dns_label_from_workspace ensure_ngrok_domain_reserved start_ngrok_ephemeral_tunnel; do
+  grep -q "^$fn() {" "$TMP/ngrok_fallback.sh" || fail "case 10: could not extract $fn from run.sh"
+done
+mkdir -p "$TMP/fake-ngrok-bin"
+cat > "$TMP/fake-ngrok-bin/ngrok" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NGROK_CALLS"
+case "$1" in
+  config) exit 0 ;;
+  api)
+    case "$3" in
+      list) printf '%s\n' '{"next_page_uri": null, "reserved_domains": []}' ;;
+      create) printf '%s\n' '{"id": "rd_created"}' ;;
+    esac
+    exit 0
+    ;;
+  http)
+    domain=""
+    while [ "$#" -gt 0 ]; do
+      [ "$1" = "--domain" ] && domain="$2"
+      shift
+    done
+    printf '{"url":"https://%s"}\n' "${domain:-free.ngrok-free.dev}"
+    exec sleep 30
+    ;;
+esac
+STUB
+chmod +x "$TMP/fake-ngrok-bin/ngrok"
+run_ngrok_fallback() { # run_ngrok_fallback <CONDUCTOR_WORKSPACE_NAME>
+  : > "$TMP/ngrok-calls"
+  NGROK_CALLS="$TMP/ngrok-calls" PATH="$TMP/fake-ngrok-bin:$PATH" \
+    CONDUCTOR_WORKSPACE_NAME="$1" NGROK_API_KEY=test-api-key NGROK_AUTHTOKEN=test-token \
+    RUN_CONTEXT_DIR="$TMP/ngrok-run" FRONTEND_PORT=3002 \
+    bash -c "
+      PIDS=(); NAMES=()
+      public_tunnel_publish_environment() { PUBLIC_BASE_URL=\"\$1\"; }
+      cloudflare_tunnel_edge_is_routing() { return 0; }
+      source '$TMP/ngrok_fallback.sh'
+      start_ngrok_ephemeral_tunnel
+      rc=\$?
+      kill \"\$NGROK_PID\" 2>/dev/null
+      exit \$rc
+    " > "$TMP/ngrok-fallback.out" 2>&1
+}
+
+run_ngrok_fallback krakow-bench-1790879218-96570-58551 \
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: run-scoped ngrok fallback did not publish a tunnel"; }
+grep -qx 'http 3002 --domain rose-krakow-bench-1790879218-96570-58551-bench.ngrok.app --log stdout --log-format json --log-level info' "$TMP/ngrok-calls" \
+  || { cat "$TMP/ngrok-calls" >&2; fail "case 10: run-scoped fallback must still bind its own named domain"; }
+if grep -q '^api reserved-domains' "$TMP/ngrok-calls"; then
+  cat "$TMP/ngrok-calls" >&2
+  fail "case 10: a run-scoped fallback domain must never be listed or reserved"
+fi
+echo "PASS: a run-scoped ngrok fallback binds its own domain without reserving it"
+
+run_ngrok_fallback krakow \
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: per-worktree ngrok fallback did not publish a tunnel"; }
+grep -qx 'api reserved-domains create --domain rose-krakow-bench.ngrok.app --description Conductor workspace krakow public frontend' "$TMP/ngrok-calls" \
+  || { cat "$TMP/ngrok-calls" >&2; fail "case 10: the per-worktree fallback domain must still be reserved"; }
+grep -qx 'http 3002 --domain rose-krakow-bench.ngrok.app --log stdout --log-format json --log-level info' "$TMP/ngrok-calls" \
+  || { cat "$TMP/ngrok-calls" >&2; fail "case 10: per-worktree fallback must bind its reserved domain"; }
+echo "PASS: the per-worktree ngrok fallback domain is still reserved and bound"
 
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

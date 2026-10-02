@@ -1153,4 +1153,8 @@ async def run_all_tests():
         "ceremony_capable_actions_arm_the_live_target_before_running",
         test_ceremony_capable_actions_arm_the_live_target_before_running,
     )
+    await runner.record_async(
+        "passkey_auth_reload_skips_foreign_host_and_same_href",
+        test_passkey_auth_reload_skips_foreign_host_and_same_href,
+    )
     return runner.all_passed

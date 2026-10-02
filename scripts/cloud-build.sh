@@ -144,7 +144,19 @@ trap 'rm -f "$JS_LOG" "$PY_LOG"' EXIT
 ) >"$JS_LOG" 2>&1 &
 JS_PID=$!
 
-bash scripts/ensure-agents-venv.sh >"$PY_LOG" 2>&1 &
+(
+    # Snapshot VMs reuse an old venv; reinstall whenever an installed release no
+    # longer satisfies requirements.txt so pin bumps on main are applied.
+    if [ ! -f agents/venv/bin/activate ] \
+        || ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
+        echo "🐍 Setting up agents venv..."
+        PYTHON_BIN="$(command -v python3)"
+        [ -f agents/venv/bin/activate ] || (cd agents && "$PYTHON_BIN" -m venv venv)
+        (cd agents && . venv/bin/activate && pip install -q -r requirements.txt)
+    else
+        echo "✅ agents venv already provisioned"
+    fi
+) >"$PY_LOG" 2>&1 &
 PY_PID=$!
 
 set +e

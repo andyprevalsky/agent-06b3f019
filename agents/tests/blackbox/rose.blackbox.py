@@ -7401,6 +7401,10 @@ async def run_all_tests():
         test_rose_client_preserves_native_tools_for_waterfall,
     )
 
+    r.record(
+        "anthropic_body_omits_effort_for_haiku",
+        test_build_anthropic_body_omits_effort_for_haiku,
+    )
     teardown_mock()
     return r.summary()
 

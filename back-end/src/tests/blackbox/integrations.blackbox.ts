@@ -90,6 +90,7 @@ import {
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
+import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
 import { generateSupabaseSession } from '../../providers/sessionTokens';
 config();
 
@@ -718,6 +719,12 @@ async function testAnthropicApiKeyCooldown_markThenOnCooldown() {
     );
   } finally {
     await restoreAnthropicApiKeyCooldown(previous);
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'anthropic',
+      onCooldown: cooldownIsLive(previous),
+    });
   }
 }
 
@@ -776,6 +783,12 @@ async function testGptApiKeyCooldown_markThenOnCooldown() {
     // Resets only this process's cache; the backend under test keeps the funded GPT key cooled for
     // the full window, so real-credential smokes on a shared backend must run before this case.
     __clearGptApiKeyCooldownCache();
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: cooldownIsLive(previous),
+    });
   }
 }
 

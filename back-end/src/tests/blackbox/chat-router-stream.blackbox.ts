@@ -16,7 +16,8 @@
  * July 19 SMS already settled the class: empty / reasoning-only / unparseable
  * streams regenerate in place. An immediate apology or FAILED is giving up on
  * the first miss. Chat router, generator, and speculative commit must use the
- * same regenerate contract. The 3s per-attempt bound must not change.
+ * same regenerate contract — deadline misses included (prod agent e8f2279b,
+ * 2026-10-01; the end-to-end replay lives in chat-router-failover.blackbox.ts).
  *
  * No live server required.
  */
@@ -226,7 +227,11 @@ async function testExhaustedMissesStayTypedAndDoNotFailAgent(): Promise<void> {
     }),
     (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'deadline'
   );
-  assert.equal(deadlineAttempts, 1, 'deadline misses must not consume a second 3s bound');
+  assert.equal(
+    deadlineAttempts,
+    MAX_CHAT_STRUCTURED_ATTEMPTS,
+    'deadline misses regenerate like every other miss before any notice'
+  );
 
   const events: string[] = [];
   await recoverChatHandlerFailure({
@@ -292,11 +297,11 @@ function testUsageAccumulatesAcrossAttempts(): void {
   assert.equal(usage.cache_read_input_tokens, 2);
 }
 
-function testPerAttemptBoundUnchanged(): void {
+function testPerAttemptBoundIsProfiled(): void {
   assert.equal(
     DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
-    3_000,
-    'retry must not raise the per-attempt 3s router bound'
+    15_000,
+    'the router attempt bound is sized from the long-context prod router profile; change it only with a new profile'
   );
   assert.equal(MAX_CHAT_STRUCTURED_ATTEMPTS, 2, 'one regenerate, not an unbounded loop');
 }
@@ -409,23 +414,6 @@ function testCallSitesUseSharedRegenerate(): void {
     /isChatLlmTransientMiss/,
     'speculative commit must not kill the turn on a typed miss'
   );
-  const handler = readFileSync(join(here, '../../providers/chat/chatHandler.ts'), 'utf8');
-  assert.match(
-    handler,
-    /deadlineRouterFallback/,
-    'router deadline must escalate execute/plan turns instead of leaving a null workflow'
-  );
-  const retry = readFileSync(join(here, '../../providers/chat/chatStructuredRetry.ts'), 'utf8');
-  assert.match(
-    retry,
-    /miss\.kind === 'deadline'/,
-    'deadline misses must not start a second 3s router bound'
-  );
-  assert.match(
-    speculation,
-    /EXPLICIT_AGENT_INTENT/,
-    'deadline fallback must match only explicit agent/plan/execute wording'
-  );
   const requireDecision = router.indexOf('requireRouterDecision({ finalized, deadlineExpired })');
   const deadlineClose = router.indexOf('!finalized.decision && deadlineExpired');
   assert.ok(
@@ -451,7 +439,7 @@ async function main(): Promise<void> {
   await testFirstMissRegeneratesInsteadOfApologizing();
   await testExhaustedMissesStayTypedAndDoNotFailAgent();
   await testNonTransientErrorsDoNotRetry();
-  testPerAttemptBoundUnchanged();
+  testPerAttemptBoundIsProfiled();
   testCallSitesUseSharedRegenerate();
   testRetryResetsPerAttemptStreamState();
   testUsageAccumulatesAcrossAttempts();

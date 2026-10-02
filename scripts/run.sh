@@ -576,7 +576,7 @@ kill_stale_same_worktree_benchmark_stack() {
     $BENCHMARK_MODE || return 0
 
     local killed_any=false
-    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http|cloudflared tunnel'
+    local pattern="$RUN_STALE_BENCHMARK_STACK_PATTERN"
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
         [ "$pid" = "$$" ] && continue
         is_current_process_family "$pid" && continue
@@ -659,7 +659,7 @@ if $IS_CLOUD; then
     # Without this guard, a Step 5 semantic run.sh murders in-flight smoke
     # workers that kill_stale_same_worktree_benchmark_stack just preserved.
     if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
-        for pattern in "worker\.py" "tsx.*server\.ts" "npx vite" "run_local_worker"; do
+        for pattern in "${RUN_CLOUD_SERVICE_KILL_PATTERNS[@]}"; do
             for pid in $(pgrep -f "$pattern" 2>/dev/null); do
                 if pid_belongs_to_active_isolated_benchmark "$pid"; then
                     echo "⏭️  Preserving ACTIVE isolated benchmark $pattern (PID $pid)"
@@ -1263,7 +1263,26 @@ fi
 bash "$SCRIPT_DIR/ensure-workspace-dependencies.sh" "${JS_SVC_DIRS[@]}"
 
 # ── Pre-flight: ensure agents venv exists with deps installed ──
-bash "$SCRIPT_DIR/ensure-agents-venv.sh"
+if [ ! -f agents/venv/bin/activate ] \
+    || ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
+    echo "🐍 Setting up agents virtualenv..."
+    PYTHON_VERSION=$(cat agents/.python-version 2>/dev/null || echo "3.11")
+    # Try asdf python first, then PATH's python3. A failed lookup must not leave
+    # "/bin/python3" (the system interpreter) as the candidate.
+    PYTHON_BIN=""
+    if ASDF_PYTHON_ROOT="$(asdf where python "$PYTHON_VERSION" 2>/dev/null)" && [ -n "$ASDF_PYTHON_ROOT" ]; then
+        PYTHON_BIN="$ASDF_PYTHON_ROOT/bin/python3"
+    fi
+    if [ ! -x "$PYTHON_BIN" ]; then
+        PYTHON_BIN=$(command -v python3)
+    fi
+    echo "   Using: $PYTHON_BIN ($($PYTHON_BIN --version 2>&1))"
+    if [ ! -f agents/venv/bin/activate ]; then
+        (cd agents && "$PYTHON_BIN" -m venv venv)
+    fi
+    (cd agents && source venv/bin/activate && pip install -r requirements.txt)
+    echo "🐍 Agents venv ready"
+fi
 
 # Pre-flight: handle processes on our ports from this worktree.
 # Cloud instances already handled above (aggressive cleanup). This block
@@ -1684,13 +1703,16 @@ start_ngrok_ephemeral_tunnel() {
     # relies on exactly that. Gating the domain on the API key would silently
     # drop every fallback back onto the shared free endpoint, which is the
     # collision this is here to prevent.
-    # Isolated runs rename the workspace "<worktree>-bench-<run id>"; deriving
-    # from that reserved a new domain per run and filled the account roster.
+    #
+    # An isolated benchmark run is named "<worktree>-bench-<run id>", so its
+    # fallback domain is unique per run. Reserving it would leave one permanent
+    # reservation per run until the account's reserved-domain cap is full and
+    # every new worktree loses its primary domain. Run-scoped names are bound
+    # without a reservation; only the per-worktree name is reserved.
     local fallback_label fallback_domain
-    fallback_label="$(CONDUCTOR_WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME%%-bench-*}" \
-        dns_label_from_workspace)" || return 1
+    fallback_label="$(dns_label_from_workspace)" || return 1
     fallback_domain="rose-${fallback_label}-bench.${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
-    if [ -n "${NGROK_API_KEY:-}" ]; then
+    if [ -n "${NGROK_API_KEY:-}" ] && [[ "${CONDUCTOR_WORKSPACE_NAME:-}" != *-bench-* ]]; then
         ensure_ngrok_domain_reserved "$fallback_domain" soft ||
             echo "   Proceeding without pre-reservation of $fallback_domain."
     fi
