@@ -19519,8 +19519,9 @@ class _FakeDomSession:
 class _FakeDomService:
     last_instance = None
 
-    def __init__(self, cdp_url):
+    def __init__(self, cdp_url, downloads_path="/tmp/downloads"):
         self.cdp_url = cdp_url
+        self.downloads_path = downloads_path
         self.session = _FakeDomSession()
         self._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(side_effect=RuntimeError("skip logo")))
         self.selector_map = {}
