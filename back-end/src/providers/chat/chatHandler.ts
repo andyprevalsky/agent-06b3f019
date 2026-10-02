@@ -477,6 +477,7 @@ async function startTemporalWorkflowForChat(
   if (loadedAgent.verifier === null) {
     throw new Error(`Agent ${agentId} has no verifier`);
   }
+  const verifier = loadedAgent.verifier;
   if (loadedAgent.temporalWorkflowId !== null || loadedAgent.status !== 'ACTIVE') return false;
 
   // A follow-up after a finished run must not inherit that run's derived
@@ -512,7 +513,7 @@ async function startTemporalWorkflowForChat(
         goal: persistedGoal,
         model: agent.model,
         reasoningMaxTokens: agent.reasoningMaxTokens,
-        verifier: { type: agent.verifier.type },
+        verifier: { type: verifier.type },
         priceLimitCents: agent.priceLimitCents,
         fastModeCacheEnabled: agent.fastModeCacheEnabled,
         worldModelMode: agent.worldModelMode,
