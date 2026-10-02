@@ -2515,6 +2515,11 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     assert production.name not in {task.name for task in suite_tasks()}
 
     assert [task.name for task in get_tasks_by_tag("agentcard-lifecycle-sandbox")] == [
+        # Hosted Rose Shop purchases: the same sandbox settlement behind a sign-in gate.
+        "browser-auth-guest-purchase",
+        "browser-auth-signup-purchase",
+        "browser-auth-signup-purchase-no-subscription",
+        "browser-auth-session-expires-at-checkout",
         "agent-payment-test-shop",
         "agent-payment-new-user-journey",
         "agent-payment-setup-resume",
