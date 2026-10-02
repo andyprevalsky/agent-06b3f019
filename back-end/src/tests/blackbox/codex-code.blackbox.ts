@@ -34,6 +34,7 @@ import {
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
 import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
+import { assert, assertStatus, request, runTest, type TestResult } from './codex-sandbox.support';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -42,70 +43,8 @@ const DEV_USER_ID = process.env.CODEX_BLACKBOX_USER_ID || '1f85ff25-6e29-4c1b-87
 
 const ErrorResponse = z.object({ error: z.string() });
 
-interface TestResult {
-  name: string;
-  passed: boolean;
-  skipped?: boolean;
-  skipReason?: string;
-  error?: string;
-  duration: number;
-}
-
-function assert(condition: boolean, message: string): void {
-  if (!condition) throw new Error(message);
-}
-
-function assertStatus(actual: number, expected: number, data: unknown): void {
-  if (actual !== expected) {
-    throw new Error(
-      `Expected status ${expected}, got ${actual}: ${JSON.stringify(data).substring(0, 400)}`
-    );
-  }
-}
-
-async function request(
-  url: string,
-  options: RequestInit = {}
-): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
-  const contentType = response.headers.get('content-type') || '';
-  const data = contentType.includes('application/json')
-    ? await response.json()
-    : await response.text();
-  return { status: response.status, data, headers: response.headers };
-}
-
 function apiKeyHeaders(): Record<string, string> {
   return { 'X-API-Key': API_KEY };
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    if (error instanceof CredentialExhaustionSkip) {
-      // Not a failure: the third-party account is out of credits/quota. Report
-      // as a loud SKIP so the deploy gate is not blocked by external funding.
-      return {
-        name,
-        passed: true,
-        skipped: true,
-        skipReason: error.message,
-        duration: Date.now() - start,
-      };
-    }
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
 }
 
 async function testCreate_noAuth() {
