@@ -287,7 +287,9 @@ stale_signal_log="$TMP_ROOT/stale-signals.log"
 # A descendant may exit after TERM while a resistant sibling holds the grace
 # period open. Deterministically model PID reuse at that boundary: the initial
 # snapshot and first identity read name the owned process, then every later read
-# reports a different birth time. Escalation must not SIGKILL the replacement.
+# reports a different birth identity. Escalation must not SIGKILL the
+# replacement. The identity primitives are stubbed (not ps) so the model holds
+# on Linux, where births come from /proc, and on macOS, where they come from ps.
 identity_signal_log="$TMP_ROOT/identity-signals.log"
 identity_ps_count="$TMP_ROOT/identity-ps-count"
 printf '0\n' > "$identity_ps_count"
@@ -295,23 +297,23 @@ printf '0\n' > "$identity_ps_count"
   jobs() {
     printf '4242\n'
   }
-  ps() {
-    if [ "${1:-}" = "-axo" ]; then
-      printf '4242 1 Mon Jan  1 00:00:00 2001\n'
-      return
-    fi
+  cloudbench_process_birth_table() {
+    printf '4242 1 birth-test:owned\n'
+  }
+  identity_read() {
     count="$(cat "$identity_ps_count")"
     count=$((count + 1))
     printf '%s\n' "$count" > "$identity_ps_count"
     if [ "$count" -eq 1 ]; then
-      printf 'Mon Jan  1 00:00:00 2001'
+      printf 'birth-test:owned\n'
     else
-      printf 'Tue Jan  2 00:00:00 2001'
+      printf 'birth-test:replacement\n'
     fi
-    case " $* " in
-      *' stat='*) printf ' S\n' ;;
-      *) printf '\n' ;;
-    esac
+  }
+  cloudbench_pid_start_time() { identity_read; }
+  cloudbench_pid_start_time_like() { identity_read; }
+  cloudbench_pid_observation_like() {
+    printf '%s\tS\n' "$(identity_read)"
   }
   kill() {
     printf '%s\n' "$*" >> "$identity_signal_log"
