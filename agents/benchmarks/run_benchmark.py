@@ -13916,24 +13916,74 @@ def enforce_cache_ratchets(task_results: list[TaskResult]) -> None:
     raise SystemExit(1)
 
 
+# A waiting ticket refreshes its mtime every poll. One that stops refreshing
+# belongs to a dead or wedged waiter (or a recycled PID) and must not block the
+# queue forever.
+_PAYMENT_LOCK_POLL_SECONDS = 0.2
+_PAYMENT_LOCK_TICKET_STALE_SECONDS = 30.0
+
+
+def _payment_lock_ticket_is_live(ticket: Path) -> bool:
+    try:
+        pid = int(ticket.name.split("-")[1])
+        age = time.time() - ticket.stat().st_mtime
+    except (IndexError, ValueError, OSError):
+        return False
+    if age > _PAYMENT_LOCK_TICKET_STALE_SECONDS:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _payment_lock_queue_head(queue_dir: Path) -> Optional[str]:
+    """Oldest live waiter's ticket name; prunes abandoned tickets on the way."""
+    for ticket in sorted(queue_dir.iterdir(), key=lambda path: path.name):
+        if _payment_lock_ticket_is_live(ticket):
+            return ticket.name
+        ticket.unlink(missing_ok=True)
+    return None
+
+
 @asynccontextmanager
 async def _sandbox_agentcard_payment_lock():
-    """Serialize payment fixtures across benchmark processes on one host."""
+    """Serialize payment fixtures across benchmark processes on one host.
+
+    Waiters queue FIFO by ticket and only the oldest live waiter may take the
+    flock. A bare non-blocking poll let a process running payment tasks back to
+    back re-acquire the instant it released, starving other worktrees for hours.
+    """
     lock_path = Path(
         os.environ.get("BENCHMARK_AGENTCARD_LOCK_PATH")
         or Path(tempfile.gettempdir()) / "rose-agentcard-sandbox-benchmark.lock"
     )
+    queue_dir = lock_path.parent / f"{lock_path.name}.queue"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    ticket = queue_dir / f"{time.time_ns():020d}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    ticket.touch()
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     acquired = False
     try:
         while not acquired:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-            except BlockingIOError:
-                await asyncio.sleep(1)
+            ticket.touch()
+            if _payment_lock_queue_head(queue_dir) == ticket.name:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    # Leave the queue on acquisition so the next waiter becomes
+                    # head and a re-entry from this process queues behind it.
+                    ticket.unlink(missing_ok=True)
+                    continue
+                except BlockingIOError:
+                    pass
+            await asyncio.sleep(_PAYMENT_LOCK_POLL_SECONDS)
         yield
     finally:
+        ticket.unlink(missing_ok=True)
         if acquired:
             fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)

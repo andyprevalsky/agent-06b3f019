@@ -1,9 +1,10 @@
-from argparse import Namespace
 import asyncio
 import multiprocessing
 import os
-from pathlib import Path
 import tempfile
+import time
+from argparse import Namespace
+from pathlib import Path
 
 import benchmarks.local as local_runner
 import benchmarks.run_benchmark as rb
@@ -69,6 +70,64 @@ def test_sandbox_payment_lock_serializes_separate_benchmark_processes(monkeypatc
                 release_tx.send(True)
                 holder.terminate()
                 holder.join(timeout=5)
+
+
+def test_sandbox_payment_lock_hands_off_to_older_waiter_before_reentry(monkeypatch, tmp_path):
+    # A batch runs payment tasks back to back. Releasing and re-entering must not
+    # jump ahead of a waiter that queued while the first task held the lock.
+    monkeypatch.setenv("BENCHMARK_AGENTCARD_LOCK_PATH", str(tmp_path / "payment.lock"))
+    order = []
+
+    async def scenario():
+        first_acquired = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def batch():
+            async with rb._sandbox_agentcard_payment_lock():
+                first_acquired.set()
+                await release_first.wait()
+            async with rb._sandbox_agentcard_payment_lock():
+                order.append("batch-reentry")
+
+        async def other_worktree():
+            await first_acquired.wait()
+            async with rb._sandbox_agentcard_payment_lock():
+                order.append("older-waiter")
+                await asyncio.sleep(0.05)
+
+        tasks = [asyncio.create_task(batch()), asyncio.create_task(other_worktree())]
+        await first_acquired.wait()
+        await asyncio.sleep(0.5)
+        release_first.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+
+    asyncio.run(scenario())
+    assert order == ["older-waiter", "batch-reentry"]
+
+
+def test_sandbox_payment_lock_skips_abandoned_queue_tickets(monkeypatch, tmp_path):
+    lock_path = tmp_path / "payment.lock"
+    monkeypatch.setenv("BENCHMARK_AGENTCARD_LOCK_PATH", str(lock_path))
+    queue_dir = tmp_path / "payment.lock.queue"
+    queue_dir.mkdir()
+    dead = multiprocessing.get_context("spawn").Process(target=int)
+    dead.start()
+    dead.join(timeout=10)
+    # Older than any new ticket: a crashed waiter, and a live PID whose ticket
+    # stopped refreshing (wedged waiter or recycled PID).
+    crashed = queue_dir / f"{1:020d}-{dead.pid}-crashed"
+    wedged = queue_dir / f"{2:020d}-{os.getpid()}-wedged"
+    crashed.touch()
+    wedged.touch()
+    stale = time.time() - rb._PAYMENT_LOCK_TICKET_STALE_SECONDS - 5
+    os.utime(wedged, (stale, stale))
+
+    async def acquire():
+        async with rb._sandbox_agentcard_payment_lock():
+            return True
+
+    assert asyncio.run(asyncio.wait_for(acquire(), timeout=5))
+    assert list(queue_dir.iterdir()) == []
 
 
 def _args(*, task=None, suite=None, exclude_task=None):

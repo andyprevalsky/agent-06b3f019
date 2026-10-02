@@ -330,6 +330,27 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     assert "18 passed" in result.stdout
 
 
+def test_sandbox_payment_lock_fairness_is_in_permanent_gate():
+    """Payment benches share one host-wide AgentCard sandbox lock.
+
+    Back-to-back payment tasks once re-acquired it the instant they released,
+    queueing other worktrees' payment smoke for hours.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    behavioral_suite = repo_root / "agents/benchmarks/run_benchmark_task_selection_test.py"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(behavioral_suite), "-k", "sandbox_payment_lock"],
+        cwd=repo_root / "agents",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "3 passed" in result.stdout
+
+
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
     repo_root = Path(__file__).resolve().parents[3]
     patch_script = repo_root / "scripts" / "create-worktree-patch.sh"
@@ -18476,6 +18497,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_dependency_rebuild_permanent_gate",
         test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate,
+    )
+    r.record(
+        "sandbox_payment_lock_fairness_permanent_gate",
+        test_sandbox_payment_lock_fairness_is_in_permanent_gate,
     )
     r.record(
         "cloudbench_patch_includes_untracked_files",
