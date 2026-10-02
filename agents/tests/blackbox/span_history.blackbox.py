@@ -458,6 +458,7 @@ async def run_all_tests():
     print("span-history blackbox tests:")
     r = BlackboxResult()
     r.record("record_and_summarize", test_record_and_summarize_span_history)
+    r.record("recent_window_follows_timestamps", test_recent_window_follows_timestamps_not_file_order)
     r.record("default_history_rollover", test_default_span_history_rolls_over_before_git_blob_limit)
     r.record("batch_history_rollover", test_one_batch_cannot_overfill_a_span_history_segment)
     r.record("latest_segment_append", test_span_history_appends_to_latest_existing_segment)
