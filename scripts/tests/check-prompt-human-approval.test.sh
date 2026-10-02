@@ -16,6 +16,8 @@ new_repo() {
     git init -q -b main
     git config user.email "test@example.com"
     git config user.name "Prompt Guard Test"
+    git config commit.gpgsign false
+    git config tag.gpgsign false
     echo "base" > README.md
     git add .
     git commit -q -m "base"

@@ -721,10 +721,29 @@ async def execute_dag(
             del task_to_index[completed_future]
 
             try:
-                success = completed_future.result()
+                task_result = completed_future.result()
             except Exception as e:
                 workflow.logger.error(f"[DAG] Task {task_index} raised exception: {e}", exc_info=True)
-                success = False
+                task_result = False
+
+            if isinstance(task_result, dict) and task_result.get("generation_handoff"):
+                workflow.logger.info(
+                    f"[DAG] Task {task_index} interrupted for generation handoff — "
+                    "canceling remaining DAG work"
+                )
+                remaining = list(pending_tasks.values())
+                for pending in remaining:
+                    pending.cancel()
+                if remaining:
+                    await asyncio.gather(*remaining, return_exceptions=True)
+                return {
+                    "status": "generation_handoff",
+                    "handoff_task_queue": task_result.get("handoff_task_queue"),
+                    "context": context,
+                    "message": f"Planned task {task_index + 1} interrupted for generation handoff.",
+                }
+
+            success = bool(task_result)
 
             if not success:
                 # Error already posted to context by execute_tool/handle_tool_event
@@ -798,7 +817,7 @@ async def _execute_single_task(
     tool_names: Optional[List[str]] = None,
     param_cache_seed_event: Optional[asyncio.Event] = None,
     param_cache_seed_lock: Optional[asyncio.Lock] = None,
-) -> bool:
+) -> bool | dict[str, Any]:
     """
     Execute a single task from the DAG.
 
@@ -811,7 +830,8 @@ async def _execute_single_task(
     - Emits IN_PROGRESS, calls tool, emits FINISHED
 
     Returns:
-        True if successful, False if failed
+        True if successful, False if failed, or a generation_handoff payload
+        when the tool yielded for cooperative cutover.
     """
     from activities.reasoning import execute_reasoning_activity
 
@@ -1162,6 +1182,21 @@ async def _execute_single_task(
 
             # Execute tool (uses existing flow - posts result to context)
             result = await execute_tool(actual_tool, params, tool_call_id)
+
+            # A cooperative cutover is not task success. Returning True here
+            # marks the node COMPLETED and starts dependents, which then raise
+            # their own approval waits and leave more pending attn_ids.
+            if isinstance(result, dict) and result.get("generation_handoff"):
+                handoff_queue = result.get("handoff_task_queue")
+                if isinstance(handoff_queue, str) and handoff_queue.strip():
+                    return {
+                        "generation_handoff": True,
+                        "handoff_task_queue": handoff_queue.strip(),
+                    }
+                workflow.logger.warning(
+                    f"[DAG] Task {task.index} reported generation_handoff without a queue"
+                )
+                return False
 
             # Check for error status
             # _execute_tool returns {"error": True} on exception, {"success": False} on tool failure
