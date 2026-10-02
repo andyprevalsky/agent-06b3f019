@@ -218,6 +218,32 @@ async function main(): Promise<void> {
       'exceeding the delay budget must fail fast, not sleep'
     );
 
+    // Organization MCP also sends throttles inside an HTTP 200 tools/call result.
+    // This is the shape consumed by GET /api/agentcard/status during setup resume.
+    let structuredThrottleCalls = 0;
+    const structuredThrottleRuntime = new AgentCardOrgRuntime(async (_token, toolName) => {
+      assert.equal(toolName, 'get_onboarding_session');
+      structuredThrottleCalls += 1;
+      if (structuredThrottleCalls === 1) {
+        return {
+          structuredContent: {
+            status: 'error',
+            message:
+              'get_onboarding_session failed: API key rate limit exceeded, please try again later',
+          },
+        };
+      }
+      return { structuredContent: { status: 'completed', cardholder_id: 'cardholder-1' } };
+    });
+    assert.deepEqual(
+      await structuredThrottleRuntime.callTool('get_onboarding_session', {
+        session_id: 'session-1',
+      }),
+      { structuredContent: { status: 'completed', cardholder_id: 'cardholder-1' } },
+      'a structured MCP throttle must retry before onboarding status is returned'
+    );
+    assert.equal(structuredThrottleCalls, 2);
+
     // Sandbox `get_company_wallet` can return HTTP 200 with
     // `{status:"error", message:"…Service temporarily unavailable"}`. That is a
     // provider outage, not a successful wallet read, so retry it the same way

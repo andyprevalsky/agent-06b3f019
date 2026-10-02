@@ -75,6 +75,11 @@ RUNNER_CMD=(node --import tsx src/tests/blackbox/run.ts)
 RUNNER_LOG="$ARTIFACT_DIR/runner.log"
 MANIFEST_PATH="$ARTIFACT_DIR/manifest.json"
 USE_EXISTING_BACKEND="${BLACKBOX_TEST_USE_EXISTING_BACKEND:-${CONTRACT_TEST_USE_EXISTING_BACKEND:-0}}"
+if [[ "$USE_EXISTING_BACKEND" != "1" ]]; then
+  # This script owns both processes, so the share-link contract can use a
+  # local-only key without depending on a production benchmark secret.
+  export BENCHMARK_SHARE_SECRET="${BENCHMARK_SHARE_SECRET:-blackbox-local-benchmark-share-secret}"
+fi
 
 # --list only needs filesystem discovery; skip backend boot for speed.
 for arg in "$@"; do
