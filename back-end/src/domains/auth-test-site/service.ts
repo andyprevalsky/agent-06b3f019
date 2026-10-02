@@ -6,7 +6,7 @@ import { createLogger } from '../../providers/logger';
 import { primitiveDomain } from '../../providers/primitive';
 import * as repo from './repo';
 import * as sites from './repoSites';
-import { AUTH_TEST_SITE_BASE_PATH, AUTH_TEST_SITE_REALM_SUFFIX, fixtureApiKey } from './config';
+import { AUTH_TEST_SITE_BASE_PATH, AUTH_TEST_SITE_REALM_PREFIX, fixtureApiKey } from './config';
 import {
   NEEDS_MINTED_IDENTITY,
   planScenario,
@@ -174,7 +174,7 @@ export async function createAuthTestSite(
   const holderName = trimmedName === '' ? null : trimmedName;
   const nowMs = Date.now();
   const siteId = randomBytes(6).toString('hex');
-  const realm = `rose-shop-${siteId}${AUTH_TEST_SITE_REALM_SUFFIX}`;
+  const realm = `${AUTH_TEST_SITE_REALM_PREFIX}${siteId}`;
   const publicBase = normalizePublicBaseUrl(input.publicBaseUrl);
   const entryUrl = `${publicBase.origin}${publicBase.pathname.replace(/\/+$/, '')}${AUTH_TEST_SITE_BASE_PATH}/${siteId}/?authRealm=${realm}`;
   if (canonicalAuthRealm(entryUrl) !== realm) {

@@ -71,8 +71,8 @@ def _manifest(scenario: str, **overrides) -> dict:
     manifest = {
         "siteId": "abc123",
         "scenario": scenario,
-        "realm": "rose-shop-abc123.com",
-        "entryUrl": "https://rose-x.ngrok.app/api/rose-shop/abc123/?authRealm=rose-shop-abc123.com",
+        "realm": "rose-shop-abc123",
+        "entryUrl": "https://rose-x.ngrok.app/api/rose-shop/abc123/?authRealm=rose-shop-abc123",
         "savedPasswordUsernames": saved,
         "mintedEmail": minted,
         "mintedPhone": "+15555550142" if minted_offered else None,

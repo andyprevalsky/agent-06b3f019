@@ -14,7 +14,12 @@ export function fixtureApiKey(): string {
  * get around rather than as the site's answer.
  */
 export const AUTH_TEST_SITE_BASE_PATH = '/api/rose-shop';
-export const AUTH_TEST_SITE_REALM_SUFFIX = '.com';
+/**
+ * The realm is a bare label, not a hostname. The agent's auth options are
+ * headed with it, and one that read as an address (rose-shop-<id>.test) was
+ * navigated to instead of the page the agent was already on.
+ */
+export const AUTH_TEST_SITE_REALM_PREFIX = 'rose-shop-';
 export const AUTH_TEST_SITE_NAME = 'Rose Shop';
 
 /** Bounds the in-memory site table; the oldest site is evicted past this. */

@@ -64,7 +64,7 @@ test('password_retry seeds three realm-scoped saved passwords, freshest first, t
       new Set(usernames).size === 3 && usernames.every((name) => /^(j|ng)[.a-z]*\./.test(name)),
       `saved logins must be three distinct addresses derived from the user's name: ${usernames}`
     );
-    assert(/^rose-shop-[0-9a-f]{12}\.com$/.test(manifest.realm), `bad realm ${manifest.realm}`);
+    assert(/^rose-shop-[0-9a-f]{12}$/.test(manifest.realm), `bad realm ${manifest.realm}`);
     assert(canonicalAuthRealm(manifest.entryUrl) === manifest.realm, 'entryUrl must carry realm');
     assert(manifest.savedBrowserAuthHidden === false, 'saved browser auth must be visible');
     assert(
@@ -145,6 +145,8 @@ test('nothing the agent can see says the site is a test', async () => {
       });
       assert(created.status === 201, `fixture expected 201, got ${created.status}`);
       const manifest = (await created.json()) as Manifest;
+      // The realm heads the agent's auth options; one that reads as an address gets navigated to.
+      assert(!manifest.realm.includes('.'), `realm reads as a hostname: ${manifest.realm}`);
       const seen = [manifest.realm, manifest.entryUrl.slice(base.length)];
       for (const suffix of [
         '/',

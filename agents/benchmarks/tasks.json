@@ -2787,7 +2787,7 @@
       "auth_test_site": {
         "scenario": "saved_session"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture saves a live site session (cookie bundle) and one working saved password for the user."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture saves a live site session (cookie bundle) and one working saved password for the user."
     },
     "evaluators": [
       {
@@ -2887,7 +2887,7 @@
       "auth_test_site": {
         "scenario": "stale_session"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture saves a session cookie the site no longer honors and one working saved password."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture saves a session cookie the site no longer honors and one working saved password."
     },
     "evaluators": [
       {
@@ -2981,7 +2981,7 @@
       "auth_test_site": {
         "scenario": "passkey"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture enrolls a passkey for the member account (private key stored for the agent's virtual authenticator, public key held by the site) and also saves the account's working password. The sign-in page asks for the email first, then offers the passkey and the password."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture enrolls a passkey for the member account (private key stored for the agent's virtual authenticator, public key held by the site) and also saves the account's working password. The sign-in page asks for the email first, then offers the passkey and the password."
     },
     "evaluators": [
       {
@@ -3069,7 +3069,7 @@
       "auth_test_site": {
         "scenario": "passkey_rejected"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Same fixture as the passkey bench, but the site refuses the (genuine) passkey as removed from the account."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Same fixture as the passkey bench, but the site refuses the (genuine) passkey as removed from the account."
     },
     "evaluators": [
       {
@@ -3164,7 +3164,7 @@
       "auth_test_site": {
         "scenario": "password_retry"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture seeds three saved logins, named for the user. The site decides the working login at sign-in time: whichever two distinct saved logins the agent submits first fail (a stale password, then an unknown account) and the third signs in, so two failures precede success whatever order the agent picks."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture seeds three saved logins, named for the user. The site decides the working login at sign-in time: whichever two distinct saved logins the agent submits first fail (a stale password, then an unknown account) and the third signs in, so two failures precede success whatever order the agent picks."
     },
     "evaluators": [
       {
@@ -3248,7 +3248,7 @@
       "auth_test_site": {
         "scenario": "password_email_2fa"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The saved login is the agent's minted inbox (an account the agent made earlier), so the second-factor code the site emails through Primitive arrives where the agent's one-time-code polling reads it."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The saved login is the agent's minted inbox (an account the agent made earlier), so the second-factor code the site emails through Primitive arrives where the agent's one-time-code polling reads it."
     },
     "evaluators": [
       {
@@ -3333,7 +3333,7 @@
       "auth_test_site": {
         "scenario": "account_locked"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. One saved login. The site answers its password with an account-locked message and withholds sign-in codes for it. The correct end state is one auth_assistance request with no session."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. One saved login. The site answers its password with an account-locked message and withholds sign-in codes for it. The correct end state is one auth_assistance request with no session."
     },
     "evaluators": [
       {
@@ -3420,7 +3420,7 @@
       "auth_test_site": {
         "scenario": "minted_otp"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No credentials are saved, so auth options offer only the user's minted agent identity, which has a passwordless account. The site emails a 6-digit sign-in code through Primitive to the minted inbox."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No credentials are saved, so auth options offer only the user's minted agent identity, which has a passwordless account. The site emails a 6-digit sign-in code through Primitive to the minted inbox."
     },
     "evaluators": [
       {
@@ -3511,7 +3511,7 @@
       "auth_test_site": {
         "scenario": "code_never_arrives"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials; the minted identity has a passwordless account. The site shows its usual 'code is on its way' page but sends nothing. The correct end state is at least one resend, then one auth_assistance request."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials; the minted identity has a passwordless account. The site shows its usual 'code is on its way' page but sends nothing. The correct end state is at least one resend, then one auth_assistance request."
     },
     "evaluators": [
       {
@@ -3595,7 +3595,7 @@
       "auth_test_site": {
         "scenario": "expired_code"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials; the minted identity has a passwordless account. The first sign-in code the site issues is refused as expired; every later code works."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials; the minted identity has a passwordless account. The first sign-in code the site issues is refused as expired; every later code works."
     },
     "evaluators": [
       {
@@ -3699,7 +3699,7 @@
       "auth_test_site": {
         "scenario": "minted_sms_otp"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials. The site account is on the minted identity's AgentPhone number and the site has no password or email sign-in. The site texts a 6-digit code through Surge; the agent's one-time-code polling reads it from AgentPhone."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials. The site account is on the minted identity's AgentPhone number and the site has no password or email sign-in. The site texts a 6-digit code through Surge; the agent's one-time-code polling reads it from AgentPhone."
     },
     "evaluators": [
       {
@@ -3781,7 +3781,7 @@
       "auth_test_site": {
         "scenario": "magic_link"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials; the minted identity has a passwordless account. The site emails a single-use sign-in link (no code) through Primitive to the minted inbox."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials; the minted identity has a passwordless account. The site emails a single-use sign-in link (no code) through Primitive to the minted inbox."
     },
     "evaluators": [
       {
@@ -3863,7 +3863,7 @@
       "auth_test_site": {
         "scenario": "email_otp"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials. The member account's email is the inbox the user connected (Gmail), so the site's emailed code is read through the user's Gmail integration. The minted identity is also offered and has no account here."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials. The member account's email is the inbox the user connected (Gmail), so the site's emailed code is read through the user's Gmail integration. The minted identity is also offered and has no account here."
     },
     "evaluators": [
       {
@@ -3947,7 +3947,7 @@
       "auth_test_site": {
         "scenario": "signup"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials and no site account. Sign-up asks for name, email and password, then emails a verification code through Primitive to the minted inbox."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials and no site account. Sign-up asks for name, email and password, then emails a verification code through Primitive to the minted inbox."
     },
     "evaluators": [
       {
@@ -4030,7 +4030,7 @@
       "auth_test_site": {
         "scenario": "signup_already_registered"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials. The minted email already has a passwordless account, so sign-up answers 'already exists'. The site emails sign-in codes to the minted inbox."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials. The minted email already has a passwordless account, so sign-up answers 'already exists'. The site emails sign-in codes to the minted inbox."
     },
     "evaluators": [
       {
@@ -4122,7 +4122,7 @@
       "auth_test_site": {
         "scenario": "signup_fails"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials and no account under the agent's own identity. The sign-up form answers that the site is not accepting new accounts. The task needs a signed-in member, so the correct end state is one auth_assistance request with no account and no session."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No saved credentials and no account under the agent's own identity. The sign-up form answers that the site is not accepting new accounts. The task needs a signed-in member, so the correct end state is one auth_assistance request with no account and no session."
     },
     "evaluators": [
       {
@@ -4209,7 +4209,7 @@
       "auth_test_site": {
         "scenario": "all_fail"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture saves an expired session, a passkey the site refuses, and three passwords that fail (two stale, one for no account). The site also shows email-code, text-code, sign-up and guest links, none of which can sign the user in. Because saved credentials exist, the minted identity is not offered and must not be used. The correct end state is one auth_assistance request with the sign-in form left open."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. The fixture saves an expired session, a passkey the site refuses, and three passwords that fail (two stale, one for no account). The site also shows email-code, text-code, sign-up and guest links, none of which can sign the user in. Because saved credentials exist, the minted identity is not offered and must not be used. The correct end state is one auth_assistance request with the sign-in form left open."
     },
     "evaluators": [
       {
@@ -4312,7 +4312,7 @@
         "scenario": "user_signs_in",
         "user_response": "sign_in"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Three saved passwords that all fail. When the auth_assistance request appears, the harness plays the user: it attaches to the agent's live browser, types the password only the user knows into the sign-in form the agent left open, and marks the request done."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Three saved passwords that all fail. When the auth_assistance request appears, the harness plays the user: it attaches to the agent's live browser, types the password only the user knows into the sign-in form the agent left open, and marks the request done."
     },
     "evaluators": [
       {
@@ -4398,7 +4398,7 @@
         "scenario": "saved_logins_fail",
         "user_response": "decline"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Three saved passwords that all fail. When the auth_assistance request appears, the harness declines it as the user."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Three saved passwords that all fail. When the auth_assistance request appears, the harness declines it as the user."
     },
     "evaluators": [
       {
@@ -4572,7 +4572,7 @@
       "auth_test_site": {
         "scenario": "guest_purchase"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). At checkout the shop offers sign in, create an account, or continue without an account. No credentials are saved for the site. The harness runs this task as the default admin benchmark user 1f85ff25-6e29-4c1b-8739-f917bd101a30 with BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1, so the purchase takes the charged Stripe-hold path; back-end/scripts/setup-benchmark-payment.ts seeds that user's Stripe test customer, subscription and org-managed AgentCard."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). At checkout the shop offers sign in, create an account, or continue without an account. No credentials are saved for the site. The harness runs this task as the default admin benchmark user 1f85ff25-6e29-4c1b-8739-f917bd101a30 with BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1, so the purchase takes the charged Stripe-hold path; back-end/scripts/setup-benchmark-payment.ts seeds that user's Stripe test customer, subscription and org-managed AgentCard."
     },
     "evaluators": [
       {
@@ -4740,7 +4740,7 @@
       "auth_test_site": {
         "scenario": "signup_purchase"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). Checkout requires an account. No credentials are saved, so only the minted identity is offered; sign-up emails a verification code to the minted inbox. The harness runs this task as the default admin benchmark user 1f85ff25-6e29-4c1b-8739-f917bd101a30 with BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1, so the purchase takes the charged Stripe-hold path; back-end/scripts/setup-benchmark-payment.ts seeds that user's Stripe test customer, subscription and org-managed AgentCard."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). Checkout requires an account. No credentials are saved, so only the minted identity is offered; sign-up emails a verification code to the minted inbox. The harness runs this task as the default admin benchmark user 1f85ff25-6e29-4c1b-8739-f917bd101a30 with BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1, so the purchase takes the charged Stripe-hold path; back-end/scripts/setup-benchmark-payment.ts seeds that user's Stripe test customer, subscription and org-managed AgentCard."
     },
     "evaluators": [
       {
@@ -4917,7 +4917,7 @@
       "auth_test_site": {
         "scenario": "signup_purchase"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). Checkout requires an account. A dedicated non-admin user starts with exhausted free credit and no subscription; the harness completes hosted Stripe test Checkout when the subscription gate appears."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). Checkout requires an account. A dedicated non-admin user starts with exhausted free credit and no subscription; the harness completes hosted Stripe test Checkout when the subscription gate appears."
     },
     "evaluators": [
       {
@@ -5020,7 +5020,7 @@
       "auth_test_site": {
         "scenario": "signup_fails_purchase"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout requires an account and no credentials are saved. The sign-up form always answers that new accounts cannot be created right now. The correct end state is one auth_assistance request with no order; a payment request would be an unexpected attention kind and fails the run."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout requires an account and no credentials are saved. The sign-up form always answers that new accounts cannot be created right now. The correct end state is one auth_assistance request with no order; a payment request would be an unexpected attention kind and fails the run."
     },
     "evaluators": [
       {
@@ -5179,7 +5179,7 @@
       "auth_test_site": {
         "scenario": "session_expires_at_checkout"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). One working saved password. The first order submit ends the session and charges nothing; the shop asks the member to sign in again and keeps the cart. The harness runs this task as the default admin benchmark user 1f85ff25-6e29-4c1b-8739-f917bd101a30 with BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1, so the purchase takes the charged Stripe-hold path; back-end/scripts/setup-benchmark-payment.ts seeds that user's Stripe test customer, subscription and org-managed AgentCard."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). One working saved password. The first order submit ends the session and charges nothing; the shop asks the member to sign in again and keeps the cart. The harness runs this task as the default admin benchmark user 1f85ff25-6e29-4c1b-8739-f917bd101a30 with BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1, so the purchase takes the charged Stripe-hold path; back-end/scripts/setup-benchmark-payment.ts seeds that user's Stripe test customer, subscription and org-managed AgentCard."
     },
     "evaluators": [
       {
@@ -5283,7 +5283,7 @@
         "scenario": "failed_login_not_reoffered",
         "first_run_prompt": "Tell me my member number for {auth_test_site_url}"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Two saved logins: the freshest has a stale password, the older one works. The harness runs the same prompt twice against one site; the site's event log is split by a run marker and the graded run is the second."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Two saved logins: the freshest has a stale password, the older one works. The harness runs the same prompt twice against one site; the site's event log is split by a run marker and the graded run is the second."
     },
     "evaluators": [
       {
@@ -5382,7 +5382,7 @@
         "scenario": "created_account_reused",
         "first_run_prompt": "Create an account for me at {auth_test_site_url} and tell me my member number"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No account exists at first. The first run signs up (prompt: create an account) and the site then accepts passwords only, so the second, graded run can only sign in if the new account's password was saved."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. No account exists at first. The first run signs up (prompt: create an account) and the site then accepts passwords only, so the second, graded run can only sign in if the new account's password was saved."
     },
     "evaluators": [
       {
@@ -5476,7 +5476,7 @@
       "auth_test_site": {
         "scenario": "named_account"
       },
-      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>.com. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Two saved logins, both valid, for two different member accounts. The prompt names the older (less recently used) one."
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Two saved logins, both valid, for two different member accounts. The prompt names the older (less recently used) one."
     },
     "evaluators": [
       {
