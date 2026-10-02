@@ -175,7 +175,7 @@ def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
 
 # Tool name → executor function mapping
 TOOL_EXECUTORS = {
-    "google_oauth_demo": google_oauth_demo,
+    "google_workspace_run": google_oauth_demo,
     "spawn_agent": spawn_agent,  # Unified: browser/code/general_purpose/explore
     "wait_for": wait_for,
     "send_message_to_user": send_message_to_user,
@@ -2014,7 +2014,7 @@ class AgentWorkflow:
         # =====================================================================
         plan_tools = PLAN_PHASE_TOOLS
         execute_tools = (
-            ["google_oauth_demo", "attempt_completion"]
+            ["google_workspace_run", "attempt_completion"]
             if matches_demo_goal(self.goal)
             else EXECUTE_PHASE_TOOLS
         )
