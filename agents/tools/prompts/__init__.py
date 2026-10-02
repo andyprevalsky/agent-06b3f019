@@ -53,7 +53,7 @@ TOOL_PROMPTS: dict[str, str] = {
 
 def get_tool_prompts() -> dict[str, str]:
     """TOOL_PROMPTS for injection, honoring ROSE_DISABLE_API_REQUEST."""
-    from domains.api_request.config import api_request_disabled
+    from utils.kill_switches import api_request_disabled
 
     if not api_request_disabled():
         return dict(TOOL_PROMPTS)

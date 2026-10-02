@@ -105,6 +105,32 @@ test('deploy cutover releases a live browser sub-agent instead of leaving it run
   );
 });
 
+test('deploy cutover closes a live code sandbox instead of leaving it running', async () => {
+  // A Claude Code run is an activity of the root workflow, like a browser. The
+  // replacement starts from durable state and never reattaches to the sandbox,
+  // so a sandbox left open keeps the old CLI working (and pushing to the same
+  // repo) next to the new run until E2B's own timeout.
+  const session = await createAnonymousSession('cutover-code-close');
+  const agentId = await createTestAgent(session.user.id, 'Cutover code sandbox close test');
+  await prisma.agent.update({
+    where: { id: agentId },
+    data: { temporalWorkflowId: agentId, status: 'ACTIVE' },
+  });
+  const taskId = randomUUID();
+  await prisma.claudeCodeSession.create({
+    data: { id: taskId, agentId, sandboxId: `local-${taskId}`, goal: 'Write answer.txt' },
+  });
+
+  await prepareAgentWorkflowReplacement(agentId, session.user.id);
+
+  const codeSession = await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: taskId } });
+  assert(
+    codeSession.status === 'CLOSED' && codeSession.closedAt !== null,
+    `a deploy cutover must close the live code sandbox, but it is still ` +
+      `status=${codeSession.status} closedAt=${String(codeSession.closedAt)}`
+  );
+});
+
 test('deploy cutover seals a live browser tool call exactly once', async () => {
   const session = await createAnonymousSession('cutover-browser-seal-once');
   const agentId = await createTestAgent(session.user.id, 'Cutover browser seal test');
@@ -211,6 +237,37 @@ test("deploy cutover releases a closed descendant's browser session", async () =
     `closing a descendant must release its rented browser, but it is still ` +
       `status=${childSession.status} closedAt=${String(childSession.closedAt)} — ` +
       `completeDescendantCleanup's raw updateMany skips the terminal release hook`
+  );
+});
+
+test("deploy cutover closes a closed descendant's code sandbox", async () => {
+  const session = await createAnonymousSession('cutover-descendant-code');
+  const rootAgentId = await createTestAgent(session.user.id, 'Cutover descendant code test');
+  await prisma.agent.update({
+    where: { id: rootAgentId },
+    data: { temporalWorkflowId: rootAgentId, status: 'ACTIVE' },
+  });
+  const childAgentId = await createTestAgent(session.user.id, 'Descendant running Claude Code');
+  await prisma.agent.update({
+    where: { id: childAgentId },
+    data: {
+      parent: { connect: { id: rootAgentId } },
+      temporalWorkflowId: childAgentId,
+      status: 'ACTIVE',
+    },
+  });
+  const taskId = randomUUID();
+  await prisma.claudeCodeSession.create({
+    data: { id: taskId, agentId: childAgentId, sandboxId: `local-${taskId}`, goal: 'Fix the bug' },
+  });
+
+  await prepareAgentWorkflowReplacement(rootAgentId, session.user.id);
+
+  const codeSession = await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: taskId } });
+  assert(
+    codeSession.status === 'CLOSED' && codeSession.closedAt !== null,
+    `closing a descendant must close its code sandbox, but it is still ` +
+      `status=${codeSession.status} closedAt=${String(codeSession.closedAt)}`
   );
 });
 

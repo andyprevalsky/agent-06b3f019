@@ -67,6 +67,8 @@ PoolName = Literal[
 
 # DAG / approval param-populator always uses ultra, even when the parent agent is flash.
 PARAM_POPULATOR_MODEL = "rose-labs/rose-1-ultra"
+# The planner always uses ultra for best DAG generation quality.
+PLANNER_MODEL = "rose-labs/rose-1-ultra"
 
 
 @dataclass(frozen=True)
