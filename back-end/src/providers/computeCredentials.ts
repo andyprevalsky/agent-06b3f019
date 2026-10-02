@@ -607,9 +607,8 @@ export async function markComputeTokenUnavailable(
 // worker shares one backoff instead of each independently hammering the key.
 //
 // A tiny in-memory write-through cache keeps the LLM hot path off the DB: the
-// shared row is read at most once per recheck interval whether the key is
-// cooled or clear, so a cooldown cleared (or extended) by any instance reaches
-// every process within one interval instead of after the full window.
+// row is re-read at most once per recheck interval, cooled or clear, so a
+// cooldown cleared in the DB is honored by every instance within that interval.
 const ANTHROPIC_API_KEY_COOLDOWN_MS = 30 * 60 * 1000; // 30 min (out-of-credits)
 const ANTHROPIC_API_KEY_COOLDOWN_DB_RECHECK_MS = 15 * 1000;
 // Sentinel singleton row. userId has no FK; name is outside the served
@@ -651,6 +650,7 @@ export async function markAnthropicApiKeyOnCooldown(reason: string): Promise<voi
   const until = new Date(Date.now() + ANTHROPIC_API_KEY_COOLDOWN_MS);
   cooldownCacheRevision++;
   cachedCooldownUntilMs = until.getTime();
+  // A read issued before the upsert below commits would drop this mark.
   lastCooldownDbCheckMs = Date.now();
   await prisma.integration.upsert({
     where: {

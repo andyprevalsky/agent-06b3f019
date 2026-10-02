@@ -9,9 +9,9 @@
  * start) the failover emitted first content at p50 1.8s / p90 3.8s / max 8.6s
  * and closed the decision in 4.1–19.1s (p50 6.0s, p90 10.7s); the previous
  * 3s bound killed every one. The bound holds only while each failover request
- * picks its GLM host by throughput (OPENROUTER_FAST_CHAT_PROVIDER, fresh
- * session per request): pinned to a slow host that price-weighted routing
- * favors, the same request finished at p90 16.6s.
+ * picks its GLM host by live performance (OPENROUTER_CHAT_LATENCY_PROVIDER,
+ * fresh session per request): pinned to a slow host that price-weighted
+ * routing favors, the same request finished at p90 16.6s.
  */
 
 import { CHAT_TIMEOUT_MS } from '../rose/cerebrasRoute';

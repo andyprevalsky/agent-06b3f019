@@ -38,8 +38,8 @@ git config user.email "andyprevalsky@yahoo.com"
 echo "✅ Git identity: Andy Prevalsky <andyprevalsky@yahoo.com>"
 
 # ── 1. Conductor-compatible env vars ─────────────────────────────────────
-. "$ROOT/scripts/lib/cloud-env.sh"
-ensure_cloud_env "$ROOT"
+. "$ROOT/scripts/lib/workspace-env.sh"
+ensure_cloud_workspace_env "$ROOT" "${CONDUCTOR_PORT:-3001}"
 
 # Load env vars into THIS shell too, so subsequent steps in this script see them.
 [ -f .cloud-env ] && . ./.cloud-env

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
 import {
   testResolveCodexAuthEnvs_apiKeyFallback,
@@ -347,12 +348,32 @@ async function testPersistOutput_rejectsInvalidCredentialFeedback() {
   assertStatus(res.status, 400, res.data);
 }
 
+/**
+ * Feedback cases on this backend cool the shared funded key and then delete
+ * its row; the backend honors that within its 15-second recheck interval.
+ */
+async function waitForFundedGptKeyRestore(): Promise<void> {
+  await retryWithBackoff(
+    () =>
+      request(`${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`, {
+        headers: apiKeyHeaders(),
+      }),
+    {
+      maxRetries: 21,
+      fixedDelays: Array.from({ length: 20 }, () => 1500),
+      shouldRetryResult: (res) => (res.data as { onCooldown?: boolean }).onCooldown === true,
+      component: 'CodexSmokeFundedKey',
+    }
+  );
+}
+
 async function testSmoke_codexCompletesE2bTask() {
   assert(API_KEY !== '', 'BACKEND_API_KEY is required');
   assert(
     process.env.E2B_API_KEY !== undefined && process.env.E2B_API_KEY !== '',
     'E2B_API_KEY is required'
   );
+  await waitForFundedGptKeyRestore();
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
@@ -496,7 +517,21 @@ async function runAll() {
   console.log('Codex Code Session Black-Box Tests\n');
   console.log(`Testing against: ${BASE_URL}\n`);
 
-  const tests: { name: string; fn: () => Promise<void> }[] = [
+  const tests: { name: string; fn: () => Promise<void> }[] = [];
+  // The feedback cases put the shared funded GPT key on cooldown, and the backend caches that
+  // cooldown in-process for its full window; deleting the DB row afterwards does not undo it.
+  // Without a synced Codex OAuth credential the smoke depends on that key, so it must run first.
+  if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
+    console.log(
+      '  SKIP  smoke -- Codex completes task in real E2B sandbox (BACKEND_CODEX_SMOKE_SKIP=1)'
+    );
+  } else {
+    tests.push({
+      name: 'smoke -- Codex completes task in real E2B sandbox',
+      fn: testSmoke_codexCompletesE2bTask,
+    });
+  }
+  tests.push(
     { name: 'POST /create -- no auth -> 401', fn: testCreate_noAuth },
     { name: 'POST /create -- missing user_id -> 500', fn: testCreate_missingUserId },
     {
@@ -582,18 +617,8 @@ async function runAll() {
     {
       name: 'smoke-skip -- success sentinel is never overridden by exhaustion',
       fn: async () => testCreditExhaustion_neverOverridesSuccessSentinel(),
-    },
-  ];
-  if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
-    console.log(
-      '  SKIP  smoke -- Codex completes task in real E2B sandbox (BACKEND_CODEX_SMOKE_SKIP=1)'
-    );
-  } else {
-    tests.push({
-      name: 'smoke -- Codex completes task in real E2B sandbox',
-      fn: testSmoke_codexCompletesE2bTask,
-    });
-  }
+    }
+  );
 
   const results: TestResult[] = [];
   for (const test of tests) {

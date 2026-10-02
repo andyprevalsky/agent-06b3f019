@@ -199,7 +199,7 @@ async function runFastChat(requestId: string, abortAfterMs?: number): Promise<un
   }
 }
 
-async function testRoutesEachRequestByThroughput(): Promise<void> {
+async function testRoutesEachRequestByLiveLatency(): Promise<void> {
   const body = buildOpenRouterFastChatBody(ROUTER_OPTIONS, 'req-attempt-1');
   const regenerate = buildOpenRouterFastChatBody(ROUTER_OPTIONS, 'req-attempt-2');
   assert.ok(
@@ -214,8 +214,13 @@ async function testRoutesEachRequestByThroughput(): Promise<void> {
   const provider = body.provider as Record<string, unknown> | undefined;
   assert.equal(
     provider?.sort,
-    'throughput',
+    'latency',
     'Cerebras-stall failover must not ride price-weighted routing to the slowest GLM hosts'
+  );
+  assert.deepEqual(
+    provider?.preferred_min_throughput,
+    { p50: 80 },
+    'latency ranking must still prefer hosts fast enough to stream the structured reply'
   );
   assert.equal(
     provider?.require_parameters,
@@ -224,7 +229,7 @@ async function testRoutesEachRequestByThroughput(): Promise<void> {
   );
   assert.ok(
     provider?.order === undefined && provider?.only === undefined,
-    'failover must follow the live throughput ranking, not a fixed GLM host list'
+    'failover must follow the live latency ranking, not a fixed GLM host list'
   );
   assert.notEqual(
     provider?.allow_fallbacks,
@@ -420,7 +425,10 @@ async function testCallerAbortStopsTheChatRouteBeforeTheWaterfall(): Promise<voi
 }
 
 const CASES: Array<[string, () => Promise<void>]> = [
-  ['routes each request by throughput to response_format hosts', testRoutesEachRequestByThroughput],
+  [
+    'routes each request by live latency to response_format hosts',
+    testRoutesEachRequestByLiveLatency,
+  ],
   ['the SSE parser reports the serving host once', testParserReportsUpstreamProviderOnce],
   ['records a caller abort before response headers', testCallerAbortBeforeHeadersIsRecorded],
   [

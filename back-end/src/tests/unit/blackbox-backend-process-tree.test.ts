@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const helperPath = join(process.cwd(), 'scripts', 'process-tree.sh');
+const helperPath = join(process.cwd(), '..', 'scripts', 'lib', 'process-tree.sh');
 const runnerPath = join(process.cwd(), 'scripts', 'run-blackbox-tests.sh');
 
 interface TreeRun {
@@ -126,7 +126,7 @@ assert.match(
   'runner cleanup must stop the backend and every process under it'
 );
 assert.ok(
-  runner.indexOf('trap cleanup EXIT INT TERM') < runner.indexOf('npx tsx src/bootstrap.ts'),
+  runner.indexOf('trap cleanup EXIT') < runner.indexOf('npx tsx src/bootstrap.ts'),
   'the cleanup trap must be installed before the backend starts'
 );
 

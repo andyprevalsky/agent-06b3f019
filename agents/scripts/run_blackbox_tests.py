@@ -10,6 +10,7 @@ Usage:
     python scripts/run_blackbox_tests.py web-search         # run one domain
     python scripts/run_blackbox_tests.py --list             # list available domains
     python scripts/run_blackbox_tests.py --concurrency 5    # limit parallel domains
+    python scripts/run_blackbox_tests.py --help             # show this help
 
 Modeled after back-end/scripts/run-blackbox-tests.sh.
 """
@@ -22,6 +23,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import NoReturn
 
 import structlog.contextvars
 
@@ -211,6 +213,40 @@ async def run_tests(domain_filters: list[str] | None = None, concurrency: int = 
     return 0 if failed == 0 else 1
 
 
+def _usage_error(message: str) -> NoReturn:
+    print(f"Error: {message}\n{__doc__}", file=sys.stderr)
+    sys.exit(2)
+
+
+def parse_args(args: list[str]) -> tuple[list[str], int]:
+    """Return (domain filters, concurrency).
+
+    An unrecognized option must fail fast: with no domain filter the runner
+    starts every domain, so an ignored typo would launch the full suite.
+    """
+    domain_filters: list[str] = []
+    concurrency = 30
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--concurrency":
+            if i + 1 >= len(args):
+                _usage_error("--concurrency requires an integer value")
+            try:
+                concurrency = int(args[i + 1])
+            except ValueError:
+                _usage_error(f"--concurrency requires an integer value, got '{args[i + 1]}'")
+            i += 2
+        elif arg.startswith("-"):
+            _usage_error(f"unknown option '{arg}'")
+        else:
+            domain_filters.append(arg)
+            i += 1
+
+    return domain_filters, concurrency
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -222,26 +258,7 @@ def main() -> None:
         list_domains()
         return
 
-    domain_filters: list[str] = []
-    concurrency = 30
-
-    i = 0
-    while i < len(args):
-        if args[i] == "--concurrency" and i + 1 < len(args):
-            try:
-                concurrency = int(args[i + 1])
-            except ValueError:
-                print(f"Error: --concurrency requires an integer value, got '{args[i + 1]}'")
-                sys.exit(1)
-            i += 2
-        elif not args[i].startswith("-"):
-            domain_filters.append(args[i])
-            i += 1
-        else:
-            # Ignoring an unknown flag would silently run all ~100 domains.
-            print(f"Error: unknown option '{args[i]}'\n{__doc__}")
-            sys.exit(2)
-
+    domain_filters, concurrency = parse_args(args)
     exit_code = asyncio.run(run_tests(domain_filters or None, concurrency))
     sys.exit(exit_code)
 

@@ -347,64 +347,6 @@ else
     FAIL=$((FAIL+1)); echo "  ❌ setup-db.sh missing ROSE_USE_SYSTEM_PG / system seed source wiring"
 fi
 
-# A host whose cache was never populated by a benchmark stack pulls the
-# canonical base fixture into the exact path + sidecars local.py and run.sh
-# restore, so the seed-memory ratchet does not depend on smoke running first.
-PULL_CACHE="$TMP/pull-cache"
-: > "${PULL_TEST_LOG:=$TMP/pull-npx.log}"
-export PULL_TEST_LOG
-printf '%s\n' \
-    '#!/bin/sh' \
-    'printf "%s|%s\n" "$(pwd)" "$*" >> "$PULL_TEST_LOG"' \
-    '[ "$1 $2 $3" = "tsx scripts/seed-dump-cache.ts get" ] || exit 95' \
-    '[ "${FAKE_R2_MISS:-0}" = 0 ] || exit 1' \
-    'printf "canonical-from-%s\n" "$4" > "$5"' \
-    > "$FAKE_BIN/npx"
-chmod +x "$FAKE_BIN/npx"
-PULL_EXPECTED_PATH="$(
-    PYTHONPATH="$ROOT_DIR/agents" "$PYTHON_BIN" -c \
-        'import sys; from pathlib import Path; from benchmarks.local import local_seed_dump_path; print(local_seed_dump_path(Path(sys.argv[1]), Path(sys.argv[2])))' \
-        "$SCHEMA_FILE" "$PULL_CACHE"
-)"
-PULL_REMOTE_TOKEN="$("$PYTHON_BIN" "$ROOT_DIR/agents/benchmarks/seed_cache_path.py" --cache-token --pg-major 16 "$SCHEMA_FILE")"
-set +e
-PULLED_PATH="$(PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" pull "$SCHEMA_FILE" "$PULL_CACHE" 16)"
-PULL_STATUS=$?
-set -e
-PULL_DECISION="$(seed_cache_decision "$PULL_EXPECTED_PATH" "$EXPECTED_HASH" 0 "$PULL_REMOTE_TOKEN")"
-if [ "$PULL_STATUS" -eq 0 ] \
-   && [ "$PULLED_PATH" = "$PULL_EXPECTED_PATH" ] \
-   && [ "$(cat "$PULL_EXPECTED_PATH" 2>/dev/null)" = "canonical-from-$PULL_REMOTE_TOKEN" ] \
-   && [ "$(cat "${PULL_EXPECTED_PATH}.cachetoken" 2>/dev/null)" = "$PULL_REMOTE_TOKEN" ] \
-   && [ "$PULL_DECISION" = "restore-local" ] \
-   && grep -q "^$ROOT_DIR/back-end|" "$PULL_TEST_LOG" \
-   && [ ! -L "${PULL_EXPECTED_PATH}.publish.lock" ]; then
-    PASS=$((PASS+1)); echo "  ✅ pull lands the canonical fixture where run.sh and local.py restore it"
-else
-    FAIL=$((FAIL+1)); echo "  ❌ pull failed: status=$PULL_STATUS path='$PULLED_PATH' expected='$PULL_EXPECTED_PATH' decision=$PULL_DECISION"
-fi
-
-rm -rf "$PULL_CACHE"
-set +e
-MISS_PATH="$(FAKE_R2_MISS=1 PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" pull "$SCHEMA_FILE" "$PULL_CACHE" 16 2>/dev/null)"
-MISS_STATUS=$?
-NO_MAJOR_STATUS=0
-PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" pull "$SCHEMA_FILE" "$PULL_CACHE" "" >/dev/null 2>&1 || NO_MAJOR_STATUS=$?
-set -e
-if [ "$MISS_STATUS" -ne 0 ] && [ -z "$MISS_PATH" ] && [ "$NO_MAJOR_STATUS" -eq 2 ] \
-   && ! find "$PULL_CACHE" \( -type f -o -type l \) -print -quit | grep -q .; then
-    PASS=$((PASS+1)); echo "  ✅ an R2 miss or missing pg major fails closed without leaving a dump, temp, or lock"
-else
-    FAIL=$((FAIL+1)); echo "  ❌ pull miss leaked state: status=$MISS_STATUS path='$MISS_PATH' no_major=$NO_MAJOR_STATUS"
-fi
-
-MEASURE="$ROOT_DIR/back-end/scripts/measure-seed-memory.sh"
-if grep -q 'benchmark-seed-cache pull prisma/schema.prisma "$SEED_CACHE_DIR" "$SEED_PG_MAJOR"' "$MEASURE"; then
-    PASS=$((PASS+1)); echo "  ✅ seed-memory ratchet pulls the canonical fixture when its cache is empty"
-else
-    FAIL=$((FAIL+1)); echo "  ❌ seed-memory ratchet no longer pulls the canonical fixture on an empty cache"
-fi
-
 # Fleet must fail closed before provisioning when the cloud-guest (pg15)
 # canonical seed dump is missing — otherwise every clone dies at the barrier.
 FLEET="$ROOT_DIR/scripts/run-bench-fleet"
@@ -416,6 +358,74 @@ if grep -q 'CLOUDBENCH_GUEST_PG_MAJOR' "$FLEET" \
     PASS=$((PASS+1)); echo "  ✅ run-bench-fleet preflights the cloud-guest pg major seed dump"
 else
     FAIL=$((FAIL+1)); echo "  ❌ run-bench-fleet missing cloud-guest canonical seed-dump preflight"
+fi
+
+echo
+echo "canonical base pull — a box that has not run a benchmark yet must fetch the"
+echo "reviewed base fixture into the exact pair an isolated benchmark restores."
+
+SEED_CACHE_GET_LOG="$TMP/seed-cache-get.log"
+: > "$SEED_CACHE_GET_LOG"
+export SEED_CACHE_GET_LOG
+printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "%s\n" "$*" >> "$SEED_CACHE_GET_LOG"' \
+    '[ "$1 $2 $3" = "tsx scripts/seed-dump-cache.ts get" ] || exit 95' \
+    '[ "${FAKE_SEED_CACHE_MISS:-0}" = 0 ] || exit 1' \
+    'printf "canonical-base-for-%s\n" "$4" > "$5"' \
+    > "$FAKE_BIN/npx"
+chmod +x "$FAKE_BIN/npx"
+PULL_CACHE="$TMP/pull-cache"
+CANONICAL_TOKEN="$(benchmark_base_cache_token "$SCHEMA_FILE" 16)"
+CANONICAL_HASH="${CANONICAL_TOKEN%%-*}"
+CANONICAL_PATH="$(
+    PYTHONPATH="$ROOT_DIR/agents" "$PYTHON_BIN" -c \
+        'import sys; from pathlib import Path; from benchmarks.local import local_seed_dump_path; print(local_seed_dump_path(Path(sys.argv[1]), Path(sys.argv[2])))' \
+        "$SCHEMA_FILE" "$PULL_CACHE"
+)"
+
+set +e
+PULLED_PATH="$(cd "$TMP" && PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" pull-canonical \
+    "$SCHEMA_FILE" pull-cache 16)"
+PULL_STATUS=$?
+set -e
+check "canonical pull exits 0" "0" "$PULL_STATUS"
+check "canonical pull lands on the path local.py restores" "$CANONICAL_PATH" "$PULLED_PATH"
+check "canonical pull fetches the run.sh shared-cache token" \
+    "canonical-base-for-$CANONICAL_TOKEN" "$(cat "$CANONICAL_PATH" 2>/dev/null)"
+check "pulled pair restores locally for the same token" "restore-local" \
+    "$(seed_cache_decision "$CANONICAL_PATH" "$CANONICAL_HASH" 1 "$CANONICAL_TOKEN")"
+
+set +e
+REPULLED_PATH="$(PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" pull-canonical \
+    "$SCHEMA_FILE" "$PULL_CACHE" 16)"
+REPULL_STATUS=$?
+set -e
+check "a valid pulled pair is reused without another fetch" \
+    "0 $CANONICAL_PATH 1" "$REPULL_STATUS $REPULLED_PATH $(wc -l < "$SEED_CACHE_GET_LOG" | tr -d ' ')"
+
+rm -f "$CANONICAL_PATH" "$CANONICAL_PATH.schemahash" "$CANONICAL_PATH.cachetoken"
+set +e
+FAKE_SEED_CACHE_MISS=1 PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" pull-canonical \
+    "$SCHEMA_FILE" "$PULL_CACHE" 16 >/dev/null 2>&1
+MISS_STATUS=$?
+set -e
+if [ "$MISS_STATUS" -ne 0 ] \
+   && [ ! -e "$CANONICAL_PATH" ] \
+   && [ ! -e "$CANONICAL_PATH.schemahash" ] \
+   && [ ! -e "$CANONICAL_PATH.cachetoken" ] \
+   && [ ! -L "$CANONICAL_PATH.publish.lock" ] \
+   && ! find "$PULL_CACHE" -type f -name '*.tmp.*' -print -quit | grep -q .; then
+    PASS=$((PASS+1)); echo "  ✅ a shared-cache miss fails without leaving a pair, lock, or temp file"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ shared-cache miss: status=$MISS_STATUS or leaked dump/sidecar/lock/temp state"
+fi
+
+MEASUREMENT="$ROOT_DIR/back-end/scripts/measure-seed-memory.sh"
+if grep -q 'benchmark-seed-cache" pull-canonical' "$MEASUREMENT"; then
+    PASS=$((PASS+1)); echo "  ✅ seed memory measurement pulls the canonical base when no dump is cached"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ seed memory measurement fails on a box with no cached dump"
 fi
 
 echo "RESULTS: $PASS passed, $FAIL failed"

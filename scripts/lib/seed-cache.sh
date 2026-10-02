@@ -206,45 +206,46 @@ materialize_benchmark_seed_dump() (
     printf '%s\n' "$target_dump"
 )
 
-# Pull the canonical base fixture from the shared R2 cache into the path
-# benchmarks/local.py restores from, with the sidecars seed_cache_decision
-# validates. A host that never booted a benchmark stack (fresh cloud VM or
-# worktree) has an empty cache, and the seed-memory ratchet runs before smoke.
+# Fetch the reviewed canonical base fixture from the shared cache into the exact
+# dump + sidecar pair an isolated benchmark restores (agents/benchmarks/local.py),
+# so a box that has not run a benchmark yet still has the artifact. A valid pair
+# is reused as-is; a miss leaves no partial pair behind.
 pull_canonical_benchmark_seed_dump() (
     local schema_path="$1"
     local cache_dir="$2"
     local pg_major="$3"
     local repo_root
-    local local_token
-    local remote_token
+    local python_bin
+    local token
     local schema_hash
     local target_dump
     local temp_dump
 
-    if [ -z "$pg_major" ]; then
-        echo "pg_dump major is required to select the canonical seed dump" >&2
-        return 2
-    fi
     repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-    local_token="$(benchmark_base_cache_token "$schema_path")" || return 1
-    remote_token="$(benchmark_base_cache_token "$schema_path" "$pg_major")" || return 1
-    schema_hash="${local_token%%-*}"
+    python_bin="$repo_root/agents/venv/bin/python"
+    [ -x "$python_bin" ] || python_bin="$(command -v python3)"
     mkdir -p "$cache_dir"
     cache_dir="$(cd "$cache_dir" && pwd)"
-    target_dump="$cache_dir/$local_token.dump"
+    token="$(benchmark_base_cache_token "$schema_path" "$pg_major")" || return 1
+    schema_hash="${token%%-*}"
+    target_dump="$("$python_bin" "$repo_root/agents/benchmarks/seed_cache_path.py" \
+        --canonical-path "$schema_path" "$cache_dir")" || return 1
     temp_dump="${target_dump}.tmp.$$"
 
     acquire_benchmark_seed_lock "$target_dump" || return 1
-    trap 'rm -f "$temp_dump" 2>/dev/null || true; release_benchmark_seed_lock "$target_dump"' EXIT INT TERM
-    rm -f "$temp_dump" 2>/dev/null || true
-    if ! (cd "$repo_root/back-end" && npx tsx scripts/seed-dump-cache.ts get "$remote_token" "$temp_dump") >&2 \
-        || [ ! -s "$temp_dump" ]; then
-        echo "canonical base fixture $remote_token is not in the shared seed cache" >&2
-        return 1
+    trap 'rm -f "$temp_dump" "$temp_dump.schemahash" "$temp_dump.cachetoken" 2>/dev/null || true; release_benchmark_seed_lock "$target_dump"' EXIT INT TERM
+    if [ "$(seed_cache_decision "$target_dump" "$schema_hash" 0 "$token")" != restore-local ]; then
+        if ! (cd "$repo_root/back-end" && npx tsx scripts/seed-dump-cache.ts get "$token" "$temp_dump") \
+           || [ ! -s "$temp_dump" ]; then
+            echo "canonical base fixture is unavailable in the shared cache: $token" >&2
+            return 1
+        fi
+        printf '%s' "$schema_hash" > "$temp_dump.schemahash"
+        printf '%s' "$token" > "$temp_dump.cachetoken"
+        mv "$temp_dump" "$target_dump"
+        mv "$temp_dump.schemahash" "${target_dump}.schemahash"
+        mv "$temp_dump.cachetoken" "${target_dump}.cachetoken"
     fi
-    mv "$temp_dump" "$target_dump"
-    printf '%s' "$schema_hash" > "${target_dump}.schemahash"
-    printf '%s' "$remote_token" > "${target_dump}.cachetoken"
     release_benchmark_seed_lock "$target_dump"
     trap - EXIT INT TERM
     printf '%s\n' "$target_dump"

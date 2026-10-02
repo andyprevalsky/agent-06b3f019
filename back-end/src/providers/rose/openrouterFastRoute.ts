@@ -36,6 +36,22 @@ export const OPENROUTER_FAST_CHAT_POOL = 'openrouter-fast-chat';
  */
 export const DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS = CHAT_TIMEOUT_MS;
 
+/**
+ * Chat fallbacks must finish a whole structured reply inside the router bound.
+ * OpenRouter's default price-weighted balancing lands on slow fp4 hosts,
+ * and a static `order` list silently degrades to the first listed endpoint when
+ * its hosts cannot serve the request (OpenRouter's Cerebras Qwen host lacks
+ * `response_format`/`tools`). Rank hosts by OpenRouter's live 5-minute TTFT
+ * percentiles instead, preferring hosts fast enough to stream the JSON, and
+ * only among hosts that honor the strict schema/tool parameters.
+ */
+export const OPENROUTER_CHAT_LATENCY_PROVIDER = {
+  sort: 'latency',
+  preferred_min_throughput: { p50: 80 },
+  allow_fallbacks: true,
+  require_parameters: true,
+} as const;
+
 function chatIdleTimeoutMs(): number {
   const configured = Number(process.env.OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS);
   return Number.isFinite(configured) && configured > 0
@@ -50,21 +66,6 @@ function normalizeOpenRouterFastChatEffort(effort?: string): string {
   if (effort === 'max') return 'xhigh';
   return effort ?? DEFAULT_OPENROUTER_FAST_CHAT_EFFORT;
 }
-
-/**
- * OpenRouter's default routing is price-weighted. On the e8f2279b router
- * request the cheap hosts it favors finished in p50 8.4s / p90 11.9s;
- * throughput sorting finished in p50 2.7s / p90 3.4s (62/62 inside the router
- * bounds). Load-balanced throughput floors spread hosts but still drew slow
- * ones (p90 13.0s).
- * `sort` disables load balancing, so failover traffic goes to OpenRouter's
- * current throughput leader and moves on only when that host errors.
- * `require_parameters` keeps hosts that would ignore `response_format`.
- */
-export const OPENROUTER_FAST_CHAT_PROVIDER = {
-  sort: 'throughput',
-  require_parameters: true,
-} as const;
 
 /**
  * OpenRouter pins a conversation (keyed by its first messages unless
@@ -86,12 +87,12 @@ export function buildOpenRouterFastChatBody(
     messages: normalizeOpenAiToolCalls(options.messages),
     stream: true,
     stream_options: { include_usage: true },
-    provider: OPENROUTER_FAST_CHAT_PROVIDER,
     session_id: openRouterFastChatSessionId(requestId),
     // Always stamp reasoning.effort so every Rose body builder is well-formed.
     // Callers (chat router/generator) may pass effort:'minimal' for latency;
     // omit → xhigh to match the rest of the Rose surface.
     reasoning: { effort: normalizeOpenRouterFastChatEffort(options.effort) },
+    provider: OPENROUTER_CHAT_LATENCY_PROVIDER,
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),
     ...(options.response_format ? { response_format: options.response_format } : {}),

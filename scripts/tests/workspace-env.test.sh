@@ -25,6 +25,8 @@ unset ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME \
   ROSE_DEPLOY_SOURCE_WORKSPACE \
   ROSE_USE_SYSTEM_PG \
   TEMPORAL_TASK_QUEUE 2>/dev/null || true
+# The host's real agent store would otherwise pin every default-path identity.
+export CLOUD_ENV_AGENT_STORE_DIR="$TMP_ROOT/no-agent-store"
 
 expect_eq() {
   local actual="$1"
@@ -102,10 +104,7 @@ expect_eq "$isolated_benchmark_port" "56220" "isolated benchmark preserves its r
 
 cloud_workspace="$TMP_ROOT/cloud-checkout"
 mkdir -p "$cloud_workspace"
-cat >"$cloud_workspace/.cloud-env" <<'ENV'
-# rose-cloud-env
-export CONDUCTOR_WORKSPACE_NAME=cloud-generated
-ENV
+bash -c ". '$HELPER_SRC'; write_cloud_env '$cloud_workspace/.cloud-env' 3001 cloud-generated '$cloud_workspace' \"\$(cloud_env_boot_id)\""
 cloud_name="$(
   cd "$cloud_workspace"
   CONDUCTOR_WORKSPACE_NAME=cloud-generated \
@@ -113,6 +112,144 @@ cloud_name="$(
   bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
 )"
 expect_eq "$cloud_name" "cloud-generated" "cloud-generated workspace name remains authoritative"
+
+stale_shell_name="$(
+  cd "$cloud_workspace"
+  CONDUCTOR_WORKSPACE_NAME=cloud-from-before-rekey \
+  CONDUCTOR_WORKSPACE_PATH="$cloud_workspace" \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+)"
+expect_eq "$stale_shell_name" "cloud-generated" "a shell opened before a re-key adopts the current .cloud-env name"
+
+pinned_cloud_name="$(
+  cd "$cloud_workspace"
+  ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+  CONDUCTOR_WORKSPACE_NAME=cloud-generated-bench-run-1 \
+  CONDUCTOR_WORKSPACE_PATH="$cloud_workspace" \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+)"
+expect_eq "$pinned_cloud_name" "cloud-generated-bench-run-1" "a trusted cloud identity is not replaced by .cloud-env"
+
+isolated_cloud_name="$(
+  cd "$cloud_workspace"
+  BENCHMARK_ISOLATED_RUN=true \
+  CONDUCTOR_WORKSPACE_NAME=cloud-generated-lifecycle \
+  CONDUCTOR_WORKSPACE_PATH="$cloud_workspace" \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+)"
+expect_eq "$isolated_cloud_name" "cloud-generated-lifecycle" "an isolated benchmark cloud identity is not replaced by .cloud-env"
+
+# Every VM booted from one prebuilt snapshot inherits the snapshot's .cloud-env.
+# Each must mint its own workspace name, or they all publish the same reserved
+# ngrok domain and the second stack dies with ERR_NGROK_334.
+snapshot_env="$TMP_ROOT/snapshot.cloud-env"
+bash -c ". '$HELPER_SRC'; write_cloud_env '$snapshot_env' 3001 cloud-44cb5599 /workspace boot-snapshot"
+for vm in vm-a vm-b; do
+  mkdir -p "$TMP_ROOT/$vm"
+  cp "$snapshot_env" "$TMP_ROOT/$vm/.cloud-env"
+  bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$TMP_ROOT/$vm/.cloud-env' '' boot-$vm" 2>/dev/null
+done
+read_cloud_env() {
+  bash -c ". '$HELPER_SRC'; cloud_env_value '$1' '$2'"
+}
+vm_a_name="$(read_cloud_env "$TMP_ROOT/vm-a/.cloud-env" CONDUCTOR_WORKSPACE_NAME)"
+vm_b_name="$(read_cloud_env "$TMP_ROOT/vm-b/.cloud-env" CONDUCTOR_WORKSPACE_NAME)"
+[[ "$vm_a_name" =~ ^cloud-[0-9a-f]{8}$ ]] || { echo "FAIL: re-keyed name is not cloud-<8 hex>: '$vm_a_name'" >&2; exit 1; }
+[ "$vm_a_name" != "cloud-44cb5599" ] || { echo "FAIL: snapshot workspace name survived a boot change" >&2; exit 1; }
+[ "$vm_a_name" != "$vm_b_name" ] || { echo "FAIL: two VMs from one snapshot share workspace name $vm_a_name" >&2; exit 1; }
+echo "PASS: VMs booted from one snapshot mint distinct workspace names"
+expect_eq "$(read_cloud_env "$TMP_ROOT/vm-a/.cloud-env" CONDUCTOR_PORT)" "3001" "re-key keeps the snapshot port"
+expect_eq "$(read_cloud_env "$TMP_ROOT/vm-a/.cloud-env" CONDUCTOR_ROOT_PATH)" "/workspace" "re-key keeps the snapshot root path"
+grep -qx '# rose-cloud-env' "$TMP_ROOT/vm-a/.cloud-env" \
+  || { echo "FAIL: re-keyed .cloud-env lost the # rose-cloud-env trust marker" >&2; exit 1; }
+echo "PASS: re-keyed .cloud-env keeps the # rose-cloud-env trust marker"
+
+cp "$TMP_ROOT/vm-a/.cloud-env" "$TMP_ROOT/vm-a/before"
+bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$TMP_ROOT/vm-a/.cloud-env' '' boot-vm-a"
+cmp -s "$TMP_ROOT/vm-a/before" "$TMP_ROOT/vm-a/.cloud-env" \
+  || { echo "FAIL: refreshing on the same boot rewrote .cloud-env" >&2; exit 1; }
+echo "PASS: refreshing on the minting boot keeps the workspace name"
+
+mkdir -p "$TMP_ROOT/legacy"
+cat >"$TMP_ROOT/legacy/.cloud-env" <<'ENV'
+# rose-cloud-env
+export CONDUCTOR_PORT=3001
+export CONDUCTOR_WORKSPACE_NAME=cloud-44cb5599
+export CONDUCTOR_ROOT_PATH=/workspace
+ENV
+bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$TMP_ROOT/legacy/.cloud-env' '' boot-legacy" 2>/dev/null
+legacy_name="$(read_cloud_env "$TMP_ROOT/legacy/.cloud-env" CONDUCTOR_WORKSPACE_NAME)"
+[ "$legacy_name" != "cloud-44cb5599" ] || { echo "FAIL: a .cloud-env without a boot stamp was trusted as current" >&2; exit 1; }
+echo "PASS: a .cloud-env without a boot stamp is re-keyed"
+
+if command -v flock >/dev/null 2>&1; then
+  mkdir -p "$TMP_ROOT/race"
+  cp "$snapshot_env" "$TMP_ROOT/race/.cloud-env"
+  for _ in 1 2 3 4 5 6 7 8; do
+    bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$TMP_ROOT/race/.cloud-env' '' boot-race" 2>>"$TMP_ROOT/race/stderr" &
+  done
+  wait
+  expect_eq "$(grep -c '^Re-keyed ' "$TMP_ROOT/race/stderr")" "1" "parallel refreshes on one boot re-key exactly once"
+  expect_eq "$(grep -c '^# rose-cloud-boot-id boot-race$' "$TMP_ROOT/race/.cloud-env")" "1" "parallel refreshes leave one boot stamp"
+fi
+
+if [ -n "$(bash -c ". '$HELPER_SRC'; cloud_env_boot_id")" ]; then
+  mkdir -p "$TMP_ROOT/snapshot-vm"
+  cp "$snapshot_env" "$TMP_ROOT/snapshot-vm/.cloud-env"
+  booted_name="$(
+    cd "$TMP_ROOT/snapshot-vm"
+    CONDUCTOR_WORKSPACE_NAME=cloud-44cb5599 \
+    CONDUCTOR_WORKSPACE_PATH="$TMP_ROOT/snapshot-vm" \
+    bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env 2>/dev/null; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+  )"
+  expect_eq "$booted_name" "$(read_cloud_env "$TMP_ROOT/snapshot-vm/.cloud-env" CONDUCTOR_WORKSPACE_NAME)" \
+    "normalizing on a snapshot-booted VM adopts the re-keyed name"
+  [ "$booted_name" != "cloud-44cb5599" ] || { echo "FAIL: snapshot-booted VM kept the snapshot workspace name" >&2; exit 1; }
+  echo "PASS: snapshot-booted VM drops the snapshot workspace name"
+fi
+
+# A Cursor agent keeps its store id across reboot and resume, so only a clone
+# (new store id) is re-keyed; the DB volume and reserved domain stay attached.
+agent_env="$TMP_ROOT/agent/.cloud-env"
+mkdir -p "$TMP_ROOT/agent"
+bash -c ". '$HELPER_SRC'; write_cloud_env '$agent_env' 3001 cloud-builder /workspace boot-build bc-builder"
+bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$agent_env' bc-clone boot-clone" 2>/dev/null
+clone_name="$(read_cloud_env "$agent_env" CONDUCTOR_WORKSPACE_NAME)"
+[ "$clone_name" != "cloud-builder" ] || { echo "FAIL: a clone with a new agent store id kept the builder's name" >&2; exit 1; }
+echo "PASS: a new agent store id re-keys a snapshot clone"
+bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$agent_env' bc-clone boot-reboot" 2>"$TMP_ROOT/agent/reboot.err"
+expect_eq "$(read_cloud_env "$agent_env" CONDUCTOR_WORKSPACE_NAME)" "$clone_name" "a reboot with the same agent store id keeps the workspace name"
+expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$agent_env' boot-id")" "boot-reboot" "a kept identity records the new boot"
+expect_eq "$(grep -c '^Re-keyed ' "$TMP_ROOT/agent/reboot.err" || true)" "0" "a reboot with the same agent store id is not reported as a re-key"
+cp "$agent_env" "$TMP_ROOT/agent/before"
+bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$agent_env' '' boot-reboot"
+cmp -s "$TMP_ROOT/agent/before" "$agent_env" \
+  || { echo "FAIL: an agent store restart within one boot rewrote .cloud-env" >&2; exit 1; }
+echo "PASS: an unavailable agent store within the minting boot keeps the identity untouched"
+bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$agent_env' '' boot-unknown" 2>/dev/null
+[ "$(read_cloud_env "$agent_env" CONDUCTOR_WORKSPACE_NAME)" != "$clone_name" ] \
+  || { echo "FAIL: a new boot without an agent store id kept the name" >&2; exit 1; }
+echo "PASS: a new boot without an agent store id is re-keyed"
+
+boot_only_env="$TMP_ROOT/agent/boot-only.cloud-env"
+bash -c ". '$HELPER_SRC'; write_cloud_env '$boot_only_env' 3001 cloud-bootonly /workspace boot-same"
+bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$boot_only_env' bc-late boot-same"
+expect_eq "$(read_cloud_env "$boot_only_env" CONDUCTOR_WORKSPACE_NAME)" "cloud-bootonly" "an agent store that starts after minting keeps the name"
+expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$boot_only_env' agent-id")" "bc-late" "a late agent store id is recorded for later reboots"
+
+# /run is on the snapshotted disk: a store id is trusted only while its daemon runs.
+fake_store="$TMP_ROOT/agent-store"
+mkdir -p "$fake_store"
+printf 'bc-live' >"$fake_store/self-store-id"
+bash -c 'exec -a cursor-agent-store-fuse sleep 60' &
+store_pid=$!
+printf 'pid=%s\n' "$store_pid" >"$fake_store/ready"
+expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "bc-live" "a running store daemon's id is the agent id"
+kill "$store_pid" 2>/dev/null || true
+wait "$store_pid" 2>/dev/null || true
+expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "" "a stale store id without its daemon is ignored"
+printf 'pid=%s\n' "$$" >"$fake_store/ready"
+expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "" "a reused pid that is not the store daemon is ignored"
 
 explicit_queue="$(
   TEMPORAL_TASK_QUEUE=semantic-sentinel \
@@ -211,90 +348,90 @@ self_conflict="$(
 )"
 expect_eq "$self_conflict" "" "the workspace's own container is never treated as a conflict"
 
-# cloud-build.sh must write `# rose-cloud-env` into .cloud-env itself (not only
-# into shell rc files). Without that marker, normalize_conductor_workspace_env
-# rewrites the synthetic cloud name to the checkout basename and breaks ngrok
-# domain reuse on Cursor Cloud agents.
+# Cloud VMs boot from disk snapshots that carry /etc/machine-id and the
+# .cloud-env written while the snapshot was built. Every clone must still get
+# its own workspace name, or concurrent agents share one ngrok domain
+# (ERR_NGROK_334) and one run.sh Temporal queue. The `# rose-cloud-env` marker
+# must be in .cloud-env itself (not only in shell rc files), or
+# normalize_conductor_workspace_env rewrites the synthetic name to the checkout
+# basename and breaks ngrok domain reuse.
 cloud_build_script="$ROOT_DIR/scripts/cloud-build.sh"
-CLOUD_ENV_SRC="$ROOT_DIR/scripts/lib/cloud-env.sh"
-if ! grep -q 'ensure_cloud_env "$ROOT"' "$cloud_build_script"; then
-  echo "FAIL: cloud-build.sh must provision .cloud-env through ensure_cloud_env" >&2
+fresh_env="$TMP_ROOT/fresh.cloud-env"
+bash -c ". '$HELPER_SRC'; write_cloud_env '$fresh_env' 3001 \"\$(new_cloud_workspace_name)\" /workspace boot-fresh"
+grep -qx '# rose-cloud-env' "$fresh_env" \
+  || { echo "FAIL: write_cloud_env must include the # rose-cloud-env marker" >&2; exit 1; }
+if ! grep -q 'ensure_cloud_workspace_env "\$ROOT"' "$cloud_build_script"; then
+  echo "FAIL: cloud-build.sh must provision .cloud-env through ensure_cloud_workspace_env" >&2
   exit 1
 fi
-cloud_env_root="$TMP_ROOT/cloud-env-root"
-cloud_env_home="$TMP_ROOT/cloud-env-home"
-mkdir -p "$cloud_env_root" "$cloud_env_home"
-: >"$cloud_env_home/.bashrc"
-printf '44cb5599-0000-4000-8000-000000000001\n' >"$TMP_ROOT/boot-builder"
-printf '9f3e7a21-1111-4111-8111-000000000002\n' >"$TMP_ROOT/boot-clone"
-run_ensure_cloud_env() {
-  HOME="$cloud_env_home" ROSE_CLOUD_BOOT_ID_FILE="$1" \
-    env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
-    bash -c ". '$CLOUD_ENV_SRC'; ensure_cloud_env '$cloud_env_root' >/dev/null" &&
-    sed -nE 's/^export CONDUCTOR_WORKSPACE_NAME=(.*)$/\1/p' "$cloud_env_root/.cloud-env"
+if grep -q 'machine-id' "$cloud_build_script"; then
+  echo "FAIL: cloud-build.sh must not derive the workspace id from /etc/machine-id (shared by every snapshot clone)" >&2
+  exit 1
+fi
+echo "PASS: cloud-build.sh provisions .cloud-env through ensure_cloud_workspace_env"
+
+# These cases exercise the boot-id path, so this VM's real agent store must not
+# leak in (a shared agent id would correctly keep one name across "clones").
+cloud_identity() {
+  local root="$1" boot_id_file="$2"
+  HOME="$TMP_ROOT/home" CLOUD_ENV_AGENT_STORE_DIR="$TMP_ROOT/no-agent-store" bash -c \
+    ". '$HELPER_SRC'; ensure_cloud_workspace_env \"\$1\" 3001 \"\$2\" >/dev/null && . \"\$1/.cloud-env\" && printf '%s\n' \"\$CONDUCTOR_WORKSPACE_NAME\"" \
+    _ "$root" "$boot_id_file"
 }
-builder_name="$(run_ensure_cloud_env "$TMP_ROOT/boot-builder")"
-expect_eq "$builder_name" "cloud-44cb5599" "cloud identity is derived from the instance boot id"
-expect_eq "$(grep -c '^# rose-cloud-env$' "$cloud_env_root/.cloud-env")" "1" "generated .cloud-env carries the # rose-cloud-env marker"
-expect_eq "$(run_ensure_cloud_env "$TMP_ROOT/boot-builder")" "cloud-44cb5599" "the generating instance keeps its workspace id"
-clone_name="$(run_ensure_cloud_env "$TMP_ROOT/boot-clone")"
-expect_eq "$clone_name" "cloud-9f3e7a21" "a VM booted from a snapshot of another instance regenerates its workspace id"
-expect_eq "$(grep -c '^\[ -f .*/.cloud-env \] && \. .*/.cloud-env$' "$cloud_env_home/.bashrc")" "1" "shell rc sources .cloud-env exactly once"
-printf '# rose-cloud-env\nexport CONDUCTOR_PORT=3001\nexport CONDUCTOR_WORKSPACE_NAME=cloud-legacy\n' >"$cloud_env_root/.cloud-env"
-expect_eq "$(run_ensure_cloud_env "$TMP_ROOT/boot-clone")" "cloud-9f3e7a21" "a snapshot-baked .cloud-env without an instance stamp is regenerated"
-printf '# Generated by cloudbench-entrypoint.sh\nexport CONDUCTOR_WORKSPACE_NAME=cloudbench\n' >"$cloud_env_root/.cloud-env"
-expect_eq "$(run_ensure_cloud_env "$TMP_ROOT/boot-clone")" "cloudbench" "cloudbench-pinned .cloud-env identities are never rewritten"
-rm -f "$cloud_env_root/.cloud-env"
-native_out="$(
-  HOME="$cloud_env_home" ROSE_CLOUD_BOOT_ID_FILE="$TMP_ROOT/boot-clone" \
-  CONDUCTOR_PORT=55190 CONDUCTOR_WORKSPACE_NAME=lagos \
-  bash -c ". '$CLOUD_ENV_SRC'; ensure_cloud_env '$cloud_env_root'"
-)"
-expect_eq "$([ -e "$cloud_env_root/.cloud-env" ] && echo written || echo absent)" "absent" "native Conductor env writes no .cloud-env"
-case "$native_out" in
-  *"Native Conductor env detected"*) echo "PASS: native Conductor env is reported" ;;
-  *) echo "FAIL: native Conductor env path not taken: $native_out" >&2; exit 1 ;;
-esac
-
-spaced_root="$TMP_ROOT/cloud env \$(touch pwned) root"
-spaced_home="$TMP_ROOT/spaced-home"
-mkdir -p "$spaced_root" "$spaced_home"
-: >"$spaced_home/.bashrc"
-HOME="$spaced_home" ROSE_CLOUD_BOOT_ID_FILE="$TMP_ROOT/boot-clone" \
-  env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
-  bash -c '. "$1"; ensure_cloud_env "$2" >/dev/null' _ "$CLOUD_ENV_SRC" "$spaced_root"
-spaced_env="$(
-  cd "$TMP_ROOT"
-  env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME -u CONDUCTOR_ROOT_PATH \
-    bash -c '. "$1"; printf "%s\n" "$CONDUCTOR_ROOT_PATH" "$CONDUCTOR_WORKSPACE_NAME" "$CONDUCTOR_PORT"' _ "$spaced_home/.bashrc"
-)"
-expect_eq "$(printf '%s\n' "$spaced_env" | sed -n '1p')" "$spaced_root" "a checkout path with spaces and shell syntax round-trips through the rc source line"
-expect_eq "$(printf '%s\n' "$spaced_env" | sed -n '2p')" "cloud-9f3e7a21" "the rc source line exports the generated workspace name"
-expect_eq "$(printf '%s\n' "$spaced_env" | sed -n '3p')" "3001" "the rc source line exports the default port"
-expect_eq "$([ -e "$TMP_ROOT/pwned" ] && echo executed || echo inert)" "inert" "shell syntax in the checkout path is never executed"
-
-moved_root="$TMP_ROOT/cloud-env-moved"
-mkdir -p "$moved_root"
-HOME="$cloud_env_home" ROSE_CLOUD_BOOT_ID_FILE="$TMP_ROOT/boot-clone" \
-  env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
-  bash -c ". '$CLOUD_ENV_SRC'; ensure_cloud_env '$moved_root' >/dev/null"
-expect_eq "$(grep -cxF "[ -f $moved_root/.cloud-env ] && . $moved_root/.cloud-env" "$cloud_env_home/.bashrc")" "1" "a checkout at a new path gets its own rc source line"
-
-bad_port_root="$TMP_ROOT/cloud-env-bad-port"
-mkdir -p "$bad_port_root"
-set +e
-bad_port_out="$(
-  HOME="$cloud_env_home" ROSE_CLOUD_BOOT_ID_FILE="$TMP_ROOT/boot-clone" CONDUCTOR_PORT='30$(id)' \
-    env -u CONDUCTOR_WORKSPACE_NAME \
-    bash -c ". '$CLOUD_ENV_SRC'; ensure_cloud_env '$bad_port_root'" 2>&1
-)"
-bad_port_status=$?
-set -e
-if [ "$bad_port_status" -eq 0 ] || [ -e "$bad_port_root/.cloud-env" ] || [[ "$bad_port_out" != *"CONDUCTOR_PORT must be a decimal integer"* ]]; then
-  echo "FAIL: a nonnumeric CONDUCTOR_PORT must be rejected without writing .cloud-env: status=$bad_port_status output='$bad_port_out'" >&2
+mkdir -p "$TMP_ROOT/home" "$TMP_ROOT/snapshot-a" "$TMP_ROOT/native"
+printf 'build-boot\n' > "$TMP_ROOT/boot-build"
+printf 'clone-boot-a\n' > "$TMP_ROOT/boot-a"
+printf 'clone-boot-b\n' > "$TMP_ROOT/boot-b"
+build_name="$(cloud_identity "$TMP_ROOT/snapshot-a" "$TMP_ROOT/boot-build")"
+if [[ ! "$build_name" =~ ^cloud-[0-9a-f]{8}$ ]]; then
+  echo "FAIL: generated cloud workspace name '$build_name' is not cloud-<8 hex>" >&2
   exit 1
 fi
-echo "PASS: a nonnumeric CONDUCTOR_PORT is rejected without writing .cloud-env"
+echo "PASS: a fresh instance gets a cloud-<8 hex> workspace name"
+expect_eq "$(grep -c '^# rose-cloud-env$' "$TMP_ROOT/snapshot-a/.cloud-env")" "1" \
+  "generated .cloud-env carries the # rose-cloud-env marker"
+expect_eq "$(cloud_identity "$TMP_ROOT/snapshot-a" "$TMP_ROOT/boot-build")" "$build_name" \
+  "the same boot keeps its workspace name across reruns"
+cp -p "$TMP_ROOT/snapshot-a/.cloud-env" "$TMP_ROOT/snapshot-a/.cloud-env.baked"
+mkdir -p "$TMP_ROOT/snapshot-b"
+cp -p "$TMP_ROOT/snapshot-a/.cloud-env.baked" "$TMP_ROOT/snapshot-b/.cloud-env"
+clone_a_name="$(CONDUCTOR_PORT=3001 CONDUCTOR_WORKSPACE_NAME="$build_name" \
+  cloud_identity "$TMP_ROOT/snapshot-a" "$TMP_ROOT/boot-a")"
+clone_b_name="$(CONDUCTOR_PORT=3001 CONDUCTOR_WORKSPACE_NAME="$build_name" \
+  cloud_identity "$TMP_ROOT/snapshot-b" "$TMP_ROOT/boot-b")"
+if [ "$clone_a_name" = "$build_name" ] || [ "$clone_b_name" = "$build_name" ] || [ "$clone_a_name" = "$clone_b_name" ]; then
+  echo "FAIL: snapshot clones share a workspace name: build=$build_name a=$clone_a_name b=$clone_b_name" >&2
+  exit 1
+fi
+echo "PASS: snapshot clones of one baked .cloud-env each mint their own workspace name"
+expect_eq "$(cloud_identity "$TMP_ROOT/snapshot-a" "$TMP_ROOT/boot-a")" "$clone_a_name" \
+  "a clone keeps its minted name for the rest of its boot"
+native_output="$(HOME="$TMP_ROOT/home" CONDUCTOR_PORT=3001 CONDUCTOR_WORKSPACE_NAME=lagos-v1 \
+  bash -c ". '$HELPER_SRC'; ensure_cloud_workspace_env \"\$1\" 3001 \"\$2\"" _ "$TMP_ROOT/native" "$TMP_ROOT/boot-a")"
+if [ -e "$TMP_ROOT/native/.cloud-env" ] || [[ "$native_output" != *"Native Conductor env detected"* ]]; then
+  echo "FAIL: a native Conductor workspace must not get a synthetic .cloud-env" >&2
+  exit 1
+fi
+echo "PASS: a native Conductor workspace keeps its own identity"
+
+# .cloud-env files minted by the earlier boot-id-only writer record the boot as
+# ROSE_CLOUD_BOOT_ID; the same boot must keep that name instead of re-keying.
+mkdir -p "$TMP_ROOT/boot-id-export"
+cat >"$TMP_ROOT/boot-id-export/.cloud-env" <<'ENV'
+# rose-cloud-env
+# Generated by scripts/cloud-build.sh — per-instance, gitignored.
+export CONDUCTOR_PORT=3001
+export CONDUCTOR_WORKSPACE_NAME=cloud-0badc0de
+export CONDUCTOR_ROOT_PATH=/workspace
+export ROSE_CLOUD_BOOT_ID=clone-boot-a
+ENV
+expect_eq "$(cloud_identity "$TMP_ROOT/boot-id-export" "$TMP_ROOT/boot-a")" "cloud-0badc0de" \
+  "a ROSE_CLOUD_BOOT_ID .cloud-env from the same boot keeps its workspace name"
+expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$TMP_ROOT/boot-id-export/.cloud-env' boot-id")" "clone-boot-a" \
+  "a kept ROSE_CLOUD_BOOT_ID identity is restamped with the boot id"
+[ "$(cloud_identity "$TMP_ROOT/boot-id-export" "$TMP_ROOT/boot-b")" != "cloud-0badc0de" ] \
+  || { echo "FAIL: a ROSE_CLOUD_BOOT_ID .cloud-env from another boot kept its name" >&2; exit 1; }
+echo "PASS: a ROSE_CLOUD_BOOT_ID .cloud-env from another boot is re-keyed"
 
 # Every agents/venv provisioner reinstalls when requirements.txt is no longer
 # satisfied. Gating on `import temporalio` alone kept browser-use 0.11 in a
