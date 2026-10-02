@@ -11030,6 +11030,128 @@ async def test_execute_action_request_payment_card_rejects_duplicate_after_card_
     assert "card_number" in out["error"]
     assert "line_items" not in out["error"]
 
+_TEST_SHOP_ORIGIN = "https://rose-cloud-bench.ngrok.app"
+_TEST_SHOP_PAGE_IMAGES = [
+    f"https://placehold.co/320x220/png?text={name}"
+    for name in ("Aurora+Notebook", "Copper+Pen", "Ceramic+Mug", "Canvas+Tote", "Desk+Lamp")
+]
+
+
+def _test_shop_receipt(image_urls):
+    items = (
+        ("Aurora Notebook", "aurora-notebook", "4.8 stars", "1,284 reviews", 1200),
+        ("Ceramic Mug", "ceramic-mug", "4.6 stars", "932 reviews", 900),
+        ("Canvas Tote", "canvas-tote", "4.9 stars", "2,051 reviews", 1500),
+    )
+    return {
+        "merchant": "Rose Labs Test Payment",
+        "currency": "USD",
+        "line_items": [
+            {
+                "name": name,
+                "image_url": image_url,
+                "product_url": f"{_TEST_SHOP_ORIGIN}/p/{slug}",
+                "rating": rating,
+                "review_count": reviews,
+                "unit_price_cents": cents,
+                "quantity": 1,
+                "line_total_cents": cents,
+            }
+            for (name, slug, rating, reviews, cents), image_url in zip(items, image_urls)
+        ],
+        "fees": [{"label": "Tax", "amount_cents": 297}, {"label": "Shipping", "amount_cents": 499}],
+        "subtotal_cents": 3600,
+        "total_cents": 4396,
+    }
+
+
+async def test_execute_action_request_payment_card_rejects_image_url_not_rendered_on_page():
+    """Agent 638c2b87: the browser LLM reasoned `320x220` but emitted `220x220` for
+    Canvas Tote. The page never rendered that asset, so the approval must not show it."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    dom.get_page_image_urls = AsyncMock(return_value=list(_TEST_SHOP_PAGE_IMAGES))
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    receipt = _test_shop_receipt(
+        [
+            "https://placehold.co/320x220/png?text=Aurora+Notebook",
+            "https://placehold.co/320x220/png?text=Ceramic+Mug",
+            "https://placehold.co/220x220/png?text=Canvas+Tote",
+        ]
+    )
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "request_payment_card", "params": receipt},
+        current_url=f"{_TEST_SHOP_ORIGIN}/test_payment",
+        trusted_page_urls=[f"{_TEST_SHOP_ORIGIN}/test_payment"],
+    )
+
+    assert out.get("status") != "awaiting_payment_card_approval", out
+    assert out["success"] is False
+    assert "line_items[2].image_url" in out["error"]
+    assert "https://placehold.co/220x220/png?text=Canvas+Tote" in out["error"]
+    assert "line_items[0]" not in out["error"]
+    dom.get_page_image_urls.assert_awaited_once()
+
+
+async def test_execute_action_request_payment_card_accepts_image_urls_rendered_on_page():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    dom.get_page_image_urls = AsyncMock(return_value=list(_TEST_SHOP_PAGE_IMAGES))
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    receipt = _test_shop_receipt(
+        [
+            # Same asset over http: canonicalized downstream, so it is still the page image.
+            "http://placehold.co/320x220/png?text=Aurora+Notebook",
+            "https://placehold.co/320x220/png?text=Ceramic+Mug",
+            None,
+        ]
+    )
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "request_payment_card", "params": receipt},
+        current_url=f"{_TEST_SHOP_ORIGIN}/test_payment",
+        trusted_page_urls=[f"{_TEST_SHOP_ORIGIN}/test_payment"],
+    )
+
+    assert "error" not in out, out
+    assert out["status"] == "awaiting_payment_card_approval"
+    assert out["payment_request"] == receipt
+    dom.get_page_image_urls.assert_awaited_once()
+
+
+async def test_execute_action_request_payment_card_without_image_urls_skips_page_read():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    dom.get_page_image_urls = AsyncMock(return_value=[])
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "request_payment_card", "params": _test_shop_receipt([None, None, None])},
+        current_url=f"{_TEST_SHOP_ORIGIN}/test_payment",
+    )
+
+    assert out["status"] == "awaiting_payment_card_approval"
+    dom.get_page_image_urls.assert_not_awaited()
+
 async def test_execute_action_dropdown_options_missing_element():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -17898,6 +18020,75 @@ def test_extract_media_candidates_prefers_checkout_product_jpeg_over_small_art()
 
     assert candidates[0]["url"] == "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA540_.jpg"
 
+def test_extract_image_urls_from_dom_state_is_uncapped_and_keeps_every_srcset_candidate():
+    """Receipt grounding needs every rendered image, not the 12 ranked media candidates."""
+    from browser_tools.dom_service import _extract_image_urls_from_dom_state
+
+    thumbnails = [
+        SimpleNamespace(tag_name="img", attributes={"src": f"/img/item-{n}.png"}) for n in range(15)
+    ]
+    responsive = SimpleNamespace(
+        tag_name="source",
+        attributes={"srcset": "https://cdn.shop.example/tote-320.jpg 320w, https://cdn.shop.example/tote-640.jpg 640w"},
+    )
+    vector = SimpleNamespace(tag_name="img", attributes={"src": "https://cdn.shop.example/mug.svg"})
+    dynamic = SimpleNamespace(
+        tag_name="img",
+        attributes={"data-a-dynamic-image": json.dumps({"https://cdn.shop.example/lamp-679.jpg": [679, 679]})},
+    )
+    inline = SimpleNamespace(tag_name="img", attributes={"src": "data:image/png;base64,AAAA"})
+    link = SimpleNamespace(tag_name="a", attributes={"href": "https://cdn.shop.example/not-an-image.jpg"})
+    root = SimpleNamespace(
+        original_node=SimpleNamespace(tag_name="body", attributes={}),
+        children=[
+            SimpleNamespace(original_node=node, children=[])
+            for node in (*thumbnails, responsive, vector, dynamic, inline, link)
+        ],
+    )
+
+    urls = _extract_image_urls_from_dom_state(
+        SimpleNamespace(_root=root),
+        page_url="https://shop.example/checkout",
+    )
+
+    assert urls[:15] == [f"https://shop.example/img/item-{n}.png" for n in range(15)]
+    assert "https://cdn.shop.example/tote-320.jpg" in urls
+    assert "https://cdn.shop.example/tote-640.jpg" in urls
+    assert "https://cdn.shop.example/mug.svg" in urls
+    assert "https://cdn.shop.example/lamp-679.jpg" in urls
+    assert not any(url.startswith("data:") for url in urls)
+    assert "https://cdn.shop.example/not-an-image.jpg" not in urls
+    assert len(urls) == len(set(urls)) == 19
+    assert _extract_image_urls_from_dom_state(SimpleNamespace(_root=None), page_url="https://shop.example/") == []
+
+async def test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_screenshot():
+    from browser_tools.dom_service import DOMService
+
+    image = SimpleNamespace(tag_name="img", attributes={"src": "/img/tote.png"})
+    selector_map = {7: image}
+    snapshot = SimpleNamespace(
+        url="https://shop.example/checkout",
+        dom_state=SimpleNamespace(
+            _root=SimpleNamespace(original_node=image, children=[]),
+            selector_map=selector_map,
+        ),
+    )
+    service = DOMService.__new__(DOMService)
+    service._selector_map = {}
+    service._session = SimpleNamespace(get_browser_state_summary=AsyncMock(return_value=snapshot))
+
+    assert await service.get_page_image_urls() == ["https://shop.example/img/tote.png"]
+    service._session.get_browser_state_summary.assert_awaited_once_with(include_screenshot=False)
+    assert service._selector_map is selector_map
+
+    service._session = None
+    try:
+        await service.get_page_image_urls()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("a disconnected DOM service must not report an empty image set")
+
 def test_write_lock_notification_prompt_includes_media_candidates():
     from domains.spawn_browser_agent_v3.handler import _write_lock_notification_prompt
 
@@ -22731,6 +22922,18 @@ async def run_all_tests():
         "execute_action_request_payment_card_rejects_duplicate_after_card_ready",
         test_execute_action_request_payment_card_rejects_duplicate_after_card_ready,
     )
+    await r.record_async(
+        "execute_action_request_payment_card_rejects_unrendered_image_url",
+        test_execute_action_request_payment_card_rejects_image_url_not_rendered_on_page,
+    )
+    await r.record_async(
+        "execute_action_request_payment_card_accepts_rendered_image_urls",
+        test_execute_action_request_payment_card_accepts_image_urls_rendered_on_page,
+    )
+    await r.record_async(
+        "execute_action_request_payment_card_no_image_urls_skips_page_read",
+        test_execute_action_request_payment_card_without_image_urls_skips_page_read,
+    )
     await r.record_async("execute_action_dropdown_options_no_el", test_execute_action_dropdown_options_missing_element)
     await r.record_async("execute_action_select_dropdown_no_el", test_execute_action_select_dropdown_missing_element)
     await r.record_async("execute_action_attempt_completion", test_execute_action_attempt_completion)
@@ -23532,6 +23735,14 @@ async def run_all_tests():
     r.record(
         "extract_media_candidates_prefers_product_jpeg",
         test_extract_media_candidates_prefers_checkout_product_jpeg_over_small_art,
+    )
+    r.record(
+        "extract_image_urls_from_dom_state_uncapped",
+        test_extract_image_urls_from_dom_state_is_uncapped_and_keeps_every_srcset_candidate,
+    )
+    await r.record_async(
+        "dom_service_get_page_image_urls_fresh_snapshot",
+        test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_screenshot,
     )
     r.record(
         "write_lock_notification_prompt_media_candidates",
