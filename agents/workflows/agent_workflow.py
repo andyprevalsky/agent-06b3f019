@@ -78,7 +78,12 @@ with workflow.unsafe.imports_passed_through():
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
     from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
-    from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
+    from loop.dag_executor import (
+        TaskDAG,
+        execute_dag,
+        extract_plan_from_context,
+        plan_superseded_by_new_user_instruction,
+    )
     from loop.run_agent import _run_verifier, run_agent
     from providers.fast_cache.google_oauth_demo_fixture import matches_demo_goal, normalize_completion_notice
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
@@ -2167,6 +2172,11 @@ class AgentWorkflow:
             workflow.logger.info("[DAG] Skipping DAG (continued after context reset)")
         else:
             plan_data = extract_plan_from_context(execute_context)
+            if plan_data and plan_superseded_by_new_user_instruction(execute_context):
+                workflow.logger.info(
+                    "[DAG] Skipping stale plan superseded by a newer USER instruction after completion_summary"
+                )
+                plan_data = None
             if plan_data:
                 workflow.logger.info("[DAG] Found plan, attempting DAG execution")
                 try:

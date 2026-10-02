@@ -213,6 +213,93 @@ def test_extract_plan_from_context_ignores_in_progress():
     assert extract_plan_from_context(context) is None
 
 
+def _plan_followup_context(*, include_final_summary: bool, later_user: bool, final_summary_flag: bool = True):
+    messages = [
+        {"role": "USER", "text": "order me glide floss from doordash", "metadata": None},
+        {
+            "role": "TOOL",
+            "text": "plan",
+            "metadata": {
+                "toolName": "set_plan",
+                "toolStatus": "FINISHED",
+                "data": {"tasks": [{"goal": "x", "tool_name": "spawn_explore_agent"}]},
+            },
+        },
+    ]
+    if include_final_summary:
+        messages.append(
+            {
+                "role": "TOOL",
+                "text": "done",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "isFinalSummary": final_summary_flag,
+                },
+            }
+        )
+    if later_user:
+        messages.append(
+            {
+                "role": "USER",
+                "text": "get a refund, the doordasher delivered to the wrong location",
+                "metadata": None,
+            }
+        )
+    return messages
+
+
+def test_plan_superseded_by_user_after_final_summary():
+    """USER after Task Complete makes the historical plan stale."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    assert plan_superseded_by_new_user_instruction(
+        _plan_followup_context(include_final_summary=True, later_user=True)
+    )
+
+
+def test_plan_superseded_by_final_summary_without_later_user():
+    """Task Complete alone makes the historical plan stale for a new execute."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    assert plan_superseded_by_new_user_instruction(
+        _plan_followup_context(include_final_summary=True, later_user=False)
+    )
+
+
+def test_plan_superseded_by_user_after_set_plan_without_summary():
+    """FAILED / credit-kill follow-up after set_plan stales the DAG without Task Complete."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    assert plan_superseded_by_new_user_instruction(
+        _plan_followup_context(include_final_summary=False, later_user=True)
+    )
+
+
+def test_plan_not_superseded_by_hidden_user_after_set_plan():
+    """Schema-refresh USER rows do not stale a live incomplete plan."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    context = _plan_followup_context(include_final_summary=False, later_user=False)
+    context.append(
+        {
+            "role": "USER",
+            "text": "generated schema",
+            "metadata": {"hidden": True, "isResponseSchemaUpdate": True},
+        }
+    )
+    assert not plan_superseded_by_new_user_instruction(context)
+
+
+def test_plan_not_superseded_by_non_final_summary_without_later_user():
+    """A non-final completion_summary without a later USER leaves the plan live."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    assert not plan_superseded_by_new_user_instruction(
+        _plan_followup_context(include_final_summary=True, later_user=False, final_summary_flag=False)
+    )
+
+
 def test_tool_aliases_constants():
     """TOOL_ALIASES and ALIAS_TYPE_OVERRIDES are correctly defined."""
     from loop.dag_executor import ALIAS_TYPE_OVERRIDES, TOOL_ALIASES
@@ -1384,6 +1471,23 @@ async def run_all_tests():
     r.record("extract_plan_from_context_found", test_extract_plan_from_context_found)
     r.record("extract_plan_from_context_empty", test_extract_plan_from_context_empty)
     r.record("extract_plan_from_context_ignores_in_progress", test_extract_plan_from_context_ignores_in_progress)
+    r.record("plan_superseded_by_user_after_final_summary", test_plan_superseded_by_user_after_final_summary)
+    r.record(
+        "plan_superseded_by_final_summary_without_later_user",
+        test_plan_superseded_by_final_summary_without_later_user,
+    )
+    r.record(
+        "plan_superseded_by_user_after_set_plan_without_summary",
+        test_plan_superseded_by_user_after_set_plan_without_summary,
+    )
+    r.record(
+        "plan_not_superseded_by_hidden_user_after_set_plan",
+        test_plan_not_superseded_by_hidden_user_after_set_plan,
+    )
+    r.record(
+        "plan_not_superseded_by_non_final_summary_without_later_user",
+        test_plan_not_superseded_by_non_final_summary_without_later_user,
+    )
     r.record("tool_aliases_constants", test_tool_aliases_constants)
     r.record(
         "dag_foreach_alias_override_passes_spawn_agent_validation",
