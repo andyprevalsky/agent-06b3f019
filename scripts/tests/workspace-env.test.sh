@@ -243,6 +243,12 @@ mkdir -p "$fake_store"
 printf 'bc-live' >"$fake_store/self-store-id"
 bash -c 'exec -a cursor-agent-store-fuse sleep 60' &
 store_pid=$!
+# The real daemon writes ready once it runs. Until exec completes, /proc shows the
+# forked test shell's cmdline (or none mid-exec), so publish the pid only after that.
+for _ in $(seq 1 100); do
+  tr '\0' ' ' <"/proc/$store_pid/cmdline" 2>/dev/null | grep -q '^cursor-agent-store-fuse ' && break
+  sleep 0.05
+done
 printf 'pid=%s\n' "$store_pid" >"$fake_store/ready"
 expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "bc-live" "a running store daemon's id is the agent id"
 kill "$store_pid" 2>/dev/null || true
