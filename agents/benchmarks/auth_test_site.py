@@ -30,6 +30,7 @@ per-run site in its prompt as ``{auth_test_site_url}``.
 from __future__ import annotations
 
 from contextvars import ContextVar
+from datetime import datetime
 from typing import Any, Optional
 
 import httpx
@@ -541,6 +542,38 @@ def _check_saved_password_states(check: dict, report: dict) -> Optional[str]:
     return None
 
 
+# Kinds whose form carries a side effect: a failed sign-in counted against the
+# account, a second account, a second order.
+_SUBMIT_KINDS = ("password", "second_factor", "code_verify", "sms_verify", "signup", "signup_verify", "order")
+# An agent needs at least a model turn and a typed field between two submits of
+# the same form; anything closer is the browser sending one submit twice.
+DUPLICATE_SUBMIT_WINDOW_SECONDS = 8.0
+
+
+def _attempt_time(attempt: dict) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(str(attempt.get("at") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _check_duplicate_submissions(attempts: list[dict]) -> Optional[str]:
+    """One click must reach the site as one submit."""
+    last_seen: dict[tuple[str, str], datetime] = {}
+    for attempt in attempts:
+        kind = str(attempt.get("kind") or "")
+        at = _attempt_time(attempt)
+        if kind not in _SUBMIT_KINDS or at is None:
+            continue
+        key = (kind, str(attempt.get("email") or "").casefold())
+        previous = last_seen.get(key)
+        last_seen[key] = at
+        if previous is not None and (at - previous).total_seconds() < DUPLICATE_SUBMIT_WINDOW_SECONDS:
+            gap = (at - previous).total_seconds()
+            return f"The {kind} form for {key[1] or 'the guest'} reached the site twice {gap:.1f}s apart"
+    return None
+
+
 def evaluate_outcome(check: dict, evidence: Any, deliverable: str) -> tuple[bool, str]:
     """Judge one ``auth_test_site_outcome`` check from the site's own records."""
     if not isinstance(evidence, dict):
@@ -576,7 +609,8 @@ def evaluate_outcome(check: dict, evidence: Any, deliverable: str) -> tuple[bool
 
     marker = next((index for index, a in enumerate(attempts) if a.get("kind") == "run_marker"), None)
     problem = (
-        _check_session(check, report, sessions)
+        _check_duplicate_submissions(attempts)
+        or _check_session(check, report, sessions)
         or _check_event_rules(check, attempts, manifest, "")
         or _check_orders(check, report)
         or _check_saved_password_states(check, report)

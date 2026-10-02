@@ -9,9 +9,11 @@ the runner's site lifecycle (including the stand-in user and two-run tasks).
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import os
 import threading
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
@@ -92,8 +94,19 @@ def _manifest(scenario: str, **overrides) -> dict:
     return manifest
 
 
+_ATTEMPT_CLOCK = itertools.count()
+
+
 def _attempt(kind: str, email: str, outcome: str, reason: str | None = None) -> dict:
-    return {"at": "2026-10-01T00:00:00.000Z", "kind": kind, "email": email, "outcome": outcome, "reason": reason}
+    """Site events half a minute apart, the pace of an agent taking one step at a time."""
+    at = datetime(2026, 10, 1, tzinfo=timezone.utc) + timedelta(seconds=30 * next(_ATTEMPT_CLOCK))
+    return {
+        "at": at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "kind": kind,
+        "email": email,
+        "outcome": outcome,
+        "reason": reason,
+    }
 
 
 def _session(email: str, method: str) -> dict:
@@ -613,6 +626,38 @@ async def test_missing_report_fails_the_outcome_check_closed() -> None:
     assert auth_test_site.active_manifest() is None
 
 
+def test_outcome_check_fails_a_form_that_reached_the_site_twice() -> None:
+    """One click is one submit: the browser re-sending a sign-in form doubles a
+    failed attempt against the account, and would double an order."""
+    from benchmarks.auth_test_site import evaluate_outcome
+
+    retry = _outcome_check("browser-auth-saved-password-retry")
+    report = _retry_report()
+    first = report["attempts"][0]
+    echo = dict(first)
+    echo["at"] = (
+        (datetime.fromisoformat(first["at"].replace("Z", "+00:00")) + timedelta(seconds=4.3))
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+    report["attempts"].insert(1, echo)
+    ok, detail = evaluate_outcome(
+        retry, {"manifest": _manifest("password_retry"), "report": report}, MEMBER_NUMBER
+    )
+    assert not ok and "reached the site twice 4.3s apart" in detail, detail
+
+    # The same login tried again a full agent step later is a retry, not an echo.
+    echo["at"] = (
+        (datetime.fromisoformat(first["at"].replace("Z", "+00:00")) + timedelta(seconds=20))
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+    ok, detail = evaluate_outcome(
+        retry, {"manifest": _manifest("password_retry"), "report": report}, MEMBER_NUMBER
+    )
+    assert ok, detail
+
+
 def test_outcome_check_grades_orders_accounts_and_second_runs() -> None:
     from benchmarks.auth_test_site import evaluate_outcome
 
@@ -678,7 +723,8 @@ def test_outcome_check_grades_orders_accounts_and_second_runs() -> None:
     still_offered = [{**two_runs["savedPasswords"][0], "disabledAt": None}, two_runs["savedPasswords"][1]]
     ok, detail = reoffer_with(savedPasswords=still_offered)
     assert not ok and "is still offered" in detail, detail
-    retried = [*two_runs["attempts"][:3], two_runs["attempts"][0], two_runs["attempts"][3]]
+    again = _attempt("password", SAVED[0], "rejected", "wrong_password")
+    retried = [*two_runs["attempts"][:3], again, _attempt("password", SAVED[1], "signed_in")]
     ok, detail = reoffer_with(attempts=retried)
     assert not ok and "in the second run" in detail, detail
     ok, detail = reoffer_with(attempts=two_runs["attempts"][:2])
@@ -884,6 +930,10 @@ async def run_all_tests():
     await runner.record_async(
         "missing_report_fails_the_outcome_check_closed",
         test_missing_report_fails_the_outcome_check_closed,
+    )
+    runner.record(
+        "outcome_check_fails_a_form_that_reached_the_site_twice",
+        test_outcome_check_fails_a_form_that_reached_the_site_twice,
     )
     runner.record(
         "outcome_check_grades_orders_accounts_and_second_runs",

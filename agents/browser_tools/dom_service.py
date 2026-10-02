@@ -1597,6 +1597,11 @@ class DOMService:
         At most once per target href (so a long LLM step past the 8s cooldown
         cannot wipe typed credentials). Host must match a held passkey rpId so
         an Amazon credential cannot reload an unrelated merchant login page.
+
+        Never repeats a form submission. A page that a form submit produced is
+        left alone, and the load itself is a plain GET of the same URL rather
+        than Page.reload, which re-sends a POST body: on a failed sign-in that
+        submitted every saved password twice.
         """
         last = self._passkey_auth_reload_at_by_target.get(target_id)
         if last is not None and (time.monotonic() - last) < 8.0:
@@ -1638,7 +1643,9 @@ class DOMService:
             }
             if not any(rp and (host == rp or host.endswith("." + rp)) for rp in held_rp_ids):
                 return
-            await self._send_cdp_command(cdp_session, "Page.reload", {"ignoreCache": True})
+            if await self._document_came_from_form_submit(cdp_session):
+                return
+            await self._send_cdp_command(cdp_session, "Page.navigate", {"url": href})
             self._passkey_auth_reload_at_by_target[target_id] = time.monotonic()
             self._passkey_auth_reload_url_by_target[target_id] = href
             logger.info(
@@ -1649,6 +1656,17 @@ class DOMService:
             logger.warning(
                 f"⚠️ [passkey] auth-page reload after VA rebuild failed: {e}"
             )
+
+    async def _document_came_from_form_submit(self, cdp_session: Any) -> bool:
+        """True unless the browser reports the current page was reached some other way."""
+        try:
+            history = await self._send_cdp_command(cdp_session, "Page.getNavigationHistory", {})
+            entries = history.get("entries") or []
+            transition = entries[int(history.get("currentIndex"))].get("transitionType")
+        except Exception as e:
+            logger.warning(f"⚠️ [passkey] navigation history unavailable; not reloading: {e}")
+            return True
+        return not transition or transition == "form_submit"
 
     async def _read_signcounts_for_target(
         self, target_id: str, cdp_session: Any

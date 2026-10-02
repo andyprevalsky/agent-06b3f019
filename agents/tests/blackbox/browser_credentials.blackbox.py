@@ -557,7 +557,9 @@ def _webauthn_browser_double():
             return {"credentials": list(creds.values())}
         if method == "Runtime.evaluate":
             return {"result": {"value": "https://www.amazon.com/"}}
-        if method == "Page.reload":
+        if method == "Page.getNavigationHistory":
+            return {"currentIndex": 0, "entries": [{"transitionType": "link"}]}
+        if method == "Page.navigate":
             return {}
         raise AssertionError(method)
 
@@ -930,12 +932,13 @@ async def test_passkey_rebuild_reloads_amazon_signin_page() -> None:
         )
     }
 
+    navigated: list = []
+
     async def send_with_reload(method: str, params: dict, target_id: str):
         if method == "Runtime.evaluate":
             return {"result": {"value": href["value"]}}
-        if method == "Page.reload":
-            state.calls.append((method, target_id))
-            return {}
+        if method == "Page.navigate":
+            navigated.append(params.get("url"))
         return await send(method, params, target_id)
 
     dom = DOMService(cdp_url="")
@@ -944,9 +947,47 @@ async def test_passkey_rebuild_reloads_amazon_signin_page() -> None:
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
     state.reset_environment("target-a")
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
-    assert any(method == "Page.reload" for method, _ in state.calls), (
-        "VA rebuild on Amazon sign-in must reload so Conditional UI re-probes"
+    assert navigated == [href["value"]], (
+        "VA rebuild on Amazon sign-in must load the page again so Conditional UI re-probes"
     )
+
+
+async def test_passkey_rebuild_never_resubmits_a_form() -> None:
+    """A page produced by a form submit is left alone: loading it again would
+    either send the form a second time (a second failed password, a second
+    order) or throw away the result the agent has not read yet."""
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    href = "https://www.amazon.com.mx/ap/signin"
+    transition = {"value": "form_submit"}
+
+    async def send_after_submit(method: str, params: dict, target_id: str):
+        if method == "Runtime.evaluate":
+            return {"result": {"value": href}}
+        if method == "Page.getNavigationHistory":
+            state.calls.append((method, target_id))
+            if transition["value"] is None:
+                raise RuntimeError("history unavailable")
+            return {"currentIndex": 1, "entries": [{"transitionType": "link"}, {"transitionType": transition["value"]}]}
+        return await send(method, params, target_id)
+
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(send_after_submit)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    state.reset_environment("target-a")
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    loads = [method for method, _ in state.calls if method in ("Page.reload", "Page.navigate")]
+    assert loads == [], f"a submitted form's result page was loaded again: {loads}"
+
+    # Not knowing how the page was reached is treated the same way.
+    transition["value"] = None
+    dom._passkey_auth_reload_at_by_target.clear()
+    state.reset_environment("target-a")
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    loads = [method for method, _ in state.calls if method in ("Page.reload", "Page.navigate")]
+    assert loads == [], f"page loaded again without knowing how it was reached: {loads}"
 
 
 async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
@@ -959,9 +1000,6 @@ async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
     async def send_with_reload(method: str, params: dict, target_id: str):
         if method == "Runtime.evaluate":
             return {"result": {"value": href["value"]}}
-        if method == "Page.reload":
-            state.calls.append((method, target_id))
-            return {}
         return await send(method, params, target_id)
 
     dom = DOMService(cdp_url="")
@@ -970,7 +1008,7 @@ async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
     state.reset_environment("target-a")
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
-    assert not any(method == "Page.reload" for method, _ in state.calls), (
+    assert not any(method == "Page.navigate" for method, _ in state.calls), (
         "Amazon passkey must not reload an unrelated Google sign-in page"
     )
 
@@ -979,7 +1017,7 @@ async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
     )
     state.reset_environment("target-a")
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
-    first_reloads = sum(1 for method, _ in state.calls if method == "Page.reload")
+    first_reloads = sum(1 for method, _ in state.calls if method == "Page.navigate")
     assert first_reloads == 1
 
     # Same href after another rebuild must not reload again (preserve typed fields).
@@ -987,7 +1025,7 @@ async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
     # Expire cooldown so only the href gate applies.
     dom._passkey_auth_reload_at_by_target.clear()
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
-    assert sum(1 for method, _ in state.calls if method == "Page.reload") == first_reloads
+    assert sum(1 for method, _ in state.calls if method == "Page.navigate") == first_reloads
 
 
 async def test_invalidate_preserves_advanced_signcounts_for_usage() -> None:
@@ -1221,6 +1259,14 @@ async def run_all_tests():
     await runner.record_async(
         "passkey_rebuild_reloads_amazon_signin_page",
         test_passkey_rebuild_reloads_amazon_signin_page,
+    )
+    await runner.record_async(
+        "passkey_rebuild_never_resubmits_a_form",
+        test_passkey_rebuild_never_resubmits_a_form,
+    )
+    await runner.record_async(
+        "passkey_auth_reload_skips_foreign_host_and_same_href",
+        test_passkey_auth_reload_skips_foreign_host_and_same_href,
     )
     await runner.record_async(
         "passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target",
