@@ -13,104 +13,84 @@ import {
   shouldSnapshotPreviousGoal,
 } from '../../domains/agents/repoAgentMutations';
 import { prisma } from '../../providers/database';
-import { createTestHarness } from './[REDACTED]-test-utils';
 
-const { test, finish } = createTestHarness('chat follow-up goal persist');
+const previousGoal = 'order me glide floss from doordash';
+const nextGoal = 'Get a refund for the DoorDash order delivered to the wrong location';
+const routerParaphrase = 'Order Oral-B Glide floss on DoorDash';
 
-assert.deepStrictEqual(
-  followUpRunStateUpdate(
-    'Get a refund for the DoorDash order delivered to the wrong location',
-    'order me glide floss from doordash'
-  ).goal,
-  'Get a refund for the DoorDash order delivered to the wrong location'
-);
-assert.strictEqual(
-  followUpRunStateUpdate('order me glide floss from doordash', 'order me glide floss from doordash')
-    .goal,
-  undefined
-);
-assert.strictEqual(followUpRunStateUpdate('   ', 'order me glide floss from doordash').goal, undefined);
-assert.strictEqual(
-  shouldSnapshotPreviousGoal(
-    'Get a refund for the DoorDash order delivered to the wrong location',
-    'order me glide floss from doordash'
-  ),
-  true
-);
-assert.strictEqual(
-  shouldSnapshotPreviousGoal('order me glide floss from doordash', 'order me glide floss from doordash'),
-  false
-);
+assert.deepStrictEqual(followUpRunStateUpdate(nextGoal, previousGoal).goal, nextGoal);
+assert.strictEqual(followUpRunStateUpdate(previousGoal, previousGoal).goal, undefined);
+assert.strictEqual(followUpRunStateUpdate('   ', previousGoal).goal, undefined);
+assert.strictEqual(shouldSnapshotPreviousGoal(nextGoal, previousGoal), true);
+assert.strictEqual(shouldSnapshotPreviousGoal(previousGoal, previousGoal), false);
+assert.strictEqual(shouldSnapshotPreviousGoal(routerParaphrase, previousGoal), true);
 
 async function main(): Promise<void> {
-  await test('follow-up write persists router goal and keeps prior goal readable', async () => {
-    const runId = `chat-followup-goal-${randomUUID()}`;
-    const agentId = randomUUID();
-    const previousGoal = 'order me glide floss from doordash';
-    const nextGoal = 'Get a refund for the DoorDash order delivered to the wrong location';
-    try {
-      await prisma.agent.create({
-        data: {
-          id: agentId,
-          userId: runId,
-          goal: previousGoal,
-          status: 'ACTIVE',
-          progress: 1,
-          responseSchema: { fields: [{ name: 'order_confirmation_id', type: 'str' }] },
-          structuredResponse: { order_confirmation_id: 'dff187de' },
-          toolsInUse: ['spawn_browser_agent'],
-          statusMessage: 'Task completed',
-          verifier: { create: {} },
-        },
-      });
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: followUpRunStateUpdate(nextGoal, previousGoal),
-      });
-      const after = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-      assert.strictEqual(after.goal, nextGoal);
-      assert.strictEqual(after.responseSchema, null);
-      assert.strictEqual(after.structuredResponse, null);
-      assert.strictEqual(after.progress, 0);
-      assert.deepStrictEqual(after.toolsInUse, []);
-      assert.strictEqual(after.statusMessage, null);
-      assert.strictEqual(shouldSnapshotPreviousGoal(nextGoal, previousGoal), true);
-    } finally {
-      await prisma.agent.deleteMany({ where: { userId: runId } });
-    }
-  });
+  const followUpUserId = `chat-followup-goal-${randomUUID()}`;
+  const followUpAgentId = randomUUID();
+  try {
+    await prisma.agent.create({
+      data: {
+        id: followUpAgentId,
+        userId: followUpUserId,
+        goal: previousGoal,
+        status: 'ACTIVE',
+        progress: 1,
+        responseSchema: { fields: [{ name: 'order_confirmation_id', type: 'str' }] },
+        structuredResponse: { order_confirmation_id: 'dff187de' },
+        toolsInUse: ['spawn_browser_agent'],
+        statusMessage: 'Task completed',
+        verifier: { create: {} },
+      },
+    });
+    await prisma.agent.update({
+      where: { id: followUpAgentId },
+      data: followUpRunStateUpdate(nextGoal, previousGoal),
+    });
+    const afterFollowUp = await prisma.agent.findUniqueOrThrow({ where: { id: followUpAgentId } });
+    assert.strictEqual(afterFollowUp.goal, nextGoal);
+    assert.strictEqual(afterFollowUp.responseSchema, null);
+    assert.strictEqual(afterFollowUp.structuredResponse, null);
+    assert.strictEqual(afterFollowUp.progress, 0);
+    assert.deepStrictEqual(afterFollowUp.toolsInUse, []);
+    assert.strictEqual(afterFollowUp.statusMessage, null);
+  } finally {
+    await prisma.agent.deleteMany({ where: { userId: followUpUserId } });
+  }
 
-  await test('first-run escalate shape does not rewrite create-time Agent.goal', async () => {
-    const runId = `chat-first-run-goal-${randomUUID()}`;
-    const agentId = randomUUID();
-    const createTimeGoal = 'order me glide floss from doordash';
-    const routerParaphrase = 'Order Oral-B Glide floss on DoorDash';
-    try {
-      await prisma.agent.create({
-        data: {
-          id: agentId,
-          userId: runId,
-          goal: createTimeGoal,
-          status: 'ACTIVE',
-          progress: 0,
-          verifier: { create: {} },
-        },
-      });
-      const before = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-      assert.strictEqual(before.structuredResponse, null);
-      assert.strictEqual(before.progress, 0);
-      // Handler only calls followUpRunStateUpdate when structuredResponse or
-      // progress says a prior run finished. First-run must not persist the
-      // router paraphrase (2026-07-03 fast-cache namespace).
-      assert.notStrictEqual(routerParaphrase, createTimeGoal);
-      const after = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-      assert.strictEqual(after.goal, createTimeGoal);
-    } finally {
-      await prisma.agent.deleteMany({ where: { userId: runId } });
-    }
-  });
+  const firstRunUserId = `chat-first-run-goal-${randomUUID()}`;
+  const firstRunAgentId = randomUUID();
+  try {
+    await prisma.agent.create({
+      data: {
+        id: firstRunAgentId,
+        userId: firstRunUserId,
+        goal: previousGoal,
+        status: 'ACTIVE',
+        progress: 0,
+        verifier: { create: {} },
+      },
+    });
+    const firstRun = await prisma.agent.findUniqueOrThrow({ where: { id: firstRunAgentId } });
+    assert.strictEqual(firstRun.structuredResponse, null);
+    assert.strictEqual(firstRun.progress, 0);
+    assert.strictEqual(firstRun.goal, previousGoal);
+    // Handler only applies followUpRunStateUpdate when a prior run finished.
+    // Calling it here would persist a router paraphrase — that is the
+    // 2026-07-03 fast-cache miss, so first-run must not take this write.
+    assert.notStrictEqual(routerParaphrase, previousGoal);
+  } finally {
+    await prisma.agent.deleteMany({ where: { userId: firstRunUserId } });
+  }
 
-  await finish();
+  process.stdout.write('PASS chat follow-up persists router goal and keeps prior goal snapshotable\n');
 }
 
-void main();
+void main()
+  .catch((error: unknown) => {
+    console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });
