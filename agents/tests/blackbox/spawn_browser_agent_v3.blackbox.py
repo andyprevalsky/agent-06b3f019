@@ -1239,7 +1239,7 @@ def test_verifier_checkpoints_stay_bounded():
 
 
 def test_observed_interaction_keeps_earlier_browser_result_for_verifier():
-    """A later final page must not erase proof visible after an earlier click."""
+    """A later final page must not erase proof observed after a click or evaluate."""
     from domains.spawn_browser_agent_v3.handler import _preserve_observed_interaction_for_verifier
 
     checkpoints: list = []
@@ -1276,6 +1276,25 @@ def test_observed_interaction_keeps_earlier_browser_result_for_verifier():
         "dom_tree": "<main>Verified</main>",
         "kind": "preserved_evidence",
     }]
+    pending = _preserve_observed_interaction_for_verifier(
+        action_name="evaluate",
+        succeeded=True,
+        awaiting_observation=False,
+        observed_state={"dom_tree": "<main>Before evaluate</main>"},
+        current_url="https://example.com",
+        verifier_checkpoints=checkpoints,
+    )
+    assert pending and len(checkpoints) == 1
+    pending = _preserve_observed_interaction_for_verifier(
+        action_name="read_browser_state",
+        succeeded=True,
+        awaiting_observation=pending,
+        observed_state={"dom_tree": "<main>Evaluated result</main>", "title": "Result"},
+        current_url="https://example.com",
+        verifier_checkpoints=checkpoints,
+    )
+    assert not pending
+    assert checkpoints[-1]["dom_tree"] == "<main>Evaluated result</main>"
 
 
 def test_evaluate_tool_schema_has_no_preserve_evidence_flag():

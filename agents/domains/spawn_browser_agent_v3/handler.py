@@ -766,62 +766,11 @@ def _preserve_observed_interaction_for_verifier(
         if _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint):
             return False
     if action_name in {
-        "goto", "click", "click_coordinates", "input_text", "select_dropdown",
+        "goto", "click", "click_coordinates", "evaluate", "input_text", "select_dropdown",
         "drag", "press_keys", "press_key", "upload_file", "submit_form",
     }:
         return True
     return awaiting_observation
-
-
-async def _capture_preserved_evidence_after_evaluate(
-    *,
-    dom_service: Any,
-    verifier_checkpoints: List[Dict[str, Any]],
-    current_url: str,
-) -> Optional[Dict[str, Any]]:
-    """Always-on: snapshot live DOM after a successful evaluate for the verifier.
-
-    No model flag. The JS return value is not trusted as proof; only the
-    browser-extracted DOM checkpoint is.
-    """
-    if dom_service is None:
-        return None
-    # Bound + one retry: a frozen renderer must not stall the activity past the
-    # supervisor step budget, and a single transient CDP blip should not drop
-    # the only DOM proof the verifier will see after navigation.
-    last_error: Optional[BaseException] = None
-    state: Any = None
-    for attempt in range(2):
-        try:
-            state = await asyncio.wait_for(
-                dom_service.get_browser_state(include_screenshot=False),
-                timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
-            )
-            last_error = None
-            break
-        except asyncio.TimeoutError as exc:
-            last_error = exc
-            logger.warning(
-                "Timed out refreshing browser state for preserved evaluate evidence",
-                attempt=attempt + 1,
-                timeout_s=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            last_error = exc
-            logger.warning(
-                "Failed to refresh browser state for preserved evaluate evidence",
-                attempt=attempt + 1,
-                error=str(exc)[:200],
-            )
-    if last_error is not None or not isinstance(state, dict):
-        return None
-    checkpoint = _browser_ground_truth_checkpoint(
-        state,
-        str(state.get("url") or current_url or ""),
-        kind="preserved_evidence",
-    )
-    _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
-    return state
 
 
 def _replace_resume_image_blocks(value: Any) -> Any:
