@@ -6,11 +6,11 @@ Other helpers should import and use _update_agent_status_impl directly.
 
 from typing import Dict, Optional
 
-import httpx
 import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.http_client import get_http_client
 from helpers.workflow_generation import workflow_generation_headers
 
 logger = structlog.get_logger()
@@ -49,45 +49,45 @@ async def _update_agent_status_impl(
     """
     config = load_config()
 
-    async with httpx.AsyncClient() as client:
-        payload = {
-            "status": status,
-            "progress": progress,
-            "statusMessage": status_message,
-            "tokenCount": token_count,
-            "tokensIn": tokens_in,
-            "tokensOut": tokens_out,
-            "contextSize": context_size,
-            "messageCount": message_count,
-        }
-        if structured_response is not None:
-            payload["structuredResponse"] = structured_response
-        if iteration_offset is not None:
-            payload["iterationOffset"] = iteration_offset
+    client = get_http_client()
+    payload = {
+        "status": status,
+        "progress": progress,
+        "statusMessage": status_message,
+        "tokenCount": token_count,
+        "tokensIn": tokens_in,
+        "tokensOut": tokens_out,
+        "contextSize": context_size,
+        "messageCount": message_count,
+    }
+    if structured_response is not None:
+        payload["structuredResponse"] = structured_response
+    if iteration_offset is not None:
+        payload["iterationOffset"] = iteration_offset
 
-        response = await client.patch(
-            f"{config.backend.api_url}/api/agents/{agent_id}/status",
-            json=payload,
-            headers={
-                "X-API-Key": config.backend.api_key,
-                "Content-Type": "application/json",
-                **workflow_generation_headers(),
-            },
-            timeout=30.0,
-        )
-        response.raise_for_status()
+    response = await client.patch(
+        f"{config.backend.api_url}/api/agents/{agent_id}/status",
+        json=payload,
+        headers={
+            "X-API-Key": config.backend.api_key,
+            "Content-Type": "application/json",
+            **workflow_generation_headers(),
+        },
+        timeout=30.0,
+    )
+    response.raise_for_status()
 
-        logger.info(
-            "Agent status updated",
-            agent_id=agent_id,
-            status=status,
-            progress=progress,
-            tokens=token_count,
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-            context_size=context_size,
-            messages=message_count,
-        )
+    logger.info(
+        "Agent status updated",
+        agent_id=agent_id,
+        status=status,
+        progress=progress,
+        tokens=token_count,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        context_size=context_size,
+        messages=message_count,
+    )
 
 
 @activity.defn

@@ -19,7 +19,6 @@ from utils.purchase_approval import (
     validate_product_url_for_page,
     validate_product_url_for_pages,
 )
-from utils.user_facing_writing_prompt import user_facing_text_description
 
 MAX_BROWSER_WAIT_MS = 60_000
 
@@ -312,14 +311,12 @@ class SelectDropdownTool(BaseModel):
 
 
 class EvaluateTool(BaseModel):
-    """Execute JavaScript in the page; successful calls also retain a verifier DOM snapshot."""
+    """Execute JavaScript in the page."""
 
     tool: Literal["evaluate"]
     code: str = Field(
         description=(
-            "JavaScript code to execute. Returns the result of the expression. "
-            "After success, the runtime always retains a bounded browser-extracted DOM snapshot "
-            "for verification (no preserve flag)."
+            "JavaScript code to execute. Returns the result of the expression."
         )
     )
     timeout: Optional[float] = Field(
