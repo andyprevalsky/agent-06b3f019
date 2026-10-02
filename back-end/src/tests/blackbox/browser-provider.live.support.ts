@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken';
 import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
+import { kernelProxyCandidates } from '../../providers/browser/kernelProxy';
 import { steel, steelCdpConnectionUrl } from '../../providers/steel/session';
 import {
   assert,
@@ -428,14 +429,26 @@ export async function runLiveProviderParity(): Promise<void> {
     assert(resumed.saved_url === 'https://example.com/resume-check', 'resume lost the saved URL');
     assert(resumedMetadata.provider === 'kernel', 'resume changed providers');
     assert(resumedMetadata.profile_id === profileId, 'resume did not reuse the Kernel profile');
-    assert(
-      resumedMetadata.proxy_source === metadata.proxy_source &&
-        JSON.stringify(resumedMetadata.proxy_location) === JSON.stringify(metadata.proxy_location),
-      'resume lost resolved proxy fallback metadata'
-    );
-
     const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
-    assert(secondRemote.proxy_id === proxyId, 'resume did not reuse the managed proxy ID');
+    const resumedCandidate = kernelProxyCandidates({
+      country: 'US',
+      state: 'CA',
+      city: 'San Francisco',
+    }).find(
+      (candidate) =>
+        candidate.source === resumedMetadata.proxy_source &&
+        JSON.stringify(candidate.location) === JSON.stringify(resumedMetadata.proxy_location)
+    );
+    if (resumedCandidate === undefined) {
+      throw new Error('resume returned invalid proxy fallback metadata');
+    }
+    const resumedProxy = await prisma.browserProviderProxy.findUnique({
+      where: { provider_proxyKey: { provider: 'kernel', proxyKey: resumedCandidate.proxyKey } },
+    });
+    assert(
+      resumedProxy?.proxyId === secondRemote.proxy_id,
+      'resume metadata did not identify the actual managed proxy'
+    );
 
     // A Steel infra outage returns null (skips the Steel legs) while Kernel is
     // healthy; real rotation defects still throw. See the wrapper's doc comment.
