@@ -52,10 +52,7 @@ import {
 import { CLOUD_AGENT_TOOL_NAME, CREATING_CLOUD_AGENT_TITLE } from './cloudAgentLifecycleTool';
 import { withChatEscalationDeadline } from './chatEscalationDeadline';
 import { createLogger } from '../logger';
-import {
-  followUpRunStateUpdate,
-  shouldSnapshotPreviousGoal,
-} from '../../domains/agents/repoAgentMutations';
+import { followUpRunStateUpdate, shouldSnapshotPreviousGoal } from '../derivedRunState';
 import {
   createEarlyDirectGeneratorCoordinator,
   shouldStartEarlyDirectGenerator,
@@ -491,7 +488,8 @@ async function startTemporalWorkflowForChat(
   //   first-run escalate: Agent.goal unchanged, schema kept
   //   post-completion:    Agent.goal = router goal, previousGoal snapshotted
   //                       on the Cloud Agent chip, derived state nulled
-  let agent = loadedAgent;
+  const agent = loadedAgent;
+  let persistedGoal = agent.goal;
   if (agent.structuredResponse !== null || agent.progress > 0) {
     const update = followUpRunStateUpdate(goal, agent.goal);
     await prisma.agent.update({
@@ -499,7 +497,7 @@ async function startTemporalWorkflowForChat(
       data: update,
     });
     if (typeof update.goal === 'string') {
-      agent = { ...agent, goal: update.goal };
+      persistedGoal = update.goal;
     }
   }
 
@@ -511,7 +509,7 @@ async function startTemporalWorkflowForChat(
       goal,
       startPhase,
       agent: {
-        goal: agent.goal,
+        goal: persistedGoal,
         model: agent.model,
         reasoningMaxTokens: agent.reasoningMaxTokens,
         verifier: { type: agent.verifier.type },
