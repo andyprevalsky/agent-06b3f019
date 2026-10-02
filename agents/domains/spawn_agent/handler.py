@@ -39,8 +39,8 @@ from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     build_for_each_goal,
     coerce_for_each_items,
-    compile_explore_wrap_up,
     compile_explore_grep_evidence,
+    compile_explore_wrap_up,
     resolve_start_phase,
     spawn_explore_agent_activity,
     validate_spawn_params,
@@ -880,12 +880,16 @@ class SpawnAgentManager(ToolManager):
             unavailable_sources = result.get("unavailable_sources") or []
             explore_failed = result.get("status") not in {None, "completed"}
             explore_error_reason = result.get("error_reason")
-            if not explore_result:
+            fast_mode = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+            # An empty live completion is not usable research. In Fast Mode the
+            # chip filter also strips replay-end stub copy, so a completed
+            # activity (which already applied its evidence gate) stays FINISHED.
+            if not explore_result and not (fast_mode and not explore_failed):
                 explore_failed = True
                 explore_error_reason = explore_error_reason or _EXPLORE_NO_EVIDENCE
             # Fast Mode may soft-complete a malformed cached LLM turn only
             # when prior tool calls produced evidence to pass to the parent.
-            if explore_failed and bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)):
+            if explore_failed and fast_mode:
                 cached_evidence = compile_explore_wrap_up("", explore_tool_call_results)
                 if cached_evidence and explore_error_reason != _EXPLORE_NO_EVIDENCE:
                     explore_result = cached_evidence

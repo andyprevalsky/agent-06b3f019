@@ -1035,6 +1035,98 @@ async def test_handler_explore_failed_result_fast_mode_without_evidence_errors()
     assert not any(event.status == MessageStatus.FINISHED for event in events)
 
 
+async def _explore_cold_stub_activity_result():
+    """Run the real explore activity on the Fast Mode cold-namespace stub.
+
+    Mirrors DAG task 1 of test-mass-agent-run-0 (0381fb79, 2026-10-02): the
+    explore goal has no recorded explore_agent rows, so Fast Mode replays the
+    soft-complete payload at p:1. The trusted local summary makes the
+    completion acceptable, and the stub copy is stripped from the result.
+    """
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+    from providers.fast_cache.rose_cache import soft_complete_on_miss
+
+    stub_call = soft_complete_on_miss("explore_agent")["tool_calls"][0]
+    stub_args = json.loads(stub_call["arguments"])
+    completions = []
+
+    async def fake_run_agent(**kwargs):
+        completions.append(await kwargs["execute_tool"](stub_call["name"], stub_args, stub_call["id"]))
+        return {"status": "completed", "final_response": stub_args["result"], "tokens_in": 0, "tokens_out": 0}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a",
+            user_id="u",
+            goal="Research platform and audience benchmarks for a personal brand",
+            model="m",
+            local_data_summary="Recent local threads: 3 conversations about longevity content.",
+        )
+    assert completions == [{"success": True, "message": "Completion accepted"}]
+    assert result["status"] == "completed"
+    assert result["result"] == ""
+    assert result["tool_call_results"] == []
+    return result
+
+
+async def _spawn_explore_with_result(result, *, fast_mode: bool):
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=_Activity(result=result),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        wf = _FakeWFInstance()
+        wf.fast_mode_cache_enabled = fast_mode
+        return await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=wf,
+                tool_call={"type": "explore", "goal": "Research platform and audience benchmarks"},
+                tool_call_id="tc-cold-stub",
+            )
+        )
+    finally:
+        restore()
+
+
+async def test_handler_explore_fast_mode_cold_stub_completion_finishes():
+    """A completed Fast Mode replay end must not ERROR the explore spawn.
+
+    The activity already applied its evidence gate. Re-deriving failure from
+    the display-filtered chip text turned the stub into ERROR, so the DAG
+    cancelled the sibling explore and the replay diverged into 20 more errors.
+    """
+    from tools.base import MessageStatus
+
+    events = await _spawn_explore_with_result(await _explore_cold_stub_activity_result(), fast_mode=True)
+
+    finished = [event for event in events if event.status == MessageStatus.FINISHED]
+    assert len(finished) == 1
+    assert finished[0].data["result"] == ""
+    assert "error_reason" not in finished[0].data
+    assert not any(event.status == MessageStatus.ERROR for event in events)
+
+
+async def test_handler_explore_live_empty_completion_still_errors():
+    """Outside Fast Mode, an empty completed explore stays retryable by the parent."""
+    from domains.spawn_agent.handler import _EXPLORE_NO_EVIDENCE
+    from tools.base import MessageStatus
+
+    events = await _spawn_explore_with_result(await _explore_cold_stub_activity_result(), fast_mode=False)
+
+    error = next(event for event in events if event.status == MessageStatus.ERROR)
+    assert error.message == _EXPLORE_NO_EVIDENCE
+    assert error.data["error_reason"] == _EXPLORE_NO_EVIDENCE
+    assert not any(event.status == MessageStatus.FINISHED for event in events)
+
+
 async def test_handler_explore_failed_result_forwards_error_reason():
     """An explicit activity failure reason reaches the parent and UI event."""
     from domains.spawn_agent.handler import SpawnAgentManager
@@ -4870,6 +4962,15 @@ async def run_all_tests():
         "handler_explore_failed_result_fast_mode_without_evidence_errors",
         test_handler_explore_failed_result_fast_mode_without_evidence_errors,
     )
+    await r.record_async(
+        "handler_explore_fast_mode_cold_stub_completion_finishes",
+        test_handler_explore_fast_mode_cold_stub_completion_finishes,
+    )
+    await r.record_async(
+        "handler_explore_live_empty_completion_still_errors",
+        test_handler_explore_live_empty_completion_still_errors,
+    )
+    r.record("user_facing_explore_result_keeps_prod_summaries", test_user_facing_explore_result_keeps_prod_summaries)
     await r.record_async(
         "handler_explore_failed_result_forwards_error_reason",
         test_handler_explore_failed_result_forwards_error_reason,
