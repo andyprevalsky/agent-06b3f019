@@ -1078,6 +1078,16 @@ OAI_DEMO_ROOT_GOAL_HASH = "4ae3193053ac1d8f"
 # ---------------------------------------------------------------------------
 
 _DEMO_TAG = "DEMO"
+GOOGLE_OAUTH_DEMO_PROMPT_PREFIX = (
+    "DEMO FIXTURE ONLY. Produce the Rose agent segment for a Google OAuth review video."
+)
+GOOGLE_OAUTH_DEMO_GOAL_HASH = "b3f12957955734b1"
+
+
+@functools.lru_cache(maxsize=1)
+def google_oauth_demo_goal_hash() -> str:
+    """Exact DEMO namespace, available even in worker images without benchmarks/."""
+    return GOOGLE_OAUTH_DEMO_GOAL_HASH
 
 
 def _task_has_demo_tag(task: dict) -> bool:
@@ -1095,7 +1105,7 @@ def demo_cache_goal_hashes() -> frozenset[str]:
     cannot drift if the catalog load fails in workers. Also accepts legacy
     ``fast_cache: "on"`` so older catalog rows keep working until retagged.
     """
-    hashes: set[str] = {OAI_DEMO_ROOT_GOAL_HASH}
+    hashes: set[str] = {OAI_DEMO_ROOT_GOAL_HASH, GOOGLE_OAUTH_DEMO_GOAL_HASH}
     try:
         tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
         with tasks_path.open(encoding="utf-8") as fh:
