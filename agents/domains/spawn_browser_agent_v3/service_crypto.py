@@ -890,7 +890,10 @@ def build_auth_options_prompt_section(
         match_text = f"; likely match: {match}" if match else ""
         lines.append(f"- Email OTP: available ({connected_text}{match_text})")
     else:
-        lines.append("- Email OTP: unavailable")
+        lines.append(
+            "- Email OTP: unavailable (none of the user's inboxes is connected; "
+            "mail to the minted address still arrives)"
+        )
 
     if minted:
         minted_id = minted.get("id") or minted.get("accountLabel") or minted.get("account_label") or minted.get("email")
