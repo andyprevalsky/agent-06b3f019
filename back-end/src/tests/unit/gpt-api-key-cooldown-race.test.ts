@@ -34,6 +34,24 @@ async function main(): Promise<void> {
     assert.equal(await isGptApiKeyOnCooldown(), true, 'the next request must skip the funded key');
     assert.equal(readCount, 1);
     process.stdout.write('GPT API key cooldown: stale DB read cannot clear a new local mark\n');
+
+    __clearGptApiKeyCooldownCache();
+    let finishWrite!: () => void;
+    integration.upsert = async () =>
+      new Promise((resolve) => {
+        finishWrite = () => resolve({});
+      });
+    const pendingMark = markGptApiKeyOnCooldown('insufficient_quota');
+    const readDuringWrite = isGptApiKeyOnCooldown();
+    finishRead(null);
+    assert.equal(
+      await readDuringWrite,
+      true,
+      'DB read during an upsert must retain the local mark'
+    );
+    finishWrite();
+    await pendingMark;
+    assert.equal(await isGptApiKeyOnCooldown(), true, 'committed mark must remain cached');
   } finally {
     integration.findUnique = originalFindUnique;
     integration.upsert = originalUpsert;

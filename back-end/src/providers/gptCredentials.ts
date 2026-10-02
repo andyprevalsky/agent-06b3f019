@@ -16,6 +16,7 @@ const GPT_API_KEY_COOLDOWN_DB_RECHECK_MS = 15 * 1000;
 let cachedGptKeyCooldownUntilMs = 0;
 let lastGptKeyCooldownDbCheckMs = 0;
 let gptKeyCooldownCacheRevision = 0;
+let pendingGptKeyCooldownWrites = 0;
 
 /** Test-only: refresh the local cache without changing the persisted cooldown. */
 export function __clearGptApiKeyCooldownCache(): void {
@@ -284,8 +285,14 @@ export async function markGptIntegrationRateLimited(
 /** True when the shared funded GPT_API_KEY is currently backed off. */
 export async function isGptApiKeyOnCooldown(): Promise<boolean> {
   const now = Date.now();
-  if (now < cachedGptKeyCooldownUntilMs) return true;
-  if (now - lastGptKeyCooldownDbCheckMs < GPT_API_KEY_COOLDOWN_DB_RECHECK_MS) return false;
+  // A local mark must remain effective while its DB upsert is in flight.
+  // The prior row can still be absent when a concurrent recheck starts.
+  if (pendingGptKeyCooldownWrites > 0 && now < cachedGptKeyCooldownUntilMs) return true;
+  // The DB is authoritative. A test fixture or operator can remove a cooldown
+  // while this process is alive, so even a positive cache needs rechecking.
+  if (now - lastGptKeyCooldownDbCheckMs < GPT_API_KEY_COOLDOWN_DB_RECHECK_MS) {
+    return now < cachedGptKeyCooldownUntilMs;
+  }
   lastGptKeyCooldownDbCheckMs = now;
   const cacheRevision = gptKeyCooldownCacheRevision;
   const row = await prisma.integration.findUnique({
@@ -310,24 +317,29 @@ export async function markGptApiKeyOnCooldown(reason: string): Promise<void> {
   const until = new Date(Date.now() + GPT_API_KEY_COOLDOWN_MS);
   gptKeyCooldownCacheRevision++;
   cachedGptKeyCooldownUntilMs = until.getTime();
-  await prisma.integration.upsert({
-    where: {
-      userId_name_accountId: {
+  pendingGptKeyCooldownWrites++;
+  try {
+    await prisma.integration.upsert({
+      where: {
+        userId_name_accountId: {
+          userId: GPT_API_KEY_COOLDOWN_USER_ID,
+          name: GPT_API_KEY_COOLDOWN_NAME,
+          accountId: '',
+        },
+      },
+      create: {
         userId: GPT_API_KEY_COOLDOWN_USER_ID,
         name: GPT_API_KEY_COOLDOWN_NAME,
-        accountId: '',
+        type: 'TOOL_SETUP',
+        status: 'NOT_CONNECTED',
+        rateLimitedUntil: until,
+        failureReason: reason,
       },
-    },
-    create: {
-      userId: GPT_API_KEY_COOLDOWN_USER_ID,
-      name: GPT_API_KEY_COOLDOWN_NAME,
-      type: 'TOOL_SETUP',
-      status: 'NOT_CONNECTED',
-      rateLimitedUntil: until,
-      failureReason: reason,
-    },
-    update: { rateLimitedUntil: until, failureReason: reason },
-  });
+      update: { rateLimitedUntil: until, failureReason: reason },
+    });
+  } finally {
+    pendingGptKeyCooldownWrites--;
+  }
   log.warn('Funded GPT API key backed off', { reason, until: until.toISOString() });
 }
 

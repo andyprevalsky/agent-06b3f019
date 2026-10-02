@@ -21,7 +21,10 @@ import {
   steelCdpUrl,
   steelDebugUrl,
 } from './session';
-import { validateSessionConnection } from './sessionConnection';
+import {
+  type SteelConnectionValidationResult,
+  validateSessionConnectionWithReason,
+} from './sessionConnection';
 import { steelCdpConnectionUrl } from './urls';
 
 function hasValue(value: string | null | undefined): value is string {
@@ -142,13 +145,13 @@ export interface SteelSessionReplacementDependencies {
     profileId?: string | null;
     proxySource?: string | null;
   }>;
-  validateConnection: (wsUrl: string) => Promise<boolean>;
+  validateConnection: (wsUrl: string) => Promise<boolean | SteelConnectionValidationResult>;
   releaseSession?: (sessionId: string) => Promise<void>;
 }
 
 const defaultReplacementDependencies: SteelSessionReplacementDependencies = {
   createSession: async (input) => steel.sessions.create(input),
-  validateConnection: validateSessionConnection,
+  validateConnection: validateSessionConnectionWithReason,
 };
 
 export async function recreateSession(
@@ -238,8 +241,16 @@ export async function recreateSession(
       const debugUrl = steelDebugUrl(session.debugUrl);
       const wsUrl = steelCdpUrl(session.id);
 
-      if (!(await dependencies.validateConnection(wsUrl))) {
-        throw new Error(`Session validation failed on attempt ${attempt}`);
+      const validation = await dependencies.validateConnection(wsUrl);
+      const isValid = typeof validation === 'boolean' ? validation : validation.valid;
+      if (!isValid) {
+        const failureReason =
+          typeof validation !== 'boolean' && !validation.valid
+            ? validation.failureReason
+            : undefined;
+        throw new Error(
+          `Session validation failed on attempt ${attempt}${failureReason ? `: ${failureReason}` : ''}`
+        );
       }
 
       await navigateToSavedUrl(wsUrl, savedUrl);

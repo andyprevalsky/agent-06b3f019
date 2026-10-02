@@ -18,6 +18,7 @@ import {
 import {
   assertFixedRotationLadder,
   isSteelCapacityRateLimit,
+  isSteelProvisioningOutage,
 } from './browser-provider-rotation.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
 
@@ -105,6 +106,35 @@ const tests: Array<[string, () => void]> = [
       assert(
         !isSteelCapacityRateLimit(new Error('/rotate-proxy 403: Steel authentication rejected')),
         'Steel authentication failures must fail closed'
+      );
+    },
+  ],
+  [
+    'live ladder recognizes only diagnosed Steel connectivity outages',
+    () => {
+      assert(
+        isSteelProvisioningOutage(
+          new Error(
+            '/rotate-proxy 500: {"error":"Failed to create Steel replacement after 5 attempts: Session validation failed on attempt 5: Connection timeout"}'
+          )
+        ),
+        'diagnosed CDP connection timeout should use the Steel outage path'
+      );
+      assert(
+        !isSteelProvisioningOutage(
+          new Error(
+            '/rotate-proxy 500: {"error":"Failed to create Steel replacement after 5 attempts: Session validation failed on attempt 5"}'
+          )
+        ),
+        'unexplained validation failure must remain blocking'
+      );
+      assert(
+        !isSteelProvisioningOutage(
+          new Error(
+            '/rotate-proxy 403: {"error":"Failed to create Steel replacement: Authentication rejected"}'
+          )
+        ),
+        'Steel auth rejection must remain blocking'
       );
     },
   ],

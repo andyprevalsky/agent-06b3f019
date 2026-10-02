@@ -8,6 +8,12 @@ import { steelCdpConnectionUrl } from './urls';
 
 const SESSION_VALIDATION_TIMEOUT = 10000;
 const WS_BACKOFF_DELAYS = [100, 400, 800];
+type CdpConnector = (wsUrl: string) => Promise<Browser>;
+
+async function defaultCdpConnector(wsUrl: string): Promise<Browser> {
+  const { chromium } = await import('playwright');
+  return chromium.connectOverCDP(wsUrl);
+}
 
 /**
  * Connect to the session via CDP and validate it, returning the OPEN browser
@@ -15,16 +21,46 @@ const WS_BACKOFF_DELAYS = [100, 400, 800];
  * (e.g. to reuse it for user-data injection, saving a second 3-5s CDP
  * handshake) are responsible for closing it.
  */
-export async function connectValidatedBrowser(wsUrl: string): Promise<Browser | null> {
+export type SteelConnectionValidationResult =
+  | { valid: true }
+  | {
+      valid: false;
+      failureReason:
+        | 'Connection timeout'
+        | 'Connection error'
+        | 'Authentication rejected'
+        | 'Session validation failed';
+    };
+
+function safeValidationFailureReason(
+  error: unknown
+): Exclude<SteelConnectionValidationResult, { valid: true }>['failureReason'] {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/\b401\b|\b403\b|unauthorized|forbidden/i.test(message)) {
+    return 'Authentication rejected';
+  }
+  if (/timeout|timed out|etimedout/i.test(message)) return 'Connection timeout';
+  if (
+    /econnrefused|econnreset|enotfound|eai_again|socket hang up|connection error/i.test(message)
+  ) {
+    return 'Connection error';
+  }
+  return 'Session validation failed';
+}
+
+export async function connectValidatedBrowser(
+  wsUrl: string,
+  onFailure?: (error: unknown) => void,
+  connectBrowser: CdpConnector = defaultCdpConnector
+): Promise<Browser | null> {
   try {
     let connected: Browser | undefined;
     await retryWithBackoff(
       async () => {
-        const { chromium } = await import('playwright');
         let browser: Browser | undefined;
         try {
           browser = await Promise.race([
-            chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl)),
+            connectBrowser(steelCdpConnectionUrl(wsUrl)),
             new Promise<never>((_, reject) =>
               setTimeout(() => reject(new Error('Connection timeout')), SESSION_VALIDATION_TIMEOUT)
             ),
@@ -47,11 +83,12 @@ export async function connectValidatedBrowser(wsUrl: string): Promise<Browser | 
         maxRetries: 3,
         fixedDelays: WS_BACKOFF_DELAYS,
         component: 'Steel session validation',
-        isRetryable: () => true,
+        isRetryable: (error) => safeValidationFailureReason(error) !== 'Authentication rejected',
       }
     );
     return connected ?? null;
   } catch (error) {
+    onFailure?.(error);
     log.info('  Session validation failed', {
       error: error instanceof Error ? error.message : String(error),
     });
@@ -59,11 +96,26 @@ export async function connectValidatedBrowser(wsUrl: string): Promise<Browser | 
   }
 }
 
-export async function validateSessionConnection(wsUrl: string): Promise<boolean> {
-  const browser = await connectValidatedBrowser(wsUrl);
-  if (browser === null) return false;
+export async function validateSessionConnectionWithReason(
+  wsUrl: string,
+  connectBrowser?: CdpConnector
+): Promise<SteelConnectionValidationResult> {
+  let failureReason: Exclude<SteelConnectionValidationResult, { valid: true }>['failureReason'] =
+    'Session validation failed';
+  const browser = await connectValidatedBrowser(
+    wsUrl,
+    (error) => {
+      failureReason = safeValidationFailureReason(error);
+    },
+    connectBrowser
+  );
+  if (browser === null) return { valid: false, failureReason };
   await browser.close().catch(() => {});
-  return true;
+  return { valid: true };
+}
+
+export async function validateSessionConnection(wsUrl: string): Promise<boolean> {
+  return (await validateSessionConnectionWithReason(wsUrl)).valid;
 }
 
 export async function createLocalBrowserSession(

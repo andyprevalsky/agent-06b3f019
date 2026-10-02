@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
+import { testCodexWsServerOverlayUsesLocalSource } from './codex-code-overlay.case';
 import {
   testResolveCodexAuthEnvs_apiKeyFallback,
   testResolveCodexAuthEnvs_cooldownExcludesFundedKey,
@@ -483,6 +484,10 @@ async function runAll() {
       fn: testTemplate_pinsCodexCliForGpt56,
     },
     {
+      name: 'template -- overlays the local Codex fallback server for default and custom IDs',
+      fn: testCodexWsServerOverlayUsesLocalSource,
+    },
+    {
       name: 'auth -- revoked OAuth refresh token triggers funded-key fallback',
       fn: testRuntimeFallback_recognizesRevokedOAuthRefreshToken,
     },
@@ -564,7 +569,10 @@ async function runAll() {
       '  SKIP  smoke -- Codex completes task in real E2B sandbox (BACKEND_CODEX_SMOKE_SKIP=1)'
     );
   } else {
-    tests.push({
+    // The feedback cases below deliberately back off the funded key in the
+    // backend process. Run the real smoke before those destructive fixtures;
+    // deleting their DB row cannot clear the backend's in-memory cooldown.
+    tests.unshift({
       name: 'smoke -- Codex completes task in real E2B sandbox',
       fn: testSmoke_codexCompletesE2bTask,
     });
