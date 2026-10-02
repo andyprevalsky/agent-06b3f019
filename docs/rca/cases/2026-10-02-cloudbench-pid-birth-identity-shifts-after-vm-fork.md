@@ -12,6 +12,7 @@ symptoms:
   - "FAIL: mandatory autoscaler attach budget must not run while its primary is intentionally stopped behind the boot-config barrier"
   - "⚠️  central hub on :40192 has no exact owner proof; leaving it untouched"
   - "cloudbench-multi-workstream.test.sh blocked in wait(1) on a live test Hub after the failure"
+  - "Could not capture the process table for owned tree teardown (first fix, failed controllers only)"
 tags:
   - cloudbench
   - process-identity
@@ -77,6 +78,26 @@ shim. It requires every producer to emit the same identity, every verifier to
 keep matching live owners across the step, a live port lease to survive a
 neighbor's reap, and exited owners to stop matching.
 
+### Follow-up: identity helpers inside EXIT traps
+
+The first version of the fix ended `cloudbench_process_birth_table`,
+`fleet_pid_start_time`, and `fleet_pid_matches_start` with a bare `return`.
+Fleet teardown calls them from the controller's EXIT trap, and there a bare
+`return` reports the status from before the trap, which is the controller's own
+exit code. Every fail-closed autoscaler controller in the multi-workstream
+test, plus scenario 16's provisioning runs, logged
+`Could not capture the process table for owned tree teardown`
+and orphaned its snapshot and aggregator loops to init: 11 leaked loops in one
+run. After a successful run (pending status 0), a dead `proc-start` owner would
+read as alive. Those tests only asserted the nonzero exit, so they passed.
+
+Each helper now ends with the scanner or matcher as its last command. The
+identity test runs teardown and matching from an EXIT trap with pending status
+0 and 3. On the first fix it reports `fleet-dead=match` at status 0 and
+`table=failed teardown=failed loop=alive` at status 3. With the fix every
+check passes. `cloudbench-multi-workstream.test.sh` now fails if any controller
+log reports a teardown survivor, or if any controller process outlives its run.
+
 `scripts/setup-db.sh` still uses lstart. There, descendant identities are
 captured and re-verified within one bounded teardown, so the exposure is a
 fork inside that teardown window rather than across a run.
@@ -91,3 +112,6 @@ A process birth identity must come from a value the kernel fixes at fork. On
 Linux that is the `/proc/<pid>/stat` start tick. `ps -o lstart` is a rendering
 of the wall clock, and it changes for every live process whenever a VM pause
 or NTP step moves that clock.
+
+A shell helper that teardown can reach from a trap must not end in a bare
+`return`. Make the command whose status matters the last command.

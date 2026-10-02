@@ -1255,6 +1255,9 @@ cloudbench_pid_matches_start() {
   [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ]
 }
 
+# Teardown calls these from EXIT traps, where a bare `return` reports the
+# status from before the trap rather than the last command. Let the scanner or
+# matcher be the final command so its own status is the function's status.
 cloudbench_process_birth_table() {  # -> "<pid> <ppid> <birth identity>" per live process
   if [ -r /proc/self/stat ]; then
     python3 - <<'PY'
@@ -1282,9 +1285,9 @@ if not rows:
     raise SystemExit(1)
 sys.stdout.write("\n".join(rows) + "\n")
 PY
-    return
+  else
+    ps -axo pid=,ppid=,lstart= 2>/dev/null
   fi
-  ps -axo pid=,ppid=,lstart= 2>/dev/null
 }
 
 cloudbench_terminate_tree_and_wait() {

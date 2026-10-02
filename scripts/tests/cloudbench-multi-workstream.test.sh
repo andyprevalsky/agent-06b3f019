@@ -4167,4 +4167,20 @@ done
     fail "scenario 16: ambiguous clone failure left $amb_orphans name-only orphan record(s) — RCA #6 regression"
 echo "PASS: scenario 16 — ambiguous clone failure releases its reserved name (no orphan); retry provisions"
 
+# Fail-closed scenarios exit nonzero by design, but every controller must still
+# reap its own snapshot/aggregator loops instead of orphaning them to init.
+teardown_survivor_logs="$(grep -lE 'survived local teardown|Could not capture the process table' \
+    "$TMP_ROOT"/controller-*.log 2>/dev/null || true)"
+[ -z "$teardown_survivor_logs" ] ||
+    fail "controller teardown left owned local processes alive: $teardown_survivor_logs"
+orphaned_controllers="$(ps -axo pid=,args= 2>/dev/null |
+    awk -v root="$TMP_ROOT/" 'index($0, root) && $2 == "bash" && $3 ~ /\/run-bench-(fleet|cloud)$/')"
+if [ -n "$orphaned_controllers" ]; then
+    while read -r orphan_pid _; do
+        kill "$orphan_pid" 2>/dev/null || true
+    done <<< "$orphaned_controllers"
+    fail "controller processes outlived their runs: $orphaned_controllers"
+fi
+echo "PASS: every controller, including fail-closed runs, reaped its own local processes"
+
 echo "PASS: two workstreams ran cloud benchmarks concurrently, isolated end to end"

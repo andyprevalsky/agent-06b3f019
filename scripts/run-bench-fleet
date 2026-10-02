@@ -870,12 +870,14 @@ FLEET_OWNER_HOST="$(hostname 2>/dev/null || uname -n)"
 # Fleet registry, capacity, and inventory-lock records keep the edge-trimmed
 # lstart spelling where /proc is unavailable, so a live macOS owner written by
 # an older controller still reads as alive in the shared git-common registry.
+# Both run from EXIT-trap teardown, where a bare `return` would report the
+# pre-trap status; the matcher must be the final command instead.
 fleet_pid_start_time() {
     if [ -r /proc/self/stat ]; then
         cloudbench_pid_start_time "$1"
-        return
+    else
+        ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
     fi
-    ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
 }
 
 fleet_pid_matches_start() {  # <pid> <recorded-identity>
@@ -884,11 +886,12 @@ fleet_pid_matches_start() {  # <pid> <recorded-identity>
     case "$2" in
         proc-start:*)
             cloudbench_pid_matches_start "$1" "$2"
-            return
+            ;;
+        *)
+            actual_start="$(ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+            [ -n "$actual_start" ] && [ "$actual_start" = "$2" ]
             ;;
     esac
-    actual_start="$(ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    [ -n "$actual_start" ] && [ "$actual_start" = "$2" ]
 }
 
 FLEET_OWNER_PID_START="$(fleet_pid_start_time $$)"

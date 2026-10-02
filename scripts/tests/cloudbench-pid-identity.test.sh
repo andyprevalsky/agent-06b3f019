@@ -199,4 +199,54 @@ cloudbench_pid_matches_start "$owner_pid" "$identity" &&
   fail "the script snapshot helper must report an exited owner as absent"
 unstep_clock
 
+# Fleet teardown runs inside EXIT traps whose pending status is the
+# controller's own exit code. Each identity helper must report its own result
+# there, or every failed run orphans its snapshot/aggregator loops and a
+# successful run reads dead owners as alive.
+trap_probe="$TMP_ROOT/trap-probe.sh"
+cat > "$trap_probe" <<'SH'
+set -uo pipefail
+root_dir="$1" report="$2" dead_identity="$3" pending_status="$4"
+source "$root_dir/scripts/lib/cloudbench-env.sh"
+eval "$(awk '/^fleet_pid_start_time\(\) \{/,/^}/' "$root_dir/scripts/run-bench-fleet")"
+eval "$(awk '/^fleet_pid_matches_start\(\) \{/,/^}/' "$root_dir/scripts/run-bench-fleet")"
+loop() { while :; do sleep 1; done; }
+loop &
+loop_pid=$!
+dead_pid="${dead_identity%%|*}"
+dead_identity="${dead_identity#*|}"
+on_exit() {
+  local live_identity
+  trap - EXIT
+  trap '' HUP INT TERM
+  live_identity="$(fleet_pid_start_time "$loop_pid")"
+  {
+    cloudbench_process_birth_table >/dev/null && echo "table=ok" || echo "table=failed"
+    cloudbench_pid_matches_start "$loop_pid" "$live_identity" \
+      && echo "live=match" || echo "live=mismatch"
+    fleet_pid_matches_start "$loop_pid" "$live_identity" \
+      && echo "fleet-live=match" || echo "fleet-live=mismatch"
+    fleet_pid_matches_start "$dead_pid" "$dead_identity" \
+      && echo "fleet-dead=match" || echo "fleet-dead=mismatch"
+    cloudbench_terminate_tree_and_wait 10 "$loop_pid" >/dev/null 2>&1 \
+      && echo "teardown=ok" || echo "teardown=failed"
+    kill -0 "$loop_pid" 2>/dev/null && echo "loop=alive" || echo "loop=reaped"
+  } > "$report"
+  kill "$loop_pid" 2>/dev/null || true
+}
+trap on_exit EXIT
+exit "$pending_status"
+SH
+expected_trap_report=$'table=ok\nlive=match\nfleet-live=match\nfleet-dead=mismatch\nteardown=ok\nloop=reaped'
+for pending_status in 0 3; do
+  trap_report="$TMP_ROOT/trap-report.$pending_status"
+  trap_status=0
+  timeout 60 bash "$trap_probe" "$ROOT_DIR" "$trap_report" "$owner_pid|$identity" \
+    "$pending_status" >"$trap_report.log" 2>&1 || trap_status=$?
+  [ "$trap_status" = "$pending_status" ] ||
+    fail "EXIT-trap probe must keep exit status $pending_status, got $trap_status"
+  [ "$(cat "$trap_report" 2>/dev/null)" = "$expected_trap_report" ] ||
+    fail "identity helpers misreported inside an EXIT trap pending status $pending_status: $(tr '\n' ' ' < "$trap_report" 2>/dev/null)"
+done
+
 echo "PASS: cloudbench PID birth identities survive a wall-clock step"
