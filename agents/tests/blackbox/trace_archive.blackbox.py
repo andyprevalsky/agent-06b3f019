@@ -154,7 +154,8 @@ def test_local_store_publishes_metadata_atomically():
             mode = args[0] if args else kwargs.get("mode", "r")
             if "w" in mode and path.name.startswith(meta.name):
                 metadata_opened.set()
-                if not release_metadata_write.wait(timeout=5):
+                # Deadlock guard only; the main thread releases right after its check.
+                if not release_metadata_write.wait(timeout=30):
                     handle.close()
                     raise TimeoutError("metadata write was not released")
             return handle
@@ -169,11 +170,17 @@ def test_local_store_publishes_metadata_atomically():
         writer = threading.Thread(target=write_artifact)
         try:
             writer.start()
-            assert metadata_opened.wait(timeout=2), "metadata writer never opened its output"
+            # Wait for the open itself, not a fixed window: a loaded host can take
+            # seconds to schedule the writer. A writer that exits without opening
+            # the metadata stops the wait; the cap only prevents a hung test.
+            deadline = time.monotonic() + 30
+            while not metadata_opened.wait(timeout=0.05) and writer.is_alive() and time.monotonic() < deadline:
+                pass
+            assert metadata_opened.is_set(), "metadata writer never opened its output"
             assert not meta.exists(), "final metadata path became visible before its JSON was complete"
         finally:
             release_metadata_write.set()
-            writer.join(timeout=5)
+            writer.join(timeout=30)
             Path.open = original_open
             restore()
 
