@@ -416,13 +416,11 @@ async function createRemoteSession(
           proxyLocation,
         });
       } else {
-        remote = await createWithManagedProxy(
-          preferKernelProxyCandidate(
-            kernelProxyCandidates(proxyLocation),
-            options.preferredManagedProxyKey
-          ),
-          0
+        const candidates = preferKernelProxyCandidate(
+          kernelProxyCandidates(proxyLocation),
+          options.preferredManagedProxyKey
         );
+        remote = await createWithManagedProxy(candidates, 0);
       }
     }
     // Do not mark the profile bound here — persistBrowserSessionRow (or the
