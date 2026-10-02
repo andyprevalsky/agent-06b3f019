@@ -1,5 +1,6 @@
 """Tests for hub_upload — env-gated, best-effort run-bundle upload."""
 
+import gzip
 import json
 import socket
 import threading
@@ -25,12 +26,17 @@ def _serve(record: list):
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
             length = int(self.headers.get("Content-Length") or 0)
+            content_encoding = self.headers.get("Content-Encoding")
+            payload = self.rfile.read(length)
+            if content_encoding == "gzip":
+                payload = gzip.decompress(payload)
             record.append(
                 {
                     "path": self.path,
                     "api_key": self.headers.get("X-API-Key"),
                     "user_id": self.headers.get("X-User-Id"),
-                    "body": json.loads(self.rfile.read(length) or b"{}"),
+                    "content_encoding": content_encoding,
+                    "body": json.loads(payload or b"{}"),
                 }
             )
             payload = b'{"run": {"run_id": "x"}}'
@@ -137,8 +143,24 @@ def test_uploads_bundle_with_auth_headers(monkeypatch):
         assert record[0]["path"] == "/api/benchmarks/runs"
         assert record[0]["api_key"] == "test-key"
         assert record[0]["user_id"] == "user-1"
+        assert record[0]["content_encoding"] is None
         assert record[0]["body"]["run_id"] == "run-42"
         assert record[0]["body"]["source"] == "manual-run"
+    finally:
+        server.shutdown()
+
+
+def test_large_bundle_uploads_with_gzip(monkeypatch):
+    record: list = []
+    server, url = _serve(record)
+    try:
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", url)
+        monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "test-key")
+        monkeypatch.setattr("benchmarks.hub_upload.HUB_GZIP_THRESHOLD_BYTES", 256, raising=False)
+        assert upload_run_bundle({"run_id": "large-run", "tasks": [], "padding": "x" * 512}, required=True)
+        assert len(record) == 1
+        assert record[0]["content_encoding"] == "gzip"
+        assert record[0]["body"]["padding"] == "x" * 512
     finally:
         server.shutdown()
 

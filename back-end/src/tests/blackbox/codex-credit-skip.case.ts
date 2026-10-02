@@ -47,6 +47,24 @@ export function testCodexCreditSkip_authRevocationStillFailsHard() {
     codexSmokeCreditSkipReason('401 Unauthorized: please log out and sign in again', []) === null,
     'auth/OAuth revocation is user-fixable and must remain a hard failure, not a funding skip'
   );
+  assert(
+    codexSmokeCreditSkipReason(
+      '[Codex] Error: Your access token could not be refreshed because your refresh token was revoked.\n' +
+        '[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n' +
+        'You have no credits remaining. Add credits to continue.',
+      [
+        { type: 'auth_fallback', reason: 'oauth_refresh_invalid' },
+        { type: 'error', message: 'You have no credits remaining.' },
+      ]
+    ) === null,
+    'funded-key exhaustion cannot excuse a revoked OAuth credential'
+  );
+  assert(
+    codexSmokeCreditSkipReason('You have no credits remaining.', [
+      { type: 'error', error: { message: 'token_revoked' } },
+    ]) === null,
+    'code-only token_revoked must remain a hard failure even with funded-key exhaustion'
+  );
 }
 
 export function testCodexCreditSkip_matchesE2bTeamBlockedWording() {
