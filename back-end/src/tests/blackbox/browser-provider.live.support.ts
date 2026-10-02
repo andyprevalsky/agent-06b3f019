@@ -8,7 +8,6 @@ import jwt from 'jsonwebtoken';
 import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
-import { kernelProxyCandidates } from '../../providers/browser/kernelProxy';
 import {
   releaseSteelRemoteSession,
   steel,
@@ -311,6 +310,10 @@ export async function runLiveProviderParity(): Promise<void> {
       'residential session was not evicted before the mobile-band rotation'
     );
     liveSessionId = String(mobileRotated.session_id);
+    const mobileRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
+    const mobileProxyId = mobileRemote.proxy_id;
+    assert(Boolean(mobileProxyId), 'mobile rotation did not retain its managed proxy ID');
+    const mobileMetadata = mobileRotated.browser_session_metadata ?? {};
     const mobileIp = await readDifferentExitIp(String(mobileRotated.ws_url), residentialIp);
     // Ground truth comes from ipify, not from response metadata alone.
     assert(
@@ -458,34 +461,23 @@ export async function runLiveProviderParity(): Promise<void> {
     assert(resumed.saved_url === 'https://example.com/resume-check', 'resume lost the saved URL');
     assert(resumedMetadata.provider === 'kernel', 'resume changed providers');
     assert(resumedMetadata.profile_id === profileId, 'resume did not reuse the Kernel profile');
-    const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
-    const resumedCandidate = kernelProxyCandidates({
-      country: 'US',
-      state: 'CA',
-      city: 'San Francisco',
-    }).find(
-      (candidate) =>
-        candidate.source === resumedMetadata.proxy_source &&
-        JSON.stringify(candidate.location) === JSON.stringify(resumedMetadata.proxy_location)
-    );
-    if (resumedCandidate === undefined) {
-      throw new Error('resume returned invalid proxy fallback metadata');
-    }
-    const resumedProxy = await prisma.browserProviderProxy.findUnique({
-      where: { provider_proxyKey: { provider: 'kernel', proxyKey: resumedCandidate.proxyKey } },
-    });
     assert(
-      resumedProxy?.proxyId === secondRemote.proxy_id,
-      'resume metadata did not identify the actual managed proxy'
+      resumedMetadata.proxy_source === mobileMetadata.proxy_source &&
+        JSON.stringify(resumedMetadata.proxy_location) ===
+          JSON.stringify(mobileMetadata.proxy_location),
+      `resume lost the rotated proxy choice: before=${JSON.stringify(mobileMetadata)} after=${JSON.stringify(resumedMetadata)}`
     );
+
+    const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
+    assert(secondRemote.proxy_id === mobileProxyId, 'resume did not reuse the rotated proxy ID');
 
     const resumedAfterDeletion = await assertResumeReprovisionsDeletedProxy({
       kernel,
       taskId: String(init.task_id),
       sessionId: liveSessionId,
       agentLocation: AGENT_LOCATION,
-      proxySource: metadata.proxy_source,
-      proxyLocation: metadata.proxy_location,
+      proxySource: mobileMetadata.proxy_source,
+      proxyLocation: mobileMetadata.proxy_location,
       post: postWithKernelConnectionRetry,
     });
     liveSessionId = resumedAfterDeletion;

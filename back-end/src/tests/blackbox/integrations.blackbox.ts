@@ -71,6 +71,7 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import {
   processGoogleDataPurge,
   runGoogleDataPurgeJob,
@@ -789,6 +790,30 @@ async function testGptApiKeyCooldown_markThenOnCooldown() {
       key: 'gpt',
       onCooldown: cooldownIsLive(previous),
     });
+  }
+  if (previous === null) {
+    // The API runs in a different process. Removing the fixture row must make
+    // that process observe the restored funded-key availability too.
+    const status = await retryWithBackoff(
+      async () => {
+        const status = await request(`${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`, {
+          headers: apiKeyHeaders(),
+        });
+        assertStatus(status.status, 200, status.data);
+        return status;
+      },
+      {
+        maxRetries: 73,
+        fixedDelays: Array(72).fill(250),
+        shouldRetryResult: (result) =>
+          (result.data as { onCooldown?: boolean }).onCooldown === true,
+        component: 'funded GPT key cooldown cleanup',
+      }
+    );
+    assert(
+      (status.data as { onCooldown?: boolean }).onCooldown !== true,
+      'backend retained the fixture funded-key cooldown after DB cleanup'
+    );
   }
 }
 

@@ -90,6 +90,12 @@ for arg in "$@"; do
   fi
 done
 
+# A standalone blackbox run starts its own backend. Keep the benchmark-share
+# bearer-link fixture self-contained when no share key was exported.
+if [[ "$USE_EXISTING_BACKEND" != "1" && -z "${BENCHMARK_SHARE_SECRET:-}" ]]; then
+  export BENCHMARK_SHARE_SECRET="$(openssl rand -hex 32)"
+fi
+
 # Fixture-backed domains write deterministic outbound responses into the
 # fast-forward cache. When the full suite targets an existing backend, prove
 # that backend consumes those fixtures before any database setup or test can

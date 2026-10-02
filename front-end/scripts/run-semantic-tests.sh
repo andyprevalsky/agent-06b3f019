@@ -26,32 +26,37 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FRONTEND_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_DIR="$(dirname "$FRONTEND_DIR")"
 
-resolve_local_semantic_db_port() {
-  node - "$REPO_DIR/.context/services.json" "$REPO_DIR" "$BACKEND_PORT" "$FRONTEND_PORT" <<'NODE'
-const fs = require('node:fs');
-const [manifestPath, worktree, backendPort, frontendPort] = process.argv.slice(2);
-const stack = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-const port = stack.database?.runtime_port;
-if (stack.status === 'running' && stack.worktree === worktree &&
-    stack.ports?.backend === Number(backendPort) &&
-    stack.ports?.frontend === Number(frontendPort) &&
-    Number.isInteger(port) && port > 0) {
-  process.stdout.write(String(port));
-  }
-NODE
-}
-
 apply_local_semantic_db_urls() {
-  if [[ -z "${LOCAL_DB_PORT:-}" && -f "$REPO_DIR/.context/services.json" ]]; then
-    LOCAL_DB_PORT=$(resolve_local_semantic_db_port)
-  fi
-  if [[ -n "${LOCAL_DB_PORT:-}" ]]; then
-    if [[ -z "${SEMANTIC_DATABASE_URL:-}" ]]; then
-      export SEMANTIC_DATABASE_URL="postgresql://postgres:postgres@localhost:${LOCAL_DB_PORT}/victoria?connection_limit=50&pool_timeout=30"
-    fi
+  # The semantic command runs in a fresh shell, so LOCAL_DB_PORT exported while
+  # starting run.sh may be absent here. An explicit database URL is authoritative.
+  # Otherwise require the running stack's exact backend manifest: guessing the
+  # default Postgres port can seed a different database from the live backend.
+  if [[ -n "${SEMANTIC_DATABASE_URL:-}" ]]; then
     if [[ -z "${SEMANTIC_DIRECT_URL:-}" ]]; then
       export SEMANTIC_DIRECT_URL="$SEMANTIC_DATABASE_URL"
     fi
+    return 0
+  fi
+  if [[ -z "${LOCAL_DB_PORT:-}" ]]; then
+    local manifest_port=""
+    if [[ -f "$REPO_DIR/.context/services.json" ]]; then
+      manifest_port=$(jq -er --arg backend "${BACKEND_URL:-}" \
+        'select(.status == "running" and .urls.backend == $backend) | .database.runtime_port' \
+        "$REPO_DIR/.context/services.json" 2>/dev/null) || manifest_port=""
+    fi
+    if [[ ! "$manifest_port" =~ ^[0-9]+$ ]] || (( manifest_port < 1 || manifest_port > 65535 )); then
+      echo "FAIL: Cannot identify the running stack database for ${BACKEND_URL:-unset}; set SEMANTIC_DATABASE_URL or LOCAL_DB_PORT" >&2
+      return 1
+    fi
+    export LOCAL_DB_PORT="$manifest_port"
+  fi
+  if [[ ! "$LOCAL_DB_PORT" =~ ^[0-9]+$ ]] || (( LOCAL_DB_PORT < 1 || LOCAL_DB_PORT > 65535 )); then
+    echo "FAIL: LOCAL_DB_PORT must be a valid TCP port, got $LOCAL_DB_PORT" >&2
+    return 1
+  fi
+  export SEMANTIC_DATABASE_URL="postgresql://postgres:postgres@localhost:${LOCAL_DB_PORT}/victoria?connection_limit=50&pool_timeout=30"
+  if [[ -z "${SEMANTIC_DIRECT_URL:-}" ]]; then
+    export SEMANTIC_DIRECT_URL="$SEMANTIC_DATABASE_URL"
   fi
 }
 

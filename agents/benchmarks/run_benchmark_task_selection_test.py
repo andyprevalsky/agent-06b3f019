@@ -123,6 +123,42 @@ def test_agent_payment_tasks_use_the_admin_account_with_forced_customer_path():
     assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
 
 
+def test_parallel_benchmark_identities_keep_approval_headers_task_scoped(monkeypatch):
+    """A sibling completing must not switch a payment task's attention polling user."""
+    monkeypatch.delenv("BENCHMARK_RUN_USER_ID", raising=False)
+    monkeypatch.setattr(rb, "API_KEY", "benchmark-test-key")
+    payment_user = "00000000-0000-4000-8000-000000000111"
+    sibling_user = "00000000-0000-4000-8000-000000000222"
+
+    async def run_concurrently():
+        payment_ready = asyncio.Event()
+        sibling_done = asyncio.Event()
+
+        async def payment():
+            token = rb._task_benchmark_user_id.set(payment_user)
+            try:
+                payment_ready.set()
+                await sibling_done.wait()
+                return (await rb._api_headers())["X-User-Id"]
+            finally:
+                rb._task_benchmark_user_id.reset(token)
+
+        async def sibling():
+            await payment_ready.wait()
+            token = rb._task_benchmark_user_id.set(sibling_user)
+            try:
+                user_id = (await rb._api_headers())["X-User-Id"]
+            finally:
+                rb._task_benchmark_user_id.reset(token)
+                sibling_done.set()
+            return user_id
+
+        return await asyncio.gather(payment(), sibling())
+
+    assert asyncio.run(run_concurrently()) == [payment_user, sibling_user]
+    assert "BENCHMARK_RUN_USER_ID" not in os.environ
+
+
 def test_payment_fixture_identity_is_shared_by_environment_and_seed(monkeypatch):
     monkeypatch.delenv("BENCHMARK_AGENT_PAYMENT_USER_ID", raising=False)
     monkeypatch.delenv("BENCHMARK_ISOLATED_RUN", raising=False)
