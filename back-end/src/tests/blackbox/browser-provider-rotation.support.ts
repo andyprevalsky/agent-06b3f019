@@ -24,7 +24,7 @@ interface CrossProviderLadderOptions {
   currentKernelSessionId: string;
   mobileIp: string;
   post: (path: string, body?: unknown) => Promise<RotationResponse>;
-  readDifferentExitIp: (wsUrl: string, previousIp: string) => Promise<string>;
+  readDifferentExitIp: (wsUrl: string, previousIp: string, stage: string) => Promise<string>;
   retrieveKernelBrowser: (sessionId: string) => Promise<{ deleted_at?: string | Date | null }>;
   retrieveSteelBrowser: (sessionId: string) => Promise<{ status?: string; timeout?: number }>;
   /** Whether Steel can boot a session created with its default options right now. */
@@ -306,7 +306,11 @@ export async function runCrossProviderRotationLadder(
 
   const evictedKernel = await retrieveKernelBrowser(currentKernelSessionId);
   assert(Boolean(evictedKernel.deleted_at), 'provider switch leaked the superseded Kernel session');
-  const firstSteelIp = await readDifferentExitIp(String(switched.ws_url), mobileIp);
+  const firstSteelIp = await readDifferentExitIp(
+    String(switched.ws_url),
+    mobileIp,
+    `rotation3 steel, Steel session ${String(switched.session_id)}`
+  );
 
   let steelRotated: RotationResponse;
   try {
@@ -360,7 +364,11 @@ export async function runCrossProviderRotationLadder(
     supersededSteelStatus === 'released',
     `call 4 leaked the superseded Steel session (status=${supersededSteelStatus})`
   );
-  const secondSteelIp = await readDifferentExitIp(String(steelRotated.ws_url), firstSteelIp);
+  const secondSteelIp = await readDifferentExitIp(
+    String(steelRotated.ws_url),
+    firstSteelIp,
+    `rotation4 steel, Steel session ${String(steelRotated.session_id)}`
+  );
   const liveSteelTimeoutMs = (await retrieveSteelBrowser(String(steelRotated.session_id))).timeout;
   const activityBudgetMs = browserActivityBudgetMinutes() * 60_000;
   assert(

@@ -18,6 +18,7 @@ import { prisma } from '../../providers/database';
 import {
   isSteelProvisioningOutage,
   isSteelSessionRateLimited,
+  runCrossProviderRotationLadder,
 } from '../blackbox/browser-provider-rotation.support';
 
 function testMobileCandidates(): void {
@@ -444,6 +445,70 @@ function testSteelOutageDetector(): void {
   );
 }
 
+async function testCrossProviderLadderLabelsSteelExitIpReads(): Promise<void> {
+  const responses = [
+    {
+      task_id: 'task-1',
+      provider: 'steel',
+      proxy_tier: 'residential',
+      previous_provider: 'kernel',
+      recovery_action: 'provider_switched',
+      rotations_used: 3,
+      rotations_remaining: 1,
+      next_recovery: 'rotate_steel_residential_ip',
+      saved_url: 'https://example.com/provider-switch-check',
+      browser_session_metadata: { provider: 'steel', steel_profile_id: 'profile-1' },
+      session_id: 'steel-session-1',
+      ws_url: 'wss://steel/1',
+    },
+    {
+      task_id: 'task-1',
+      provider: 'steel',
+      proxy_tier: 'residential',
+      previous_provider: 'steel',
+      recovery_action: 'ip_rotated',
+      rotations_used: 4,
+      rotations_remaining: 0,
+      next_recovery: 'rotation_budget_exhausted',
+      session_id: 'steel-session-2',
+      ws_url: 'wss://steel/2',
+    },
+  ];
+  const stages: unknown[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({ error: 'proxy_rotation_exhausted', message: 'PROXY_ROTATION_EXHAUSTED' }),
+      { status: 409 }
+    );
+  try {
+    await runCrossProviderRotationLadder({
+      baseUrl: 'http://ladder.test',
+      headers: {},
+      taskId: 'task-1',
+      currentKernelSessionId: 'kernel-session-2',
+      mobileIp: '10.0.0.2',
+      post: async () => responses.shift()!,
+      readDifferentExitIp: async (...args: unknown[]) => {
+        stages.push(args[2]);
+        return `10.0.1.${stages.length}`;
+      },
+      retrieveKernelBrowser: async () => ({ deleted_at: new Date() }),
+      retrieveSteelBrowser: async () => ({ status: 'released', timeout: Number.MAX_SAFE_INTEGER }),
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.deepStrictEqual(
+    stages,
+    [
+      'rotation3 steel, Steel session steel-session-1',
+      'rotation4 steel, Steel session steel-session-2',
+    ],
+    'a Steel exit-IP failure must name the Steel session it read, not the evicted Kernel one'
+  );
+}
+
 async function main(): Promise<void> {
   testMobileCandidates();
   testResidentialUnchanged();
@@ -453,6 +518,7 @@ async function main(): Promise<void> {
   testRotationTierLadder();
   testRotationRequestSchema();
   testSteelOutageDetector();
+  await testCrossProviderLadderLabelsSteelExitIpReads();
   process.stdout.write('PASS rotate_ip mobile candidates + escalation ladder\n');
 }
 

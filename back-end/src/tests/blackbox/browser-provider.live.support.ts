@@ -221,10 +221,7 @@ export async function runLiveProviderParity(): Promise<void> {
         async () => {
           const ip = await readExitIp(wsUrl);
           if (ip === '' || ip === previousIp) {
-            throw new Error(
-              `proxy returned unchanged exit IP ${ip || '<empty>'} ` +
-                `(${stage}, Kernel session ${liveSessionId})`
-            );
+            throw new Error(`proxy returned unchanged exit IP ${ip || '<empty>'} (${stage})`);
           }
           return ip;
         },
@@ -278,7 +275,7 @@ export async function runLiveProviderParity(): Promise<void> {
     const ipAfter = await readDifferentExitIp(
       String(rotated.ws_url),
       ipBefore,
-      'rotation1 residential'
+      `rotation1 residential, Kernel session ${liveSessionId}`
     );
     // Residential exits vary per session; a rotation should land a different IP.
     assert(
@@ -328,7 +325,7 @@ export async function runLiveProviderParity(): Promise<void> {
     const mobileIp = await readDifferentExitIp(
       String(mobileRotated.ws_url),
       residentialIp,
-      'rotation2 mobile'
+      `rotation2 mobile, Kernel session ${liveSessionId}`
     );
     // Ground truth comes from ipify, not from response metadata alone.
     assert(
