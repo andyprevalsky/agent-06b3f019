@@ -135,21 +135,21 @@ def test_parallel_benchmark_identities_keep_approval_headers_task_scoped(monkeyp
         sibling_done = asyncio.Event()
 
         async def payment():
-            token = rb._task_benchmark_user_id.set(payment_user)
+            token = rb._task_run_user_id.set(payment_user)
             try:
                 payment_ready.set()
                 await sibling_done.wait()
                 return (await rb._api_headers())["X-User-Id"]
             finally:
-                rb._task_benchmark_user_id.reset(token)
+                rb._task_run_user_id.reset(token)
 
         async def sibling():
             await payment_ready.wait()
-            token = rb._task_benchmark_user_id.set(sibling_user)
+            token = rb._task_run_user_id.set(sibling_user)
             try:
                 user_id = (await rb._api_headers())["X-User-Id"]
             finally:
-                rb._task_benchmark_user_id.reset(token)
+                rb._task_run_user_id.reset(token)
                 sibling_done.set()
             return user_id
 
