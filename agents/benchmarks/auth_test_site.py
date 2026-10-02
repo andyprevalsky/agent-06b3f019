@@ -61,7 +61,6 @@ SCENARIO_LADDERS: dict[str, tuple[int, bool, int, int]] = {
     "email_otp": (0, True, 0, 0),
     "signup": (0, True, 0, 0),
     "signup_already_registered": (0, True, 0, 0),
-    "signup_fails": (0, True, 0, 0),
     "guest_purchase": (0, True, 0, 0),
     "signup_purchase": (0, True, 0, 0),
     "signup_fails_purchase": (0, True, 0, 0),
@@ -77,7 +76,6 @@ NO_SESSION_SCENARIOS = (
     "all_fail",
     "account_locked",
     "code_never_arrives",
-    "signup_fails",
     "signup_fails_purchase",
 )
 USER_RESPONSES = ("sign_in", "decline")

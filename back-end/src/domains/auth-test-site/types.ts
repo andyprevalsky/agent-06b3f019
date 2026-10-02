@@ -42,7 +42,6 @@ export const AUTH_TEST_SITE_SCENARIOS = [
   'email_otp',
   'signup',
   'signup_already_registered',
-  'signup_fails',
   'guest_purchase',
   'signup_purchase',
   'signup_fails_purchase',

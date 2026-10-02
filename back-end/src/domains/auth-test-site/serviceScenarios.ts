@@ -22,7 +22,7 @@
  *   none (minted has account)    emailed code ok / never / expired   minted_otp / code_never_arrives / expired_code
  *   none (minted has account)    texted code / emailed link          minted_sms_otp / magic_link
  *   none (user's inbox account)  emailed code to the user's inbox    email_otp
- *   none                         sign-up ok / duplicate / errors     signup / signup_already_registered / signup_fails
+ *   none                         sign-up ok / duplicate              signup / signup_already_registered
  *   none                         shop: guest ok / account required   guest_purchase / signup_purchase / signup_fails_purchase
  *   none                         sign-up, then password-only         created_account_reused
  */
@@ -355,7 +355,6 @@ const PLANNERS: Record<AuthTestSiteScenario, (ctx: PlanContext) => ScenarioPlan>
   email_otp: emailOtpPlan,
   signup: () => openSitePlan({ signUp: 'open' }),
   signup_already_registered: (ctx) => mintedAccountPlan(ctx, { signUp: 'open' }),
-  signup_fails: () => openSitePlan({ signUp: 'error' }),
   guest_purchase: () => openSitePlan({ ...SHOP, signUp: 'open', guest: 'checkout' }),
   signup_purchase: () => openSitePlan({ ...SHOP, signUp: 'open' }),
   signup_fails_purchase: () => openSitePlan({ ...SHOP, signUp: 'error' }),

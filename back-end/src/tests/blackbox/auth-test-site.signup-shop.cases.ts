@@ -169,27 +169,11 @@ test('signup_already_registered: sign-up is refused and the emailed code signs i
   }
 });
 
-test('signup_fails and created_account_reused: sign-up errors, or leaves a password-only account', async () => {
+test('created_account_reused: sign-up leaves a password-only account', async () => {
   const userId = await createUser();
   try {
     const minted = await createMintedIdentity(userId);
     await withLocalSite(async ({ base, sentMail }) => {
-      const failing = await seed(base, userId, 'signup_fails');
-      const refused = await postForm(base, pagePath(failing, '/signup'), {
-        name: 'Rose Cedar',
-        email: minted.email,
-        password: 'correct-horse-7',
-      });
-      assert(
-        (await refused.text()).includes('is not accepting new accounts'),
-        'sign-up must error'
-      );
-      const failingReport = await fetchReport(base, failing.siteId);
-      assert(
-        failingReport.accounts.length === 0 && failingReport.sessions.length === 0,
-        'nothing created'
-      );
-
       const reused = await seed(base, userId, 'created_account_reused');
       const codeLink = await getPage(base, pagePath(reused, '/login/code'));
       assert(codeLink.status === 303, 'a password-only site has no emailed-code sign-in');
