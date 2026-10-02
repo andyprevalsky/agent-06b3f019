@@ -10,6 +10,7 @@ Usage:
     python scripts/run_blackbox_tests.py web-search         # run one domain
     python scripts/run_blackbox_tests.py --list             # list available domains
     python scripts/run_blackbox_tests.py --concurrency 5    # limit parallel domains
+    python scripts/run_blackbox_tests.py --help             # show this help
 
 Modeled after back-end/scripts/run-blackbox-tests.sh.
 """
@@ -22,6 +23,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import NoReturn
 
 import structlog.contextvars
 
@@ -56,10 +58,7 @@ def discover_domains() -> list[str]:
     """Discover all blackbox test domains from test files."""
     if not TESTS_DIR.exists():
         return []
-    return sorted(
-        f.stem.replace(".blackbox", "").replace("_", "-")
-        for f in TESTS_DIR.glob("*.blackbox.py")
-    )
+    return sorted(f.stem.replace(".blackbox", "").replace("_", "-") for f in TESTS_DIR.glob("*.blackbox.py"))
 
 
 def domain_to_test_file(domain: str) -> Path | None:
@@ -91,9 +90,7 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
     # begin with the same request/logging context as an isolated process.
     structlog.contextvars.clear_contextvars()
     try:
-        spec = importlib.util.spec_from_file_location(
-            f"blackbox_{domain.replace('-', '_')}", test_file
-        )
+        spec = importlib.util.spec_from_file_location(f"blackbox_{domain.replace('-', '_')}", test_file)
         if spec is None or spec.loader is None:
             return (domain, False, "Could not load test file")
 
@@ -121,13 +118,9 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
         structlog.contextvars.clear_contextvars()
 
 
-async def run_tests(
-    domain_filters: list[str] | None = None, concurrency: int = 30
-) -> int:
+async def run_tests(domain_filters: list[str] | None = None, concurrency: int = 30) -> int:
     run_id = os.environ.get("BLACKBOX_TEST_RUN_ID", generate_run_id())
-    artifact_dir = Path(
-        os.environ.get("BLACKBOX_TEST_ARTIFACT_DIR", str(ARTIFACT_ROOT / run_id))
-    )
+    artifact_dir = Path(os.environ.get("BLACKBOX_TEST_ARTIFACT_DIR", str(ARTIFACT_ROOT / run_id)))
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     # Write manifest
@@ -213,40 +206,59 @@ async def run_tests(
         "failed": failed,
         "total": passed + failed,
         "elapsed_seconds": round(elapsed, 1),
-        "details": [
-            {"domain": d, "passed": s, "message": m} for d, s, m in results
-        ],
+        "details": [{"domain": d, "passed": s, "message": m} for d, s, m in results],
     }
     (artifact_dir / "results.json").write_text(json.dumps(result_data, indent=2))
 
     return 0 if failed == 0 else 1
 
 
-def main() -> None:
-    args = sys.argv[1:]
+def _usage_error(message: str) -> NoReturn:
+    print(f"Error: {message}\n{__doc__}", file=sys.stderr)
+    sys.exit(2)
 
-    if "--list" in args:
-        list_domains()
-        return
 
+def parse_args(args: list[str]) -> tuple[list[str], int]:
+    """Return (domain filters, concurrency).
+
+    An unrecognized option must fail fast: with no domain filter the runner
+    starts every domain, so an ignored typo would launch the full suite.
+    """
     domain_filters: list[str] = []
     concurrency = 30
 
     i = 0
     while i < len(args):
-        if args[i] == "--concurrency" and i + 1 < len(args):
+        arg = args[i]
+        if arg == "--concurrency":
+            if i + 1 >= len(args):
+                _usage_error("--concurrency requires an integer value")
             try:
                 concurrency = int(args[i + 1])
             except ValueError:
-                print(f"Error: --concurrency requires an integer value, got '{args[i + 1]}'")
-                sys.exit(1)
+                _usage_error(f"--concurrency requires an integer value, got '{args[i + 1]}'")
             i += 2
-        elif not args[i].startswith("-"):
-            domain_filters.append(args[i])
-            i += 1
+        elif arg.startswith("-"):
+            _usage_error(f"unknown option '{arg}'")
         else:
+            domain_filters.append(arg)
             i += 1
 
+    return domain_filters, concurrency
+
+
+def main() -> None:
+    args = sys.argv[1:]
+
+    if "-h" in args or "--help" in args:
+        print(__doc__)
+        return
+
+    if "--list" in args:
+        list_domains()
+        return
+
+    domain_filters, concurrency = parse_args(args)
     exit_code = asyncio.run(run_tests(domain_filters or None, concurrency))
     sys.exit(exit_code)
 
