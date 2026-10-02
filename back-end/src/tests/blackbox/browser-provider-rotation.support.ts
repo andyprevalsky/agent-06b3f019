@@ -419,7 +419,7 @@ export async function runCrossProviderRotationLadder(
       await cdp.send('DOM.setFileInputFiles', { nodeId: input.nodeId, files: [upload.path] });
       const selected = await page.evaluate("document.querySelector('#upload').files?.[0]?.name");
       assert(
-        selected === 'upload-proof.txt',
+        selected === upload.path.split('/').at(-1),
         'Browser Use remote path was not usable by file input'
       );
     } finally {

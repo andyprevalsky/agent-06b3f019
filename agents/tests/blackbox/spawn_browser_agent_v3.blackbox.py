@@ -11638,6 +11638,36 @@ async def test_execute_action_scroll_missing_element_index_errors():
     assert out["error"] == "Element with index 34 not found"
     hu.scroll.assert_not_awaited()
 
+
+async def test_execute_action_approved_payment_ref_recovers_from_stale_shadow_index():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    dom = MagicMock()
+    dom.session = _fake_session_with_event_bus()
+    dom.selector_map = {}
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
+    ah = MagicMock()
+    card_refs = {
+        "card_number": "4111111111111111",
+        "card_name": "Rose Labs",
+        "card_expiry": "12/30",
+        "card_cvv": "123",
+    }
+    filled = {"success": True, "payment_ref_direct_fill": True, "payment_refs_filled": list(card_refs)}
+    with patch.object(service_actions, "_try_direct_payment_ref_fill", AsyncMock(return_value=filled)) as direct_fill:
+        out = await service_actions.execute_action(
+            dom,
+            ah,
+            {"action": "input_text", "index": 8, "params": {"text": "card_number"}},
+            secret_refs=card_refs,
+            current_url="https://checkout.example.com/pay",
+        )
+
+    assert out == filled
+    direct_fill.assert_awaited_once()
+    assert direct_fill.await_args.kwargs["index"] is None
+    assert direct_fill.await_args.kwargs["text"] == card_refs["card_number"]
+
 async def test_execute_action_extract_disabled():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -14263,6 +14293,26 @@ async def test_click_receipt_declines_parent_document_for_iframe_control():
             session = MagicMock()
             session.get_page = AsyncMock(return_value=page)
             assert await _arm_click_receipt(session, {"x": 120, "y": 757}) is None
+        finally:
+            await browser.close()
+
+
+async def test_click_receipt_accepts_motor_variance_on_same_control():
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.service_actions import _arm_click_receipt, _read_click_receipt
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content('<button style="position:absolute;left:50px;top:50px;width:120px;height:60px">Pay</button>')
+            session = MagicMock()
+            session.get_page = AsyncMock(return_value=page)
+            receipt = await _arm_click_receipt(session, {"x": 100, "y": 80})
+            assert receipt is not None
+            await page.mouse.click(112, 80)
+            assert await _read_click_receipt(receipt) is True
         finally:
             await browser.close()
 
@@ -23192,6 +23242,10 @@ async def run_all_tests():
         "execute_action_scroll_missing_element_index_errors",
         test_execute_action_scroll_missing_element_index_errors,
     )
+    await r.record_async(
+        "execute_action_approved_payment_ref_recovers_from_stale_shadow_index",
+        test_execute_action_approved_payment_ref_recovers_from_stale_shadow_index,
+    )
     await r.record_async("execute_action_extract_disabled", test_execute_action_extract_disabled)
     await r.record_async("execute_action_goto_delegates", test_execute_action_goto_delegates)
     await r.record_async("execute_action_click_delegates", test_execute_action_click_delegates)
@@ -23386,6 +23440,10 @@ async def run_all_tests():
     await r.record_async(
         "click_receipt_skips_iframe_control",
         test_click_receipt_declines_parent_document_for_iframe_control,
+    )
+    await r.record_async(
+        "click_receipt_accepts_motor_variance_on_same_control",
+        test_click_receipt_accepts_motor_variance_on_same_control,
     )
     await r.record_async(
         "execute_click_element_humanizer_missing_coords",

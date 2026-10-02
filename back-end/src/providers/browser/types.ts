@@ -6,8 +6,9 @@ export const BROWSER_PROVIDERS = ['steel', 'kernel', 'browser-use'] as const;
 export type BrowserProviderName = (typeof BROWSER_PROVIDERS)[number];
 
 export function storedBrowserProvider(value: string): BrowserProviderName {
-  if (BROWSER_PROVIDERS.includes(value as BrowserProviderName)) return value as BrowserProviderName;
-  throw new Error(`Unsupported stored browser provider: ${value}`);
+  // BrowserSession.provider has no database constraint. Preserve the previous
+  // legacy fallback while recognizing Browser Use explicitly.
+  return value === 'kernel' || value === 'browser-use' ? value : 'steel';
 }
 
 export interface BrowserProviderSession {

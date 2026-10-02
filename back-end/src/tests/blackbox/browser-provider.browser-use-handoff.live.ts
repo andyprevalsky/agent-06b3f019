@@ -5,6 +5,8 @@ import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
 import { buildPreferredBrowserConfig } from '../../providers/browser/challengeRecovery';
 import { releaseBrowserUseRemoteSession } from '../../providers/browser/browserUse';
+import { resumeSession } from '../../providers/browser';
+import { releaseKernelRemoteSession } from '../../providers/browser/kernel';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -13,6 +15,60 @@ function assert(condition: unknown, message: string): asserts condition {
 function asRecord(value: unknown): Record<string, unknown> {
   assert(typeof value === 'object' && value !== null, 'Expected JSON object');
   return value as Record<string, unknown>;
+}
+
+async function assertRepeatedBrowserUseUploads(
+  base: string,
+  headers: Record<string, string>,
+  sessionId: string,
+  remote: Awaited<ReturnType<typeof chromium.connectOverCDP>>
+): Promise<void> {
+  const upload = async (value: string): Promise<string> => {
+    const form = new FormData();
+    form.append('file', new Blob([value], { type: 'text/plain' }), 'same-name.txt');
+    const response = await fetch(`${base}/api/browser-session/${sessionId}/files`, {
+      method: 'POST',
+      headers: { 'X-API-Key': headers['X-API-Key']!, 'X-User-Id': headers['X-User-Id']! },
+      body: form,
+    });
+    const result = asRecord(await response.json());
+    assert(response.ok && typeof result.path === 'string', 'Browser Use upload failed');
+    return result.path;
+  };
+  const first = await upload('first upload');
+  const second = await upload('second upload');
+  assert(first !== second, 'Repeated Browser Use uploads reused one remote path');
+  const context = remote.contexts()[0];
+  assert(context, 'Browser Use upload verification context is missing');
+  const page = await context.newPage();
+  try {
+    await page.goto('https://example.com', { waitUntil: 'domcontentloaded' });
+    await page.evaluate(() => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.id = 'browser-use-repeated-upload-check';
+      document.body.appendChild(input);
+    });
+    const cdp = await context.newCDPSession(page);
+    const domDocument = await cdp.send('DOM.getDocument');
+    const input = await cdp.send('DOM.querySelector', {
+      nodeId: domDocument.root.nodeId,
+      selector: '#browser-use-repeated-upload-check',
+    });
+    assert(input.nodeId, 'Browser Use upload verification input is missing');
+    for (const [remotePath, expected] of [
+      [first, 'first upload'],
+      [second, 'second upload'],
+    ]) {
+      await cdp.send('DOM.setFileInputFiles', { nodeId: input.nodeId, files: [remotePath] });
+      const actual = await page.evaluate(
+        'new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(reader.error); reader.readAsText(document.querySelector("#browser-use-repeated-upload-check").files[0]); })'
+      );
+      assert(actual === expected, 'Browser Use upload bytes changed');
+    }
+  } finally {
+    await page.close();
+  }
 }
 
 export async function runLiveBrowserUseHandoff(): Promise<void> {
@@ -42,6 +98,7 @@ export async function runLiveBrowserUseHandoff(): Promise<void> {
   };
   let sessionId: string | null = null;
   let resumedSessionId: string | null = null;
+  let kernelSessionId: string | null = null;
   let profileId: string | null = null;
   let viewer: Awaited<ReturnType<typeof chromium.launch>> | null = null;
   await prisma.user.create({ data: { userId } });
@@ -171,6 +228,7 @@ export async function runLiveBrowserUseHandoff(): Promise<void> {
       await post(`/api/browser-session/${sessionId}/computer/press-key`, {
         keys: ['Backspace'],
       });
+      await assertRepeatedBrowserUseUploads(base, headers, sessionId, remote);
       await post(`/api/auth-assistance/${requestId}/complete`, {});
       const updatedAgent = await prisma.agent.findUniqueOrThrow({ where: { id: agent.id } });
       assert(updatedAgent.status === 'ACTIVE', 'Completing handoff did not resume the agent');
@@ -212,14 +270,30 @@ export async function runLiveBrowserUseHandoff(): Promise<void> {
     } finally {
       await next.close();
     }
+    const previousFlag = process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
+    process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'false';
+    try {
+      const fallback = await resumeSession(taskId);
+      kernelSessionId = fallback.sessionId;
+      assert(fallback.provider === 'kernel', 'Rollout switch did not resume on Kernel');
+      assert(fallback.profileId !== profileId, 'Kernel reused a Browser Use profile ID');
+      const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
+      assert(row.provider === 'kernel', 'Resumed browser row did not move to Kernel');
+      const kernelBrowser = await chromium.connectOverCDP(fallback.wsUrl);
+      await kernelBrowser.close();
+    } finally {
+      if (previousFlag === undefined) delete process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
+      else process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = previousFlag;
+    }
     console.log(
-      'PASS live Browser Use iframe handoff, auth completion, and immediate profile reuse'
+      'PASS live Browser Use handoff, profile reuse, repeated uploads, and Kernel kill switch'
     );
   } finally {
     await viewer?.close().catch(() => {});
     for (const id of [sessionId, resumedSessionId]) {
       if (id) await releaseBrowserUseRemoteSession(id).catch(() => {});
     }
+    if (kernelSessionId) await releaseKernelRemoteSession(kernelSessionId).catch(() => {});
     if (profileId) {
       await fetch(`https://api.browser-use.com/api/v4/profiles/${encodeURIComponent(profileId)}`, {
         method: 'DELETE',

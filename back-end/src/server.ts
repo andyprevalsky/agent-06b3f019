@@ -646,8 +646,16 @@ const shutdown = async (signal: string) => {
       error: err instanceof Error ? err.message : String(err),
     });
   });
-  await cleanupBenchmarkKernelProfiles();
-  await cleanupBenchmarkBrowserUseProfiles();
+  await cleanupBenchmarkKernelProfiles().catch((err: unknown) => {
+    log.warn('kernel_profile_cleanup_failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+  await cleanupBenchmarkBrowserUseProfiles().catch((err: unknown) => {
+    log.warn('browser_use_profile_cleanup_failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
   await prisma.$disconnect();
   process.exit(0);
 };

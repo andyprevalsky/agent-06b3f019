@@ -114,5 +114,17 @@ assert.equal(
   false,
   'a current visible challenge cannot promote'
 );
+for (const challenge of ['Turnstile', 'blocked by Cloudflare', 'Verify you are human']) {
+  assert.equal(
+    restoredTunnelCandidate({ ...evidence, classifierReason: `Tunnel restored, but ${challenge}` }),
+    false,
+    `${challenge} in the current classifier result cannot promote`
+  );
+  assert.equal(
+    restoredTunnelCandidate({ ...evidence, cleanedDom: `${evidence.cleanedDom} ${challenge}` }),
+    false,
+    `${challenge} in the current DOM cannot promote`
+  );
+}
 
 process.stdout.write('PASS challenge recovery tunnel transport evidence\n');

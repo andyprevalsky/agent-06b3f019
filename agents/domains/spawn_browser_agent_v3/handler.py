@@ -1995,6 +1995,7 @@ async def _wait_for_provider_captcha_solver(
     task_id: str,
     *,
     page: Optional[Any] = None,
+    provider: str = "",
 ) -> None:
     """Give provider-native auto-solving the first chance before recovery probes.
 
@@ -2006,7 +2007,7 @@ async def _wait_for_provider_captcha_solver(
     deadline = started_at + 45
     saw_active_solver = False
     inactive_polls = 0
-    last_provider = ""
+    last_provider = provider
     while asyncio.get_running_loop().time() < deadline:
         activity.heartbeat("Waiting for provider CAPTCHA auto-solver")
         page_still_challenged = False
@@ -8586,7 +8587,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         source_state=recovery_storage_state,
                         target_url=current_url,
                         wait_for_solver=lambda: _wait_for_provider_captcha_solver(
-                            config, task_id, page=input_page
+                            config,
+                            task_id,
+                            page=input_page,
+                            provider=str(browser_session_metadata.get("provider") or ""),
                         ),
                         probe=probe_cookie_variant_remote,
                         commit_cookie_removals=lambda keys: commit_cookie_removals(

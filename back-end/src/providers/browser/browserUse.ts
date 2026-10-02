@@ -1,5 +1,5 @@
 /** Browser Use Cloud V4 sessions, exposed through the same CDP contract as Steel and Kernel. */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
@@ -242,9 +242,13 @@ export async function releaseBrowserUseRemoteSession(sessionId: string): Promise
         component: 'Browser Use session stop',
       }
     );
+    initialStorageHashes.delete(sessionId);
   } catch (error) {
     // A previously paused or expired browser can already be gone.
-    if (error instanceof Error && error.message.startsWith('Browser Use HTTP 404:')) return;
+    if (error instanceof Error && error.message.startsWith('Browser Use HTTP 404:')) {
+      initialStorageHashes.delete(sessionId);
+      return;
+    }
     throw error;
   }
 }
@@ -529,7 +533,7 @@ export async function readBrowserUseSessionFile(sessionId: string, path: string)
     const found = page.files.find((file) => file.path === path);
     if (found) {
       if (!found.url) throw new Error(`Browser Use download URL unavailable: ${path}`);
-      const response = await fetch(found.url);
+      const response = await fetch(found.url, { signal: AbortSignal.timeout(60_000) });
       if (!response.ok) throw new Error(`Browser Use download failed: HTTP ${response.status}`);
       return Buffer.from(await response.arrayBuffer());
     }
@@ -573,6 +577,14 @@ export async function uploadBrowserUseSessionFile(
       eventsEnabled: true,
     });
     await page.goto('https://example.com', { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    // Chrome may auto-rename a repeated download. Give this upload a unique
+    // remote filename so verification can only read the bytes just written.
+    const dot = filename.lastIndexOf('.');
+    const suffix = randomUUID();
+    const downloadName =
+      dot > 0
+        ? `${filename.slice(0, dot)}-${suffix}${filename.slice(dot)}`
+        : `${filename}-${suffix}`;
     const expression = `(() => {
       const binary = atob(${JSON.stringify(content.toString('base64'))});
       const bytes = new Uint8Array(binary.length);
@@ -580,7 +592,7 @@ export async function uploadBrowserUseSessionFile(
       const url = URL.createObjectURL(new Blob([bytes], { type: ${JSON.stringify(mimeType)} }));
       const link = document.createElement('a');
       link.href = url;
-      link.download = ${JSON.stringify(filename)};
+      link.download = ${JSON.stringify(downloadName)};
       document.documentElement.appendChild(link);
       link.click();
       link.remove();
@@ -591,7 +603,7 @@ export async function uploadBrowserUseSessionFile(
     ]);
     const failure = await download.failure();
     if (failure) throw new Error(`Browser Use upload download failed: ${failure}`);
-    const path = `/tmp/downloads/${filename}`;
+    const path = `/tmp/downloads/${download.suggestedFilename()}`;
     await page.evaluate(
       'document.documentElement.insertAdjacentHTML(\'beforeend\', \'<input type="file" id="browser-use-upload-check">\')'
     );

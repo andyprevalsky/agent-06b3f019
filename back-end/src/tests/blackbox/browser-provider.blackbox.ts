@@ -9,7 +9,9 @@ import { kernelProxyCandidates, resolveKernelProxyMode } from '../../providers/b
 import { steel } from '../../providers/steel/session';
 import {
   assert,
+  assertBrowserUseRolloutOptIn,
   assertKernelCityInventoryFallback,
+  assertStoredProviderFallback,
   assertKernelTimeoutFallback,
   isRetryableKernelNavigationError,
   withProvider,
@@ -131,6 +133,11 @@ const tests: Array<[string, () => void | Promise<void>]> = [
         else process.env.BROWSER_USE_API_KEY = previousKey;
       }
     },
+  ],
+  ['Browser Use requires an explicit enabled rollout value', assertBrowserUseRolloutOptIn],
+  [
+    'unknown legacy stored browser providers retain the Steel fallback',
+    assertStoredProviderFallback,
   ],
   [
     'Browser Use provisioning is blocked before any provider request when disabled',
@@ -556,6 +563,19 @@ async function main(): Promise<void> {
           console.error(`FAIL live Browser Use cleanup: ${String(error)}`);
         });
       }
+    }
+  }
+
+  if (process.env.RUN_BROWSER_USE_HANDOFF_LIVE === '1') {
+    try {
+      const { runLiveBrowserUseHandoff } =
+        await import('./browser-provider.browser-use-handoff.live');
+      await runLiveBrowserUseHandoff();
+    } catch (error) {
+      failed++;
+      console.error(
+        `FAIL live Browser Use handoff: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 

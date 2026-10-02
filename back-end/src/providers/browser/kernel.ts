@@ -564,7 +564,11 @@ async function recreateKernelSession(
       ...(opts.forceManagedProxyType === undefined
         ? persistedKernelProxyOptions(oldSession.proxyTier)
         : { forceManagedProxyType: opts.forceManagedProxyType }),
-      boundProfile: recordedProviderProfileBinding(oldSession),
+      // Provider profile IDs are scoped to their remote provider. A Browser
+      // Use session returning to Kernel after the rollout switch is disabled
+      // must use its Kernel profile, never the Browser Use profile ID.
+      boundProfile:
+        oldSession.provider === 'kernel' ? recordedProviderProfileBinding(oldSession) : undefined,
     }
   );
   await remote.validationBrowser.close().catch(() => {});
@@ -597,7 +601,11 @@ async function recreateKernelSession(
   // Evict the superseded Kernel browser so we never leak a paid session. On the
   // resume path the old browser was already deleted at pause time (delete
   // tolerates 404); on the rotate path it is still live and must be reaped.
-  if (previousSessionId !== '' && previousSessionId !== remote.sessionId) {
+  if (
+    oldSession.provider === 'kernel' &&
+    previousSessionId !== '' &&
+    previousSessionId !== remote.sessionId
+  ) {
     await releaseKernelRemoteSession(previousSessionId).catch((error) => {
       log.warn('Failed to evict superseded Kernel session after recreate', {
         previousSessionId,

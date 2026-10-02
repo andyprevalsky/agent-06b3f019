@@ -5,6 +5,39 @@ import {
   KERNEL_CREATE_REQUEST_OPTIONS,
 } from '../../providers/browser/kernelProxy';
 import { retryWithBackoff } from '../../providers/retry';
+import { browserUseEnabled } from '../../providers/browser/config';
+import { computeGrantBrowserProvider } from '../../domains/compute-grants/config';
+import { storedBrowserProvider } from '../../providers/browser/types';
+
+export function assertBrowserUseRolloutOptIn(): void {
+  const previous = process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
+  const previousCompute = process.env.COMPUTE_GRANT_BROWSER_PROVIDER;
+  process.env.COMPUTE_GRANT_BROWSER_PROVIDER = 'browser-use';
+  try {
+    for (const value of ['', 'unexpected', 'false']) {
+      process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = value;
+      assert(!browserUseEnabled(), `Browser Use unexpectedly enabled for ${JSON.stringify(value)}`);
+      assert(
+        computeGrantBrowserProvider() === 'kernel',
+        `compute grants unexpectedly selected Browser Use for ${JSON.stringify(value)}`
+      );
+    }
+    process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = ' YES ';
+    assert(browserUseEnabled(), 'explicit yes did not enable Browser Use');
+    assert(computeGrantBrowserProvider() === 'browser-use', 'compute grants rejected yes');
+  } finally {
+    if (previous === undefined) delete process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
+    else process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = previous;
+    if (previousCompute === undefined) delete process.env.COMPUTE_GRANT_BROWSER_PROVIDER;
+    else process.env.COMPUTE_GRANT_BROWSER_PROVIDER = previousCompute;
+  }
+}
+
+export function assertStoredProviderFallback(): void {
+  assert(storedBrowserProvider('kernel') === 'kernel', 'Kernel routing changed');
+  assert(storedBrowserProvider('browser-use') === 'browser-use', 'Browser Use routing changed');
+  assert(storedBrowserProvider('legacy') === 'steel', 'legacy browser row must use Steel');
+}
 
 export function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);

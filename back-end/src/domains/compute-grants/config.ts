@@ -53,8 +53,7 @@ export function computeGrantBrowserProvider(): 'kernel' | 'steel' | 'browser-use
   // flag parser so disabling Browser Use also returns compute grants to Kernel.
   const flag = process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
   const browserUseEnabled =
-    flag !== undefined &&
-    !['0', 'false', 'no', 'off', 'disabled'].includes(flag.trim().toLowerCase());
+    flag !== undefined && ['1', 'true', 'yes', 'on', 'enabled'].includes(flag.trim().toLowerCase());
   if (selected === 'browser-use' && !browserUseEnabled) {
     return 'kernel';
   }

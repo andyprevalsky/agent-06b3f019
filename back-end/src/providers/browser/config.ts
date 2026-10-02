@@ -21,7 +21,8 @@ export function selectedBrowserProvider(): BrowserProviderName {
 
 /** Rollout switch for new Browser Use sessions, including recovery and proxy rotation. */
 export function browserUseEnabled(): boolean {
-  return browserProviderEnabled('BROWSER_AGENT_BROWSER_USE_ENABLED', false);
+  const value = process.env.BROWSER_AGENT_BROWSER_USE_ENABLED?.trim().toLowerCase();
+  return value !== undefined && ['1', 'true', 'yes', 'on', 'enabled'].includes(value);
 }
 
 export function browserProviderEnabled(name: string, defaultValue: boolean): boolean {

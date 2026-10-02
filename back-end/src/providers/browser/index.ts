@@ -252,6 +252,20 @@ export async function resumeSession(
   const provider = await providerForTask(taskId);
   if (provider === 'kernel') return resumeKernelSession(taskId);
   if (provider === 'browser-use') {
+    if (!browserUseEnabled()) {
+      const previous = await prisma.browserSession.findUniqueOrThrow({
+        where: { id: taskId },
+        select: { sessionId: true },
+      });
+      const replacement = await resumeKernelSession(taskId);
+      await releaseSupersededBrowser({
+        taskId,
+        previousProvider: 'browser-use',
+        previousSessionId: previous.sessionId,
+        operation: 'resume',
+      });
+      return replacement;
+    }
     const { previousSessionId, previousProvider, ...session } =
       await resumeBrowserUseSession(taskId);
     await releaseSupersededBrowser({

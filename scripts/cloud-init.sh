@@ -160,7 +160,7 @@ if [ -n "${BROWSER_USE_API_KEY:-}" ]; then
 fi
 if [ "${BROWSER_AGENT_BROWSER_USE_ENABLED+x}" = x ]; then
     for envf in agents/.env back-end/.env; do
-        upsert_env_key "$envf" BROWSER_AGENT_BROWSER_USE_ENABLED "$BROWSER_AGENT_BROWSER_USE_ENABLED"
+        upsert_env_key "$envf" BROWSER_AGENT_BROWSER_USE_ENABLED "${BROWSER_AGENT_BROWSER_USE_ENABLED:-false}"
     done
     log "synced BROWSER_AGENT_BROWSER_USE_ENABLED into agents/.env and back-end/.env"
 fi

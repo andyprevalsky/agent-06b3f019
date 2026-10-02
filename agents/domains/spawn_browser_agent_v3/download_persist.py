@@ -683,6 +683,8 @@ async def persist_navigation_download_via_page_fetch(
     if resolve_browser_provider(provider) == "browser-use":
         native = await wait_for_browser_use_download(config, session_id, filename)
         if not native:
+            if int(payload.get("size") or 0) > _MAX_PERSIST_BYTES:
+                return None
             # Browser Use exposes Chrome downloads, not a session-file upload.
             # Recreate the credentialed fetch as a browser download when the
             # original navigation did not leave a native download behind.

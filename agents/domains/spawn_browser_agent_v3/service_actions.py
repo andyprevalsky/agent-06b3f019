@@ -1689,7 +1689,15 @@ async def execute_action(
         if index is not None:
             element = dom_service.selector_map.get(index)
             if not element:
-                return {"success": False, "error": f"Element with index {index} not found"}
+                # Payment inputs inside open shadow roots can be visible in the
+                # browser state without a selector-map entry. Let the approved
+                # card-ref path locate the field semantically across roots and
+                # frames instead of rejecting its stale index up front.
+                payment_ref = params.get("text") if action_name == "input_text" else None
+                if payment_ref in PAYMENT_CARD_SECRET_REFS and has_payment_card_secret_refs(secret_refs):
+                    index = None
+                else:
+                    return {"success": False, "error": f"Element with index {index} not found"}
 
         context = _ActionContext(
             dom_service=dom_service,
@@ -3144,8 +3152,7 @@ _ARM_CLICK_RECEIPT_JS = """
     const receipts = window.__roseBrowserClickReceipts ||= {};
     const receipt = { seen: false, listener: null };
     receipt.listener = (event) => {
-        if (Math.abs(event.clientX - x) <= 8 && Math.abs(event.clientY - y) <= 8
-            && (event.target === target || target.contains(event.target))) {
+        if (event.target === target || target.contains(event.target)) {
             receipt.seen = true;
         }
     };
