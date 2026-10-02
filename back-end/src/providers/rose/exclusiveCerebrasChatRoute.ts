@@ -12,11 +12,12 @@ import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './type
 const log = createLogger('Rose');
 
 /**
- * How long the exclusive Cerebras stream may stay silent before the generic
- * waterfall starts IN PARALLEL as a hedge. Shorter than the 1.2s pre-content
- * stall guard, so a throttled/queued Cerebras stream no longer serializes
- * stall detection + waterfall TTFT (which breached the 5s chat lifecycle
- * ratchet). Non-positive values disable hedging (pure serial fallover).
+ * How long the exclusive Cerebras stream may stay silent before the OpenRouter
+ * fallbacks start IN PARALLEL as a hedge. Cerebras keeps racing them until its
+ * own guard, so a throttled/queued or long-prefill Cerebras stream neither
+ * serializes stall detection + fallback TTFT (which breached the 5s chat
+ * lifecycle ratchet) nor loses a response it was about to send.
+ * Non-positive values disable hedging (pure serial fallover).
  */
 export const DEFAULT_CEREBRAS_CHAT_HEDGE_MS = 800;
 
@@ -70,6 +71,19 @@ export function selectExclusiveCerebrasChatRoute(params: {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+function logBranchFailure(requestId: string, race: string, callerSignal?: AbortSignal) {
+  return (branch: string, error: unknown): void => {
+    if (callerSignal?.aborted) return;
+    log.warn('cerebras_chat.hedge_branch_failed', {
+      request_id: requestId,
+      race,
+      branch,
+      error_name: error instanceof Error ? error.name : 'unknown',
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 200),
+    });
+  };
+}
+
 function withBranchAbort(options: CompletionOptions, branchSignal: AbortSignal): CompletionOptions {
   return {
     ...options,
@@ -84,7 +98,8 @@ function withBranchAbort(options: CompletionOptions, branchSignal: AbortSignal):
  * spill. This branch is entered only after direct Cerebras has failed or stayed
  * silent, so the normal fast path still makes one provider request. The fast
  * model leads: off Cerebras the same Qwen model streams at GPU-host speed
- * (measured 1.6–7.6s to first token), which alone overruns the 3s router bound.
+ * (measured 1.6–7.6s to first token). The fast model's guard is sized in
+ * openrouterFastRoute.ts.
  */
 export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   poolSpec: PoolSpec;
@@ -131,6 +146,11 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
     onWinner: (name) => {
       winnerName = name;
     },
+    onBranchFailure: logBranchFailure(
+      params.requestId,
+      'openrouter-fallback',
+      params.options.abort_signal
+    ),
   });
 
   for await (const chunk of raced) yield chunk;
@@ -214,6 +234,11 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
             });
           }
         },
+        onBranchFailure: logBranchFailure(
+          params.requestId,
+          'cerebras-hedge',
+          params.options.abort_signal
+        ),
       });
       for await (const chunk of hedged) {
         const output = emit(chunk);
@@ -237,7 +262,9 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
         pool: params.pool,
       });
     } catch (error) {
-      if (emittedAny) throw error; // post-content failures surface unchanged
+      // Post-content failures surface unchanged, and a caller that gave up
+      // (the router's deadline) must not start the waterfall it abandoned.
+      if (emittedAny || params.options.abort_signal?.aborted) throw error;
       cerebrasFailure = error;
       log.warn('cerebras_chat.pre_content_failover_to_waterfall', {
         request_id: params.requestId,
@@ -262,6 +289,7 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
       });
     } catch (error) {
       if (!(error instanceof PreContentFallThroughError)) throw error;
+      if (params.options.abort_signal?.aborted) throw error.cause;
       cerebrasFailure = error.cause;
       log.warn('cerebras_chat.pre_content_failover_to_waterfall', {
         request_id: params.requestId,

@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -337,6 +338,24 @@ def test_message_renderer_compacts_structured_response_values():
     assert "added_to_cart: True" in html
 
 
+def test_unparseable_json_values_render_as_text():
+    """Values json.loads rejects without a JSONDecodeError still render as text."""
+    renderer = _load_renderer()
+    too_deep = "[" * 200_000
+    too_long_int = "1" * 5_000
+
+    assert renderer.maybe_parse_json_string(too_deep) == too_deep
+    assert renderer.maybe_parse_json_string(f"[{too_long_int}]") == f"[{too_long_int}]"
+    assert renderer.parse_json_maybe(too_long_int) == too_long_int
+    html = renderer.render_message_content(
+        f"done\n\nStructured Response: {too_deep}",
+        Path("/tmp/rendered.html"),
+        1,
+    )
+    assert "done" in html
+    assert "Structured Response" in html
+
+
 def test_publish_dump_https_uploads_and_returns_presigned_url():
     """HTTPS publish must return a clickable URL (not a local artifact path)."""
     renderer = _load_renderer()
@@ -385,6 +404,34 @@ def test_publish_dump_https_returns_none_without_r2():
         html_path = Path(tmp) / "dump.html"
         html_path.write_text("<html>ok</html>", encoding="utf-8")
         assert renderer.publish_dump_https(html_path, agent_id="a") is None
+
+
+def test_r2_unavailable_reason_names_the_real_cause():
+    """A missing boto3 must not be reported as missing R2 env."""
+    renderer = _load_renderer()
+    saved = {name: os.environ.get(name) for name in renderer.R2_ENV}
+    real_find_spec = renderer.importlib.util.find_spec
+    try:
+        for name in renderer.R2_ENV:
+            os.environ.pop(name, None)
+        assert renderer.r2_unavailable_reason() == "set " + ", ".join(renderer.R2_ENV)
+
+        for name in renderer.R2_ENV:
+            os.environ[name] = "x"
+        renderer.importlib.util.find_spec = lambda name: None if name == "boto3" else real_find_spec(name)
+        reason = renderer.r2_unavailable_reason()
+        assert reason.startswith("boto3 is not importable"), reason
+        assert "agents/venv/bin/python" in reason
+
+        renderer.importlib.util.find_spec = lambda name: object()
+        assert renderer.r2_unavailable_reason() == ""
+    finally:
+        renderer.importlib.util.find_spec = real_find_spec
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def test_publish_rendered_dump_copies_html_and_assets():
@@ -528,6 +575,10 @@ async def run_all_tests():
         test_message_renderer_compacts_structured_response_values,
     )
     r.record(
+        "unparseable_json_values_render_as_text",
+        test_unparseable_json_values_render_as_text,
+    )
+    r.record(
         "publish_rendered_dump_copies_html_and_assets",
         test_publish_rendered_dump_copies_html_and_assets,
     )
@@ -538,6 +589,10 @@ async def run_all_tests():
     r.record(
         "publish_dump_https_returns_none_without_r2",
         test_publish_dump_https_returns_none_without_r2,
+    )
+    r.record(
+        "r2_unavailable_reason_names_the_real_cause",
+        test_r2_unavailable_reason_names_the_real_cause,
     )
     r.record(
         "published_dump_is_viewable_without_sidecar_assets",

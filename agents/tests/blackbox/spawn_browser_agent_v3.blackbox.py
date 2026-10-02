@@ -6192,7 +6192,7 @@ def test_payment_card_approval_finishes_original_browser_tool_result():
 def test_large_payment_request_resumes_with_parseable_finished_tool_result():
     from domains.spawn_browser_agent_v3.handler import (
         _append_browser_turn_messages,
-        _compact_browser_turn_messages_for_resume,
+        _browser_turn_messages_for_resume,
         _resolve_payment_card_tool_result_for_resume,
         _simulated_browser_resume_payload,
     )
@@ -6210,7 +6210,7 @@ def test_large_payment_request_resumes_with_parseable_finished_tool_result():
         result={"success": True, "status": "awaiting_payment_card_approval", "payment_request": request},
         tool_call_id="payment-call-large",
     )
-    real_turns = _compact_browser_turn_messages_for_resume(turns)
+    real_turns = _browser_turn_messages_for_resume(turns)
     simulated_turns = _simulated_browser_resume_payload(
         browser_state={},
         action_entries=[],
@@ -23678,6 +23678,34 @@ async def run_all_tests():
         test_manager_cancelled_browser_pause_preserves_preallocated_task_id,
     )
     await r.record_async(
+        "manager_handoff_during_payment_card_approval_is_task_scoped",
+        test_manager_generation_handoff_during_payment_card_approval_is_task_scoped,
+    )
+    await r.record_async(
+        "manager_handoff_during_write_approval_is_task_scoped",
+        test_manager_generation_handoff_during_write_approval_is_task_scoped,
+    )
+    await r.record_async(
+        "manager_handoff_terminal_falls_back_to_preallocated_task_id",
+        test_manager_generation_handoff_terminal_falls_back_to_preallocated_task_id,
+    )
+    await r.record_async(
+        "manager_failure_terminal_is_task_scoped",
+        test_manager_failure_terminal_is_task_scoped,
+    )
+    await r.record_async(
+        "manager_failure_before_activity_start_names_no_task",
+        test_manager_failure_before_activity_start_names_no_task,
+    )
+    await r.record_async(
+        "manager_write_lock_rejection_terminal_is_task_scoped",
+        test_manager_write_lock_rejection_terminal_is_task_scoped,
+    )
+    await r.record_async(
+        "manager_auth_assistance_failure_terminal_is_task_scoped",
+        test_manager_auth_assistance_failure_terminal_is_task_scoped,
+    )
+    await r.record_async(
         "manager_passes_fast_mode_cache",
         test_manager_passes_fast_mode_cache_for_browser_activity,
     )
@@ -23821,6 +23849,14 @@ async def run_all_tests():
     r.record(
         "browser_tool_events_declare_action_type",
         test_browser_tool_events_declare_action_type,
+    )
+    r.record(
+        "large_payment_request_resumes_with_parseable_result",
+        test_large_payment_request_resumes_with_parseable_finished_tool_result,
+    )
+    await r.record_async(
+        "browser_agent_yields_when_ownership_is_already_user",
+        test_browser_agent_yields_when_ownership_is_already_user,
     )
     return r.all_passed
 

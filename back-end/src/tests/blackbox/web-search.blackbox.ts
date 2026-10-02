@@ -94,6 +94,85 @@ async function main(): Promise<void> {
         assert(result.answer.includes('Turbo is optimized'), 'excerpt lost');
       })
     );
+
+    results.push(
+      await runTest(
+        'a stalled Parallel response is hedged so the search stays inside the chat SLA',
+        async () => {
+          requests.length = 0;
+          let stalledAborted = false;
+          const stalledFetch = globalThis.fetch;
+          globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+            if (requests.length === 0) {
+              requests.push({ url: String(input), init });
+              return new Promise<Response>((_resolve, reject) => {
+                init?.signal?.addEventListener('abort', () => {
+                  stalledAborted = true;
+                  reject(new DOMException('aborted', 'AbortError'));
+                });
+              });
+            }
+            return stalledFetch(input, init);
+          }) as typeof fetch;
+          const startedAt = Date.now();
+          let deadline: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const result = await Promise.race([
+              executeWebSearch('Parallel Search Turbo latency'),
+              new Promise<never>((_resolve, reject) => {
+                deadline = setTimeout(
+                  () => reject(new Error('search never settled after the provider stalled')),
+                  6_000
+                );
+              }),
+            ]);
+            const elapsedMs = Date.now() - startedAt;
+            assert(requests.length === 2, `expected one hedge request, got ${requests.length}`);
+            assert(elapsedMs < 2_500, `hedged search took ${elapsedMs}ms`);
+            assert(stalledAborted, 'the stalled request must be aborted once the hedge wins');
+            assert(
+              requests[1].init?.body === requests[0].init?.body,
+              'the hedge must repeat the original request'
+            );
+            assert(
+              result.sources[0] === 'https://parallel.ai/blog/parallel-search-turbo',
+              'hedge result lost'
+            );
+          } finally {
+            clearTimeout(deadline);
+            globalThis.fetch = stalledFetch;
+          }
+        }
+      )
+    );
+
+    results.push(
+      await runTest('a prompt Parallel response never sends a hedge request', async () => {
+        requests.length = 0;
+        await executeWebSearch('Parallel Search Turbo latency');
+        await new Promise((resolve) => setTimeout(resolve, 1_800));
+        assert(requests.length === 1, `expected no hedge, got ${requests.length} requests`);
+      })
+    );
+
+    results.push(
+      await runTest('a provider error before the hedge delay is not hedged', async () => {
+        requests.length = 0;
+        const okFetch = globalThis.fetch;
+        globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+          requests.push({ url: String(input), init });
+          return new Response('bad objective', { status: 400 });
+        }) as typeof fetch;
+        try {
+          const result = await executeWebSearch('Parallel Search Turbo latency');
+          await new Promise((resolve) => setTimeout(resolve, 1_800));
+          assert(requests.length === 1, `a 400 must not be hedged, got ${requests.length}`);
+          assert(result.sources.length === 0, 'a failed search must not report sources');
+        } finally {
+          globalThis.fetch = okFetch;
+        }
+      })
+    );
   } finally {
     globalThis.fetch = originalFetch;
     if (originalApiKey === undefined) delete process.env.PARRALLEL_API_KEY;

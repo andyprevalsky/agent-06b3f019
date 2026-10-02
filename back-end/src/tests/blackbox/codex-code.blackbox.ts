@@ -1,7 +1,5 @@
 #!/usr/bin/env tsx
 import { config } from 'dotenv';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
@@ -23,6 +21,11 @@ import {
   testCodexCreditSkip_createUnavailableOnCooldownIsSkip,
 } from './codex-credit-skip.case';
 import {
+  testPromptBuilder_sharedContractMentionsOutputRules,
+  testRuntimeFallback_recognizesRevokedOAuthRefreshToken,
+  testTemplate_pinsCodexCliForGpt56,
+} from './codex-template-contract.case';
+import {
   CredentialExhaustionSkip,
   codexCreateUnavailableSkipReason,
   codexSmokeCreditSkipReason,
@@ -33,6 +36,7 @@ import {
   testDetectCreditExhaustion_observedOpenAiWording,
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
+import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -199,60 +203,6 @@ async function waitForCodexOutput(
   );
 }
 
-async function testPromptBuilder_sharedContractMentionsOutputRules() {
-  const { buildCodeAgentSystemPrompt, CODE_AGENT_INSTRUCTIONS_VERSION } =
-    await import('../../providers/codeAgentPrompt');
-
-  const prompt = buildCodeAgentSystemPrompt({
-    githubRepoUrl: 'https://github.com/acme/widgets.git',
-    workDir: '/home/user/workspace',
-  });
-
-  assert(prompt.includes(CODE_AGENT_INSTRUCTIONS_VERSION), 'Prompt version missing');
-  assert(prompt.includes('/home/user/attachments'), 'Attachments directory missing');
-  assert(prompt.includes('/home/user/output'), 'Output directory missing');
-  assert(
-    prompt.includes('Files outside this directory are not returned to the user'),
-    'Output directory return contract missing'
-  );
-  assert(
-    prompt.includes('verify each requested artifact exists in /home/user/output'),
-    'Output artifact verification rule missing'
-  );
-  assert(prompt.includes('Do not return the original attachment path'), 'Transform rule missing');
-  assert(
-    prompt.includes('Do not launch a separate claude/Claude Code CLI'),
-    'Nested Claude CLI guard missing'
-  );
-  assert(prompt.includes('/home/user/workspace'), 'Repo workDir missing');
-}
-
-async function testTemplate_pinsCodexCliForGpt56() {
-  const dockerfile = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'e2b.Dockerfile'),
-    'utf8'
-  );
-  assert(
-    dockerfile.includes('ARG CODEX_VERSION=0.144.1') &&
-      dockerfile.includes('npm install -g "@openai/codex@$CODEX_VERSION"') &&
-      !dockerfile.includes('ubuntu.mirror.constant.com'),
-    'Codex E2B template must pin the GPT-5.6-compatible Codex CLI and use reliable Ubuntu sources'
-  );
-}
-
-async function testRuntimeFallback_recognizesRevokedOAuthRefreshToken() {
-  const wsServer = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'ws-server.mjs'),
-    'utf8'
-  );
-  assert(
-    wsServer.includes('refresh_token_invalidated') &&
-      wsServer.includes('oauth_refresh_invalid') &&
-      wsServer.includes('oauthFallbackReason ??= classifyOAuthFallbackReason(message)'),
-    'Codex ws-server must classify revoked refresh tokens for funded-key fallback'
-  );
-}
-
 async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
   const userId = crypto.randomUUID();
   const integration = await prisma.integration.create({
@@ -329,6 +279,12 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
         name: 'gpt_api_key_cooldown',
       },
     });
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: false,
+    });
   }
 }
 
@@ -373,6 +329,24 @@ async function testSmoke_codexCompletesE2bTask() {
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
+  const sharedCooldown = await prisma.integration.findUnique({
+    where: {
+      userId_name_accountId: {
+        userId: '00000000-0000-0000-0000-000000000000',
+        name: 'gpt_api_key_cooldown',
+        accountId: '',
+      },
+    },
+    select: { rateLimitedUntil: true },
+  });
+  if (!cooldownIsLive(sharedCooldown)) {
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: false,
+    });
+  }
 
   try {
     const createRes = await request(`${BASE_URL}/api/codex-code-session/create`, {
