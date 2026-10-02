@@ -15,6 +15,7 @@ import {
   steelStartupProbe,
   validateBrowserConnection,
 } from '../../providers/steel/sessionConnection';
+import { createSteelRecoverySession } from '../../providers/steel/sessionRecovery';
 import {
   isSteelProvisioningOutage,
   isSteelSessionValidationFailure,
@@ -94,6 +95,43 @@ async function main(): Promise<void> {
     assert.strictEqual(result.browser, browser);
     assert.strictEqual(result.failure, null);
     assert.strictEqual(probes, 0);
+  });
+
+  await test('challenge-recovery candidates stop validating once Steel declares startup failure', async () => {
+    let created = 0;
+    let connects = 0;
+    const probed: string[] = [];
+    const released: string[] = [];
+    await assert.rejects(
+      createSteelRecoverySession(
+        {
+          proxyLocation: { country: 'US', state: 'CA', city: 'SAN FRANCISCO' },
+          proxyMode: 'fixed',
+        },
+        {
+          createSession: async () => {
+            created += 1;
+            return { id: `dead-${created}`, debugUrl: 'https://steel.example/debug' };
+          },
+          connect: async () => {
+            connects += 1;
+            throw new Error('Connection timeout');
+          },
+          retrieveSession: async (id) => {
+            probed.push(id);
+            return { status: 'failed', releaseReason: 'startup_failed' };
+          },
+          releaseRemoteSession: async (id) => {
+            released.push(id);
+          },
+        }
+      ),
+      /Steel reported session dead-5 failed \(startup_failed\)/
+    );
+    assert.strictEqual(created, 5);
+    assert.strictEqual(connects, 5, 'kept dialing CDP after Steel declared the candidate dead');
+    assert.deepStrictEqual(probed, ['dead-1', 'dead-2', 'dead-3', 'dead-4', 'dead-5']);
+    assert.deepStrictEqual(released, probed);
   });
 
   await test('the Steel probe reports only a failed session, with its release reason', async () => {
