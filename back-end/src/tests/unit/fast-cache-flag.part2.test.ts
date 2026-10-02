@@ -136,20 +136,26 @@ test('chat router caches successful output without gating downstream work', () =
     join(process.cwd(), 'src', 'providers', 'chat', 'routerLlm.ts'),
     'utf8'
   );
+  const cacheReader = readFileSync(
+    join(process.cwd(), 'src', 'providers', 'chat', 'routerFastCache.ts'),
+    'utf8'
+  );
   assert.ok(router.includes('agentFastMode'), 'router must read Fast Mode flag');
   assert.ok(
     router.includes("contentKey(fastMode.goal, 'chat_router'"),
     'router must use a canonical request key'
   );
   assert.ok(router.includes('fastMode.writeEnabled'), 'router must honor write-through accounts');
-  assert.ok(router.includes('cacheGet(cacheKey)'), 'router must read before live LLM');
+  assert.ok(router.includes('readRouterFastCache('), 'router must read before live LLM');
+  assert.ok(cacheReader.includes('const hit = await get(key)'), 'router must read the exact key');
   assert.ok(
-    router.includes('awaitCacheFirst: isOaiDemoGoal(fastMode.goal)'),
-    'router must wait for cache only on the OAi demo Fast Mode goal'
+    router.includes('if (isOaiDemoGoal(cacheGoal))') &&
+      router.includes('const hit = await readCache()'),
+    'router must await cache and fail closed on the OAi demo Fast Mode goal'
   );
   assert.ok(router.includes('cacheSet({'), 'router must store successful router output');
   assert.ok(
-    router.includes('isValidRouterCacheJson(json)'),
+    cacheReader.includes('isValidRouterCacheJson(json)'),
     'router must validate cached output before accepting a hit'
   );
   assert.ok(

@@ -1687,7 +1687,12 @@ async def execute_action(
         if index is not None:
             element = dom_service.selector_map.get(index)
             if not element:
-                return {"success": False, "error": f"Element with index {index} not found"}
+                # A resumed browser activity restores the model's page transcript
+                # before the new DOMService has rebuilt its live selector map.
+                await dom_service.get_browser_state(include_screenshot=False)
+                element = dom_service.selector_map.get(index)
+                if not element:
+                    return {"success": False, "error": f"Element with index {index} not found"}
 
         context = _ActionContext(
             dom_service=dom_service,

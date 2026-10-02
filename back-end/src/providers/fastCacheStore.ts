@@ -500,9 +500,21 @@ export async function agentFastMode(agentId: string): Promise<{
   return {
     enabled,
     goal,
-    writeEnabled: enabled,
+    writeEnabled: fastCacheWriteAllowed(enabled),
     rootAgentId,
     rootGoal,
     providerFastMode,
   };
+}
+
+export function fastCacheWriteAllowed(
+  enabled: boolean,
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  return (
+    enabled &&
+    !['1', 'true', 'yes', 'on'].includes(
+      (env.FAST_MODE_CACHE_DISABLE_WRITE_THROUGH ?? '').trim().toLowerCase()
+    )
+  );
 }
