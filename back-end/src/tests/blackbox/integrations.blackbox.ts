@@ -773,6 +773,8 @@ async function testGptApiKeyCooldown_markThenOnCooldown() {
         },
       });
     }
+    // Resets only this process's cache; the backend under test keeps the funded GPT key cooled for
+    // the full window, so real-credential smokes on a shared backend must run before this case.
     __clearGptApiKeyCooldownCache();
   }
 }

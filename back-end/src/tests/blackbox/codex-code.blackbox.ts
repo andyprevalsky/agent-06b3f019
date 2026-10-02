@@ -492,7 +492,21 @@ async function runAll() {
   console.log('Codex Code Session Black-Box Tests\n');
   console.log(`Testing against: ${BASE_URL}\n`);
 
-  const tests: { name: string; fn: () => Promise<void> }[] = [
+  const tests: { name: string; fn: () => Promise<void> }[] = [];
+  // The feedback cases put the shared funded GPT key on cooldown, and the backend caches that
+  // cooldown in-process for its full window; deleting the DB row afterwards does not undo it.
+  // Without a synced Codex OAuth credential the smoke depends on that key, so it must run first.
+  if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
+    console.log(
+      '  SKIP  smoke -- Codex completes task in real E2B sandbox (BACKEND_CODEX_SMOKE_SKIP=1)'
+    );
+  } else {
+    tests.push({
+      name: 'smoke -- Codex completes task in real E2B sandbox',
+      fn: testSmoke_codexCompletesE2bTask,
+    });
+  }
+  tests.push(
     { name: 'POST /create -- no auth -> 401', fn: testCreate_noAuth },
     { name: 'POST /create -- missing user_id -> 500', fn: testCreate_missingUserId },
     {
@@ -578,18 +592,8 @@ async function runAll() {
     {
       name: 'smoke-skip -- success sentinel is never overridden by exhaustion',
       fn: async () => testCreditExhaustion_neverOverridesSuccessSentinel(),
-    },
-  ];
-  if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
-    console.log(
-      '  SKIP  smoke -- Codex completes task in real E2B sandbox (BACKEND_CODEX_SMOKE_SKIP=1)'
-    );
-  } else {
-    tests.push({
-      name: 'smoke -- Codex completes task in real E2B sandbox',
-      fn: testSmoke_codexCompletesE2bTask,
-    });
-  }
+    }
+  );
 
   const results: TestResult[] = [];
   for (const test of tests) {
