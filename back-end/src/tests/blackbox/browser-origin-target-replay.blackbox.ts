@@ -26,6 +26,7 @@ async function verifyOriginTargetReplay() {
   const sessions = new Map<string, { id: string; type: string }>();
   const traffic: Array<{ target: string; bytes: number; payloadBytes: number }> = [];
   let observe = false;
+  let originPayloadEvaluations = 0;
   let restoreNetworkRequests = 0;
   const server = createServer((request, response) => {
     if (request.url?.startsWith('/.rose-storage-')) restoreNetworkRequests++;
@@ -84,6 +85,12 @@ async function verifyOriginTargetReplay() {
       client.on('message', (data) => {
         const bytes = Buffer.from(data.toString());
         const message = JSON.parse(bytes.toString());
+        if (
+          ['Runtime.evaluate', 'Runtime.callFunctionOn'].includes(message.method) &&
+          JSON.stringify(message.params).includes('rose.origin-state.')
+        ) {
+          originPayloadEvaluations++;
+        }
         if (observe && message.method === 'Page.addScriptToEvaluateOnNewDocument') {
           const script = String(message.params.source);
           traffic.push({
@@ -142,6 +149,7 @@ async function verifyOriginTargetReplay() {
     });
     await seed.close();
     const callerPages = context.pages();
+    const beforeLocalStorage = originPayloadEvaluations;
     await injectLocalStorageState(
       context,
       [
@@ -154,6 +162,14 @@ async function verifyOriginTargetReplay() {
         },
       ],
       Date.now()
+    );
+    const localStorageMutations = originPayloadEvaluations - beforeLocalStorage;
+    assert.ok(localStorageMutations > 0, 'actual CDP payload evaluations were not observed');
+    console.log(JSON.stringify({ originPayloadSinglePacketMutations: localStorageMutations }));
+    assert.equal(
+      localStorageMutations,
+      1,
+      'fitting origin payload spent a second CDP acknowledgement on completion'
     );
     await injectIndexedDBState(
       context,

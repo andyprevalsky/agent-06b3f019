@@ -281,6 +281,68 @@ This proves and repairs retained-payload fanout at its owning boundary. The
 original live OOM allocation and a fresh post-repair cloud outcome are separate
 claims and remain unverified here. The ten-slice fleet gate is still required.
 
+### October 2: remove redundant payload-completion acknowledgments
+
+The unchanged `a1114c7` cloud diagnostic `20261002-160354-21125` evaluated
+`polar-odysseys-082aa17f3e88` and completed 18 correlated LIVE queries, but four
+browser preparations returned `BrowserStateInjectionTimeout`. It therefore
+received zero credit. Native cleanup verified all ten pool Machines stopped,
+zero claims and no remaining owner registry. Teardown completed about 24 seconds
+after its guest acknowledgment; the failures occurred during execution.
+
+The original state phases continued making useful progress up to their
+18-second deadline. The first reached 31 of 34 LocalStorage rows; three others
+finished LocalStorage and exhausted the remaining budget transferring IndexedDB.
+The fifth preparation completed in 14.707 seconds. Completed SQL occupied
+0.200, 3.071, 2.696, 3.377 and 3.152 seconds respectively. These observations do
+not attribute the remaining time to one transport operation or prove a new cause.
+Archive searches for `BrowserStateInjectionTimeout` and `browser state storage
+injection timeout` led to this recurrence and earlier CDP/serialization cases.
+
+A configured owning diagnostic used the canonical Kernel creation helper, its
+validated browser, fresh persistent profile, residential city proxy, the retained
+34 LocalStorage / eight IndexedDB / eight cache / seven permission rows, and a
+preserved canonical cookie bundle with 161 cookies. It completed injection in
+8.342 seconds under the unchanged 18-second budget, with 148 evaluations and
+50 navigations. Its lifecycle took 19.932 seconds and all exact resources retired.
+Its frozen cookies cannot prove equality to the original run's refreshed cookie
+version. An earlier attempt stopped before injection because its test guard
+compared raw location formatting with canonical normalized proxy formatting;
+that artifact is preserved as a test setup failure, not a timeout reproduction.
+
+The protocol sent every data packet without a completion marker, then always
+spent an extra acknowledgment on an empty completion packet. The existing actual
+Chromium/CDP blackbox now counts both runtime evaluation forms used by Playwright.
+Its positive observation assertion prevents a missing observer from becoming
+false causal evidence. On the buggy implementation, the frozen test failed in
+11.702 seconds: a fitting LocalStorage payload used two acknowledged mutations
+instead of one. The identical test and command passed in 12.961 seconds after
+the change, with one mutation. This proves eliminated protocol work, not a
+wall-clock speedup or resolution of the original live timeout.
+
+`injectOriginPayload` now retains only its last bounded packet until the opaque
+SQL read transaction succeeds, then carries the completion marker with that
+packet. Earlier packets still stream with completion unset. The combined envelope
+receives the exact unchanged 1 MB check; if it no longer fits, the original
+separate completion protocol remains. Cancellation checks, immutable
+user/origin/revision predicates and storage settlement remain unchanged. Memory
+adds one bounded pending packet per active injector, independent of fleet width;
+there is no shared lock or per-user fan-in at 10,000 agents.
+
+The frozen command, from `back-end` with the existing owned local database, is
+`node node_modules/tsx/dist/cli.mjs src/tests/blackbox/browser-origin-target-replay.blackbox.ts`.
+The test retains storage after disconnect/reload, Unicode and empty values,
+existing records/cache names, foreign page/iframe isolation, caller-page
+preservation and late cancellation. The existing real-Postgres payload, memory
+and Steel domains also passed the canonical blackbox runner in 76.435 seconds;
+the memory budget remains 1,200 MB. Typecheck, affected lint and independent
+implementation review passed. Private immutable artifacts are under
+`.context/acceptance/proof111-completion-packet-rca/`; no payloads or raw logs
+are committed. The owning file remains automatically discovered in the normal
+backend `/deploy` blackbox gate. Full final-source deploy and fleet evidence are
+separate required gates. The original OOM allocation and 18-second timeout
+attribution remain open.
+
 ## Human feedback
 
 The user required completing the infrastructure repair and ten consecutive

@@ -375,6 +375,12 @@ storage after injector disconnect, caller-page preservation and late page
 acquisition after cancellation. All three suites run in the backend `/deploy` gate.
 These causal tests do not prove that an earlier live OOM had the same allocation
 source; retain its evidence and verify fresh fleet outcomes separately.
+A fitting origin payload completes in its data packet; avoid a separate empty
+CDP acknowledgment. Keep the last packet bounded and withhold its completion
+marker until the opaque SQL read transaction succeeds. Recheck the combined
+wire envelope and retain separate completion only when it cannot fit. The same
+real-CDP blackbox counts actual acknowledged payload mutations while checking
+persistent storage, cancellation and unrelated targets; it remains in `/deploy`.
 Bound packet-sizing work as well as transmitted bytes: do not repeatedly
 serialize the entire unsent SQL chunk. The same memory blackbox measures encoded
 bytes against delivered bytes while preserving its content hash and RSS budget.

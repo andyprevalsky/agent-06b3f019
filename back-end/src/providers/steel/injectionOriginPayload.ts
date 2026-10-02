@@ -149,6 +149,7 @@ export async function injectOriginPayload(
   const writer = 'writeOriginScript' in context ? context : ownedWriter!;
   const token = `rose.origin-state.${randomUUID()}`;
   let index = 0;
+  let pending: { index: number; part: string; script: string; wireBytes: number } | undefined;
   const started = performance.now();
   let rawBytes = 0;
   let submittedEnvelopeBudgetBytes = 0;
@@ -210,7 +211,10 @@ export async function injectOriginPayload(
         wireBytes = scriptWireBytes(script);
       }
       encodingMs += performance.now() - encodingStarted;
-      await send(script, wireBytes);
+      // Keep only the final bounded packet unacknowledged. Its completion marker
+      // must wait for the opaque SQL read transaction to finish successfully.
+      if (pending) await send(pending.script, pending.wireBytes);
+      pending = { index, part: raw.slice(offset, end), script, wireBytes };
       offset = end;
       index++;
     }
@@ -220,6 +224,19 @@ export async function injectOriginPayload(
   try {
     if ('id' in row) await readOriginTextParts(table, row, consume, signal);
     else await consume(JSON.stringify(legacyValue) ?? 'null');
+    if (pending) {
+      const encodingStarted = performance.now();
+      const completed = chunkScript(targetOrigin, token, pending.index, pending.part, index, apply);
+      const completedBytes = scriptWireBytes(completed);
+      encodingMs += performance.now() - encodingStarted;
+      if (completedBytes <= MAX_ORIGIN_INIT_SCRIPT_BYTES) {
+        await send(completed, completedBytes);
+        return;
+      }
+      // A longer total marker can cross the exact envelope bound. Preserve the
+      // original two-packet completion protocol in that case.
+      await send(pending.script, pending.wireBytes);
+    }
     const finish = chunkScript(targetOrigin, token, null, '', index, apply);
     const finishBytes = scriptWireBytes(finish);
     if (finishBytes > MAX_ORIGIN_INIT_SCRIPT_BYTES) {
