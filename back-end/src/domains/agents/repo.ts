@@ -13,6 +13,8 @@ export {
   failAgentIfStillActive,
   clearWorkflowForTerminalAgent,
   DERIVED_RUN_STATE_RESET,
+  followUpRunStateUpdate,
+  shouldSnapshotPreviousGoal,
   softDeleteAgent,
   restoreAgentAndDescendants,
   findArchivedAgent,

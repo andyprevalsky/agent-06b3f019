@@ -13,6 +13,8 @@ export {
   deleteAgentTools,
   deleteAttentionRequests,
   DERIVED_RUN_STATE_RESET,
+  followUpRunStateUpdate,
+  shouldSnapshotPreviousGoal,
   failAgentIfStillActive,
   findArchivedAgent,
   replaceAgentTools,

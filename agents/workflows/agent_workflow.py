@@ -1992,8 +1992,10 @@ class AgentWorkflow:
             startup_execute_context = filter_internal_subagent_messages(startup_execute_context)
             prior_run_superseded = plan_superseded_by_new_user_instruction(startup_execute_context)
             if prior_run_superseded:
-                # A completed or followed-up run's schema is not live. Keep it
-                # None here so we never generate from Agent.goal (the old task).
+                # A completed or followed-up run's schema is not live. Chat
+                # persist has already moved Agent.goal to the router task;
+                # still skip generate-from-row here so a stale leftover cannot
+                # win a race, then regenerate from the latest USER below.
                 response_schema = None
                 self.output_schema = None
         if (

@@ -101,8 +101,12 @@ that plan (`plan_data = None`) and falls through to `run_agent`. Terminal
 reactivation (`clearWorkflowForTerminalAgent`) and follow-up Temporal start
 immediately null `responseSchema`, `structuredResponse`, `progress`,
 `toolsInUse`, and `statusMessage` on the Agent row so the new run never
-observes the old contract. Startup must not rebuild the schema from
-`Agent.goal`; it generates from the latest real USER instruction only.
+observes the old contract. The same write persists the chat-router goal
+onto `Agent.goal` so schema / fast-cache / UI base off the new task;
+the prior goal stays on the Cloud Agent chip (`previousGoal`) and in the
+original USER row. First-run escalate still keeps create-time `Agent.goal`
+(2026-07-03). Startup must not rebuild the schema from a stale leftover
+goal; it generates from the latest real USER instruction only.
 `continue_as_new` / deploy resume keep the live schema and plan. A live
 plan with no later USER and no Task Complete still runs `execute_dag`.
 A later root run on the same Agent row must resume the latest
@@ -111,8 +115,9 @@ raw first-run dump.
 Cemented by `wf_execute_skips_stale_plan_after_completion_followup`,
 `wf_execute_nulled_schema_does_not_regenerate_from_old_goal`,
 `wf_plan_followup_does_not_regenerate_schema_from_old_goal`,
-`wf_execute_skips_plan_after_user_followup_without_summary`, and
-`clearWorkflowForTerminalAgent` in `workflow-terminal-cleanup.test.ts`.
+`wf_execute_skips_plan_after_user_followup_without_summary`,
+`clearWorkflowForTerminalAgent` in `workflow-terminal-cleanup.test.ts`,
+and `followUpRunStateUpdate` in `chat-followup-goal.test.ts`.
 
 Siblings this also prevents: post-completion "cancel that" / "also get X" /
 "do it for a different address" replaying the original book/order/send DAG;

@@ -52,7 +52,10 @@ import {
 import { CLOUD_AGENT_TOOL_NAME, CREATING_CLOUD_AGENT_TITLE } from './cloudAgentLifecycleTool';
 import { withChatEscalationDeadline } from './chatEscalationDeadline';
 import { createLogger } from '../logger';
-import { DERIVED_RUN_STATE_RESET } from '../../domains/agents/repoAgentMutations';
+import {
+  followUpRunStateUpdate,
+  shouldSnapshotPreviousGoal,
+} from '../../domains/agents/repoAgentMutations';
 import {
   createEarlyDirectGeneratorCoordinator,
   shouldStartEarlyDirectGenerator,
@@ -163,12 +166,20 @@ export async function handleChatMessage(config: {
       where: { id: config.agentId },
       include: { verifier: true },
     });
-    await withChatEscalationDeadline(async () => {
+    const prefetchedAgent = await withChatEscalationDeadline(async () => {
+      const agentRow = await escalationAgentPromise;
       await createMessage({
         agentId: config.agentId,
         role: 'ASSISTANT',
         text: decision.reasoning,
       });
+      // Post-completion cutover: keep the prior Agent.goal on this chip so
+      // replacing the live pointer does not drop the finished task's goal.
+      // First-run escalate leaves Agent.goal (and this snapshot) alone.
+      const snapshotPreviousGoal =
+        agentRow !== null &&
+        (agentRow.structuredResponse !== null || agentRow.progress > 0) &&
+        shouldSnapshotPreviousGoal(decision.goal, agentRow.goal);
       await createMessage({
         agentId: config.agentId,
         role: 'TOOL',
@@ -180,8 +191,10 @@ export async function handleChatMessage(config: {
           toolStatus: 'IN_PROGRESS',
           title: CREATING_CLOUD_AGENT_TITLE,
           startPhase: decision.mode,
+          ...(snapshotPreviousGoal ? { previousGoal: agentRow.goal } : {}),
         },
       });
+      return agentRow;
     });
 
     let started: boolean;
@@ -191,7 +204,7 @@ export async function handleChatMessage(config: {
         config.userId,
         decision.goal,
         decision.mode,
-        await escalationAgentPromise
+        prefetchedAgent
       );
     } catch (error) {
       // Pre-acceptance failures only: startTemporalWorkflowForChat swallows
@@ -453,30 +466,41 @@ async function startTemporalWorkflowForChat(
   startPhase: 'plan' | 'execute' = 'plan',
   prefetchedAgent?: Prisma.AgentGetPayload<{ include: { verifier: true } }> | null
 ): Promise<boolean> {
-  const agent =
+  const loadedAgent =
     prefetchedAgent ??
     (await prisma.agent.findUnique({
       where: { id: agentId },
       include: { verifier: true },
     }));
 
-  if (agent === null) {
+  if (loadedAgent === null) {
     throw new Error(`Agent ${agentId} not found`);
   }
 
-  if (agent.verifier === null) {
+  if (loadedAgent.verifier === null) {
     throw new Error(`Agent ${agentId} has no verifier`);
   }
-  if (agent.temporalWorkflowId !== null || agent.status !== 'ACTIVE') return false;
+  if (loadedAgent.temporalWorkflowId !== null || loadedAgent.status !== 'ACTIVE') return false;
 
   // A follow-up after a finished run must not inherit that run's derived
-  // artifacts. First-run escalation has progress 0 and no structuredResponse,
-  // so it keeps a schema generated at create time.
+  // artifacts, and Agent.goal must become the chat-router task so schema /
+  // fast-cache / UI base off the new instruction. First-run escalation has
+  // progress 0 and no structuredResponse, so it keeps create-time goal+schema
+  // (2026-07-03: do not persist an LLM paraphrase over the original row).
+  //
+  //   first-run escalate: Agent.goal unchanged, schema kept
+  //   post-completion:    Agent.goal = router goal, previousGoal snapshotted
+  //                       on the Cloud Agent chip, derived state nulled
+  let agent = loadedAgent;
   if (agent.structuredResponse !== null || agent.progress > 0) {
+    const update = followUpRunStateUpdate(goal, agent.goal);
     await prisma.agent.update({
       where: { id: agentId },
-      data: { ...DERIVED_RUN_STATE_RESET },
+      data: update,
     });
+    if (typeof update.goal === 'string') {
+      agent = { ...agent, goal: update.goal };
+    }
   }
 
   // Start Temporal workflow (existing function)
