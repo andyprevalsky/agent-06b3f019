@@ -34,7 +34,9 @@ export async function assertResumeReprovisionsDeletedProxy(options: {
   post: (path: string, body?: unknown) => Promise<BrowserApiResponse>;
 }): Promise<string> {
   const { kernel, taskId, sessionId, agentLocation, proxySource, proxyLocation, post } = options;
-  const candidate = kernelProxyCandidates(agentLocation).find((c) => c.source === proxySource);
+  const candidate = (['residential', 'mobile', 'isp'] as const)
+    .flatMap((type) => kernelProxyCandidates(agentLocation, type))
+    .find((c) => c.source === proxySource);
   assert(candidate !== undefined, `no managed proxy candidate for source ${String(proxySource)}`);
 
   const doomed = await kernel.proxies.create(

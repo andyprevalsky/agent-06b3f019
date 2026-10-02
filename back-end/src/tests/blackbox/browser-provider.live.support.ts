@@ -460,8 +460,8 @@ export async function runLiveProviderParity(): Promise<void> {
       taskId: String(init.task_id),
       sessionId: liveSessionId,
       agentLocation: AGENT_LOCATION,
-      proxySource: metadata.proxy_source,
-      proxyLocation: metadata.proxy_location,
+      proxySource: resumedMetadata.proxy_source,
+      proxyLocation: resumedMetadata.proxy_location,
       post: postWithKernelConnectionRetry,
     });
     liveSessionId = resumedAfterDeletion;
