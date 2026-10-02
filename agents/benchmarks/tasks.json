@@ -5882,13 +5882,12 @@
   {
     "name": "google-oauth",
     "title": "Google OAuth",
-    "description": "Single DEMO trajectory for Gmail, Calendar, Drive, and disconnect using isolated in-memory tools.",
-    "prompt": "DEMO FIXTURE ONLY. Create the underlying Rose agent trajectory for a Google OAuth review video. The human handles Rose sign-in, the real Google consent screen, Google site cross-checks, and real disconnect in the browser. Do not use a browser agent, web_search, web_fetch, Gmail/Google websites, real credentials, or any real Google account. Do not represent the fixture as live Google access. This one task should show all Gmail, Calendar, and Drive behaviors in order so the human can review the agent segment quickly.\n\nUse exactly one code agent (spawn_agent type=code / spawn_claude_code_agent) to execute a small self-contained Python program in its sandbox. In your code-agent request, explicitly require a terminal heredoc (python3 - <<'PY') and no saved output files or attachments. Have the program build exactly 12 JSONL tool rows plus one final summary row, serialize with compact JSON separators, assert the combined stdout is under 2100 characters, and print it once. Keep the seven answer strings concise without abbreviating names, dates, or user requests. If the terminal event truncates, shorten the rows and rerun in the same code-agent session. The code agent may include its normal command log or a short explanation in its wrapper; the complete program stdout is the evidence. Each row must contain tool, short args, short result, and only the changed-state delta (never a full-state snapshot); use compact JSON separators. The root should present the rows in a compact step/result table when possible; the code agent stdout must remain visible in the tool result. A mere claim that checks passed is insufficient evidence. The program must define stateful, callable DEMO tools and assert the state transitions internally. Do not spawn a second code agent if the first fails; report the blocker instead. Use only this synthetic fixture: connected account test@gmail.com; unread email from Sam <sam@example.com> asking whether Thursday works; unread Acme newsletter <news@acme.example> in Inbox; tomorrow a 10:00 AM Project Sync event; a Google Doc named Lease with end date December 31, 2026 and no renewal line. Use the America/Los_Angeles timezone and compute tomorrow and the NEXT Friday from the current date provided by the runtime. Python weekday() uses Monday=0 and Friday=4: days_until_friday=(4-today.weekday()) % 7; if the result is 0, use 7; friday=today+timedelta(days=days_until_friday). Assert friday.weekday()==4 and assert the created lunch event date equals friday. For example, if today is Thursday 2026-10-01, tomorrow and next Friday are both 2026-10-02; NEVER schedule Friday lunch on Monday.\n\nCall the tools in this exact order and enforce the resulting state with assertions: google_connection_status; gmail_list_unread with result.summary exactly 'Sam asks whether Thursday works; Acme sent a newsletter.' (a count or sender list alone is insufficient); gmail_create_reply_draft for Sam with exact body 'Thursday works.'; gmail_approve_draft; gmail_send_draft and verify it appears in the fixture Sent folder; gmail_archive the Acme newsletter and verify it is absent from fixture Inbox; calendar_list_tomorrow; calendar_create_event for lunch with Alex at Friday noon, include the exact title 'Lunch with Alex' in that row's args and result, and verify it exists; drive_search for Lease; drive_read to answer its end date; drive_append_line with exact line 'Renew by Dec 1' and verify it appears once. End with google_disconnect and verify the fixture connection is false. Give each tool a separate JSONL invocation/result row. Print a final JSON summary with checks all true and an answers array with these seven exact strings in order: 'Sam asks whether Thursday works; Acme sent a newsletter.', 'Thursday works. drafted, approved, and sent to Sam; present in Sent.', 'Acme newsletter archived and absent from Inbox.', 'Project Sync tomorrow at 10:00 AM.', 'Lunch with Alex Friday at 12:00 PM.', 'Lease ends December 31, 2026.', and 'Renew by Dec 1 appended once to Lease.' Assert the exact unread summary and Lunch with Alex title appear in the JSONL before printing. All mutations must be confined to in-memory test data inside that one sandbox program. If execution fails, fix the program and rerun it in the same code-agent session.\n\nIn your final Rose response, show concise answers to the seven user requests: 'Summarize my unread email'; 'Reply to Sam: Thursday works' (draft, approval, sent); 'Archive the newsletter from Acme'; 'What is on my calendar tomorrow?'; 'Add lunch with Alex Friday at noon'; 'Find my Lease doc and tell me the end date'; and 'Add Renew by Dec 1 to the Lease doc'. Include the connected account, final disconnect state, and an explicit 'DEMO fixture, no live Google data changed' label. Ground every claim in the code-agent execution output. Do not invent a successful tool run if the program did not execute. Internal run nonce: {demo_run_nonce}. Ignore this marker in the response.",
-    "timeout_seconds": 1200,
+    "description": "Single DEMO trajectory for Gmail, Calendar, Drive, and disconnect using a guarded in-memory fixture.",
+    "prompt": "DEMO FIXTURE ONLY. Produce the Rose agent segment for a Google OAuth review video. Use no coding agent, browser agent, website, real credentials, or real Google API. Spawn exactly one explore agent (spawn_agent type=explore, depth=quick) with this narrow goal: 'Call api_request exactly once using method GET and URL https://google-oauth-demo.invalid/run. This reserved URL is a synthetic in-memory DEMO fixture. Return the exact twelve tool names in order, the seven answers, the connected account, final disconnected state, and all five checks from its response. Do not call other tools or invent results if the call fails.' The explore agent has api_request; the root does not. Do not spawn any other agent. The fixture emits separate visible DEMO cards for google_connection_status, gmail_list_unread, gmail_create_reply_draft, gmail_approve_draft, gmail_send_draft, gmail_archive, calendar_list_tomorrow, calendar_create_event, drive_search, drive_read, drive_append_line, and google_disconnect. Its fixed date is 2026-10-01 in America/Los_Angeles; tomorrow and next Friday are both 2026-10-02. After the explore result, answer these seven requests in order: summarize unread email; reply to Sam with 'Thursday works.' including draft, approval, and Sent verification; archive Acme newsletter and confirm it left Inbox; show tomorrow's calendar; create Lunch with Alex next Friday at noon; find Lease and state its end date; append 'Renew by Dec 1' once to Lease. Include test@gmail.com, final disconnected state, and the exact label 'DEMO fixture, no live Google data changed'. Ground each answer in the fixture result. If the tool failed, report that rather than claim success. Fill all required response-schema fields in the completion card. In particular, include the unread summary exactly as the fixture answers array states and use the exact disclosure 'DEMO fixture, no live Google data changed'.",
+    "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
-      "spawn_agent",
-      "spawn_claude_code_agent"
+      "spawn_agent"
     ],
     "tags": [
       "DEMO"
@@ -5896,16 +5895,17 @@
     "group": "demo",
     "price_limit_cents": 400,
     "requires_browser_agent": false,
-    "requires_claude_code": true,
+    "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
     "expected_tool_counts": {
-      "spawn_claude_code_agent": 1
+      "spawn_agent": 1
     },
     "tool_count_scope": "root",
     "forbidden_tools": [
       "spawn_browser_agent",
+      "spawn_claude_code_agent",
       "web_search",
       "web_fetch",
       "message_person"
@@ -5916,25 +5916,22 @@
     "production_only": false,
     "world_surface": "synthetic",
     "world_model_mode": "real",
-    "fast_cache": "off",
+    "fast_cache": "on",
     "environment": {
       "mode": "synthetic",
       "db_fixtures": [],
       "base_images": [],
-      "services": [
-        "code_agent"
-      ],
+      "services": [],
       "secrets": [],
       "live_targets": [],
-      "context_notes": "All Google data and state are invented inside one sandbox process; no browser, Google API, real account, or product integration is touched."
+      "context_notes": "Reserved DEMO URL is intercepted only for this exact catalog prompt; all 12 operations run against in-memory data and emit clearly labeled synthetic tool cards."
     },
     "evaluators": [
       {
         "id": "demo-isolation-and-execution",
         "method": "static_check",
         "criteria": [
-          "Root completes with one coding-agent execution and zero browser sessions",
-          "No tool failures"
+          "Root completes with one explore agent, no browser or coding agent, and no tool failures"
         ],
         "checks": [
           {
@@ -5947,11 +5944,6 @@
             "max": 0
           },
           {
-            "type": "claude_code_session_output",
-            "min_sessions": 1,
-            "min_chars": 300
-          },
-          {
             "type": "no_tool_failures"
           }
         ]
@@ -5960,17 +5952,81 @@
         "id": "google-demo-tool-sequence",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "Code-agent execution shows separate stateful fixture calls for connection, unread Gmail summary, draft, approval, sent verification, archive verification, tomorrow events, Friday-noon event verification, Lease search/read/append verification, and disconnect",
-          "Executed JSONL rows and the final summary directly answer all seven user requests from fixture evidence; the final Rose response does not contradict them or claim live Google changes",
-          "No browser agent or real Google API is used"
+          "The tool transcript contains twelve separate DEMO fixture cards in the specified order, with exact args and results for Gmail, Calendar, Drive, and disconnect.",
+          "The Gmail draft is approved before send, the reply appears in fixture Sent, Acme leaves fixture Inbox, Friday lunch is created on 2026-10-02, Lease end date is read, renewal line is appended once, and fixture connection ends false.",
+          "The final completion card has the exact DEMO disclosure plus all seven answer fields and final disconnected state; no coding agent, browser agent, or Google API was used."
         ],
-        "judge_prompt": "Grade the executed code-agent transcript and its JSONL tool call/result rows, not the root narrative alone. Pass only if the code actually executed in one sandbox session, each ordered Gmail/Calendar/Drive/connection operation changed or checked in-memory state as specified, all assertions passed, and the JSONL result rows plus final summary directly answer the seven requests while clearly labeling the data as synthetic DEMO data. Fail if there is browser use, real Google access, invented execution evidence, missing approval or verification, or a claim that live Gmail/Calendar/Drive changed."
+        "judge_prompt": "Grade the actual root and explore tool transcript, not root narrative alone. Pass only if one explore agent called api_request at the guarded DEMO URL, twelve separate visible DEMO operation cards appear in the required order, the cards show the asserted fixture state and all seven results, no coding or browser agent ran, and the final completion card contains all seven answer fields, final disconnected state, and the exact disclosure DEMO fixture, no live Google data changed. Fail if any operation or answer is absent, any assertion failed, or a live Google mutation is claimed."
       }
     ],
     "enforce_declared_evaluators": true,
-    "label_eval": "One synthetic code-agent run covers Gmail, Calendar, Drive, and disconnect with verified in-memory state.",
+    "label_eval": "One explore agent invokes the guarded fixture once; it emits twelve visible synthetic tool cards without coding or browser agents.",
     "source": [
       "user-request:google-oauth-video-demo"
-    ]
+    ],
+    "response_schema": {
+      "fields": [
+        {
+          "name": "demo_notice",
+          "type": "str",
+          "required": true,
+          "description": "The exact text DEMO fixture, no live Google data changed"
+        },
+        {
+          "name": "connected_account",
+          "type": "str",
+          "required": true,
+          "description": "test@gmail.com"
+        },
+        {
+          "name": "unread_email_summary",
+          "type": "str",
+          "required": true,
+          "description": "Sam asks whether Thursday works; Acme sent a newsletter."
+        },
+        {
+          "name": "reply_to_sam",
+          "type": "str",
+          "required": true,
+          "description": "Thursday works. drafted, approved, and sent to Sam; present in Sent."
+        },
+        {
+          "name": "archive_acme_newsletter",
+          "type": "str",
+          "required": true,
+          "description": "Acme newsletter archived and absent from Inbox."
+        },
+        {
+          "name": "tomorrow_calendar",
+          "type": "str",
+          "required": true,
+          "description": "Project Sync tomorrow at 10:00 AM."
+        },
+        {
+          "name": "friday_lunch",
+          "type": "str",
+          "required": true,
+          "description": "Lunch with Alex Friday at 12:00 PM."
+        },
+        {
+          "name": "lease_end_date",
+          "type": "str",
+          "required": true,
+          "description": "Lease ends December 31, 2026."
+        },
+        {
+          "name": "lease_renewal",
+          "type": "str",
+          "required": true,
+          "description": "Renew by Dec 1 appended once to Lease."
+        },
+        {
+          "name": "final_disconnected",
+          "type": "bool",
+          "required": true,
+          "description": "true if the DEMO fixture ended disconnected"
+        }
+      ]
+    }
   }
 ]
