@@ -8,7 +8,7 @@
  *
  *   run_benchmark.py ──POST /fixtures {userId, scenario, publicBaseUrl}──► service
  *        │                 seeds BrowserPassword / Cookie / PasskeyCredential /
- *        │                 MintedAccount rows for realm rose-shop-<siteId>.test
+ *        │                 MintedAccount rows for realm rose-shop-<siteId>.com
  *        ▼
  *   browser agent ──GET <entryUrl>──► /login ──► /account | /checkout ──► /orders/:n
  *        ▼

@@ -8,7 +8,7 @@ itself (back-end/src/domains/auth-test-site). A task opts in with
 per-run site in its prompt as ``{auth_test_site_url}``.
 
     run_single_task
-        │ create_site ──POST /api/test-sites/rose-shop/fixtures──► backend
+        │ create_site ──POST /api/rose-shop/fixtures──► backend
         │                 seeds the saved session / passkey / passwords / minted
         │                 account for a per-run realm, returns the manifest
         │ validate_manifest — the auth ladder the agent will see must match the
@@ -38,7 +38,7 @@ import httpx
 AUTH_TEST_SITE_URL_PLACEHOLDER = "{auth_test_site_url}"
 AUTH_TEST_SITE_ACCOUNT_PLACEHOLDER = "{auth_test_site_account}"
 AUTH_TEST_SITE_OUTCOME_CHECK = "auth_test_site_outcome"
-FIXTURES_PATH = "/api/test-sites/rose-shop/fixtures"
+FIXTURES_PATH = "/api/rose-shop/fixtures"
 
 # What auth options must list for each scenario: (saved passwords, minted offered,
 # passkeys, saved-session bundles). Mirrors back-end serviceScenarios.ts.

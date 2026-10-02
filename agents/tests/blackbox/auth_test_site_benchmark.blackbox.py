@@ -71,8 +71,8 @@ def _manifest(scenario: str, **overrides) -> dict:
     manifest = {
         "siteId": "abc123",
         "scenario": scenario,
-        "realm": "rose-shop-abc123.test",
-        "entryUrl": "https://rose-x.ngrok.app/api/test-sites/rose-shop/abc123/?authRealm=rose-shop-abc123.test",
+        "realm": "rose-shop-abc123.com",
+        "entryUrl": "https://rose-x.ngrok.app/api/rose-shop/abc123/?authRealm=rose-shop-abc123.com",
         "savedPasswordUsernames": saved,
         "mintedEmail": minted,
         "mintedPhone": "+15555550142" if minted_offered else None,
@@ -486,7 +486,7 @@ async def test_goal_placeholder_resolves_per_lane_and_fails_closed() -> None:
 
 
 class _FakeBackend:
-    """Stands in for the local backend's /api/test-sites/rose-shop/fixtures routes."""
+    """Stands in for the local backend's /api/rose-shop/fixtures routes."""
 
     def __init__(self, scenario: str, report: dict) -> None:
         self.requests: list[tuple[str, str, dict | None, dict]] = []
@@ -556,7 +556,7 @@ async def test_runner_seeds_grades_and_deletes_the_site() -> None:
             manifest = await rb._apply_auth_test_site(task, backend.base_url)
             assert manifest is not None and auth_test_site.active_manifest() == manifest
             method, path, body, sent_headers = backend.requests[0]
-            assert (method, path) == ("POST", "/api/test-sites/rose-shop/fixtures")
+            assert (method, path) == ("POST", "/api/rose-shop/fixtures")
             assert body == {"userId": "user-1", "scenario": "password_retry", "publicBaseUrl": "https://rose-x.ngrok.app"}
             assert sent_headers.get("x-api-key") == "fixture-key"
             assert manifest["entryUrl"] in rb._benchmark_goal_for_task(task, backend.base_url)
@@ -576,7 +576,7 @@ async def test_runner_seeds_grades_and_deletes_the_site() -> None:
                 ],
             }
             await rb._hydrate_auth_test_site_evidence(data, backend.base_url)
-            assert backend.requests[1][:2] == ("GET", "/api/test-sites/rose-shop/fixtures/abc123/report")
+            assert backend.requests[1][:2] == ("GET", "/api/rose-shop/fixtures/abc123/report")
             outcome_evaluator = next(e for e in task.evaluators if e["id"] == "saved-password-retry-outcome")
             ok, detail = rb._run_declared_static_check(task, outcome_evaluator, data)
             assert ok, detail
@@ -593,7 +593,7 @@ async def test_runner_seeds_grades_and_deletes_the_site() -> None:
             assert ok, f"the completion card's structured outputs are part of the final answer: {detail}"
 
             await rb._release_auth_test_site(backend.base_url, manifest)
-            assert backend.requests[2][:2] == ("DELETE", "/api/test-sites/rose-shop/fixtures/abc123")
+            assert backend.requests[2][:2] == ("DELETE", "/api/rose-shop/fixtures/abc123")
             assert auth_test_site.active_manifest() is None
 
         unrelated = get_task_by_name("whatsapp-history-recall")
@@ -794,8 +794,8 @@ async def test_goal_names_the_account_and_first_run_precedes_the_graded_run() ->
             assert manifest is not None and manifest["firstRunAgentId"] == "first-run-agent"
             assert len(created_goals) == 1 and created_goals[0].startswith("Create an account for me at https://")
             assert [request[:2] for request in backend.requests] == [
-                ("POST", "/api/test-sites/rose-shop/fixtures"),
-                ("POST", "/api/test-sites/rose-shop/fixtures/abc123/mark"),
+                ("POST", "/api/rose-shop/fixtures"),
+                ("POST", "/api/rose-shop/fixtures/abc123/mark"),
             ], backend.requests
             assert backend.requests[1][2] == {"label": "graded-run"}
             assert rb._benchmark_goal_for_task(task, backend.base_url).startswith("Tell me my member number for https://")
@@ -809,7 +809,7 @@ async def test_goal_names_the_account_and_first_run_precedes_the_graded_run() ->
                 assert "first run did not complete" in str(exc)
             else:
                 raise AssertionError("a failed first run was allowed to continue into the graded run")
-            assert backend.requests[-1][:2] == ("DELETE", "/api/test-sites/rose-shop/fixtures/abc123"), backend.requests
+            assert backend.requests[-1][:2] == ("DELETE", "/api/rose-shop/fixtures/abc123"), backend.requests
             assert auth_test_site.active_manifest() is None
     finally:
         auth_test_site.set_active_manifest(None)
