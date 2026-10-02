@@ -136,6 +136,7 @@ from .repo import (
     save_browser_action_message,
     save_browser_assistant_message,
     save_browser_credential_ref_message,
+    save_minted_account_password,
     upload_file_to_session,
 )
 from .resume_store import hydrate_resume_context, persist_resume_context
@@ -169,6 +170,7 @@ from .service_actions import (
     wait_for_navigation_ready,
 )
 from .service_crypto import (
+    MINTED_NEW_PASSWORD_REF,
     PAYMENT_CARD_ENTRY_RULE,
     PAYMENT_CARD_SECRET_REFS,
     ExtractedOTP,
@@ -9388,6 +9390,22 @@ Based on this feedback, I need to continue working on the task and address the i
                 current_url = str(result.get("current_url") or "")
                 if current_url and (not visited_urls or current_url != visited_urls[-1]):
                     visited_urls.append(current_url)
+            if (
+                action_name == "input_text"
+                and result.get("success")
+                and str(unified_action.get("params", {}).get("text", "")) == MINTED_NEW_PASSWORD_REF
+                and current_url
+            ):
+                # The account now exists (or is being created) under this password; keep it.
+                try:
+                    await save_minted_account_password(config, user_id, current_url)
+                except Exception as save_error:
+                    logger.warning(
+                        "Failed to save minted account password",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        error=extract_error_message(save_error),
+                    )
             if (
                 not result.get("credential_ref")
                 and action_name == "input_text"

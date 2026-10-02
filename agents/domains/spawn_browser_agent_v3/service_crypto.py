@@ -399,6 +399,9 @@ def _format_duration(seconds: int) -> str:
     return f"{int(seconds / 60)}m"
 
 
+# The ref the minted identity's new-account password is typed by (see back-end
+# providers/mintedAccountPassword.ts).
+MINTED_NEW_PASSWORD_REF = "pwd:new"
 MAX_EMAIL_LINKS = 5
 MINTED_INBOX_LABEL = "primitive"
 
@@ -901,7 +904,22 @@ def build_auth_options_prompt_section(
         minted_phone = minted.get("phone") or minted.get("agentPhone") or minted.get("agent_phone")
         if minted_email:
             phone_clause = f" | Phone -> {minted_phone}" if minted_phone else ""
-            lines.append(f"- Minted account: Email -> {minted_email}{phone_clause} | {_disabled_label(minted)}")
+            # The password to create the account with. Typing the ref saves it, so
+            # the account can be signed into again on a later run.
+            new_password = minted.get("newPassword") or minted.get("new_password") or {}
+            new_password_ref = str(new_password.get("ref") or "")
+            new_password_encrypted = str(new_password.get("encryptedPassword") or "")
+            password_clause = ""
+            if new_password_ref and new_password_encrypted:
+                ref_to_encrypted[new_password_ref] = new_password_encrypted
+                credential_refs_by_secret_ref[new_password_ref] = {
+                    "kind": "minted_account",
+                    "id": str(minted_id or minted_email),
+                }
+                password_clause = f" | New password ref: {new_password_ref}"
+            lines.append(
+                f"- Minted account: Email -> {minted_email}{phone_clause}{password_clause} | {_disabled_label(minted)}"
+            )
             credential_refs_by_secret_ref[str(minted_email)] = {
                 "kind": "minted_account",
                 "id": str(minted_id or minted_email),

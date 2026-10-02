@@ -44,6 +44,59 @@ def test_tool_results_never_echo_a_saved_password_or_card_number() -> None:
     assert mask_secret_values({"result": "x"}, None) == {"result": "x"}
 
 
+async def test_minted_account_is_offered_a_new_password_ref_that_is_saved_when_typed() -> None:
+    """A sign-up password is typed by ref and kept, so the new account can be signed into later.
+
+    Before this the agent made up a password at sign-up and nothing saved it: the
+    account it had just created was unreachable on the next run.
+    """
+    from _test_utils import get_captured_requests, teardown_mock
+    from domains.spawn_browser_agent_v3.repo import save_minted_account_password
+    from domains.spawn_browser_agent_v3.service_crypto import (
+        MINTED_NEW_PASSWORD_REF,
+        build_auth_options_prompt_section,
+    )
+
+    minted = {
+        "id": "minted-row-1",
+        "email": "rose.cedar11@mail.example",
+        "phone": None,
+        "disabled": False,
+        "newPassword": {"ref": "pwd:new", "encryptedPassword": "envelope"},
+    }
+    section, encrypted_refs, _origins, credential_refs = build_auth_options_prompt_section(
+        {"realm": "shop.example", "minted": minted}
+    )
+    assert MINTED_NEW_PASSWORD_REF == "pwd:new"
+    assert (
+        "- Minted account: Email -> rose.cedar11@mail.example | New password ref: pwd:new | enabled" in section
+    ), section
+    assert encrypted_refs == {"pwd:new": "envelope"}, "the worker decrypts the ref like any saved password"
+    assert credential_refs["pwd:new"] == {"kind": "minted_account", "id": "minted-row-1"}
+
+    older_backend, refs, _origins, _credential_refs = build_auth_options_prompt_section(
+        {"realm": "shop.example", "minted": {**minted, "newPassword": None}}
+    )
+    assert "New password ref" not in older_backend and refs == {}
+
+    setup_mock({"/api/auth-options/minted-password": {"status": 200, "json": {"saved": True}}})
+    try:
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.example.com", api_key="k1"))
+        saved = await save_minted_account_password(config, "user-1", "https://shop.example/signup")
+        assert saved is True
+        call = assert_captured_call(
+            0,
+            url_contains="/api/auth-options/minted-password",
+            method="POST",
+            body_contains={"origin": "https://shop.example/signup"},
+        )
+        headers = {str(key).lower(): value for key, value in (call.get("requestHeaders") or {}).items()}
+        assert headers.get("x-user-id") in (None, "user-1"), headers
+        assert len(get_captured_requests()) == 1
+    finally:
+        teardown_mock()
+
+
 def test_steel_cdp_key_is_materialized_only_at_connection_boundary() -> None:
     from domains.spawn_browser_agent_v3.cdp_urls import steel_cdp_connection_url
 
@@ -1180,6 +1233,10 @@ async def run_all_tests():
     await runner.record_async(
         "native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site",
         test_native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site,
+    )
+    await runner.record_async(
+        "minted_account_is_offered_a_new_password_ref_that_is_saved_when_typed",
+        test_minted_account_is_offered_a_new_password_ref_that_is_saved_when_typed,
     )
     runner.record(
         "tool_results_never_echo_a_saved_password_or_card_number",

@@ -6,7 +6,8 @@
 import { randomUUID } from 'node:crypto';
 import { EmailProvider, IntegrationStatus, IntegrationType } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import { getAuthOptions } from '../../domains/auth-options/service';
+import { getAuthOptions, saveMintedAccountPassword } from '../../domains/auth-options/service';
+import { mintedAccountPassword } from '../../providers/mintedAccountPassword';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -57,6 +58,61 @@ async function connectInbox(
 }
 
 export const identityCases: Array<{ name: string; fn: () => Promise<void> }> = [
+  {
+    // An account the agent signs up for used to be unreachable afterwards: the
+    // password it made up was never saved. The minted identity now carries the
+    // password to create the account with, and typing it saves it.
+    name: 'a minted account is created with a password that is saved once typed',
+    fn: () =>
+      withFreshUser(async (userId) => {
+        const site = 'https://shop.example/signup';
+        const before = await getAuthOptions(userId, site);
+        assert(
+          before.minted !== null,
+          'minted identity must be offered on a site with nothing saved'
+        );
+        assert(
+          before.minted.newPassword?.ref === 'pwd:new',
+          'minted must carry the new-password ref'
+        );
+        assert(
+          mintedAccountPassword(userId, 'shop.example') ===
+            mintedAccountPassword(userId, 'shop.example') &&
+            mintedAccountPassword(userId, 'shop.example') !==
+              mintedAccountPassword(userId, 'other.example'),
+          'the password is stable for a site and different across sites'
+        );
+        const unsaved = await prisma.browserPassword.count({ where: { userId } });
+        assert(unsaved === 0, 'nothing is saved until the password is typed');
+
+        try {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const saved = await saveMintedAccountPassword(userId, site);
+            assert(saved.saved && saved.username === before.minted.email, 'save must succeed');
+          }
+          const rows = await prisma.browserPassword.findMany({ where: { userId } });
+          assert(
+            rows.length === 1 &&
+              rows[0]?.origin === site &&
+              rows[0]?.username === before.minted.email,
+            `exactly one saved login for the new account: ${JSON.stringify(rows.map((r) => r.username))}`
+          );
+          const after = await getAuthOptions(userId, site);
+          assert(
+            after.passwords.length === 1 && after.passwords[0]?.username === before.minted.email,
+            'the next run is offered the saved login'
+          );
+          assert(after.minted === null, 'a saved login takes the place of the minted offer');
+          const elsewhere = await saveMintedAccountPassword(
+            userId,
+            'https://never-visited.example/'
+          );
+          assert(!elsewhere.saved, 'no minted account for a realm means nothing to save');
+        } finally {
+          await prisma.browserPassword.deleteMany({ where: { userId } });
+        }
+      }),
+  },
   {
     // "Email OTP" was hard-coded unavailable, so the agent was told the rung did
     // not exist even though codes sent to a connected inbox were being read and

@@ -380,6 +380,10 @@ for task_name in "${BENCH_TASK_LIST[@]}"; do
             BENCH_NEEDS_AGENTCARD_ONBOARDING=1
             BENCH_NEEDS_NEW_USER_CHECKOUT=1
             ;;
+        browser-auth-signup-purchase-no-subscription)
+            BENCH_NEEDS_AGENTCARD_ONBOARDING=1
+            BENCH_NEEDS_NEW_USER_CHECKOUT=1
+            ;;
         gate-subscription-card-mint|gate-kyc-card-mint)
             BENCH_NEEDS_BUNDLED_FRONTEND=1
             BENCH_NEEDS_AGENTCARD_ONBOARDING=1

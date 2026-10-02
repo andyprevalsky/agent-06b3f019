@@ -122,6 +122,38 @@ export async function createAgentIdentityEmailIfAbsent(userId: string, email: st
   return prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
 }
 
+/** The login a sign-up created, saved the way a synced browser password is. */
+export async function upsertSignupPassword(params: {
+  userId: string;
+  origin: string;
+  username: string;
+  encryptedPassword: string;
+  browserSource: string;
+  nowMs: number;
+}) {
+  const now = BigInt(params.nowMs);
+  return prisma.browserPassword.upsert({
+    where: {
+      userId_origin_username: {
+        userId: params.userId,
+        origin: params.origin,
+        username: params.username,
+      },
+    },
+    create: {
+      userId: params.userId,
+      origin: params.origin,
+      username: params.username,
+      encryptedPassword: params.encryptedPassword,
+      dateLastUsed: now,
+      dateCreated: now,
+      browserSource: params.browserSource,
+    },
+    update: { encryptedPassword: params.encryptedPassword, dateLastUsed: now },
+    select: { id: true },
+  });
+}
+
 export async function setAgentIdentityPhone(params: {
   userId: string;
   phone: string;

@@ -43,5 +43,7 @@ export interface AuthOptionsResponse {
     provider: 'primitive';
     phoneProvider: 'agentphone' | null;
     disabled: boolean;
+    /** The password to create this account with; saved once the agent types it. */
+    newPassword: { ref: string; encryptedPassword: string } | null;
   };
 }

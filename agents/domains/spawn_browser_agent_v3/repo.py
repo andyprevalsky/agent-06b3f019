@@ -19,13 +19,13 @@ from domains.spawn_browser_agent_v3.config import (
     EXTRACT_MAX_CONTENT_LENGTH,
     MIME_TYPE_MAP,
 )
-from tools.base import MessageStatus
-from utils.error_utils import extract_error_message
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
     raise_if_generation_sealed,
     workflow_generation_headers,
 )
+from tools.base import MessageStatus
+from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 
@@ -849,6 +849,22 @@ async def acknowledge_browser_user_control(config: Any, task_id: str) -> str:
     if response.status_code == 200:
         return str(response.json().get("state") or "agent")
     raise RuntimeError(f"Failed to acknowledge browser control: HTTP {response.status_code}")
+
+
+async def save_minted_account_password(config: Any, user_id: str, origin: str) -> bool:
+    """Keep the password the agent just created a minted account with on ``origin``.
+
+    Idempotent on the backend, so a retried activity saves the same login once.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/auth-options/minted-password",
+            headers={"x-api-key": config.backend.api_key or "", "x-user-id": user_id},
+            json={"origin": origin},
+        )
+    if response.status_code != 200:
+        raise RuntimeError(f"Failed to save minted account password: HTTP {response.status_code}")
+    return bool(response.json().get("saved"))
 
 
 async def close_browser_session(config: Any, session_id: str, pause: bool = False, current_url: str = "") -> None:

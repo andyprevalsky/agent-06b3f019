@@ -11,6 +11,7 @@ import { benchmarkSavedBrowserAuthDisabled } from './benchmarkBrowserAuth';
 import { primitiveDomain, createMintedInbox, findMintedInbox } from './primitive';
 import { createAgentPhoneNumber, isAgentPhoneEmailFallbackSafe } from './agentPhone';
 import { createLogger } from './logger';
+import { mintedNewPasswordOption } from './mintedAccountPassword';
 import * as repo from './authOptionsStore';
 import type { AuthOptionsResponse } from './authOptionsTypes';
 
@@ -147,6 +148,7 @@ export async function getAuthOptions(
             provider: 'primitive',
             phoneProvider: mintedIdentity?.phoneProvider === 'agentphone' ? 'agentphone' : null,
             disabled: mintedAccount.disabledAt !== null,
+            newPassword: mintedNewPasswordOption(userId, realm),
           }
         : null,
   };

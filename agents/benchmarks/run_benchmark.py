@@ -232,6 +232,8 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 NEW_USER_PAYMENT_JOURNEY_TASK_NAME = "agent-payment-new-user-journey"
+# Same journey on the hosted Rose Shop: a fresh account per lane, no subscription.
+ROSE_SHOP_NO_SUBSCRIPTION_TASK_NAME = "browser-auth-signup-purchase-no-subscription"
 AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
 AGENT_PAYMENT_SANDBOX_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
@@ -1860,6 +1862,10 @@ def _benchmark_user_id_for_task(task_name: str, base_url: Optional[str] = None) 
     """Return a task-scoped synthetic identity, leaving ordinary and production tasks unchanged."""
     if task_name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
         return _free_credit_subscription_gate_user_id()
+    if task_name == ROSE_SHOP_NO_SUBSCRIPTION_TASK_NAME:
+        # A new account every lane: the first lane's Checkout subscribes its user,
+        # so a shared user would start every later lane already subscribed.
+        return str(uuid.uuid4()) if base_url is None or _is_local_base_url(base_url) else None
     if task_name == NEW_USER_PAYMENT_JOURNEY_TASK_NAME:
         return _new_user_payment_journey_user_id() if base_url is None or _is_local_base_url(base_url) else None
     if task_name in GATE_FIXTURE_TASK_USER_IDS:
@@ -6138,11 +6144,11 @@ def _run_free_credit_subscription_fixture(action: str, user_id: Optional[str] = 
     return _parse_last_json_line(result.stdout)
 
 
-def _run_new_user_payment_fixture() -> dict:
+def _run_new_user_payment_fixture(user_id: Optional[str] = None) -> dict:
     result = subprocess.run(
         ["npx", "tsx", "scripts/setup-benchmark-new-user-payment.ts"],
         cwd=REPO_ROOT / "back-end",
-        env=_free_credit_subscription_fixture_env(_new_user_payment_journey_user_id()),
+        env=_free_credit_subscription_fixture_env(user_id or _new_user_payment_journey_user_id()),
         capture_output=True,
         text=True,
         timeout=120,
@@ -6152,13 +6158,13 @@ def _run_new_user_payment_fixture() -> dict:
     return _parse_last_json_line(result.stdout)
 
 
-async def _verify_new_user_payment_start_state(base_url: str) -> None:
+async def _verify_new_user_payment_start_state(base_url: str, user_id: Optional[str] = None) -> None:
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(
             f"{base_url}/api/credits/usage",
             headers=headers,
-            params={"userId": _new_user_payment_journey_user_id()},
+            params={"userId": user_id or _new_user_payment_journey_user_id()},
         )
         response.raise_for_status()
         usage = response.json()
@@ -12331,14 +12337,16 @@ async def run_single_task(
     plaid_transactions_fixture_action: Optional[str] = None
     free_credit_subscription_manifest: Optional[dict] = None
     gate_fixture_manifest: Optional[dict] = None
-    if task.name in {FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME, NEW_USER_PAYMENT_JOURNEY_TASK_NAME}:
+    new_user_payment_tasks = {NEW_USER_PAYMENT_JOURNEY_TASK_NAME, ROSE_SHOP_NO_SUBSCRIPTION_TASK_NAME}
+    if task.name in {FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME} | new_user_payment_tasks:
         if not _is_local_base_url(base_url):
             raise RuntimeError(f"{task.name} must run against the local benchmark stack")
-        fixture_user_id = (
-            _new_user_payment_journey_user_id()
-            if task.name == NEW_USER_PAYMENT_JOURNEY_TASK_NAME
-            else _free_credit_subscription_gate_user_id()
-        )
+        if task.name == ROSE_SHOP_NO_SUBSCRIPTION_TASK_NAME:
+            fixture_user_id = _current_benchmark_user_id()
+        elif task.name == NEW_USER_PAYMENT_JOURNEY_TASK_NAME:
+            fixture_user_id = _new_user_payment_journey_user_id()
+        else:
+            fixture_user_id = _free_credit_subscription_gate_user_id()
         free_credit_subscription_manifest = _run_free_credit_subscription_fixture("apply", fixture_user_id)
         print(
             "    💳 Prepared free-credit subscription gate fixture: "
@@ -12346,9 +12354,9 @@ async def run_single_task(
             f"credit={free_credit_subscription_manifest.get('credit_cents')}c "
             f"used={free_credit_subscription_manifest.get('used_cents')}c"
         )
-        if task.name == NEW_USER_PAYMENT_JOURNEY_TASK_NAME:
-            _run_new_user_payment_fixture()
-            await _verify_new_user_payment_start_state(base_url)
+        if task.name in new_user_payment_tasks:
+            _run_new_user_payment_fixture(fixture_user_id)
+            await _verify_new_user_payment_start_state(base_url, fixture_user_id)
     if task.name in GATE_FIXTURE_TASK_MODES:
         if not _is_local_base_url(base_url):
             raise RuntimeError(f"{task.name} must run against the local benchmark stack")
