@@ -226,3 +226,41 @@ abandonment`. This is a recurrence of the receipt fingerprint drift already
 recorded above, not another sandbox cardholder closure. Human feedback for this
 recurrence: the operator directed the agent to fix the runtime issue without
 raising timeouts, weakening tests, or touching the separate Explore issue.
+
+## 2026-10-03 recurrence: treasury-rails unused card never released under foreign load
+
+The PR #1401 deploy backend coverage lane failed `treasury-rails` with
+`transfer for card_d9109871658de3d93171a63b ended in "consumed" — an unused
+card must reclaim/release, not stay consumed`. The test minted $13.00 at
+03:47:34Z, closed it unused at 03:47:37Z, and swept `recover_funds` every
+~10 seconds for 240 seconds. The sweeps recovered $14.48, $37.21, and $37.21,
+which match the spent-card residuals of three foreign cards on the same
+cardholder (`card_2585635f…`, `card_09f75bf8…`, `card_cf353deb…`). No sweep
+returned this card's $13.00, and its transfer stayed `consumed` with
+`released_cents: 0`.
+
+A read-only provider check at about 04:00Z found the card `CLOSED` with $0.00
+remaining. The transfer was still `consumed` with `released_cents: 0`. Between
+03:44Z and 03:58Z, the provider listed nine other cards on the one
+mint-capable cardholder. They came from $43.96 and $21.23 payment checkouts and
+another workspace's identical $13.00 treasury mint. At 03:57:25Z, a foreign
+$43.96 mint (`card_0ecf64c3…`) netted entirely against idle residual
+(`transferred_cents: 0`). This proves that unrecovered residual was on the
+cardholder even though this test's sweeps could not recover it during its
+window.
+
+This machine did not originate any of that activity. The coverage run issued
+exactly one `create_card` and one `close_card`, both for this test's card. The
+long-running local stack issued none in the window. Branch code did not touch
+the path: every org MCP call succeeded on attempt 1, so the branch's
+throttle-retry change never engaged. The same test passed in the four earlier
+backend coverage runs of this deploy (164–196 seconds each).
+
+Classification: third-party / shared-fixture contention, the same class as this
+case. How the provider attributes residual to transfers while foreign cards are
+open is not visible through the MCP, so the exact mechanism remains an open
+visibility gap. Relaxing the assertion to accept pool or residual movement
+would reopen the foreign-residual false pass fixed in `13fb3fa48`. Prevention
+item 1 still applies: the gate needs its own mint-capable cardholder. Setting
+one up is a provider fixture change (a new verified sandbox cardholder) that
+requires an operator.

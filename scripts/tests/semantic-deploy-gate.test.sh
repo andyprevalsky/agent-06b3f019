@@ -267,7 +267,6 @@ require_text "$DEPLOY_COMMAND" 'Missing credentials fail closed' "/deploy must d
 require_text "$DEPLOY_COMMAND" "scripts/run-bench-hub-poller\$" "/deploy must classify poller-only changes into backend coverage"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'integration-health"' "backend coverage must isolate live credential health from deterministic coverage"
 require_text "$ROOT_DIR/agents/scripts/run-coverage.sh" 'playwright install chromium' "agents coverage must install the venv Playwright chromium revision before real-browser blackboxes"
-require_text "$ROOT_DIR/agents/scripts/run-coverage.sh" 'for attempt in 1 2 3; do' "agents coverage must retry a Playwright install that loses the shared cache lock"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" '  export BACKEND_UNIT_DATABASE_URL="$LOCAL_DB_URL"' "backend coverage must hand unit tests the schema-synced coverage database"
 if grep -Fq 'if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then' "$ROOT_DIR/back-end/scripts/run-coverage.sh" &&
   grep -A1 -F 'if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then' "$ROOT_DIR/back-end/scripts/run-coverage.sh" | grep -Fq 'BACKEND_UNIT_DATABASE_URL'; then
@@ -356,6 +355,31 @@ require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export SEED_REQUIRE_COMPUTE_TOKEN_TY
 bash "$DESCEND_COMMAND_TEST"
 bash "$AUTO_RCA_WORKFLOW_TEST"
 node --test "$PROD_SESSION_TEST"
+
+# Local semantic workers follow measured host capacity (RCA
+# 2026-10-02-semantic-renderer-stall-consumed-chip-poll-budget): at load ~56 on
+# 14 cores, four Chromium workers left one renderer frozen for 34s and a 30s
+# chip poll failed without ever observing a value. Other workspaces' load may
+# never drop, so the runner sizes concurrency (floor 1) instead of waiting.
+eval "$(sed -n '/^semantic_workers_for_capacity() {/,/^}/p' "$RUNNER")"
+[ "$(semantic_workers_for_capacity 4 14 56.20 44)" = 1 ] || fail "an overloaded host must drop semantic workers to one"
+[ "$(semantic_workers_for_capacity 4 14 1.50 60)" = 4 ] || fail "an idle host must keep the requested semantic workers"
+[ "$(semantic_workers_for_capacity 4 14 11.50 60)" = 2 ] || fail "partial headroom must cap semantic workers at whole idle cores"
+[ "$(semantic_workers_for_capacity 4 14 1.50 10)" = 1 ] || fail "low free memory must drop semantic workers to one"
+[ "$(semantic_workers_for_capacity 1 14 0.10 90)" = 1 ] || fail "host capacity must never raise semantic workers above the request"
+[ "$(semantic_workers_for_capacity 4 '' '' '')" = 4 ] || fail "unknown host capacity must not cap semantic workers"
+eval "$(sed -n '/^probe_semantic_host_capacity() {/,/^}/p' "$RUNNER")"
+IFS='|' read -r probe_cpus probe_load probe_mem <<< "$(probe_semantic_host_capacity)"
+[[ "$probe_cpus" =~ ^[1-9][0-9]*$ ]] || fail "host capacity probe must report the CPU count"
+[[ "$probe_load" =~ ^[0-9]+\.[0-9]{2}$ ]] || fail "host capacity probe must report the 1-minute load average"
+[[ -z "$probe_mem" || "$probe_mem" =~ ^[0-9]+$ ]] || fail "host capacity probe must report free memory as a whole percentage"
+require_text "$RUNNER" 'SEMANTIC_WORKERS=$(semantic_workers_for_capacity "$REQUESTED_SEMANTIC_WORKERS"' "local semantic runs must size Playwright workers to measured host capacity"
+require_text "$RUNNER" 'echo "  Semantic workers: requested=$REQUESTED_SEMANTIC_WORKERS effective=$SEMANTIC_WORKERS' "semantic runner must log the capacity inputs behind its worker count"
+validate_line=$(grep -n 'SEMANTIC_WORKERS must be a positive integer' "$RUNNER" | head -1 | cut -d: -f1)
+capacity_line=$(grep -n 'SEMANTIC_WORKERS=$(semantic_workers_for_capacity' "$RUNNER" | head -1 | cut -d: -f1)
+first_launch_line=$(grep -n 'run_playwright test' "$RUNNER" | head -1 | cut -d: -f1)
+[ -n "$capacity_line" ] && [ "$validate_line" -lt "$capacity_line" ] && [ "$capacity_line" -lt "$first_launch_line" ] \
+  || fail "semantic worker sizing must run after request validation and before Playwright launches"
 
 # LOCAL_DB_PORT + unset DATABASE + set DIRECT must not clobber the caller URL.
 eval "$(sed -n '/^apply_local_semantic_db_urls() {/,/^}/p' "$RUNNER")"
@@ -486,5 +510,39 @@ wait_for_isolated_benchmarks "$bench_repo" 0 1 >/dev/null \
 if wait_for_isolated_benchmarks "$bench_repo" "10m" 1 >/dev/null 2>&1; then
   fail "a non-integer wait budget must fail closed"
 fi
+
+# Every back-end structural suite must be reachable from /deploy: Step 4 runs
+# `npm run test:structural`, and that script must list every *.test.ts file.
+require_text "$DEPLOY_COMMAND" 'run-deploy-stage backend-structural --reuse-passed -- npm run test:structural' "/deploy Step 4 must run the full back-end structural suite"
+structural_script=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["scripts"]["test:structural"])' "$ROOT_DIR/back-end/package.json")
+for structural_test in "$ROOT_DIR"/back-end/src/tests/structural/*.test.ts; do
+  case "$structural_script" in
+    *"src/tests/structural/$(basename "$structural_test")"*) ;;
+    *) fail "back-end structural test $(basename "$structural_test") is not in npm run test:structural, so no gate runs it" ;;
+  esac
+done
+
+# agents coverage skips the host-wide locked `playwright install` only when
+# every dry-run install location is complete; anything else must install.
+eval "$(sed -n '/^playwright_chromium_installed() {/,/^}/p' "$ROOT_DIR/agents/scripts/run-coverage.sh")"
+pw_dir="$(mktemp -d "${TMPDIR:-/tmp}/pw-installed.XXXXXX")"
+mkdir -p "$pw_dir/chromium-1" "$pw_dir/chromium_headless_shell-1"
+: >"$pw_dir/chromium-1/INSTALLATION_COMPLETE"
+cat >"$pw_dir/fake-python" <<FAKE
+#!/usr/bin/env bash
+[ "\$FAKE_PLAN" = unreadable ] && exit 1
+printf 'Chromium\\n  Install location:    %s/chromium-1\\n\\nHeadless\\n  Install location:    %s/chromium_headless_shell-1\\n' "$pw_dir" "$pw_dir"
+FAKE
+chmod +x "$pw_dir/fake-python"
+if PYTHON_BIN="$pw_dir/fake-python" playwright_chromium_installed; then
+  fail "a missing browser revision must not skip the real install"
+fi
+: >"$pw_dir/chromium_headless_shell-1/INSTALLATION_COMPLETE"
+PYTHON_BIN="$pw_dir/fake-python" playwright_chromium_installed ||
+  fail "complete browser revisions must skip the host-wide locked install"
+if FAKE_PLAN=unreadable PYTHON_BIN="$pw_dir/fake-python" playwright_chromium_installed; then
+  fail "an unreadable dry-run plan must fall back to the real install"
+fi
+rm -rf "$pw_dir"
 
 echo "All semantic deploy gate checks passed."

@@ -83,6 +83,18 @@ assert.ok(
   'rejected acceptance must use retried terminate helper'
 );
 assert.ok(
+  startHelper.includes('followUpRunStateUpdate'),
+  'follow-up escalation must persist the router goal and clear prior-run schema/progress before Temporal start'
+);
+assert.ok(
+  /structuredResponse !== null \|\| agent\.progress > 0/.test(startHelper),
+  'first-run escalation must keep create-time schema and Agent.goal; only prior-run artifacts reset'
+);
+assert.ok(
+  escalationBranch.includes('previousGoal'),
+  'follow-up Cloud Agent chip must snapshot the prior Agent.goal so the live pointer can move'
+);
+assert.ok(
   /UNACCEPTED_TERMINATE_ATTEMPTS\s*=\s*3/.test(handler),
   'unaccepted workflow cleanup must use a bounded retry budget'
 );

@@ -1,4 +1,7 @@
+import { createLogger } from '../logger';
 import { AGENTCARD_MCP_RESOURCE } from './config';
+
+const log = createLogger('AgentCardOrgRuntime');
 
 /**
  * AgentCard throttles the organization MCP per fixed window (observed: 120 requests/minute, shared
@@ -148,7 +151,10 @@ function shouldRetryOrgMcpError(error: unknown): boolean {
   return looksLikeRateLimitError(error) || looksLikeTransientUnavailableError(error);
 }
 
-function mcpStructuredResultIsTransientlyUnavailable(result: unknown): string | undefined {
+function mcpStructuredResultRetryableError(
+  result: unknown,
+  toolName: string
+): AgentCardOrgRuntimeError | undefined {
   if (typeof result !== 'object' || result === null) return undefined;
   const record = result as Record<string, unknown>;
   const structured =
@@ -157,13 +163,46 @@ function mcpStructuredResultIsTransientlyUnavailable(result: unknown): string | 
       : record;
   const message = typeof structured.message === 'string' ? structured.message : '';
   const status = structured.status;
-  if (
-    (status === 'error' || status === 'unavailable') &&
-    /temporarily unavailable|service unavailable/i.test(message)
-  ) {
-    return message;
+  if (status !== 'error' && status !== 'unavailable') return undefined;
+  if (looksLikeRateLimitError(message)) {
+    return new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP ${toolName} is rate limited: ${message}`,
+      429,
+      'agentcard_org_mcp_rate_limited',
+      { tool: toolName, message }
+    );
+  }
+  if (/temporarily unavailable|service unavailable/i.test(message)) {
+    return new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP ${toolName} is temporarily unavailable: ${message}`,
+      503,
+      'agentcard_org_mcp_unavailable',
+      { tool: toolName, message }
+    );
   }
   return undefined;
+}
+
+/**
+ * AgentCard also reports its upstream API-key throttle as an HTTP-200 `isError` tools/call result
+ * without a structured status ("<tool> failed: API key rate limit exceeded, please try again
+ * later", no `retryAfter`), which {@link mcpStructuredResultRetryableError} cannot see.
+ */
+function mcpToolResultRateLimitMessage(result: unknown): string | undefined {
+  if (typeof result !== 'object' || result === null) return undefined;
+  const record = result as Record<string, unknown>;
+  if (record.isError !== true) return undefined;
+  const structured =
+    typeof record.structuredContent === 'object' && record.structuredContent !== null
+      ? (record.structuredContent as Record<string, unknown>)
+      : record;
+  const text = (Array.isArray(record.content) ? record.content : [])
+    .map((part) => (part as { text?: unknown } | null)?.text)
+    .filter((part): part is string => typeof part === 'string' && part !== '')
+    .join('\n');
+  const message =
+    typeof structured.message === 'string' && structured.message !== '' ? structured.message : text;
+  return looksLikeRateLimitError(message) ? message : undefined;
 }
 
 /**
@@ -389,9 +428,10 @@ export class AgentCardOrgRuntime {
   /**
    * Calls an organization MCP tool, transparently recovering from the failure modes that are
    * expected on a healthy provider: a flaky MCP 401/403 on `tools/call` (retry once), a throttled
-   * request window (wait for the window to refill, bounded), and a structured
-   * `{status:"error", message:"…temporarily unavailable"}` tools/call result (HTTP 200 with a
-   * sandbox outage). Everything else propagates untouched.
+   * request window (wait for the window to refill, bounded), a structured `{status:"error"}`
+   * tools/call result (HTTP 200) reporting a sandbox outage or rate limit, and a read whose
+   * text-only `isError` result reports an upstream API-key throttle (retried exactly like a
+   * transport throttle). Everything else propagates untouched.
    *
    * A throttle used to escape as a raw transport error, so every caller that lacked its own
    * rate-limit handling turned a few seconds of provider backpressure into a hard failure.
@@ -424,26 +464,51 @@ export class AgentCardOrgRuntime {
   ): Promise<unknown> {
     let lastRetryError: unknown;
     for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
+      const startedAtMs = Date.now();
       try {
         const result = await this.callToolOnce(toolName, args);
-        const transient = mcpStructuredResultIsTransientlyUnavailable(result);
-        if (transient !== undefined) {
+        const retryableError = mcpStructuredResultRetryableError(result, toolName);
+        if (retryableError !== undefined) throw retryableError;
+        // A text-only throttle carries no structured status, so only reads are replayed: it can
+        // arrive after a multi-step mutation's earlier upstream steps already changed provider state.
+        const throttled = IDEMPOTENT_READ_TOOLS.has(toolName)
+          ? mcpToolResultRateLimitMessage(result)
+          : undefined;
+        if (throttled !== undefined) {
           throw new AgentCardOrgRuntimeError(
-            `AgentCard Organization MCP ${toolName} is temporarily unavailable: ${transient}`,
-            503,
-            'agentcard_org_mcp_unavailable',
-            { tool: toolName, message: transient }
+            `AgentCard Organization MCP ${toolName} rate limited: ${throttled}`,
+            429,
+            'agentcard_org_mcp_rate_limited',
+            { tool: toolName, message: throttled }
           );
         }
+        log.info('Organization MCP tool call succeeded', {
+          tool: toolName,
+          attempt,
+          duration_ms: Date.now() - startedAtMs,
+        });
         return result;
       } catch (error) {
-        if (!shouldRetryOrgMcpError(error)) throw error;
-        lastRetryError = error;
-        if (attempt === RATE_LIMIT_RETRY_ATTEMPTS) break;
+        const retryable = shouldRetryOrgMcpError(error);
         // Derived from the deadline, not decremented locally: time spent inside the throttled call
         // itself counts against the budget too, and a shared deadline already reflects every wait
         // the caller's earlier calls consumed.
-        const waitMs = rateLimitDelayMs(error, attempt, deadlineAtMs - Date.now());
+        const waitMs =
+          retryable && attempt < RATE_LIMIT_RETRY_ATTEMPTS
+            ? rateLimitDelayMs(error, attempt, deadlineAtMs - Date.now())
+            : null;
+        log.warn('Organization MCP tool call failed', {
+          tool: toolName,
+          attempt,
+          duration_ms: Date.now() - startedAtMs,
+          error: errorMessage(error),
+          retryable,
+          retry_after_advertised: /"retryAfter"\s*:\s*\d+/.test(errorMessage(error)),
+          retry_wait_ms: waitMs,
+          retry_budget_remaining_ms: Math.max(0, deadlineAtMs - Date.now()),
+        });
+        if (!retryable) throw error;
+        lastRetryError = error;
         if (waitMs === null) break;
         await delay(waitMs);
       }

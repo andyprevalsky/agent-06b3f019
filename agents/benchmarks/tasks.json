@@ -514,7 +514,7 @@
   {
     "name": "spawn-sub-agents",
     "title": "Multi-Level General-Purpose Agent Spawning",
-    "prompt": "Find the current population of Tokyo and the current population of New York City. You MUST use spawn_general_purpose_agent exactly twice - once per city. Each general-purpose agent should use explore-agent web research, MUST NOT use a browser agent, Claude Code, or code sandbox, and should return only the numeric population value. After both agents complete, multiply the two populations together and report the final product.",
+    "prompt": "Find (1) Tokyo Metropolis's total Japanese-and-foreign resident population in the Tokyo Metropolitan Government Basic Resident Register table dated August 1, 2026, and (2) the U.S. Census Bureau QuickFacts estimate for New York City proper dated July 1, 2025. Use official sources for both values. You MUST use spawn_general_purpose_agent exactly twice - once per city. Each general-purpose agent should use explore-agent web research, MUST NOT use a browser agent, Claude Code, or code sandbox, and should return only the numeric population value. After both agents complete, multiply the two populations together and report the final product.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_general_purpose_agent"],
@@ -5569,6 +5569,278 @@
     ],
     "memory": "on",
     "success_on_plan": true
+  },
+  {
+    "name": "grep-agent-trajectories-cross-surface",
+    "title": "Recall browser and code agent history",
+    "description": "Retrieve grounded facts from two prior agent runs.",
+    "prompt": "What page title did my last browser agent run report for example.com, and what step count did my last coding agent run report for Collatz starting at 27?",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": [
+      "grep"
+    ],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "db_fixtures": [],
+      "services": [
+        "grep"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses historical R2 trace content materialized in the canonical base image search index; no task-specific fixture."
+    },
+    "enforce_declared_evaluators": true,
+    "source": [
+      "feature:agent-trajectories"
+    ],
+    "evaluators": [
+      {
+        "id": "prior-browser-and-code-facts",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer gives Example Domain as the document title and 111 as the Collatz step count.",
+          "Both facts are grounded in prior agent trajectory messages.",
+          "The answer does not substitute general knowledge or invent a source."
+        ],
+        "judge_prompt": "Pass only if the completed answer says the prior browser run found the title Example Domain and the prior Collatz-27 run reported 111 total steps. Require actual agent_trajectories grep evidence for both facts in the trajectory from distinct prior runs. Do not infer either fact from general knowledge, the task prompt, other grep sources, or a fabricated citation."
+      }
+    ],
+    "label_eval": "Grounded prior browser title and Collatz step count with two archived trace paths."
+  },
+  {
+    "name": "grep-agent-trajectories-followup",
+    "title": "Recall a prior research agent result",
+    "description": "Recall the user's most recent city comparison request.",
+    "prompt": "What was my last message to an agent about comparing cities to live in?",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": [
+      "grep"
+    ],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "db_fixtures": [],
+      "services": [
+        "grep"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses historical R2 trace content materialized in the canonical base image search index; no task-specific fixture."
+    },
+    "enforce_declared_evaluators": true,
+    "source": [
+      "feature:agent-trajectories"
+    ],
+    "evaluators": [
+      {
+        "id": "prior-city-comparison-facts",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer names Austin, Denver, and Lisbon.",
+          "The answer recalls that the user requested cost of living, best neighborhoods, and weather for each city.",
+          "The answer is grounded in a prior USER agent trajectory message, directly or through a delegated grep-backed result quoting the message and path."
+        ],
+        "judge_prompt": "Pass only if the answer reports the user's city comparison message: Austin TX, Denver CO, and Lisbon Portugal, with a request to research cost of living, best neighborhoods, and weather for each city. Require evidence from a prior USER message in agent_trajectories. Accept either a direct grep result containing the message or a completed delegated agent result that quotes its exact content and prior USER message path after a grep-backed search. Fail if the answer relies on an unsupported summary, live web, a guess, or only the current run."
+      }
+    ],
+    "label_eval": "Grounded recall of the user's last city comparison request."
+  },
+  {
+    "name": "grep-agent-trajectories-isolation",
+    "title": "Recall a prior coding request",
+    "description": "Recover the user's request to a prior coding agent.",
+    "prompt": "What did I ask my coding agent to do with the Collatz sequence starting at 27?",
+    "timeout_seconds": 450,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": [
+      "grep"
+    ],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "db_fixtures": [],
+      "services": [
+        "grep"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses historical R2 trace content materialized in the canonical base image search index; no task-specific fixture."
+    },
+    "enforce_declared_evaluators": true,
+    "source": [
+      "feature:agent-trajectories"
+    ],
+    "evaluators": [
+      {
+        "id": "prior-coding-request",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer says the user asked for a Python program to compute the Collatz sequence starting at 27.",
+          "The answer says to print every number until the sequence reaches 1 and the total step count.",
+          "The request is grounded in a prior USER agent trajectory message."
+        ],
+        "judge_prompt": "Pass only if the answer says the user asked the coding agent to write and run a Python program for Collatz starting at 27, print every number through 1, and print the total step count. Require the earlier USER message in agent_trajectories grep evidence. Fail if the answer is based only on general knowledge, an agent summary, or the current run."
+      }
+    ],
+    "label_eval": "Grounded recall of a prior coding request."
+  },
+  {
+    "name": "grep-agent-trajectories-browser-verification",
+    "title": "Recall how a browser run verified a title",
+    "description": "Recover the verification method from a prior browser run.",
+    "prompt": "How did my browser agent verify the title of example.com?",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": ["grep"],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": ["base:victoria-prod-sync-v1"],
+      "db_fixtures": [],
+      "services": ["grep"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses a prior browser trace already present in the canonical base image."
+    },
+    "enforce_declared_evaluators": true,
+    "source": ["feature:agent-trajectories"],
+    "evaluators": [
+      {
+        "id": "prior-browser-title-verification",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer says the browser agent checked the page title in the browser tab or state and confirmed it by evaluating document.title in the page.",
+          "The verification method is grounded in messages from the earlier browser run."
+        ],
+        "judge_prompt": "Pass only if the answer explains that the prior browser run saw Example Domain in the browser tab or state and confirmed the title with an in-page JavaScript evaluation of document.title. Require agent_trajectories grep evidence from that earlier run showing these actions. Fail if the answer guesses how a browser usually checks titles, cites only the current run, or reports a title without explaining the verification."
+      }
+    ],
+    "label_eval": "Grounded recall of browser tab and document.title verification."
+  },
+  {
+    "name": "grep-agent-trajectories-code-tool-status",
+    "title": "Recall a coding tool's reported status",
+    "description": "Recover a prior coding tool result.",
+    "prompt": "Did my coding agent's tool report success or failure when it ran the Collatz program?",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": ["grep"],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": ["base:victoria-prod-sync-v1"],
+      "db_fixtures": [],
+      "services": ["grep"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses the original coding-tool result already present in the canonical base image."
+    },
+    "enforce_declared_evaluators": true,
+    "source": ["feature:agent-trajectories"],
+    "evaluators": [
+      {
+        "id": "prior-code-tool-reported-status",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer says the code-agent tool reported FAILED.",
+          "The status is grounded in the original prior TOOL message, rather than a later summary."
+        ],
+        "judge_prompt": "Pass only if the answer says the prior coding-agent tool reported FAILED. Require agent_trajectories grep evidence from the original prior TOOL message with its Status line. The underlying process exit code may be mentioned but is not required by the user's question. Fail if the answer treats the process exit or later verifier as a successful tool status, or relies only on a later summary."
+      }
+    ],
+    "label_eval": "Grounded original coding-tool status."
   },
   {
     "name": "google-oauth",

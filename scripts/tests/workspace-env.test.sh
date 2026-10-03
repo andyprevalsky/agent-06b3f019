@@ -479,4 +479,8 @@ for venv_provisioner in scripts/cloud-build.sh scripts/run.sh scripts/prepare-de
 done
 echo "PASS: every agents venv provisioner checks requirements.txt satisfaction"
 
+# cloud-init.sh's injected-secret -> .env sync has no /deploy gate of its own;
+# this already-gated environment suite runs it so a regression fails Step 4s.
+bash "$ROOT_DIR/scripts/tests/cloud-init-env.test.sh"
+
 echo "All workspace env tests passed."

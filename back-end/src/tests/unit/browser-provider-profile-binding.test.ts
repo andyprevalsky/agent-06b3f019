@@ -258,9 +258,20 @@ function steelReplacementNeverReusesForeignProviderProfile(): void {
     reusableSteelRecordedProfileId({
       provider: 'kernel',
       providerProfileId: 'e7cufm4qrkxq3f6jhp2jcm83',
+      providerProfileSource: 'user_persistent',
     }),
     null,
     'a Kernel-origin profile must never be reused as a Steel profile'
+  );
+
+  assert.strictEqual(
+    reusableSteelRecordedProfileId({
+      provider: 'browser-use',
+      providerProfileId: '11111111-2222-3333-4444-555555555555',
+      providerProfileSource: 'user_persistent',
+    }),
+    null,
+    'a Browser Use UUID must not be mistaken for a Steel profile'
   );
 
   // Steel → Steel resume/rotate: the recorded Steel profile is reloaded so
@@ -269,6 +280,7 @@ function steelReplacementNeverReusesForeignProviderProfile(): void {
     reusableSteelRecordedProfileId({
       provider: 'steel',
       providerProfileId: '11111111-2222-3333-4444-555555555555',
+      providerProfileSource: 'user_persistent',
     }),
     '11111111-2222-3333-4444-555555555555',
     'a Steel-origin recorded profile must be reused on resume/rotate'
@@ -276,7 +288,11 @@ function steelReplacementNeverReusesForeignProviderProfile(): void {
 
   for (const providerProfileId of [null, undefined, '']) {
     assert.strictEqual(
-      reusableSteelRecordedProfileId({ provider: 'steel', providerProfileId }),
+      reusableSteelRecordedProfileId({
+        provider: 'steel',
+        providerProfileId,
+        providerProfileSource: 'user_persistent',
+      }),
       null,
       'an unrecorded Steel profile must fall back rather than reuse an empty id'
     );

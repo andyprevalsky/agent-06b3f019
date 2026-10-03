@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 
 import assert from 'node:assert/strict';
 import {
@@ -7,6 +6,52 @@ import {
   ensureBenchmarkOrgCardholder,
   resolveBenchmarkCardholderId,
 } from '../../providers/agentcard/benchmark-float';
+import {
+  AgentCardOrgRuntime,
+  AgentCardOrgRuntimeError,
+  type AgentCardOrgToolCaller,
+} from '../../providers/agentcard/org-runtime';
+
+const ORG_ENV_NAMES = [
+  'AGENTCARD_ORG_MCP_ACCESS_TOKEN',
+  'AGENTCARD_ORG_OAUTH_CLIENT_ID',
+  'AGENTCARD_ORG_OAUTH_CLIENT_SECRET',
+] as const;
+
+/** Run against the real org runtime so its rate-limit handling is exercised, not bypassed. */
+async function withOrgRuntime(
+  toolResults: (toolName: string, call: number) => unknown,
+  run: (callOrgTool: AgentCardOrgToolCaller, calls: () => number) => Promise<void>
+): Promise<void> {
+  const original = Object.fromEntries(ORG_ENV_NAMES.map((name) => [name, process.env[name]]));
+  for (const name of ORG_ENV_NAMES) delete process.env[name];
+  process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN = 'direct-org-token';
+  let calls = 0;
+  const runtime = new AgentCardOrgRuntime(async (_token, toolName) => {
+    calls += 1;
+    return toolResults(toolName, calls);
+  });
+  try {
+    await run(
+      (toolName, args, deadlineAtMs) => runtime.callTool(toolName, args, deadlineAtMs),
+      () => calls
+    );
+  } finally {
+    for (const name of ORG_ENV_NAMES) {
+      const value = original[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+const API_KEY_THROTTLE_MESSAGE =
+  'get_cardholder_kyc_status failed: API key rate limit exceeded, please try again later';
+
+const API_KEY_THROTTLE_RESULTS: unknown[] = [
+  { structuredContent: { status: 'error', message: API_KEY_THROTTLE_MESSAGE } },
+  { isError: true, content: [{ type: 'text', text: API_KEY_THROTTLE_MESSAGE }] },
+];
 
 function walletResult(cents: {
   balance: number;
@@ -311,7 +356,72 @@ async function main(): Promise<void> {
     assert.deepEqual(status, { verificationStatus: 'verified' });
   }
 
-  console.log('AgentCard benchmark sandbox float tests passed');
+  // REGRESSION (agent-payment-new-user-journey, 2026-10-02): AgentCard returns its upstream
+  // API-key throttle as an HTTP-200 tool error, not a transport 429. The org runtime handed it
+  // back as a successful read, so the readiness check failed on the first refusal with no retry.
+  for (const throttled of API_KEY_THROTTLE_RESULTS) {
+    await withOrgRuntime(
+      (toolName, call) => {
+        assert.equal(toolName, 'get_cardholder_kyc_status');
+        return call === 1 ? throttled : { structuredContent: { kyc_status: 'verified' } };
+      },
+      async (callOrgTool, calls) => {
+        const status = await ensureBenchmarkOrgCardholder('cardholder-ready', callOrgTool);
+        assert.deepEqual(status, { verificationStatus: 'verified' });
+        assert.equal(calls(), 2, 'a throttled KYC read must be retried, not surfaced');
+      }
+    );
+  }
+
+  // A throttle that never clears stays bounded and fails closed with an attributable error.
+  await withOrgRuntime(
+    () => API_KEY_THROTTLE_RESULTS[0],
+    async (callOrgTool, calls) => {
+      await assert.rejects(
+        () => ensureBenchmarkOrgCardholder('cardholder-ready', callOrgTool),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          assert.match(message, /cardholder readiness check failed/i);
+          assert.match(message, /rate limit exhausted for get_cardholder_kyc_status/i);
+          assert.match(message, /API key rate limit exceeded/);
+          return true;
+        }
+      );
+      assert.equal(calls(), 3, 'rate-limit retries must stay bounded');
+    }
+  );
+
+  // An org-wide throttle is not evidence about one cardholder: resolution must fail closed rather
+  // than spend more requests on the next candidate, and every read shares ONE retry budget.
+  {
+    const kycReads: string[] = [];
+    const deadlines = new Set<number | undefined>();
+    const callOrgTool: AgentCardOrgToolCaller = async (name, args, deadlineAtMs) => {
+      deadlines.add(deadlineAtMs);
+      if (name === 'get_cardholder_kyc_status') {
+        kycReads.push(String(args.cardholder_id));
+        throw new AgentCardOrgRuntimeError(
+          `AgentCard Organization MCP rate limit exhausted for ${name} after 3 attempts`,
+          429,
+          'agentcard_org_mcp_rate_limited'
+        );
+      }
+      return cardholdersResult([
+        { id: 'ch-andy', email: 'andy@roselabs.ai' },
+        { id: 'ch-bench', email: 'agentcard-benchmark@roselabs.ai' },
+      ]);
+    };
+    await assert.rejects(
+      () => resolveBenchmarkCardholderId(['ch-andy'], callOrgTool),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError && error.code === 'agentcard_org_mcp_rate_limited'
+    );
+    assert.deepEqual(kycReads, ['ch-andy'], 'no further candidates are read once throttled');
+    assert.equal(deadlines.size, 1, 'list + KYC reads share one rate-limit deadline');
+    assert.equal(typeof [...deadlines][0], 'number');
+  }
+
+  process.stdout.write('AgentCard benchmark sandbox float tests passed\n');
 }
 
 void main();

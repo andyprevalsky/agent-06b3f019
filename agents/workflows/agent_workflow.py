@@ -78,7 +78,13 @@ with workflow.unsafe.imports_passed_through():
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
     from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
-    from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
+    from loop.dag_executor import (
+        TaskDAG,
+        execute_dag,
+        extract_plan_from_context,
+        latest_real_user_instruction,
+        plan_superseded_by_new_user_instruction,
+    )
     from loop.run_agent import _run_verifier, run_agent
     from providers.fast_cache.google_oauth_demo_fixture import matches_demo_goal, normalize_completion_notice
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
@@ -1969,7 +1975,35 @@ class AgentWorkflow:
         # startup generation keeps that initial cache prefix stable; later user
         # feedback revisions take the non-blocking context-message path below.
         is_sub_agent = bool(parent_workflow_id or parent_agent_id or fetched_parent_agent_id)
-        if response_schema is None and self.goal and not is_sub_agent:
+        startup_execute_context: Optional[List[Dict[str, Any]]] = None
+        # Chat re-escalation after a terminal run starts a new workflow with
+        # plan|execute and no resume_state. continue_as_new / deploy resume
+        # keep the live schema and plan — a later USER there is mid-run
+        # feedback, not a new task.
+        is_fresh_start = resume_state is None and start_phase in ("plan", "execute")
+        prior_run_superseded = False
+        if is_fresh_start and not is_sub_agent:
+            startup_execute_context = await workflow.execute_activity(
+                poll_new_messages,
+                args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            startup_execute_context = filter_internal_subagent_messages(startup_execute_context)
+            prior_run_superseded = plan_superseded_by_new_user_instruction(startup_execute_context)
+            if prior_run_superseded:
+                # A completed or followed-up run's schema is not live. Chat
+                # persist has already moved Agent.goal to the router task;
+                # still skip generate-from-row here so a stale leftover cannot
+                # win a race, then regenerate from the latest USER below.
+                response_schema = None
+                self.output_schema = None
+        if (
+            response_schema is None
+            and self.goal
+            and not is_sub_agent
+            and not prior_run_superseded
+        ):
             try:
                 generated = await workflow.execute_activity(
                     set_response_schema_activity,
@@ -1998,6 +2032,10 @@ class AgentWorkflow:
                 workflow.logger.warning(f"Failed to generate response_schema at startup: {e}")
         elif response_schema is None and is_sub_agent:
             workflow.logger.info("Skipping response_schema generation for sub-agent")
+
+        if prior_run_superseded and startup_execute_context is not None:
+            await self._regenerate_output_schema_for_new_instruction(startup_execute_context)
+            response_schema = self.output_schema
 
         # Freeze the schema used in the main-agent system prompt. Any later
         # feedback-driven revision is appended at the conversation tail so the
@@ -2151,6 +2189,8 @@ class AgentWorkflow:
         # Get context from PLAN phase (or poll if skipped)
         if not skip_plan:
             execute_context = plan_result.get("context", [])
+        elif startup_execute_context is not None:
+            execute_context = startup_execute_context
         else:
             # Poll messages to get context if we skipped PLAN
             # Use epoch timestamp to get ALL messages (not None - that crashes poll_new_messages)
@@ -2167,6 +2207,16 @@ class AgentWorkflow:
             workflow.logger.info("[DAG] Skipping DAG (continued after context reset)")
         else:
             plan_data = extract_plan_from_context(execute_context)
+            if (
+                resume_state is None
+                and start_phase in ("plan", "execute")
+                and plan_data
+                and plan_superseded_by_new_user_instruction(execute_context)
+            ):
+                workflow.logger.info(
+                    "[DAG] Skipping stale plan superseded by a newer USER instruction after completion_summary"
+                )
+                plan_data = None
             if plan_data:
                 workflow.logger.info("[DAG] Found plan, attempting DAG execution")
                 try:
@@ -2668,6 +2718,71 @@ class AgentWorkflow:
             if task is None:
                 raise RuntimeError("Response schema refresh did not start")
             await task
+
+    async def _regenerate_output_schema_for_new_instruction(self, context: List[Dict[str, Any]]) -> None:
+        """Replace a completed-run schema with one generated from the latest USER.
+
+        Chat re-escalation nulls Agent.responseSchema before Temporal start.
+        Mid-run refresh still preserves fields. A superseded fresh start is a
+        new task, so generate from the latest real USER text only.
+        """
+        latest = latest_real_user_instruction(context)
+        if not latest:
+            return
+        try:
+            generated = await workflow.execute_activity(
+                set_response_schema_activity,
+                args=[
+                    self.agent_id,
+                    [latest],
+                    self._active_compute_token_payload(),
+                    self.fast_mode_cache_enabled,
+                    False,
+                ],
+                start_to_close_timeout=timedelta(seconds=90),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Failed to regenerate output_schema after superseded plan: {e}")
+            return
+        schema = generated.get("schema") if isinstance(generated, dict) else None
+        if not (isinstance(schema, dict) and schema.get("fields")):
+            return
+        if schema == self.output_schema:
+            return
+        schema_message = format_required_output_schema_user_message(schema)
+        idempotency_key = str(workflow.uuid4())
+        self._response_schema_internal_signal_keys.add(idempotency_key)
+        try:
+            await workflow.execute_activity(
+                post_agent_message,
+                args=[
+                    self.agent_id,
+                    (
+                        f"{RESPONSE_SCHEMA_UPDATE_PREFIX}\n"
+                        "This replaces every earlier output-schema requirement.\n\n"
+                        f"{schema_message}"
+                    ),
+                    "USER",
+                    {
+                        "hidden": True,
+                        "isResponseSchemaUpdate": True,
+                        "responseSchemaRevision": self._response_schema_revision,
+                        "idempotencyKey": idempotency_key,
+                    },
+                ],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Failed to persist regenerated output_schema context message: {e}")
+            return
+        self.output_schema = schema
+        self._system_prompt_output_schema = schema
+        self.message_count += 1
+        workflow.logger.info(
+            f"Regenerated output_schema from latest USER instruction with {len(schema['fields'])} field(s)"
+        )
 
     async def build_system_prompt(self) -> str:
         """Build system prompt for the current phase.

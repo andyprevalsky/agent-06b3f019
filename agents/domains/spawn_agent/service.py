@@ -44,6 +44,10 @@ from utils.tool_schemas import get_explore_agent_tools
 
 logger = structlog.get_logger()
 
+# Return gathered tool evidence just before the depth's activity timeout.
+# Leave room to drain pending FE posts and persist the final explore chip.
+LIVE_EXPLORE_DRAIN_SLACK_SECONDS = 15
+
 COMMON_CSV_HEADER_NAMES = {
     "address",
     "city",
@@ -222,6 +226,16 @@ def compile_explore_wrap_up(
         return text
     parts = [_fallback_trace_text(item) for item in tool_call_results or []]
     return _bounded_explore_parts([part for part in parts if part], budget)
+
+
+def compile_explore_grep_evidence(tool_call_results: List[Any], *, budget: int = 6_000) -> str:
+    """Keep bounded, original grep results beside an explore agent's summary."""
+    grep_results = [
+        str(item).strip()
+        for item in tool_call_results
+        if str(item).lstrip().startswith("[grep]")
+    ]
+    return _bounded_explore_parts(list(dict.fromkeys(grep_results))[-3:], budget)
 
 
 _SOURCE_GOAL_TERMS = {
@@ -593,6 +607,9 @@ async def spawn_explore_agent_activity(
     # Background FE posts so fanout does not serialize on createMessage.
     # Fast Mode does not change this — cache only mocks external lib calls.
     _pending_fe_posts: "list[asyncio.Task]" = []
+    # A timeout can cancel the awaiter while a threshold drain is in progress.
+    # Keep those drains alive until final cleanup has observed their results.
+    _inflight_fe_drains: "list[asyncio.Task[None]]" = []
     # Tail of the in-flight post chain for each chip, keyed by toolCallId.
     _fe_post_chain: "dict[str, asyncio.Task]" = {}
     _FE_POST_DRAIN_THRESHOLD = 64
@@ -689,7 +706,9 @@ async def spawn_explore_agent_activity(
 
     async def _maybe_drain_pending_fe_posts() -> None:
         if len(_pending_fe_posts) >= _FE_POST_DRAIN_THRESHOLD:
-            await _drain_pending_fe_posts()
+            drain = asyncio.create_task(_drain_pending_fe_posts())
+            _inflight_fe_drains.append(drain)
+            await asyncio.shield(drain)
 
     # Send the system prompt verbatim. Contact + message-thread context is
     # fetched on-demand via the grep tool (network / agent_network_* / messages
@@ -932,7 +951,7 @@ async def spawn_explore_agent_activity(
     result: Dict[str, Any] = {}
     try:
         with heartbeat_resume_details(resume_details):
-            result = await run_agent(
+            run_agent_coro = run_agent(
                 agent_id=agent_id,
                 user_id=user_id,
                 system_prompt=explore_system_prompt,
@@ -964,6 +983,28 @@ async def spawn_explore_agent_activity(
                 fast_mode_cache_enabled=_explore_fast_mode_enabled,
                 goal_text=_explore_fast_mode_goal,
             )
+            if _oai_demo:
+                result = await run_agent_coro
+            else:
+                deadline_expired = False
+                try:
+                    # The parent waits this depth's whole activity timeout
+                    # (quick/medium 600s, deep 1800s); wrap up just inside it.
+                    async with asyncio.timeout(
+                        explore_limits_for_depth(effective_depth)[1].total_seconds()
+                        - LIVE_EXPLORE_DRAIN_SLACK_SECONDS
+                    ) as deadline:
+                        result = await run_agent_coro
+                except asyncio.TimeoutError:
+                    deadline_expired = True
+                else:
+                    deadline_expired = deadline.expired()
+                if deadline_expired:
+                    # run_agent catches CancelledError and returns status="paused".
+                    # The timeout context distinguishes that local wind-down from
+                    # an external pause, which must keep its cancellation behavior.
+                    logger.info("Explore agent returning gathered evidence before its activity timeout")
+                    result = {"status": "completed"}
     finally:
         _heartbeat_stop.set()
         heartbeat_task.cancel()
@@ -971,9 +1012,20 @@ async def spawn_explore_agent_activity(
             await heartbeat_task
         except (asyncio.CancelledError, Exception):
             pass
-        # Flush any backgrounded FE posts before returning/propagating so the FE
-        # receives every tool message even though they no longer blocked the leaf loop.
-        await _drain_pending_fe_posts()
+        # A timed-out explore may have been awaiting a threshold drain. Its
+        # shielded posts must finish before a final drain or activity return.
+        drain_error: BaseException | None = None
+        if _inflight_fe_drains:
+            results = await asyncio.shield(
+                asyncio.gather(*_inflight_fe_drains, return_exceptions=True)
+            )
+            drain_error = next((item for item in results if isinstance(item, BaseException)), None)
+        # Flush posts queued after the last threshold drain as well.
+        try:
+            await _drain_pending_fe_posts()
+        finally:
+            if drain_error is not None:
+                raise drain_error
 
     # Defensive fallback: when the explore agent terminates with attempt_completion
     # but leaves result empty, the parent receives no evidence. Synthesize a

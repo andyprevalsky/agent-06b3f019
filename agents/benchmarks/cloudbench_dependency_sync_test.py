@@ -6953,7 +6953,9 @@ if grep -Fxq vol_exact "$VOLUMES"; then exit 30; fi
         text=True,
         capture_output=True,
         check=False,
-        timeout=10,
+        # This fake Fly recovery executes many shell subprocesses even though
+        # sleep is stubbed. Leave room for a loaded deploy host to schedule them.
+        timeout=30,
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
@@ -8446,10 +8448,15 @@ def test_isolated_backend_session_launcher_is_macos_portable(tmp_path: Path) -> 
     )
     try:
         deadline = time.time() + 5
-        while time.time() < deadline and not ready.exists():
+        values: list[str] = []
+        while time.time() < deadline:
+            if ready.exists():
+                values = ready.read_text().split()
+                if len(values) == 3:
+                    break
             time.sleep(0.05)
-        assert ready.exists(), "session-owned child did not start"
-        pid, sid, pgid = (int(value) for value in ready.read_text().split())
+        assert len(values) == 3, "session-owned child did not publish its process identity"
+        pid, sid, pgid = (int(value) for value in values)
         assert pid == process.pid
         assert sid == process.pid
         assert pgid == process.pid
@@ -13564,6 +13571,38 @@ printf '%s\\n' "${{BENCH_ARGS[@]}}"
     assert "--port" not in result.stdout.splitlines(), result.stdout
 
 
+def test_isolated_backend_target_plan_mode_parse_survives_early_reader_exit(tmp_path: Path) -> None:
+    """Reading the plan's mode line must not race the write of its later lines.
+
+    Piping the plan through `head -1` under pipefail fails with SIGPIPE (141)
+    whenever head exits before the writer finishes; on a loaded deploy host the
+    two-line production plan lost that race. A long plan makes the race certain.
+    """
+    driver = DRIVER_SCRIPT.read_text()
+    stack_block = driver.split('\nBENCH_TARGET_MODE_FOR_STACK=""', 1)[1].split('\nif [ "$BENCH_SIMULATE" = "1" ]', 1)[0]
+    command_builder = "BENCH_ARGS=()" + driver.split("\nBENCH_ARGS=()", 1)[1].split('log "running benchmark:', 1)[0]
+    target_script = tmp_path / "target.py"
+    target_script.write_text("print('prod')\nfor i in range(20000):\n    print(f'--arg-{i}')\n")
+    script = f"""set -euo pipefail
+REPO_DIR={shlex.quote(str(ROOT))}
+BENCHMARK_TARGET_SCRIPT={shlex.quote(str(target_script))}
+BENCH_TASK_LIST=(agent-payment-production-abandonment)
+BASE_PORT=3001
+BACKEND_PORT=3001
+BENCH_MAX_CONCURRENCY=5
+BENCH_SIMULATE=0
+BENCH_TARGET_MODE_FOR_STACK=""
+{stack_block}
+{command_builder}
+printf 'stack=%s run=%s args=%s\\n' "$BENCH_TARGET_MODE_FOR_STACK" "$BENCH_TARGET_MODE" "${{#BENCH_TARGET_ARGS[@]}}"
+"""
+
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert result.stdout.strip() == "stack=prod run=prod args=20000", result.stdout
+
+
 def test_production_only_cloud_route_clears_local_frontend_override() -> None:
     driver = DRIVER_SCRIPT.read_text()
 
@@ -13580,7 +13619,7 @@ def test_production_only_real_mode_skips_public_tunnel() -> None:
     """
     driver = DRIVER_SCRIPT.read_text()
 
-    assert 'BENCH_TARGET_MODE_FOR_STACK="$(printf' in driver
+    assert 'BENCH_TARGET_MODE_FOR_STACK="${BENCH_TARGET_PLAN_FOR_STACK%%' in driver
     assert 'elif [ "$BENCH_TARGET_MODE_FOR_STACK" = "prod" ]; then' in driver
     prod_idx = driver.index('elif [ "$BENCH_TARGET_MODE_FOR_STACK" = "prod" ]; then')
     else_idx = driver.index("\nelse\n", prod_idx)

@@ -25,20 +25,24 @@ MODE="${1:-check}"
 # Python revision missing ("Executable doesn't exist at
 # chromium_headless_shell-1234"). Install the venv browsers before the
 # suite so a shared cache cannot fail the domain.
-# The install takes a cache-wide lock even when the browser is present. On a
-# loaded host the installer can miss its own lock refresh ("Unable to update
-# lock within the stale threshold") while other worktrees install, so retry.
-for attempt in 1 2 3; do
-    if "$PYTHON_BIN" -m playwright install chromium; then
-        break
-    fi
-    if [ "$attempt" -eq 3 ]; then
-        echo "playwright install chromium failed after $attempt attempts" >&2
-        exit 1
-    fi
-    echo "playwright install chromium failed (attempt $attempt); retrying" >&2
-    sleep $((attempt * 5))
-done
+#
+# `install` always takes the machine-wide ms-playwright directory lock, even
+# when every browser is present, and on a loaded host shared by many worktrees
+# that lock's heartbeat goes stale ("Unable to update lock within the stale
+# threshold"), failing coverage before any test runs. Only install when a
+# revision this Playwright needs lacks its INSTALLATION_COMPLETE marker.
+playwright_chromium_installed() {
+    local locations location
+    locations="$("$PYTHON_BIN" -m playwright install --dry-run chromium 2>/dev/null |
+        sed -n 's/^[[:space:]]*Install location:[[:space:]]*//p')" || return 1
+    [ -n "$locations" ] || return 1
+    while IFS= read -r location; do
+        [ -f "$location/INSTALLATION_COMPLETE" ] || return 1
+    done <<< "$locations"
+}
+if ! playwright_chromium_installed; then
+    "$PYTHON_BIN" -m playwright install chromium
+fi
 
 # Domain tests share process-global mock state. Give each domain a fresh process
 # inside a bounded worker pool, then merge their parallel coverage files before

@@ -101,6 +101,11 @@ while IFS= read -r file; do
       # `description:` and would otherwise miss the content scanner.
       PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
       ;;
+    agents/providers/rose/browser_use.py)
+      # Browser tool descriptions span multiple Python string literals, so a
+      # continuation-only edit does not match the diff scanner's assignment rule.
+      PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
+      ;;
     *smsSupervisor/contextBuilder.ts|*SmsSupervisor/contextBuilder.ts)
       # SMS surface overlay + system prompt composition — LLM-visible even when
       # edits land mid-template without an assignment on the same hunk line.

@@ -903,7 +903,10 @@ async def test_handler_explore_capture_tool_results():
     from domains.spawn_agent.handler import SpawnAgentManager
     from tools.base import MessageStatus
 
-    sub_agent_trace = ["[web_search] {big}", "[grep] {stuff}"]
+    sub_agent_trace = [
+        "[web_search] {big}",
+        "[grep] {trace_path: agent_trajectories/root/USER/message, message_role: USER, text: City comparison}",
+    ]
     fake = _FakeSpawnWF(
         activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
         start_activity_result=_Activity(
@@ -932,6 +935,9 @@ async def test_handler_explore_capture_tool_results():
     finished = next(e for e in events if e.status == MessageStatus.FINISHED)
     assert "tool_call_results" not in (finished.data or {}), "must not persist raw trace in event data"
     assert captured == sub_agent_trace, "collector must receive the raw trace out-of-band"
+    assert "Original grep results:" in finished.message
+    assert "agent_trajectories/root/USER/message" in finished.message
+    assert "[web_search]" not in finished.message
 
 
 async def test_handler_explore_failed_result_yields_error():
@@ -1038,6 +1044,98 @@ async def test_handler_explore_failed_result_fast_mode_without_evidence_errors()
     assert not any(event.status == MessageStatus.FINISHED for event in events)
 
 
+async def _explore_cold_stub_activity_result():
+    """Run the real explore activity on the Fast Mode cold-namespace stub.
+
+    Mirrors DAG task 1 of test-mass-agent-run-0 (0381fb79, 2026-10-02): the
+    explore goal has no recorded explore_agent rows, so Fast Mode replays the
+    soft-complete payload at p:1. The trusted local summary makes the
+    completion acceptable, and the stub copy is stripped from the result.
+    """
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+    from providers.fast_cache.rose_cache import soft_complete_on_miss
+
+    stub_call = soft_complete_on_miss("explore_agent")["tool_calls"][0]
+    stub_args = json.loads(stub_call["arguments"])
+    completions = []
+
+    async def fake_run_agent(**kwargs):
+        completions.append(await kwargs["execute_tool"](stub_call["name"], stub_args, stub_call["id"]))
+        return {"status": "completed", "final_response": stub_args["result"], "tokens_in": 0, "tokens_out": 0}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a",
+            user_id="u",
+            goal="Research platform and audience benchmarks for a personal brand",
+            model="m",
+            local_data_summary="Recent local threads: 3 conversations about longevity content.",
+        )
+    assert completions == [{"success": True, "message": "Completion accepted"}]
+    assert result["status"] == "completed"
+    assert result["result"] == ""
+    assert result["tool_call_results"] == []
+    return result
+
+
+async def _spawn_explore_with_result(result, *, fast_mode: bool):
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=_Activity(result=result),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        wf = _FakeWFInstance()
+        wf.fast_mode_cache_enabled = fast_mode
+        return await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=wf,
+                tool_call={"type": "explore", "goal": "Research platform and audience benchmarks"},
+                tool_call_id="tc-cold-stub",
+            )
+        )
+    finally:
+        restore()
+
+
+async def test_handler_explore_fast_mode_cold_stub_completion_finishes():
+    """A completed Fast Mode replay end must not ERROR the explore spawn.
+
+    The activity already applied its evidence gate. Re-deriving failure from
+    the display-filtered chip text turned the stub into ERROR, so the DAG
+    cancelled the sibling explore and the replay diverged into 20 more errors.
+    """
+    from tools.base import MessageStatus
+
+    events = await _spawn_explore_with_result(await _explore_cold_stub_activity_result(), fast_mode=True)
+
+    finished = [event for event in events if event.status == MessageStatus.FINISHED]
+    assert len(finished) == 1
+    assert finished[0].data["result"] == ""
+    assert "error_reason" not in finished[0].data
+    assert not any(event.status == MessageStatus.ERROR for event in events)
+
+
+async def test_handler_explore_live_empty_completion_still_errors():
+    """Outside Fast Mode, an empty completed explore stays retryable by the parent."""
+    from domains.spawn_agent.handler import _EXPLORE_NO_EVIDENCE
+    from tools.base import MessageStatus
+
+    events = await _spawn_explore_with_result(await _explore_cold_stub_activity_result(), fast_mode=False)
+
+    error = next(event for event in events if event.status == MessageStatus.ERROR)
+    assert error.message == _EXPLORE_NO_EVIDENCE
+    assert error.data["error_reason"] == _EXPLORE_NO_EVIDENCE
+    assert not any(event.status == MessageStatus.FINISHED for event in events)
+
+
 async def test_handler_explore_failed_result_forwards_error_reason():
     """An explicit activity failure reason reaches the parent and UI event."""
     from domains.spawn_agent.handler import SpawnAgentManager
@@ -1121,6 +1219,119 @@ async def test_handler_explore_unavailable_sources_still_finished():
     assert finished.data["unavailable_sources"] == unavailable
     assert "error_reason" not in (finished.data or {})
     assert not any(event.status == MessageStatus.ERROR for event in events)
+
+
+async def test_handler_explore_synthesis_checkpoint_requires_two_grounded_prior_results():
+    """A later sourced round gets one advisory; sparse and failed rounds do not."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from helpers.context_scope import filter_internal_subagent_messages
+    from helpers.llm import build_llm_messages
+    from tools.base import MessageStatus
+
+    sourced = "Sourced cost, neighborhoods, and weather facts. " * 6 + "https://example.com/city"
+    prior_context = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "spawn_agent", "type": "explore", "tool_call_id": "prior-a"},
+                    {"tool": "spawn_agent", "type": "explore", "tool_call_id": "prior-b"},
+                ]
+            },
+        },
+        *[
+            {
+                "role": "TOOL",
+                "text": sourced,
+                "metadata": {
+                    "toolName": "spawn_agent",
+                    "agentType": "explore",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": call_id,
+                    "data": {"result": sourced},
+                },
+            }
+            for call_id in ("prior-a", "prior-b")
+        ],
+    ]
+
+    async def run_result(result, context, *, wf=None):
+        fake = _FakeSpawnWF(
+            activity_results={"fetch_local_data_summary": ""},
+            start_activity_result=_Activity(result=result),
+        )
+        instance = wf or _FakeWFInstance(context=context)
+        restore = _patch_spawn_workflow(fake)
+        try:
+            events = await _collect(
+                SpawnAgentManager()._spawn_explore(
+                    workflow_instance=instance,
+                    tool_call={"type": "explore", "goal": "Follow up on a city"},
+                    tool_call_id="followup",
+                )
+            )
+        finally:
+            restore()
+        return next(event for event in events if event.status != MessageStatus.IN_PROGRESS), instance
+
+    grounded = {
+        "status": "completed",
+        "result": sourced,
+        "tool_call_results": ["[web_search] https://example.com/city"],
+    }
+    event, wf = await run_result(grounded, prior_context)
+    assert "Research checkpoint for the parent agent" in event.message
+    assert event.data["result"] == sourced  # Guidance never becomes research evidence.
+    model_context = [
+        {"role": "USER", "text": "Compare these cities", "timestamp": "2026-09-30T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-09-30T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "spawn_agent", "type": "explore", "tool_call_id": "followup"}
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": event.message,
+            "timestamp": "2026-09-30T00:00:02Z",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "toolCallId": "followup",
+                "toolStatus": "FINISHED",
+                "agentType": "explore",
+            },
+        },
+    ]
+    llm_messages = await build_llm_messages(filter_internal_subagent_messages(model_context), "system")
+    assert any(
+        message["role"] == "tool" and "Research checkpoint for the parent agent" in message["content"]
+        for message in llm_messages
+    )
+    again, _ = await run_result(grounded, prior_context, wf=wf)
+    assert "Research checkpoint" not in again.message
+
+    sparse, _ = await run_result({"status": "completed", "result": "Brief result"}, prior_context)
+    assert "Research checkpoint" not in sparse.message
+    failed, _ = await run_result(
+        {"status": "error", "result": sourced, "tool_call_results": ["[web_search] source"]},
+        prior_context,
+    )
+    assert "Research checkpoint" not in failed.message
+    only_one_prior, _ = await run_result(grounded, prior_context[:-1])
+    assert "Research checkpoint" not in only_one_prior.message
+    resumed_context = prior_context + [
+        {
+            "role": "TOOL",
+            "text": event.message,
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        }
+    ]
+    after_resume, _ = await run_result(grounded, resumed_context)
+    assert "Research checkpoint" not in after_resume.message
 
 
 async def test_handler_explore_cancelled_yields_error():
@@ -1214,6 +1425,39 @@ async def test_handler_explore_timeout_finishes_with_heartbeat_wrap_up():
     assert not any(event.status == MessageStatus.ERROR for event in events)
     assert fake.wait_condition_timeouts
     assert fake.wait_condition_timeouts[0] is not None
+
+
+async def test_handler_explore_timeout_finishes_with_heartbeat_tool_evidence():
+    """A heartbeat with only tool results supplies bounded, grounded research."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    evidence = {
+        "result": "",
+        "tool_call_results": [
+            "[web_fetch] **Result:** Denver single-person monthly costs excluding rent: $1,303.8."
+        ],
+    }
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=_Activity(exception=_explore_timeout_activity_error(evidence)),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=_FakeWFInstance(),
+                tool_call={"type": "explore", "goal": "research Denver cost"},
+                tool_call_id="tc-timeout-evidence",
+            )
+        )
+    finally:
+        restore()
+
+    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
+    assert "$1,303.8" in finished.message
+    assert finished.data["result"] == finished.message
+    assert not any(event.status == MessageStatus.ERROR for event in events)
 
 
 async def test_explore_timeout_during_an_llm_call_keeps_the_tool_evidence():
@@ -1372,6 +1616,11 @@ async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
     assert not any(event.status == MessageStatus.FINISHED for event in events)
     assert handle._cancelled
     assert not handle._awaited
+    from temporalio import workflow
+
+    assert fake.start_activity_calls[0]["kwargs"]["cancellation_type"] == (
+        workflow.ActivityCancellationType.TRY_CANCEL
+    )
     assert fake.wait_condition_timeouts == [timedelta(seconds=600), EXPLORE_CANCEL_GRACE]
 
 
@@ -3590,6 +3839,174 @@ async def test_spawn_explore_agent_activity_error_status_returned():
     assert result["structured_response"] == {"topic": "partial"}
 
 
+async def test_spawn_explore_self_wrap_returns_collected_tool_evidence():
+    """A blocked live explore returns grounded evidence before the parent's wait."""
+    from datetime import timedelta
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_grep = MagicMock()
+    fake_grep.execute_tool = AsyncMock(
+        return_value={
+            "result": "Denver single-person monthly cost excluding rent: $1,303.8.",
+            "usage": {"llm": [], "service": []},
+        }
+    )
+
+    async def fake_run_agent(**kwargs):
+        await kwargs["execute_tool"](
+            "grep", {"pattern": "Denver cost", "sources": ["agent_trajectories"]}, "tc1"
+        )
+        await asyncio.Event().wait()
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.grep.GrepManager", return_value=fake_grep),
+        patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(milliseconds=50))),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a", user_id="u", goal="research Denver cost", model="m"
+        )
+
+    assert result["status"] == "completed"
+    assert "$1,303.8" in result["result"]
+    assert result["tool_call_results"]
+
+
+async def test_spawn_explore_self_wrap_recovers_paused_loop_result():
+    """A loop that swallows the local deadline cancellation still returns evidence."""
+    from datetime import timedelta
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_grep = MagicMock()
+    fake_grep.execute_tool = AsyncMock(
+        return_value={
+            "result": "Denver single-person monthly cost excluding rent: $1,303.8.",
+            "usage": {"llm": [], "service": []},
+        }
+    )
+    caught_cancel = False
+
+    async def fake_run_agent(**kwargs):
+        nonlocal caught_cancel
+        await kwargs["execute_tool"](
+            "grep", {"pattern": "Denver cost", "sources": ["agent_trajectories"]}, "tc1"
+        )
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            caught_cancel = True
+            return {"status": "paused"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.grep.GrepManager", return_value=fake_grep),
+        patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(milliseconds=50))),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a", user_id="u", goal="research Denver cost", model="m"
+        )
+
+    assert caught_cancel
+    assert result["status"] == "completed"
+    assert "$1,303.8" in result["result"]
+
+
+async def test_spawn_explore_external_pause_is_not_self_wrap():
+    """An external cancellation remains paused while the live deadline is open."""
+    from datetime import timedelta
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    started = asyncio.Event()
+
+    async def fake_run_agent(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return {"status": "paused"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(seconds=5))),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
+    ):
+        task = asyncio.create_task(
+            spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research", model="m")
+        )
+        await started.wait()
+        task.cancel()
+        result = await task
+
+    assert result["status"] == "error"
+    assert result["error_reason"] == "paused"
+
+
+async def test_spawn_explore_self_wrap_without_evidence_fails():
+    """The same live deadline cannot turn an empty explore into success."""
+    from datetime import timedelta
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    async def fake_run_agent(**kwargs):
+        await asyncio.Event().wait()
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(milliseconds=50))),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a", user_id="u", goal="research Denver cost", model="m"
+        )
+
+    assert result["status"] == "error"
+    assert result["result"] == ""
+    assert result["error_reason"] == "explore completed without tool evidence"
+
+
+async def test_spawn_explore_demo_keeps_full_activity_budget():
+    """The live parent deadline does not truncate a demo explore."""
+    from datetime import timedelta
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    async def fake_run_agent(**kwargs):
+        await asyncio.sleep(0.06)
+        return {"status": "completed", "final_response": "Grounded demo result"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(milliseconds=50))),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a",
+            user_id="u",
+            goal="demo research",
+            model="m",
+            local_data_summary="Grounded local input",
+            oai_demo=True,
+        )
+
+    assert result["status"] == "completed"
+    assert result["result"] == "Grounded demo result"
+
+
 async def test_spawn_explore_agent_activity_unavailable_sources_still_completed():
     """Unavailable grep sources append a notice but do not force explore status=error."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -4083,6 +4500,59 @@ async def test_explore_fe_posts_are_ordered_within_one_tool_call():
         f"one chip's lifecycle was delivered out of order: {chip}. A slow "
         "IN_PROGRESS overtook its own ERROR, leaving an unreapable spinner."
     )
+
+
+async def test_explore_timeout_during_threshold_drain_preserves_fe_posts():
+    """A live deadline must wait for posts already removed from the pending queue."""
+    from datetime import timedelta
+
+    from domains.spawn_agent import service
+
+    delivered: list[str] = []
+    threshold_reached = asyncio.Event()
+    release_posts = asyncio.Event()
+
+    async def slow_save(**kwargs):
+        await release_posts.wait()
+        delivered.append(kwargs["tool_call_id"])
+
+    async def fake_run_agent(**kwargs):
+        post_message = kwargs["post_message"]
+        for index in range(64):
+            if index == 63:
+                threshold_reached.set()
+            await post_message(
+                "Evidence",
+                "TOOL",
+                {"toolCallId": f"chip-{index}", "toolName": "grep", "toolStatus": "FINISHED"},
+            )
+        return {"status": "completed", "final_response": "ok", "tokens_in": 0, "tokens_out": 0}
+
+    async def release_after_deadline():
+        await threshold_reached.wait()
+        await asyncio.sleep(1.1)
+        release_posts.set()
+
+    release_task = asyncio.create_task(release_after_deadline())
+    try:
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("loop.run_agent.run_agent", new=fake_run_agent),
+            patch("domains.spawn_agent.service.save_explore_message", new=slow_save),
+            patch.object(service, "explore_limits_for_depth", return_value=(5, timedelta(seconds=1))),
+            patch.object(service, "LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0),
+        ):
+            await asyncio.wait_for(
+                service.spawn_explore_agent_activity(
+                    agent_id="agent-x", user_id="u", goal="g", model="m", task_id="task-explore"
+                ),
+                timeout=5,
+            )
+    finally:
+        release_task.cancel()
+        await asyncio.gather(release_task, return_exceptions=True)
+
+    assert len(delivered) == 64
 
 
 def test_three_sibling_explores_get_stable_isolated_cache_sequences():
@@ -4636,6 +5106,15 @@ async def run_all_tests():
         test_handler_explore_failed_result_fast_mode_without_evidence_errors,
     )
     await r.record_async(
+        "handler_explore_fast_mode_cold_stub_completion_finishes",
+        test_handler_explore_fast_mode_cold_stub_completion_finishes,
+    )
+    await r.record_async(
+        "handler_explore_live_empty_completion_still_errors",
+        test_handler_explore_live_empty_completion_still_errors,
+    )
+    r.record("user_facing_explore_result_keeps_prod_summaries", test_user_facing_explore_result_keeps_prod_summaries)
+    await r.record_async(
         "handler_explore_failed_result_forwards_error_reason",
         test_handler_explore_failed_result_forwards_error_reason,
     )
@@ -4643,10 +5122,18 @@ async def run_all_tests():
         "handler_explore_unavailable_sources_still_finished",
         test_handler_explore_unavailable_sources_still_finished,
     )
+    await r.record_async(
+        "handler_explore_synthesis_checkpoint_requires_grounded_prior_batch",
+        test_handler_explore_synthesis_checkpoint_requires_two_grounded_prior_results,
+    )
     await r.record_async("handler_explore_cancelled", test_handler_explore_cancelled_yields_error)
     await r.record_async(
         "handler_explore_timeout_finishes_with_heartbeat_wrap_up",
         test_handler_explore_timeout_finishes_with_heartbeat_wrap_up,
+    )
+    await r.record_async(
+        "handler_explore_timeout_finishes_with_heartbeat_tool_evidence",
+        test_handler_explore_timeout_finishes_with_heartbeat_tool_evidence,
     )
     await r.record_async(
         "explore_timeout_during_llm_call_keeps_tool_evidence",
@@ -4823,6 +5310,26 @@ async def run_all_tests():
     )
     await r.record_async("explore_activity_error", test_spawn_explore_agent_activity_error_status_returned)
     await r.record_async(
+        "explore_self_wrap_returns_collected_tool_evidence",
+        test_spawn_explore_self_wrap_returns_collected_tool_evidence,
+    )
+    await r.record_async(
+        "explore_self_wrap_recovers_paused_loop_result",
+        test_spawn_explore_self_wrap_recovers_paused_loop_result,
+    )
+    await r.record_async(
+        "explore_external_pause_is_not_self_wrap",
+        test_spawn_explore_external_pause_is_not_self_wrap,
+    )
+    await r.record_async(
+        "explore_self_wrap_without_evidence_fails",
+        test_spawn_explore_self_wrap_without_evidence_fails,
+    )
+    await r.record_async(
+        "explore_demo_keeps_full_activity_budget",
+        test_spawn_explore_demo_keeps_full_activity_budget,
+    )
+    await r.record_async(
         "explore_activity_unavailable_sources_still_completed",
         test_spawn_explore_agent_activity_unavailable_sources_still_completed,
     )
@@ -4855,6 +5362,10 @@ async def run_all_tests():
         "explore_tool_error_keeps_tool_name", test_explore_tool_error_persists_under_the_failing_tools_name
     )
     await r.record_async("explore_fe_posts_ordered_per_chip", test_explore_fe_posts_are_ordered_within_one_tool_call)
+    await r.record_async(
+        "explore_timeout_preserves_inflight_fe_posts",
+        test_explore_timeout_during_threshold_drain_preserves_fe_posts,
+    )
     r.record(
         "explore_cache_sequences_stable_and_isolated",
         test_three_sibling_explores_get_stable_isolated_cache_sequences,

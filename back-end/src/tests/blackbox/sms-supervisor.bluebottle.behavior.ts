@@ -229,6 +229,7 @@ export async function testBluebottle_groundedSpawnAllowed(prisma: PrismaClient) 
             arguments: {
               goal: 'Order a 16oz vanilla bean shakerato with oat milk plus a waffle for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco.',
               budget_dollars: 1,
+              start_phase: 'execute',
             },
           },
           { tool: 'send_user_message', arguments: { message: reply } },
@@ -314,6 +315,7 @@ export async function testBluebottle_sep12ParaphrasedDoubleAckBlocked(prisma: Pr
               arguments: {
                 goal: 'Place my usual Blue Bottle order (cold vanilla bean shakerato with oat or almond milk and a waffle) for pickup at Blue Bottle Coffee, Ferry Building. Use saved payment method and confirm when ready for pickup.',
                 budget_dollars: 1,
+                start_phase: 'execute',
               },
             },
           ],

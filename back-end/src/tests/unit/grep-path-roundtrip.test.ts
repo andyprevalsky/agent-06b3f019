@@ -19,6 +19,7 @@ import assert from 'node:assert/strict';
 import {
   buildAccountLabel,
   buildAgentNetworkPath,
+  buildAgentTrajectoryPath,
   buildDocumentPath,
   buildMessagePath,
   buildNetworkPath,
@@ -90,6 +91,31 @@ test('agent_network paths round-trip', () => {
     agentId: 'agent-abc',
     role: 'ASSISTANT',
     messageId: 'm-1',
+  });
+});
+
+test('agent_trajectories paths round-trip at every prefix', () => {
+  const rootMessage = buildAgentTrajectoryPath('root-1', 'root-1', 'TOOL', 'message-1');
+  assert.equal(rootMessage, 'agent_trajectories/root-1/TOOL/message-1');
+  assert.deepEqual(parseGrepPath(rootMessage), {
+    source: 'agent_trajectories',
+    rootAgentId: 'root-1',
+    agentId: 'root-1',
+    role: 'TOOL',
+    messageId: 'message-1',
+  });
+  const built = buildAgentTrajectoryPath('root-1', 'agent-2', 'TOOL', 'message-3');
+  assert.deepEqual(parseGrepPath(built), {
+    source: 'agent_trajectories',
+    rootAgentId: 'root-1',
+    agentId: 'agent-2',
+    role: 'TOOL',
+    messageId: 'message-3',
+  });
+  assert.deepEqual(parseGrepPath('agent_trajectories/root-1/agent-2'), {
+    source: 'agent_trajectories',
+    rootAgentId: 'root-1',
+    agentId: 'agent-2',
   });
 });
 

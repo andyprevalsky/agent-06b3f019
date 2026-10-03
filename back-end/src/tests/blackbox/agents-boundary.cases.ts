@@ -12,11 +12,16 @@ import {
   createAnonymousSession,
   createTestAgent,
   deleteTestAgent,
+  postAgentWithRetry,
   clearCaptures,
   readCaptures,
   sleep,
   randomUUID,
 } from './agents-blackbox-harness';
+import {
+  GITHUB_USER_REPOS_URL,
+  selectGithubRepoCreationCall,
+} from '../helpers/github-repo-capture';
 
 // ---------------------------------------------------------------------------
 // Boundary capture tests (run sequentially — shared capture buffer)
@@ -104,31 +109,35 @@ export async function testBoundary_createAgentGeoip(): Promise<void> {
 
 export async function testBoundary_createAgentGithubRepo(): Promise<void> {
   const session = await createAnonymousSession('boundary-github');
-  await clearCaptures();
+  // Scope to this request. Parallel domains (auto-RCA) write /dispatches into
+  // the shared buffer; taking githubCalls[0] then fails with
+  // "Expected GitHub repos URL, got .../dispatches".
+  const captureToken = `github-repo-${randomUUID()}`;
+  const createRes = await postAgentWithRetry(
+    { ...apiKeyHeaders(session.user.id), 'X-Capture-Token': captureToken },
+    { goal: 'Boundary github test' }
+  );
+  if (createRes.status === 201) {
+    const body = createRes.data as { agent_id: string };
+    trackedAgentIds.add(body.agent_id);
+  } else {
+    assertStatus(createRes.status, 201, createRes.data);
+  }
 
-  // Chat mode root agent triggers fire-and-forget GitHub repo creation
-  await createTestAgent(session.user.id, 'Boundary github test');
-
-  // Wait longer for fire-and-forget GitHub call
   await sleep(3000);
-  const calls = await readCaptures();
-
-  // Filter for GitHub API call
-  const githubCalls = calls.filter((c) => c.url.includes('api.github.com'));
-  // May be 0 if GITHUB_TOKEN is not configured
-  if (githubCalls.length > 0) {
-    const call = githubCalls[0];
-    assert(
-      call.url === 'https://api.github.com/user/repos',
-      `Expected GitHub repos URL, got ${call.url}`
-    );
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?token=${captureToken}`);
+  assertStatus(capturesRes.status, 200, capturesRes.data);
+  const calls = (capturesRes.data as { captures: CapturedCall[] }).captures;
+  const call = selectGithubRepoCreationCall(calls);
+  // May be absent if GITHUB_TOKEN is not configured
+  if (call) {
+    assert(call.url === GITHUB_USER_REPOS_URL, `Expected GitHub repos URL, got ${call.url}`);
     assert(call.method === 'POST', `Expected POST for GitHub, got ${call.method}`);
     assert(
       call.requestHeaders['accept']?.includes('application/vnd.github') ||
         call.requestHeaders['Accept']?.includes('application/vnd.github'),
       'Expected GitHub Accept header'
     );
-    // Verify request body has repo name
     if (call.requestBody) {
       const body = JSON.parse(call.requestBody);
       assert(

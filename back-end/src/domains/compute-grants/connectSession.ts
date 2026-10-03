@@ -114,6 +114,19 @@ function createPendingConnect(
   };
 }
 
+async function releaseFailedSetup(entry: PendingConnect, provider: string, connectId: string) {
+  if (entry.release === null) return;
+  try {
+    await entry.release();
+  } catch (releaseError) {
+    log.warn('connect.setup_release_failed', {
+      provider,
+      connect_id: connectId,
+      error: releaseError instanceof Error ? releaseError.message : String(releaseError),
+    });
+  }
+}
+
 export async function startConnectSession(
   userId: string,
   provider: string,
@@ -201,7 +214,7 @@ export async function startConnectSession(
       log.warn('connect.setup_failed', { provider, connect_id: connectId, error: message });
       entry.failed = message;
       // Never leave a browser billing because setup failed.
-      if (entry.release !== null) await entry.release();
+      await releaseFailedSetup(entry, provider, connectId);
     }
   })();
 

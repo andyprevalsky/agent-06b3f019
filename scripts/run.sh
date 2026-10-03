@@ -436,13 +436,13 @@ is_current_process_family() {
 
 process_cwd_in_this_worktree() {
     local pid=$1
-    local cwd root
+    local cwd physical_worktree
     cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
-    # macOS reports /private/var/... in lsof while $PWD may be /var/....
-    # Compare physical paths so workers without a worktree path in argv are found.
-    root=$(pwd -P)
+    # macOS reports /var as /private/var in lsof, while $PWD keeps the logical
+    # path used to start the process. Compare both spellings before reaping it.
+    physical_worktree=$(pwd -P)
     case "$cwd" in
-        "$root"|"$root"/*) return 0 ;;
+        "$PWD"|"$PWD"/*|"$physical_worktree"|"$physical_worktree"/*) return 0 ;;
     esac
     return 1
 }
@@ -2337,6 +2337,20 @@ kill_tree_hard() {
     kill -9 "$pid" 2>/dev/null || true
 }
 
+# Each isolated benchmark run bundles its own ~220MB frontend keyed by run id and
+# nothing reads it after the run; 36 leaked bundles filled the host disk. Shared
+# (port-keyed) bundles are reused across restarts and stay.
+remove_isolated_frontend_build() {
+    [ "$BENCHMARK_ISOLATED_RUN" = "true" ] || return 0
+    [ -n "${FRONTEND_DIST_DIR:-}" ] || return 0
+    case "$(basename "$FRONTEND_DIST_DIR")" in
+        shared_*) return 0 ;;
+    esac
+    case "$FRONTEND_DIST_DIR" in
+        */.context/frontend-builds/*) rm -rf "$FRONTEND_DIST_DIR" ;;
+    esac
+}
+
 cleanup() {
     if $SHUTTING_DOWN; then return; fi
     SHUTTING_DOWN=true
@@ -2368,6 +2382,7 @@ cleanup() {
     write_services_manifest || true
     [ -n "$NGROK_CONFIG_FILE" ] && rm -f "$NGROK_CONFIG_FILE"
     [ -n "$FAIL_DIR" ] && rm -rf "$FAIL_DIR"
+    remove_isolated_frontend_build
     wait 2>/dev/null
 }
 trap 'release_seed_lock_if_held; cleanup' EXIT
