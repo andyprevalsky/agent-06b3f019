@@ -444,6 +444,13 @@ after execution and resource release, and does not block the next slice.
 Publishers must retire before final cleanup. Keep the normal 7,200-second
 backstop and the requested temporary 300-second execution backstop unchanged.
 These requirements do not change benchmark grading or deploy qualification.
+Owned cloud finalization keeps archive/readiness/publication failures in
+`cloud_cleanup_evidence.warnings` and preserves the evaluator's terminal verdict.
+A lost pause acknowledgment can likewise recover through the later exact
+sealed-tree, provider and payment proof. Missing execution results or ownership,
+unsealed trees and unresolved external resources remain hard cleanup failures.
+The existing benchmark deploy domain covers warning-only completion, late logs,
+missing results and the provider/payment/ownership failure controls.
 Benchmark request identity is scoped per task; exact resource cleanup temporarily
 overrides it with the persisted root owner. Preserve that precedence and restore
 both scopes on cancellation. The existing cleanup and benchmark identity tests

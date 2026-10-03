@@ -1607,9 +1607,7 @@ def _validate_payment_lifecycle(task: BenchmarkTask, data: dict) -> Optional[str
         # identity matcher so parenthetical environment suffixes do not fail a
         # successful purchase lifecycle.
         if path.endswith(".merchant"):
-            identity_error = _validate_payment_merchant_identity(
-                expected_value, actual_value, {}, None
-            )
+            identity_error = _validate_payment_merchant_identity(expected_value, actual_value, {}, None)
             if identity_error is None:
                 return None
             return f"{path} mismatch: expected {expected_value!r}, got {actual_value!r}"
@@ -1634,7 +1632,7 @@ def _codex_harness_credential_skip_result(task: BenchmarkTask) -> TaskResult:
         passed=False,
         agent_id="",
         status="SKIPPED",
-        benchmark_status='SKIPPED',
+        benchmark_status="SKIPPED",
         progress_score=0,
         duration_seconds=0,
         cost_cents=0,
@@ -1650,7 +1648,7 @@ def _claude_code_credential_skip_result(task: BenchmarkTask) -> TaskResult:
         passed=False,
         agent_id="",
         status="SKIPPED",
-        benchmark_status='SKIPPED',
+        benchmark_status="SKIPPED",
         progress_score=0,
         duration_seconds=0,
         cost_cents=0,
@@ -1953,7 +1951,9 @@ _task_run_user_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVa
 )
 
 
-_owned_cleanup_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("owned_cleanup_user_id", default=None)
+_owned_cleanup_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "owned_cleanup_user_id", default=None
+)
 
 
 def _current_benchmark_user_id() -> str:
@@ -3956,6 +3956,7 @@ async def poll_agent(
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None,
 ) -> Tuple[dict, int, int, Optional[str]]:
     """Bound polling for callers that have already prepared an agent."""
+
     async def execute(snapshot: dict):
         return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
 
@@ -3976,9 +3977,7 @@ async def _run_with_agent_execution_backstop(
     deadline = started_at + seconds
     execution = asyncio.create_task(execute(snapshot))
     try:
-        finished, _ = await asyncio.wait(
-            {execution}, timeout=max(0.0, deadline - asyncio.get_running_loop().time())
-        )
+        finished, _ = await asyncio.wait({execution}, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
         if finished:
             return await execution
         print(f"    ⏰ Agent execution deadline reached after {seconds}s; cancelling poll")
@@ -3992,9 +3991,7 @@ async def _run_with_agent_execution_backstop(
             if finished:
                 break
         if not execution.done():
-            raise RuntimeError(
-                f"Agent execution did not stop after {seconds}s wall-clock backstop"
-            )
+            raise RuntimeError(f"Agent execution did not stop after {seconds}s wall-clock backstop")
         await asyncio.gather(execution, return_exceptions=True)
     except BaseException:
         if not execution.done():
@@ -4181,7 +4178,9 @@ async def _poll_agent(
                 data["_benchmark"]["plan"] = accepted_plan
                 if status not in TERMINAL_STATUSES and not await pause_agent(base_url, agent_id):
                     print(f"    ⚠ Could not pause plan-only agent {agent_id[:12]} after its plan was accepted")
-                print(f"    ✅ Plan accepted ({len(accepted_plan.get('tasks') or [])} tasks) — plan-only task stops here")
+                print(
+                    f"    ✅ Plan accepted ({len(accepted_plan.get('tasks') or [])} tasks) — plan-only task stops here"
+                )
                 return data, approvals_triggered, approvals_resolved, None
 
         if step_budget and status not in TERMINAL_STATUSES:
@@ -4688,7 +4687,9 @@ async def _poll_agent(
                                     )
                                 except Exception as checkout_error:
                                     return (
-                                        data, approvals_triggered, approvals_resolved,
+                                        data,
+                                        approvals_triggered,
+                                        approvals_resolved,
                                         f"Subscription Checkout failed: {checkout_error}",
                                     )
                                 subscription_checkout_evidence = checkout
@@ -4801,7 +4802,12 @@ async def _poll_agent(
                                 approvals_resolved += 1
                                 print(f"    ✅ Auto-approved attention request {req_id[:8]}")
                         elif task.complete_subscription_checkout and observed_kind == "gate:subscription":
-                            return data, approvals_triggered, approvals_resolved, "Subscription gate reached generic approval handler"
+                            return (
+                                data,
+                                approvals_triggered,
+                                approvals_resolved,
+                                "Subscription gate reached generic approval handler",
+                            )
                         elif task.approval_handling == "prompt_user":
                             if req_id:
                                 question = req.get("question", req.get("message", "(no details)"))
@@ -5221,7 +5227,11 @@ def evaluate_task(
         checkout = benchmark_state.get("subscription_checkout") or {}
         if benchmark_state.get("expected_gate_seen") is not True:
             return False, "Expected subscription gate before Checkout"
-        if checkout.get("status") != "complete" or checkout.get("payment_status") != "paid" or checkout.get("webhook_delivered") is not True:
+        if (
+            checkout.get("status") != "complete"
+            or checkout.get("payment_status") != "paid"
+            or checkout.get("webhook_delivered") is not True
+        ):
             return False, "Expected paid Stripe test Checkout and local webhook delivery"
 
     if task.require_attention_order:
@@ -5575,21 +5585,37 @@ def _agent_messages_ready_for_browser_hub_archive(
 
 
 def _agent_messages_ready_for_durable_browser_evidence(
-    messages: Optional[List[dict]], *, zero_session_task_ids: set[str] | None = None,
+    messages: Optional[List[dict]],
+    *,
+    zero_session_task_ids: set[str] | None = None,
 ) -> bool:
     """Require terminal and attached recording for every browser, including no-row failures."""
     states: dict[str, dict[str, bool]] = {}
-    lifecycle = {"browser", "session_init", "session_started", "task_started", "recording", "network_recording", "task_complete"}
+    lifecycle = {
+        "browser",
+        "session_init",
+        "session_started",
+        "task_started",
+        "recording",
+        "network_recording",
+        "task_complete",
+    }
     for row in extract_message_transcript({"messages": messages or []}):
         meta = row.get("metadata")
         if not isinstance(meta, dict) or not isinstance(meta.get("task_id"), str) or not meta["task_id"]:
             continue
         action = meta.get("action_type")
-        browser = meta.get("toolName") == "spawn_browser_agent" or meta.get("agentType") == "browser" or action in {"browser", "recording", "network_recording"}
+        browser = (
+            meta.get("toolName") == "spawn_browser_agent"
+            or meta.get("agentType") == "browser"
+            or action in {"browser", "recording", "network_recording"}
+        )
         code = meta.get("toolName") == "spawn_claude_code_agent" or meta.get("agentType") == "code"
         if not browser and not code and action not in lifecycle:
             continue
-        state = states.setdefault(meta["task_id"], {"browser": False, "code": False, "complete": False, "recording": False})
+        state = states.setdefault(
+            meta["task_id"], {"browser": False, "code": False, "complete": False, "recording": False}
+        )
         state["browser"] |= browser
         state["code"] |= code
         state["complete"] |= action == "task_complete"
@@ -5638,8 +5664,13 @@ async def _refresh_agent_after_pause_for_browser_terminal(
 
 
 async def _refresh_browser_archive_snapshot(
-    base_url: str, agent_id: str, data: dict, logs: dict,
-    *, expected_agent_ids: set[str] | None = None, timeout_seconds: float = 60.0,
+    base_url: str,
+    agent_id: str,
+    data: dict,
+    logs: dict,
+    *,
+    expected_agent_ids: set[str] | None = None,
+    timeout_seconds: float = 60.0,
     ownership_before: dict | None = None,
 ) -> dict:
     """Refresh the entire tree at the final archive boundary; incomplete evidence fails closed."""
@@ -5648,7 +5679,9 @@ async def _refresh_browser_archive_snapshot(
         while True:
             observation = {
                 "observed_at": datetime.now(timezone.utc).isoformat(),
-                "ready": False, "phase": "tree_fetch", "completed_agent_ids": [],
+                "ready": False,
+                "phase": "tree_fetch",
+                "completed_agent_ids": [],
             }
             logs["browser_archive_observation"] = observation
             tree_agents = await get_agent_tree(base_url, agent_id)
@@ -5672,7 +5705,8 @@ async def _refresh_browser_archive_snapshot(
             snapshots = dict(zip(sorted(ids), await asyncio.gather(*(fetch_snapshot(aid) for aid in sorted(ids)))))
             logs["browser_archive_observation"] = {
                 "observed_at": datetime.now(timezone.utc).isoformat(),
-                "ready": False, "phase": "browser_readiness",
+                "ready": False,
+                "phase": "browser_readiness",
                 "snapshots": snapshots,
             }
             latest = snapshots[agent_id]
@@ -5687,8 +5721,7 @@ async def _refresh_browser_archive_snapshot(
                 from benchmarks.browser_zero_allocation import cancelled_before_session_task_ids
 
                 candidates_by_agent = {
-                    aid: cancelled_before_session_task_ids(value.get("messages"))
-                    for aid, value in snapshots.items()
+                    aid: cancelled_before_session_task_ids(value.get("messages")) for aid, value in snapshots.items()
                 }
                 if any(candidates_by_agent.values()):
                     current = await asyncio.to_thread(cloud_batch_cleanup.exact_root_sessions, base_url, agent_id)
@@ -5696,11 +5729,15 @@ async def _refresh_browser_archive_snapshot(
                         zero_tasks_by_agent = candidates_by_agent
             if all(
                 _agent_messages_ready_for_durable_browser_evidence(
-                    value.get("messages"), zero_session_task_ids=zero_tasks_by_agent.get(aid),
-                ) for aid, value in snapshots.items()
+                    value.get("messages"),
+                    zero_session_task_ids=zero_tasks_by_agent.get(aid),
+                )
+                for aid, value in snapshots.items()
             ):
+
                 async def cached_get(aid):
                     return snapshots[aid]
+
                 tree = canonicalize_agent_tree(await collect_tree_messages(agent_id, tree_agents, cached_get))
                 if set(tree) != ids:
                     raise RuntimeError("archive tree transcript capture was incomplete")
@@ -5711,7 +5748,9 @@ async def _refresh_browser_archive_snapshot(
                     logs["browser_zero_allocation_receipt"] = {
                         "root_agent_id": agent_id,
                         "task_ids": sorted({task_id for tasks in zero_tasks_by_agent.values() for task_id in tasks}),
-                        "task_ids_by_agent": {aid: sorted(tasks) for aid, tasks in zero_tasks_by_agent.items() if tasks},
+                        "task_ids_by_agent": {
+                            aid: sorted(tasks) for aid, tasks in zero_tasks_by_agent.items() if tasks
+                        },
                         "tree_agent_ids": sorted(ids),
                         "before_browser_sessions": [],
                         "archive_browser_sessions": [],
@@ -5722,13 +5761,17 @@ async def _refresh_browser_archive_snapshot(
                 raise RuntimeError("browser evidence did not become terminal with attached recordings before archive")
             await asyncio.sleep(min(2, max(0, deadline - time.monotonic())))
 
+
 async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: dict) -> dict:
     """Drain admitted purchases through canonical compensation before DB teardown."""
     attempted = set()
     async with asyncio.timeout(PAYMENT_CLEANUP_TIMEOUT_SECONDS):
         while True:
             snapshot = await asyncio.to_thread(
-                cloud_batch_cleanup.exact_root_sessions, base_url, root_id, require_deleted=True,
+                cloud_batch_cleanup.exact_root_sessions,
+                base_url,
+                root_id,
+                require_deleted=True,
             )
             evidence["payment_snapshot"] = snapshot
             pending = cloud_batch_cleanup.pending_root_payments(snapshot)
@@ -5746,7 +5789,9 @@ async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: d
                 # complete this contract, including for non-abandonment tasks.
                 try:
                     await _start_payment_abandonment_with_recovery(
-                        base_url, agent_id, abandon_payment=abandon_test_payment,
+                        base_url,
+                        agent_id,
+                        abandon_payment=abandon_test_payment,
                     )
                 except Exception as error:
                     errors.append(f"{agent_id}: {str(error) or type(error).__name__}")
@@ -5757,7 +5802,12 @@ async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: d
 
 
 async def _wait_for_owned_root_seal(
-    base_url: str, root_id: str, before: dict, evidence: dict, *, timeout_seconds: float = 180.0,
+    base_url: str,
+    root_id: str,
+    before: dict,
+    evidence: dict,
+    *,
+    timeout_seconds: float = 180.0,
 ) -> dict:
     """A disconnected DELETE may still be sealing descendants in the backend."""
     try:
@@ -5773,11 +5823,15 @@ async def _wait_for_owned_root_seal(
                 ):
                     raise RuntimeError("owned root identity or sealing evidence changed after DELETE")
                 evidence["delete_seal_observation"] = {
-                    "observed_at": datetime.now(timezone.utc).isoformat(), "snapshot": snapshot,
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                    "snapshot": snapshot,
                 }
                 if snapshot.get("root_deleted") is True and unsealed == []:
                     return await asyncio.to_thread(
-                        cloud_batch_cleanup.exact_root_sessions, base_url, root_id, require_deleted=True,
+                        cloud_batch_cleanup.exact_root_sessions,
+                        base_url,
+                        root_id,
+                        require_deleted=True,
                     )
                 await asyncio.sleep(2)
     except TimeoutError as error:
@@ -5802,16 +5856,19 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
             # prerequisite/task roots. Preserve that evaluator result while
             # finalizing each root's own archive and external ownership.
             try:
-                valid_roots = (len(root_ids) == len(set(root_ids)) and all(
+                valid_roots = len(root_ids) == len(set(root_ids)) and all(
                     str(uuid.UUID(aid)) == aid for aid in root_ids
-                ))
+                )
             except ValueError:
                 valid_roots = False
             if not valid_roots:
                 failures.append(f"{result.name}: malformed composite root identity")
                 continue
-            nested = [logs for logs in (result.logs or {}).values()
-                      if isinstance(logs, dict) and isinstance(logs.get("worker_logs"), list)]
+            nested = [
+                logs
+                for logs in (result.logs or {}).values()
+                if isinstance(logs, dict) and isinstance(logs.get("worker_logs"), list)
+            ]
             if len(nested) != len(root_ids):
                 failures.append(f"{result.name}: composite root evidence is incomplete")
                 continue
@@ -5847,8 +5904,10 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
     # Keep every other missing root fail-closed: an interrupted create may
     # still own sessions even when its HTTP response never reached us.
     rootless_sms = [
-        r for r in results
-        if not r.agent_id and r.status != "SKIPPED"
+        r
+        for r in results
+        if not r.agent_id
+        and r.status != "SKIPPED"
         and isinstance(getattr(r, "stop_metadata", None), dict)
         and r.stop_metadata.get("runner") == "sms"
         and r.stop_metadata.get("owned_cleanup_verified") is True
@@ -5860,6 +5919,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
             raise RuntimeError("; ".join(failures) or "owned cloud execution has no proven root allocation")
         return
     snapshots = {}
+    preparation_warnings = {}
     for aid in sorted(owned):
         try:
             # Task-scoped fixture identities have already been restored. Bind
@@ -5874,15 +5934,25 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
             finally:
                 _owned_cleanup_user_id.reset(identity)
         except Exception as error:
-            failures.append(f"{aid}: {str(error) or type(error).__name__}")
+            detail = str(error) or type(error).__name__
+            if aid in snapshots:
+                # A lost pause acknowledgment can be recovered by the exact
+                # sealed-tree/provider/payment proof below.
+                preparation_warnings[aid] = [f"pause: {detail}"]
+            else:
+                failures.append(f"{aid}: {detail}")
     for aid in sorted(owned):
         result = by_id.get(aid)
         before = snapshots.get(aid)
         identity = _owned_cleanup_user_id.set(before["root_user_id"]) if before is not None else None
         try:
             logs = stage_logs.get(aid, {})
-            evidence = {"root_agent_id": aid, "errors": []}
+            evidence = {"root_agent_id": aid, "errors": [], "warnings": preparation_warnings.get(aid, [])}
             logs["cloud_cleanup_evidence"] = evidence
+            if result is None:
+                detail = "owned cloud root did not produce a task result"
+                evidence["errors"].append(f"execution: {detail}")
+                failures.append(f"{aid}: {detail}")
             try:
                 if before is None:
                     raise RuntimeError("exact provider ownership was not established")
@@ -5893,11 +5963,12 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 # bound makes late recording messages return 404. Keep the
                 # root alive for a bounded, session-scaled archive wait. The
                 # refresh returns immediately when all recordings are ready.
-                archive_timeout_seconds = min(
-                    600.0, 60.0 + 30.0 * len(before["browser_sessions"])
-                )
+                archive_timeout_seconds = min(600.0, 60.0 + 30.0 * len(before["browser_sessions"]))
                 data = await _refresh_browser_archive_snapshot(
-                    base_url, aid, {}, logs,
+                    base_url,
+                    aid,
+                    {},
+                    logs,
                     expected_agent_ids=set(before["tree_agent_ids"]),
                     timeout_seconds=archive_timeout_seconds,
                     ownership_before=before,
@@ -5907,8 +5978,14 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 if aid in primary_ids and "," not in result.agent_id:
                     result.message_count = len(data.get("messages") or [])
                 archive_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
-                    base_url, aid, result.name, force=True, owned_batch_final=True, benchmark_passed=result.passed,
-                    benchmark_status=result.benchmark_status, failure_reason=result.failure_reason,
+                    base_url,
+                    aid,
+                    result.name,
+                    force=True,
+                    owned_batch_final=True,
+                    benchmark_passed=result.passed,
+                    benchmark_status=result.benchmark_status,
+                    failure_reason=result.failure_reason,
                 )
                 logs["cloud_archive_manifest_ref"] = archive_ref
                 logs["cloud_world_model_fidelity"] = world_model_fidelity
@@ -5919,12 +5996,10 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                     raise RuntimeError("owned cloud root final archive was not confirmed")
             except Exception as error:
                 detail = str(error) or type(error).__name__
-                evidence["errors"].append(f"archive: {detail}")
-                failures.append(f"{aid}: {detail}")
-                if result is not None:
-                    result.passed = False
-                    result.benchmark_status = "ERROR"
-                    result.failure_reason = f"Cloud evidence finalization failed: {detail}"
+                # Archive/publication is diagnostic. Preserve the evaluator's
+                # terminal outcome while still requiring exact resource release.
+                evidence["warnings"].append(f"archive: {detail}")
+                print(f"    Cloud archive warning: {aid}: {detail}")
             finally:
                 # Even failed evidence must release its exact resources. A DELETE
                 # response alone is insufficient because backend cleanup is best effort.
@@ -5940,7 +6015,11 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         # authority is granted until the exact DB fence completes.
                         await _wait_for_owned_root_seal(base_url, aid, before, evidence)
                     receipt = await asyncio.to_thread(
-                        cloud_batch_cleanup.close_exact_root_sessions, base_url, aid, before, evidence=evidence,
+                        cloud_batch_cleanup.close_exact_root_sessions,
+                        base_url,
+                        aid,
+                        before,
+                        evidence=evidence,
                     )
                     logs["cloud_provider_cleanup"] = receipt
                     print(f"    Verified cloud root provider cleanup: {aid}")
@@ -5965,14 +6044,19 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         result.benchmark_status = "ERROR"
                         result.failure_reason = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
                 if result is not None:
-                    if evidence["errors"]:
+                    if evidence["errors"] or evidence["warnings"]:
                         try:
                             cleanup_worker_logs = await asyncio.to_thread(fetch_local_worker_logs, aid, newest=True)
                             # Preserve the prior capture alongside the newest 20k
                             # diagnostics (at most 40k for two capped captures).
-                            logs["worker_logs"] = list(dict.fromkeys([
-                                *(logs.get("worker_logs") or []), *cleanup_worker_logs,
-                            ]))
+                            logs["worker_logs"] = list(
+                                dict.fromkeys(
+                                    [
+                                        *(logs.get("worker_logs") or []),
+                                        *cleanup_worker_logs,
+                                    ]
+                                )
+                            )
                             evidence["worker_logs_observed_at"] = datetime.now(timezone.utc).isoformat()
                         except Exception as capture_error:
                             evidence["worker_logs_capture_error"] = str(capture_error) or type(capture_error).__name__
@@ -7969,13 +8053,26 @@ async def _apply_memory_fixtures(task: "BenchmarkTask", base_url: str) -> list[d
         for name in names:
             fixture = load_fixture(name)
             for row in fixture.get("rows", []):
-                body = {k: v for k, v in row.items() if k in {
-                    "goal", "benchmark_task_name", "passed", "root_status", "world_model_mode",
-                    "agent_created_at", "critical_path", "compressor_version",
-                }}
+                body = {
+                    k: v
+                    for k, v in row.items()
+                    if k
+                    in {
+                        "goal",
+                        "benchmark_task_name",
+                        "passed",
+                        "root_status",
+                        "world_model_mode",
+                        "agent_created_at",
+                        "critical_path",
+                        "compressor_version",
+                    }
+                }
                 resp = await client.put(f"{base_url}/api/planner-memory/{row['id']}", headers=headers, json=body)
                 if resp.status_code != 200:
-                    raise RuntimeError(f"memory fixture {name}: upsert {row['id']} failed {resp.status_code} {resp.text[:200]}")
+                    raise RuntimeError(
+                        f"memory fixture {name}: upsert {row['id']} failed {resp.status_code} {resp.text[:200]}"
+                    )
             applied.append({"fixture": name, "rows": len(fixture.get("rows", []))})
             print(f"    🧠 memory fixture {name}: {len(fixture.get('rows', []))} row(s) loaded")
     return applied
@@ -9203,7 +9300,9 @@ async def _run_auth_bundle_biometrics_gate(
     gate_task = get_task_by_name(BIOMETRICS_WEBDECOY_TASK_NAME)
     print("    🧬 Auth bundle biometrics gate: WebDecoy FCaptcha score must be 0.00")
     return await run_single_task(
-        base_url, gate_task, keep_failed_agents=keep_failed_agents,
+        base_url,
+        gate_task,
+        keep_failed_agents=keep_failed_agents,
         on_agent_created=on_agent_created,
     )
 
@@ -9237,7 +9336,7 @@ async def run_minted_agent_account_task(
             passed=False,
             agent_id="",
             status="SKIPPED",
-            benchmark_status='SKIPPED',
+            benchmark_status="SKIPPED",
             progress_score=0,
             duration_seconds=0,
             cost_cents=0,
@@ -9375,7 +9474,9 @@ async def run_minted_agent_account_task(
         os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "true"
         try:
             post_result = await run_single_task(
-                base_url, post_task, keep_failed_agents=keep_failed_agents,
+                base_url,
+                post_task,
+                keep_failed_agents=keep_failed_agents,
                 on_agent_created=remember_owned_root,
             )
         finally:
@@ -9474,7 +9575,9 @@ async def run_minted_agent_account_task(
         os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "false"
         try:
             signup_result = await run_single_task(
-                base_url, signup_task, keep_failed_agents=keep_failed_agents,
+                base_url,
+                signup_task,
+                keep_failed_agents=keep_failed_agents,
                 on_agent_created=remember_owned_root,
             )
         finally:
@@ -9564,7 +9667,9 @@ async def run_minted_agent_account_task(
             os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "true"
             try:
                 post_result = await run_single_task(
-                    base_url, post_task, keep_failed_agents=keep_failed_agents,
+                    base_url,
+                    post_task,
+                    keep_failed_agents=keep_failed_agents,
                     on_agent_created=remember_owned_root,
                 )
             finally:
@@ -9734,7 +9839,9 @@ async def run_minted_agent_account_task(
         os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "true"
         try:
             booking_result = await run_single_task(
-                base_url, booking_task, keep_failed_agents=keep_failed_agents,
+                base_url,
+                booking_task,
+                keep_failed_agents=keep_failed_agents,
                 on_agent_created=remember_owned_root,
             )
         finally:
@@ -10900,9 +11007,7 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
     if browser_counts:
         session_reached_ids = _browser_session_reached_ids(messages)
         session_reached_roots = {
-            find(("browser", instance_id))
-            for instance_id in session_reached_ids
-            if ("browser", instance_id) in parents
+            find(("browser", instance_id)) for instance_id in session_reached_ids if ("browser", instance_id) in parents
         }
         has_live_browser = any(
             actual > 0 or find(("browser", instance_id)) in session_reached_roots
@@ -12100,7 +12205,11 @@ def _run_declared_static_check(
             continue
         if check_type == "subscription_checkout_completed":
             checkout = benchmark_state.get("subscription_checkout") or {}
-            if checkout.get("status") != "complete" or checkout.get("payment_status") != "paid" or checkout.get("webhook_delivered") is not True:
+            if (
+                checkout.get("status") != "complete"
+                or checkout.get("payment_status") != "paid"
+                or checkout.get("webhook_delivered") is not True
+            ):
                 return False, "Paid Stripe Checkout and local webhook delivery were not observed"
             continue
         if check_type == "expected_payment_lifecycle":
@@ -12722,7 +12831,9 @@ async def _run_single_task_as_run_user(
 
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
         result = await run_minted_agent_account_task(
-            base_url, task, keep_failed_agents,
+            base_url,
+            task,
+            keep_failed_agents,
             on_agent_created=on_agent_created,
         )
         # Composite tasks return a single evaluator record for multiple exact
@@ -13023,7 +13134,7 @@ async def _run_single_task_as_run_user(
                     passed=True,
                     agent_id=agent_id,
                     status=(data.get("agent") or {}).get("status", "PAUSED"),
-                    benchmark_status='PASSED',
+                    benchmark_status="PASSED",
                     progress_score=(data.get("agent") or {}).get("progress", 0),
                     duration_seconds=round(duration, 1),
                     cost_cents=0,
@@ -15026,7 +15137,7 @@ async def main_async(args):
                                     passed=False,
                                     agent_id="",
                                     status="ERROR",
-                                    benchmark_status='ERROR',
+                                    benchmark_status="ERROR",
                                     progress_score=0,
                                     duration_seconds=0,
                                     cost_cents=0,
@@ -15052,7 +15163,7 @@ async def main_async(args):
                                 passed=False,
                                 agent_id="",
                                 status="CANCELLED",
-                                benchmark_status='CANCELLED',
+                                benchmark_status="CANCELLED",
                                 progress_score=0,
                                 duration_seconds=0,
                                 cost_cents=0,

@@ -23,6 +23,7 @@ sources:
   - agent cee43eed-c9c5-4a64-95c1-9f409d3fd713
   - fleet run 20260928-131153-24839
   - agent 9a9283c8-b72e-4b0f-914e-f82f0dfd08af
+  - fleet run 20261003-022837-17288
 repro: agents/benchmarks/cloud_batch_cleanup_test.py
 status: open
 ---
@@ -138,6 +139,63 @@ per-agent requests, shared locks or live verification stage are added. Live
 fleet outcome proof remains outstanding.
 
 
+### 2026-10-03 recurrence: optional archive failure retained released ownership
+
+The current infrastructure campaign uses the user's revised contract: meaningful
+provider execution, a genuine terminal PASSED or FAILED outcome, and exact owned
+resource retirement within 1,800 seconds. Archive and publication failures are
+warnings. The previous finalizer still combined archive failures with mandatory
+cleanup failures, overwrote the task's FAILED verdict with ERROR, and raised before
+the guest completion acknowledgment. Its earlier regressions explicitly blessed
+that obsolete coupling, so the changed policy had not reached its owning boundary.
+
+Run `20261003-022837-17288` captured one archive TimeoutError at browser readiness.
+Its original exact cleanup evidence established a sealed/deleted root, one provider
+release receipt and zero purchases; no provider or payment failure was recorded.
+The finalizer nevertheless raised, the task result was not collected, and native
+observations showed all ten pool Machines started with ten claims and one owner
+registry. This was a real retained-resource failure, not a task verdict to waive.
+Canonical exact-owner recovery subsequently verified all ten stopped with their
+original volumes, zero claims/registry and all eleven recorded process owners
+absent. Recovery grants zero acceptance credit; original artifacts remain private.
+
+Archive searches used `owned-cloud evidence finalization TimeoutError cleanup
+acknowledgement` and `browser archive readiness root timed out recording terminal`.
+This is a recurrence at the same finalization/acknowledgment boundary. The deepest
+owned cause is a contract that gave optional artifact production authority over
+mandatory resource release. The repair removes that authority rather than raising
+a timeout or fabricating a recording, result or cleanup receipt.
+
+The permanent owning test
+`test_archive_warning_preserves_terminal_result_and_exact_cleanup` ran unchanged:
+`cd agents && source venv/bin/activate && python -m pytest
+benchmarks/cloud_batch_cleanup_test.py -q -k
+archive_warning_preserves_terminal_result_and_exact_cleanup`. Before the repair
+it failed with the finalizer's archive RuntimeError in 0.84 seconds; afterward it
+passed in 0.59 seconds. It covers timeout and missing manifest, PASSED and FAILED
+verdict/reason preservation, exact once-only resource callbacks and late logs.
+The existing cleanup suite's 32 cases passed in 1.89 seconds, retaining hard
+provider/payment/tree/owner/cancellation controls and adding a missing-result
+control. An old four-arm fixture also required its current `require_deleted`
+callback contract; its initial fixture failure is preserved and is not causal
+evidence. Both added cases are auto-registered by the existing benchmark deploy
+domain; there is no new live stage or large verification suite.
+
+The finalizer now records artifact failures separately as warnings, preserves
+terminal task grading and returns only after authoritative resource cleanup.
+A failed pause acknowledgment with an established exact snapshot can recover
+through the same later sealed-tree/provider/payment proof. Missing task results,
+unknown ownership, owner/session drift, unsealed descendants, unresolved payments
+and provider rejection remain hard. Cancellation still propagates and restores
+the exact owner context. At 10,000 agents the change adds no network request,
+shared admission lock or global inventory; it changes classification only within
+each existing owned finalization operation.
+
+The archive timeout's underlying readiness cause and the exact unchanged local
+benchmark outcome reproduction remain open. The causal owning test does not
+establish a new successful fleet slice or resolve the original live OOM. This
+case remains open pending actual outcome and campaign proof.
+
 ## Human feedback
 
 The user required completion without permission prompts, ten consecutive
@@ -146,6 +204,11 @@ normal large execution backstops around 120 minutes. This validation temporarily
 uses a five-minute execution limit. The limit does not replace recording or
 provider teardown checks. After completion, explain current deploy benchmark
 selection and a proposal for one global twenty-benchmark deploy budget.
+
+For this recurrence the user explicitly requested the practical terminal/result
+and exact-resource E2E gate, warning-only recovered/intermediate errors, no speed
+reviews, no unnecessary resets or reruns, and quick owning tests cemented in the
+existing deploy process without adding a massive verification suite.
 
 ## Reusable lesson
 
