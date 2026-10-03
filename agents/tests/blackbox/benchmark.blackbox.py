@@ -686,6 +686,8 @@ def test_boot_terminal_runtime_evidence_is_in_permanent_gate():
             suite + "::test_boot_terminal_runtime_evidence_admission_precedes_guest_start",
             str(repo_root / "agents/benchmarks/cloudbench_runtime_retention_test.py"),
             str(repo_root / "agents/benchmarks/cloudbench_worker_evidence_test.py"),
+            str(repo_root / "agents/benchmarks/run_benchmark_task_selection_test.py")
+            + "::test_parallel_benchmark_identities_keep_approval_headers_task_scoped",
         ],
     ]
     commands = [[sys.executable, "-m", "pytest", "-q", *targets] for targets in groups]

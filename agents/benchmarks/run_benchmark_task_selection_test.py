@@ -1,9 +1,9 @@
 import asyncio
 import multiprocessing
 import os
+import tempfile
 from argparse import Namespace
 from pathlib import Path
-import tempfile
 
 import pytest
 
@@ -193,21 +193,17 @@ def test_parallel_benchmark_identities_keep_approval_headers_task_scoped(monkeyp
         sibling_done = asyncio.Event()
 
         async def payment():
-            token = rb._task_benchmark_user_id.set(payment_user)
-            try:
+            with rb._benchmark_run_user_scope(payment_user):
                 payment_ready.set()
                 await sibling_done.wait()
                 return (await rb._api_headers())["X-User-Id"]
-            finally:
-                rb._task_benchmark_user_id.reset(token)
 
         async def sibling():
             await payment_ready.wait()
-            token = rb._task_benchmark_user_id.set(sibling_user)
             try:
-                user_id = (await rb._api_headers())["X-User-Id"]
+                with rb._benchmark_run_user_scope(sibling_user):
+                    user_id = (await rb._api_headers())["X-User-Id"]
             finally:
-                rb._task_benchmark_user_id.reset(token)
                 sibling_done.set()
             return user_id
 

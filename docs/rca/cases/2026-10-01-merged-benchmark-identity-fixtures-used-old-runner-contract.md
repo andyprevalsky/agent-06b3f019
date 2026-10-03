@@ -82,3 +82,25 @@ controls, and the cleanup cancellation fixture. These controls already run in
 the canonical `/deploy` agents coverage gate; no additional suite was added.
 The original failed launch remains archived. This merge seam result does not
 claim a new fleet pass or resolve any unrelated latency cause.
+
+## October 3 integration recurrence: task identity scope
+
+The next pinned-main integration added a task-selection test that accessed
+`_task_benchmark_user_id`, absent from the retained runner. The affected checks
+passed workflow, DAG and error-utils, then stopped with 36 pytest passes and
+this `AttributeError`, before benchmark coverage or its tail ran. Archive
+searches were `_task_benchmark_user_id AttributeError` and `benchmark identity
+context fixture`; the latter identified this fixture-contract recurrence.
+
+Use the runner's existing `_benchmark_run_user_scope` for both siblings instead
+of reaching into an alternate implementation's context variable. Preserve the
+event ordering, both returned identities and the no-environment-mutation
+assertion. The same isolated selector and environment failed in 2.077 seconds
+before the fixture correction and passed in 1.518 seconds afterward. Only the
+fixture changed; production identity precedence and cleanup remain unchanged.
+The corrected selector is registered in the existing benchmark blackbox's owned
+pytest group, alongside the existing test through real `run_single_task` calls.
+It adds no new stage or subprocess and preserves the group's 60-second guard.
+Private evidence is under
+`.context/acceptance/proof118-task-identity-rca/`; the original failed affected
+aggregate remains failed, and subsequent coverage completion is separate.
