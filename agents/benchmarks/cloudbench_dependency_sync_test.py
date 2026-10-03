@@ -6905,11 +6905,17 @@ FLY() {{
       mv "$VOLUMES.tmp" "$VOLUMES"
       return 0 ;;
     "volumes list")
-      python3 - "$VOLUMES" <<'PY'
-import json
-import sys
-print(json.dumps([{{"id": line.strip()}} for line in open(sys.argv[1]) if line.strip()]))
-PY
+      # Keep the fake provider in-process: launching Python on every poll can
+      # exhaust this test's 10-second subprocess bound on a shared deploy host.
+      first=1
+      printf '['
+      while IFS= read -r volume_id; do
+        [ -n "$volume_id" ] || continue
+        if [ "$first" = 0 ]; then printf ','; fi
+        printf '{{"id":"%s"}}' "$volume_id"
+        first=0
+      done < "$VOLUMES"
+      printf ']\n'
       return 0 ;;
   esac
   return 0

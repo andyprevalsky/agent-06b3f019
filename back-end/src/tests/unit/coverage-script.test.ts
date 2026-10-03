@@ -26,6 +26,10 @@ const blackboxRunner = readFileSync(
   join(process.cwd(), 'src', 'tests', 'blackbox', 'run.ts'),
   'utf8'
 );
+const agentCardLockWrapper = readFileSync(
+  join(process.cwd(), 'scripts', 'with-agentcard-lock.py'),
+  'utf8'
+);
 const gateResolutionProvider = readFileSync(
   join(process.cwd(), 'src', 'providers', 'gateResolution.ts'),
   'utf8'
@@ -298,8 +302,18 @@ assert.match(
 );
 assert.match(
   blackboxRunner,
-  /spawn\(process\.execPath, \['--import', 'tsx', file\]/,
-  'blackbox domains must avoid npm and tsx wrapper processes under V8 coverage'
+  /const paymentDomain = domain === 'treasury-rails';[\s\S]*const command = paymentDomain \? 'python3' : process\.execPath;[\s\S]*: \['--import', 'tsx', file\];[\s\S]*spawn\(command, args/,
+  'ordinary blackbox domains must avoid npm wrappers; only the treasury rail takes the Python lock'
+);
+assert.match(
+  blackboxRunner,
+  /AGENTCARD_LOCK_ACQUIRED[\s\S]*timeout = armTimeout\(timeoutMs, 'Domain'\)/,
+  'treasury rail test timeout must begin after acquiring the sandbox payment lock'
+);
+assert.match(
+  agentCardLockWrapper,
+  /fcntl\.flock\(fd, fcntl\.LOCK_EX\)[\s\S]*AGENTCARD_LOCK_ACQUIRED[\s\S]*os\.set_inheritable\(fd, True\)[\s\S]*os\.execvp/,
+  'the treasury rail must keep the benchmark lock through the test process'
 );
 assert.match(
   unitRunner,

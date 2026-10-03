@@ -14,7 +14,9 @@ import jwt from 'jsonwebtoken';
 import { prisma } from '../../providers/database';
 import {
   PLANNER_MEMORY_INDEX_VERSION,
+  embedTexts,
   plannerMemoryGoalHash,
+  toVectorLiteral,
 } from '../../providers/plannerMemoryEmbedding';
 import { retryWithBackoff } from '../../providers/retry';
 import { upsertPlannerMemoryFromRun } from '../../providers/plannerMemoryStore';
@@ -362,11 +364,20 @@ export async function runTests(): Promise<boolean> {
             });
             const hit = hits.find((c) => c.id === id);
             assert(hit, 'paraphrased request must retrieve the semantically matching run');
-            const unrelated = hits.find((c) => c.id === unrelatedId);
-            assert(unrelated, 'with no floor every visible row is scored');
+            // The API returns only the top 20 by default, even with no similarity floor.
+            // Score the unrelated fixture directly so corpus growth cannot hide it past
+            // that limit while the semantic gap remains checked.
+            const [queryVector] = await embedTexts([paraphrase]);
+            const unrelatedScores = await prisma.$queryRaw<Array<{ similarity: number }>>`
+              SELECT (1 - ("goalVector" <=> ${toVectorLiteral(queryVector)}::vector))::float8 AS similarity
+              FROM "PlannerMemoryEmbedding"
+              WHERE "plannerMemoryId" = ${unrelatedId}
+            `;
+            assert.strictEqual(unrelatedScores.length, 1, 'unrelated fixture must be embedded');
+            const unrelatedSimilarity = unrelatedScores[0].similarity;
             assert(
-              hit.similarity > unrelated.similarity + 0.1,
-              `semantic match ${hit.similarity} must clearly outrank unrelated ${unrelated.similarity}`
+              hit.similarity > unrelatedSimilarity + 0.1,
+              `semantic match ${hit.similarity} must clearly outrank unrelated ${unrelatedSimilarity}`
             );
             // Default floor is the production cutoff (0.70): the unrelated run never surfaces.
             const defaults = await search({ goal: paraphrase, user_id: s.userId });

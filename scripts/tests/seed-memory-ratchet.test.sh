@@ -77,8 +77,8 @@ require_text "$MEASUREMENT" \
     'SCHEMA_PUSH_LOG="$OUT_DIR/schema-push-$i.log"' \
     "schema push failures must retain the Prisma diagnostic"
 require_text "$BUDGET" \
-    'SEED_PEAK_RSS_BUDGET_MB = 230' \
-    "budget must remain cemented to ceil(191MB * 1.20)"
+    'SEED_PEAK_RSS_BUDGET_MB = 228' \
+    "budget must remain cemented to ceil(190MB * 1.20)"
 require_text "$BUDGET" \
     'SEED_RSS_HEADROOM_RATIO = 0.2' \
     "headroom ratio must remain exactly 20%"
@@ -159,4 +159,4 @@ fi
 [ "$attempts" -eq 30 ] || fail "host readiness must stop after its bounded retry window"
 grep -Fq 'simulated connection refusal' "$probe_diagnostic" || fail "host readiness must retain the last probe diagnostic"
 
-echo "PASS: /deploy enforces five fidelity-verified cold seeds at the measured 230MB ratchet"
+echo "PASS: /deploy enforces five fidelity-verified cold seeds at the measured 228MB ratchet"

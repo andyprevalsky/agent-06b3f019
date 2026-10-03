@@ -2922,6 +2922,13 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
     raise AssertionError("unreachable: the final attempt raises or returns")
 
 
+async def prepare_sandbox_payment_residual(task: BenchmarkTask, base_url: str) -> None:
+    """Drain idle fixture headroom so this task's mint has a reclaimable pool transfer."""
+    if task.production_only or "agentcard-lifecycle-sandbox" not in task.tags:
+        return
+    await configure_benchmark_agentcard_setup(base_url, "prepare-residual")
+
+
 async def ensure_payment_lifecycle_cleanup(
     base_url: str,
     agent_id: str,
@@ -12416,6 +12423,7 @@ async def _run_single_task_as_run_user(
         print(f"    🔌 Realtime monitor subscribed to agent:{agent_id[:12]}")
 
     try:
+        await prepare_sandbox_payment_residual(task, base_url)
         setup_fixture_action = _agentcard_setup_fixture_action(task, base_url)
         if setup_fixture_action == "reset":
             await configure_benchmark_agentcard_setup(base_url, "reset")

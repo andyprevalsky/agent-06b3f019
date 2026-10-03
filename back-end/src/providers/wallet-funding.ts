@@ -5,6 +5,8 @@ import {
   type AgentCardOrgToolCaller,
 } from './agentcard/org-runtime';
 import { orgPollWaitsMs } from './agentcard/org-poll-schedule';
+import { recoverCardholderFunds } from './agentcard/fund-recovery';
+import { getOrgManagedCardholderId } from './agentcard/store';
 import { createLogger } from './logger';
 
 const log = createLogger('WalletFunding');
@@ -163,7 +165,10 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
     } = {
       attempts: RELEASE_LOOKUP_ATTEMPTS,
       delayMs: RELEASE_LOOKUP_DELAY_MS,
-    }
+    },
+    private readonly resolveCardholderId: (
+      userId: string
+    ) => Promise<string | undefined> = getOrgManagedCardholderId
   ) {}
 
   async fundUserWallet(request: WalletFundingRequest): Promise<WalletFundingResult> {
@@ -244,6 +249,8 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
     // a single `callTool`; re-arming it per observation would let this loop accumulate one budget
     // per read (6 x 30s = 180s) on top of its own ~57s schedule and overrun the caller's timeout.
     const retryDeadlineAtMs = orgRetryDeadlineAtMs();
+    let cardholderId: string | undefined;
+    let cardholderResolved = false;
     for (let attempt = 1; attempt <= observations; attempt += 1) {
       let result: unknown;
       try {
@@ -287,6 +294,37 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
             agentcard_transfer: transfer,
           }),
         };
+      }
+      // AgentCard may leave the exact fully funded transfer `consumed` after close until its
+      // released cardholder residual is recovered. Treasury-rails exercises this provider path.
+      // The recovery is only an accelerator: its yield never substitutes for this transfer's
+      // reclaimed/released status, and a partially spent or unrelated card is never swept here.
+      if (
+        attempt < observations &&
+        request.cardId !== undefined &&
+        transfer?.card_id === request.cardId &&
+        transfer.amount_cents === request.amountCents &&
+        transfer.transferred_cents === request.amountCents &&
+        releasedCents === 0 &&
+        status === 'consumed'
+      ) {
+        try {
+          if (!cardholderResolved) {
+            cardholderId = await this.resolveCardholderId(request.userId);
+            cardholderResolved = true;
+          }
+          if (cardholderId !== undefined) {
+            await recoverCardholderFunds(cardholderId, (toolName, args) =>
+              this.toolCaller(toolName, args, retryDeadlineAtMs)
+            );
+          }
+        } catch (error) {
+          log.warn('Could not accelerate AgentCard transfer release through residual recovery', {
+            purchase_id: request.purchaseId,
+            transfer_id: maskId(request.providerTransferId),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
       if (attempt < observations) await delay(waits[attempt - 1]);
     }

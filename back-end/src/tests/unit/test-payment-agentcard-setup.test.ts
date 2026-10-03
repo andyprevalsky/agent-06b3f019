@@ -40,7 +40,7 @@ async function main(): Promise<void> {
     );
     await assert.rejects(
       () => configureBenchmarkAgentCardSetup({ userId, action: 'nonsense' }),
-      /action must be reset or complete/
+      /action must be reset, complete, or prepare-residual/
     );
     const connected = await configureBenchmarkAgentCardSetup(
       { userId, action: 'complete' },
@@ -89,6 +89,54 @@ async function main(): Promise<void> {
     } finally {
       if (previous === undefined) delete process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID;
       else process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = previous;
+    }
+  });
+
+  await test('sandbox payment setup sweeps only the resolved cardholder before a mint', async () => {
+    const userId = await seedUser();
+    const recovered: string[] = [];
+    const ready = await configureBenchmarkAgentCardSetup(
+      { userId, action: 'prepare-residual' },
+      {
+        resolveCardholderId: async () => 'cardholder-resolved',
+        recoverCardholderResidual: async (cardholderId) => {
+          recovered.push(cardholderId);
+          return { status: 'completed', amountCents: 4396 };
+        },
+      }
+    );
+    assert.equal(ready.status, 'residual_ready');
+    assert.deepEqual(recovered, ['cardholder-resolved']);
+    await assert.rejects(
+      () =>
+        configureBenchmarkAgentCardSetup(
+          { userId, action: 'prepare-residual' },
+          {
+            resolveCardholderId: async () => 'cardholder-resolved',
+            recoverCardholderResidual: async () => ({ status: 'requested', amountCents: 4396 }),
+          }
+        ),
+      /not yet settled/
+    );
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      await assert.rejects(
+        () =>
+          configureBenchmarkAgentCardSetup(
+            { userId, action: 'prepare-residual' },
+            {
+              resolveCardholderId: async () => 'cardholder-resolved',
+              recoverCardholderResidual: async () => {
+                throw new Error('production recovery must never run');
+              },
+            }
+          ),
+        /Sandbox residual preparation unavailable/
+      );
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
     }
   });
 

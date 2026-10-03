@@ -1183,7 +1183,10 @@ if [ "$USER_EXISTS" = "0" ]; then
     _seed_ok=0
     for _seed_try in 1 2 3; do
         _seed_rc=0
-        (cd back-end && npx tsx scripts/seed-local.ts) || _seed_rc=$?
+        # Bound V8 old space so a delayed GC cannot retain COPY-stream buffers through
+        # LocalStorage/IndexedDB and spike the cold seed above its RSS ratchet.
+        (cd back-end && NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
+            npx tsx scripts/seed-local.ts) || _seed_rc=$?
         if [ "$_seed_rc" = 0 ]; then _seed_ok=1; break; fi
         _seed_signal=""
         case "$_seed_rc" in

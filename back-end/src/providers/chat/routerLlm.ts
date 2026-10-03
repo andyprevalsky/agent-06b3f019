@@ -58,6 +58,8 @@ export type { RouterDecision } from './routerDecision';
 
 const log = createLogger('RouterLLM');
 const ROUTER_CACHE_HANG_MS = 5_000;
+// Routing is a classification step; sampling can escalate a one-search chat request to agent mode.
+const ROUTER_TEMPERATURE = 0;
 
 // ============================================
 // Router Response with streaming metadata
@@ -156,7 +158,10 @@ export function buildRouterCompletionOptions(params: {
   return {
     model: params.model,
     messages: params.messages,
-    temperature: 0.3,
+    temperature: ROUTER_TEMPERATURE,
+    // Cerebras reserves the model's full sequence length when this is omitted,
+    // exhausting the shared token quota even for a short routing decision.
+    ...(params.providerRoute === 'direct-cerebras' ? { max_tokens: 1_024 } : {}),
     // The router is a small structured classification step. Gemini 3.5 Flash
     // enables medium reasoning by default on OpenRouter, which can consume most
     // of the synchronous chat latency budget after a Cerebras stall. Keep its
@@ -259,7 +264,7 @@ export async function callRouterLlm(params: {
   if ((fastModeRead || fastModeWrite) && fastMode.goal) {
     fcKey = contentKey(fastMode.goal, 'chat_router', {
       model: params.model,
-      temperature: 0.3,
+      temperature: ROUTER_TEMPERATURE,
       effort: 'minimal',
       response_format: {
         type: 'json_schema',

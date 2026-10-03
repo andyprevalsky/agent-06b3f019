@@ -197,6 +197,25 @@ def validate_browser_agents_terminated_with_recording(
         fetchable ``recording_file_pointer``
     Agents with no browser tasks pass.
     """
+    browser_actions = {
+        "browser",
+        "session_init",
+        "session_started",
+        "recording",
+        "network_recording",
+    }
+    browser_task_ids: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        meta = _message_metadata(message)
+        task_id = meta.get("task_id")
+        if isinstance(task_id, str) and task_id and (
+            meta.get("toolName") == "spawn_browser_agent"
+            or meta.get("action_type") in browser_actions
+        ):
+            browser_task_ids.add(task_id)
+
     tasks: dict[str, dict[str, bool]] = {}
     recording_candidates: dict[str, list[dict]] = {}
     for message in messages:
@@ -204,7 +223,7 @@ def validate_browser_agents_terminated_with_recording(
             continue
         meta = _message_metadata(message)
         task_id = meta.get("task_id")
-        if not isinstance(task_id, str) or not task_id:
+        if not isinstance(task_id, str) or task_id not in browser_task_ids:
             continue
         action = str(meta.get("action_type") or "")
         tool_name = str(meta.get("toolName") or "")
@@ -228,14 +247,7 @@ def validate_browser_agents_terminated_with_recording(
         state = tasks.setdefault(
             task_id, {"seen": False, "complete": False, "recording_ok": False}
         )
-        if action in {
-            "browser",
-            "session_init",
-            "session_started",
-            "task_started",
-            "recording",
-            "network_recording",
-        }:
+        if action in browser_actions or action == "task_started":
             state["seen"] = True
         if action == "task_complete":
             state["complete"] = True
