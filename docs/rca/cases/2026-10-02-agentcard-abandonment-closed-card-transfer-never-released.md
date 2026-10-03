@@ -18,7 +18,9 @@ tags:
   - deploy-gate
 sources:
   - PR #1341
+  - PR #1401
   - agent 75ea1c1e-0b2a-49f5-b6f5-6fb2a67f5346
+  - agent 536786c2-3213-4ffd-99d8-8853b9908bcb
   - task agent-payment-abandonment
 repro: bash scripts/run-bench --local agent-payment-abandonment (provider-dependent); AgentCard list_transfers / list_recoveries read in /opt/cursor/artifacts/rca_evidence/agentcard-abandonment-ledger.txt
 status: open
@@ -92,7 +94,33 @@ pinned by the benchmark blackbox case
 The 420s reconciliation deadline and the task's expected lifecycle are
 unchanged.
 
+### Recurrence on 2026-10-03
+
+`/deploy` Step 6 smoke (deploy run `20261002-213707-2123940`, HEAD
+`b695d03aa`) failed `agent-payment-abandonment` (agent
+`536786c2-3213-4ffd-99d8-8853b9908bcb`) the same way. Step 6a's run of the same
+task on the same HEAD passed.
+
+- Transfer `owt_…15ffb1` (card `card_c7034bd976487fb861b5620e`, $43.96 mint,
+  2798 transferred) was created at 03:36:21. `close_card` returned `CLOSED` at
+  03:36:29 with no throttle or retry. AgentCard still reported it `consumed`
+  with `released_cents: 0` at 16:04, 12.5 hours later. `get_card` reports
+  `CLOSED, $0.00 remaining`.
+- The passing 6a run had the same timing: transfer `owt_…0e51c1` was closed 9s
+  after its mint, and AgentCard released 4396 within about 2.5 minutes.
+- This occurrence rules out the netting variant above. Another consumer's
+  $13 mint on the shared cardholder at 03:37:01, 32s after our close,
+  transferred its full 1300, and the next recovery (03:39:58) pulled exactly
+  that 1300. Our card's 4396 never returned as headroom, so AgentCard released
+  nothing at all rather than releasing value that a netting mint then consumed.
+- PR #1401's deploy hit the same stall (agent `22d0b761`, transfer
+  `owt_…2312920`). All four HELD/no-release failures of the two abandonment
+  tasks fall between 2026-10-02 20:31Z and 2026-10-03 03:37Z, under heavy
+  concurrent use of the shared sandbox cardholder. The attempts ledger has none
+  in about 200 runs from 2026-09-20 until then.
+
 Still open:
+
 - Report the stuck transfer (`owt_…8ce5`, card `card_cb91b224db24a8dd6f1448c0`)
   to AgentCard with the ledger read.
 - If AgentCard confirms that netting suppresses the release, give each payment
