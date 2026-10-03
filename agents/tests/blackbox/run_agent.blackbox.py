@@ -1413,16 +1413,21 @@ async def test_run_agent_refusal_reroute_crosses_the_temporal_activity_boundary(
         )
 
     assert len(activity_calls) >= 2, "expected the refused call to be retried through the activity"
-    # The exclusion rides in the LAST positional slot; a new arg may only be appended there so an
-    # older replayed Temporal history still resolves to the default. Check the slot actually holds
-    # the flag before reading it, so the original defect (the argument never being sent at all)
-    # reports as itself rather than as a confusing value mismatch.
-    assert isinstance(activity_calls[0][-1], bool), (
-        "call_llm_activity is not receiving the anthropic-exclusion flag at all; last positional "
-        f"arg was {activity_calls[0][-1]!r}. The reroute dies at the workflow->activity boundary."
+    # Activity args are positional (new ones are appended so an older replayed Temporal history
+    # still resolves to the default), so read the flag at its signature position. Check the slot
+    # actually holds the flag before reading it, so the original defect (the argument never being
+    # sent at all) reports as itself rather than as a confusing value mismatch.
+    import inspect
+
+    from helpers.llm import call_llm_activity
+
+    exclude_index = list(inspect.signature(call_llm_activity).parameters).index("exclude_anthropic_family")
+    assert len(activity_calls[0]) > exclude_index and isinstance(activity_calls[0][exclude_index], bool), (
+        "call_llm_activity is not receiving the anthropic-exclusion flag at all; positional args were "
+        f"{activity_calls[0][exclude_index:]!r}. The reroute dies at the workflow->activity boundary."
     )
-    assert activity_calls[0][-1] is False, "first attempt must not pre-emptively exclude Anthropic"
-    assert activity_calls[1][-1] is True, "the retry after a refusal must reroute off Anthropic"
+    assert activity_calls[0][exclude_index] is False, "first attempt must not pre-emptively exclude Anthropic"
+    assert activity_calls[1][exclude_index] is True, "the retry after a refusal must reroute off Anthropic"
 
 
 def test_is_refusal_error_detects_type_message_and_cause_chain():

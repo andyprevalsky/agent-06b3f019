@@ -511,6 +511,67 @@ Files in this directory will be automatically uploaded and returned to the user.
 # ---------------------------------------------------------------------------
 
 
+# Claude Code CLI stream-json messages that ws-server forwards verbatim as
+# `cli_message` events. (log field, CLI field) pairs; values are scalars from the
+# SDK schema (status enums, epoch seconds, counts, categorized error enum).
+_CLI_RATE_LIMIT_FIELDS = (
+    ("rate_limit_status", "status"),
+    ("rate_limit_type", "rateLimitType"),
+    ("utilization", "utilization"),
+    ("resets_at", "resetsAt"),
+    ("overage_status", "overageStatus"),
+    ("overage_resets_at", "overageResetsAt"),
+    ("overage_disabled_reason", "overageDisabledReason"),
+    ("is_using_overage", "isUsingOverage"),
+    ("surpassed_threshold", "surpassedThreshold"),
+)
+_CLI_API_RETRY_FIELDS = (
+    ("attempt", "attempt"),
+    ("max_retries", "max_retries"),
+    ("retry_delay_ms", "retry_delay_ms"),
+    ("error_status", "error_status"),
+    ("error", "error"),
+)
+_CLI_LOG_VALUE_MAX_CHARS = 200
+
+
+def _bounded_cli_log_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:_CLI_LOG_VALUE_MAX_CHARS]
+
+
+def _log_claude_cli_message(
+    event: dict[str, Any],
+    *,
+    agent_id: str,
+    task_id: str,
+    sandbox_id: str,
+) -> None:
+    """Log CLI rate-limit status and API retries; other CLI messages stay unlogged."""
+    message = event.get("cli_message")
+    if not isinstance(message, dict):
+        return
+    ids = {"agent_id": agent_id, "task_id": task_id, "sandbox_id": sandbox_id}
+
+    if message.get("type") == "rate_limit_event":
+        info = message.get("rate_limit_info")
+        info = info if isinstance(info, dict) else {}
+        logger.info(
+            "[ClaudeCode] CLI rate-limit status",
+            **ids,
+            **{key: _bounded_cli_log_value(info.get(src)) for key, src in _CLI_RATE_LIMIT_FIELDS},
+        )
+        return
+
+    if message.get("type") == "system" and message.get("subtype") == "api_retry":
+        logger.info(
+            "[ClaudeCode] CLI API retry",
+            **ids,
+            **{key: _bounded_cli_log_value(message.get(src)) for key, src in _CLI_API_RETRY_FIELDS},
+        )
+
+
 def _log_code_agent_event(
     event: dict[str, Any],
     *,
@@ -584,6 +645,10 @@ def _log_code_agent_event(
                 reasoning_output_tokens=usage.get("reasoning_output_tokens") or 0,
             )
             return
+
+    if event_type == "cli_message":
+        _log_claude_cli_message(event, agent_id=agent_id, task_id=task_id, sandbox_id=sandbox_id)
+        return
 
     # Progress events for Claude Code + Codex — must survive info-level retention.
     if event_type in {"tool_use", "tool_result", "agent_message", "result", "error", "session"}:

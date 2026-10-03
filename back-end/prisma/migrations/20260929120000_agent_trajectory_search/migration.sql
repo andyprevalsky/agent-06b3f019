@@ -113,23 +113,11 @@ CREATE TRIGGER "User_trajectory_search_delete"
 AFTER DELETE ON "User"
 FOR EACH ROW EXECUTE FUNCTION delete_user_agent_trajectory_search();
 
-WITH RECURSIVE roots AS (
-  SELECT a.id, a.id AS root_id FROM "Agent" a WHERE a."parentAgentId" IS NULL
-  UNION ALL
-  SELECT child.id, roots.root_id FROM "Agent" child
-  JOIN roots ON child."parentAgentId" = roots.id
-)
-INSERT INTO "AgentTrajectorySearch" (
-  "messageId", "userId", "rootAgentId", "agentId", "surface", "role", "createdAt", "searchText",
-  "agentGoal", "agentTitle"
-)
-SELECT m.id, a."userId", roots.root_id, a.id, a.source::text,
-       m.role::text, m."createdAt", m.text, a.goal, a.title
-FROM "Message" m
-JOIN "Agent" a ON a.id = m."agentId"
-JOIN roots ON roots.id = a.id
-WHERE btrim(m.text) <> '' AND m.role::text <> 'SYSTEM' AND a."userId" IS NOT NULL
-ON CONFLICT ("messageId") DO NOTHING;
+-- Historical live messages are backfilled in bounded batches after deploy by
+-- `scripts/backfill-agent-trajectory-search.ts --live-messages`. A single
+-- INSERT ... SELECT over every production message exceeded the statement
+-- timeout at boot (57014) and failed the release; the triggers above index
+-- every new or edited message from the moment this migration commits.
 
 -- Remove rows left by earlier local projections before this role was excluded.
 DELETE FROM "AgentTrajectorySearch" WHERE role = 'SYSTEM';

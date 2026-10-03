@@ -5436,6 +5436,190 @@ async def test_call_llm_activity_force_backend_ignores_and_preserves_shared_cont
         _pending_llm_context.pop(agent_id_key, None)
 
 
+async def test_call_llm_activity_ignores_pending_context_left_by_an_evicted_workflow():
+    """An LLM activity must build the conversation of ITS turn, never a stale same-agent slot.
+
+    REGRESSION (2026-10-02, test-mass-agent-run-0 GP e268b1db): under host load the GP
+    workflow's task timed out on worker W and resumed on worker Y. W kept the
+    `_pending_llm_context[agent_id]` slot its workflow had written for an earlier turn
+    (that activity had run on another worker, so nothing consumed it). The turn-4 LLM
+    activity later landed on W, read that slot, and sent the model a conversation missing
+    the newest explore spawns -- so the July GP replay saw too few prior explores and
+    replayed a 4th one past the 3-per-GP cap.
+
+    Drives the real writer (run_agent, workflow scope) and the real reader
+    (call_llm_activity) across a simulated worker migration.
+    """
+    from helpers import llm as llm_mod
+    from loop import run_agent as run_mod
+    from providers.fast_cache.rose_cache import _prior_explore_spawn_tool_call_ids
+
+    agent_id = "agent-evicted-pending-ctx"
+    worker_w_slots = llm_mod._pending_llm_context  # the process the turn-4 activity lands on
+    worker_y_slots: dict = {}
+    worker_w_slots.pop(agent_id, None)
+    scheduled: list[list] = []
+    turn4_canonical_context: list = []
+
+    async def mock_execute_activity(fn, args=None, **_kwargs):
+        if fn is not llm_mod.call_llm_activity:
+            return {}
+        scheduled.append(list(args or []))
+        turn = len(scheduled)
+        if turn == 3:
+            # W stalls with this turn's activity in flight; the workflow task times out and
+            # the workflow resumes on Y. W keeps the slot it just wrote for turn 3, frozen:
+            # the evicted workflow instance on W never mutates its context again (this test
+            # keeps running the same coroutine as "Y", so detach W's copy explicitly).
+            stale = worker_w_slots[agent_id]
+            worker_w_slots[agent_id] = (list(stale[0]), *stale[1:])
+            run_mod._pending_llm_context = worker_y_slots
+        if turn == 4:
+            turn4_canonical_context.extend(worker_y_slots[agent_id][0])
+        return {
+            "response": "",
+            "tool_calls": [{"tool": "spawn_agent", "type": "explore", "goal": f"Explore angle {turn}"}],
+            "usage": {},
+            "detected_tools_ordered": [("spawn_agent", f"tc-explore-{turn}", float(turn))],
+        }
+
+    async def execute_tool(_tool_name, _tool_args, tool_call_id):
+        return {"message": f"EXPLORE-RESULT-{tool_call_id}"}
+
+    async def prompt():
+        return "System prompt"
+
+    try:
+        with (
+            patch.object(run_mod, "_pending_llm_context", worker_w_slots),
+            patch.object(run_mod.workflow, "execute_activity", new=AsyncMock(side_effect=mock_execute_activity)),
+            patch.object(run_mod.asyncio, "sleep", new=AsyncMock()),
+        ):
+            await run_mod.run_agent(
+                agent_id=agent_id,
+                user_id="user-evicted",
+                system_prompt=prompt,
+                verifier_prompt_generator=prompt,
+                model="rose-labs/rose-1-ultra",
+                tools=["spawn_agent", "attempt_completion"],
+                initial_context=[{"role": "USER", "text": "Analyze one creator", "timestamp": "2026-10-02T00:00:00Z"}],
+                is_inside_temporal_activity=False,
+                post_message=AsyncMock(),
+                execute_tool=execute_tool,
+                max_iterations=4,
+                skip_verification=True,
+                skip_status_updates=True,
+            )
+
+        assert len(scheduled) == 4, f"expected four LLM turns, got {len(scheduled)}"
+        assert agent_id in worker_w_slots, "worker W must still hold the slot written before eviction"
+        assert "EXPLORE-RESULT-tc-explore-3" in json.dumps(turn4_canonical_context)
+
+        sent: list = []
+
+        async def capture_llm(**kwargs):
+            sent.append(kwargs["messages"])
+            return (
+                SimpleNamespace(response="", tool_calls=[]),
+                {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                [],
+            )
+
+        with (
+            patch("helpers.llm.call_llm_structured_streaming", new=AsyncMock(side_effect=capture_llm)),
+            patch(
+                "helpers.fetch_config._fetch_agent_data_impl",
+                new=AsyncMock(return_value={"agent": {"id": agent_id}, "messages": turn4_canonical_context}),
+            ),
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm.activity.in_activity", return_value=False),
+        ):
+            # Turn 4's activity, with the exact args the workflow scheduled, runs on W.
+            await llm_mod.call_llm_activity(*scheduled[3])
+
+        assert len(sent) == 1
+        sent_text = json.dumps(sent[0])
+        assert "EXPLORE-RESULT-tc-explore-3" in sent_text, (
+            "turn-4 LLM call was built from worker W's stale turn-3 slot: the newest tool result "
+            "is missing from the conversation sent to the model"
+        )
+        prior_explores = _prior_explore_spawn_tool_call_ids({"messages": sent[0]})
+        assert prior_explores == {"tc-explore-1", "tc-explore-2", "tc-explore-3"}, (
+            f"July GP explore cap would count {sorted(prior_explores)} prior explores, not all three"
+        )
+    finally:
+        worker_w_slots.pop(agent_id, None)
+        worker_y_slots.pop(agent_id, None)
+
+
+async def test_call_llm_activity_consumes_only_its_own_tagged_pending_slot():
+    """Same-worker handoff still skips the backend; a foreign tagged slot is neither used nor popped."""
+    from helpers.llm import _pending_llm_context, call_llm_activity
+
+    agent_id = "agent-tagged-pending-slot"
+    own_context = [{"role": "USER", "text": "OWN-TURN-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}]
+    foreign_slot = (
+        [{"role": "USER", "text": "FOREIGN-TURN-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}],
+        "System prompt",
+        None,
+        "user-tagged",
+        "stream-other:7",
+    )
+    sent: list = []
+    backend = AsyncMock(
+        return_value={
+            "agent": {"id": agent_id},
+            "messages": [{"role": "USER", "text": "BACKEND-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}],
+        }
+    )
+
+    async def capture_llm(**kwargs):
+        sent.append(json.dumps(kwargs["messages"]))
+        return (
+            SimpleNamespace(response="", tool_calls=[]),
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            [],
+        )
+
+    async def call(token):
+        await call_llm_activity(
+            agent_id,
+            "rose-labs/rose-1-ultra",
+            [],
+            0,
+            agent_id,
+            system_prompt="System prompt",
+            pending_context_token=token,
+        )
+
+    try:
+        with (
+            patch("helpers.llm.call_llm_structured_streaming", new=AsyncMock(side_effect=capture_llm)),
+            patch("helpers.fetch_config._fetch_agent_data_impl", new=backend),
+            patch("helpers.llm.asyncio.sleep", new=AsyncMock()),
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm.activity.in_activity", return_value=False),
+        ):
+            _pending_llm_context[agent_id] = (own_context, "System prompt", None, "user-tagged", "stream-a:3")
+            await call("stream-a:3")
+            assert "OWN-TURN-CONTEXT" in sent[-1]
+            assert backend.await_count == 0, "a matching same-worker slot must not refetch from the backend"
+            assert agent_id not in _pending_llm_context, "the call must consume its own slot"
+
+            _pending_llm_context[agent_id] = foreign_slot
+            await call("stream-a:4")
+            assert "BACKEND-CONTEXT" in sent[-1] and "FOREIGN-TURN-CONTEXT" not in sent[-1]
+            assert backend.await_count == 1
+
+            # A token-less caller (DAG param populator) never adopts a tagged run_agent slot.
+            _pending_llm_context[agent_id] = foreign_slot
+            await call(None)
+            assert "FOREIGN-TURN-CONTEXT" not in sent[-1]
+            assert backend.await_count == 2
+    finally:
+        _pending_llm_context.pop(agent_id, None)
+
+
 async def test_call_planner_llm_activity_failure_raises():
     """Planner LLM raises if /completions returns non-200 and no retries succeed."""
     import httpx
@@ -8845,6 +9029,14 @@ async def run_all_tests():
     await r.record_async(
         "call_llm_activity_force_backend",
         test_call_llm_activity_force_backend_ignores_and_preserves_shared_context,
+    )
+    await r.record_async(
+        "call_llm_activity_ignores_evicted_workflow_pending_ctx",
+        test_call_llm_activity_ignores_pending_context_left_by_an_evicted_workflow,
+    )
+    await r.record_async(
+        "call_llm_activity_consumes_only_own_tagged_pending_slot",
+        test_call_llm_activity_consumes_only_its_own_tagged_pending_slot,
     )
     await r.record_async("call_planner_llm_activity_failure", test_call_planner_llm_activity_failure_raises)
     await r.record_async("verifier_schema_file_pointer", test_build_verifier_json_schema_file_pointer_type)

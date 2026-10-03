@@ -35,6 +35,7 @@ import fcntl
 import ipaddress
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -49,7 +50,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -13898,34 +13899,113 @@ def enforce_cache_ratchets(task_results: list[TaskResult]) -> None:
     raise SystemExit(1)
 
 
-@asynccontextmanager
-async def _sandbox_agentcard_payment_lock():
-    """Serialize payment fixtures across benchmark processes on one host."""
-    lock_path = Path(
-        os.environ.get("BENCHMARK_AGENTCARD_LOCK_PATH")
-        or Path(tempfile.gettempdir()) / "rose-agentcard-sandbox-benchmark.lock"
-    )
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    acquired = False
+AGENTCARD_SANDBOX_LOCK_FILENAME = "rose-agentcard-sandbox-benchmark.lock"
+AGENTCARD_SANDBOX_DEFAULT_SLOTS = 2
+AGENTCARD_SANDBOX_POLL_SECONDS = 1.0
+# Waiters sleep poll * [1, 1 + JITTER) so lanes that started together do not
+# poll in lockstep and let the same lane win every freed slot.
+AGENTCARD_SANDBOX_POLL_JITTER = 0.5
+# After releasing, a holder pauses for poll * HANDOFF (longer than any waiter's
+# poll interval, including legacy 1s pollers) before its process can start the
+# next sandbox task, so a back-to-back holder cannot re-take the slot ahead of
+# lanes that were already waiting.
+AGENTCARD_SANDBOX_RELEASE_HANDOFF = 2.0
+
+
+def _agentcard_sandbox_slot_count() -> int:
+    raw = os.environ.get("BENCHMARK_AGENTCARD_SLOTS", "").strip()
+    if not raw:
+        return AGENTCARD_SANDBOX_DEFAULT_SLOTS
     try:
-        while not acquired:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-            except BlockingIOError:
-                await asyncio.sleep(1)
-        yield
+        return max(1, int(raw))
+    except ValueError as exc:
+        raise ValueError(f"BENCHMARK_AGENTCARD_SLOTS must be an integer, got {raw!r}") from exc
+
+
+def _agentcard_sandbox_slot_paths() -> list[Path]:
+    """Slot 0 is the legacy single-lock path; slots 1..K-1 add a `.slot<N>` suffix."""
+    legacy = Path(
+        os.environ.get("BENCHMARK_AGENTCARD_LOCK_PATH") or Path(tempfile.gettempdir()) / AGENTCARD_SANDBOX_LOCK_FILENAME
+    )
+    extra = [legacy.with_name(f"{legacy.name}.slot{slot}") for slot in range(1, _agentcard_sandbox_slot_count())]
+    return [legacy, *extra]
+
+
+def _try_acquire_agentcard_slot(fds: list[int]) -> int | None:
+    for slot, fd in enumerate(fds):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            continue
+        return slot
+    return None
+
+
+@asynccontextmanager
+async def _sandbox_agentcard_payment_lock(
+    label: str = "",
+    *,
+    poll_seconds: float = AGENTCARD_SANDBOX_POLL_SECONDS,
+    sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+    jitter: Callable[[], float] = random.random,
+) -> AsyncIterator[int]:
+    """Hold one of K host-wide AgentCard sandbox slots for one benchmark task.
+
+    Why a limit at all: every Conductor workspace's isolated lane has its own
+    Postgres/backend/worker, Stripe customers, and asserts only on its own
+    card/transfer/intent, so overlapping lanes are correct. The one shared
+    resource is AgentCard's org-wide API budget of 120 req/min; one lifecycle
+    run makes ~42 org calls/min, so two concurrent runs fit and a third risks
+    rate-limit failures. Hence `BENCHMARK_AGENTCARD_SLOTS` (default 2, min 1)
+    counting slots instead of one host-wide mutex.
+
+    Compatibility: slot 0 is exactly the legacy single-lock path
+    (`BENCHMARK_AGENTCARD_LOCK_PATH` or `$TMPDIR/rose-agentcard-sandbox-benchmark.lock`),
+    so workspaces still running the old code (which lock only that file) keep
+    coordinating with new code. Slots 1..K-1 use the same path plus `.slot<N>`.
+
+    flock is per open file description, so each acquire opens its own fds and
+    holds the lock in this process until release. Yields the held slot index.
+    """
+    paths = _agentcard_sandbox_slot_paths()
+    who = f" [{label}]" if label else ""
+    started = time.monotonic()
+    fds: list[int] = []
+    held: int | None = None
+    try:
+        for path in paths:
+            fds.append(os.open(path, os.O_CREAT | os.O_RDWR, 0o600))
+        announced = False
+        while (held := _try_acquire_agentcard_slot(fds)) is None:
+            if not announced:
+                print(
+                    f"  ⏳ AgentCard sandbox{who}: waiting for AgentCard sandbox slot "
+                    f"(all {len(paths)} held by other benchmark lanes; shared 120 req/min org budget) {paths[0]}",
+                    flush=True,
+                )
+                announced = True
+            await sleep(poll_seconds * (1 + AGENTCARD_SANDBOX_POLL_JITTER * jitter()))
+        print(
+            f"  🔒 AgentCard sandbox{who}: acquired slot {held} of {len(paths)} "
+            f"after {time.monotonic() - started:.1f}s wait ({paths[held]})",
+            flush=True,
+        )
+        yield held
     finally:
-        if acquired:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+        if held is not None:
+            fcntl.flock(fds[held], fcntl.LOCK_UN)
+        for fd in fds:
+            os.close(fd)
+    # Reached only on a clean exit; an exception or cancellation propagates
+    # out of the finally above without delaying teardown.
+    await sleep(poll_seconds * AGENTCARD_SANDBOX_RELEASE_HANDOFF)
 
 
 async def _run_with_sandbox_payment_lock(
     task: BenchmarkTask, runner: Callable[[], Awaitable[TaskResult]]
 ) -> TaskResult:
     if "agentcard-lifecycle-sandbox" in getattr(task, "tags", []):
-        async with _sandbox_agentcard_payment_lock():
+        async with _sandbox_agentcard_payment_lock(getattr(task, "name", "")):
             return await runner()
     return await runner()
 

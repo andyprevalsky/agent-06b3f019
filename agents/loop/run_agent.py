@@ -342,6 +342,9 @@ async def run_agent(
     # run_agent is workflow-scope, so raw uuid4 is regenerated on replay and
     # breaks event/id correlation across a worker migration.
     stream_id = str(_safe_uuid4())
+    # Per-LLM-turn identity for the `_pending_llm_context` handoff. Deterministic
+    # (stream_id + counter) so a replay on another worker reproduces the same tokens.
+    pending_context_seq = 0
 
     # Set up execute_activity based on context (workflow vs activity)
     execute_activity = (
@@ -1044,6 +1047,12 @@ async def run_agent(
         ):
             llm_context = _context_with_plan_fsm_labels(context)
 
+        # A slot left on another worker by an earlier turn (this workflow migrated
+        # away mid-run) never carries this token, so call_llm_activity cannot build
+        # this turn's prompt from that stale conversation.
+        pending_context_seq += 1
+        pending_context_token = f"{stream_id}:{pending_context_seq}"
+
         if build_messages:
             async with span(
                 "run_loop.build_messages_custom",
@@ -1077,6 +1086,7 @@ async def run_agent(
                 current_system_prompt,
                 pre_resolved_ids,
                 user_id,
+                pending_context_token,
             )
             messages = None  # Signals to use shared state path below
         else:
@@ -1455,6 +1465,7 @@ async def run_agent(
                         # Temporal history, so a new parameter may only be added at the end, where
                         # an older replayed history falls back to the default.
                         exclude_anthropic_family_on_llm_retry,
+                        pending_context_token,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),

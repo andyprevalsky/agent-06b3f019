@@ -696,10 +696,13 @@ def _canonical_pending_approval_resume(pending_approval: Any) -> Optional[Dict[s
         request_id = pending_approval.get("request_id")
         if isinstance(request_id, str) and request_id:
             question = pending_approval.get("question")
-            return {
+            entry: Dict[str, Any] = {
                 "request_id": request_id,
                 "question": question if isinstance(question, str) else "",
             }
+            if pending_approval.get("reminder_sent") is True:
+                entry["reminder_sent"] = True
+            return entry
         return None
     if isinstance(pending_approval, str) and pending_approval:
         return {"request_id": pending_approval, "question": ""}

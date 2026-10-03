@@ -5304,7 +5304,10 @@ async def test_client_direct_auth_stall_marks_token_before_rotation():
                 messages=[{"role": "user", "content": "hi"}],
                 gpt_auth=auth,
                 call_site="test-stall-cooldown",
-                deadline_s=2.0,
+                # The assertion is about cooling the stalled token before
+                # rotation. Leave room for coverage and host scheduling after
+                # the 10 ms TTFT guard fires.
+                deadline_s=10.0,
                 ttft_timeout_s=0.01,
                 idle_timeout_s=0.5,
             )

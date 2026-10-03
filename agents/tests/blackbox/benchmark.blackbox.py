@@ -330,6 +330,35 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     assert "18 passed" in result.stdout
 
 
+def test_run_benchmark_task_selection_suite_is_in_permanent_gate():
+    """Run the whole task-selection/identity/AgentCard-slot suite in a fresh interpreter.
+
+    The AgentCard sandbox slot cases need real separate processes (flock is per
+    open file description), so they cannot run in-process here.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    behavioral_suite = repo_root / "agents/benchmarks/run_benchmark_task_selection_test.py"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-v", str(behavioral_suite)],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    for case in (
+        "test_sandbox_payment_lock_slot0_is_the_legacy_lock_path",
+        "test_sandbox_payment_lock_single_slot_serializes_separate_benchmark_processes",
+        "test_sandbox_payment_lock_two_slots_admit_two_processes_and_block_a_third",
+        "test_sandbox_payment_lock_legacy_holder_on_slot0_leaves_new_slots_free",
+        "test_sandbox_payment_lock_announces_wait_once_jitters_polls_and_hands_off",
+    ):
+        assert f"{case} PASSED" in result.stdout, f"{case} did not run and pass:\n{result.stdout}"
+
+
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
     repo_root = Path(__file__).resolve().parents[3]
     patch_script = repo_root / "scripts" / "create-worktree-patch.sh"
@@ -18433,6 +18462,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_dependency_rebuild_permanent_gate",
         test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate,
+    )
+    r.record(
+        "run_benchmark_task_selection_suite_permanent_gate",
+        test_run_benchmark_task_selection_suite_is_in_permanent_gate,
     )
     r.record(
         "cloudbench_patch_includes_untracked_files",
