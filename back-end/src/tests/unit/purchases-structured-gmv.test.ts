@@ -101,6 +101,22 @@ async function main(): Promise<void> {
       status: 'skipped',
       reason: 'agentcard_purchase_exists',
     });
+
+    // The browser agent reported the item price, not the charged total: the
+    // same card purchase still covers it, so no second purchase row appears.
+    const itemPriceOnly = await recordStructuredGmv({
+      userId,
+      agentId,
+      structured: {
+        selected_product_url: 'https://blick.example/products/pencil',
+        selected_product_price_usd: 10.0,
+        order_confirmation_id: 'BLICK-CONF-99',
+      },
+    });
+    assert.deepEqual(itemPriceOnly, {
+      status: 'skipped',
+      reason: 'agentcard_purchase_exists',
+    });
   });
 
   await withUser(async (userId) => {

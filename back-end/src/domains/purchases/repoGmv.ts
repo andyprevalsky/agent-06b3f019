@@ -14,7 +14,10 @@ export async function findAgentcardCoveringPurchase(input: {
       agentId: input.agentId,
       provider: { notIn: [...STRUCTURED_GMV_PROVIDERS] },
       status: { in: input.statuses },
-      totalCents: input.totalCents,
+      // The structured output may carry an item price or subtotal rather than
+      // the charged total (selected_product_price_usd: 15.00 against a $21.23
+      // card purchase); the card row then still covers it.
+      totalCents: { gte: input.totalCents },
       createdAt: { gte: input.since },
     },
     select: { id: true },
