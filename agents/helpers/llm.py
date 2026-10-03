@@ -4929,6 +4929,11 @@ def _schema_field_names(response_schema: Optional[Dict[str, Any]]) -> List[str]:
     ]
 
 
+_POINTER_FIELD_TYPES = frozenset(
+    {"file_pointer", "session_file_pointer", "list[file_pointer]", "list[session_file_pointer]"}
+)
+
+
 def _has_schema_value(value: Any, field_type: Optional[str] = None) -> bool:
     if value is None:
         return False
@@ -5047,6 +5052,10 @@ def _structured_response_satisfies_schema(
         # non-empty value must still have the declared shape (pointer dicts,
         # object lists), whatever its requiredness.
         if not _has_schema_value(value, field.get("type")):
+            # A present pointer must resolve to a real file; omission is the
+            # only way to leave an optional pointer field unset.
+            if _normalize_schema_field_type(field.get("type")) in _POINTER_FIELD_TYPES:
+                return False
             empty = value is None or value == "" or value == [] or value == {}
             if not empty:
                 return False
