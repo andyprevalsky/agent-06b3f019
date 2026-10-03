@@ -209,5 +209,38 @@ failures = mod.validate_browser_agents_terminated_with_recording(
 )
 assert any("no correctly attached recording" in f for f in failures), failures
 
+# Other tools share the generic task lifecycle actions; a Claude Code task is not a browser
+failures = mod.validate_browser_agents_terminated_with_recording(
+    agent,
+    [
+        msg(
+            task_id="cc1",
+            toolName="spawn_claude_code_agent",
+            action_type="claude_code_started",
+            toolStatus="IN_PROGRESS",
+        ),
+        msg(
+            task_id="cc1",
+            toolName="spawn_claude_code_agent",
+            action_type="task_started",
+            toolStatus="FINISHED",
+        ),
+        msg(
+            task_id="cc1",
+            toolName="spawn_claude_code_agent",
+            action_type="task_complete",
+            toolStatus="FINISHED",
+        ),
+    ],
+)
+assert failures == [], failures
+
+# A lifecycle row without a tool name still counts as browser progress
+failures = mod.validate_browser_agents_terminated_with_recording(
+    agent,
+    [msg(task_id="t4", action_type="task_complete", toolStatus="FINISHED")],
+)
+assert any("no correctly attached recording" in f for f in failures), failures
+
 print("publish_evidence_links browser validation checks passed")
 PY
