@@ -20,7 +20,7 @@ function accountBar(site: AuthTestSite, session: SiteSession | null, cartCount: 
 
 function productCard(site: AuthTestSite, item: ShopItem): string {
   return `<div class="product" data-product-id="${item.id}">
-      <img src="${item.imageUrl}" alt="${escapeHtml(item.name)}">
+      <a href="${item.imageUrl}"><img src="${item.imageUrl}" alt="${escapeHtml(item.name)}"></a>
       <h2><a href="${siteUrl(site, `/products/${item.id}`)}">${escapeHtml(item.name)}</a></h2>
       <p>${escapeHtml(item.description)}</p>
       <p><strong>${money(item.priceCents)}</strong> · ${item.rating} stars (${item.reviewCount} reviews)</p>
@@ -67,7 +67,7 @@ function summaryTable(site: AuthTestSite, totals: CartTotals, removable: boolean
         ? `<td><form method="post" action="${siteUrl(site, '/cart/remove')}"><input type="hidden" name="item" value="${line.item.id}"><button type="submit">Remove</button></form></td>`
         : '';
       return `<tr class="line-item" data-name="${escapeHtml(line.item.name)}" data-product-url="${publicSiteUrl(site, `/products/${line.item.id}`)}" data-image-url="${line.item.imageUrl}" data-unit-price-cents="${line.item.priceCents}" data-quantity="${line.quantity}" data-line-total-cents="${line.lineTotalCents}" data-rating="${line.item.rating}" data-review-count="${line.item.reviewCount}">
-        <td><a href="${publicSiteUrl(site, `/products/${line.item.id}`)}">${escapeHtml(line.item.name)}</a><br><img src="${line.item.imageUrl}" alt="${escapeHtml(line.item.name)}" width="80"><br>${line.item.rating} stars (${line.item.reviewCount} reviews)</td>
+        <td><a href="${publicSiteUrl(site, `/products/${line.item.id}`)}">${escapeHtml(line.item.name)}</a><br><a href="${line.item.imageUrl}"><img src="${line.item.imageUrl}" alt="${escapeHtml(line.item.name)}" width="80"></a><br>${line.item.rating} stars (${line.item.reviewCount} reviews)</td>
         <td>${line.quantity} × ${money(line.item.priceCents)}</td>
         <td>${money(line.lineTotalCents)}</td>${remove}
       </tr>`;
