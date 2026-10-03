@@ -997,6 +997,22 @@ def test_outbox_drain_bounds_failed_posts_and_reaches_later_artifacts():
             assert trace_archive._drain_backend_outbox(limit=1) == 1
             assert posts[-1] == "llm/2.json.gz.enc"
             assert trace_archive._root_outbox_has_artifacts("agent-replay-budget")
+
+            posts.clear()
+            assert trace_archive._drain_backend_outbox(limit=8, stop_after_failure=True) == 0
+            assert len(posts) == 1, "automatic recovery continued after a failed post"
+
+            ciphertext = b"other-root-pending"
+            trace_archive._write_outbox(
+                "other-root",
+                "llm/pending.json.gz.enc",
+                ciphertext,
+                {"ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest()},
+            )
+            posts.clear()
+            assert trace_archive._drain_backend_outbox(limit=1) == 0
+            assert len(posts) == 1, "failed posts exceeded the shared cross-root attempt budget"
+            assert trace_archive._root_outbox_has_artifacts("other-root")
         finally:
             trace_archive._post_backend_artifact = original_post
             restore()

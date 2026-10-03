@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional
 
@@ -675,31 +675,10 @@ def _drain_backend_outbox(
     root_agent_id: Optional[str] = None,
     deadline: Optional[float] = None,
     stop_after_failure: bool = False,
+    *,
+    _publication_lease_held: bool = False,
 ) -> int:
-    if root_agent_id is None:
-        try:
-            root = _outbox_root()
-            bundles = sorted(item.name for item in root.iterdir() if item.is_dir()) if root.exists() else []
-        except OSError:
-            return 0
-        drained = 0
-        for bundle in bundles:
-            if drained >= limit:
-                break
-            drained += _drain_backend_outbox(limit - drained, bundle, deadline)
-        return drained
-    # Automatic retries skip a busy owner instead of queueing behind it.
-    with _archive_publication_lease(root_agent_id, exclusive=True, deadline=time.monotonic()) as acquired:
-        if not acquired:
-            return 0
-        return _drain_backend_outbox_unlocked(limit, root_agent_id, deadline)
-
-
-def _drain_backend_outbox_unlocked(
-    limit: int = 8,
-    root_agent_id: Optional[str] = None,
-    deadline: Optional[float] = None,
-) -> int:
+    assert not _publication_lease_held or root_agent_id is not None
     if deadline is not None and time.monotonic() >= deadline:
         return 0
     root = _outbox_root()
@@ -739,65 +718,72 @@ def _drain_backend_outbox_unlocked(
             candidates.append((modified_ns, bundle, target))
     # An unsuccessful upload stays durable, but moves behind other entries so
     # one permanently rejected artifact cannot starve newer recoverable ones.
-    if root_agent_id is None:
-        candidates.sort(key=lambda entry: (entry[0], str(entry[2])))
-    else:
-        candidates.sort(key=lambda entry: str(entry[2]))
+    candidates.sort(key=lambda entry: (entry[0], str(entry[2])))
     drained = 0
     attempted = 0
     for _, bundle, target in candidates:
         if attempted >= limit or (deadline is not None and time.monotonic() >= deadline):
             return drained
-        attempted += 1
-        path = target.relative_to(bundle).as_posix()
-        try:
-            with _artifact_lock(target):
-                _recover_artifact_transaction_unlocked(target)
-                meta_path = target.with_suffix(target.suffix + ".meta.json")
-                if not meta_path.exists():
-                    continue
-                pair = _read_artifact_pair_unlocked(target)
-            if pair is None:
+        # Never adopt an active publisher's durable pairs. Terminal flush
+        # already owns this root's exclusive lease; reacquiring it would deadlock.
+        lease = (
+            nullcontext(True)
+            if _publication_lease_held
+            else _archive_publication_lease(bundle.name, exclusive=True, deadline=time.monotonic())
+        )
+        with lease as acquired:
+            if not acquired:
                 continue
-            ciphertext, metadata = pair
-            expected_ciphertext_sha256 = str(metadata["ciphertext_sha256"])
-            remaining = None if deadline is None else deadline - time.monotonic()
-            if remaining is not None and remaining <= 0:
-                return drained
-            ref = _post_backend_artifact(
-                root_agent_id=bundle.name,
-                path=path,
-                ciphertext=ciphertext,
-                metadata=metadata,
-                timeout_s=remaining,
-            )
-            if ref:
-                if _delete_outbox(
-                    bundle.name,
-                    path,
-                    expected_ciphertext_sha256=expected_ciphertext_sha256,
-                ):
-                    drained += 1
-            else:
+            attempted += 1
+            path = target.relative_to(bundle).as_posix()
+            try:
+                with _artifact_lock(target):
+                    _recover_artifact_transaction_unlocked(target)
+                    meta_path = target.with_suffix(target.suffix + ".meta.json")
+                    if not meta_path.exists():
+                        continue
+                    pair = _read_artifact_pair_unlocked(target)
+                if pair is None:
+                    continue
+                ciphertext, metadata = pair
+                expected_ciphertext_sha256 = str(metadata["ciphertext_sha256"])
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return drained
+                ref = _post_backend_artifact(
+                    root_agent_id=bundle.name,
+                    path=path,
+                    ciphertext=ciphertext,
+                    metadata=metadata,
+                    timeout_s=remaining,
+                )
+                if ref:
+                    if _delete_outbox(
+                        bundle.name,
+                        path,
+                        expected_ciphertext_sha256=expected_ciphertext_sha256,
+                    ):
+                        drained += 1
+                else:
+                    try:
+                        os.utime(target, None)
+                    except FileNotFoundError:
+                        pass
+                    if stop_after_failure:
+                        return drained
+            except Exception as exc:
+                logger.warning(
+                    "trace_archive.outbox_drain_error",
+                    root_agent_id=bundle.name,
+                    path=path,
+                    error=str(exc)[:200],
+                )
                 try:
                     os.utime(target, None)
-                except FileNotFoundError:
+                except OSError:
                     pass
                 if stop_after_failure:
                     return drained
-        except Exception as exc:
-            logger.warning(
-                "trace_archive.outbox_drain_error",
-                root_agent_id=bundle.name,
-                path=path,
-                error=str(exc)[:200],
-            )
-            try:
-                os.utime(target, None)
-            except OSError:
-                pass
-            if stop_after_failure:
-                return drained
     return drained
 
 
@@ -1099,7 +1085,12 @@ def flush_archive_writes(root_agent_id: str, timeout_s: float = 25.0) -> bool:
             while _root_outbox_has_artifacts(safe_root):
                 if time.monotonic() >= deadline:
                     return False
-                if _drain_backend_outbox_unlocked(limit=64, root_agent_id=safe_root, deadline=deadline) == 0:
+                if (
+                    _drain_backend_outbox(
+                        limit=64, root_agent_id=safe_root, deadline=deadline, _publication_lease_held=True
+                    )
+                    == 0
+                ):
                     return False
     return True
 
