@@ -2,16 +2,33 @@
 
 Business logic orchestration for approval requests.
 Imports: own repo, own types, own config, external packages.
+
+Approval SMS reminder (per attention request):
+
+    create row + chip
+         |
+         v
+    initial write_lock SMS  <--- the notification
+         |
+         +-- user responds ----> done (no extra SMS)
+         |
+         +-- 15m elapses ------> one reminder SMS
+         |                            |
+         |                            +-- user responds -> done
+         |                            +-- later timeouts -> silence
+         +-- cutover -----------> stash reminder_sent, reuse same row
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator, Callable, Dict, Optional
+from asyncio import TimeoutError as AsyncTimeoutError
 
 import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
@@ -22,8 +39,10 @@ from helpers.wait_condition_or_handoff import wait_condition_or_generation_hando
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 
 from .config import (
+    APPROVAL_REMINDER_TIMEOUT_MINUTES,
     CREATE_REQUEST_MAX_ATTEMPTS,
     CREATE_REQUEST_TIMEOUT_SECONDS,
+    MAX_APPROVAL_REMINDERS,
     REJECTION_SENTINEL,
     SMS_NOTIFY_MAX_ATTEMPTS,
     SMS_NOTIFY_TIMEOUT_SECONDS,
@@ -134,11 +153,22 @@ def pending_approval_request_to_resume(messages: list[Dict[str, Any]]) -> Option
     return pending[-1]["request_id"]
 
 
-def _resume_entries(pending: Any) -> list[Dict[str, str]]:
+def _resume_entry(request_id: str, question: str = "", reminder_sent: bool = False) -> Dict[str, Any]:
+    entry: Dict[str, Any] = {"request_id": request_id, "question": question}
+    if reminder_sent:
+        entry["reminder_sent"] = True
+    return entry
+
+
+def _entry_reminder_sent(item: Dict[str, Any]) -> bool:
+    return item.get("reminder_sent") is True
+
+
+def _resume_entries(pending: Any) -> list[Dict[str, Any]]:
     if isinstance(pending, dict):
         raw_requests = pending.get("requests")
         if isinstance(raw_requests, list):
-            entries: list[Dict[str, str]] = []
+            entries: list[Dict[str, Any]] = []
             for item in raw_requests:
                 if not isinstance(item, dict):
                     continue
@@ -146,37 +176,67 @@ def _resume_entries(pending: Any) -> list[Dict[str, str]]:
                 if isinstance(request_id, str) and request_id:
                     question = item.get("question")
                     entries.append(
-                        {
-                            "request_id": request_id,
-                            "question": question if isinstance(question, str) else "",
-                        }
+                        _resume_entry(
+                            request_id,
+                            question if isinstance(question, str) else "",
+                            _entry_reminder_sent(item),
+                        )
                     )
             return entries
         request_id = pending.get("request_id")
         if isinstance(request_id, str) and request_id:
             question = pending.get("question")
             return [
-                {
-                    "request_id": request_id,
-                    "question": question if isinstance(question, str) else "",
-                }
+                _resume_entry(
+                    request_id,
+                    question if isinstance(question, str) else "",
+                    _entry_reminder_sent(pending),
+                )
             ]
     if isinstance(pending, str) and pending:
-        return [{"request_id": pending, "question": ""}]
+        return [_resume_entry(pending)]
     return []
 
 
-def _set_resume_entries(workflow_instance: Any, entries: list[Dict[str, str]]) -> None:
+def _set_resume_entries(workflow_instance: Any, entries: list[Dict[str, Any]]) -> None:
     if not entries:
         workflow_instance._pending_approval_resume = None
         return
     if len(entries) == 1:
-        workflow_instance._pending_approval_resume = {
-            "request_id": entries[0]["request_id"],
-            "question": entries[0]["question"],
-        }
+        workflow_instance._pending_approval_resume = _resume_entry(
+            str(entries[0]["request_id"]),
+            str(entries[0].get("question") or ""),
+            _entry_reminder_sent(entries[0]),
+        )
         return
-    workflow_instance._pending_approval_resume = {"requests": list(entries)}
+    workflow_instance._pending_approval_resume = {
+        "requests": [
+            _resume_entry(
+                str(entry["request_id"]),
+                str(entry.get("question") or ""),
+                _entry_reminder_sent(entry),
+            )
+            for entry in entries
+        ]
+    }
+
+
+def _stashed_approval_reminder_sent(workflow_instance: Any, request_id: str) -> bool:
+    for entry in _resume_entries(getattr(workflow_instance, "_pending_approval_resume", None)):
+        if entry["request_id"] == request_id:
+            return _entry_reminder_sent(entry)
+    return False
+
+
+def _flag_is_true(value: Any) -> bool:
+    return value is True or value == "true" or value == "1"
+
+
+def _resume_request_reminder_sent(workflow_instance: Any, resume_request: Dict[str, Any]) -> bool:
+    request_id = str(resume_request.get("attention_request_id") or "")
+    return _stashed_approval_reminder_sent(workflow_instance, request_id) or _flag_is_true(
+        resume_request.get("reminder_sent")
+    )
 
 
 def _stashed_approval_request_id(
@@ -202,7 +262,11 @@ def _stashed_approval_request_id(
 
 
 def _stash_approval_resume(
-    workflow_instance: Any, request_id: str, question: str = ""
+    workflow_instance: Any,
+    request_id: str,
+    question: str = "",
+    *,
+    reminder_sent: bool = False,
 ) -> None:
     if not request_id:
         return
@@ -211,9 +275,11 @@ def _stash_approval_resume(
         if entry["request_id"] == request_id:
             if question and not entry["question"]:
                 entry["question"] = question
+            if reminder_sent:
+                entry["reminder_sent"] = True
             _set_resume_entries(workflow_instance, entries)
             return
-    entries.append({"request_id": request_id, "question": question})
+    entries.append(_resume_entry(request_id, question, reminder_sent))
     _set_resume_entries(workflow_instance, entries)
 
 
@@ -381,6 +447,53 @@ class RequestUserApprovalManager(ToolManager):
         )
 
 
+async def _send_approval_sms(
+    workflow_instance: Any,
+    *,
+    user_id: Any,
+    agent_id: Any,
+    workflow_id: Any,
+    question: str,
+    request_id: str,
+    metadata: Optional[Dict[str, Any]],
+    reminder: bool,
+) -> None:
+    """Send the initial write_lock SMS or the single extra reminder."""
+    try:
+        notification_args = [
+            user_id,
+            "write_lock",
+            agent_id,
+            {
+                "question": question,
+                "attention_request_id": request_id,
+                "workflow_id": workflow_id,
+                "metadata": metadata or None,
+                "reminder": reminder,
+            },
+        ]
+        world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+        if world_model_mode != "real":
+            notification_args.append(world_model_mode)
+        await workflow.execute_activity(
+            notify_sms_event_activity,
+            args=notification_args,
+            start_to_close_timeout=timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS),
+            retry_policy=RetryPolicy(maximum_attempts=SMS_NOTIFY_MAX_ATTEMPTS),
+        )
+        logger.info(
+            "Sent write_lock SMS reminder" if reminder else "Sent write_lock SMS notification",
+            request_id=request_id,
+            agent_id=agent_id,
+            reminder=reminder,
+        )
+    except Exception as sms_err:
+        logger.warning(
+            "Failed to send write_lock SMS reminder: %s" if reminder else "Failed to send write_lock SMS notification: %s",
+            sms_err,
+        )
+
+
 def _approval_event_metadata(
     question: str, metadata: Optional[Dict[str, Any]], request_id: str
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
@@ -430,6 +543,7 @@ async def request_user_approval_direct(
         request_id = str(resume_request["attention_request_id"])
         tool_call_id = str(resume_request["tool_call_id"])
         metadata_payload, event_metadata = _approval_event_metadata(question, metadata, request_id)
+        resume_info = workflow.info()
         logger.info(
             "Resuming approval wait after generation handoff",
             request_id=request_id,
@@ -443,6 +557,11 @@ async def request_user_approval_direct(
             event_metadata=event_metadata,
             metadata_payload=metadata_payload,
             park=park,
+            reminder_already_sent=_resume_request_reminder_sent(workflow_instance, resume_request),
+            user_id=workflow_instance.user_id,
+            agent_id=workflow_instance.agent_id,
+            workflow_id=resume_info.workflow_id,
+            metadata=metadata,
         )
 
     info = workflow.info()
@@ -492,31 +611,18 @@ async def request_user_approval_direct(
         # approval is O(approvals) and must reach the user or the child hangs
         # silently. Benchmarks are suppressed centrally on the backend
         # (Agent.isBenchmark). Skip on resume — the original wait already notified.
+        # At most one extra reminder SMS may follow the initial notification.
         if not reused_request:
-            try:
-                notification_args = [
-                    user_id,
-                    "write_lock",
-                    agent_id,
-                    {
-                        "question": question,
-                        "attention_request_id": request_id,
-                        "workflow_id": workflow_id,
-                        "metadata": metadata or None,
-                    },
-                ]
-                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
-                if world_model_mode != "real":
-                    notification_args.append(world_model_mode)
-                await workflow.execute_activity(
-                    notify_sms_event_activity,
-                    args=notification_args,
-                    start_to_close_timeout=timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS),
-                    retry_policy=RetryPolicy(maximum_attempts=SMS_NOTIFY_MAX_ATTEMPTS),
-                )
-                logger.info("Sent write_lock SMS notification", request_id=request_id, agent_id=agent_id)
-            except Exception as sms_err:
-                logger.warning(f"Failed to send write_lock SMS notification: {sms_err}")
+            await _send_approval_sms(
+                workflow_instance,
+                user_id=user_id,
+                agent_id=agent_id,
+                workflow_id=workflow_id,
+                question=question,
+                request_id=request_id,
+                metadata=metadata,
+                reminder=False,
+            )
 
     except Exception as e:
         error_event = ToolEvent(
@@ -546,6 +652,13 @@ async def request_user_approval_direct(
         event_metadata=event_metadata,
         metadata_payload=metadata_payload,
         park=park,
+        reminder_already_sent=_stashed_approval_reminder_sent(workflow_instance, request_id)
+        if reused_request
+        else False,
+        user_id=user_id,
+        agent_id=agent_id,
+        workflow_id=workflow_id,
+        metadata=metadata,
     )
 
 
@@ -558,30 +671,86 @@ async def _await_approval_response(
     event_metadata: Dict[str, Any],
     metadata_payload: Dict[str, Any],
     park: Optional[Callable[[Dict[str, str]], bool]],
+    reminder_already_sent: bool = False,
+    user_id: Any = None,
+    agent_id: Any = None,
+    workflow_id: Any = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> ApprovalResult:
     # Snapshot context length before waiting
     context_len_before_wait = len(workflow_instance.context)
+    reminder_sent = reminder_already_sent
+    responded = request_id in workflow_instance._signal_responses
 
-    # Wait indefinitely for this specific request's response
-    try:
-        await wait_condition_or_generation_handoff(
-            lambda: request_id in workflow_instance._signal_responses,
-            workflow_instance,
-            workflow_mod=workflow,
+    def _on_handoff(exc: GenerationHandoffRequested) -> None:
+        park_payload: Dict[str, str] = {
+            "attention_request_id": request_id,
+            "tool_call_id": tool_call_id,
+        }
+        if reminder_sent:
+            park_payload["reminder_sent"] = "true"
+        parked = park is not None and park(park_payload)
+        _stash_approval_resume(
+            workflow_instance, request_id, question, reminder_sent=reminder_sent
         )
-    except GenerationHandoffRequested as exc:
-        if park is not None and park({"attention_request_id": request_id, "tool_call_id": tool_call_id}):
+        if parked:
             raise GenerationHandoffRequested(exc.task_queue, parked=True) from None
-        _stash_approval_resume(workflow_instance, request_id, question)
-        interrupt_event = ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="🔐 Requesting user approval",
-            message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
-            status=MessageStatus.FINISHED,
-            metadata=event_metadata,
-        )
-        await workflow_instance._handle_tool_event(interrupt_event, tool_call_id, TOOL_NAME)
-        raise
+
+    # Initial notification already went out. Wait once for the reminder
+    # window; if the user is still silent, send exactly one extra SMS.
+    if not responded and not reminder_sent:
+        try:
+            await wait_condition_or_generation_handoff(
+                lambda: request_id in workflow_instance._signal_responses,
+                workflow_instance,
+                timeout=timedelta(minutes=APPROVAL_REMINDER_TIMEOUT_MINUTES),
+                workflow_mod=workflow,
+            )
+            responded = True
+        except GenerationHandoffRequested as exc:
+            _on_handoff(exc)
+            interrupt_event = ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="🔐 Requesting user approval",
+                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                status=MessageStatus.FINISHED,
+                metadata=event_metadata,
+            )
+            await workflow_instance._handle_tool_event(interrupt_event, tool_call_id, TOOL_NAME)
+            raise
+        except (AsyncTimeoutError, TemporalTimeoutError, TimeoutError):
+            if MAX_APPROVAL_REMINDERS > 0:
+                await _send_approval_sms(
+                    workflow_instance,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    workflow_id=workflow_id,
+                    question=question,
+                    request_id=request_id,
+                    metadata=metadata,
+                    reminder=True,
+                )
+                reminder_sent = True
+
+    # After the one extra reminder, wait indefinitely with no more SMS.
+    if not responded:
+        try:
+            await wait_condition_or_generation_handoff(
+                lambda: request_id in workflow_instance._signal_responses,
+                workflow_instance,
+                workflow_mod=workflow,
+            )
+        except GenerationHandoffRequested as exc:
+            _on_handoff(exc)
+            interrupt_event = ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="🔐 Requesting user approval",
+                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                status=MessageStatus.FINISHED,
+                metadata=event_metadata,
+            )
+            await workflow_instance._handle_tool_event(interrupt_event, tool_call_id, TOOL_NAME)
+            raise
 
     signal_response = workflow_instance._signal_responses.pop(request_id)
     _clear_approval_resume(workflow_instance, request_id)
