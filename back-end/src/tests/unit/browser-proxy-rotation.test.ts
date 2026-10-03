@@ -53,6 +53,61 @@ function testResidentialUnchanged(): void {
   assert.strictEqual(candidates[0].source, 'kernel_residential_city');
 }
 
+function testBenchmarkProxyReuseRequiresSameLocationAndTier(): void {
+  const candidate = kernelProxyCandidates({ country: 'US', state: 'CA', city: 'PALO ALTO' })[0];
+  assert.strictEqual(
+    selectReusableKernelProxy(
+      [
+        {
+          status: 'available',
+          id: 'wrong-tier',
+          name: candidate.name,
+          type: 'mobile',
+          config: candidate.config,
+        },
+        {
+          status: 'available',
+          id: 'wrong-city',
+          name: candidate.name,
+          type: 'residential',
+          config: { country: 'US', state: 'CA', city: 'san_francisco' },
+        },
+        {
+          status: 'available',
+          id: 'same-proxy',
+          name: candidate.name,
+          type: 'residential',
+          config: { country: 'us', state: 'ca', city: 'palo_alto' },
+        },
+      ],
+      candidate
+    ),
+    'same-proxy'
+  );
+  assert.strictEqual(
+    selectReusableKernelProxy(
+      [
+        {
+          status: 'available',
+          id: 'different-name',
+          name: 'another-proxy',
+          type: 'residential',
+          config: candidate.config,
+        },
+        {
+          status: 'available',
+          id: 'extra-setting',
+          name: candidate.name,
+          type: 'residential',
+          config: { ...candidate.config, zip: '94301' },
+        },
+      ],
+      candidate
+    ),
+    undefined
+  );
+}
+
 function testRestoredProxyReuse(): void {
   const candidate = kernelProxyCandidates({ country: 'US', state: 'CA', city: 'PALO ALTO' })[0]!;
   const matching = {
@@ -80,6 +135,20 @@ function testRestoredProxyReuse(): void {
     undefined
   );
   const countryCandidate = kernelProxyCandidates({ country: 'US' })[0]!;
+  assert.strictEqual(
+    selectReusableKernelProxy(
+      [
+        {
+          ...matching,
+          name: countryCandidate.name,
+          config: { country: ['US'] as unknown as string },
+        },
+      ],
+      countryCandidate
+    ),
+    undefined,
+    'a malformed array location must not match a geographic proxy candidate'
+  );
   assert.strictEqual(
     selectReusableKernelProxy(
       [{ ...matching, name: countryCandidate.name, config: { country: 'US', state: 'CA' } }],
@@ -467,6 +536,7 @@ function testSteelOutageDetector(): void {
 async function main(): Promise<void> {
   testMobileCandidates();
   testResidentialUnchanged();
+  testBenchmarkProxyReuseRequiresSameLocationAndTier();
   testRestoredProxyReuse();
   await testPaginatedProxyReuseAndConcurrentOwnership();
   await testDeletedCachedProxyKeepsLocation();

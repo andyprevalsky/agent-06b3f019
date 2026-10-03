@@ -22,10 +22,12 @@ import {
 } from '../../providers/claudeCredentials';
 import {
   fetchComputeTokenForUser,
+  getCerebrasApiKeyCooldown,
   heartbeatComputeTokenLineage,
   isAnthropicApiKeyOnCooldown,
   isGptApiKeyOnCooldown,
   markAnthropicApiKeyOnCooldown,
+  markCerebrasApiKeyOnCooldown,
   markGptApiKeyOnCooldown,
   releaseComputeTokenLineage,
 } from '../../providers/computeCredentials';
@@ -763,6 +765,8 @@ export async function markComputeTokenRateLimited(
     userId?: string;
     rateLimitedUntil?: string;
     failureReason?: string;
+    credentialId?: string;
+    model?: string;
   }
 ) {
   if (type === 'claude') {
@@ -778,11 +782,21 @@ export async function markComputeTokenRateLimited(
     await markAnthropicApiKeyOnCooldown(params.failureReason ?? 'rate_limit');
     return { ok: true, type, rateLimitedUntil: null };
   }
+  if (type === 'cerebras') {
+    await markCerebrasApiKeyOnCooldown(
+      params.credentialId ?? '',
+      params.model ?? '',
+      params.rateLimitedUntil ?? ''
+    );
+    return { ok: true, type, rateLimitedUntil: params.rateLimitedUntil };
+  }
   if (type === 'gpt_api_key') {
     await markGptApiKeyOnCooldown(params.failureReason ?? 'out_of_credits');
     return { ok: true, type, rateLimitedUntil: null };
   }
-  throw new Error('Invalid type. Must be "claude", "gpt", "anthropic", or "gpt_api_key".');
+  throw new Error(
+    'Invalid type. Must be "claude", "gpt", "anthropic", "cerebras", or "gpt_api_key".'
+  );
 }
 
 export async function getGptApiKeyCooldown() {
@@ -791,6 +805,8 @@ export async function getGptApiKeyCooldown() {
     onCooldown: await isGptApiKeyOnCooldown(),
   };
 }
+
+export { getCerebrasApiKeyCooldown };
 
 /** Read the running backend's shared ANTHROPIC_API_KEY availability.
  *  Consumers must require both configured=true and onCooldown=false before

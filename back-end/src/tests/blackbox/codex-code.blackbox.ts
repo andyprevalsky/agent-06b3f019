@@ -28,6 +28,8 @@ import {
 } from './codex-template-contract.case';
 import {
   CredentialExhaustionSkip,
+  runTest,
+  type TestResult,
   codexCreateUnavailableSkipReason,
   codexSmokeCreditSkipReason,
   detectCodexCreditExhaustion,
@@ -47,15 +49,6 @@ const API_KEY = process.env.BACKEND_API_KEY || '';
 const DEV_USER_ID = process.env.CODEX_BLACKBOX_USER_ID || '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
 const ErrorResponse = z.object({ error: z.string() });
-
-interface TestResult {
-  name: string;
-  passed: boolean;
-  skipped?: boolean;
-  skipReason?: string;
-  error?: string;
-  duration: number;
-}
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -86,32 +79,6 @@ async function request(
 
 function apiKeyHeaders(): Record<string, string> {
   return { 'X-API-Key': API_KEY };
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    if (error instanceof CredentialExhaustionSkip) {
-      // Not a failure: the third-party account is out of credits/quota. Report
-      // as a loud SKIP so the deploy gate is not blocked by external funding.
-      return {
-        name,
-        passed: true,
-        skipped: true,
-        skipReason: error.message,
-        duration: Date.now() - start,
-      };
-    }
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
 }
 
 async function testCreate_noAuth() {
@@ -316,7 +283,11 @@ async function testSmoke_codexCompletesE2bTask() {
     }
     assertStatus(createRes.status, 200, createRes.data);
 
-    const body = createRes.data as { ws_url?: string; task_id?: string; sandbox_id?: string };
+    const body = createRes.data as {
+      ws_url?: string;
+      task_id?: string;
+      sandbox_id?: string;
+    };
     assert(!!body.ws_url, 'Missing ws_url');
     assert(!!body.task_id, 'Missing task_id');
     assert(!!body.sandbox_id, 'Missing sandbox_id');
@@ -384,8 +355,12 @@ async function testSmoke_codexCompletesE2bTask() {
     }
 
     const { Sandbox } = await import('e2b');
-    const sandbox = await Sandbox.connect(sandboxId!, { apiKey: process.env.E2B_API_KEY });
-    const promptFile = await sandbox.files.read('/home/user/AGENTS.md', { format: 'text' });
+    const sandbox = await Sandbox.connect(sandboxId!, {
+      apiKey: process.env.E2B_API_KEY,
+    });
+    const promptFile = await sandbox.files.read('/home/user/AGENTS.md', {
+      format: 'text',
+    });
     assert(
       String(promptFile).includes('/home/user/output') &&
         String(promptFile).includes('Do not return the original attachment path'),
@@ -429,7 +404,10 @@ async function runAll() {
   }
   tests.push(
     { name: 'POST /create -- no auth -> 401', fn: testCreate_noAuth },
-    { name: 'POST /create -- missing user_id -> 500', fn: testCreate_missingUserId },
+    {
+      name: 'POST /create -- missing user_id -> 500',
+      fn: testCreate_missingUserId,
+    },
     {
       name: 'prompt -- shared code-agent contract includes output rules',
       fn: testPromptBuilder_sharedContractMentionsOutputRules,

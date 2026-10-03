@@ -6,6 +6,8 @@ DESCEND_COMMAND="$ROOT_DIR/.claude/commands/descend.md"
 DESCEND_STEP_LOGGER="$ROOT_DIR/scripts/descend_step_log.py"
 DESCEND_STEP_HISTORY="$ROOT_DIR/agents/benchmarks/history/descend_steps.jsonl"
 GIT_ATTRIBUTES="$ROOT_DIR/.gitattributes"
+RUN_BENCH="$ROOT_DIR/scripts/run-bench"
+CLAUDE_RULES="$ROOT_DIR/CLAUDE.md"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -34,14 +36,29 @@ require_text 'That exact rerun supplies `/RCA`' "/descend must make the post-app
 require_text "freeze a min-heap" "/descend must freeze a min-heap after the first infra-clean RCA set"
 require_text "Andy sees a deeper" "/descend must show a deeper bench only when easier benches are busy"
 require_text "not a prod deploy" "/descend must apply approved fixes on a local snapshot, not a prod deploy"
-require_text "original frozen rank" "/descend must reinsert a failed local rerun at its original frozen rank"
+require_text "original frozen rank" "/descend must reinsert a failed outcome-proof rerun at its original frozen rank"
 require_text "Immediately fire a sub-agent" "/descend must start the outcome-proof rerun immediately on approve"
-require_text "Default substrate: cloud fleet" "/descend must default benchmark runs to the cloud fleet"
-require_text "scripts/run-bench <task>" "/descend outcome-proof must use cloud fleet run-bench (not --local by default)"
+require_text "APPLY_AND_CLOUD_RERUN" "/descend must apply the fix then rerun on the cloud fleet"
+require_text "**Default substrate: cloud fleet.**" "/descend must default benchmark runs to the cloud fleet"
+require_text "solely when Andy explicitly" "/descend must require an explicit user opt-in before using --local"
+require_text 'scripts/run-bench <task>' "/descend outcome-proof must use cloud-fleet run-bench without --local by default"
+if grep -Fq 'scripts/run-bench --local <task>' "$DESCEND_COMMAND"; then
+  fail "/descend must not hardcode --local for outcome-proof bench reruns"
+fi
 require_text "fail-closes on a stale/missing infra-canary stamp" "/descend must document infra-canary fail-closed preflight"
-require_text "outcome-proof run on the cloud" "/descend Rerun section must default outcome-proof to cloud fleet"
 require_text "RANK_HEAP" "/descend must rank failing tasks before pipelined fix approval"
-require_text "PIPELINE_HEAP" "/descend must pipeline approve, local rerun, and the next ask"
+require_text "PIPELINE_HEAP" "/descend must pipeline approve, cloud-fleet outcome-proof, and the next ask"
+require_text "## One benchmark command" "/descend must define one benchmark entrypoint"
+require_text "--concurrency N" "/descend must document bounded benchmark concurrency"
+require_text "-k K" "/descend must document repeated isolated benchmark runs"
+require_text "scripts/run-bench stability-proof -k K --concurrency N --seed S" \
+  "/descend must document the full-catalog no-INFRA command"
+require_text "terminal _batch/run.json classification" \
+  "/descend must classify capability versus INFRA from the terminal batch"
+require_text "distinct controller lock + run ID + machine/volume/queue per instance" \
+  "/descend must preserve per-copy isolation"
+require_text 'existing always-run `Descend Command` deploy gate' \
+  "/descend must keep command proof in the existing zero-cost deploy gate"
 # Soft until command-wiring PR lands: runtime preflight in run-bench-fleet is the
 # durable substrate guarantee. When the docs are present, pin them strictly.
 if grep -Fq 'FLEET_INFRA_CANARY' "$DESCEND_COMMAND"; then
@@ -113,5 +130,278 @@ grep -Fq '| Admin approval |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin mu
 grep -Fq '| Benchmark |' <<<"$RESPONSE_CONTRACT" && fail "real rerun must replace the ambiguous Benchmark column"
 
 python3 "$ROOT_DIR/scripts/tests/descend-step-log.test.py"
+bash "$ROOT_DIR/scripts/tests/fleet-infra-stability-proof.test.sh"
+
+grep -Fq '`scripts/run-bench` is the one supported entrypoint' "$CLAUDE_RULES" \
+  || fail "CLAUDE.md must name the canonical benchmark command"
+grep -Fq '`scripts/run-bench <task> -k K --concurrency N`' "$CLAUDE_RULES" \
+  || fail "CLAUDE.md must document repeat and concurrency flags"
+
+tmp="$(mktemp -d)"
+cleanup() {
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+mkdir -p "$tmp/captures"
+cat >"$tmp/fake-fleet" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+capture="$RUN_BENCH_FAKE_CAPTURE_ROOT/$RUN_BENCH_CAMPAIGN_ID/$RUN_BENCH_CAMPAIGN_JOB_ID"
+mkdir -p "$(dirname "$capture")"
+{
+  printf 'task=%s\n' "$RUN_BENCH_CAMPAIGN_TASK"
+  printf 'run=%s\n' "$RUN_BENCH_CAMPAIGN_RUN"
+  printf 'lock=%s\n' "$CLOUDBENCH_CONTROLLER_LOCK_NAME"
+  printf 'parent=%s\n' "${BENCHMARK_HUB_PARENT_RUN_ID:-}"
+  printf 'args='
+  printf '<%s>' "$@"
+  printf '\n'
+} >"$capture"
+sleep 0.02
+if [ "${RUN_BENCH_FAKE_FAIL_RUN:-}" = "$RUN_BENCH_CAMPAIGN_RUN" ]; then
+  exit 17
+fi
+SH
+chmod +x "$tmp/fake-fleet"
+
+run_campaign() {
+  local campaign_id="$1"
+  shift
+  RUN_BENCH_CAMPAIGN_ID="$campaign_id" \
+  RUN_BENCH_CAMPAIGN_ROOT="$tmp/campaigns" \
+  RUN_BENCH_FAKE_CAPTURE_ROOT="$tmp/captures" \
+  RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/fake-fleet" \
+    "$RUN_BENCH" "$@"
+}
+
+run_campaign repeat-short demo-fleet-alpha -k=4 --concurrency=2 --timeout 7
+python3 - "$tmp/campaigns/repeat-short/summary.json" "$tmp/captures/repeat-short" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary = json.loads(Path(sys.argv[1]).read_text())
+captures = sorted(Path(sys.argv[2]).iterdir())
+assert summary["status"] == "passed"
+assert summary["runs"] == 4
+assert summary["concurrency"] == 2
+assert summary["total_jobs"] == 4
+assert summary["peak_concurrency"] == 2
+assert [job["run"] for job in summary["jobs"]] == [1, 2, 3, 4]
+assert len({job["controller_lock"] for job in summary["jobs"]}) == 4
+assert len(captures) == 4
+for capture in captures:
+    text = capture.read_text()
+    assert "task=demo-fleet-alpha" in text
+    assert "parent=\n" in text, (
+        "campaign child inherited a parent Hub run that the campaign never registered"
+    )
+    assert "<demo-fleet-alpha><--timeout><7><--foreground>" in text
+PY
+
+set +e
+RUN_BENCH_FAKE_FAIL_RUN=2 run_campaign repeat-long \
+  demo-fleet-alpha --runs 3 --concurrency 2
+campaign_status=$?
+set -e
+[ "$campaign_status" -eq 17 ] \
+  || fail "campaign must propagate the first child exit exactly (got $campaign_status)"
+python3 - "$tmp/campaigns/repeat-long/summary.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary = json.loads(Path(sys.argv[1]).read_text())
+assert summary["status"] == "failed"
+assert summary["total_jobs"] == 3
+assert [job["controller_exit_code"] for job in summary["jobs"]] == [0, 17, 0]
+PY
+
+mkdir -p "$tmp/catalog"
+cat >"$tmp/catalog/tasks.json" <<'JSON'
+[
+  {"name":"slice-smoke","status":"ready","tags":["smoke"]},
+  {"name":"slice-daily","status":"ready","bench":"pipeline-e2e"}
+]
+JSON
+cat >"$tmp/catalog/polar_tasks.json" <<'JSON'
+[
+  {"name":"slice-polar","status":"ready","group":"polar-bench","tags":["polar-bench"]}
+]
+JSON
+RUN_BENCH_CATALOG_UNDER_TEST="$tmp/catalog/tasks.json" \
+  run_campaign named-slices pre-deploy daily --concurrency=2
+python3 - "$tmp/campaigns/named-slices/summary.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary = json.loads(Path(sys.argv[1]).read_text())
+assert summary["task_count"] == 2
+assert summary["total_jobs"] == 2
+assert summary["peak_concurrency"] == 2
+assert [job["task"] for job in summary["jobs"]] == ["slice-smoke", "slice-daily"]
+PY
+
+for invalid in '-k=0' '--runs=bad' '--concurrency=0'; do
+  if run_campaign "invalid-${invalid//[^a-zA-Z0-9]/-}" demo-fleet-alpha "$invalid" \
+      >"$tmp/invalid.out" 2>&1; then
+    fail "$invalid must fail closed"
+  fi
+  grep -Fq 'must be positive integers' "$tmp/invalid.out" \
+    || fail "$invalid must explain its positive-integer contract"
+done
+
+# CAMPAIGN_LIFECYCLE_REGRESSIONS_BEGIN
+python3 - "$ROOT_DIR" <<'PY'
+import argparse
+import importlib.util
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+campaign_script = Path(sys.argv.pop()) / "scripts" / "run-bench-campaign.py"
+
+
+class CampaignLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        (self.root / "scripts").mkdir()
+        (self.root / "scripts" / "run-bench").write_text('''#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  signalled) kill -TERM "$$" ;;
+  waiting)
+    trap 'exit 0' TERM
+    touch "$RUN_BENCH_CAMPAIGN_ROOT/child-ready"
+    while :; do sleep 0.1; done
+    ;;
+  passed|queued) exit 0 ;;
+  *) exit 99 ;;
+esac
+''')
+        self.environment = {
+            **os.environ,
+            "RUN_BENCH_CAMPAIGN_ROOT": str(self.root),
+            "RUN_BENCH_CAMPAIGN_ID": "lifecycle",
+        }
+
+    def command(self, *tasks):
+        return [
+            sys.executable, str(campaign_script), "--root", str(self.root),
+            "--runs", "1", "--concurrency", "1",
+            *[argument for task in tasks for argument in ("--task", task)],
+        ]
+
+    def summary(self):
+        return json.loads((self.root / "lifecycle" / "summary.json").read_text())
+
+    def test_child_signal_has_shell_exit_status(self):
+        completed = subprocess.run(
+            self.command("signalled"), env=self.environment,
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(completed.returncode, 143, completed.stdout + completed.stderr)
+        summary = self.summary()
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["jobs"][0]["controller_exit_code"], 143)
+        self.assertEqual(summary["jobs"][0]["status"], "failed")
+
+    def test_campaign_cancel_marks_active_and_queued_jobs(self):
+        process = subprocess.Popen(
+            self.command("passed", "waiting", "queued"), env=self.environment,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.root / "child-ready").exists():
+                self.assertIsNone(process.poll(), "campaign exited before its child was ready")
+                self.assertLess(time.monotonic(), deadline, "child never became ready")
+                time.sleep(0.02)
+            process.send_signal(signal.SIGTERM)
+            output, _ = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 143, output)
+            summary = self.summary()
+            self.assertEqual(summary["status"], "cancelled")
+            self.assertEqual(
+                [job["status"] for job in summary["jobs"]],
+                ["passed", "cancelled", "cancelled"],
+            )
+            # A cooperative active child exits cleanly after TERM; its actual
+            # exit code must not erase the campaign's cancellation disposition.
+            self.assertEqual(summary["jobs"][1]["controller_exit_code"], 0)
+            self.assertNotIn("_terminated_by_campaign", json.dumps(summary))
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+                process.communicate(timeout=35)
+
+    def test_stop_runs_one_bounded_teardown_before_delayed_reap(self):
+        spec = importlib.util.spec_from_file_location("campaign_lifecycle", campaign_script)
+        campaign = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(campaign)
+        handlers = {}
+        child = None
+        clock = 0
+        signals = []
+
+        class DelayedReapProcess:
+            pid = 777
+
+            def __init__(self, *_args, **_kwargs):
+                nonlocal child
+                child = self
+                self.killed = False
+                self.polls_after_kill = 0
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+            def poll(self):
+                if not self.killed:
+                    return None
+                self.polls_after_kill += 1
+                return None if self.polls_after_kill == 1 else -signal.SIGKILL
+
+        def killpg(pid, signum):
+            self.assertEqual(pid, child.pid)
+            signals.append(signum)
+            if signum == signal.SIGKILL:
+                child.killed = True
+
+        def monotonic():
+            nonlocal clock
+            clock += 31
+            return clock
+
+        args = argparse.Namespace(
+            root=self.root, runs=1, concurrency=1, task=["waiting"], forward_arg=[]
+        )
+        with (
+            patch.dict(os.environ, self.environment),
+            patch.object(campaign, "parse_args", return_value=args),
+            patch.object(campaign.subprocess, "Popen", DelayedReapProcess),
+            patch.object(campaign.signal, "signal", side_effect=lambda signum, handler: handlers.update({signum: handler})),
+            patch.object(campaign.os, "killpg", side_effect=killpg),
+            patch.object(campaign.time, "monotonic", side_effect=monotonic),
+            patch.object(campaign.time, "sleep"),
+            patch.object(campaign, "terminate_owned_children", wraps=campaign.terminate_owned_children) as teardown,
+        ):
+            self.assertEqual(campaign.main(), 143)
+        self.assertEqual(teardown.call_count, 1, "stop repeated its full shutdown window")
+        self.assertEqual(signals, [signal.SIGTERM, signal.SIGKILL])
+        self.assertEqual(self.summary()["jobs"][0]["status"], "cancelled")
+
+
+unittest.main()
+PY
+# CAMPAIGN_LIFECYCLE_REGRESSIONS_END
 
 echo "All /descend command checks passed."

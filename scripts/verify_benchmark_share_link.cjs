@@ -2,7 +2,10 @@
 
 /** Verify that an empty browser profile actually renders a shared agent. */
 const fs = require("node:fs");
-const { chromium } = require("playwright");
+const path = require("node:path");
+const { createRequire } = require("node:module");
+const backendRequire = createRequire(path.join(__dirname, "../back-end/package.json"));
+const { chromium } = backendRequire("playwright");
 
 async function main() {
   const { url, agentId, snippets } = JSON.parse(fs.readFileSync(0, "utf8"));

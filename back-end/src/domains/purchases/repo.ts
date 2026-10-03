@@ -2,6 +2,8 @@ import { Prisma, PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prism
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { lockPurchaseWalletTransition } from '../../providers/purchase-wallet-funding-repo';
 import { canonicalStoredPurchaseFingerprint } from './fingerprint';
+import { PurchaseError } from './errors';
+import { lockPurchaseAgentAdmission, type PurchaseAgentAdmission } from './repoAgentAdmission';
 
 const FINGERPRINT_BACKFILL_LOCK_SEED = 8_675_309;
 const IDEMPOTENT_PURCHASE_STATUSES = [
@@ -16,6 +18,7 @@ const IDEMPOTENT_PURCHASE_STATUSES = [
 ];
 
 export { createPendingPurchaseWithLock } from './repoOpen';
+export { assertPurchaseAgentAdmitted } from './repoAgentAdmission';
 
 function legacyFingerprintWhere(
   userId: string,
@@ -131,17 +134,20 @@ export async function createPendingPurchase(data: {
   lineItemsJson: unknown;
   totalCents: number;
 }) {
-  return prisma.purchaseSpend.create({
-    data: {
-      userId: data.userId,
-      agentId: data.agentId,
-      fingerprint: data.fingerprint,
-      canonicalFingerprint: data.canonicalFingerprint,
-      merchant: data.merchant,
-      lineItemsJson: data.lineItemsJson as Prisma.InputJsonValue,
-      totalCents: data.totalCents,
-      status: PurchaseSpendStatus.PENDING_APPROVAL,
-    },
+  return runTransactionWithRetry(async (tx) => {
+    const agentId = await lockPurchaseAgentAdmission(tx, data);
+    return tx.purchaseSpend.create({
+      data: {
+        userId: data.userId,
+        agentId,
+        fingerprint: data.fingerprint,
+        canonicalFingerprint: data.canonicalFingerprint,
+        merchant: data.merchant,
+        lineItemsJson: data.lineItemsJson as Prisma.InputJsonValue,
+        totalCents: data.totalCents,
+        status: PurchaseSpendStatus.PENDING_APPROVAL,
+      },
+    });
   });
 }
 
@@ -168,9 +174,9 @@ export async function updatePurchaseStatus(
 }
 
 /**
- * Mark an unavailable HELD card as merchant-spent without racing the abandon
- * path. Both the observed purchase state and the absence of an active/finished
- * reclaim are predicates of the same database statement.
+ * Preserve unresolved company funding when a held card becomes unavailable. Only canonical
+ * settlement's CONSUMED funding (or a legacy card without company funding) permits clearing.
+ * The shared transition lock keeps settlement and reclaim ownership mutually exclusive.
  */
 export async function markHeldPurchaseClearedIfNoReclaim(id: string) {
   return runTransactionWithRetry(async (transaction) => {
@@ -179,17 +185,10 @@ export async function markHeldPurchaseClearedIfNoReclaim(id: string) {
       where: {
         id,
         status: PurchaseSpendStatus.HELD,
-        walletFunding: {
-          isNot: {
-            status: {
-              in: [
-                PurchaseWalletFundingStatus.RECLAIMING,
-                PurchaseWalletFundingStatus.RECLAIMED,
-                PurchaseWalletFundingStatus.RECLAIM_FAILED,
-              ],
-            },
-          },
-        },
+        OR: [
+          { walletFunding: { is: null } },
+          { walletFunding: { is: { status: PurchaseWalletFundingStatus.CONSUMED } } },
+        ],
       },
       data: { status: PurchaseSpendStatus.CLEARED },
     });
@@ -213,17 +212,54 @@ export async function markStalePurchaseFundingPending(id: string, observedUpdate
 }
 
 /** Claim one durable funding retry. Concurrent callers cannot both own the same provider replay. */
-export async function claimFundingPendingPurchase(id: string) {
-  const claimed = await prisma.purchaseSpend.updateMany({
-    where: {
-      id,
-      status: PurchaseSpendStatus.FUNDING_PENDING,
-      cardId: null,
-    },
-    data: { status: PurchaseSpendStatus.CHARGING },
+export async function claimFundingPendingPurchase(id: string, admission?: PurchaseAgentAdmission) {
+  return runTransactionWithRetry(async (tx) => {
+    const purchase = await tx.purchaseSpend.findUnique({ where: { id } });
+    if (purchase === null) return null;
+    const candidateAgentId = admission?.agentId?.trim();
+    const requestedAgentId =
+      candidateAgentId !== undefined && candidateAgentId !== '' ? candidateAgentId : undefined;
+    if (
+      (admission !== undefined && admission.userId !== purchase.userId) ||
+      (requestedAgentId !== undefined &&
+        purchase.agentId !== null &&
+        purchase.agentId !== requestedAgentId)
+    ) {
+      throw new PurchaseError(
+        'The agent is no longer available for this purchase',
+        409,
+        'purchase_agent_unavailable'
+      );
+    }
+    const agentId = await lockPurchaseAgentAdmission(tx, {
+      userId: purchase.userId,
+      agentId: requestedAgentId ?? purchase.agentId ?? undefined,
+    });
+    const claimed = await tx.purchaseSpend.updateMany({
+      // Another agent can adopt a legacy row and requeue it while this caller
+      // waits for its generation lock. Preserve the ownership we actually read.
+      where: {
+        id,
+        agentId: purchase.agentId,
+        status: PurchaseSpendStatus.FUNDING_PENDING,
+        cardId: null,
+      },
+      data: {
+        status: PurchaseSpendStatus.CHARGING,
+        // Legacy null-agent retries become owned by the verified requesting
+        // agent before any new provider effect, so terminal cleanup can find them.
+        ...(purchase.agentId === null && agentId !== undefined ? { agentId } : {}),
+      },
+    });
+    if (claimed.count !== 1) return null;
+    if (purchase.agentId === null && agentId !== undefined) {
+      await tx.purchaseWalletFunding.updateMany({
+        where: { purchaseId: id, agentId: null },
+        data: { agentId },
+      });
+    }
+    return tx.purchaseSpend.findUniqueOrThrow({ where: { id } });
   });
-  if (claimed.count !== 1) return null;
-  return prisma.purchaseSpend.findUniqueOrThrow({ where: { id } });
 }
 
 /** Stop user retries before canceling their Stripe hold; the compensator owns the provider replay. */

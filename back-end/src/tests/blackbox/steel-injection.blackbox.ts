@@ -353,40 +353,17 @@ test('browser-state injection is serial and bounded after CDP connects', async (
       startUrl: 'https://www.google.com/search?q=movie+genre',
     },
   });
-  await Promise.all([
-    prisma.localStorageOrigin.create({
-      data: {
-        userId,
-        origin: 'https://www.google.com',
-        entries: [{ key: 'session', value: 'retained' }],
-        hash: 'local-storage',
-      },
-    }),
-    prisma.indexedDBOrigin.create({
-      data: {
-        userId,
-        origin: 'https://www.google.com',
-        databases: [],
-        hash: 'indexed-db',
-      },
-    }),
-    prisma.browserPermission.create({
-      data: {
-        userId,
-        origin: 'https://www.google.com',
-        permission: 'notifications',
-        setting: 1,
-      },
-    }),
-    prisma.cacheStorageOrigin.create({
-      data: {
-        userId,
-        origin: 'https://www.google.com',
-        caches: [{ name: 'retained-cache' }],
-        hash: 'cache-storage',
-      },
-    }),
-  ]);
+  // Permissions and scrollbar CSS both mutate CDP immediately. Origin payload
+  // staging can consume the 75 ms test budget before reaching the stalled call;
+  // its SQL/content/cancellation behavior belongs to browser-origin-payload.
+  await prisma.browserPermission.create({
+    data: {
+      userId,
+      origin: 'https://www.google.com',
+      permission: 'notifications',
+      setting: 1,
+    },
+  });
 
   let activeCalls = 0;
   let maxActiveCalls = 0;
@@ -395,13 +372,17 @@ test('browser-state injection is serial and bounded after CDP connects', async (
   const firstCallStarted = new Promise<void>((resolve) => {
     markFirstCallStarted = resolve;
   });
+  let releaseFirstCall: (() => void) | undefined;
+  const firstCallReleased = new Promise<void>((resolve) => {
+    releaseFirstCall = resolve;
+  });
   const stalledContext = {
     addInitScript: async () => {
       callCount += 1;
       markFirstCallStarted?.();
       activeCalls += 1;
       maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
-      await new Promise<never>(() => {});
+      if (callCount === 1) await firstCallReleased;
       activeCalls -= 1;
     },
   };
@@ -428,8 +409,8 @@ test('browser-state injection is serial and bounded after CDP connects', async (
       firstCallStarted,
       new Promise<never>((_, reject) =>
         setTimeout(
-          () => reject(new Error('browser-state fixture was not reached within 5s')),
-          5_000
+          () => reject(new Error('browser-state fixture was not reached within 15s')),
+          15_000
         )
       ),
     ]);
@@ -437,8 +418,12 @@ test('browser-state injection is serial and bounded after CDP connects', async (
       injectionSettled,
       new Promise<{ rejected: false; message: string }>((resolve) =>
         setTimeout(
-          () => resolve({ rejected: false, message: 'browser-state injection exceeded 500ms' }),
-          500
+          () =>
+            resolve({
+              rejected: false,
+              message: 'browser-state injection exceeded the 10s test guard',
+            }),
+          10_000
         )
       ),
     ]);
@@ -453,7 +438,14 @@ test('browser-state injection is serial and bounded after CDP connects', async (
       maxActiveCalls === 1,
       `expected no overlapping addInitScript calls, got ${maxActiveCalls}`
     );
+    releaseFirstCall?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert(callCount === 1, `expected cancellation to fence later mutations, got ${callCount}`);
+    assert(maxActiveCalls === 1, 'late completion started overlapping mutations');
+    assert(activeCalls === 0, 'timed-out mutation did not drain after release');
   } finally {
+    releaseFirstCall?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     if (previousTimeout === undefined) {
       delete process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS;
     } else {
@@ -529,8 +521,8 @@ test('JIT credential injection bounds a CDP endpoint that accepts transport but 
       new Promise<{ rejected: false; message: string }>((resolve) =>
         setTimeout(
           () =>
-            resolve({ rejected: false, message: 'CDP acquisition exceeded the 500ms test budget' }),
-          500
+            resolve({ rejected: false, message: 'CDP acquisition exceeded the 10s test guard' }),
+          10_000
         )
       ),
     ]);

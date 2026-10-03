@@ -69,7 +69,7 @@ case "\$1" in
   inspect)
     if [ "\${SETUP_DB_TEST_CONFLICT:-}" = 1 ]; then printf '%s\n' 'postgres:16-alpine'; fi
     exit 0 ;;
-  run)  stamp CREATE_CONTAINER; exit 0 ;;
+  run)  stamp CREATE_CONTAINER; [ "\${SETUP_DB_TEST_DOCKER_FAIL:-0}" != 1 ] ;;
   start) exit 0 ;;
   rm) stamp RM_CONTAINER; exit 0 ;;
   port) printf '%s\n' '0.0.0.0:59006'; exit 0 ;;
@@ -138,6 +138,47 @@ mkdir -p "$TMP/fake-repo/back-end/prisma"
 touch "$TMP/fake-repo/back-end/prisma/schema.prisma"
 chmod +x "$TMP/bin"/* "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.sh" \
   "$TMP/fake-repo/scripts/benchmark-seed-cache"
+
+# A failed Mac container must never redirect a destructive setup to shared PG.
+cp "$TMP/bin/pg_isready" "$TMP/mac-control-pg_isready"
+cp "$TMP/bin/psql" "$TMP/mac-control-psql"
+cat > "$TMP/bin/uname" <<'STUB'
+#!/usr/bin/env bash
+echo Darwin
+STUB
+cat > "$TMP/bin/pg_isready" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+cat > "$TMP/bin/psql" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' SYSTEM_PG_TOUCHED >> "$EVENTS"
+exit 0
+STUB
+cat > "$TMP/bin/createdb" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' SYSTEM_PG_TOUCHED >> "$EVENTS"
+exit 0
+STUB
+chmod +x "$TMP/bin/uname" "$TMP/bin/pg_isready" "$TMP/bin/psql" "$TMP/bin/createdb"
+set +e
+(
+  cd "$TMP/fake-repo"
+  PATH="$TMP/bin:$PATH" SETUP_DB_TEST_DOCKER_FAIL=1 \
+    CONDUCTOR_PORT=59000 CONDUCTOR_WORKSPACE_NAME=fake-repo \
+    CONDUCTOR_WORKSPACE_PATH="$TMP/fake-repo" ROSE_USE_SYSTEM_PG=false \
+    ROSE_WORKSPACE_DB_LOCK_DIR="$TMP/locks" \
+    bash scripts/setup-db.sh > "$TMP/mac-fallback.out" 2>&1
+)
+mac_fallback_rc=$?
+set -e
+[ "$mac_fallback_rc" -ne 0 ] || fail "failed Mac Docker setup unexpectedly succeeded through shared Postgres"
+! grep -q SYSTEM_PG_TOUCHED "$EVENTS" || fail "failed Mac Docker setup touched shared Postgres"
+! grep -q 'PUSH\|SEED_START' "$EVENTS" || fail "failed Mac Docker setup reached destructive schema/seed work"
+rm "$TMP/bin/uname" "$TMP/bin/createdb"
+mv "$TMP/mac-control-pg_isready" "$TMP/bin/pg_isready"
+mv "$TMP/mac-control-psql" "$TMP/bin/psql"
+: > "$EVENTS"
 
 run_setup_db() { # run_setup_db <tag> <workspace-name>
   local tag="$1" ws="$2"
@@ -422,11 +463,13 @@ if os.fork():
     while True:
         time.sleep(0.1)
 
-# Publish atomically: the shell polls for the file and reads it at once.
 pid_file = Path("$DETACHED_PID_FILE")
-pid_tmp = pid_file.with_name(pid_file.name + ".tmp")
-pid_tmp.write_text(str(os.getpid()))
-os.replace(pid_tmp, pid_file)
+pending = pid_file.with_suffix(".tmp")
+with pending.open("w") as handle:
+    # Existence must imply a complete PID, even with a delayed write.
+    time.sleep(0.2)
+    handle.write(str(os.getpid()))
+pending.replace(pid_file)
 while not trigger.exists():
     time.sleep(0.02)
 os.setsid()

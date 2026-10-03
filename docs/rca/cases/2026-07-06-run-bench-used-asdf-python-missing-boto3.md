@@ -10,6 +10,7 @@ first_bad_boundary: scripts/run-bench — invoked the ambient asdf python rather
 symptoms:
   - R2 corpus reads crash from run-bench
   - boto3 import failure in a benchmark step that works when run from the venv
+  - "ModuleNotFoundError: No module named 'httpx'"
 tags:
   - benchmark
   - python
@@ -18,7 +19,7 @@ tags:
   - r2
 sources:
   - memory:project_simulate_e2e_wired_rose_provider
-repro: none-recorded
+repro: scripts/tests/cloudbench-multi-workstream.test.sh
 status: fixed
 ---
 
@@ -43,6 +44,61 @@ actual defect is one level up, in which python the wrapper selects.
 end-to-end work, alongside `--simulate` forwarding through `run-bench`/`local.py`.
 The general rule: every wrapper script that shells out to Python must select the
 project interpreter explicitly rather than inheriting whatever is on `PATH`.
+
+### September 11 cloud-controller recurrence
+
+Proof 13 (`capability-stability-20260911201448-35774`, HEAD `cf288dd2`)
+failed while importing `logs.py` from the actual `hub_upload.py`, before any
+provider allocation or benchmark task. Its local launcher put Homebrew before
+`agents/venv/bin`; Homebrew Python 3.13 lacked `httpx`, while the existing
+Python 3.11.9 project venv loaded the unchanged helper successfully. The July
+repair selected a venv only for the local Python dispatch. Cloud dispatch,
+including the early `stability-proof` branch, still inherited ambient PATH.
+
+Archive searches used `hub_upload httpx python interpreter` and
+`benchmark venv PATH Homebrew`. This is a recurrence at the same wrapper
+interpreter boundary, not a missing dependency declaration. The isolated import
+comparison is recorded in
+`.context/acceptance/fleet-startup-rca/interpreter-boundary-repro.json`.
+
+The permanent multi-workstream test launches the actual fleet controller in a
+private Git worktree. A project Python wrapper records actual Hub invocation;
+its scratch `logs.py` deliberately raises a missing-module error at the same
+import boundary, before outbound HTTP. The final unchanged command is:
+
+```bash
+CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY=1 bash scripts/tests/cloudbench-multi-workstream.test.sh
+```
+
+Before the fix it reports `Hub upload bypassed the project Python interpreter`.
+After the fleet selects its workspace venv before any dependency-bearing helper,
+the same assertion passes. Both results are recorded in
+`fleet-startup-rca/permanent-final-red-green.json`, with `before-final.log` and
+`after-final.log`. The original native failure printer also lacked GNU
+`timeout`; the assertion failures precede that diagnostic-only error. Existing
+scripts-only fixtures preserve ambient Python when no venv exists, and ordinary
+successful fleet scenarios remain mandatory in the full deploy controller
+suite. No global dependency installation, requirements change, or live benchmark
+pass is claimed by this causal proof.
+
+The repair unifies cloud helper interpreter ownership once per controller,
+including snapshot re-entry and direct fleet invocation. It adds no per-agent
+work or shared coordination at 10,000 agents. The accompanying startup cleanup
+failure is tracked in `2026-09-11-failed-stability-proof-abandoned-retained-fleet`.
+
+## October 1 deploy verification environment recurrence
+
+The PR #1299 integration check used a private launcher whose PATH selected
+Homebrew Python 3.13 for nested structural checks. Two evidence-publication
+checks failed with `ModuleNotFoundError: No module named 'markdown_it'`; the
+existing project Python 3.11 virtualenv already contained the declared package.
+The other 31 structural checks passed. Selecting the existing agents virtualenv
+for every nested Python process made the exact two failed checks pass unchanged
+in 2.335 seconds. No dependency installation, source repair, relaxed assertion,
+or timeout adjustment was needed. The original failed receipt remains retained;
+the final result combines its 31 passes with only the two corrected reruns.
+Independent review bound all 232 inputs and confirmed every owned launcher had
+exited. This was a private verification launch error, not a fleet runtime defect.
 
 ## Human feedback
 

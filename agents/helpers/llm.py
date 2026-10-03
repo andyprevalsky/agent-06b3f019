@@ -2896,7 +2896,8 @@ async def call_llm_structured_streaming(
                     chunk = await _stream_iter.__anext__()
                 except StopAsyncIteration:
                     break
-                _await_s += _safe_time() - _t_await
+                finally:
+                    _await_s += _safe_time() - _t_await
                 chunk_count += 1
                 if deferred_fast_cache_acc is not None and fast_cache_accumulate is not None:
                     fast_cache_accumulate(deferred_fast_cache_acc, chunk)

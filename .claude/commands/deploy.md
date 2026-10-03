@@ -199,7 +199,7 @@ CHANGED_AGENT_RUNTIME=$(printf '%s\n' "$CHANGED_AGENTS" |
   bash "$(git rev-parse --show-toplevel)/scripts/classify-agent-runtime-changes.sh")
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
-CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|setup-db\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
+CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|setup-db\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/(cloud_batch_cleanup_test|cloudbench_(dependency_sync|recovery_review)_test|run_benchmark|wall_clock_backstop_test)\.py)' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS" ] && echo "yes" || echo "")
 CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 
@@ -480,13 +480,16 @@ their assertions or test counts:
 `bash scripts/tests/approval-format.test.sh`,
 `bash scripts/tests/durable-evidence-links.test.sh`,
 `bash scripts/tests/publish_evidence_links_browser_validation.test.sh`,
+`bash scripts/tests/publish_evidence_links_composite.test.sh`,
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
 `bash scripts/tests/cooperative-cutover-monitor.test.sh`,
-`bash scripts/tests/agent-surface-hash.test.sh`,
 `bash scripts/tests/agents-structural.test.sh`,
 `bash scripts/tests/deploy-agent-clone-recovery.test.sh`,
+`bash scripts/tests/agent-surface-hash.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
+`python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
+`python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
@@ -607,22 +610,35 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
 bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
+# Native Linux with ripgrep: driver ownership reads /proc.
+bash scripts/tests/cloudbench-status-service-shutdown.test.sh
+bash scripts/tests/fleet-infra-canary.test.sh
+bash scripts/tests/fleet-infra-stability-proof.test.sh
+python3 scripts/tests/verify-successful-llm-queries.test.py
+python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
+python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py
+python3 scripts/tests/cloudbench-forensic-quiesced.test.py
 bash scripts/tests/cloudbench-multi-workstream.test.sh
 bash scripts/tests/cloudbench-github-token.test.sh
 bash scripts/tests/seed-dump-toolchain.test.sh
+agents/venv/bin/python -m pytest -q agents/benchmarks/wall_clock_backstop_test.py
 agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
-  -k 'prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or exact_volume_ownership_survives_delayed_visibility_and_failed_delete'
+  agents/benchmarks/cloudbench_worker_snapshot_test.py \
+  agents/benchmarks/cloudbench_recovery_review_test.py \
+  agents/benchmarks/cloudbench_codex_auth_test.py \
+  agents/benchmarks/cloud_batch_cleanup_test.py \
+  -k 'fly_with_timeout or test_clone_retries_transient_volume_not_found or test_clone_gives_up_after_max_attempts or test_clone_times_out_and_retries_a_hung_clone or clone_creation_cannot_start_copied_primary or cloudbench_codex_auth or autoscaler_runtime_handoff or prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or boot_payload or boot_launch_compresses_complete_payload or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or refresh_deps_applies_exact_workspace_before_rebuild or fetch_ref_restores_dirty_exact_sha or warm_deps_preflight or exact_volume_ownership_survives_delayed_visibility_and_failed_delete or exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers or pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper or exact_recovery_seals_actual_retained_owner_remote_evidence_paths or fleet_lifecycle_receipt_requires_final_registry_retirement or watchdog_collects_cancelled_artifact_after_bounded_shutdown or terminal_projection_preserves_benchmark_outcome or boot_driver_state_write_failure or driver_cleanup_persists_evidence_in_fresh_data_directory or terminal_projection_empty_tasks or terminal_projection_rejection_removes_all_artifacts or status_recovery_read_closes_descriptor or cloudbench_recovery_review or migration or migrated_registry or owned_worker_volume or composite_result_finalizes_each_exact_root or minted_dispatch_preserves_live_root_observer or boot_terminal_runtime_evidence_collects_complete_logs or cloudbench_worker_snapshot or quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt'
 if [ -z "$CHANGED_AGENTS" ]; then
   cd agents && ./venv/bin/python scripts/run_blackbox_tests.py benchmark
 fi
 ```
 
-The six controller commands must pass. The agents `benchmark` blackbox domain
+The controller commands above must pass. The agents `benchmark` blackbox domain
 must also pass exactly once: Step 4g's agents coverage already runs it whenever
 `$CHANGED_AGENTS` is non-empty, so Step 4cb runs it directly only when agents
 coverage was skipped. Never launch the same controller-owning domain in both
 parallel lanes; they share local lock and fixture state. When `$CHANGED_AGENTS`
-is non-empty, wait for Step 4g to finish before starting the six controller
+is non-empty, wait for Step 4g to finish before starting the controller
 commands above. This operational
 verification wiring is pre-authorized by Step 0p and must never pause for human
 approval.
@@ -905,7 +921,7 @@ cd "$(git rev-parse --show-toplevel)"
 bash scripts/run-deploy-stage smoke -- bash scripts/run-predeploy-local
 ```
 
-`scripts/run-predeploy-local` selects tasks via `agents/benchmarks/select_predeploy_benches.py` (identical selection to the cloud path, so they can't drift): **existing `smoke` always runs**, then **history gate for added canaries/path extras only** (last 3 eligibility attempts in `agents/benchmarks/history/task_attempts.jsonl` all passed; predeploy/worktree attempts excluded so assignment cannot self-invalidate), then a **category floor** (one history-qualified canary per floor category: payment, grep, sms, browser_stateful) plus **path-triggered depth** from the git diff, hard-capped at **20**. Before running it prints a clear selection report (`TOTAL SELECTED: N / 20`, plus skipped-for-history and uncovered floor categories). Hitting the hard cap prints a loud scream and drops extras (floor always fits or the gate fails closed). New catalog tasks auto-attach by `deploy_category` / tags — set `deploy_canary: true` to prefer a task as its category canary. Override the cap only with review via `PREDEPLOY_BENCH_CAP`. It then runs the selected set through `scripts/run-bench --local` at full selected-task concurrency on the isolated stack, ordering longest-recent-median first when an emergency/debug concurrency cap is supplied. It exits non-zero unless every requested task passes, so the command IS the gate.
+`scripts/run-predeploy-local` selects tasks via `agents/benchmarks/select_predeploy_benches.py` (identical selection to the cloud path, so they can't drift): **existing `smoke` always runs**, then **history gate for added canaries/path extras only** (last 3 eligibility attempts in `agents/benchmarks/history/task_attempts.jsonl` all passed; predeploy/worktree attempts excluded so assignment cannot self-invalidate), then a **category floor** (one history-qualified canary per floor category: payment, grep, sms, browser_stateful) plus **path-triggered depth** from the git diff, hard-capped at **20**. Before running it prints a clear selection report (`TOTAL SELECTED: N / 20`, plus skipped-for-history and uncovered floor categories). Hitting the hard cap prints a loud scream and drops extras (floor always fits or the gate fails closed). New catalog tasks auto-attach by `deploy_category` / tags — set `deploy_canary: true` to prefer a task as its category canary. Override the cap only with review via `PREDEPLOY_BENCH_CAP`. It then runs the selected set through `scripts/run-bench --local` with default concurrency 2 on the isolated stack, scheduling longest-recent-median first. `PREDEPLOY_LOCAL_CONCURRENCY` is an emergency/debug override; it does not change the selected task count or the 20-task ceiling. It exits non-zero unless every requested task passes, so the command IS the gate.
 
 Every invocation tees its console output to `.context/predeploy-runs/<run-id>/runner.log` and writes actual start/end time, total wall duration, status, concurrency, task set, and schedule to `summary.json` beside it. Inspect the accumulated actual totals plus per-task pass history at any time:
 
@@ -1108,6 +1124,7 @@ billing state.
 cd "$(git rev-parse --show-toplevel)"
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
   BENCHMARK_SKIP_WMH_BUILD=1 \
+  BENCHMARK_ATTEMPT_SUITE=predeploy \
   BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0 \
   bash scripts/run-deploy-stage agentcard-lifecycle -- \
   bash scripts/run-bench --local agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment --bootstrap --max-concurrency 1 --no-dashboard

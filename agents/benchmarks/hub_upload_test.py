@@ -24,19 +24,17 @@ from benchmarks.hub_upload import (
 
 def _serve(record: list):
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):  # noqa: N802
+        def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
-            content_encoding = self.headers.get("Content-Encoding")
-            payload = self.rfile.read(length)
-            if content_encoding == "gzip":
-                payload = gzip.decompress(payload)
+            raw = self.rfile.read(length)
+            decoded = gzip.decompress(raw) if self.headers.get("Content-Encoding") == "gzip" else raw
             record.append(
                 {
                     "path": self.path,
                     "api_key": self.headers.get("X-API-Key"),
                     "user_id": self.headers.get("X-User-Id"),
-                    "content_encoding": content_encoding,
-                    "body": json.loads(payload or b"{}"),
+                    "content_encoding": self.headers.get("Content-Encoding"),
+                    "body": json.loads(decoded or b"{}"),
                 }
             )
             payload = b'{"run": {"run_id": "x"}}'
@@ -57,7 +55,7 @@ def _serve(record: list):
 def test_upload_timeout_scales_with_payload_size():
     """Mass-agent bundles (~40MB+) must not keep a flat 30s Hub POST deadline."""
     assert upload_timeout_for_payload(0) == 30.0
-    assert upload_timeout_for_payload(1024) == 30.0
+    assert upload_timeout_for_payload(1024) == 30.0 + 1024 / (512 * 1024)
     # ~47MB mass-agent smoke bundle needs well above 30s.
     forty_seven_mb = 47 * 1024 * 1024
     timeout = upload_timeout_for_payload(forty_seven_mb)
@@ -120,9 +118,7 @@ def test_mirror_dual_writes_ephemeral_hub_to_prod(monkeypatch):
             "benchmarks.hub_upload.DEFAULT_HUB_URL",
             url,
         )
-        assert mirror_run_bundle_to_durable_hub(
-            {"run_id": "run-durable", "tasks": [{"name": "t", "agent_id": "a1"}]}
-        )
+        assert mirror_run_bundle_to_durable_hub({"run_id": "run-durable", "tasks": [{"name": "t", "agent_id": "a1"}]})
         assert len(record) == 1
         assert record[0]["body"]["run_id"] == "run-durable"
     finally:
@@ -143,7 +139,7 @@ def test_uploads_bundle_with_auth_headers(monkeypatch):
         assert record[0]["path"] == "/api/benchmarks/runs"
         assert record[0]["api_key"] == "test-key"
         assert record[0]["user_id"] == "user-1"
-        assert record[0]["content_encoding"] is None
+        assert record[0]["content_encoding"] == "gzip"
         assert record[0]["body"]["run_id"] == "run-42"
         assert record[0]["body"]["source"] == "manual-run"
     finally:
@@ -156,11 +152,10 @@ def test_large_bundle_uploads_with_gzip(monkeypatch):
     try:
         monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", url)
         monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "test-key")
-        monkeypatch.setattr("benchmarks.hub_upload.HUB_GZIP_THRESHOLD_BYTES", 256, raising=False)
-        assert upload_run_bundle({"run_id": "large-run", "tasks": [], "padding": "x" * 512}, required=True)
+        assert upload_run_bundle({"run_id": "large-run", "tasks": [], "padding": "x" * (8 * 1024 * 1024)}, required=True)
         assert len(record) == 1
         assert record[0]["content_encoding"] == "gzip"
-        assert record[0]["body"]["padding"] == "x" * 512
+        assert record[0]["body"]["padding"] == "x" * (8 * 1024 * 1024)
     finally:
         server.shutdown()
 
@@ -176,7 +171,7 @@ def test_required_upload_retries_transient_disconnect(monkeypatch):
     attempts: list[int] = []
 
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):  # noqa: N802
+        def do_POST(self):
             attempts.append(1)
             length = int(self.headers.get("Content-Length") or 0)
             self.rfile.read(length)
@@ -362,9 +357,7 @@ def test_hub_upload_copied_script_works_without_sibling_logs(tmp_path):
     src = Path(__file__).resolve().parent
     (bench / "hub_upload.py").write_text((src / "hub_upload.py").read_text())
     bundle = tmp_path / "bundle.json"
-    bundle.write_text(
-        '{"run_id": "copied-only", "tasks": [{"name": "t", "logs": {"tree": {"root_agent_id": "x"}}}]}'
-    )
+    bundle.write_text('{"run_id": "copied-only", "tasks": [{"name": "t", "logs": {"tree": {"root_agent_id": "x"}}}]}')
     proc = _run_hub_upload_script(bench / "hub_upload.py", bundle, cwd=repo)
     combined = f"{proc.stdout}\n{proc.stderr}"
     assert "ModuleNotFoundError" not in combined, combined

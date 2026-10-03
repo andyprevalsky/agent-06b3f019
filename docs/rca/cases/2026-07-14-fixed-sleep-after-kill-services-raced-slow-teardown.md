@@ -105,6 +105,42 @@ runs those gates are absent, adding no fan-in, storage, network work, or lock
 contention; the only production-path operation is a pair of local shell
 conditions in the existing autoscaler loop.
 
+## 2026-10-01 recurrence: a failed archive admission assertion escaped its fixture lifetime
+
+The merged PR #1299 agents coverage run on `2c2a845dbf72c6732488347cc430be56a8e49882`
+reported `archive admission blocked the event loop for 0.274s` against the unchanged
+0.25-second limit. The burst fixture awaited accepted archive writes only after
+that assertion. Its failure path restored the storage function and environment,
+then removed the temporary directory while the shared executor still owned writes.
+The resulting `Directory not empty` cleanup error masked the admission assertion;
+subsequent background writes crossed into the next outbox fixture, which then
+failed its drain assertion. This is another fixture-lifetime violation of the
+owned-completion rule above. It does not establish the cause of the initial
+0.274-second admission measurement.
+
+The permanent `test_async_archive_burst_retires_jobs_after_assertion` invokes the
+actual existing burst fixture and injects an assertion after eight real accepted
+writes. Before the fix it failed because accepted jobs remained alive when the
+fixture returned. An outer local-only safety fixture drained those jobs before
+restoring its own state. The same regression passed after giving the burst its
+own executor and joining it in `finally` before restoring any patched globals or
+removing storage. A private boundary observer independently measured eight pending
+jobs at environment restoration before the fix and zero afterward, preserving
+the injected assertion in both observations.
+
+The unchanged burst and following outbox test passed in isolation before and
+after the fixture repair. Their 96 inputs, 0.25-second admission limit, 64-job cap,
+0.2-second slow store, and artifact checks remain unchanged. The original
+admission-latency cause remains an open observability gap, not a claimed runtime
+fix. No production archive code, benchmark budget, provider call, or model policy
+changed. At 10,000 production agents this test-only correction adds no runtime
+work.
+
+Permanent reproduction (activate `agents/venv` and run from `agents`):
+`PYTHONPATH=tests/blackbox python -c 'import asyncio,runpy; asyncio.run(runpy.run_path("tests/blackbox/trace_archive.blackbox.py")["test_async_archive_burst_retires_jobs_after_assertion"]())'`.
+Both RED and GREEN used the same reproduction. The test is registered in the
+existing `trace-archive` domain discovered by the mandatory agents coverage gate.
+
 ## Human feedback
 
 None recorded.

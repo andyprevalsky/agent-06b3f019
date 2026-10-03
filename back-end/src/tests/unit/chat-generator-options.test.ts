@@ -10,6 +10,7 @@ async function run(): Promise<void> {
   const phases = selectChatPhaseModels('rose-labs/rose-1-ultra');
   const abortController = new AbortController();
   const options = buildGeneratorCompletionOptions({
+    agentId: 'chat-options-contract',
     model: phases.generator,
     messages: [
       { role: 'system', content: 'generator system' },

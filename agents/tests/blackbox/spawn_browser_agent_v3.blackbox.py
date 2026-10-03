@@ -6,6 +6,7 @@ and handler (ClaudeTokenState, get_manager, workflow helper static bits).
 """
 
 import ast
+import warnings
 import asyncio
 import base64
 import contextlib
@@ -54,6 +55,18 @@ def test_browser_use_captcha_wait_does_not_rotate_before_solver_window():
 # ========================================
 # Helpers: build a real encrypted envelope
 # ========================================
+
+def _in_browser_activity_context(function):
+    """Give activity-bound fixtures the SDK cancellation and heartbeat context."""
+    import functools
+    from temporalio.testing import ActivityEnvironment
+
+    @functools.wraps(function)
+    async def run(*args, **kwargs):
+        return await ActivityEnvironment().run(function, *args, **kwargs)
+
+    return run
+
 
 def _make_rsa_keypair():
     """Generate an RSA keypair and return (private_pem_b64, public_key)."""
@@ -978,6 +991,62 @@ def test_browser_navigation_handles_installed_timeout_without_global_patch():
         assert "Start URL navigation failed (continuing into agent loop)" in handler_source
 
 
+async def test_browser_navigation_uses_event_timeout_without_global_patch():
+    """The actual CDP navigation receives the event budget without global mutation."""
+    import inspect
+    import browser_use.browser.session as browser_session_mod
+    from browser_use.browser.events import NavigateToUrlEvent
+    from types import MethodType
+
+    from domains.spawn_browser_agent_v3 import handler as handler_mod
+    from domains.spawn_browser_agent_v3.config import NAVIGATE_TO_URL_TIMEOUT_SECONDS
+
+    original_wait_for = asyncio.wait_for
+    budgets = []
+
+    async def observe_wait_for(awaitable, timeout):
+        assert asyncio.wait_for is original_wait_for
+        budgets.append(timeout)
+        return await original_wait_for(awaitable, timeout)
+
+    navigate = AsyncMock(return_value={"loaderId": "offline-loader"})
+    cdp_session = SimpleNamespace(
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Page=SimpleNamespace(navigate=navigate))),
+        session_id="offline-session",
+    )
+    session = SimpleNamespace(
+        agent_focus_target_id="offline-target",
+        session_manager=SimpleNamespace(get_target=lambda _: SimpleNamespace(url="about:blank")),
+        get_or_create_cdp_session=AsyncMock(return_value=cdp_session),
+        event_bus=SimpleNamespace(dispatch=AsyncMock()),
+        _close_extension_options_pages=AsyncMock(),
+        logger=MagicMock(),
+    )
+    session._navigate_and_wait = MethodType(browser_session_mod.BrowserSession._navigate_and_wait, session)
+    event = NavigateToUrlEvent(url="https://example.com", wait_until="commit")
+    assert event.event_timeout == NAVIGATE_TO_URL_TIMEOUT_SECONDS
+    # Observe only browser-use's module binding; never alter the asyncio module.
+    observed_asyncio = SimpleNamespace(**vars(asyncio))
+    observed_asyncio.wait_for = observe_wait_for
+    with patch.object(browser_session_mod, "asyncio", observed_asyncio):
+        await browser_session_mod.BrowserSession.on_NavigateToUrlEvent(session, event)
+    assert budgets == [NAVIGATE_TO_URL_TIMEOUT_SECONDS], budgets
+    navigate.assert_awaited_once_with(
+        params={"url": event.url, "transitionType": "address_bar"}, session_id="offline-session"
+    )
+    assert asyncio.wait_for is original_wait_for
+    upstream_source = Path(browser_session_mod.__file__).read_text(encoding="utf-8")
+    handler_source = Path(handler_mod.__file__).read_text(encoding="utf-8")
+    assert "apply_browser_use_navigate_timeout_patch" not in handler_source
+
+    if "nav_timeout" in inspect.signature(browser_session_mod.BrowserSession._navigate_and_wait).parameters:
+        assert "nav_timeout=event.event_timeout" in upstream_source
+    else:
+        assert "nav_timeout = 20.0" in upstream_source
+        assert "start_url_nav_error = nav_exc" in handler_source
+        assert "Start URL navigation failed (continuing into agent loop)" in handler_source
+
+
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
     from domains.spawn_browser_agent_v3.service import (
         append_completion_evidence,
@@ -1794,6 +1863,89 @@ async def test_browser_agent_recording_survives_kernel_to_steel_recovery():
         else:
             os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = previous_dir
 
+async def test_browser_agent_recording_retains_kernel_segments_without_recovery_frames():
+    """A failed promoted screenshot must not discard the prior native recording."""
+    import tempfile
+    from playwright.async_api import async_playwright
+    from domains.spawn_browser_agent_v3 import recording as recording_module
+    from domains.spawn_browser_agent_v3.handler import _finalize_browser_recording_for_fe
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    class FailedScreenshotPage:
+        url = "https://steel.example/recovered"
+
+        async def screenshot(self, **_kwargs):
+            raise RuntimeError("Page.screenshot: browser has been closed")
+
+    restore = _kernel_replay_env()
+    calls = []
+    try:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"BROWSER_AGENT_RECORDINGS_DIR": directory, "BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL": "0"}
+        ), patch.object(recording_module.httpx, "AsyncClient", lambda *a, **k: _SessionAwareReplayClient(calls)):
+            recorder = await BrowserAgentRecorder.create(
+                page=object(), agent_id="agent-1", task_id="task-1", session_id="kernel-one",
+                browser_url="https://kernel.example/live/one", session_metadata={"provider": "kernel"},
+            )
+            assert recorder is not None
+            await recorder.rotate_kernel_replay("kernel-two")
+            await recorder.transition_browser(
+                page=FailedScreenshotPage(), session_id="steel-final",
+                browser_url="https://steel.example/live/final", session_metadata={"provider": "steel"},
+            )
+            urls = ["https://kernel.example/view/kernel-one", "https://kernel.example/view/kernel-two"]
+            assert recorder.replay_view_urls == urls
+            assert recorder.frames == [] and not recorder.uses_kernel_replay
+            upload = AsyncMock(return_value={"id": "retained-native-recording"})
+            save = AsyncMock(return_value=True)
+            with patch("domains.spawn_browser_agent_v3.handler.upload_to_storage", upload), patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message", save
+            ), patch.object(recorder, "archive_recording_artifacts_in_background", return_value=False):
+                result = await _finalize_browser_recording_for_fe(
+                    browser_recorder=recorder, agent_id="agent-1", task_id="task-1", user_id="user-1",
+                    browser_url="https://steel.example/live/final", browser_session_metadata={"provider": "steel"},
+                )
+            assert result is not None, "retained native replay was discarded when recovery captured no frames"
+            assert result["recording_file_pointer"] == {"id": "retained-native-recording"}
+            upload.assert_awaited_once()
+            save.assert_awaited_once()
+            assert save.await_args.kwargs["status"].value == "FINISHED"
+            assert save.await_args.kwargs["extra_metadata"]["recording_file_pointer"] == result["recording_file_pointer"]
+            html_text = upload.await_args.kwargs["file_content"].decode("utf-8")
+            assert all(url in html_text for url in urls)
+            assert recorder.frames == []
+            manifest = json.loads((recorder.output_dir / "manifest.json").read_text())
+            assert manifest["source_frame_count"] == 0 and manifest["frame_count"] == 0
+            assert manifest["recording_source"] == "kernel_replay"
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page()
+                    page_errors = []
+                    page.on("pageerror", lambda error: page_errors.append(error))
+                    await page.route("**/*", lambda route: route.abort())
+                    await page.set_content(html_text)
+                    assert await page.evaluate("prefixVideo.getAttribute('src')") == urls[0]
+                    await page.locator("#skipIdle").uncheck()
+                    assert await page.evaluate("!prefixVideo.hidden && canvas.hidden && showingPrefix")
+                    await page.evaluate("prefixVideo.dispatchEvent(new Event('ended'))")
+                    assert await page.evaluate("prefixVideo.getAttribute('src')") == urls[1]
+                    await page.evaluate("prefixVideo.dispatchEvent(new Event('ended'))")
+                    await page.locator("#skipIdle").check()
+                    assert await page.evaluate("!prefixVideo.hidden && canvas.hidden && showingPrefix")
+                    assert page_errors == [], "native-only recording controls raised a page error"
+                finally:
+                    await browser.close()
+            empty = BrowserAgentRecorder(
+                page=FailedScreenshotPage(), agent_id="agent-1", task_id="empty-task", session_id="steel-empty",
+                browser_url="https://steel.example/empty", session_metadata={"provider": "steel"},
+            )
+            assert await empty.close(include_steel_media=False, archive_artifacts=False) is None
+            assert empty.export_inline_html_bytes() is None
+    finally:
+        restore()
+
+
 async def test_browser_agent_recording_rebinds_screenshot_mode_across_providers():
     """Steel -> Steel and Steel -> Kernel keep one screenshot timeline. Once a
     recording is in screenshot mode it must not open an unrelated native replay
@@ -2160,15 +2312,18 @@ async def test_browser_agent_recording_enabled_by_trace_archive_in_prod():
         "BROWSER_AGENT_RECORDING_INTERVAL_SECONDS": os.environ.get("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"),
     }
     old_archive_root = trace_archive._LOCAL_ROOT
-    old_store = trace_archive.store_encrypted_artifact
+    old_publish = trace_archive._publish_artifact_batch
     try:
         uploaded_paths = []
 
-        def fake_store_encrypted_artifact(*, root_agent_id, path, ciphertext, metadata):
-            uploaded_paths.append((root_agent_id, path, len(ciphertext), metadata))
-            return f"r2://fake/{root_agent_id}/{path}"
+        def fake_publish_artifact_batch(root_agent_id, artifacts):
+            uploaded_paths.extend(
+                (root_agent_id, item["path"], len(base64.b64decode(item["ciphertextB64"])), item["metadata"])
+                for item in artifacts
+            )
+            return True
 
-        trace_archive.store_encrypted_artifact = fake_store_encrypted_artifact
+        trace_archive._publish_artifact_batch = fake_publish_artifact_batch
         with tempfile.TemporaryDirectory() as recordings, tempfile.TemporaryDirectory() as archive:
             os.environ["ENVIRONMENT"] = "production"
             os.environ["TRACE_ARCHIVE_ENABLED"] = "1"
@@ -2196,7 +2351,7 @@ async def test_browser_agent_recording_enabled_by_trace_archive_in_prod():
             assert all(size > 0 for _root, _path, size, _metadata in uploaded_paths)
     finally:
         trace_archive._LOCAL_ROOT = old_archive_root
-        trace_archive.store_encrypted_artifact = old_store
+        trace_archive._publish_artifact_batch = old_publish
         for key, value in saved_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -2323,6 +2478,32 @@ async def test_browser_recording_finalizer_uploads_frame_replay_after_cancellati
         assert metadata["recording_file_pointer"] == {"id": "file-pointer-1"}
         assert metadata["browser_session_metadata"] == {"provider": "steel"}
 
+async def test_browser_recording_finalizer_requires_backend_acknowledgement():
+    import tempfile
+    from domains.spawn_browser_agent_v3.handler import _finalize_browser_recording_for_fe
+
+    with tempfile.TemporaryDirectory() as directory:
+        recording_path = Path(directory) / "index.html"
+        recording_path.write_text("<html>recording</html>")
+        for kernel in (False, True):
+            recorder = SimpleNamespace(
+                uses_kernel_replay=kernel,
+                stop_kernel_replay=AsyncMock(return_value="https://recording.example/view"),
+                replay_view_urls=[],
+                close=AsyncMock(return_value=recording_path),
+                export_inline_html_bytes=lambda: b"<html>recording</html>",
+            )
+            with (
+                patch("domains.spawn_browser_agent_v3.handler.upload_to_storage", AsyncMock(return_value={"id": "recording-file"})),
+                patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock(return_value=False)),
+            ):
+                with pytest.raises(RuntimeError, match="recording message was not acknowledged"):
+                    await _finalize_browser_recording_for_fe(
+                        browser_recorder=recorder, agent_id="agent-1", task_id="task-1", user_id="user-1",
+                        browser_url="https://debug.example", browser_session_metadata={"provider": "kernel" if kernel else "steel"},
+                    )
+
+
 async def test_browser_recording_finalizer_persists_before_trace_archive():
     """FE persistence is the critical path; the trace copy is background work.
 
@@ -2403,16 +2584,32 @@ async def test_browser_recording_background_archive_keeps_event_loop_responsive(
         for index in range(3):
             (recorder.output_dir / f"frame-{index}.png").write_bytes(b"frame")
 
-        original_read_bytes = Path.read_bytes
+        original_open = Path.open
 
-        def slow_read_bytes(path):
-            time_module.sleep(0.05)
-            return original_read_bytes(path)
+        def slow_open(path, *args, **kwargs):
+            opened = original_open(path, *args, **kwargs)
+            if args != ("rb",):
+                return opened
+
+            class SlowRead:
+                def __enter__(self):
+                    opened.__enter__()
+                    return self
+
+                def __exit__(self, *error):
+                    return opened.__exit__(*error)
+
+                def read(self, *read_args):
+                    time_module.sleep(0.05)
+                    return opened.read(*read_args)
+
+            return SlowRead()
 
         with (
             patch.object(recording, "archive_enabled", return_value=True),
-            patch.object(recording, "archive_bytes", return_value={"ref": "archive-ref"}),
-            patch.object(Path, "read_bytes", slow_read_bytes),
+            patch("helpers.trace_archive._publish_artifact_batch", return_value=True),
+            patch("helpers.trace_archive.store_encrypted_artifact", return_value="archive-ref"),
+            patch.object(Path, "open", slow_open),
         ):
             assert recorder.archive_recording_artifacts_in_background() is True
             started = time_module.monotonic()
@@ -5987,6 +6184,59 @@ async def test_save_browser_action_message_posts_metadata():
     assert body["metadata"]["total_steps"] == 30
     assert body["metadata"]["output_schema"] == {"fields": []}
 
+async def test_browser_action_save_correlates_each_http_call_and_failure_without_payload_logs():
+    import httpx
+    import structlog.contextvars
+    from structlog.testing import capture_logs
+    from _test_utils import setup_mock_fn
+    from domains.spawn_browser_agent_v3.repo import save_browser_action_message
+    from tools.base import MessageStatus
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if len(requests) == 1:
+            raise httpx.ReadTimeout("acknowledgment unavailable", request=request)
+        return httpx.Response(201, json={"ok": True})
+
+    setup_mock_fn(respond)
+    private_values = ["private-action-title", "private-message-body", "https://private.invalid/action"]
+    with (
+        patch("config.load_config", return_value=_fake_config()),
+        structlog.contextvars.bound_contextvars(span_id="browser-activity", agent_id="ag1", request_id=None),
+        capture_logs(processors=[structlog.contextvars.merge_contextvars]) as events,
+    ):
+        results = []
+        for _ in range(2):
+            results.append(
+                await save_browser_action_message(
+                    agent_id="ag1",
+                    title=private_values[0],
+                    message=private_values[1],
+                    status=MessageStatus.FINISHED,
+                    task_id="browser-task",
+                    browser_url=private_values[2],
+                    action_type="goto",
+                    tool_call_id="browser-tool",
+                )
+            )
+        assert structlog.contextvars.get_contextvars()["span_id"] == "browser-activity"
+
+    assert results == [False, True]
+    assert len(requests) == 2, "an ambiguous timeout must not replay the POST"
+    parents = [request.headers.get("x-parent-span-id") for request in requests]
+    assert all(parents), "every save must propagate its own trace parent to the backend"
+    assert len(set(parents)) == 2 and "browser-activity" not in parents
+    for parent in parents:
+        starts = [event for event in events if event.get("event") == "span.start" and event.get("span_id") == parent]
+        assert len(starts) == 1 and starts[0]["parent_span_id"] == "browser-activity"
+    failures = [event for event in events if event.get("event") == "Failed to save browser action message"]
+    assert len(failures) == 1 and failures[0]["span_id"] == parents[0]
+    assert failures[0]["agent_id"] == "ag1"
+    assert all(value not in json.dumps(events) for value in private_values)
+
+
 async def test_save_browser_action_message_init_no_subagent():
     from tools.base import MessageStatus
     from domains.spawn_browser_agent_v3.repo import save_browser_action_message
@@ -6078,6 +6328,57 @@ async def test_save_browser_action_message_rejects_redirect():
         )
 
     assert accepted is False
+
+async def test_finished_recording_retries_connection_failure_without_changing_payload():
+    import httpx
+    from tools.base import MessageStatus
+    from domains.spawn_browser_agent_v3.repo import save_browser_action_message
+
+    post = AsyncMock(side_effect=[httpx.ConnectTimeout("connection unavailable"), httpx.Response(201)])
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=SimpleNamespace(post=post))
+    client.__aexit__ = AsyncMock(return_value=False)
+    with (
+        patch("config.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.repo.get_http_client", return_value=SimpleNamespace(post=post)),
+        patch("asyncio.sleep", AsyncMock()),
+    ):
+        accepted = await save_browser_action_message(
+            agent_id="ag1", title="Browser recording saved", message="Provider replay",
+            status=MessageStatus.FINISHED, task_id="browser-one", action_type="recording",
+            extra_metadata={"recording_view_url": "https://recording.example/view"},
+        )
+    assert accepted is True, "a pre-request connection failure must not discard a real recording"
+    assert post.await_count == 2
+    assert post.await_args_list[0] == post.await_args_list[1], "the exact recording identity must survive retry"
+
+
+async def test_finished_recording_connection_retry_is_bounded_and_other_failures_are_not_replayed():
+    import httpx
+    from tools.base import MessageStatus
+    from domains.spawn_browser_agent_v3.repo import save_browser_action_message
+
+    cases = [
+        ("recording", httpx.ConnectTimeout("unavailable"), 3),
+        ("recording", httpx.ReadTimeout("ambiguous acknowledgement"), 1),
+        ("click", httpx.ConnectTimeout("unavailable"), 1),
+    ]
+    for action_type, error, attempts in cases:
+        post = AsyncMock(side_effect=error)
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=SimpleNamespace(post=post))
+        client.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch("config.load_config", return_value=_fake_config()),
+            patch("domains.spawn_browser_agent_v3.repo.get_http_client", return_value=SimpleNamespace(post=post)),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            accepted = await save_browser_action_message(
+                agent_id="ag1", title="recording", message="Provider replay",
+                status=MessageStatus.FINISHED, task_id="browser-one", action_type=action_type,
+            )
+        assert accepted is False
+        assert post.await_count == attempts
 
 async def test_save_browser_action_message_tool_name_override():
     """Verifier feedback flows back as `attempt_completion` TOOL result (C5)."""
@@ -8598,6 +8899,7 @@ async def test_browser_streaming_rose_client_forwards_and_folds_chunks():
     ]
     assert forwarded_tools == ["call-1"]
 
+@_in_browser_activity_context
 async def test_call_browser_use_with_rotation_rotates_claude_token():
     import domains.spawn_browser_agent_v3.handler as handler
     from domains.spawn_browser_agent_v3.handler import _call_browser_use_with_rotation
@@ -13759,6 +14061,42 @@ async def test_disconnect_browser_captures_passkey_usage_before_disconnect():
     dom_service.disconnect.assert_awaited_once()
 
 
+async def test_terminal_disconnect_stall_does_not_block_recording_cleanup():
+    from domains.spawn_browser_agent_v3 import handler
+
+    events = []
+
+    async def capture_usage():
+        events.append("credential_ref_saved")
+
+    async def stalled_disconnect():
+        events.append("disconnect_started")
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            # A CDP library can ignore cancellation while its socket drains.
+            await asyncio.sleep(1)
+
+    dom_service = SimpleNamespace(disconnect=AsyncMock(side_effect=stalled_disconnect))
+    started = time_module.monotonic()
+    with patch.object(handler, "BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS", 0.01):
+        with pytest.raises(TimeoutError):
+            await capture_usage()
+            try:
+                await handler._bounded_browser_terminal_io(dom_service.disconnect(), "cleanup CDP disconnect")
+            finally:
+                events.append("recording_cleanup_resumed")
+
+    if not (time_module.monotonic() - started < 0.5):
+        warnings.warn(
+            'Intermediate timing diagnostic: time_module.monotonic() - started < 0.5',
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    assert events == ["credential_ref_saved", "disconnect_started", "recording_cleanup_resumed"]
+    dom_service.disconnect.assert_awaited_once()
+
+
 async def test_disconnect_browser_times_out_hung_cdp_and_still_returns():
     """Payment/write-lock return must not hang forever on wedged CDP disconnect.
 
@@ -18880,6 +19218,7 @@ async def test_spawn_browser_activity_requires_output_schema():
         else:
             raise AssertionError("expected missing output_schema to raise")
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_raises_when_new_session_has_no_cdp_url():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -18923,6 +19262,7 @@ async def test_spawn_browser_activity_raises_when_new_session_has_no_cdp_url():
         else:
             raise AssertionError("expected missing cdp_url to raise")
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -18972,6 +19312,7 @@ async def test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url
         else:
             raise AssertionError("expected missing resumed cdp_url to raise")
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -19027,6 +19368,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
     assert fetch_mock.await_args.kwargs == {"validate_live": True}
     resume_mock.assert_not_awaited()
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session():
     """A handoff refresh may replace the provider session while keeping the browser task stable."""
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -19106,6 +19448,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refr
     assert connected_cdp_urls == ["ws://refreshed-by-auth-page"]
     assert session_info["resume_mode"] == "backend_refreshed_session"
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_live_session_expired():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -19171,6 +19514,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_liv
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live_session_expired():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -19237,6 +19581,7 @@ async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_write_approval_resume_falls_back_when_liveness_missing():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -19299,6 +19644,7 @@ async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
 
+@_in_browser_activity_context
 async def test_browser_supervisor_recovery_clicks_generic_dismiss_button():
     from domains.spawn_browser_agent_v3.handler import _perform_generic_browser_recovery
 
@@ -19345,6 +19691,7 @@ async def test_browser_supervisor_recovery_clicks_generic_dismiss_button():
     assert buttons[1].clicked is True
     page.reload.assert_not_awaited()
 
+@_in_browser_activity_context
 async def test_browser_supervisor_recovery_uses_fallback_url_when_page_url_missing():
     from domains.spawn_browser_agent_v3.handler import _perform_generic_browser_recovery
 
@@ -19407,6 +19754,7 @@ async def test_goto_action_returns_current_url_for_recovery_fallback():
     recorded_result = action_history.record_action.await_args.kwargs["result"]
     assert recorded_result["current_url"] == "https://order.example.com/menu"
 
+@_in_browser_activity_context
 async def test_browser_supervisor_snapshot_reads_lightweight_page_state():
     from domains.spawn_browser_agent_v3.handler import (
         _browser_supervisor_snapshot,
@@ -19514,6 +19862,7 @@ class _FakeAsyncPlaywright:
         return self._instance
 
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
     from contextlib import ExitStack
 
@@ -21814,6 +22163,589 @@ async def test_manager_payment_gate_reports_company_funding_deadline():
     assert delayed.metadata["code"] == "purchase_funding_delayed"
     assert delayed.metadata["task_id"] == "task-1"
 
+class _TerminalBoundaryHandle:
+    def __init__(self, result):
+        self.result = result
+
+    def done(self):
+        return True
+
+    def cancel(self):
+        raise AssertionError("completed activity was cancelled")
+
+    def __await__(self):
+        async def value():
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+        return value().__await__()
+
+
+def _browser_manager_terminal_events(events):
+    return [
+        event
+        for event in events
+        if (getattr(event, "metadata", None) or {}).get("action_type") == "task_complete"
+    ]
+
+
+async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
+    from domains.spawn_browser_agent_v3 import handler as h
+    from helpers.handle_tool_event import handle_tool_event
+    from helpers.llm import convert_context_to_messages
+    from tools.base import MessageStatus
+    from tools.request_user_approval import UserRejectedError
+
+    wf = SimpleNamespace(
+        user_id="fixture-user",
+        agent_id="fixture-agent",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        _signal_responses={},
+        _update_tree_state=AsyncMock(),
+    )
+    first = {
+        "status": "awaiting_write_approval",
+        "question": "Fixture approval?",
+        "approval_type": "write",
+        "current_url": "https://example.test/",
+        "write_lock_approvals": {},
+    }
+    if kind.startswith("auth"):
+        first = {"status": "awaiting_auth_assistance", "base_site": "example.test"}
+    if kind == "auth-pending":
+        first["request_id"] = "request-fixture"
+    if has_id:
+        first["task_id"] = "task-fixture"
+    if kind == "activity-error":
+        first = RuntimeError("fixture activity failure")
+    if kind == "missing-result":
+        first = None
+
+    ids = []
+    events = []
+    context = [{
+        "role": "ASSISTANT", "text": "", "timestamp": "2026-10-01T00:00:00Z",
+        "metadata": {"tool_calls": [{"tool": "spawn_browser_agent", "tool_call_id": "fixture-tool"}]},
+    }]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    def start(*_args, **kwargs):
+        ids.append(kwargs["args"][4])
+        return _TerminalBoundaryHandle(
+            first
+            if len(ids) == 1
+            else {"task_id": ids[-1], "success": True, "message": "done"}
+        )
+
+    async def approve(*_args, **_kwargs):
+        if kind in ("write-pending", "write-cancel"):
+            entered.set()
+            await release.wait()
+            return {"attention_request_id": "fixture-approval"}
+        if kind == "approval-error":
+            raise RuntimeError("fixture approval failure")
+        raise UserRejectedError(
+            "fixture rejected",
+            rejection_message="fixture feedback" if kind == "write-rejected" else "",
+        )
+
+    async def wait_condition(*_args, **_kwargs):
+        if kind == "auth-pending" and wf.is_paused:
+            entered.set()
+            await release.wait()
+            wf._signal_responses["request-fixture"] = "fixture response"
+
+    async def collect():
+        async for event in h.SpawnBrowserAgentManagerV3().execute_tool(
+            wf, {"goal": "fixture action"}, "fixture-tool"
+        ):
+            events.append(event)
+            if kind == "write-rejected":
+                await handle_tool_event(
+                    event, wf.agent_id, "fixture-tool", "spawn_browser_agent", capture_message
+                )
+
+    async def capture_message(_function, *, args, **_kwargs):
+        _agent_id, text, role, metadata, _file_pointer = args
+        context.append({
+            "role": role, "text": text, "metadata": metadata,
+            "timestamp": (datetime(2026, 10, 1, tzinfo=timezone.utc) + timedelta(seconds=len(context))).isoformat(),
+        })
+
+    with (
+        patch.object(h.workflow, "start_activity", side_effect=start),
+        patch.object(h.workflow, "wait_condition", side_effect=wait_condition),
+        patch.object(
+            h.workflow, "now", return_value=datetime(2026, 9, 11, tzinfo=timezone.utc)
+        ),
+        patch(
+            "tools.request_user_approval.request_user_approval_direct",
+            side_effect=approve,
+        ),
+    ):
+        task = asyncio.create_task(collect())
+        try:
+            if kind in ("write-pending", "auth-pending", "write-cancel"):
+                await asyncio.wait_for(entered.wait(), 10)
+                assert not task.done() and not _browser_manager_terminal_events(events)
+                if kind == "write-cancel":
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    else:
+                        raise AssertionError("manager swallowed task cancellation")
+                    assert not _browser_manager_terminal_events(events)
+                    return {
+                        "case": kind,
+                        "cancellation_propagated": True,
+                        "premature_terminal": False,
+                    }
+                release.set()
+            await asyncio.wait_for(task, 10)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    completed = _browser_manager_terminal_events(events)
+    assert len(completed) == 1, (kind, len(completed))
+    expected_id = "task-fixture" if has_id and isinstance(first, dict) else ids[0]
+    assert completed[0].metadata["task_id"] == expected_id, (kind, completed[0].metadata)
+    assert completed[0].status == (
+        MessageStatus.FINISHED
+        if kind in ("write-pending", "auth-pending", "write-rejected")
+        else MessageStatus.ERROR
+    )
+    assert len(ids) == (2 if kind in ("write-pending", "auth-pending") else 1)
+    if kind == "write-rejected":
+        tool_results = [
+            message for message in convert_context_to_messages(context, include_assistant=True)
+            if message["role"] == "tool"
+        ]
+        assert len(tool_results) == 1
+        assert tool_results[0]["tool_call_id"] == "fixture-tool"
+        assert "fixture feedback" in tool_results[0]["content"], "FE closure erased the user's rejection feedback"
+    return {
+        "case": kind,
+        "result_has_id": has_id,
+        "exact_terminal_count": 1,
+        "terminal_identity_correct": True,
+        "activity_starts": len(ids),
+    }
+
+
+async def test_manager_terminal_scope_and_pending_resumes():
+    for kind in ("write-rejected", "auth-missing", "approval-error"):
+        for has_id in (True, False):
+            await _drive_browser_manager_terminal_boundary(kind, has_id)
+    for kind in ("activity-error", "missing-result", "write-pending", "auth-pending", "write-cancel"):
+        await _drive_browser_manager_terminal_boundary(kind)
+
+
+async def _drive_browser_write_pause_archive_boundary(
+    *,
+    pause: bool,
+    concurrent_approval=False,
+    cancel=False,
+    handoff=False,
+    pause_on_grant=False,
+    pause_on_open=False,
+    reply_phase=None,
+    rejection_feedback="Specific fixture rejection feedback",
+):
+    import copy
+    import httpx
+    from benchmarks import run_benchmark as bench
+    from domains.spawn_browser_agent_v3 import handler as browser
+    from domains.spawn_browser_agent_v3.repo import save_browser_action_message
+    from helpers.messages import post_agent_message
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from domains.request_user_approval.config import REJECTION_SENTINEL
+    from tools.base import MessageStatus
+    from workflows.agent_workflow import AgentWorkflow
+
+    root, tool = "00000000-0000-4000-8000-000000000088", "owned-write-tool"
+    task_id = browser._stable_browser_task_id(root, tool)
+    rows, starts, paused_starts = [], [], []
+    parked, changed = asyncio.Event(), asyncio.Event()
+    opening_persisted = asyncio.Event()
+    reply_pending = asyncio.Event()
+    reply_blocked = False
+    wf = SimpleNamespace(
+        user_id="fixture-user",
+        agent_id=root,
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        context=[],
+        _signal_responses={},
+        _update_tree_state=AsyncMock(),
+        _get_pending_child_workflow_ids=lambda: [],
+        _track_usage=AsyncMock(),
+    )
+    wf._handle_tool_event = AgentWorkflow._handle_tool_event.__get__(wf)
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="http://fixture.invalid", api_key="fixture-key"))
+    real_client = httpx.AsyncClient
+
+    async def poll_messages(_timestamp):
+        wf.context.append({"role": "USER", "text": rejection_feedback})
+        if reply_phase == "rejection-poll":
+            reply_pending.set()
+            await asyncio.Event().wait()
+
+    wf._poll_messages = poll_messages
+
+    def persisted(request):
+        assert request.method == "POST" and request.url.path == f"/api/agents/{root}/messages"
+        payload = json.loads(request.content)
+        row = {**payload, "text": payload["message"], "timestamp": datetime.now(timezone.utc).isoformat()}
+        rows.append(copy.deepcopy(row))
+        wf.context.append(copy.deepcopy(row))
+        return httpx.Response(201, json={"message_id": str(len(rows))})
+
+    def client(*args, **kwargs):
+        return real_client(*args, **{**kwargs, "transport": httpx.MockTransport(persisted)})
+
+    async def execute_activity(function, *, args, **_kwargs):
+        nonlocal reply_blocked
+        if function is post_agent_message:
+            expected_title = "✓ User approval received" if reply_phase == "approved" else "✗ User rejected action"
+            if (
+                reply_phase in ("approved", "rejected")
+                and not reply_blocked
+                and (args[3] or {}).get("title") == expected_title
+            ):
+                reply_blocked = True
+                reply_pending.set()
+                await asyncio.Event().wait()
+            if pause_on_grant and (args[3] or {}).get("action_type") == "write_lock_granted":
+                await AgentWorkflow.pause(wf)
+            result = await function(*args)
+            if (
+                reply_phase == "rejected-persisted"
+                and not reply_blocked
+                and (args[3] or {}).get("title") == "✗ User rejected action"
+            ):
+                reply_blocked = True
+                wf.context.append({"role": "USER", "text": "Later unrelated user request"})
+                reply_pending.set()
+                await asyncio.Event().wait()
+            if (
+                pause_on_open
+                and (args[3] or {}).get("toolName") == "request_user_approval"
+                and (args[3] or {}).get("toolStatus") == "IN_PROGRESS"
+            ):
+                opening_persisted.set()
+                await asyncio.Event().wait()
+            return result
+        if function.__name__ == "create_approval_request_activity":
+            assert args[0:2] == [wf.user_id, root]
+            return "owned-approval"
+        if function.__name__ == "notify_sms_event_activity":
+            return None
+        raise AssertionError(f"unexpected activity: {function.__name__}")
+
+    async def wait_condition(predicate, **kwargs):
+        while not predicate():
+            if "timeout" in kwargs:
+                assert kwargs["timeout"].total_seconds() == 30, "handoff poll bound changed"
+                if getattr(wf, "handoff_requested", False):
+                    raise asyncio.TimeoutError
+            parked.set()
+            await changed.wait()
+            changed.clear()
+
+    class Handle:
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("completed browser activity must not be cancelled")
+
+        def __await__(self):
+            async def result():
+                if len(starts) == 1:
+                    return {
+                        "status": "awaiting_write_approval",
+                        "task_id": task_id,
+                        "session_id": "owned-session",
+                        "question": "Approve fixture write?",
+                        "approval_type": "write",
+                        "current_url": "https://fixture.invalid/",
+                        "write_lock_approvals": {},
+                    }
+                return {
+                    "status": "completed",
+                    "success": True,
+                    "task_id": task_id,
+                    "session_id": "owned-session",
+                    "message": "Fixture complete",
+                }
+
+            return result().__await__()
+
+    def start_activity(_function, *, args, **_kwargs):
+        if wf.is_paused:
+            paused_starts.append(True)
+        assert args[4] == task_id and not wf.is_paused, "paused browser started a resume"
+        starts.append(copy.deepcopy(args[8] if len(args) > 8 else None))
+        return Handle()
+
+    async def archive():
+        logs = {}
+        with (
+            patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])),
+            patch.object(bench, "get_agent", AsyncMock(side_effect=lambda *_args: {"messages": copy.deepcopy(rows)})),
+        ):
+            snapshot = await bench._refresh_browser_archive_snapshot(
+                "http://fixture.invalid", root, {}, logs, expected_agent_ids={root}, timeout_seconds=10
+            )
+        assert bench._agent_messages_ready_for_durable_browser_evidence(snapshot["messages"])
+        return logs
+
+    with (
+        patch("helpers.httpx_capture._mock_handler", persisted),
+        patch("httpx.AsyncClient", side_effect=client),
+        patch("config.load_config", return_value=config),
+        patch("helpers.messages.load_config", return_value=config),
+        patch("temporalio.activity.heartbeat"),
+        patch.object(browser.workflow, "logger", MagicMock()),
+        patch.object(browser.workflow, "info", return_value=SimpleNamespace(workflow_id=root)),
+        patch.object(browser.workflow, "uuid4", return_value="approval-tool"),
+        patch.object(browser.workflow, "now", return_value=datetime(2026, 10, 1, tzinfo=timezone.utc)),
+        patch.object(browser.workflow, "start_activity", side_effect=start_activity),
+        patch.object(browser.workflow, "execute_activity", side_effect=execute_activity),
+        patch.object(browser.workflow, "wait_condition", side_effect=wait_condition),
+        patch.object(browser, "get_manager", return_value=browser.SpawnBrowserAgentManagerV3()),
+    ):
+        assert await save_browser_action_message(
+            root,
+            "Started",
+            "Fixture started",
+            MessageStatus.IN_PROGRESS,
+            task_id,
+            action_type="task_started",
+            tool_call_id=tool,
+        )
+        previous_tasks = asyncio.all_tasks()
+        owned = asyncio.create_task(browser.spawn_browser_agent(wf, {"goal": "Fixture write"}, tool))
+        try:
+            await asyncio.wait_for(opening_persisted.wait() if pause_on_open else parked.wait(), 10)
+            assert await save_browser_action_message(
+                root,
+                "Recording saved",
+                "Fixture retained native replay",
+                MessageStatus.FINISHED,
+                task_id,
+                action_type="recording",
+                tool_call_id=tool,
+                extra_metadata={"recording_view_url": "https://recording.example/owned"},
+            )
+            assert not owned.done() and len(starts) == 1
+            assert not bench._agent_messages_ready_for_durable_browser_evidence(rows)
+            wf._signal_responses["unrelated-approval"] = "approved"
+            changed.set()
+            await asyncio.sleep(0)
+            assert not owned.done() and len(starts) == 1, "foreign approval resumed owned browser"
+            if cancel or handoff:
+                if cancel:
+                    owned.cancel()
+                else:
+                    wf.handoff_requested = True
+                    wf._check_generation_handoff = AsyncMock(return_value="candidate-queue")
+                    changed.set()
+                try:
+                    await asyncio.wait_for(asyncio.shield(owned), 10)
+                except (asyncio.CancelledError, GenerationHandoffRequested) as interrupted:
+                    assert (
+                        isinstance(interrupted, asyncio.CancelledError)
+                        if cancel
+                        else interrupted.task_queue == "candidate-queue"
+                    )
+                else:
+                    raise AssertionError("manager swallowed cancellation or generation handoff")
+                assert len(starts) == 1
+                terminals = [
+                    row for row in rows
+                    if row.get("metadata", {}).get("action_type") == "task_complete"
+                ]
+                if cancel:
+                    assert not terminals, "raw cancellation fabricated a browser terminal"
+                    closed = next(
+                        row["metadata"]
+                        for row in rows
+                        if row.get("metadata", {}).get("title") == "Approval interrupted"
+                    )
+                    opened = next(
+                        row["metadata"]
+                        for row in rows
+                        if row.get("metadata", {}).get("toolName") == "request_user_approval"
+                    )
+                    assert closed == {
+                        **opened,
+                        "title": "Approval interrupted",
+                        "toolStatus": "FINISHED",
+                        "excludeFromModel": True,
+                    }
+                else:
+                    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+                    assert len(terminals) == 1
+                    assert terminals[0]["message"] == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+                    assert terminals[0]["metadata"]["task_id"] == task_id
+                    assert terminals[0]["metadata"]["session_id"] == "owned-session"
+                    assert terminals[0]["metadata"]["toolStatus"] == "FINISHED"
+                    await archive()
+                return
+            if reply_phase:
+                wf._signal_responses["owned-approval"] = "approved" if reply_phase == "approved" else REJECTION_SENTINEL
+                changed.set()
+                await asyncio.wait_for(reply_pending.wait(), 10)
+                assert "owned-approval" not in wf._signal_responses, "specific decision was not consumed"
+            if pause:
+                await AgentWorkflow.pause(wf)
+                wf._update_tree_state.assert_awaited_once_with(status="PAUSED")
+                if concurrent_approval:
+                    wf._signal_responses["owned-approval"] = "approved"
+                changed.set()
+                done, _ = await asyncio.wait({owned}, timeout=0.25)
+                assert done, "real PAUSE left write-approval manager parked after durable recording"
+            else:
+                wf._signal_responses["owned-approval"] = "approved"
+                changed.set()
+                await asyncio.wait_for(asyncio.shield(owned), 10)
+            await owned
+            assert not paused_starts, "PAUSE during grant persistence started a resumed browser activity"
+            terminals = [row for row in rows if row.get("metadata", {}).get("action_type") == "task_complete"]
+            assert len(terminals) == 1 and terminals[0]["metadata"]["task_id"] == task_id
+            assert len(starts) == (1 if pause or pause_on_grant else 2)
+            if pause and not concurrent_approval and not reply_phase:
+                assert any(row.get("metadata", {}).get("title") == "Approval interrupted" for row in rows), (
+                    "PAUSE after durable approval opening left its exact chip IN_PROGRESS"
+                )
+                opened = next(
+                    row["metadata"]
+                    for row in rows
+                    if row.get("metadata", {}).get("toolName") == "request_user_approval"
+                )
+                closed = next(
+                    row["metadata"] for row in rows if row.get("metadata", {}).get("title") == "Approval interrupted"
+                )
+                assert closed == {
+                    **opened,
+                    "title": "Approval interrupted",
+                    "toolStatus": "FINISHED",
+                    "excludeFromModel": True,
+                }
+                assert closed["requestUserApproval"]["attentionRequestId"] == "owned-approval"
+            if reply_phase:
+                opened = next(
+                    row["metadata"]
+                    for row in rows
+                    if row.get("metadata", {}).get("toolName") == "request_user_approval"
+                )
+                replies = [
+                    row
+                    for row in rows
+                    if row.get("metadata", {}).get("toolName") == "request_user_approval"
+                    and row["metadata"].get("toolStatus") == "FINISHED"
+                ]
+                if reply_phase == "rejected-persisted":
+                    assert len(replies) == 2, "fixture must observe persisted delivery and cancellation replay"
+                    assert replies[0]["message"] == rejection_feedback
+                    assert replies[1]["message"] == replies[0]["message"], (
+                        "cancellation rewrote an already-persisted rejection using later USER text"
+                    )
+                    assert replies[1]["metadata"] == replies[0]["metadata"], (
+                        "cancellation replay changed lifecycle metadata"
+                    )
+                    replies = replies[:1]
+                assert len(replies) == 1, "PAUSE after a real decision left its exact approval chip IN_PROGRESS"
+                expected_title = "✓ User approval received" if reply_phase == "approved" else "✗ User rejected action"
+                assert replies[0]["metadata"] == {**opened, "title": expected_title, "toolStatus": "FINISHED"}, (
+                    "cancellation replaced the actual decision"
+                )
+                expected_text = "User response:\napproved" if reply_phase == "approved" else rejection_feedback
+                assert expected_text in replies[0]["message"], "cancellation discarded the actual response feedback"
+            await archive()
+            foreign = copy.deepcopy(rows)
+            for row in foreign:
+                if row.get("metadata", {}).get("action_type") == "task_complete":
+                    row["metadata"]["task_id"] = "unrelated-browser"
+            assert not bench._agent_messages_ready_for_durable_browser_evidence(foreign), (
+                "foreign terminal sealed owned browser"
+            )
+            return {
+                "case": "pause" if pause else "successful-resume",
+                "activity_starts": len(starts),
+                "same_task_terminal": True,
+                "actual_archive_ready": True,
+                "unrelated_identity_rejected": True,
+            }
+        finally:
+            if not owned.done():
+                owned.cancel()
+            await asyncio.gather(owned, return_exceptions=True)
+            assert not (asyncio.all_tasks() - previous_tasks), "owned approval/pause await survived manager exit"
+
+
+async def test_manager_write_pause_seals_persisted_browser_for_archive():
+    """PAUSE ends the manager's deferred write resume with a durable terminal."""
+    await _drive_browser_write_pause_archive_boundary(pause=False)
+    await _drive_browser_write_pause_archive_boundary(pause=True)
+    await _drive_browser_write_pause_archive_boundary(pause=True, concurrent_approval=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, pause_on_grant=True)
+    await _drive_browser_write_pause_archive_boundary(pause=True, pause_on_open=True)
+    for phase in ("approved", "rejection-poll", "rejected"):
+        await _drive_browser_write_pause_archive_boundary(pause=True, reply_phase=phase)
+    for feedback in ("Specific fixture rejection feedback", ""):
+        await _drive_browser_write_pause_archive_boundary(
+            pause=True, reply_phase="rejected-persisted", rejection_feedback=feedback
+        )
+    await _drive_browser_write_pause_archive_boundary(pause=False, cancel=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, handoff=True)
+    from domains.spawn_browser_agent_v3.handler import _request_browser_write_approval_until_paused
+
+    with patch("tools.request_user_approval.request_user_approval_direct", new_callable=AsyncMock) as request:
+        assert await _request_browser_write_approval_until_paused(SimpleNamespace(is_paused=True)) is None
+        request.assert_not_awaited()
+
+
+async def test_manager_abandoned_payment_resumes_close_exact_browser_task():
+    from tools.base import MessageStatus
+
+    for scenario in ("kyc-rejected", "subscription-rejected", "kyc-blocked", "subscription-blocked", "setup-repeated", "setup-timeout", "funding-timeout"):
+        if scenario.startswith(("kyc-", "subscription-")):
+            status = "kyc_required" if scenario.startswith("kyc-") else "subscription_required"
+            options = {"mint_results": [{"status": status}], "reject_gate": scenario.endswith("rejected")}
+        elif scenario.startswith("setup-"):
+            options = {
+                "mint_results": [{"status": "agentcard_setup_required", "connectUrl": "https://setup.example/connect"}],
+                "agentcard_connected": scenario == "setup-repeated",
+            }
+        else:
+            options = {"mint_results": [{"status": "agentcard_company_funding_in_progress", "retryAfterSeconds": 5}]}
+        events, _, _, _ = await _drive_payment_card_gate(**options)
+        terminals = [event for event in events if (getattr(event, "metadata", None) or {}).get("action_type") == "task_complete"]
+        assert len(terminals) == 1, f"{scenario}: manager returned without exactly one terminal event"
+        assert terminals[0].metadata["task_id"] == "task-1"
+        assert terminals[0].status == MessageStatus.FINISHED
+        expected_code = (
+            "purchase_cancelled" if scenario.endswith("rejected") else
+            "purchase_blocked" if scenario.endswith("blocked") else
+            "agentcard_user_setup_required" if scenario == "setup-repeated" else
+            "agentcard_setup_timed_out" if scenario == "setup-timeout" else
+            "purchase_funding_delayed"
+        )
+        assert terminals[0].metadata["code"] == expected_code
+        assert events[-1] is terminals[0]
+
+
 # ========================================
 # Runner
 # ========================================
@@ -22003,6 +22935,130 @@ async def test_asyncio_browser_heartbeat_starves_when_event_loop_blocked():
     )
 
 
+async def test_browser_work_checkpoint_preserves_cancel_after_completed_await():
+    """A completed wait_for child must not erase Temporal's cancellation latch."""
+    from temporalio import activity
+    from temporalio.testing import ActivityEnvironment
+    from domains.spawn_browser_agent_v3.activity_heartbeat import browser_activity_checkpoint
+
+    for cancelled in (False, True):
+        environment = ActivityEnvironment()
+        ready = asyncio.Event()
+        page = asyncio.get_running_loop().create_future()
+        events = []
+
+        async def browser_work():
+            try:
+                ready.set()
+                await asyncio.wait_for(page, timeout=60)
+                browser_activity_checkpoint("calling browser model")
+                events.append("paid-step")
+            except asyncio.CancelledError:
+                events.append("cancelled")
+            finally:
+                # A work checkpoint must not keep injecting cancellation into
+                # recording finalization after it has entered the cleanup path.
+                await asyncio.sleep(0)
+                activity.heartbeat("recording cleanup")
+                events.append("recording-saved")
+
+        running = asyncio.create_task(environment.run(browser_work))
+        await ready.wait()
+        page.set_result({"url": "https://example.test"})
+        if cancelled:
+            environment.cancel()
+        await running
+        expected = ["cancelled" if cancelled else "paid-step", "recording-saved"]
+        assert events == expected, f"browser continued work after cancellation: {events}"
+
+
+async def test_browser_recovery_stops_after_cancelled_completed_await():
+    """Nested recovery must not restart work after a bounded await loses Task.cancel."""
+    from temporalio import activity
+    from temporalio.testing import ActivityEnvironment
+    from domains.spawn_browser_agent_v3.handler import _run_browser_supervisor_recovery
+
+    operations = ["snapshot", "focus", "escape", "buttons", "reload", "message"]
+    for mode, boundary in [("normal", "snapshot"), ("pending", "snapshot")] + [
+        ("completed", operation) for operation in operations[:-1]
+    ]:
+        environment = ActivityEnvironment()
+        ready = asyncio.Event()
+        result = asyncio.get_running_loop().create_future()
+        observed = []
+        post_cancel = []
+
+        async def operation(name, value=None):
+            observed.append(name)
+            if activity.is_cancelled():
+                post_cancel.append(name)
+            if name == boundary:
+                ready.set()
+                await result
+            return value
+
+        class Page:
+            url = "https://example.test/"
+            context = SimpleNamespace(pages=[])
+
+            @property
+            def keyboard(self):
+                return self
+
+            async def evaluate(self, script):
+                return await operation("snapshot", {"url": self.url})
+
+            async def bring_to_front(self):
+                await operation("focus")
+
+            async def press(self, key):
+                await operation("escape")
+
+            def locator(self, selector):
+                return self
+
+            async def all(self):
+                return await operation("buttons", [])
+
+            async def reload(self):
+                await operation("reload")
+
+        async def save_message(**kwargs):
+            return await operation("message", True)
+
+        async def work():
+            try:
+                await _run_browser_supervisor_recovery(
+                    agent_id="cancel-recovery-root", task_id="cancel-recovery-browser",
+                    browser_url=Page.url, tool_call_id="cancel-recovery-tool", iteration=1,
+                    reason="action_timeout", input_page=Page(), dom_service=None,
+                    browser_turn_messages=[], reload_page=True,
+                )
+                observed.append("returned")
+            except asyncio.CancelledError:
+                observed.append("cancelled")
+            finally:
+                await asyncio.sleep(0)
+                activity.heartbeat("recording cleanup")
+                observed.append("cleanup")
+
+        with patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", new=save_message):
+            running = asyncio.create_task(environment.run(work))
+            await asyncio.wait_for(ready.wait(), timeout=10)
+            if mode == "pending":
+                environment.cancel()
+            else:
+                result.set_result(None)
+                if mode == "completed":
+                    asyncio.get_running_loop().call_soon(environment.cancel)
+            await asyncio.wait_for(running, timeout=10)
+        expected = operations + ["returned", "cleanup"] if mode == "normal" else [
+            *operations[:operations.index(boundary) + 1], "cancelled", "cleanup"
+        ]
+        assert observed == expected, f"{mode}/{boundary}: recovery continued after cancellation: {observed}"
+        assert post_cancel == [], f"{mode}/{boundary}: side effects after cancellation latch: {post_cancel}"
+
+
 async def test_browser_activity_heartbeat_survives_event_loop_block():
     """Thread pump must keep heartbeating while the browser event loop is blocked."""
     from domains.spawn_browser_agent_v3.activity_heartbeat import BrowserActivityHeartbeat
@@ -22059,6 +23115,7 @@ def test_browser_activity_uses_thread_heartbeat_pump():
     assert "asyncio.create_task(_background_heartbeat())" not in source
 
 
+@_in_browser_activity_context
 async def test_browser_agent_yields_until_user_hands_control_back():
     """The activity must acknowledge ownership and stop acting until release."""
     from domains.spawn_browser_agent_v3.handler import _wait_for_browser_user_control
@@ -22082,6 +23139,7 @@ async def test_browser_agent_yields_until_user_hands_control_back():
     assert heartbeat.call_count == 2
 
 
+@_in_browser_activity_context
 async def test_browser_agent_yields_when_ownership_is_already_user():
     """Immediate same-session USER ownership still parks the activity until release."""
     from domains.spawn_browser_agent_v3.handler import _wait_for_browser_user_control
@@ -22701,6 +23759,10 @@ async def run_all_tests():
         test_disconnect_browser_captures_passkey_usage_before_disconnect,
     )
     await r.record_async(
+        "terminal_disconnect_stall_does_not_block_recording_cleanup",
+        test_terminal_disconnect_stall_does_not_block_recording_cleanup,
+    )
+    await r.record_async(
         "disconnect_times_out_hung_cdp_and_still_returns",
         test_disconnect_browser_times_out_hung_cdp_and_still_returns,
     )
@@ -22811,6 +23873,10 @@ async def run_all_tests():
     r.record(
         "browser_navigation_handles_installed_timeout_without_global_patch",
         test_browser_navigation_handles_installed_timeout_without_global_patch,
+    )
+    await r.record_async(
+        "browser_navigation_uses_event_timeout_without_global_patch",
+        test_browser_navigation_uses_event_timeout_without_global_patch,
     )
     r.record(
         "browser_task_prompt_no_system_duplication",
@@ -23064,6 +24130,10 @@ async def run_all_tests():
         test_save_browser_action_message_posts_metadata,
     )
     await r.record_async(
+        "browser_action_save_correlates_each_http_call_and_failure_without_payload_logs",
+        test_browser_action_save_correlates_each_http_call_and_failure_without_payload_logs,
+    )
+    await r.record_async(
         "save_browser_action_message_tool_name_override",
         test_save_browser_action_message_tool_name_override,
     )
@@ -23086,6 +24156,14 @@ async def run_all_tests():
     await r.record_async(
         "save_browser_action_message_rejects_redirect",
         test_save_browser_action_message_rejects_redirect,
+    )
+    await r.record_async(
+        "finished_recording_retries_connection_failure_without_changing_payload",
+        test_finished_recording_retries_connection_failure_without_changing_payload,
+    )
+    await r.record_async(
+        "finished_recording_connection_retry_is_bounded_and_other_failures_are_not_replayed",
+        test_finished_recording_connection_retry_is_bounded_and_other_failures_are_not_replayed,
     )
     await r.record_async("save_browser_assistant_message", test_save_browser_assistant_message)
     await r.record_async(
@@ -23269,6 +24347,14 @@ async def run_all_tests():
     await r.record_async(
         "asyncio_browser_heartbeat_starves_when_event_loop_blocked",
         test_asyncio_browser_heartbeat_starves_when_event_loop_blocked,
+    )
+    await r.record_async(
+        "browser_work_checkpoint_preserves_cancellation",
+        test_browser_work_checkpoint_preserves_cancel_after_completed_await,
+    )
+    await r.record_async(
+        "browser_recovery_stops_after_cancelled_completed_await",
+        test_browser_recovery_stops_after_cancelled_completed_await,
     )
     await r.record_async(
         "browser_activity_heartbeat_survives_event_loop_block",
@@ -24196,6 +25282,10 @@ async def run_all_tests():
         test_browser_agent_recording_survives_kernel_to_steel_recovery,
     )
     await r.record_async(
+        "browser_agent_recording_retains_kernel_segments_without_recovery_frames",
+        test_browser_agent_recording_retains_kernel_segments_without_recovery_frames,
+    )
+    await r.record_async(
         "browser_agent_recording_rebinds_screenshot_mode_across_providers",
         test_browser_agent_recording_rebinds_screenshot_mode_across_providers,
     )
@@ -24238,6 +25328,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_recording_finalizer_cancel_resilient",
         test_browser_recording_finalizer_uploads_frame_replay_after_cancellation,
+    )
+    await r.record_async(
+        "browser_recording_finalizer_requires_acknowledgement",
+        test_browser_recording_finalizer_requires_backend_acknowledgement,
     )
     await r.record_async(
         "browser_recording_finalizer_persists_before_trace_archive",
@@ -24660,6 +25754,18 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_subscription_checkout_failure_still_raises_gate",
         test_manager_payment_gate_subscription_checkout_failure_still_raises_gate,
+    )
+    await r.record_async(
+        "manager_terminal_scope_and_pending_resumes",
+        test_manager_terminal_scope_and_pending_resumes,
+    )
+    await r.record_async(
+        "manager_write_pause_seals_persisted_browser_for_archive",
+        test_manager_write_pause_seals_persisted_browser_for_archive,
+    )
+    await r.record_async(
+        "manager_abandoned_payment_resume_terminal",
+        test_manager_abandoned_payment_resumes_close_exact_browser_task,
     )
     await r.record_async(
         "manager_payment_gate_above_max_limit_errors_without_subscribe_gate",

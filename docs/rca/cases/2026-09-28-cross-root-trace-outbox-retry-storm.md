@@ -57,3 +57,42 @@ None recorded.
 ## Reusable lesson
 
 Scope opportunistic durable outbox retries to the work owner whose successful write triggered them.
+
+
+## October 2 recurrence: retry policy lost at the ownership wrapper
+
+The affected-domain gate on the integrated source passed nine domains and
+failed `trace-archive`: the existing bounded failed-post regression raised
+`NameError: name 'stop_after_failure' is not defined`. The complete gate
+remained failed and its coverage tail did not run. Archive searches for
+`stop_after_failure NameError` and `outbox drain retry throttled failed posts`
+identified this related retry-storm boundary and the September 11 ownership
+case; neither was treated as proof of this new failure.
+
+The merge combined incoming failure-stop and age-based replay scheduling with
+an older root-lease wrapper. That wrapper dropped the failure-stop option,
+counted successful deletions rather than global attempts, and forced each
+root through path ordering, which prevented failed entries from moving behind
+recoverable work. Adding the missing argument alone would leave those
+scheduling defects in place.
+
+The fix removes the duplicate recursive scheduler. A single candidate loop
+orders durable pairs by age, counts attempted entries across roots, and honors
+the caller's first-failure stop. Every candidate still requires the existing
+exclusive root publication lease through its post and ciphertext-hash-bound
+deletion. Terminal flush reuses its already-held root lease. Busy publishers,
+root-scoped opportunistic retries, durable failures and original deadlines
+retain their existing protections.
+
+The same existing owning case, extended with first-failure and cross-root
+attempt-budget assertions, failed on the unchanged production implementation
+in 1.154 seconds and passed after the fix in 0.643 seconds; driver, environment
+and test bytes matched. Two earlier private invocations missed the canonical
+environment prelude and failed during setup; they remain separate evidence.
+The existing real-process recording lease/crash-recovery control also passed
+in 3.186 seconds, preserving exact ciphertext recovery and rejection of active
+foreign batch adoption. These quick controls remain in their existing normal
+agent blackbox domains. The affected trace domain and canonical coverage tail
+must complete on the adopted fix; this offline repair gives no live benchmark
+or fleet credit. Private original failures and source bindings are retained in
+`proof119-trace-outbox-rca` and `proof119-agents-affected`.

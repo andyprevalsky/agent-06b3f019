@@ -71,6 +71,10 @@ GATES = (
         ("bash", "scripts/tests/publish_evidence_links_browser_validation.test.sh"),
     ),
     Gate(
+        "publish-evidence-composite-projection",
+        ("bash", "scripts/tests/publish_evidence_links_composite.test.sh"),
+    ),
+    Gate(
         "workflow-deployment-migration",
         ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),
     ),
@@ -78,16 +82,24 @@ GATES = (
         "cooperative-cutover-monitor",
         ("bash", "scripts/tests/cooperative-cutover-monitor.test.sh"),
     ),
-    Gate(
-        "agent-surface-hash",
-        ("bash", "scripts/tests/agent-surface-hash.test.sh"),
-    ),
     Gate("agents-structural", ("bash", "scripts/tests/agents-structural.test.sh")),
     Gate(
         "deploy-agent-clone-recovery",
         ("bash", "scripts/tests/deploy-agent-clone-recovery.test.sh"),
     ),
+    Gate(
+        "agent-surface-hash",
+        ("bash", "scripts/tests/agent-surface-hash.test.sh"),
+    ),
     Gate("factory-review", ("python3", "scripts/tests/factory-review.test.py")),
+    Gate(
+        "cloudbench-rejected-start-recovery",
+        ("python3", "scripts/tests/cloudbench-rejected-start-recovery.test.py"),
+    ),
+    Gate(
+        "cloudbench-prestack-recovery",
+        ("python3", "scripts/tests/cloudbench-prestack-recovery.test.py"),
+    ),
     Gate("wait-for-code-review", ("python3", "scripts/tests/wait-for-code-review.test.py")),
     Gate("deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")),
     Gate("deploy-stage", ("bash", "scripts/tests/run-deploy-stage.test.sh")),

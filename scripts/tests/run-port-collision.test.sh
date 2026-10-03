@@ -312,6 +312,17 @@ wait_for_connection() {
     exit 1
 }
 
+# On Bash 3.2 a subshell without exec forks the server. Killing only $! then
+# leaves that server orphaned. Every listener launcher must own its socket.
+assert_listener_owned() {
+    local pid="$1" port="$2"
+    if ! lsof -a -p "$pid" -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+        echo "FAIL: recorded fixture PID $pid does not own listener $port" >&2
+        exit 1
+    fi
+    printf 'PASS: fixture PID %s owns listener %s\n' "$pid" "$port"
+}
+
 wait_for_frontend_test_port="$(find_free_port)"
 wait_for_frontend_test_root="$TMP_ROOT/frontend-ready"
 wait_for_frontend_test_log="$TMP_ROOT/frontend-ready.log"
@@ -332,6 +343,7 @@ if ! FRONTEND_START_READY_ATTEMPTS=30 RUN_SERVICE_READY_SLEEP_SECONDS=0.1 \
     echo "FAIL: frontend readiness must wait for a slow bundled build before tunnel smoke" >&2
     exit 1
 fi
+assert_listener_owned "$frontend_test_pid" "$wait_for_frontend_test_port"
 echo "PASS: frontend readiness waits for a delayed local frontend"
 
 failed_frontend_log="$TMP_ROOT/frontend-failed.log"
@@ -381,6 +393,7 @@ foreign_port="$(find_free_port)"
 PIDS+=("$!")
 FIXTURE_PORTS+=("$foreign_port")
 wait_for_port "$foreign_port"
+assert_listener_owned "${PIDS[${#PIDS[@]}-1]}" "$foreign_port"
 
 if ! port_requires_reassign "$foreign_port"; then
     echo "FAIL: expected a non-worktree listener to require port reassignment" >&2
@@ -404,6 +417,7 @@ own_port="$(find_free_port)"
 PIDS+=("$!")
 FIXTURE_PORTS+=("$own_port")
 wait_for_port "$own_port"
+assert_listener_owned "${PIDS[${#PIDS[@]}-1]}" "$own_port"
 
 if port_requires_reassign "$own_port"; then
     echo "FAIL: expected a current-worktree listener to be handled by cleanup, not reassignment" >&2

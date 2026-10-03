@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# run-fleet-infra-stability-proof — sequential multi-slice cloud fleet INFRA
-# durability proof at $0.
+# run-fleet-infra-stability-proof — sequential multi-slice cloud fleet
+# durability proof. Default mode is a $0 INFRA probe; --capability runs the
+# sampled benchmark tasks and advances past ordinary evaluator failures.
+# SKIPPED tasks do not prove actual execution and abort a capability proof.
 #
 # Runs RUNS sequential fleets. Each fleet is WIDTH catalog-sampled tasks in
 # parallel under --infra-probe --strict-barrier (no LLM / run_benchmark).
-# Fail closed on the first non-zero fleet exit — every slice must report ZERO
-# INFRA exclusions / child INFRA_ERROR.
+# Fail closed on the first INFRA result — every slice must report ZERO INFRA
+# exclusions / child INFRA_ERROR. In capability mode a non-zero controller exit
+# is classified from terminal `_batch/run.json`, not conflated with INFRA.
 #
 # Pool: unified catalog (tasks.json + polar_tasks.json). Probe never executes
 # the task body, so polar/browser names are fine for INFRA proof. LIVE DEMO
@@ -16,19 +19,34 @@
 #   bash scripts/run-fleet-infra-stability-proof
 #   bash scripts/run-fleet-infra-stability-proof --dry-sample
 #   bash scripts/run-fleet-infra-stability-proof --runs 10 --width 20 --seed 20260908
+#   scripts/run-bench stability-proof -k 10 --concurrency 10 --seed 20260908
 #
 # Env overrides: FLEET_INFRA_PROOF_{RUNS,WIDTH,SEED,TIMEOUT}
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
 RUNS="${FLEET_INFRA_PROOF_RUNS:-10}"
 WIDTH="${FLEET_INFRA_PROOF_WIDTH:-20}"
 SEED="${FLEET_INFRA_PROOF_SEED:-20260908}"
-TIMEOUT="${FLEET_INFRA_PROOF_TIMEOUT:-1800}"
+TIMEOUT="${FLEET_INFRA_PROOF_TIMEOUT:-7200}"
+POOL_FILE=""
+EXCLUDE_FILE=""
+DISJOINT=0
+MIN_SUCCESSFUL_LLM=0
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS-7200}"
+case "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in
+  ''|*[!0-9]*|0) echo "❌ BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
+[ "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" -gt 0 ] || exit 2
+export BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS
 DRY_SAMPLE=0
+MODE=infra
 ARTIFACT_DIR="${FLEET_INFRA_PROOF_ARTIFACT_DIR:-/opt/cursor/artifacts}"
+FLEET_BIN="${FLEET_INFRA_PROOF_FLEET_BIN:-$ROOT_DIR/scripts/run-bench-fleet}"
+RECOVERY_BIN="${FLEET_INFRA_PROOF_RECOVERY_BIN:-$ROOT_DIR/scripts/run-bench-fleet}"
 
 usage() {
   cat <<'EOF'
@@ -36,10 +54,17 @@ Usage: bash scripts/run-fleet-infra-stability-proof [options]
 
 Options:
   --dry-sample       Print all slices as JSON; no Fly / no fleet launch.
+  --capability       Require PASSED/FAILED real tasks; SKIPPED/INFRA abort.
   --runs <n>         Number of sequential fleets (default 10)
+  -k <n>             Alias for --runs
   --width <n>        Parallel tasks per fleet (default 20)
+  --concurrency <n>  Alias for --width
   --seed <n>         Deterministic sampling seed (default 20260908)
-  --timeout <s>      Per-fleet controller timeout (default 1800)
+  --timeout <s>      Per-fleet controller timeout (default 7200)
+  --pool-file <path>  Select from this JSON list of ready task names
+  --exclude-file <path>  JSON list of task names used in earlier successful runs
+  --disjoint        Never reuse a task across this proof's slices (automatic in capability mode)
+  --min-successful-llm <n>  Require >=3 correlated completed model responses per task
   -h, --help         Show this help
 EOF
 }
@@ -47,12 +72,22 @@ EOF
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-sample) DRY_SAMPLE=1; shift ;;
-    --runs)
+    --capability) MODE=capability; DISJOINT=1; shift ;;
+    --disjoint) DISJOINT=1; shift ;;
+    --runs|-k)
       RUNS="${2:-}"; shift 2
       case "$RUNS" in ''|*[!0-9]*|0) echo "❌ --runs must be a positive integer" >&2; exit 2 ;; esac
       ;;
-    --width)
+    --runs=*|-k=*)
+      RUNS="${1#*=}"; shift
+      case "$RUNS" in ''|*[!0-9]*|0) echo "❌ --runs must be a positive integer" >&2; exit 2 ;; esac
+      ;;
+    --width|--concurrency)
       WIDTH="${2:-}"; shift 2
+      case "$WIDTH" in ''|*[!0-9]*|0) echo "❌ --width must be a positive integer" >&2; exit 2 ;; esac
+      ;;
+    --width=*|--concurrency=*)
+      WIDTH="${1#*=}"; shift
       case "$WIDTH" in ''|*[!0-9]*|0) echo "❌ --width must be a positive integer" >&2; exit 2 ;; esac
       ;;
     --seed)
@@ -65,6 +100,9 @@ while [ "$#" -gt 0 ]; do
       TIMEOUT="${2:-}"; shift 2
       case "$TIMEOUT" in ''|*[!0-9]*|0) echo "❌ --timeout must be a positive integer" >&2; exit 2 ;; esac
       ;;
+    --pool-file) POOL_FILE="${2:-}"; shift 2 ;;
+    --exclude-file) EXCLUDE_FILE="${2:-}"; shift 2 ;;
+    --min-successful-llm) MIN_SUCCESSFUL_LLM="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "❌ unknown arg: $1" >&2
@@ -88,36 +126,79 @@ esac
 if ! [[ "$SEED" =~ ^-?[0-9]+$ ]]; then
   echo "❌ SEED must be an integer (got: $SEED)" >&2; exit 2
 fi
+case "$MIN_SUCCESSFUL_LLM" in ''|*[!0-9]*)
+  echo "❌ --min-successful-llm must be an integer >=3" >&2; exit 2 ;;
+esac
+if [ "$MIN_SUCCESSFUL_LLM" -ne 0 ] && { [ "$MIN_SUCCESSFUL_LLM" -lt 3 ] || [ "$MODE" != capability ]; }; then
+  echo "❌ --min-successful-llm requires capability mode and a minimum >=3" >&2; exit 2
+fi
 
 if [ "$WIDTH" -gt 32 ]; then
   echo "❌ refusing width>32 (hard cap 32; same as infra canary; ratchet deliberately)" >&2
   exit 2
 fi
+POOL_FILE_ARGS=()
+if [ -n "$POOL_FILE" ]; then
+  [ -f "$POOL_FILE" ] && [ ! -L "$POOL_FILE" ] || {
+    echo "❌ --pool-file must be a regular JSON file" >&2; exit 2;
+  }
+  POOL_FILE="$(cd "$(dirname "$POOL_FILE")" && pwd -P)/$(basename "$POOL_FILE")"
+  POOL_FILE_ARGS=(--pool-file "$POOL_FILE")
+fi
+SAMPLE_ARGS=("${POOL_FILE_ARGS[@]}")
+if [ "$MODE" = capability ]; then SAMPLE_ARGS+=(--require-cloud-root); fi
+if [ "$MIN_SUCCESSFUL_LLM" -gt 0 ]; then
+  SAMPLE_ARGS+=(--min-successful-llm "$MIN_SUCCESSFUL_LLM")
+fi
+if [ -n "$EXCLUDE_FILE" ]; then
+  [ -f "$EXCLUDE_FILE" ] && [ ! -L "$EXCLUDE_FILE" ] || {
+    echo "❌ --exclude-file must be a regular JSON file" >&2; exit 2;
+  }
+  EXCLUDE_FILE="$(cd "$(dirname "$EXCLUDE_FILE")" && pwd -P)/$(basename "$EXCLUDE_FILE")"
+  SAMPLE_ARGS+=(--exclude-file "$EXCLUDE_FILE")
+fi
+[ "$DISJOINT" = 1 ] && SAMPLE_ARGS+=(--disjoint)
 
 if [ "$DRY_SAMPLE" = "1" ]; then
   exec python3 "$ROOT_DIR/scripts/fleet_infra_sample.py" dry-proof \
     --repo "$ROOT_DIR" \
     --runs "$RUNS" \
     --width "$WIDTH" \
-    --seed "$SEED"
+    --seed "$SEED" \
+    "${SAMPLE_ARGS[@]}"
 fi
 
-mkdir -p "$ARTIFACT_DIR" .context/fleet/infra-stability-proof
-PROOF_ID="infra-stability-$(date -u +%Y%m%d%H%M%S)-$$"
-PROOF_DIR=".context/fleet/infra-stability-proof/$PROOF_ID"
+if [ "$MODE" = capability ]; then
+  STATE_ROOT="${FLEET_INFRA_PROOF_STATE_ROOT:-.context/fleet/capability-stability-proof}"
+  PROOF_ID="capability-stability-$(date -u +%Y%m%d%H%M%S)-$$"
+else
+  STATE_ROOT="${FLEET_INFRA_PROOF_STATE_ROOT:-.context/fleet/infra-stability-proof}"
+  PROOF_ID="infra-stability-$(date -u +%Y%m%d%H%M%S)-$$"
+fi
+mkdir -p "$STATE_ROOT"
+if ! mkdir -p "$ARTIFACT_DIR" 2>/dev/null || [ ! -d "$ARTIFACT_DIR" ]; then
+  echo "⚠️  optional artifact directory unavailable; retaining proof logs under $STATE_ROOT" >&2
+  ARTIFACT_DIR="$STATE_ROOT"
+fi
+PROOF_DIR="$STATE_ROOT/$PROOF_ID"
 mkdir -p "$PROOF_DIR"
+GIT_COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir)"
 SUMMARY_JSON="$PROOF_DIR/summary.json"
-SUMMARY_ARTIFACT="$ARTIFACT_DIR/fleet_infra_stability_proof_${PROOF_ID}.log"
+SUMMARY_ARTIFACT="$ARTIFACT_DIR/fleet_${MODE}_stability_proof_${PROOF_ID}.log"
 
-echo "🛡  fleet infra stability proof"
+echo "🛡  fleet $MODE stability proof"
 echo "   runs=$RUNS width=$WIDTH seed=$SEED timeout=${TIMEOUT}s"
 echo "   proof_id=$PROOF_ID"
-echo "   mode: --infra-probe (strict barrier, \$0, no LLM)"
-echo "   fail closed: any INFRA / non-zero fleet exit aborts remaining slices"
+if [ "$MODE" = capability ]; then
+  echo "   mode: real benchmark execution; FAILED advances, SKIPPED/INFRA abort"
+else
+  echo "   mode: --infra-probe (strict barrier, \$0, no LLM)"
+fi
+echo "   fail closed: any INFRA outcome aborts remaining slices"
 
-python3 - "$SUMMARY_JSON" "$PROOF_ID" "$RUNS" "$WIDTH" "$SEED" "$TIMEOUT" <<'PY'
-import json, sys, time
-path, proof_id, runs, width, seed, timeout = sys.argv[1:]
+python3 - "$SUMMARY_JSON" "$PROOF_ID" "$RUNS" "$WIDTH" "$SEED" "$TIMEOUT" "$MODE" "$POOL_FILE" "$EXCLUDE_FILE" "$DISJOINT" "$MIN_SUCCESSFUL_LLM" <<'PY'
+import hashlib, json, os, sys, time
+path, proof_id, runs, width, seed, timeout, mode, pool_file, exclude_file, disjoint, min_successful_llm = sys.argv[1:]
 json.dump(
     {
         "proof_id": proof_id,
@@ -126,6 +207,14 @@ json.dump(
         "width": int(width),
         "seed": int(seed),
         "timeout_seconds": int(timeout),
+        "benchmark_wall_clock_backstop_seconds": int(os.environ["BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS"]),
+        "mode": mode,
+        "eligibility_pool_file": pool_file or None,
+        "eligibility_pool_sha256": hashlib.sha256(open(pool_file, "rb").read()).hexdigest() if pool_file else None,
+        "excluded_names_file": exclude_file or None,
+        "excluded_names_sha256": hashlib.sha256(open(exclude_file, "rb").read()).hexdigest() if exclude_file else None,
+        "disjoint_slices": disjoint == "1",
+        "minimum_successful_llm_queries": int(min_successful_llm),
         "slices": [],
         "status": "running",
     },
@@ -140,106 +229,614 @@ FAILED_SLICE=""
 FAILED_RC=0
 
 record_slice() {
-  local idx="$1" rc="$2" log_path="$3"
-  shift 3
+  local idx="$1" rc="$2" classification="$3" log_path="$4" batch_path="$5"
+  shift 5
   local -a names=("$@")
-  python3 - "$SUMMARY_JSON" "$idx" "$rc" "$log_path" "${names[@]}" <<'PY'
-import json, sys, time
+  python3 - "$SUMMARY_JSON" "$idx" "$rc" "$classification" "$log_path" "$batch_path" "${names[@]}" <<'PY'
+import json, os, sys, time
+from pathlib import Path
 path = sys.argv[1]
 idx = int(sys.argv[2])
 rc = int(sys.argv[3])
-log_path = sys.argv[4]
-names = sys.argv[5:]
+classification = sys.argv[4]
+log_path = sys.argv[5]
+batch_path = sys.argv[6] or None
+names = sys.argv[7:]
 data = json.loads(open(path).read() or "{}")
+cleanup_path = Path(log_path).with_suffix('.cleanup.json')
+try:
+    cleanup = json.loads(cleanup_path.read_text())
+except (OSError, ValueError):
+    cleanup = {}
 data.setdefault("slices", []).append(
     {
         "slice": idx,
         "rc": rc,
-        "passed": rc == 0,
+        "classification": classification,
+        "passed": classification != "infra",
         "names": names,
         "log": log_path,
+        "batch_run": batch_path,
+        "fleet_owner_token": cleanup.get('fleet_owner_token'),
+        "cleanup_receipt": str(cleanup_path) if cleanup else None,
+        "cleanup_status": cleanup.get('status'),
         "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 )
-if rc != 0:
+if classification == "infra":
     data["status"] = "failed"
     data["failed_slice"] = idx
-open(path, "w").write(json.dumps(data, indent=2) + "\n")
+tmp = Path(path + '.tmp')
+with tmp.open('w') as handle:
+    handle.write(json.dumps(data, indent=2) + '\n')
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, path)
+PY
+}
+
+# A verified real capability slice has exercised the same bring-up, barrier,
+# autoscaler, and exact provider teardown contracts as the smaller infra canary.
+# Refresh its preflight stamp under the canary's lock so the next sequential
+# slice does not spend minutes rerunning a weaker probe after the TTL expires.
+# If publication fails, leave the old stamp alone; the next slice runs the
+# normal canary preflight.
+refresh_infra_canary_from_capability_slice() {
+  local index="$1"
+  [ "$MODE" = capability ] || return 0
+  python3 - "$SUMMARY_JSON" "$index" "$ROOT_DIR" \
+    "${FLEET_INFRA_CANARY_STAMP:-$ROOT_DIR/.context/fleet-infra-canary.last-pass}" \
+    "${FLEET_INFRA_CANARY_LOCK:-$ROOT_DIR/.context/fleet-infra-canary-preflight.transaction.lock}" <<'PY'
+import fcntl
+import json
+import runpy
+import sys
+from pathlib import Path
+
+summary_path, index, repo, stamp, lock = sys.argv[1:]
+summary = json.loads(Path(summary_path).read_text())
+row = summary["slices"][-1]
+assert row["slice"] == int(index)
+assert row["classification"] in {"pass", "harness"}
+assert row["cleanup_status"] == "verified" and row["passed"] is True
+batch = Path(row["batch_run"])
+receipt = json.loads((batch.parent / "lifecycle.json").read_text())
+assert receipt["status"] == "verified"
+assert receipt["fleet_owner_token"] == row["fleet_owner_token"]
+assert receipt["workspace_root"] == repo
+assert receipt["controller_exit_code"] == row["rc"]
+stamp, lock = Path(stamp), Path(lock)
+stamp.parent.mkdir(parents=True, exist_ok=True)
+lock.parent.mkdir(parents=True, exist_ok=True)
+writer = runpy.run_path(str(Path(repo) / "scripts/cloudbench-infra-canary-preflight.py"))["_write_stamp"]
+with lock.open("a+", encoding="utf-8") as handle:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    writer(stamp, f"capability-proof={summary['proof_id']} slice={index}")
+print(f"🛡  verified capability slice {index} refreshed infra preflight stamp")
+PY
+}
+
+classify_capability_slice() {
+  local log_path="$1" owner_token="$2" controller_exit="$3"
+  shift 3
+  python3 - "$log_path" "$owner_token" "$controller_exit" "$ROOT_DIR" "$@" <<'PY'
+import hashlib
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+log_path = Path(sys.argv[1])
+owner_token, controller_exit, workspace = sys.argv[2:5]
+expected = sys.argv[5:]
+try:
+    text = log_path.read_text()
+except OSError:
+    print("infra\t")
+    raise SystemExit
+matches = re.findall(
+    r"^🔏 execution provenance: (.+)/execution-provenance[.]json$",
+    text,
+    flags=re.MULTILINE,
+)
+# Nested canaries also print provenance to the parent's stdout. Bind selection
+# to this slice's owner, never to log order, and reject ambiguous ownership.
+candidates = []
+for path in dict.fromkeys(matches):
+    candidate = Path(path) / "_batch" / "run.json"
+    try:
+        identity = json.loads((candidate.parent / "lifecycle.json").read_text())
+    except (OSError, ValueError):
+        continue
+    if (isinstance(identity, dict)
+        and identity.get("fleet_owner_token") == owner_token
+        and identity.get("workspace_root") == workspace):
+        candidates.append(candidate)
+if len(candidates) != 1:
+    print("infra\t")
+    raise SystemExit
+batch_path = candidates[0]
+try:
+    payload = json.loads(batch_path.read_text())
+except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    print(f"infra\t{batch_path}")
+    raise SystemExit
+# A workload result cannot certify resource teardown. Require the exact slice
+# owner's final verdict and the immutable audit it binds, including failures
+# after the provider audit was sealed (for example registry removal).
+try:
+    run_dir = batch_path.parent.parent
+    receipt = json.loads((batch_path.parent / "lifecycle.json").read_text())
+    audit = run_dir / "teardown-ownership"
+    if audit.is_symlink() or not audit.is_dir():
+        raise ValueError("unsafe teardown audit")
+    metadata = dict(line.split("=", 1) for line in (audit / "meta").read_text().splitlines())
+    binding = dict(line.split("=", 1) for line in (audit / "source-audit").read_text().splitlines())
+    common = subprocess.check_output(
+        ["git", "-C", workspace, "rev-parse", "--git-common-dir"], text=True
+    ).strip()
+    common = (Path(workspace) / common).resolve()
+    source = common / "cloudbench-fleet-audits" / owner_token
+    expected_identity = {
+        "fleet_owner_token": owner_token, "run_id": run_dir.name,
+        "workspace_root": workspace,
+    }
+    if any(receipt.get(key) != value or metadata.get(key) != value for key, value in expected_identity.items()):
+        raise ValueError("lifecycle identity mismatch")
+    if (receipt.get("version") != 1 or receipt.get("status") != "verified"
+        or type(receipt.get("controller_exit_code")) is not int
+        or receipt["controller_exit_code"] != int(controller_exit)
+        or receipt["controller_exit_code"] not in (0, 1)
+        or metadata.get("version") != "1"
+        or metadata.get("status") != "provider-teardown-verified"
+        or binding.get("path") != str(source)):
+        raise ValueError("fleet lifecycle was not verified")
+    digest = hashlib.sha256()
+    for item in sorted(audit.rglob("*"), key=lambda item: str(item.relative_to(audit))):
+        if item.is_symlink() or not (item.is_dir() or item.is_file()):
+            raise ValueError("unsafe audit entry")
+        if item.is_file() and item.name != "source-audit":
+            relative, data = str(item.relative_to(audit)).encode(), item.read_bytes()
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            digest.update(len(data).to_bytes(8, "big"))
+            digest.update(data)
+    if digest.hexdigest() != binding.get("sha256") or digest.hexdigest() != receipt.get("audit_sha256"):
+        raise ValueError("teardown audit changed")
+except (OSError, TypeError, ValueError, KeyError, subprocess.SubprocessError):
+    print(f"infra\t{batch_path}")
+    raise SystemExit
+tasks = payload.get("tasks") if isinstance(payload, dict) else None
+if not isinstance(tasks, list):
+    print(f"infra\t{batch_path}")
+    raise SystemExit
+names = [task.get("name") for task in tasks if isinstance(task, dict)]
+if names != expected or len(names) != len(tasks):
+    print(f"infra\t{batch_path}")
+    raise SystemExit
+statuses = [task.get("benchmark_status") if task.get("benchmark_status") is not None else task.get("status") for task in tasks]
+if any(not isinstance(status, str) or not status for status in statuses):
+    print(f"infra\t{batch_path}")
+    raise SystemExit
+statuses = [status.upper() for status in statuses]
+known = {"PASSED", "FAILED", "SKIPPED", "INFRA_ERROR", "ERROR", "CANCELLED"}
+if any(type(task.get("passed")) is not bool for task in tasks):
+    print(f"infra\t{batch_path}")
+elif any(status not in known for status in statuses):
+    print(f"infra\t{batch_path}")
+elif any(status in {"SKIPPED", "INFRA_ERROR", "ERROR", "CANCELLED"} for status in statuses):
+    print(f"infra\t{batch_path}")
+elif any(task["passed"] != (status == "PASSED") for task, status in zip(tasks, statuses)):
+    print(f"infra\t{batch_path}")
+elif all(bool(task.get("passed")) for task in tasks):
+    print(f"pass\t{batch_path}")
+else:
+    print(f"harness\t{batch_path}")
 PY
 }
 
 finalize() {
   local status="$1"
   python3 - "$SUMMARY_JSON" "$status" "$PASSED" <<'PY'
-import json, sys, time
+import json, os, sys, time
 path, status, passed = sys.argv[1], sys.argv[2], int(sys.argv[3])
 data = json.loads(open(path).read() or "{}")
 data["status"] = status
 data["passed_slices"] = passed
 data["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-open(path, "w").write(json.dumps(data, indent=2) + "\n")
+from pathlib import Path
+receipts = [json.loads(item.read_text()) for item in Path(path).parent.glob('slice-*.cleanup.json')]
+data['cleanup_status'] = 'verified' if all(item.get('status') == 'verified' for item in receipts) else 'failed_retained'
+tmp = Path(path + '.tmp')
+with tmp.open('w') as handle:
+    handle.write(json.dumps(data, indent=2) + '\n')
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, path)
 PY
-  cp -f "$SUMMARY_JSON" "$ARTIFACT_DIR/fleet_infra_stability_proof_${PROOF_ID}_summary.json" 2>/dev/null || true
+  cp -f "$SUMMARY_JSON" "$ARTIFACT_DIR/fleet_${MODE}_stability_proof_${PROOF_ID}_summary.json" 2>/dev/null || true
 }
 
-{
-  echo "proof_id=$PROOF_ID runs=$RUNS width=$WIDTH seed=$SEED"
+# Persist the obligation before launching any command capable of allocating.
+# The immutable tracked session leader remains the authority for cancellation;
+# an exit status alone never authorizes provider recovery.
+write_slice_cleanup() {
+  python3 - "$slice_cleanup" "$slice_owner_token" "$1" "$slice_group_drained" \
+    "${slice_pid:-}" "${slice_pid_start:-}" "${slice_group_token:-}" "$ROOT_DIR" <<'PY'
+import hashlib, json, os, sys
+from pathlib import Path
+path, owner, status, drained, pid, birth, token, workspace = sys.argv[1:]
+data = dict(version=1, fleet_owner_token=owner, workspace_root=workspace,
+            status=status, process_group_drained=drained == '1',
+            pid=int(pid) if pid else None, pid_start=birth, group_token=token,
+            proof_sha256=hashlib.sha256((Path(workspace) / 'scripts/run-fleet-infra-stability-proof').read_bytes()).hexdigest())
+tmp = Path(path + '.tmp')
+with tmp.open('w') as handle:
+    json.dump(data, handle, indent=2)
+    handle.write('\n')
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, path)
+PY
+}
+
+proof_owner_terminal() {  # <allow-never-allocated>
+  python3 - "$GIT_COMMON_DIR" "$slice_owner_token" "$ROOT_DIR" "$PROOF_DIR/runs" "$1" <<'PY'
+import hashlib, re, sys
+from pathlib import Path
+common, owner, workspace, runs, allow_empty = sys.argv[1:]
+registry = Path(common) / 'cloudbench-fleet-ownership' / owner
+audit = Path(common) / 'cloudbench-fleet-audits' / owner
+
+def fields(path):
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('missing or unsafe audit metadata')
+    pairs = [line.split('=', 1) for line in path.read_text().splitlines()]
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError('duplicate audit metadata')
+    return result
+
+def digest(root):
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError('unsafe audit directory')
+    result = hashlib.sha256()
+    for path in sorted(root.rglob('*'), key=lambda item: str(item.relative_to(root))):
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            raise ValueError('unsafe audit entry')
+        if path.is_file() and path.name != 'source-audit':
+            relative, data = str(path.relative_to(root)).encode(), path.read_bytes()
+            result.update(len(relative).to_bytes(8, 'big'))
+            result.update(relative)
+            result.update(len(data).to_bytes(8, 'big'))
+            result.update(data)
+    return result.hexdigest()
+
+try:
+    if registry.exists() or registry.is_symlink():
+        raise ValueError('owner registry remains')
+    if not audit.exists() and not audit.is_symlink() and allow_empty == '1':
+        raise SystemExit(0)
+    metadata = fields(audit / 'meta')
+    run_id = metadata.get('run_id', '')
+    if (metadata.get('version') != '1' or metadata.get('fleet_owner_token') != owner
+        or metadata.get('workspace_root') != str(Path(workspace).resolve())
+        or metadata.get('status') != 'provider-teardown-verified'
+        or not metadata.get('app') or not re.fullmatch(r'[A-Za-z0-9._-]+', run_id)
+        or run_id in {'.', '..'}):
+        raise ValueError('terminal audit identity is incomplete or mismatched')
+    run = Path(runs) / run_id
+    if run.is_symlink() or run.resolve().parent != Path(runs).resolve():
+        raise ValueError('unsafe audit run path')
+    mirror = run / 'teardown-ownership'
+    binding = fields(mirror / 'source-audit')
+    actual = digest(audit)
+    if (binding.get('path') != str(audit) or binding.get('sha256') != actual
+        or digest(mirror) != actual):
+        raise ValueError('terminal audit mirror is not bound to its exact shared source')
+except (OSError, ValueError, TypeError):
+    raise SystemExit(1)
+PY
+}
+
+recover_proof_slice() {
+  [ "$slice_recovery_attempted" = 0 ] || return "$slice_recovery_rc"
+  slice_recovery_attempted=1
+  slice_recovery_rc=1
+  if [ "$slice_identity_valid" != 1 ] \
+    || [ "$(cloudbench_process_group_state "$slice_pid")" != absent ] \
+    || cloudbench_pid_exists "$slice_pid"; then
+    write_slice_cleanup failed_retained
+    return 1
+  fi
+  slice_group_drained=1
+  write_slice_cleanup running || return 1
+  local registry="$GIT_COMMON_DIR/cloudbench-fleet-ownership/$slice_owner_token"
+  local audit="$GIT_COMMON_DIR/cloudbench-fleet-audits/$slice_owner_token"
+  # Neither a dangling link nor a truncated terminal marker is absence/proof.
+  if [ -L "$registry" ] || [ -L "$audit" ] || [ -L "$audit/meta" ]; then
+    write_slice_cleanup failed_retained
+    return 1
+  fi
+  if proof_owner_terminal 1; then
+    slice_recovery_rc=0
+  else
+    env CLOUDBENCH_SCRIPT_SNAPSHOT= CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE=borrow \
+      bash "$RECOVERY_BIN" --recover-stale-owner "$slice_owner_token" \
+      > "$PROOF_DIR/slice-$i.recovery.log" 2>&1 && slice_recovery_rc=0
+    cat "$PROOF_DIR/slice-$i.recovery.log" || true
+    # Require canonical retirement and its exact immutable audit mirror after
+    # recovery, even when the external command reports success.
+    proof_owner_terminal 0 || slice_recovery_rc=1
+  fi
+  if [ "$slice_recovery_rc" = 0 ]; then
+    write_slice_cleanup verified || slice_recovery_rc=1
+  fi
+  if [ "$slice_recovery_rc" != 0 ]; then write_slice_cleanup failed_retained; fi
+  return "$slice_recovery_rc"
+}
+
+run_owned_proof_slice() {
+  local slice_cleanup="$PROOF_DIR/slice-$i.cleanup.json"
+  local slice_owner="$PROOF_DIR/slice-$i.owner" slice_status="$PROOF_DIR/slice-$i.status"
+  local slice_raw_log="$PROOF_DIR/slice-$i.controller.log" slice_log_fd="" relay_failed=0
+  local slice_pid="" slice_pid_start="" slice_group_token="" slice_group_drained=0
+  local slice_recovery_attempted=0 slice_recovery_rc=1 controller_rc=1 relay_pid slice_identity_valid=0
+  local self_pid="$BASHPID"
+  trap ':' HUP INT TERM
+  write_slice_cleanup pending || return 1
+  printf 'pid=%s\npid_start=%s\n' "$self_pid" \
+    "$(cloudbench_pid_start_time "$self_pid")" \
+    > "$PROOF_DIR/active-waiter.owner"
+  if [ -s "$PROOF_DIR/cancel.request" ]; then
+    write_slice_cleanup verified
+    return 143
+  fi
+  if ! cloudbench_detach_reexec_tracked "$slice_owner" "$slice_raw_log" \
+    env FLEET_STABILITY_SLICE="$i" CLOUDBENCH_FLEET_OWNER_TOKEN="$slice_owner_token" \
+      CLOUDBENCH_RUNS_ROOT="$PROOF_DIR/runs" bash -c '
+status_file="$1"; shift
+status=1
+write_status() { printf "%s\n" "$status" > "$status_file.tmp" && mv "$status_file.tmp" "$status_file"; }
+trap write_status EXIT
+trap "status=129; exit 129" HUP
+trap "status=130; exit 130" INT
+trap "status=143; exit 143" TERM
+"$@"
+status=$?
+exit "$status"
+' proof-slice "$slice_status" bash "$FLEET_BIN" "$@"; then
+    write_slice_cleanup failed_retained
+    return 1
+  fi
+  slice_pid="$(cloudbench_tracked_owner_value "$slice_owner" pid)"
+  slice_pid_start="$(cloudbench_tracked_owner_value "$slice_owner" pid_start)"
+  slice_group_token="$(cloudbench_tracked_owner_value "$slice_owner" group_token)"
+  if [[ "$slice_pid" =~ ^[1-9][0-9]*$ ]] \
+    && [ "$(cloudbench_tracked_owner_value "$slice_owner" pgid)" = "$slice_pid" ] \
+    && [ -n "$slice_pid_start" ] && [[ "$slice_group_token" =~ ^[0-9a-f]{32}$ ]]; then
+    slice_identity_valid=1
+  fi
+  write_slice_cleanup pending
+  # Stream a durable log independently of its consumer. Completion travels
+  # through an anonymous pipe, so ENOSPC cannot strand a relay waiting for a
+  # marker file which could not be created. Drain final bytes after the signal.
+  exec {slice_log_fd}> >(python3 -u -c '
+import os, select, sys
+from pathlib import Path
+complete = False
+with Path(sys.argv[1]).open(encoding="utf-8", errors="replace") as handle:
+    while True:
+        chunk = handle.read()
+        if chunk:
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+        elif complete:
+            break
+        elif select.select([0], [], [], .1)[0]:
+            os.read(0, 1)
+            complete = True
+' "$slice_raw_log") || relay_failed=1
+  relay_pid=$!
+  cloudbench_wait_tracked_detached "$slice_owner" "$slice_status" recover_proof_slice
+  controller_rc=$?
+  # The waiter resets its temporary traps. Further cancellation must not kill
+  # the canonical recovery process which is now the remaining resource owner.
+  trap ':' HUP INT TERM
+  recover_proof_slice || true
+  if [ -n "$slice_log_fd" ]; then
+    printf . >&"$slice_log_fd" || relay_failed=1
+    exec {slice_log_fd}>&-
+  fi
+  wait "$relay_pid" || relay_failed=1
+  if [ "$relay_failed" != 0 ]; then
+    printf "failed\n" > "$PROOF_DIR/slice-$i.log-failed" || controller_rc=70
+  fi
+  rm -f "$PROOF_DIR/active-waiter.owner"
+  return "$controller_rc"
+}
+
+forward_proof_cancellation() {
+  local pid birth signal_name="${proof_signal:-}"
+  if [ -z "$signal_name" ]; then
+    [ -s "$PROOF_DIR/cancel.request" ] || return 0
+    signal_name="$(cat "$PROOF_DIR/cancel.request")"
+  fi
+  case "$signal_name" in HUP|INT|TERM) ;; *) return 1 ;; esac
+  # In-memory intent remains actionable even if a full disk rejects the record.
+  printf '%s\n' "$signal_name" > "$PROOF_DIR/cancel.request" 2>/dev/null || true
+  pid="$(cloudbench_tracked_owner_value "$PROOF_DIR/active-waiter.owner" pid)"
+  birth="$(cloudbench_tracked_owner_value "$PROOF_DIR/active-waiter.owner" pid_start)"
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  # Address the exact waiter, whose existing trap forwards once to the tracked
+  # group and enforces the existing cancellation/drain deadlines.
+  if cloudbench_pid_matches_start "$pid" "$birth"; then
+    kill -s "$signal_name" "$pid" 2>/dev/null || true
+  fi
+}
+
+# Body completion is process-owned, not dependent on optional disk records.
+# Keep its anonymous pipe open through both the body and logger; EOF proves
+# both have finished even if every terminal/identity record write was rejected.
+set +e
+exec {proof_console_fd}>&1
+exec {proof_completion_reader}< <(
+  exec {proof_completion_writer}>&1
+(
+  trap 'rc=$?; printf "%s\n" "$rc" >&"$proof_completion_writer" || true; printf "%s\n" "$rc" > "$PROOF_DIR/controller.exit" || true; exit "$rc"' EXIT
+  trap '' PIPE
+  body_self_pid="$BASHPID"
+  printf 'pid=%s\npid_start=%s\n' "$body_self_pid" \
+    "$(cloudbench_pid_start_time "$body_self_pid")" \
+    > "$PROOF_DIR/controller.owner"
+  set -e
+  echo "proof_id=$PROOF_ID runs=$RUNS width=$WIDTH seed=$SEED" || true
   for ((i = 0; i < RUNS; i++)); do
     mapfile -t BENCHES < <(
       python3 "$ROOT_DIR/scripts/fleet_infra_sample.py" sample \
         --repo "$ROOT_DIR" \
         --width "$WIDTH" \
         --seed "$SEED" \
-        --slice "$i"
+        --slice "$i" \
+        "${SAMPLE_ARGS[@]}"
     )
     if [ "${#BENCHES[@]}" -ne "$WIDTH" ]; then
-      echo "❌ slice $i: catalog sample returned ${#BENCHES[@]}/$WIDTH names" >&2
+      echo "❌ slice $i: catalog sample returned ${#BENCHES[@]}/$WIDTH names" >&2 || true
       FAILED_SLICE="$i"
       FAILED_RC=2
-      record_slice "$i" 2 "$PROOF_DIR/slice-${i}.log" "${BENCHES[@]:-}"
+      record_slice "$i" 2 infra "$PROOF_DIR/slice-${i}.log" "" "${BENCHES[@]:-}"
       finalize failed
       # stdout only — the outer `tee "$SUMMARY_ARTIFACT"` captures these lines;
       # a second `tee -a` races the outer writer and can clobber failure lines.
-      echo "❌ INFRA STABILITY PROOF FAILED at slice $i (sample)"
+      echo "❌ INFRA STABILITY PROOF FAILED at slice $i (sample)" || true
       exit 2
     fi
 
     SLICE_LOG="$PROOF_DIR/slice-${i}.log"
-    echo ""
-    echo "════════════════════════════════════════════════════════════"
-    echo "▶ slice $((i + 1))/$RUNS  (index=$i, width=$WIDTH)"
-    echo "  tasks: ${BENCHES[*]}"
-    echo "  log: $SLICE_LOG"
-    echo "════════════════════════════════════════════════════════════"
+    echo "" || true
+    echo "════════════════════════════════════════════════════════════" || true
+    echo "▶ slice $((i + 1))/$RUNS  (index=$i, width=$WIDTH)" || true
+    echo "  tasks: ${BENCHES[*]}" || true
+    echo "  log: $SLICE_LOG" || true
+    echo "════════════════════════════════════════════════════════════" || true
 
     set +e
-    bash "$ROOT_DIR/scripts/run-bench-fleet" \
-      "${BENCHES[@]}" \
-      --infra-probe \
-      --timeout "$TIMEOUT" \
-      --foreground \
-      > >(tee "$SLICE_LOG") 2>&1
-    rc=$?
+    slice_owner_token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+    slice_args=("${BENCHES[@]}" --timeout "$TIMEOUT" --foreground)
+    if [ "$MODE" != capability ]; then slice_args+=(--infra-probe); fi
+    run_owned_proof_slice "${slice_args[@]}" 2>&1 | tee "$SLICE_LOG"
+    slice_pipe_status=("${PIPESTATUS[@]}")
+    rc="${slice_pipe_status[0]}"
     set -e
 
-    record_slice "$i" "$rc" "$SLICE_LOG" "${BENCHES[@]}"
+    cleanup_status="$(python3 - "$PROOF_DIR/slice-$i.cleanup.json" <<'PYREAD'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1]))['status'])
+except (OSError, ValueError, KeyError):
+    print('failed_retained')
+PYREAD
+)"
+    if [ -s "$PROOF_DIR/cancel.request" ] || [ "$cleanup_status" != verified ]; then
+      classification=infra
+      batch_path=""
+    elif [ "${slice_pipe_status[1]}" -ne 0 ] || [ -s "$PROOF_DIR/slice-$i.log-failed" ]; then
+      echo "❌ slice log publication failed" >&2 || true
+      classification=infra
+      batch_path=""
+    elif [ "$MODE" = capability ]; then
+      classification_line="$(classify_capability_slice "$SLICE_LOG" "$slice_owner_token" "$rc" "${BENCHES[@]}")"
+      IFS=$'\t' read -r classification batch_path <<< "$classification_line"
+    elif [ "$rc" -eq 0 ]; then
+      classification=pass
+      batch_path=""
+    else
+      classification=infra
+      batch_path=""
+    fi
+    if [ "$classification" != infra ] && [ "$MIN_SUCCESSFUL_LLM" -gt 0 ]; then
+      if ! python3 "$ROOT_DIR/scripts/verify_successful_llm_queries.py" \
+        "$(dirname "$(dirname "$batch_path")")" "$PROOF_DIR/slice-$i.llm-proof.json" \
+        --minimum "$MIN_SUCCESSFUL_LLM" --expected-count "$WIDTH"; then
+        echo "❌ slice $i lacks the required correlated successful LLM evidence" >&2 || true
+        classification=infra
+      fi
+    fi
+    record_slice "$i" "$rc" "$classification" "$SLICE_LOG" "$batch_path" "${BENCHES[@]}"
 
-    if [ "$rc" -ne 0 ]; then
+    if [ "$classification" = infra ]; then
       FAILED_SLICE="$i"
       FAILED_RC="$rc"
+      [ "$FAILED_RC" -ne 0 ] || FAILED_RC=1
       finalize failed
-      echo "❌ INFRA STABILITY PROOF FAILED at slice $i (fleet exit=$rc)"
-      echo "   zero INFRA required on ALL $RUNS slices — aborting remaining"
-      exit "$rc"
+      echo "❌ ${MODE^^} STABILITY PROOF FAILED at slice $i (fleet exit=$rc)" || true
+      echo "   zero INFRA required on ALL $RUNS slices — aborting remaining" || true
+      exit "$FAILED_RC"
     fi
 
+    if [ "$MODE" = capability ] && ! refresh_infra_canary_from_capability_slice "$i"; then
+      echo "⚠️  capability slice passed but could not refresh infra preflight stamp; next slice will run the normal canary" >&2 || true
+    fi
     PASSED=$((PASSED + 1))
-    echo "✅ slice $i PASSED ($PASSED/$RUNS)"
+    echo "✅ slice $i NO-INFRA classification=$classification ($PASSED/$RUNS)" || true
   done
 
   finalize passed
-  echo ""
-  echo "✅ INFRA STABILITY PROOF PASSED: $PASSED/$RUNS slices × $WIDTH parallel (zero INFRA)"
-  echo "   summary: $SUMMARY_JSON"
-} 2>&1 | tee "$SUMMARY_ARTIFACT"
-exit "${PIPESTATUS[0]}"
+  echo "" || true
+  echo "✅ ${MODE^^} STABILITY PROOF PASSED: $PASSED/$RUNS slices × $WIDTH parallel (zero INFRA)" || true
+  echo "   summary: $SUMMARY_JSON" || true
+) 2>&1 | tee "$SUMMARY_ARTIFACT" >&"$proof_console_fd"
+)
+proof_pipeline_pid=$!
+exec {proof_console_fd}>&-
+proof_signal=""
+trap 'proof_signal=HUP' HUP
+trap 'proof_signal=INT' INT
+trap 'proof_signal=TERM' TERM
+proof_body_rc=""
+proof_completion_invalid=0
+proof_completion_buffer=""
+while :; do
+  forward_proof_cancellation
+  IFS= read -r -n 4 -t .1 -u "$proof_completion_reader" proof_completion_line
+  completion_read_rc=$?
+  # Timed/signal-interrupted reads can consume part of the frame. Preserve
+  # those bytes until the delimiter, while bounding all retained protocol data.
+  if [ "$proof_completion_invalid" = 0 ]; then
+    if [ "$((${#proof_completion_buffer} + ${#proof_completion_line}))" -gt 3 ]; then
+      proof_completion_invalid=1
+      proof_completion_buffer=""
+    else
+      proof_completion_buffer+="$proof_completion_line"
+    fi
+  fi
+  if [ "$completion_read_rc" = 0 ]; then
+    if [ "$proof_completion_invalid" = 0 ] \
+      && [[ "$proof_completion_buffer" =~ ^[0-9]{1,3}$ ]] \
+      && [ "$proof_completion_buffer" -le 255 ] && [ -z "$proof_body_rc" ]; then
+      proof_body_rc="$proof_completion_buffer"
+    else
+      proof_completion_invalid=1
+    fi
+    proof_completion_buffer=""
+  elif [ "$completion_read_rc" = 1 ]; then
+    [ -z "$proof_completion_buffer" ] || proof_completion_invalid=1
+    break
+  fi
+  # A timeout/signal only wakes cancellation forwarding. Even a terminal frame
+  # is not permission to leave before the body and its logger close the pipe.
+done
+exec {proof_completion_reader}<&-
+wait "$proof_pipeline_pid"
+pipeline_rc=$?
+trap - HUP INT TERM
+set -e
+if [ "$proof_completion_invalid" = 0 ]; then
+  if [ -n "$proof_body_rc" ]; then exit "$proof_body_rc"; fi
+  # Rejected status publication can suppress the frame as well as the file.
+  # The reaped pipeline still supplies a real failure result; never invent pass.
+  if [ "$pipeline_rc" -ne 0 ]; then exit "$pipeline_rc"; fi
+fi
+echo "❌ proof supervisor exited without a terminal status; ownership remains recorded in $PROOF_DIR" >&2
+exit 1

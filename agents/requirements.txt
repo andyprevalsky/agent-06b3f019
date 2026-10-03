@@ -1,5 +1,5 @@
-# Temporal SDK
-temporalio>=1.18.1
+# Temporal SDK and its gRPC support for native shutdown contract fixtures
+temporalio[grpc]>=1.18.1
 markdown-it-py>=4.0.0
 
 # HTTP and async support

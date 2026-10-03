@@ -54,10 +54,10 @@ function isTransientOrgMcpPollError(error: unknown): boolean {
 /**
  * Drain idle cardholder headroom into the pool before minting.
  *
- * A mint against existing residual can net (`transferred_cents: 0`, pool untouched). Its transfer
- * may sit at `consumed` while `recover_funds` credits unrelated residual and false-passes a weaker
- * sweep check. Sweep first, then retry once if the provider still nets headroom: at least one
- * settled mint must prove a full pool debit on its own transfer.
+ * A mint against existing residual can net (`transferred_cents: 0`, pool untouched).
+ * Sweeping cannot reserve a globally shared cardholder's headroom, and unrelated residual
+ * recovery cannot prove this mint's funding. Sweep first, then retry once if the provider
+ * still nets headroom: at least one settled mint must prove a full pool debit on its own transfer.
  */
 async function sweepResidualHeadroom(timeoutMs = 60_000): Promise<number> {
   const deadline = Date.now() + timeoutMs;
@@ -90,7 +90,9 @@ async function sweepResidualHeadroom(timeoutMs = 60_000): Promise<number> {
  */
 async function readCardTransfer(
   cardId: string
-): Promise<(MintTransferObservation & { transferredCents: number }) | undefined> {
+): Promise<
+  (MintTransferObservation & { amountCents: number; transferredCents: number }) | undefined
+> {
   const transfers =
     (
       (await callOrgTool('list_transfers', { limit: 100 })) as {
@@ -101,6 +103,7 @@ async function readCardTransfer(
   if (mine === undefined) return undefined;
   return {
     status: String(mine.status ?? 'unknown'),
+    amountCents: Number(mine.amount_cents ?? 0),
     releasedCents: Number(mine.released_cents ?? 0),
     transferredCents: Number(mine.transferred_cents ?? 0),
   };
@@ -325,6 +328,17 @@ async function main(): Promise<void> {
 
     let cardClosed = false;
     try {
+      // Observation only: the provider does not promise immediate transfer visibility.
+      try {
+        const issued = await readCardTransfer(cardId);
+        console.log(
+          `  issuance funding: found=${issued !== undefined} amount=${issued?.amountCents ?? 'missing'} ` +
+            `transferred=${issued?.transferredCents ?? 'missing'} ` +
+            `released=${issued?.releasedCents ?? 'missing'} status=${issued?.status ?? 'missing'}`
+        );
+      } catch {
+        console.log('  issuance funding: read unavailable; terminal assertions remain required');
+      }
       // An aggregate pool balance delta cannot prove what this card drew.
       const closed = (await callOrgTool('close_card', { card_id: cardId })) as {
         structuredContent?: { status?: string };

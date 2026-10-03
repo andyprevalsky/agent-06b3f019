@@ -19,16 +19,34 @@ function makeAgent(status: AgentDetail['status']): AgentDetail {
     reasoning_effort: 'medium',
     progress: status === 'COMPLETED' ? 1 : 0,
     status,
+    status_message: null,
+    temporal_workflow_id: null,
+    token_count: 0,
+    tokens_in: 0,
+    tokens_out: 0,
+    tool_tokens_in: 0,
+    tool_tokens_out: 0,
+    tool_cost_cents: 0,
+    context_size: 0,
+    message_count: 0,
+    price_limit_cents: 0,
+    tree_cost_cents: 0,
+    write_lock_enabled: false,
+    verifier: null,
+    tools: [],
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
-    messages: [],
-  } as AgentDetail;
+  };
 }
 
 function makeContext(status: AgentDetail['status']): AgentContextValue {
   return {
     agent: makeAgent(status),
     applyAgentDetail: () => true,
+    inspectionContext: null,
+    stagePendingAgentCreation: () => {},
+    reconcilePendingAgentCreation: async () => {},
+    rollbackPendingAgentCreation: () => false,
     selectedAgentId: 'agent-1',
     setSelectedAgentId: () => {},
     messages: [],

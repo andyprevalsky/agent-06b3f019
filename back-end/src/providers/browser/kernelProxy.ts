@@ -156,7 +156,8 @@ export function selectReusableKernelProxy(
     if (!config || Object.keys(config).length !== Object.keys(candidate.config).length)
       return false;
     return Object.entries(candidate.config).every(
-      ([key, value]) => String(config?.[key] ?? '').toLowerCase() === value.toLowerCase()
+      ([key, value]) =>
+        typeof config[key] === 'string' && config[key].toLowerCase() === value.toLowerCase()
     );
   })?.id;
 }

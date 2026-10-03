@@ -20,12 +20,14 @@ tags:
 sources:
   - agent 1bad2b70-0129-4619-9e39-2f3184e65aee
   - agent 5a69c0b2-08ab-4b72-b440-b264589bd8d3
-  - benchmark run a381369b-6013-4aa2-964d-75e8fff2c321
+  - PR #1302
 repro: agents/tests/blackbox/rose.blackbox.py::test_build_openrouter_body_pins_large_gemini_completed_tool_prefix
 status: fixed
 ---
 
 ## Problem
+
+Benchmark run: `a381369b-6013-4aa2-964d-75e8fff2c321`.
 
 The `parallel-tool-calls` deploy smoke completed functionally, but its
 repeatable provider prompt-cache hit rate remained below the hard 30% ratchet.

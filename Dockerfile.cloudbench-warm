@@ -60,12 +60,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# pgvector for the distro's Postgres major (planner-memory vector columns;
-# prisma db push creates the extension). Debian/Ubuntu ship it as
-# postgresql-<major>-pgvector.
-RUN apt-get update \
-    && PG_MAJOR="$(ls /usr/lib/postgresql | sort -n | tail -1)" \
-    && apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}-pgvector" \
+# Compile pgvector for the installed server; third-party binary/JIT packages can differ.
+COPY scripts/cloudbench-install-pgvector.sh /tmp/rose-cloudbench-install-pgvector.sh
+RUN bash /tmp/rose-cloudbench-install-pgvector.sh \
+    && rm -f /tmp/rose-cloudbench-install-pgvector.sh \
     && rm -rf /var/lib/apt/lists/*
 
 # Real isolated phone/payment benchmarks expose each per-machine frontend and
@@ -77,6 +75,10 @@ RUN curl -fsSL \
         -o /tmp/cloudflared.deb \
     && apt-get install -y --no-install-recommends /tmp/cloudflared.deb \
     && rm -f /tmp/cloudflared.deb
+
+# The documented fallback must also exist when a Quick Tunnel cannot route.
+COPY scripts/cloudbench-install-ngrok.sh /tmp/rose-cloudbench-install-ngrok.sh
+RUN bash /tmp/rose-cloudbench-install-ngrok.sh && rm -f /tmp/rose-cloudbench-install-ngrok.sh
 
 # ── Non-root user that owns the repo + can drive the Postgres cluster ──────
 # run.sh's system-Postgres fallback uses `su - postgres` / pg_ctlcluster; the

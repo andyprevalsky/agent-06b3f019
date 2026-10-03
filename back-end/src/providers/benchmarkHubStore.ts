@@ -342,9 +342,9 @@ async function readAgentRunIndexForMutation(
   }
 }
 
-/** Load the compact lookup without touching any full run bundle. */
+/** Read one committed compact snapshot, sharing the multi-object writer boundary. */
 export async function loadHubAgentRunIndex(): Promise<HubAgentRunIndexSnapshot | null> {
-  return readAgentRunIndexStrict();
+  return withIndexLock(readAgentRunIndexStrict);
 }
 
 /** A small exact-key tombstone keeps stale per-process maps from serving deleted runs. */

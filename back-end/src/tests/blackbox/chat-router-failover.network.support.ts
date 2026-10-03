@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { prisma } from '../../providers/database';
 import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 import { type LiveObservation, observedLiveFetch } from './chat-router-failover.live.support';
@@ -240,6 +241,111 @@ export function installNetwork(scenario: Scenario, startedAt: number) {
 }
 
 export type FailoverNetwork = ReturnType<typeof installNetwork>;
+
+/** Observe the real router clock; optionally hold only this fixture's later persistence. */
+export function observeRouterCompletion(
+  agentId: string,
+  routerBoundMs: number,
+  holdPostDecisionPersistence: boolean
+) {
+  const originalWrite = process.stdout.write;
+  const originalCreate = prisma.message.create;
+  const starts: string[] = [];
+  const completions: Array<{ streamId: string; durationMs: number; observedAt: number }> = [];
+  const pendingCreates: Promise<unknown>[] = [];
+  let heldWrites = 0;
+  process.stdout.write = function (
+    this: typeof process.stdout,
+    chunk: string | Uint8Array,
+    ...rest: unknown[]
+  ) {
+    const text = (typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'))
+      .replace(new RegExp(String.fromCharCode(27) + '\\[[0-9;]*m', 'g'), '')
+      .trim();
+    let record: Record<string, unknown> | undefined;
+    try {
+      if (text.startsWith('{')) record = JSON.parse(text) as Record<string, unknown>;
+      else if (text.includes('[RouterLLM]')) {
+        const event =
+          /\[RouterLLM\] (Starting streaming for routing decision|Streaming complete)/.exec(text);
+        if (event) {
+          record = { component: 'RouterLLM', message: `[RouterLLM] ${event[1]}` };
+          for (const key of ['agentId', 'streamId', 'durationMs']) {
+            const value = new RegExp(`\\b${key}=([^ ]+)`).exec(text)?.[1];
+            record[key] = key === 'durationMs' ? Number(value) : value;
+          }
+        }
+      }
+    } catch {
+      // Other stdout is forwarded unchanged and cannot supply a measurement.
+    }
+    if (
+      record?.component === 'RouterLLM' &&
+      record.agentId === agentId &&
+      typeof record.streamId === 'string' &&
+      record.streamId.length > 0
+    ) {
+      if (record.message === '[RouterLLM] Starting streaming for routing decision') {
+        starts.push(String(record.streamId));
+      } else if (record.message === '[RouterLLM] Streaming complete') {
+        completions.push({
+          streamId: String(record.streamId),
+          durationMs: Number(record.durationMs),
+          observedAt: Date.now(),
+        });
+      }
+    }
+    return Reflect.apply(originalWrite, this, [chunk, ...rest]);
+  } as typeof process.stdout.write;
+  prisma.message.create = ((...args: Parameters<typeof originalCreate>) => {
+    const completion = completions[0];
+    if (
+      holdPostDecisionPersistence &&
+      heldWrites === 0 &&
+      completion &&
+      starts.length === 1 &&
+      completion.streamId === starts[0] &&
+      args[0].data.agentId === agentId &&
+      args[0].data.role === 'ASSISTANT'
+    ) {
+      heldWrites += 1;
+      // The router has already finished. Make the independent persistence boundary
+      // cross its 15s clock without changing any router/provider timer or stream.
+      const remaining = Math.max(
+        0,
+        completion.observedAt - completion.durationMs + routerBoundMs + 100 - Date.now()
+      );
+      const pending = new Promise<void>((resolve) => setTimeout(resolve, remaining)).then(() =>
+        Reflect.apply(originalCreate, prisma.message, args)
+      );
+      pendingCreates.push(pending);
+      return pending;
+    }
+    return Reflect.apply(originalCreate, prisma.message, args);
+  }) as typeof originalCreate;
+  return {
+    durationMs() {
+      assert.equal(starts.length, 1, 'one correlated router start is required');
+      assert.equal(completions.length, 1, 'one measured router completion is required');
+      assert.equal(completions[0].streamId, starts[0], 'completion must own the started stream');
+      assert.ok(Number.isFinite(completions[0].durationMs) && completions[0].durationMs > 0);
+      assert.equal(
+        heldWrites,
+        holdPostDecisionPersistence ? 1 : 0,
+        'only the selected postdecision persistence must exercise the hold'
+      );
+      return completions[0].durationMs;
+    },
+    async restore() {
+      try {
+        await Promise.allSettled(pendingCreates);
+      } finally {
+        process.stdout.write = originalWrite;
+        prisma.message.create = originalCreate;
+      }
+    },
+  };
+}
 
 export function firstContentDt(events: RecordedEvent[]): number {
   const event = events.find((candidate) => /"content":"[^"]/.test(candidate.line));

@@ -55,12 +55,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# pgvector for the distro's Postgres major (planner-memory vector columns;
-# prisma db push creates the extension). Debian/Ubuntu ship it as
-# postgresql-<major>-pgvector.
-RUN apt-get update \
-    && PG_MAJOR="$(ls /usr/lib/postgresql | sort -n | tail -1)" \
-    && apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}-pgvector" \
+# Compile pgvector for the installed server; third-party binary/JIT packages can differ.
+COPY scripts/cloudbench-install-pgvector.sh /tmp/rose-cloudbench-install-pgvector.sh
+RUN bash /tmp/rose-cloudbench-install-pgvector.sh \
+    && rm -f /tmp/rose-cloudbench-install-pgvector.sh \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Non-root user that owns the repo + can drive the Postgres cluster ──────

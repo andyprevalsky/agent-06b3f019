@@ -278,6 +278,8 @@ export async function mintPurchaseCard(
   assertPositiveCents(input.totalCents, 'totalCents');
   normalizeCurrency(input.currency);
 
+  await repo.assertPurchaseAgentAdmitted(input);
+
   if (input.totalCents > MAX_PURCHASE_CENTS) {
     // Distinct from subscription 402s: the browser tool surfaces this as a hard
     // error ("purchase is above max limit of X"), not a subscribe gate.

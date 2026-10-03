@@ -48,6 +48,9 @@ class StructuralGateDocumentationTests(unittest.TestCase):
     real coverage while still looking tidy. Pin both directions instead.
     """
 
+    def test_clone_recovery_is_registered(self) -> None:
+        self.assertIn("bash scripts/tests/deploy-agent-clone-recovery.test.sh", _registry_commands())
+
     def test_deploy_md_lists_every_registered_gate(self) -> None:
         deploy_md = DEPLOY_MD.read_text()
         missing = sorted(c for c in _registry_commands() if f"`{c}`" not in deploy_md)

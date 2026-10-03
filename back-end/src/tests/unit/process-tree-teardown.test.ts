@@ -101,8 +101,8 @@ assert.match(
 );
 assert.match(
   runner,
-  /cleanup\(\) \{\n\s*stop_process_tree "\$BACKEND_PID"/,
-  'run-blackbox-tests.sh must stop its isolated backend with stop_process_tree'
+  /cloudbench_terminate_tree_and_wait 5 "\$BACKEND_PID"/,
+  'run-blackbox-tests.sh must verify its isolated backend process-tree retirement'
 );
 
 process.stdout.write('PASS process-tree teardown: 3 lifecycle cases + runner wiring\n');

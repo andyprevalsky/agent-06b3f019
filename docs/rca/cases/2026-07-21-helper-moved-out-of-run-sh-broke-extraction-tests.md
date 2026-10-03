@@ -63,3 +63,29 @@ None recorded.
 A test that greps or extracts code out of one shell script silently rots when the
 helper is moved to a sourced library — source the same libraries the real script
 sources instead of reconstructing its body.
+
+## Recurrence: isolated worker cleanup fixture (2026-10-03)
+
+The canonical agents coverage run on `2f52838680f4d490a8d9ef71c76d2b584c3e4ca5`
+passed 105 of 106 domains. The worker domain's existing
+`test_stack_reaps_services_when_pending_receipt_cannot_be_written` failed after
+its extracted `cleanup()` called `remove_isolated_frontend_build`, which the
+fixture had not extracted. The original stderr records that missing command;
+the original assertion did not record the shell's return code. The aggregate
+remains failed, and its cache/unit/coverage tail did not execute.
+
+The same existing case was then called directly with a private process observer.
+It failed in 3.638 seconds with shell return code 127. Adding the actual
+`remove_isolated_frontend_build` function to the fixture's extraction list made
+that same case pass in 6.876 seconds: both worker-exit variants returned the
+required shell code 1. All observed shell owners retired. The observer, selector,
+environment, production helpers and assertions were unchanged; only the private
+receipt label and the one-line fixture dependency addition differed. The real
+helper returns immediately when no frontend build is assigned. No no-op stub,
+production change, timeout change or weakened cleanup assertion was introduced.
+
+The case remains registered in the existing worker blackbox domain. A focused
+worker refresh plus the previously unrun canonical coverage tail is required;
+the failed aggregate must not be relabeled as a fresh passing full-suite run.
+This recurrence shows why extracting the caller alone does not preserve its
+real shell dependency set, including error paths that retain `errexit`.

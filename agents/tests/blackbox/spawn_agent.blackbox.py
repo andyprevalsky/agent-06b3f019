@@ -5445,6 +5445,8 @@ async def run_all_tests():
         test_explore_timeouts_drain_within_deploy_cutover,
     )
     teardown_mock()
+    r.record("user_facing_explore_result_keeps_prod_summaries", test_user_facing_explore_result_keeps_prod_summaries)
+
     return r.all_passed
 
 

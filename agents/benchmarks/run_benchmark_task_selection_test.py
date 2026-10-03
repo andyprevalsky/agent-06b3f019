@@ -265,6 +265,64 @@ def test_local_validate_task_names_preserves_intentional_repeats():
     assert args[args.index("--max-concurrency") + 1] == "5"
 
 
+def test_owner_interrupted_cloud_run_deletes_cancelled_root(monkeypatch):
+    monkeypatch.delenv("BENCHMARK_KEEP_AGENTS", raising=False)
+    monkeypatch.delenv("BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT", raising=False)
+    assert rb._should_delete_cancelled_agent(keep_failed_agents=True) is False
+
+    monkeypatch.setenv("BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT", "true")
+    assert rb._should_delete_cancelled_agent(keep_failed_agents=True) is True
+
+    monkeypatch.setenv("BENCHMARK_KEEP_AGENTS", "true")
+    assert rb._should_delete_cancelled_agent(keep_failed_agents=True) is False
+
+
+def test_delete_agent_rejects_failed_canonical_cleanup(monkeypatch):
+    class FakeResponse:
+        status_code = 503
+
+    class FakeClient:
+        def __init__(self, timeout):
+            assert timeout == 30
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def delete(self, _url, *, headers):
+            assert headers == {"X-API-Key": "test"}
+            return FakeResponse()
+
+    async def fake_headers():
+        return {"X-API-Key": "test"}
+
+    monkeypatch.setattr(rb, "_api_headers", fake_headers)
+    monkeypatch.setattr(rb.httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="Failed to delete agent root-agent: HTTP 503"):
+        asyncio.run(rb.delete_agent("http://backend", "root-agent"))
+
+
+def test_interrupt_cleanup_status_fails_closed_until_every_root_completes(monkeypatch, tmp_path: Path):
+    status_file = tmp_path / "interrupt-cleanup.status"
+    monkeypatch.setenv("BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE", str(status_file))
+    monkeypatch.setenv("BENCHMARK_INTERRUPT_CLEANUP_TOKEN", "guest-run-token")
+    monkeypatch.setattr(rb, "_INTERRUPT_CLEANUP_STARTED", 0)
+    monkeypatch.setattr(rb, "_INTERRUPT_CLEANUP_COMPLETED", 0)
+
+    assert rb._begin_interrupt_cleanup() is True
+    rb._finalize_interrupt_cleanup_status()
+    assert "state=failed" in status_file.read_text()
+
+    rb._complete_interrupt_cleanup()
+    rb._finalize_interrupt_cleanup_status()
+    status = status_file.read_text()
+    assert "token=guest-run-token" in status
+    assert "state=clean" in status
+
+
 def test_agent_payment_tasks_use_the_admin_account_with_forced_customer_path():
     expected_user_id = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
@@ -290,21 +348,17 @@ def test_parallel_benchmark_identities_keep_approval_headers_task_scoped(monkeyp
         sibling_done = asyncio.Event()
 
         async def payment():
-            token = rb._task_run_user_id.set(payment_user)
-            try:
+            with rb._benchmark_run_user_scope(payment_user):
                 payment_ready.set()
                 await sibling_done.wait()
                 return (await rb._api_headers())["X-User-Id"]
-            finally:
-                rb._task_run_user_id.reset(token)
 
         async def sibling():
             await payment_ready.wait()
-            token = rb._task_run_user_id.set(sibling_user)
             try:
-                user_id = (await rb._api_headers())["X-User-Id"]
+                with rb._benchmark_run_user_scope(sibling_user):
+                    user_id = (await rb._api_headers())["X-User-Id"]
             finally:
-                rb._task_run_user_id.reset(token)
                 sibling_done.set()
             return user_id
 

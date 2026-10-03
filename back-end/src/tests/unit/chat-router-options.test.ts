@@ -27,6 +27,7 @@ async function run(): Promise<void> {
   const phases = selectChatPhaseModels('rose-labs/rose-1-ultra');
   const abortController = new AbortController();
   const options = buildRouterCompletionOptions({
+    agentId: 'chat-options-contract',
     model: phases.router,
     messages: [
       { role: 'system', content: 'router system' },

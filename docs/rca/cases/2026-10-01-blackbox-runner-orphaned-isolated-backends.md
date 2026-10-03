@@ -43,6 +43,52 @@ The runner starts its backend as `npx tsx src/bootstrap.ts &` and records `BACKE
 
 None recorded.
 
+## Integration verification — 2026-10-02
+
+PR #1299 independently repaired this boundary with the existing
+`cloudbench_terminate_tree_and_wait` helper. Its merge retains that exact-owner
+cleanup, the cancellation fence around launch/PID capture, one backend launch,
+and failure propagation when descendant retirement cannot be verified. The
+port lock is released only after verified cleanup. The incoming real
+npx/tsx/Node regression now executes the retained runner's actual cleanup
+function; the TERM-resistant control still checks its original grace bounds.
+Those controls passed in 2.641 seconds, including a four-process launcher tree
+and escalation after 1.137 seconds. This does not replace the final integrated
+canonical coverage gate.
+
+The incoming stale-stack shell regression exposed a Mac fixture mismatch:
+`mktemp` returned a logical directory while `lsof` reported its physical path.
+The sweep correctly rejected that nonmatching path, so the fixture worker
+survived and the original assertion failed. A captured decision trace confirms
+that the physical paths match and the logical paths do not. Canonicalizing the
+fixture root with `pwd -P` preserves every assertion and makes the same shell
+suite pass in 22.373 seconds. No production cleanup rule was changed for this
+test setup correction. Original failures and the passing run remain private
+under `.context/acceptance/proof111-main-integration/`.
+
 ## Reusable lesson
 
 `$!` for `npx …` / `npm exec …` / `tsx …` is a launcher, not the service. Signalling it alone orphans the real process, which keeps its port and memory. Stop the whole process tree (TERM, bounded wait, KILL), and check for leftovers by run ID or port instead of trusting the launcher's exit.
+
+## Timing-policy follow-up — 2026-10-03
+
+The final backend gate on source `685d26cc` passed all 179 blackbox domains and
+237 of 238 unit files. The remaining process-tree unit had already proved both
+launcher and TERM-resistant descendants stopped, then failed solely because its
+observed 618 ms escalation was below the 900 ms lower timing bound. The original
+aggregate remains a failed run; it is not evidence of surviving descendants.
+
+At the user's direction, that elapsed range is now a warning. Native identity,
+process state, harness return code and zero surviving descendants remain hard
+requirements. Fixture observation guards are more generous; the one-second
+synthetic cancellation stimulus and production teardown implementation are
+unchanged. The existing unit passed on Linux in 7.432 seconds with V8 collection,
+and its exact wrapper, child and process group were verified retired. Scoped
+formatting, lint and typechecking passed. Original and updated private evidence
+is retained under `.context/acceptance/proof116-backend-timing-policy/`.
+
+The canonical failed run deleted its raw V8 directory during EXIT cleanup, so
+these retained functional results cannot reconstruct a fresh coverage report.
+A final-source canonical coverage run and its existing normal-exit/SIGTERM
+posthook remain required before merge; the fleet acceptance proof remains a
+separate incomplete gate.

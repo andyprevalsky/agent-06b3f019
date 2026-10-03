@@ -83,11 +83,7 @@ if ! $IS_MAC; then
             $SUDO apt-get update -qq && $SUDO apt-get install -y -qq postgresql postgresql-client
         fi
         # pgvector for the installed major (planner-memory vector columns).
-        PG_MAJOR=$(ls /usr/lib/postgresql 2>/dev/null | sort -n | tail -1)
-        if [ -n "$PG_MAJOR" ] && [ ! -f "/usr/share/postgresql/$PG_MAJOR/extension/vector.control" ]; then
-            $SUDO apt-get install -y -qq "postgresql-${PG_MAJOR}-pgvector" \
-                || { $SUDO apt-get update -qq && $SUDO apt-get install -y -qq "postgresql-${PG_MAJOR}-pgvector"; }
-        fi
+        $SUDO bash "$ROOT/scripts/cloudbench-install-pgvector.sh"
         # Start the cluster
         PG_VER=$(pg_lsclusters -h 2>/dev/null | head -1 | awk '{print $1}')
         $SUDO pg_ctlcluster "$PG_VER" main start 2>/dev/null || $SUDO service postgresql start 2>/dev/null || true

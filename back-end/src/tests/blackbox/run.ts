@@ -157,6 +157,11 @@ const lateExclusiveDomainNames = new Set([
   'benchmarks-hub',
   'benchmarks-hub.part2',
   'benchmarks-test-prompts',
+  // These owning injection tests exercise cancellation and a process RSS
+  // budget. Run them after the fixture-writing pool has drained so CPU/DB
+  // contention from sibling domains cannot obscure their runtime contract.
+  'browser-origin-injection-memory',
+  'steel-injection',
   // Its feedback cases deliberately set a process-wide funded-key cooldown.
   // Keep that mutation after every other domain that may need the key.
   'codex-code',

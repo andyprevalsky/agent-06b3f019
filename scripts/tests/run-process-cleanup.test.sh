@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TMP_ROOT="$(mktemp -d)"
+TMP_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
 PIDS=()
 
 # Each fixture is spawned as `( cd ...; python3 ... ) &`, so $! is the SUBSHELL,
@@ -210,6 +210,21 @@ case "$age_dead" in
   *) echo "FAIL: process_age_seconds returned garbage for a dead pid: [$age_dead]" >&2; exit 1 ;;
 esac
 
+# A launched wrapper can finish before run.sh captures its birth. Its exact
+# reaped PID needs no signal; a live child with unknown birth must remain owned.
+bash -c 'exit 0' &
+already_exited_pid=$!
+wait "$already_exited_pid"
+if ! run_wait_owned_agent_shutdown "$already_exited_pid" "" 1; then
+  echo "FAIL: an already-reaped worker with no captured birth needs no drain" >&2
+  exit 1
+fi
+echo "PASS: an already-reaped worker needs no birth or signal"
+if run_wait_owned_agent_shutdown "$current_pid" "" 1; then
+  echo "FAIL: a live worker with unknown birth must remain fail-closed" >&2
+  exit 1
+fi
+assert_alive "$current_pid" "live worker with unknown birth is not signalled"
 # ── Service-kill patterns stop at argument boundaries ──
 #
 # pgrep -f matches its regex anywhere in argv. An unbounded
@@ -323,9 +338,9 @@ fi
 echo "PASS: run_kill_tree reaps a wrapper's grandchildren"
 
 blackbox_runner="$ROOT_DIR/back-end/scripts/run-blackbox-tests.sh"
-grep -qF 'source "$ROOT_DIR/scripts/lib/process-tree.sh"' "$blackbox_runner" \
-  && grep -qF 'stop_process_tree "$BACKEND_PID"' "$blackbox_runner" \
-  || { echo "FAIL: run-blackbox-tests.sh cleanup must reap the npx backend tree with stop_process_tree" >&2; exit 1; }
+grep -qF 'source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"' "$blackbox_runner" \
+  && grep -qF 'cloudbench_terminate_tree_and_wait 5 "$BACKEND_PID"' "$blackbox_runner" \
+  || { echo "FAIL: run-blackbox-tests.sh cleanup must reap the npx backend tree with verified cloudbench ownership cleanup" >&2; exit 1; }
 echo "PASS: run-blackbox-tests.sh cleanup reaps the whole backend tree"
 
 # Isolated runs must delete their run-keyed frontend bundle on exit (36 leaked
