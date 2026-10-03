@@ -7678,6 +7678,42 @@ fleet_job_running() {  # fleet_job_running <pid>
     jobs -pr | grep -qx "$pid"
 }
 
+# Waiting may over-wait but must never stop early. Under a heavily loaded
+# controller `jobs -pr` has omitted a live autoscaler, ending finalization
+# before it published autoscaler.completed-after-child; the later acceptance
+# check then found it running without the marker. A waiter therefore also
+# keeps waiting while the PID is alive. A reused PID can only extend the wait to
+# its deadline; it never satisfies acceptance, which still uses fleet_job_running.
+fleet_job_may_be_running() {  # fleet_job_may_be_running <pid>
+    local pid="${1:-}"
+    fleet_job_running "$pid" && return 0
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+# Poll every mandatory autoscaler until each has a terminal outcome (completion
+# marker or failure file) or has exited, bounded by the finalization deadline.
+wait_for_autoscaler_finalization() {
+    local deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
+    local finalizing j out
+    while :; do
+        finalizing=0
+        for j in "${!AUTOSCALER_PIDS[@]}"; do
+            out="${CHILD_OUT[$j]}"
+            [ -s "$out/autoscaler.failed" ] && continue
+            [ -e "$out/autoscaler.completed-after-child" ] && continue
+            if fleet_job_may_be_running "${AUTOSCALER_PIDS[$j]}"; then
+                finalizing=$((finalizing + 1))
+            fi
+        done
+        [ "$finalizing" -eq 0 ] && return 0
+        [ "$SECONDS" -ge "$deadline" ] && return 0
+        sleep 0.2
+    done
+}
+
 terminate_fleet_runner_group() {  # <runner-pgid> <HUP|INT|TERM>
     local runner_pid="$1" signal_name="$2" grace deadline kill_deadline
     grace="${CLOUDBENCH_RUNNER_TERM_SECONDS:-15}"
@@ -9312,21 +9348,7 @@ done
 # autoscalers together so a synchronous provider clone or an async worker stage
 # can settle before we sample final capacity. A timeout never forgives shortage:
 # the unchanged checks below still fail closed on live, incomplete state.
-autoscaler_finalization_deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
-while :; do
-    autoscalers_finalizing=0
-    for j in "${!AUTOSCALER_PIDS[@]}"; do
-        out="${CHILD_OUT[$j]}"
-        [ -s "$out/autoscaler.failed" ] && continue
-        [ -e "$out/autoscaler.completed-after-child" ] && continue
-        if fleet_job_running "${AUTOSCALER_PIDS[$j]}"; then
-            autoscalers_finalizing=$((autoscalers_finalizing + 1))
-        fi
-    done
-    [ "$autoscalers_finalizing" -eq 0 ] && break
-    [ "$SECONDS" -ge "$autoscaler_finalization_deadline" ] && break
-    sleep 0.2
-done
+wait_for_autoscaler_finalization
 AUTOSCALER_FAILURE=0
 for j in "${!AUTOSCALER_PIDS[@]}"; do
     tracked_workers="$(_pool_ids "${CHILD_OUT[$j]}")"

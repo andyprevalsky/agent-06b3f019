@@ -77,7 +77,7 @@ def _backend_grep_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
 
 # Local, always-available sources: no external connector, so they never gate
 # and don't need a connectivity probe.
-_LOCAL_SOURCES = {"messages", "network", "agent_network", "summary"}
+_LOCAL_SOURCES = {"messages", "network", "agent_network", "agent_trajectories", "summary"}
 _DOCUMENT_PROVIDER_ALIASES = {
     "chat_gpt": "chatgpt",
     "chatgpy": "chatgpt",
@@ -167,7 +167,7 @@ async def execute_grep(
     user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute grep search and post events via handle_tool_event."""
-    pattern = tool_call.get("pattern", "")
+    pattern = tool_call.get("pattern") or ""
     source = tool_call.get("source", "")
 
     progress_title = _format_grep_title("Searching", pattern, source)
