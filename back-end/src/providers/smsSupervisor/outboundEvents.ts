@@ -346,8 +346,7 @@ export async function notifyWriteLock(
   attentionRequestId: string,
   _workflowId: string,
   metadata?: unknown,
-  channels: SupervisorChannel[] = ['SMS'],
-  isReminder = false
+  channels: SupervisorChannel[] = ['SMS']
 ): Promise<void> {
   const startTime = Date.now();
 
@@ -355,7 +354,6 @@ export async function notifyWriteLock(
     userId,
     agentId: agent.id,
     attentionRequestId,
-    isReminder,
     questionPreview: question.substring(0, 100),
   });
 
@@ -368,8 +366,7 @@ export async function notifyWriteLock(
   const notification = getWriteLockNotification(metadata);
   const paymentCard = getRequestPaymentCard(metadata);
   const agentUrl = getAgentUrl(agent.id);
-  const body = formatPaymentApprovalBody(paymentCard, notification, question, agentUrl);
-  const message = isReminder ? `Still waiting for your approval.\n\n${body}` : body;
+  const message = formatPaymentApprovalBody(paymentCard, notification, question, agentUrl);
   const mediaUrl = getWriteLockMediaUrl(notification) ?? getPaymentCardMediaUrl(paymentCard);
   const rehostedMediaUrl = mediaUrl ? await rehostMmsAttachmentUrl(userId, mediaUrl) : null;
 
@@ -408,7 +405,6 @@ export async function notifyWriteLock(
     userId,
     agentPrefix: agent.id.substring(0, 6),
     attentionRequestId,
-    isReminder,
     channel: rehostedMediaUrl ? 'mms' : 'sms',
     hasPaymentCard: paymentCard !== null,
     hasStructuredNotification: notification !== null,

@@ -891,8 +891,8 @@ async def test_direct_attention_sms_source_sends_agentcard_setup_notify():
     assert payload["setup_url"] == "https://rose.test/setup"
 
 
-async def test_direct_approval_sends_one_reminder_then_stops():
-    """After the initial write_lock SMS, exactly one extra reminder may fire."""
+async def test_direct_approval_does_not_send_reminder():
+    """After the initial write_lock SMS, later waits must not send another SMS."""
     from datetime import datetime, timedelta, timezone
 
     from domains.request_user_approval.service import request_user_approval_direct
@@ -913,10 +913,7 @@ async def test_direct_approval_sends_one_reminder_then_stops():
             self._waits += 1
             if self._waits == 1:
                 self._now = self._now + timedelta(minutes=16)
-                raise TimeoutError("reminder window elapsed")
-            if self._waits == 2:
-                self._now = self._now + timedelta(minutes=16)
-                raise TimeoutError("must not send a second reminder")
+                raise TimeoutError("slice elapsed")
             wf._signal_responses["req-remind"] = "Approved"
             return
 
@@ -936,15 +933,14 @@ async def test_direct_approval_sends_one_reminder_then_stops():
         restore()
 
     notify_calls = [c for c in fake.activity_calls if c["name"] == "notify_sms_event_activity"]
-    assert len(notify_calls) == 2
-    assert notify_calls[0]["args"][3].get("reminder") is False
-    assert notify_calls[1]["args"][3].get("reminder") is True
+    assert len(notify_calls) == 1
+    assert notify_calls[0]["args"][3].get("reminder") is not True
     assert result["response"] == "Approved"
-    assert fake._waits == 3
+    assert fake._waits == 2
 
 
-async def test_direct_approval_resume_after_reminder_does_not_notify_again():
-    """A cutover that already sent the extra reminder must not SMS again."""
+async def test_direct_approval_resume_does_not_notify_again():
+    """A cutover that already notified must not SMS again."""
     from helpers.generation_handoff import GenerationHandoffRequested
     from domains.request_user_approval.service import request_user_approval_direct
 
@@ -952,7 +948,6 @@ async def test_direct_approval_resume_after_reminder_does_not_notify_again():
     wf._pending_approval_resume = {
         "request_id": "req-reminded",
         "question": "Approve the purchase?",
-        "reminder_sent": True,
     }
     wf._signal_responses["req-reminded"] = "Approved later"
 
@@ -980,8 +975,8 @@ async def test_direct_approval_resume_after_reminder_does_not_notify_again():
     assert not isinstance(result, GenerationHandoffRequested)
 
 
-async def test_direct_approval_resume_request_after_reminder_does_not_notify_again():
-    """Parked resume_request that already sent the extra reminder must not SMS."""
+async def test_direct_approval_resume_request_does_not_notify_again():
+    """Parked resume_request that already notified must not SMS again."""
     from domains.request_user_approval.service import request_user_approval_direct
 
     wf = _WFInstance()
@@ -1001,7 +996,6 @@ async def test_direct_approval_resume_request_after_reminder_does_not_notify_aga
             resume_request={
                 "attention_request_id": "req-parked",
                 "tool_call_id": "tool-parked",
-                "reminder_sent": "true",
             },
         )
     finally:
@@ -1099,16 +1093,16 @@ async def run_all_tests():
         test_direct_subagent_attention_sms_sends_notify,
     )
     await r.record_async(
-        "direct_one_reminder",
-        test_direct_approval_sends_one_reminder_then_stops,
+        "direct_no_reminder",
+        test_direct_approval_does_not_send_reminder,
     )
     await r.record_async(
-        "direct_resume_after_reminder",
-        test_direct_approval_resume_after_reminder_does_not_notify_again,
+        "direct_resume_no_notify",
+        test_direct_approval_resume_does_not_notify_again,
     )
     await r.record_async(
-        "direct_resume_request_after_reminder",
-        test_direct_approval_resume_request_after_reminder_does_not_notify_again,
+        "direct_resume_request_no_notify",
+        test_direct_approval_resume_request_does_not_notify_again,
     )
     teardown_mock()
     return r.all_passed

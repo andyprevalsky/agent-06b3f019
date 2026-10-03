@@ -35,8 +35,8 @@
  *   - referential integrity: SmsShortcode has no FKs; agent lookup is a soft check
  *   - event/job cardinality: no async events emitted by these endpoints
  *   - duplication prevention: completion notifications are deduplicated per agent;
- *     write_lock notifications allow the initial SMS plus one reminder per
- *     attention request and skip any further send for the same kind
+ *     write_lock notifications send only the initial SMS per attention
+ *     request and skip reminder payloads plus duplicate initial sends
  *   - tenant isolation: all endpoints are internal (API key auth), not user-scoped
  *   - time/clock: no timestamps in response
  *   - call ordering: each endpoint makes at most 1 outbound Surge call
@@ -1209,11 +1209,11 @@ async function testBoundary_notifyWriteLockNaturalLanguageOnly() {
   }
 }
 
-async function testBoundary_notifyWriteLockAllowsOneReminderThenStops() {
-  const token = captureToken('notify-write-lock-reminder-cap');
-  const agent = await createNotifyAgent('write lock reminder cap agent');
+async function testBoundary_notifyWriteLockSendsInitialOnly() {
+  const token = captureToken('notify-write-lock-initial-only');
+  const agent = await createNotifyAgent('write lock initial-only agent');
   const attentionRequestId = `attn-bb-${crypto.randomUUID()}`;
-  const question = 'Can I place the reminder-cap order for $19?';
+  const question = 'Can I place the initial-only order for $19?';
   const notify = (reminder: boolean) =>
     request(`${BASE_URL}/api/send-sms/notify`, {
       method: 'POST',
@@ -1225,7 +1225,7 @@ async function testBoundary_notifyWriteLockAllowsOneReminderThenStops() {
         payload: {
           question,
           attention_request_id: attentionRequestId,
-          workflow_id: 'wf-write-lock-reminder-cap',
+          workflow_id: 'wf-write-lock-initial-only',
           reminder,
         },
       }),
@@ -1241,20 +1241,15 @@ async function testBoundary_notifyWriteLockAllowsOneReminderThenStops() {
       console.log('    [skipped] No Surge calls -- Surge may not be configured');
       return;
     }
-    assert(surgeCalls.length === 2, `Expected initial + one reminder, got ${surgeCalls.length}`);
+    assert(surgeCalls.length === 1, `Expected only the initial SMS, got ${surgeCalls.length}`);
     const initialBody = JSON.parse(surgeCalls[0]?.requestBody ?? '{}') as { body?: string };
-    const reminderBody = JSON.parse(surgeCalls[1]?.requestBody ?? '{}') as { body?: string };
     assert(
       initialBody.body?.includes(question) === true,
       `Expected initial write-lock question, got: ${initialBody.body ?? ''}`
     );
     assert(
       initialBody.body?.includes('Still waiting for your approval.') !== true,
-      `Expected no reminder prefix on the initial SMS, got: ${initialBody.body ?? ''}`
-    );
-    assert(
-      reminderBody.body?.includes('Still waiting for your approval.') === true,
-      `Expected reminder prefix, got: ${reminderBody.body ?? ''}`
+      `Expected no reminder prefix, got: ${initialBody.body ?? ''}`
     );
   } finally {
     await prisma.toolSideEffect.deleteMany({
@@ -2035,8 +2030,8 @@ async function runAll() {
           fn: testBoundary_notifyWriteLockNaturalLanguageOnly,
         },
         {
-          name: 'notify write_lock allows one reminder then stops',
-          fn: testBoundary_notifyWriteLockAllowsOneReminderThenStops,
+          name: 'notify write_lock sends only the initial SMS',
+          fn: testBoundary_notifyWriteLockSendsInitialOnly,
         },
         {
           name: 'notify write_lock strips markdown and keeps full draft',
