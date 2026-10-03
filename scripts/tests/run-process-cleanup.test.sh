@@ -340,4 +340,26 @@ grep -qF 'source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"' "$blackbox_runner" \
   || { echo "FAIL: run-blackbox-tests.sh cleanup must reap the npx backend tree with verified cloudbench ownership cleanup" >&2; exit 1; }
 echo "PASS: run-blackbox-tests.sh cleanup reaps the whole backend tree"
 
+# Isolated runs must delete their run-keyed frontend bundle on exit (36 leaked
+# ~220MB bundles filled the disk); shared bundles and foreign paths stay.
+frontend_fn="$TMP_ROOT/frontend-build-fn.sh"
+awk '/^remove_isolated_frontend_build\(\) \{/ {p=1} p {print} p && /^\}/ {exit}' \
+  "$ROOT_DIR/scripts/run.sh" > "$frontend_fn"
+grep -q '^remove_isolated_frontend_build() {' "$frontend_fn" || {
+  echo "FAIL: could not extract remove_isolated_frontend_build from run.sh" >&2
+  exit 1
+}
+builds="$TMP_ROOT/ws/.context/frontend-builds"
+mkdir -p "$builds/1790000000-1-1" "$builds/shared_55051" "$TMP_ROOT/elsewhere/1790000000-2-2"
+check_frontend_cleanup() { # <isolated> <dir> <expect present|absent> <label>
+  ( BENCHMARK_ISOLATED_RUN="$1" FRONTEND_DIST_DIR="$2"; . "$frontend_fn"; remove_isolated_frontend_build )
+  if [ "$3" = absent ] && [ -e "$2" ]; then echo "FAIL: $4" >&2; exit 1; fi
+  if [ "$3" = present ] && [ ! -e "$2" ]; then echo "FAIL: $4" >&2; exit 1; fi
+  echo "PASS: $4"
+}
+check_frontend_cleanup false "$builds/1790000000-1-1" present "a shared stack keeps a run-keyed bundle it does not own"
+check_frontend_cleanup true "$builds/shared_55051" present "an isolated run keeps the shared port-keyed bundle"
+check_frontend_cleanup true "$TMP_ROOT/elsewhere/1790000000-2-2" present "cleanup never deletes outside .context/frontend-builds"
+check_frontend_cleanup true "$builds/1790000000-1-1" absent "an isolated run deletes its own frontend bundle on exit"
+
 echo "All run process cleanup tests passed."

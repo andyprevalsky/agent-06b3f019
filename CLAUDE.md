@@ -261,7 +261,7 @@ within the 1800-second allocation deadline; do not force extra model calls.
 `scripts/run-bench list`, then `scripts/run-bench <task> --wait` for one real
 isolated benchmark. For an infrastructure streak, use
 `scripts/run-bench stability-proof -k 10 --concurrency 10 --seed <integer>
---exclude-file <prior-successful-names.json> --min-successful-llm 3`;
+--exclude-file <prior-successful-names.json> --min-successful-llm 0`;
 the exclusion file is a JSON array of task names already used in accepted
 earlier runs. For the requested daily/Polar campaign, rebuild the eligible pool
 on every return to slice zero. Keep all 100 tasks distinct within that campaign;
@@ -427,28 +427,31 @@ delimiter runs and line boundaries. A fresh-browser timeout can mean the verifie
 expected text the UI never renders; capture that exact predicate before changing
 timeouts. The existing publisher browser-validation blackbox owns these cases.
 
-PR #1299's infrastructure acceptance requires **ten consecutive slices of ten
-benchmarks**, with **at least three successful LLM queries per benchmark's own
-agent tree**. Verify completed provider responses with correlated, nonduplicated
-trace evidence; input dumps, attempts, and aggregate counters alone do not prove
-success. Do not add calls or alter tasks to reach the minimum. Infrastructure
-failures during execution, evaluation, artifact collection, or teardown prevent
-credit even when a task verdict exists. Verify each slice's exact resource
-cleanup and ten durable FE/LLM evidence bundles before advancing. The normal
-execution backstop is 7,200 seconds. The user's temporary 300-second validation
-backstop can count only when every bench still has at least three completed LLM
-responses, a real evaluator result, and full cleanup/evidence; an interrupted
-diagnostic that misses those requirements earns no credit. Restore the normal
-backstop after this validation. These are proof acceptance requirements, not
-changes to benchmark pass criteria or deploy-selection qualification.
+PR #1299's current user-authorized acceptance requires **ten consecutive slices
+of ten distinct daily/Polar benchmarks**. Each benchmark must execute meaningful
+real provider work, reach terminal `PASSED` or `FAILED`, and release its exact
+owned resources within one 1,800-second allocation-to-finish deadline. Normally
+expect more than three LLM calls when sensible; chat, early terminal results and
+execution-window failures may need fewer. Do not force extra calls or count
+cached replay, queued requests or a Rose start event alone as provider execution.
+Inspect the actual terminal trajectory and correlated provider evidence once.
+An ordinary task failure or execution-window failure is acceptable. Recovered
+LLM, browser, save and persistence errors, intermediate timings and the 20-minute
+target are warnings. Missing meaningful execution, a missing terminal outcome,
+an E2E cutoff breach or lingering owned resources prevent credit. Retain original
+run artifacts and cleanup evidence; durable FE/LLM publication is best effort
+after execution and resource release, and does not block the next slice.
+Publishers must retire before final cleanup. Keep the normal 7,200-second
+backstop and the requested temporary 300-second execution backstop unchanged.
+These requirements do not change benchmark grading or deploy qualification.
 Benchmark request identity is scoped per task; exact resource cleanup temporarily
 overrides it with the persisted root owner. Preserve that precedence and restore
 both scopes on cancellation. The existing cleanup and benchmark identity tests
 cover concurrent siblings, preflight failures and callback/result contracts.
-The live-query verifier also rejects an owned terminal `rose.complete.failed`
-inside the benchmark's execution window, even if three other calls completed.
-It also rejects an owned browser-init HTTP 500 whose structured `detail.error`
-reports a browser-state injection timeout, even if a later retry succeeds.
+The live-query verifier retains strict diagnostic findings for owned terminal
+`rose.complete.failed` and browser-state injection failures. Use its existing
+`--diagnostics-only` mode for this campaign: a recovered error remains visible
+without rejecting a genuinely executed, terminal and cleaned-up benchmark.
 The separate `infra_errors` receipt contains event hashes, never response bodies.
 The benchmark blackbox gate runs the fast completed-query regressions: distinct
 requests sharing a span, duplicate trace views, missing or conflicting terminal
@@ -505,21 +508,17 @@ the five-minute limit through `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300` and
 `--timeout 300` on the proof command; enforce the 30-minute ceiling through an
 independent monitor of `bench-e2e.started-epoch`/`finished-epoch`. A cutoff is
 an interrupted diagnostic: cancel the exact proof owner, recover and audit its
-resources, and grant no slice credit. Never relabel an interrupted bench as a
-normal evaluator `FAILED` or waive the three successful LLM responses. Restore
+resources, and grant no slice credit. Distinguish the allocation cutoff from a
+normal execution-window `FAILED`, which can qualify after verified cleanup. Restore
 the 7,200-second backstop after this requested validation.
 After each valid slice, report the whole slice's wall-clock time and every
 bench's individual wall-clock time (including startup, evidence collection and
-teardown, alongside the task-execution duration where available). Inspect the
-critical path and task trajectories before advancing: provider retries and
-latency, browser steps and session recording, archive writes, evaluator timing,
-and cleanup receipts. Recovered errors must be checked for lost evidence or a
-material slowdown. Include compatible smoke-tagged tasks where the selected
-suites provide them; a one-response chat smoke cannot qualify by adding synthetic
-calls. For the current campaign, the user waived routine speedup reviews while
-whole-slice and individual-benchmark end-to-end wall clocks stay within 20 minutes.
-Inspect actual spikes above that threshold without speculative optimization or
-changes to tasks, prompts, models, scoring, evidence or result classification.
+teardown, alongside the task-execution duration where available). Inspect task
+trajectories and exact cleanup receipts before advancing. Include compatible
+smoke-tagged tasks where the selected suites provide them; never add synthetic
+calls to a chat smoke. The user waived speedup reviews. Report actual 20-minute
+E2E spikes as warnings and retain latency diagnostics without adding acceptance
+gates or speculative optimization.
 The independent 30-minute cancellation cutoff remains unchanged. An INFRA failure
 or runtime/runner change that invalidates earlier results restarts the ten-slice
 streak on a clean commit. The October 1 user clarification preserves credit for

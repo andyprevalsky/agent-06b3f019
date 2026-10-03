@@ -100,17 +100,28 @@ async function ensureUserExists(): Promise<void> {
   });
 }
 
+function chatgptAccountId(raw: string): string {
+  const tokens = (JSON.parse(raw) as { tokens?: { account_id?: unknown } }).tokens;
+  return typeof tokens?.account_id === 'string' ? tokens.account_id.trim() : '';
+}
+
 async function main() {
   const raw = readFileSync(codexAuthPath, 'utf8').trim();
   validateCodexAuth(raw);
   const encryptedCredentials = encryptCredentialEnvelope(raw);
+  const accountId = chatgptAccountId(raw);
   await ensureUserExists();
 
+  // Key the row by the ChatGPT account the envelope belongs to, the same key
+  // the product connectors use. A '' row beside an account-keyed row for the
+  // same account leaves two CONNECTED copies, and least-recently-used serving
+  // alternates onto whichever lineage this sync did not refresh.
   const integration = await prisma.integration.upsert({
-    where: { userId_name_accountId: { userId, name: 'gpt_code', accountId: '' } },
+    where: { userId_name_accountId: { userId, name: 'gpt_code', accountId } },
     create: {
       userId,
       name: 'gpt_code',
+      accountId,
       type: IntegrationType.TOOL_SETUP,
       status: IntegrationStatus.CONNECTED,
       isActive: true,
@@ -142,11 +153,32 @@ async function main() {
     },
   });
 
+  // This envelope is now the live lineage for its account. Retire any other
+  // CONNECTED copy of the same account (and the legacy '' row this script used
+  // to write) so it can never be served with a superseded refresh token. Other
+  // ChatGPT accounts are left untouched.
+  const { count: supersededCount } = await prisma.integration.updateMany({
+    where: {
+      userId,
+      name: 'gpt_code',
+      id: { not: integration.id },
+      status: IntegrationStatus.CONNECTED,
+      accountId: { in: [...new Set(['', accountId])] },
+    },
+    data: {
+      status: IntegrationStatus.EXPIRED,
+      isActive: false,
+      failureReason: 'superseded by local Codex auth sync',
+    },
+  });
+
   console.log(
     JSON.stringify({
       ok: true,
       integrationId: integration.id,
       userId,
+      accountId,
+      supersededCount,
       poolingEnabled,
       authPath: codexAuthPath,
     })

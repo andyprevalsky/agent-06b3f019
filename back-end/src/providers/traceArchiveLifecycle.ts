@@ -1,4 +1,6 @@
 import { createLogger } from './logger';
+import { prisma } from './database';
+import { indexArchivedTrace, indexArchivedTraceFromR2 } from './traceArchiveSearchIndex';
 import { scheduleFinalizeEmbedding } from './plannerMemoryEmbedding';
 import { type PlannerMemoryRunInput, upsertPlannerMemoryFromRun } from './plannerMemoryStore';
 import { collectFixture, collectFixtureSnapshot } from './traceArchiveFixture';
@@ -14,6 +16,7 @@ import {
 } from './traceArchive';
 import {
   type ManifestArtifact,
+  artifactPath,
   encryptedManifestIndex,
   excludeControlArtifacts,
   finalizationFenceExists,
@@ -336,12 +339,30 @@ export async function storeWorkerArtifact(
     const reconciled = await reconcileFinalizedManifest(input.rootAgentId, {
       markerExists: true,
     });
+    if (reconciled.status !== 'current' && reconciled.status !== 'updated') {
+      throw new Error(`Trace archive manifest is ${reconciled.status} for ${input.rootAgentId}`);
+    }
     if (reconciled.status === 'updated') {
       log.info('Trace archive manifest reconciled after late worker artifact', {
         root_agent_id: input.rootAgentId,
         object_path: objectPath,
         artifact_count: reconciled.actualArtifactCount,
       });
+    }
+    if (/^(llm|llm-updates)\/.*\.json\.gz\.enc$/.test(objectPath)) {
+      // A stale worker can still submit to a reused local benchmark port. In
+      // production the SQL Agent may already have been purged, so do not use
+      // its presence as the condition for indexing the archived bundle.
+      const localRoot =
+        process.env.NODE_ENV === 'production'
+          ? true
+          : (await prisma.agent.findUnique({
+              where: { id: input.rootAgentId },
+              select: { id: true },
+            })) !== null;
+      if (localRoot) {
+        await indexArchivedTraceFromR2(input.rootAgentId);
+      }
     }
   }
   return { ref };
@@ -632,6 +653,11 @@ async function finalizeAgentOnce(input: AgentFinalizeRequest): Promise<FinalizeA
             ? run.root_created_at
             : null,
       });
+      await indexArchivedTrace(
+        input.rootAgentId,
+        endFixture,
+        refs.map(artifactPath).filter((path): path is string => path !== null)
+      );
     }
     log.info('Trace archive finalized', {
       root_agent_id: input.rootAgentId,

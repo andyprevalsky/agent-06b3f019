@@ -953,6 +953,32 @@ def _descendant_pids(root: int) -> set[int]:
     return seen
 
 
+# Runner subprocesses (run_benchmark.py and other streamed commands) this
+# controller launched. A signalled controller stops them before tearing the
+# stack down, so a run_benchmark.py (and its flyctl log stream) can never be
+# orphaned to launchd polling services that no longer exist.
+_ACTIVE_CHILD_PROCESSES: set[subprocess.Popen] = set()
+
+
+def stop_active_child_processes(grace_seconds: float = 10.0) -> None:
+    """TERM every tracked child and its descendants, then KILL survivors."""
+    for process in list(_ACTIVE_CHILD_PROCESSES):
+        if process.poll() is None:
+            tree = _descendant_pids(process.pid)
+            for pid in tree:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGTERM)
+            deadline = time.monotonic() + grace_seconds
+            while process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.1)
+            for pid in tree:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=5)
+        _ACTIVE_CHILD_PROCESSES.discard(process)
+
+
 def _port_listener_pids(port: int) -> set[int]:
     try:
         out = subprocess.run(
@@ -1588,6 +1614,38 @@ def apply_isolated_postgres_default(
         env.setdefault("ROSE_USE_SYSTEM_PG", "true")
 
 
+_HOST_PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+
+
+def bypass_host_http_proxy(env: dict[str, str]) -> dict[str, str]:
+    """Keep a benchmark subprocess off the macOS system HTTP(S) proxy.
+
+    With no proxy variables set, Python's urllib/requests/httpx read the macOS
+    system proxy, and Freedom's proxy (127.0.0.1:7769) can hold their TLS
+    tunnels open forever: the runner stalls with live but idle proxy sockets
+    and never reaches its task timeout. Setting NO_PROXY makes every client use
+    the environment instead of the system settings.
+    """
+    env.setdefault("NO_PROXY", "*")
+    env.setdefault("no_proxy", "*")
+    for proxy_var in _HOST_PROXY_VARS:
+        env.pop(proxy_var, None)
+    return env
+
+
+def benchmark_runner_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Environment for the run_benchmark.py process a local run launches."""
+    env = bypass_host_http_proxy({**(os.environ if base is None else base), "PYTHONUNBUFFERED": "1"})
+    # Disable fast-cache for local benchmark runs so trajectories are actually executed
+    # rather than replayed from cache. This is required for payment-lifecycle tasks (real
+    # side effects must not be cache-replayed) and also ensures the world model is exercised
+    # during simulate runs. run_benchmark reads this and sets fast_mode_cache_enabled=false
+    # on the created agent. (Sim-scoped caching can be re-enabled once the worker-simulate
+    # path is validated.)
+    env.setdefault("BENCHMARK_FAST_MODE_CACHE", "false")
+    return env
+
+
 def start_services(
     stack: ServiceStack,
     clean_first: bool = True,
@@ -1632,10 +1690,7 @@ def start_services(
         # + compute-token fetch — it surfaces as a phantom "Can't reach database
         # server" even though raw psql/TCP to the same host succeeds. Neutralize the
         # proxy for every isolated-run subprocess (never disable the app itself).
-        env.setdefault("NO_PROXY", "*")
-        env.setdefault("no_proxy", "*")
-        for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-            env.pop(_proxy_var, None)
+        bypass_host_http_proxy(env)
         env["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
         env["BENCHMARK_RUN_ID"] = stack.run_id
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
@@ -2042,17 +2097,21 @@ def run_streamed_command(
     process = subprocess.Popen(
         list(command),
         cwd=cwd,
-        env=env,
+        env=bypass_host_http_proxy(dict(os.environ if env is None else env)),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
+    _ACTIVE_CHILD_PROCESSES.add(process)
     output_lines: list[str] = []
-    assert process.stdout is not None
-    for line in process.stdout:
-        print(line, end="")
-        output_lines.append(line)
-    code = process.wait()
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="")
+            output_lines.append(line)
+        code = process.wait()
+    finally:
+        _ACTIVE_CHILD_PROCESSES.discard(process)
     output = "".join(output_lines)
     if check and code != 0:
         raise RuntimeError(f"Command exited with {code}: {' '.join(str(part) for part in command)}")
@@ -2372,14 +2431,7 @@ def run_benchmark_invocation(
     )
     print(f"\n== Running {invocation.label}: {', '.join(invocation.tasks)}")
     print("$ " + " ".join(command))
-    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-    # Disable fast-cache for local benchmark runs so trajectories are actually executed
-    # rather than replayed from cache. This is required for payment-lifecycle tasks (real
-    # side effects must not be cache-replayed) and also ensures the world model is exercised
-    # during simulate runs. run_benchmark reads this and sets fast_mode_cache_enabled=false
-    # on the created agent. (Sim-scoped caching can be re-enabled once the worker-simulate
-    # path is validated.)
-    env.setdefault("BENCHMARK_FAST_MODE_CACHE", "false")
+    env = benchmark_runner_env()
     if owner is not None:
         env = owner.environment(env)
     process = subprocess.Popen(
@@ -2406,12 +2458,16 @@ def run_benchmark_invocation(
         if owner.signum is not None:
             raise SystemExit(128 + owner.signum)
     else:
+        _ACTIVE_CHILD_PROCESSES.add(process)
         output_lines: list[str] = []
-        assert process.stdout is not None
-        for line in process.stdout:
-            print(line, end="")
-            output_lines.append(line)
-        code = process.wait()
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                print(line, end="")
+                output_lines.append(line)
+            code = process.wait()
+        finally:
+            _ACTIVE_CHILD_PROCESSES.discard(process)
         output = "".join(output_lines)
     result_path = extract_results_path(output)
     if result_path is None:
@@ -2707,6 +2763,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     def handle_shutdown(signum: int, _frame: object) -> None:
         print(f"\nReceived signal {signum}; draining owned benchmark before services...", file=sys.stderr)
+        stop_active_child_processes()
         benchmark_owner.interrupt(signum)
         if benchmark_owner.process is None and not benchmark_owner.starting:
             raise SystemExit(128 + signum)

@@ -155,7 +155,8 @@ def test_local_store_publishes_metadata_atomically():
             mode = args[0] if args else kwargs.get("mode", "r")
             if "w" in mode and path.name.startswith(meta.name):
                 metadata_opened.set()
-                if not release_metadata_write.wait(timeout=5):
+                # Deadlock guard only; the main thread releases right after its check.
+                if not release_metadata_write.wait(timeout=30):
                     handle.close()
                     raise TimeoutError("metadata write was not released")
             return handle
@@ -170,11 +171,17 @@ def test_local_store_publishes_metadata_atomically():
         writer = threading.Thread(target=write_artifact)
         try:
             writer.start()
-            assert metadata_opened.wait(timeout=2), "metadata writer never opened its output"
+            # Wait for the open itself, not a fixed window: a loaded host can take
+            # seconds to schedule the writer. A writer that exits without opening
+            # the metadata stops the wait; the cap only prevents a hung test.
+            deadline = time.monotonic() + 30
+            while not metadata_opened.wait(timeout=0.05) and writer.is_alive() and time.monotonic() < deadline:
+                pass
+            assert metadata_opened.is_set(), "metadata writer never opened its output"
             assert not meta.exists(), "final metadata path became visible before its JSON was complete"
         finally:
             release_metadata_write.set()
-            writer.join(timeout=5)
+            writer.join(timeout=30)
             Path.open = original_open
             restore()
 
@@ -958,6 +965,64 @@ def test_outbox_drain_preserves_transaction_in_valid_artifact_name():
             restore()
 
 
+def test_outbox_drain_bounds_failed_posts_and_reaches_later_artifacts():
+    """Repeated 400s cannot trigger an unbounded replay or starve valid work."""
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        original_post = trace_archive._post_backend_artifact
+        posts = []
+        try:
+            for index in range(3):
+                path = f"llm/{index}.json.gz.enc"
+                ciphertext = f"pending-{index}".encode()
+                target = Path(
+                    trace_archive._write_outbox(
+                        "agent-replay-budget",
+                        path,
+                        ciphertext,
+                        {"ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest()},
+                    )
+                )
+                os.utime(target, (1_000 + index, 1_000 + index))
+
+            def post(**kwargs):
+                posts.append(kwargs["path"])
+                return "r2://stored" if kwargs["path"].endswith("/2.json.gz.enc") else None
+
+            trace_archive._post_backend_artifact = post
+            assert trace_archive._drain_backend_outbox(limit=2) == 0
+            assert posts == ["llm/0.json.gz.enc", "llm/1.json.gz.enc"]
+            assert trace_archive._drain_backend_outbox(limit=1) == 1
+            assert posts[-1] == "llm/2.json.gz.enc"
+            assert trace_archive._root_outbox_has_artifacts("agent-replay-budget")
+        finally:
+            trace_archive._post_backend_artifact = original_post
+            restore()
+
+
+def test_automatic_outbox_replay_is_throttled():
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        original_drain = trace_archive._drain_backend_outbox
+        calls = []
+        try:
+            trace_archive._drain_backend_outbox = lambda **kwargs: calls.append(kwargs)
+            trace_archive._drain_backend_outbox_periodically()
+            trace_archive._drain_backend_outbox_periodically()
+            assert calls == [{"limit": 8, "stop_after_failure": True}]
+            marker = trace_archive._outbox_root() / ".automatic-drain"
+            marker.write_text(str(time.time() - 61))
+            trace_archive._drain_backend_outbox_periodically()
+            assert len(calls) == 2
+        finally:
+            trace_archive._drain_backend_outbox = original_drain
+            restore()
+
+
 def test_outbox_drain_honors_expired_terminal_deadline():
     """A terminal flush cannot begin another HTTP upload after its deadline."""
     import helpers.trace_archive as trace_archive
@@ -1615,6 +1680,11 @@ async def run_all_tests():
         "outbox_drain_preserves_transaction_in_valid_artifact_name",
         test_outbox_drain_preserves_transaction_in_valid_artifact_name,
     )
+    r.record(
+        "outbox_drain_bounds_failed_posts_and_reaches_later_artifacts",
+        test_outbox_drain_bounds_failed_posts_and_reaches_later_artifacts,
+    )
+    r.record("automatic_outbox_replay_is_throttled", test_automatic_outbox_replay_is_throttled)
     r.record(
         "outbox_drain_honors_expired_terminal_deadline",
         test_outbox_drain_honors_expired_terminal_deadline,

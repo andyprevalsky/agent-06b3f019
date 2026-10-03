@@ -440,10 +440,11 @@ class GrepTool(BaseModel):
     """Search local data sources with regex grep semantics."""
 
     tool: Literal["grep"]
-    pattern: str = Field(
+    pattern: Optional[str] = Field(
+        default=None,
         description=(
-            "Regular expression pattern to search for. Plain text works as a literal regex. "
-            "Use -i for case-insensitive matching and multiline for cross-line patterns."
+            "Regular expression over record text. Omit for agent_trajectories or "
+            "agent_network to list recent records using metadata filters."
         ),
     )
     sources: Optional[
@@ -456,6 +457,7 @@ class GrepTool(BaseModel):
                 "whatsapp",
                 "network",
                 "agent_network",
+                "agent_trajectories",
                 "transactions",
                 "documents",
                 "summary",
@@ -474,6 +476,13 @@ class GrepTool(BaseModel):
             "messages is the umbrella over all communication channels (use only when the channel "
             "is genuinely unknown). network searches contact records. agent_network searches all "
             "message roles in the current agent tree and returns role/location metadata. "
+            "agent_trajectories searches prior user-owned agent runs across chat, SMS, and "
+            "Temporal; it excludes the current agent tree. Results carry a trace path, "
+            "message role, and agent title as separate fields. "
+            "Trajectory record_kind=message is a stored agent message; llm_output is a model "
+            "response; llm_context is text passed to a model and may replay earlier turns. "
+            "Ordinary results include messages and outputs; record_kind=all includes replayed "
+            "inputs. "
             "transactions searches synced Plaid transaction rows. documents searches synced "
             "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents. "
             "summary returns a compact, precomputed inventory with message counts, date ranges, "
@@ -495,6 +504,7 @@ class GrepTool(BaseModel):
             "whatsapp",
             "network",
             "agent_network",
+            "agent_trajectories",
             "transactions",
             "documents",
             "summary",
@@ -502,6 +512,34 @@ class GrepTool(BaseModel):
     ] = Field(
         default=None,
         description="Legacy single-source alias for `sources`. Prefer `sources` (a list of the exact sources the task needs).",
+    )
+    role: Optional[Literal["USER", "ASSISTANT", "TOOL"]] = Field(
+        default=None,
+        description="Message role in agent_trajectories or agent_network. Implies agent_trajectories when sources are omitted.",
+    )
+    record_kind: Optional[Literal["message", "llm_output", "llm_context", "all"]] = Field(
+        default=None,
+        description="Agent trajectory record kind; message is the stored conversation record.",
+    )
+    surface: Optional[Literal["WEB", "MAC_APP", "SMS", "WHATSAPP"]] = Field(
+        default=None,
+        description="Agent trajectory origin surface.",
+    )
+    trace_path: Optional[str] = Field(
+        default=None,
+        description="Agent trajectory root path/UUID searches its entire child tree; a child path narrows to that agent, and a message path to one message.",
+    )
+    order: Optional[Literal["newest_first", "oldest_first"]] = Field(
+        default=None,
+        description="Order messages in one agent_trajectories search. Defaults to newest_first.",
+    )
+    page_after: Optional[str] = Field(
+        default=None,
+        description="For the next page of one agent_trajectories search, pass the previous result's next_page_after path with the same query and order.",
+    )
+    until: Optional[str] = Field(
+        default=None,
+        description="Latest timestamp for agent trajectory results (ISO 8601).",
     )
     require_source_access: Optional[bool] = Field(
         default=None,
@@ -559,6 +597,7 @@ class GrepTool(BaseModel):
             "  messages (and email, gmail, imessage, whatsapp): person, since, path\n"
             "  network: path\n"
             "  agent_network: path\n"
+            "  agent_trajectories: path, since, until, role, surface, record_kind\n"
             "  transactions: since, until, account, min_amount, max_amount, "
             "status ('posted', 'pending', or 'all'), include_pending_in_totals, path\n"
             "  documents: document_source, since, until, tag, path\n"
@@ -579,8 +618,8 @@ class GrepTool(BaseModel):
     since: Optional[str] = Field(
         default=None,
         description=(
-            "messages source only: only return messages at or after this time. "
-            "ISO 8601 timestamp or a relative form like 7d, 24h, 30m. Ignored for other sources."
+            "Messages or agent trajectories at or after this time. "
+            "ISO 8601 timestamp or a relative form like 7d, 24h, 30m."
         ),
     )
     model_config = ConfigDict(populate_by_name=True)

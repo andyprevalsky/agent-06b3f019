@@ -2342,6 +2342,20 @@ kill_tree_hard() {
     kill -9 "$pid" 2>/dev/null || true
 }
 
+# Each isolated benchmark run bundles its own ~220MB frontend keyed by run id and
+# nothing reads it after the run; 36 leaked bundles filled the host disk. Shared
+# (port-keyed) bundles are reused across restarts and stay.
+remove_isolated_frontend_build() {
+    [ "$BENCHMARK_ISOLATED_RUN" = "true" ] || return 0
+    [ -n "${FRONTEND_DIST_DIR:-}" ] || return 0
+    case "$(basename "$FRONTEND_DIST_DIR")" in
+        shared_*) return 0 ;;
+    esac
+    case "$FRONTEND_DIST_DIR" in
+        */.context/frontend-builds/*) rm -rf "$FRONTEND_DIST_DIR" ;;
+    esac
+}
+
 cleanup() {
     if $SHUTTING_DOWN; then return; fi
     SHUTTING_DOWN=true
@@ -2393,6 +2407,7 @@ cleanup() {
     write_services_manifest || true
     [ -n "$NGROK_CONFIG_FILE" ] && rm -f "$NGROK_CONFIG_FILE"
     [ -n "$FAIL_DIR" ] && rm -rf "$FAIL_DIR"
+    remove_isolated_frontend_build
     wait 2>/dev/null
     if $cleanup_failed; then
         run_publish_stack_cleanup_status failed

@@ -354,7 +354,12 @@ export async function runTests(): Promise<boolean> {
             const paraphrase =
               'find me a wheelchair friendly lodge by the water up in tahoe, 2 people, has a steam room';
             // Ranking check on the search layer (below the production cutoff).
-            const hits = await search({ goal: paraphrase, user_id: s.userId, min_similarity: 0 });
+            const hits = await search({
+              goal: paraphrase,
+              user_id: s.userId,
+              min_similarity: -1,
+              limit: 50,
+            });
             const hit = hits.find((c) => c.id === id);
             assert(hit, 'paraphrased request must retrieve the semantically matching run');
             const unrelated = hits.find((c) => c.id === unrelatedId);

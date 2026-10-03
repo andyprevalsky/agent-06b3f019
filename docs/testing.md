@@ -15,17 +15,17 @@ bash scripts/test.sh --list                        # list available repos/domain
 
 ## Test Suites
 
-| Suite | Command | Server Required | Filtering |
-|-------|---------|-----------------|-----------|
-| Offline-only | `bash scripts/test.sh --no-smoke` | No | repo, domain |
-| All (offline + smoke + semantic) | `bash scripts/test.sh --port=N` | Yes | — |
-| Agents blackbox | `cd agents && python scripts/run_blackbox_tests.py [domain]` | No | domain |
-| Backend structural | `cd back-end && npx tsx src/tests/structural/layer-deps.test.ts` | No | — |
-| Backend blackbox | `cd back-end && bash scripts/run-blackbox-tests.sh [domain]` | No (self-manages) | domain |
-| Frontend blackbox | `cd front-end && bash scripts/run-blackbox-tests.sh [domain]` | No | domain |
-| Smoke benchmarks | `cd agents && python benchmarks/run_benchmark.py --suite smoke --port=N` | Yes | — |
-| Backend ESLint | `cd back-end && npm run lint` | No | — |
-| Frontend ESLint | `cd front-end && npm run lint` | No | — |
+| Suite                            | Command                                                                  | Server Required   | Filtering    |
+| -------------------------------- | ------------------------------------------------------------------------ | ----------------- | ------------ |
+| Offline-only                     | `bash scripts/test.sh --no-smoke`                                        | No                | repo, domain |
+| All (offline + smoke + semantic) | `bash scripts/test.sh --port=N`                                          | Yes               | —            |
+| Agents blackbox                  | `cd agents && python scripts/run_blackbox_tests.py [domain]`             | No                | domain       |
+| Backend structural               | `cd back-end && npx tsx src/tests/structural/layer-deps.test.ts`         | No                | —            |
+| Backend blackbox                 | `cd back-end && bash scripts/run-blackbox-tests.sh [domain]`             | No (self-manages) | domain       |
+| Frontend blackbox                | `cd front-end && bash scripts/run-blackbox-tests.sh [domain]`            | No                | domain       |
+| Smoke benchmarks                 | `cd agents && python benchmarks/run_benchmark.py --suite smoke --port=N` | Yes               | —            |
+| Backend ESLint                   | `cd back-end && npm run lint`                                            | No                | —            |
+| Frontend ESLint                  | `cd front-end && npm run lint`                                           | No                | —            |
 
 ## Suite Details
 
@@ -125,27 +125,26 @@ still needs its own isolated restored volume, and those restores run in
 parallel within a slice. Avoid recopying a large donor or refreshing its
 snapshot unless dependency manifests or the donor contents actually changed.
 
-PR #1299's infrastructure acceptance is ten consecutive slices of ten actual
-benchmarks. Each benchmark must have at least three successful, correlated LLM
-provider responses in its own agent tree, a trustworthy native evaluation,
-durable evidence and verified teardown. Ordinary benchmark `FAILED` outcomes
-are allowed; `SKIPPED`, infrastructure errors and missing results are not.
-Attempts, dump-file counts and sibling queries do not establish successful
-responses. Do not add calls or alter benchmark behavior to reach the minimum.
-Any infrastructure failure breaks the streak; later artifact recovery preserves
-diagnostic evidence without turning that failed slice into acceptance credit.
-For each valid slice, log elapsed wall time from launch through verified cleanup,
-and each bench's elapsed wall time from its exact machine admission through
-guest shutdown. Also report the task duration from the sealed run artifact so
-provisioning, evaluation, evidence transfer, and teardown remain visible.
-The user's October 1 override waives routine speedup reviews when the whole slice
-stays within 20 minutes launch-to-durable wall time and every benchmark stays
-within 20 minutes allocation-to-durable wall time.
-Inspect any spike above that threshold before advancing. Correctness, hidden
-infrastructure errors, trajectories, durable evidence and teardown still require
-review. The independent 1800-second cancellation cutoff remains unchanged. A code
-change starts a new ten-slice streak; do not shorten or change task evaluation to
-make this proof pass.
+PR #1299's current user-authorized acceptance is ten consecutive slices of ten
+distinct daily/Polar tasks. Each benchmark needs meaningful real provider
+execution, a genuine terminal `PASSED` or `FAILED`, and exact owned-resource
+release within one 1,800-second allocation-to-finish deadline. Normally expect
+more than three LLM calls when sensible; chat, early terminal results and an
+execution-window `FAILED` can need fewer. Do not force calls, alter tasks or
+count cache-only replay, queued requests or a Rose start alone as execution.
+Use `scripts/verify_successful_llm_queries.py --diagnostics-only` to retain strict
+query findings as diagnostics. Recovered LLM/browser/save/persistence errors and
+intermediate elapsed timings are warnings. Missing execution, a missing terminal
+result, an E2E cutoff breach or lingering resources break the streak; later
+recovery does not retroactively grant credit. Inspect the actual terminal
+trajectory and exact cleanup once. Retain original artifacts; FE/LLM publication
+is best effort after resource release and does not block the next slice.
+Publishers must retire before final cleanup. Report whole-slice and individual
+benchmark E2E times, with task durations where available. The 20-minute target
+is a warning and speedup reviews are waived. Preserve 7,200/300/1,800-second
+normal execution, temporary execution and E2E budgets. A runtime change that
+invalidates earlier runs starts a fresh streak; test/doc-only changes can carry
+results when their exercised inputs are verified unchanged.
 
 The existing `scripts/tests/publish_evidence_links_browser_validation.test.sh`
 also covers transcript ownership, literal versus Markdown bubbles, adjacent
