@@ -208,15 +208,21 @@ def validate_browser_agents_terminated_with_recording(
             continue
         action = str(meta.get("action_type") or "")
         tool_name = str(meta.get("toolName") or "")
-        browser_related = tool_name == "spawn_browser_agent" or action in {
-            "browser",
-            "session_init",
-            "session_started",
-            "task_started",
-            "recording",
-            "network_recording",
-            "task_complete",
-        }
+        # Other task tools (spawn_claude_code_agent) emit task_started and
+        # task_complete too, but never record a browser.
+        browser_related = tool_name == "spawn_browser_agent" or (
+            not tool_name
+            and action
+            in {
+                "browser",
+                "session_init",
+                "session_started",
+                "task_started",
+                "recording",
+                "network_recording",
+                "task_complete",
+            }
+        )
         if not browser_related:
             continue
         state = tasks.setdefault(

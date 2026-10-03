@@ -20,10 +20,12 @@ assert spec.loader is not None
 spec.loader.exec_module(mod)
 
 # Avoid network probes in unit checks: stub URL/pointer reachability.
-mod._probe_recording_view_url = lambda url, timeout=20.0: url.startswith("https://ok/")  # type: ignore[assignment]
-mod._probe_recording_file_pointer = (  # type: ignore[assignment]
+setattr(mod, "_probe_recording_view_url", lambda url, timeout=20.0: url.startswith("https://ok/"))
+setattr(
+    mod,
+    "_probe_recording_file_pointer",
     lambda agent_id, pointer, timeout=30.0: isinstance(pointer, dict)
-    and pointer.get("id") == "fp-ok"
+    and pointer.get("id") == "fp-ok",
 )
 
 
@@ -167,8 +169,42 @@ failures = mod.validate_browser_agents_terminated_with_recording(
 )
 assert failures == [], failures
 
+# A Claude Code task shares task_started/task_complete action types but never
+# records a browser, so it must not be held to the browser recording rule.
+failures = mod.validate_browser_agents_terminated_with_recording(
+    agent,
+    [
+        msg(
+            task_id="cc1",
+            toolName="spawn_claude_code_agent",
+            action_type="claude_code_started",
+            toolStatus="IN_PROGRESS",
+        ),
+        msg(
+            task_id="cc1",
+            toolName="spawn_claude_code_agent",
+            action_type="task_started",
+            toolStatus="FINISHED",
+        ),
+        msg(
+            task_id="cc1",
+            toolName="spawn_claude_code_agent",
+            action_type="task_complete",
+            toolStatus="FINISHED",
+        ),
+    ],
+)
+assert failures == [], failures
+
+# A legacy browser row without toolName still counts as a browser task.
+failures = mod.validate_browser_agents_terminated_with_recording(
+    agent,
+    [msg(task_id="t4", action_type="session_started", toolStatus="IN_PROGRESS")],
+)
+assert any("has not terminated" in f for f in failures), failures
+
 # Dead view URL → fail recording
-mod._probe_recording_view_url = lambda url, timeout=20.0: False  # type: ignore[assignment]
+setattr(mod, "_probe_recording_view_url", lambda url, timeout=20.0: False)
 failures = mod.validate_browser_agents_terminated_with_recording(
     agent,
     [
