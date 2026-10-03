@@ -422,7 +422,11 @@ if os.fork():
     while True:
         time.sleep(0.1)
 
-Path("$DETACHED_PID_FILE").write_text(str(os.getpid()))
+# Publish atomically: the shell polls for the file and reads it at once.
+pid_file = Path("$DETACHED_PID_FILE")
+pid_tmp = pid_file.with_name(pid_file.name + ".tmp")
+pid_tmp.write_text(str(os.getpid()))
+os.replace(pid_tmp, pid_file)
 while not trigger.exists():
     time.sleep(0.02)
 os.setsid()
@@ -450,9 +454,11 @@ done
 [ -f "$DETACHED_PID_FILE" ] || case10_fail \
   "case 10: could not observe the forked seed child"
 detached_pid="$(cat "$DETACHED_PID_FILE")"
+# `|| true`: under errexit + pipefail a failed probe would exit silently and skip
+# the diagnostic below.
 detached_record="$(ps -o pid=,ppid=,pgid=,lstart= -p "$detached_pid" 2>/dev/null | awk '
   NR == 1 { print $1 "|" $2 "|" $3 "|" $4 " " $5 " " $6 " " $7 " " $8 }
-')"
+' || true)"
 [ -n "$detached_record" ] || case10_fail \
   "case 10: could not capture the seed child's original identity"
 IFS='|' read -r _ expected_parent expected_group _ <<< "$detached_record"
@@ -470,7 +476,7 @@ kill -TERM "$detach_parent_pid" 2>/dev/null || true
 wait "$detach_parent_pid" 2>/dev/null || true
 for _ in $(seq 1 100); do
   current_parent_group="$(ps -o ppid=,pgid= -p "$detached_pid" 2>/dev/null | awk \
-    'NR == 1 { print $1 "|" $2 }')"
+    'NR == 1 { print $1 "|" $2 }' || true)"
   IFS='|' read -r current_parent current_group <<< "$current_parent_group"
   if [ -n "$current_parent" ] \
       && [ "$current_parent" != "$expected_parent" ] \

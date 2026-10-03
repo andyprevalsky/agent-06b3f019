@@ -923,7 +923,7 @@ fi
 BENCH_TARGET_MODE_FOR_STACK=""
 if BENCH_TARGET_PLAN_FOR_STACK="$(python3 "$BENCHMARK_TARGET_SCRIPT" \
     "$REPO_DIR/agents/benchmarks/tasks.json" "$BASE_PORT" "${BENCH_TASK_LIST[@]}" 2>/dev/null)"; then
-    BENCH_TARGET_MODE_FOR_STACK="$(printf '%s\n' "$BENCH_TARGET_PLAN_FOR_STACK" | head -1)"
+    BENCH_TARGET_MODE_FOR_STACK="${BENCH_TARGET_PLAN_FOR_STACK%%$'\n'*}"
 fi
 if [ "$BENCH_SIMULATE" = "1" ]; then
     STACK_ENV+=(
@@ -1175,7 +1175,8 @@ if ! BENCH_TARGET_PLAN="$(python3 "$BENCHMARK_TARGET_SCRIPT" \
     log "FATAL: could not resolve the catalog-mandated benchmark target"
     finish 1
 fi
-BENCH_TARGET_MODE="$(printf '%s\n' "$BENCH_TARGET_PLAN" | head -1)"
+# A pipe into `head -1` dies with SIGPIPE under pipefail when head exits first.
+BENCH_TARGET_MODE="${BENCH_TARGET_PLAN%%$'\n'*}"
 BENCH_TARGET_ARGS=()
 while IFS= read -r target_arg; do
     [ -n "$target_arg" ] && BENCH_TARGET_ARGS+=("$target_arg")

@@ -2684,6 +2684,26 @@ async def _get_initial_payment_lifecycle_with_retry(
     ) from last_error
 
 
+def _payment_lifecycle_settlement_state(lifecycle: object) -> str:
+    """Describe the provider money rows a timed-out lifecycle was still waiting on.
+
+    The first mismatch is usually Rose's purchase status, which reads the same whether Rose's
+    reconciler stalled or AgentCard never released the closed card's hold. Only THIS card's
+    org transfer row tells those apart.
+    """
+    if not isinstance(lifecycle, dict):
+        return ""
+    parts = []
+    wallet_funding = lifecycle.get("walletFunding")
+    if isinstance(wallet_funding, dict):
+        parts.append(f"walletFunding.status={wallet_funding.get('status')!r}")
+    org_transfer = lifecycle.get("orgTransfer")
+    if isinstance(org_transfer, dict):
+        fields = ("id", "cardId", "status", "transferredCents", "releasedCents")
+        parts.append(f"orgTransfer={json.dumps({key: org_transfer.get(key) for key in fields})}")
+    return f"; last observed {', '.join(parts)}" if parts else ""
+
+
 async def _wait_for_expected_payment_lifecycle(
     base_url: str,
     agent_id: str,
@@ -2740,7 +2760,10 @@ async def _wait_for_expected_payment_lifecycle(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {last_fetch_error}"
                 ) from last_fetch_error
-            raise RuntimeError(f"Payment lifecycle did not reach the expected terminal state before timeout: {error}")
+            raise RuntimeError(
+                "Payment lifecycle did not reach the expected terminal state before timeout: "
+                f"{error}{_payment_lifecycle_settlement_state(lifecycle)}"
+            )
         await asyncio.sleep(poll_interval_seconds)
         try:
             lifecycle = await (recover_lifecycle or fetch_lifecycle)(base_url, agent_id)
@@ -2871,20 +2894,32 @@ async def _start_payment_abandonment_with_recovery(
     ) from last_error
 
 
+# The setup fixture resolves the cardholder through the AgentCard org MCP, which
+# intermittently rejects a healthy secret for a couple of seconds. Both actions are
+# idempotent, so a 5xx is retried; 4xx (bad input, cardholder not ready) is not.
+AGENTCARD_SETUP_RETRY_DELAYS_SECONDS = (2, 4, 8)
+
+
 async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dict:
     headers = await _api_headers()
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
-            headers=headers,
-            # The AgentCard integration must be reset/completed for the user the task actually runs
-            # as. Hardcoding the default benchmark user left the run user's integration untouched,
-            # so the setup fixture silently configured the wrong account.
-            json={"userId": _current_benchmark_user_id(), "action": action},
-        )
-        if resp.status_code != 200:
-            raise RuntimeError(f"Failed to {action} benchmark AgentCard setup: {resp.status_code} {resp.text[:300]}")
-        return resp.json()
+    for attempt, retry_delay in enumerate((*AGENTCARD_SETUP_RETRY_DELAYS_SECONDS, None), start=1):
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
+                headers=headers,
+                # The AgentCard integration must be reset/completed for the user the task actually runs
+                # as. Hardcoding the default benchmark user left the run user's integration untouched,
+                # so the setup fixture silently configured the wrong account.
+                json={"userId": _current_benchmark_user_id(), "action": action},
+            )
+        if resp.status_code == 200:
+            return resp.json()
+        failure = f"Failed to {action} benchmark AgentCard setup: {resp.status_code} {resp.text[:300]}"
+        if resp.status_code < 500 or retry_delay is None:
+            raise RuntimeError(failure)
+        print(f"    ⚠ AgentCard setup attempt {attempt} failed; retrying in {retry_delay}s ({failure})")
+        await asyncio.sleep(retry_delay)
+    raise AssertionError("unreachable: the final attempt raises or returns")
 
 
 async def ensure_payment_lifecycle_cleanup(
@@ -4569,7 +4604,17 @@ async def poll_agent(
                                 task.agentcard_setup_action == "complete"
                                 and observed_kind == "agentcard_user_cardholder_onboarding_required"
                             ):
-                                await configure_benchmark_agentcard_setup(base_url, "complete")
+                                try:
+                                    await configure_benchmark_agentcard_setup(base_url, "complete")
+                                except RuntimeError as setup_error:
+                                    # The attention is already marked seen; swallowing this
+                                    # leaves the agent waiting on setup until the task timeout.
+                                    return (
+                                        data,
+                                        approvals_triggered,
+                                        approvals_resolved,
+                                        f"AgentCard setup fixture failed: {setup_error}",
+                                    )
                                 agentcard_setup_attention_seen = True
                                 agentcard_setup_attention_id = req_id
                                 print(f"    ✅ Completed one-time AgentCard setup for attention {req_id[:8]}")

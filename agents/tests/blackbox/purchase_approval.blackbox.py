@@ -13,6 +13,7 @@ import asyncio
 from _test_utils import BlackboxResult
 
 from utils.purchase_approval import (
+    validate_image_url_for_page,
     validate_product_detail_url,
     validate_product_url_for_page,
     validate_product_url_for_pages,
@@ -125,6 +126,47 @@ def test_page_context_helpers_still_reject_non_urls():
         raise AssertionError(f"{helper.__name__} accepted a non-URL")
 
 
+def test_image_url_must_be_an_image_the_page_renders():
+    """A receipt image is shown to the user as the item they pay for, so it must be
+    an asset the page actually renders, not a transcription with one digit drifted."""
+    page = "https://shop.example/checkout"
+    rendered = [
+        "https://placehold.co/320x220/png?text=Canvas+Tote",
+        "https://shop.example/img/mug.jpg",
+        "https://cdn.shop.example:8443/lamp.png",
+    ]
+
+    assert (
+        validate_image_url_for_page("https://placehold.co/320x220/png?text=Canvas+Tote", rendered, page)
+        == "https://placehold.co/320x220/png?text=Canvas+Tote"
+    )
+    # Same asset over the other scheme, a relative reference, and host case are equivalent.
+    assert validate_image_url_for_page("http://placehold.co/320x220/png?text=Canvas+Tote", rendered, page)
+    assert validate_image_url_for_page("/img/mug.jpg", rendered, page) == "/img/mug.jpg"
+    assert validate_image_url_for_page("https://SHOP.example/img/mug.jpg", rendered, page)
+    assert validate_image_url_for_page("https://cdn.shop.example:8443/lamp.png", rendered, page)
+
+    for drifted in (
+        "https://cdn.shop.example/lamp.png",
+        "ftp://placehold.co/320x220/png?text=Canvas+Tote",
+        "https://placehold.co/220x220/png?text=Canvas+Tote",
+        "https://placehold.co/320x220/png?text=Canvas+Bag",
+        "https://shop.example/img/mug.jpeg",
+        "https://placehold.co:abc/320x220/png?text=Canvas+Tote",
+        "not a url",
+    ):
+        try:
+            validate_image_url_for_page(drifted, rendered, page)
+        except ValueError:
+            continue
+        raise AssertionError(f"unrendered image_url was accepted: {drifted!r}")
+
+    # The field is optional, and a page with no rendered images leaves nothing to compare.
+    assert validate_image_url_for_page(None, rendered, page) is None
+    assert validate_image_url_for_page("", rendered, page) == ""
+    assert validate_image_url_for_page("https://cdn.example/x.jpg", [], page) == "https://cdn.example/x.jpg"
+
+
 async def run_all_tests():
     print("purchase-approval blackbox tests:")
     r = BlackboxResult()
@@ -134,6 +176,7 @@ async def run_all_tests():
     r.record("markup_rejected", test_markup_and_whitespace_are_still_rejected)
     r.record("page_context_constrains_host", test_page_context_constrains_the_host_only)
     r.record("wrappers_reject_non_urls", test_page_context_helpers_still_reject_non_urls)
+    r.record("image_url_must_be_rendered_on_page", test_image_url_must_be_an_image_the_page_renders)
     return r.all_passed
 
 
