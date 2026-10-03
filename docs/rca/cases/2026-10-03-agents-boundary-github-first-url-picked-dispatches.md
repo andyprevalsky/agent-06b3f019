@@ -2,7 +2,7 @@
 id: 2026-10-03-agents-boundary-github-first-url-picked-dispatches
 date: 2026-10-03
 title: Create-agent GitHub boundary took the first api.github.com capture and failed on auto-RCA /dispatches
-surface: backend
+surface: back-end
 component: agents-blackbox
 classification: our-bug
 problem_class: fixture-environment-data-mismatch
