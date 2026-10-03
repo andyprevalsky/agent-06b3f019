@@ -529,6 +529,7 @@ def _check_stack_worker_cleanup(worker_exit, bad_receipt=False):
                 'source "$SCRIPT_DIR/lib/run-process-cleanup.sh"',
                 function("kill_tree"),
                 function("kill_tree_hard"),
+                function("remove_isolated_frontend_build"),
                 function("cleanup"),
                 f"{shlex.quote(sys.executable)} backend.py &",
                 "backend_fixture_pid=$!",
