@@ -67,7 +67,7 @@ function summaryTable(site: AuthTestSite, totals: CartTotals, removable: boolean
         ? `<td><form method="post" action="${siteUrl(site, '/cart/remove')}"><input type="hidden" name="item" value="${line.item.id}"><button type="submit">Remove</button></form></td>`
         : '';
       return `<tr class="line-item" data-name="${escapeHtml(line.item.name)}" data-product-url="${publicSiteUrl(site, `/products/${line.item.id}`)}" data-image-url="${line.item.imageUrl}" data-unit-price-cents="${line.item.priceCents}" data-quantity="${line.quantity}" data-line-total-cents="${line.lineTotalCents}" data-rating="${line.item.rating}" data-review-count="${line.item.reviewCount}">
-        <td><a href="${publicSiteUrl(site, `/products/${line.item.id}`)}">${escapeHtml(line.item.name)}</a><br><img src="${line.item.imageUrl}" alt="" width="80"><br>${line.item.rating} stars (${line.item.reviewCount} reviews)</td>
+        <td><a href="${publicSiteUrl(site, `/products/${line.item.id}`)}">${escapeHtml(line.item.name)}</a><br><img src="${line.item.imageUrl}" alt="${escapeHtml(line.item.name)}" width="80"><br>${line.item.rating} stars (${line.item.reviewCount} reviews)</td>
         <td>${line.quantity} × ${money(line.item.priceCents)}</td>
         <td>${money(line.lineTotalCents)}</td>${remove}
       </tr>`;
