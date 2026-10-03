@@ -239,6 +239,7 @@ AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
 # as the same seeded user. Must equal local.ROSE_SHOP_PAYMENT_TASK_NAMES.
 ROSE_SHOP_PAYMENT_TASK_NAMES = {
     "browser-auth-guest-purchase",
+    "browser-auth-member-discount-purchase",
     "browser-auth-signup-purchase",
     "browser-auth-session-expires-at-checkout",
 }

@@ -115,6 +115,7 @@ NEW_USER_PAYMENT_TASK_NAMES = {
 # as the test-payment portal, as the same seeded user.
 ROSE_SHOP_PAYMENT_TASK_NAMES = {
     "browser-auth-guest-purchase",
+    "browser-auth-member-discount-purchase",
     "browser-auth-signup-purchase",
     "browser-auth-session-expires-at-checkout",
 }

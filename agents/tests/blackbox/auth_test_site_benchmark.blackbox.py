@@ -181,10 +181,27 @@ def test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts() ->
     assert _outcome_check("browser-auth-all-options-fail-assistance")["minted_unused"] is True
     assert _outcome_check("browser-auth-minted-email-otp")["signed_in_method"] == "email_code"
     assert _outcome_check("browser-auth-signup-purchase")["orders"] == {"count": 1, "placed_by": "signed_in_account"}
-    for name in ("browser-auth-guest-purchase", "browser-auth-signup-purchase", "browser-auth-session-expires-at-checkout"):
+    for name in (
+        "browser-auth-guest-purchase",
+        "browser-auth-member-discount-purchase",
+        "browser-auth-signup-purchase",
+        "browser-auth-session-expires-at-checkout",
+    ):
         lifecycle = get_task_by_name(name).expected_payment_lifecycle
         assert lifecycle["integrity"] == {"purchaseCount": 1, "walletFundingCount": 1, "cardCount": 1}, name
         assert get_task_by_name(name).expected_approval_count == 1, name
+
+    # A purchase bench left out of the runner's payment-task lists gets no payment
+    # fixture and fails on a missing Stripe hold, so the lists follow the catalog.
+    from benchmarks import local, run_benchmark
+
+    paying = {
+        task["name"]
+        for task in load_raw_catalog()
+        if task["name"].startswith("browser-auth-") and task.get("expected_payment_lifecycle")
+    } - {run_benchmark.ROSE_SHOP_NO_SUBSCRIPTION_TASK_NAME}
+    assert run_benchmark.ROSE_SHOP_PAYMENT_TASK_NAMES == paying, paying
+    assert local.ROSE_SHOP_PAYMENT_TASK_NAMES == paying, paying
 
 
 async def test_hosted_auth_tasks_never_overlap_on_one_stack() -> None:
