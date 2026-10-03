@@ -506,6 +506,17 @@ if wait_for_isolated_benchmarks "$bench_repo" "10m" 1 >/dev/null 2>&1; then
   fail "a non-integer wait budget must fail closed"
 fi
 
+# Every back-end structural suite must be reachable from /deploy: Step 4 runs
+# `npm run test:structural`, and that script must list every *.test.ts file.
+require_text "$DEPLOY_COMMAND" 'run-deploy-stage backend-structural --reuse-passed -- npm run test:structural' "/deploy Step 4 must run the full back-end structural suite"
+structural_script=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["scripts"]["test:structural"])' "$ROOT_DIR/back-end/package.json")
+for structural_test in "$ROOT_DIR"/back-end/src/tests/structural/*.test.ts; do
+  case "$structural_script" in
+    *"src/tests/structural/$(basename "$structural_test")"*) ;;
+    *) fail "back-end structural test $(basename "$structural_test") is not in npm run test:structural, so no gate runs it" ;;
+  esac
+done
+
 # ensure_playwright_chromium: skip the host-wide locked `playwright install`
 # when every dry-run install location is complete; install otherwise.
 # shellcheck source=../lib/ensure-playwright-chromium.sh

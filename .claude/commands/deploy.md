@@ -342,7 +342,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
    **Static verify:**
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
-   - Step 4: structural tests (skip if `CHANGED_TS` is empty)
+   - Step 4: structural tests (no skip)
    - Step 4s: deploy environment + command structural tests (no skip)
    - Step 4m-lint: mac-app format:check + lint + type-check (skip if `CHANGED_MAC_APP` is empty)
    - Step 4cb: cloud benchmark controller regressions (skip if `CHANGED_CLOUDBENCH` is empty). If
@@ -446,15 +446,20 @@ cd back-end && bash ../scripts/run-deploy-stage typescript --reuse-passed -- npx
 
 Catches type errors that ESLint misses (wrong argument types, missing properties, bad generics). Fix any errors before proceeding — pre-existing type errors in touched files are your responsibility.
 
-## Step 4: Structural tests + fix
-
-**Skip if `$CHANGED_TS` is empty** (structural invariants only apply to back-end TS changes).
+## Step 4: Structural tests + fix (no skip)
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage backend-structural --reuse-passed -- npx tsx src/tests/structural/layer-deps.test.ts
+cd back-end && bash ../scripts/run-deploy-stage backend-structural --reuse-passed -- npm run test:structural
 ```
 
-This enforces architectural invariants across all domains: import direction, cross-domain isolation, provider/util boundaries, domain completeness, Prisma/Express encapsulation, and circular import detection.
+`npm run test:structural` runs every back-end structural suite listed in
+`back-end/package.json`: `layer-deps` (import direction, cross-domain
+isolation, provider/util boundaries, domain completeness, Prisma/Express
+encapsulation, circular imports) plus migration drift, the Claude Code
+ws-server prompt/env contract, the RCA archive schema, and the rest. It runs on
+every deploy because several suites guard non-TS inputs (migrations, the E2B
+template, `docs/rca/`). `scripts/tests/semantic-deploy-gate.test.sh` fails if a
+`*.test.ts` file in `back-end/src/tests/structural/` is missing from that list.
 
 If any invariant fails, fix the violation. The test output includes remediation guidance (e.g., "Move the needed logic to service.ts or extract to a provider.").
 
