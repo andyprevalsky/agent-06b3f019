@@ -3061,7 +3061,9 @@ async def respond_to_attention_request(base_url: str, request_id: str, response:
         )
 
 
-AUTH_ASSISTANCE_TASK_ID_WAIT_SECONDS = 45
+# The agent names its browser task only after the paused task's bookkeeping
+# (credential judge, diagnostics, recording): 46s after the request on one run.
+AUTH_ASSISTANCE_TASK_ID_WAIT_SECONDS = 180
 
 
 async def _browser_task_for_auth_assistance(base_url: str, agent_id: str, req: dict) -> str:
