@@ -28,6 +28,11 @@ normalize_conductor_workspace_env
 source "$SCRIPT_DIR/local-db-container.sh"
 cd "$BACKEND_DIR"
 
+# This gate starts its own backend and signs its own benchmark-share fixtures.
+# Give both the server and blackbox runner the same local-only signing key when
+# no key was supplied; a production secret is not needed to verify the contract.
+export BENCHMARK_SHARE_SECRET="${BENCHMARK_SHARE_SECRET:-blackbox-local-benchmark-share-secret}"
+
 # Cursor Cloud (and similar) may inject BROWSER_PROVIDER into the process
 # environment. Node dotenv does not override existing vars, so a stale value
 # like "browserbase" wins over back-end/.env ("kernel") and the live
@@ -495,6 +500,14 @@ BEGIN
       FROM "AgentAttentionRequest" attention
       WHERE attention.id = request.id
     );
+  END IF;
+  -- On system Postgres this database is shared with the local stack, whose
+  -- real provider quota failures persist process-global funded-key cooldowns.
+  -- Tests that exercise the funded routes assume no backoff is active.
+  IF to_regclass('"Integration"') IS NOT NULL THEN
+    DELETE FROM "Integration"
+    WHERE "userId" = '00000000-0000-0000-0000-000000000000'
+      AND name IN ('gpt_api_key_cooldown', 'anthropic_api_key_cooldown');
   END IF;
 END $$;
 SQL

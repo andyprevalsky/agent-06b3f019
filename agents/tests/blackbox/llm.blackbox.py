@@ -52,6 +52,206 @@ def test_generated_agent_title_normalization():
     assert _normalize_generated_agent_title("x" * 100) == "x" * 80
 
 
+def test_generated_response_schema_preserves_constraints():
+    from helpers.llm import _GeneratedResponseSchema, _schema_from_generated_model
+
+    generated = _GeneratedResponseSchema.model_validate({
+        "reasoning": "Two entries and an optional note.",
+        "fields": [
+            {
+                "name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
+                "properties": [
+                    {"name": "label", "type": "str", "minLength": 3, "maxLength": 30},
+                    {"name": "note", "type": "str", "required": False},
+                ],
+            },
+        ],
+    })
+    field = _schema_from_generated_model(generated)["fields"][0]
+    assert field["minItems"] == field["maxItems"] == 2
+    assert field["properties"][0]["minLength"] == 3
+    assert field["properties"][0]["maxLength"] == 30
+    assert field["properties"][1]["required"] is False
+
+
+def test_optional_output_keys_can_be_omitted_but_present_values_are_typed():
+    from pydantic import ValidationError
+    from helpers.llm import (
+        _GeneratedResponseSchema, _schema_from_generated_model,
+        _build_verifier_json_schema, _build_verifier_response_model,
+        _structured_response_satisfies_schema,
+    )
+    from providers.rose.schema import build_openai_response_format
+    from utils.prompts import build_verifier_prompt
+
+    generated = _GeneratedResponseSchema.model_validate({
+        "reasoning": "A count and optional extra details.",
+        "fields": [
+            {"name": "total", "type": "int", "required": True},
+            {"name": "estimate", "type": "int", "required": False},
+            {"name": "rows", "type": "list[object]", "required": False,
+             "properties": [
+                 {"name": "name", "type": "str", "required": True},
+                 {"name": "rank", "type": "int", "required": False},
+             ]},
+        ],
+    })
+    schema = _schema_from_generated_model(generated)
+    assert schema["fields"][1]["required"] is False
+    assert schema["fields"][2]["properties"][1]["required"] is False
+    json_envelope = _build_verifier_json_schema(schema)["json_schema"]
+    output = json_envelope["schema"]["properties"]["output"]
+    assert output["required"] == ["total"]
+    assert output["properties"]["estimate"]["type"] == "integer"
+    assert output["properties"]["rows"]["items"]["required"] == ["name"]
+    assert json_envelope["strict"] is False
+    prompt = build_verifier_prompt(schema)
+    assert "including 1 required field(s)" in prompt
+    assert "estimate (int, optional)" in prompt
+
+    model = _build_verifier_response_model(schema)
+    assert build_openai_response_format(model)["json_schema"]["strict"] is False
+    valid = {"output": {"total": 2}, "reasoning": "Grounded", "score": 1}
+    assert model.model_validate(valid).model_dump(exclude_unset=True)["output"] == {"total": 2}
+    assert _structured_response_satisfies_schema({"total": 2}, schema)
+    assert _structured_response_satisfies_schema({"total": 2, "rows": [{"name": "A"}]}, schema)
+    for invalid in (
+        {"total": 2, "estimate": None},
+        {"total": 2, "estimate": "two"},
+        {"total": 2, "rows": [{"name": "A", "rank": None}]},
+    ):
+        assert not _structured_response_satisfies_schema(invalid, schema)
+    for invalid in (
+        {**valid, "output": {"total": 2, "estimate": None}},
+        {**valid, "output": {"total": 2, "rows": [{"name": "A", "rank": None}]}},
+    ):
+        try:
+            model.model_validate(invalid)
+            raise AssertionError("optional field present as null should be invalid")
+        except ValidationError:
+            pass
+    try:
+        _GeneratedResponseSchema.model_validate({
+            "reasoning": "No required output", "fields": [{"name": "estimate", "type": "int", "required": False}],
+        })
+        raise AssertionError("generated schema must retain one required signal")
+    except ValidationError:
+        pass
+
+
+def test_verifier_enforces_size_bounds_and_nullable_nested_fields():
+    from pydantic import ValidationError
+    from helpers.llm import _build_verifier_json_schema, _build_verifier_response_model
+
+    schema = {"fields": [
+        {
+            "name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
+            "properties": [
+                {"name": "label", "type": "str", "minLength": 3, "maxLength": 8},
+                {"name": "note", "type": "str", "nullable": True},
+            ],
+        },
+        {"name": "summary", "type": "str", "nullable": True},
+    ]}
+    output = _build_verifier_json_schema(schema)["json_schema"]["schema"]["properties"]["output"]
+    items = output["properties"]["items"]
+    assert (items["minItems"], items["maxItems"]) == (2, 2)
+    assert items["items"]["properties"]["label"]["minLength"] == 3
+    assert items["items"]["properties"]["label"]["maxLength"] == 8
+    assert "null" in items["items"]["properties"]["note"]["type"]
+    assert "null" in output["properties"]["summary"]["type"]
+
+    model = _build_verifier_response_model(schema)
+    valid = {"output": {"items": [
+        {"label": "Desk", "note": None},
+        {"label": "Lamp", "note": "Used"},
+    ], "summary": None}, "reasoning": "Grounded", "score": 1}
+    model.model_validate(valid)
+    for missing_or_unmarked_null in (
+        {**valid, "output": {"items": valid["output"]["items"]}},
+        {**valid, "output": {**valid["output"], "items": None}},
+    ):
+        try:
+            model.model_validate(missing_or_unmarked_null)
+            raise AssertionError("expected ValidationError for missing field or unmarked null")
+        except ValidationError:
+            pass
+    for invalid in (
+        {**valid, "output": {**valid["output"], "items": valid["output"]["items"][:1]}},
+        {**valid, "output": {**valid["output"], "items": valid["output"]["items"] * 2}},
+        {**valid, "output": {**valid["output"], "items": [
+            {"label": "No", "note": None}, valid["output"]["items"][1],
+        ]}},
+    ):
+        try:
+            model.model_validate(invalid)
+            raise AssertionError("expected ValidationError")
+        except ValidationError:
+            pass
+
+
+def test_structured_output_schema_respects_constraints():
+    from helpers.llm import _structured_response_satisfies_schema
+
+    schema = {"fields": [
+        {"name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
+         "properties": [{"name": "title", "type": "str", "minLength": 3}]},
+        {"name": "note", "type": "str", "nullable": True},
+    ]}
+    assert _structured_response_satisfies_schema({
+        "items": [{"title": "Desk"}, {"title": "Lamp"}], "note": None,
+    }, schema)
+    assert not _structured_response_satisfies_schema({"items": [{"title": "Desk"}], "note": None}, schema)
+    assert not _structured_response_satisfies_schema({
+        "items": [{"title": "No"}, {"title": "Lamp"}], "note": None,
+    }, schema)
+    assert not _structured_response_satisfies_schema({
+        "items": [{"title": "Desk"}, {"title": "Lamp"}],
+    }, schema)
+    zero_schema = {"fields": [
+        {"name": "items", "type": "list[str]", "maxItems": 0},
+        {"name": "summary", "type": "str", "maxLength": 0},
+    ]}
+    assert _structured_response_satisfies_schema({"items": [], "summary": ""}, zero_schema)
+    # Optional fields may be omitted or present-and-empty, but a present value
+    # must still have the declared shape.
+    optional_pointer = {"fields": [
+        {"name": "total", "type": "int"},
+        {"name": "report", "type": "file_pointer", "required": False},
+        {"name": "tags", "type": "list[str]", "required": False},
+    ]}
+    assert _structured_response_satisfies_schema({"total": 1}, optional_pointer)
+    assert _structured_response_satisfies_schema({"total": 1, "tags": []}, optional_pointer)
+    assert _structured_response_satisfies_schema({"total": 1, "report": {"path": "/out/r.md"}}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": "/out/r.md"}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": {"note": "x"}}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": ""}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": {}}, optional_pointer)
+    optional_pointer_list = {"fields": [
+        {"name": "total", "type": "int"},
+        {"name": "reports", "type": "list[file_pointer]", "required": False},
+    ]}
+    assert _structured_response_satisfies_schema({"total": 1}, optional_pointer_list)
+    assert not _structured_response_satisfies_schema({"total": 1, "reports": []}, optional_pointer_list)
+
+
+async def test_live_schema_generation_chooses_file_for_large_goal():
+    """Opt-in live proof through the production schema generator for a captured goal."""
+    goal_path = os.environ["SCHEMA_GEN_LIVE_GOAL_FILE"]
+    from helpers.llm import _generate_response_schema_with_rose
+
+    goal = Path(goal_path).read_text(encoding="utf-8").strip()
+    schema, title, usage = await _generate_response_schema_with_rose(
+        goal, agent_id="schema-gen-live-proof", include_title=True,
+    )
+    proof_path = os.getenv("SCHEMA_GEN_LIVE_PROOF_FILE")
+    if proof_path:
+        Path(proof_path).write_text(json.dumps({"schema": schema, "title": title, "usage": usage}, indent=2))
+    assert any(field["type"] in ("file_pointer", "list[file_pointer]") for field in schema["fields"]), schema
+    assert not any(field["type"] == "list[object]" for field in schema["fields"]), schema
+    assert all("properties" not in field for field in schema["fields"] if field["type"] == "file_pointer"), schema
+
+
 def test_prepare_schema_for_openai_nested_and_array():
     """Schema preparation handles nested models, arrays, and union types recursively."""
     from typing import List, Optional, Union
@@ -453,6 +653,7 @@ def test_convert_context_to_messages_includes_structured_values_not_schema():
                 "toolCallId": "browser-1",
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "output_schema": output_schema,
                 "structured_response": {"selected_url": "https://amazon.com/item"},
@@ -4336,6 +4537,7 @@ async def test_check_progress_browser_success_uses_fast_cache_write_only():
             "metadata": {
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "fcaptcha_risk_score_display": "0.16",
@@ -4633,6 +4835,8 @@ def test_rejected_completed_child_handoff_is_scoped_to_source_child():
                 "toolCallId": tool_call_id,
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "structured_response": {"answer": answer},
             },
         }
@@ -4698,6 +4902,14 @@ def test_rejected_completed_child_handoff_is_scoped_to_source_child():
         "browser-older",
     )
 
+    for legacy_success in (False, None):
+        old_result = completed_child("browser-unverified", "looks complete")
+        if legacy_success is None:
+            old_result["metadata"].pop("success")
+        else:
+            old_result["metadata"]["success"] = legacy_success
+        assert _completed_child_task_structured_handoff([old_result], schema) is None
+
 
 async def test_check_progress_accepts_completed_browser_task_structured_response():
     """Parent execute verifier accepts a finished browser child structured response without an LLM call."""
@@ -4720,6 +4932,8 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
             "metadata": {
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": structured_response,
             },
@@ -6227,6 +6441,7 @@ def test_build_verifier_context_messages_prunes_superseded_browser_protocol_fail
                 "toolName": "spawn_browser_agent",
                 "toolCallId": "tc-browser-1",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "fcaptcha_risk_score_display": "0.16",
@@ -6275,6 +6490,7 @@ async def test_build_llm_messages_prunes_superseded_browser_protocol_failure():
                 "toolName": "spawn_browser_agent",
                 "toolCallId": "tc-browser-1",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "fcaptcha_risk_score_display": "0.16",
@@ -8543,6 +8759,12 @@ async def run_all_tests():
     r.record("extract_nested_agent_json_blob_braces_embedded", test_extract_nested_agent_json_blob_braces_embedded)
     r.record("build_verifier_json_schema", test_build_verifier_json_schema)
     r.record("generated_agent_title_normalization", test_generated_agent_title_normalization)
+    r.record("generated_response_schema_preserves_constraints", test_generated_response_schema_preserves_constraints)
+    r.record("optional_output_keys_can_be_omitted_but_present_values_are_typed", test_optional_output_keys_can_be_omitted_but_present_values_are_typed)
+    r.record("verifier_enforces_size_bounds_and_nullable_nested_fields", test_verifier_enforces_size_bounds_and_nullable_nested_fields)
+    r.record("structured_output_schema_respects_constraints", test_structured_output_schema_respects_constraints)
+    if os.getenv("SCHEMA_GEN_LIVE_GOAL_FILE"):
+        await r.record_async("live_schema_generation_chooses_file", test_live_schema_generation_chooses_file_for_large_goal)
     r.record("verifier_score_schema_no_numeric_bounds", test_verifier_score_schema_has_no_numeric_bounds)
     r.record("build_verifier_json_schema_with_response_schema", test_build_verifier_json_schema_with_response_schema)
     r.record("build_verifier_json_schema_all_types", test_build_verifier_json_schema_all_types)

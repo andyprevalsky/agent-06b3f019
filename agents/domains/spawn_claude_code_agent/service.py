@@ -54,6 +54,7 @@ from helpers.tracing import traced
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
 from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
+from utils.response_schema_constraints import explicitly_allows_empty_value, value_satisfies_output_field_constraints
 from utils.terminal_filter import TerminalFilter
 
 logger = structlog.get_logger()
@@ -1375,20 +1376,8 @@ async def _handle_reconnect_exhausted(
 # ---------------------------------------------------------------------------
 
 
-_TERMINAL_TRUNCATION_RE = re.compile(r"\+\s*\d+\s+lines?\s*\(ctrl\+o to expand\)", re.IGNORECASE)
 _ABSOLUTE_PATH_RE = re.compile(r"/home/user/[A-Za-z0-9._/\-]+")
 _CODEX_COMMAND_RE = re.compile(r"\[Codex command (?:started|completed)\]\s*(.+)")
-
-
-def _terminal_output_is_truncated(final_output: str) -> bool:
-    """Detect Claude Code's TUI truncation marker (e.g. '+225 lines (ctrl+o to expand)').
-
-    When Claude Code prints long output, the terminal shows only the first ~3 lines
-    followed by a collapse indicator. The grounded-evidence verifier can't see the
-    hidden lines, so any schema field that needs them (e.g. a sequence list) becomes
-    unpopulatable from the visible terminal alone.
-    """
-    return bool(_TERMINAL_TRUNCATION_RE.search(final_output or ""))
 
 
 def _build_codex_evidence_summary(final_output: str) -> str:
@@ -1532,22 +1521,31 @@ def _synthesize_codex_structured_response(
         if "file_pointer" in field_type:
             path = script_paths[0] if script_paths else (paths[0] if paths else None)
             if not path:
-                return None
+                if field.get("required", True):
+                    return None
+                continue
             structured[name] = {"path": path}
         elif field_type.startswith("list") and "sequence" in descriptor:
             if not numbers:
-                return None
+                if field.get("required", True):
+                    return None
+                continue
             if "collatz" in descriptor and not _is_valid_collatz_sequence(numbers, total_steps):
-                return None
+                if field.get("required", True):
+                    return None
+                continue
             structured[name] = numbers
         elif field_type in {"integer", "int", "number"} and "step" in descriptor:
             if total_steps is None:
-                return None
+                if field.get("required", True):
+                    return None
+                continue
             structured[name] = total_steps
         elif "path" in descriptor and paths:
             structured[name] = script_paths[0] if script_paths else paths[0]
         else:
-            return None
+            if field.get("required", True):
+                return None
 
     return structured or None
 
@@ -1590,20 +1588,38 @@ def _structured_response_satisfies_declared_schema(
     output_schema: Optional[Dict[str, Any]],
     structured_response: Optional[Dict[str, Any]],
 ) -> bool:
-    """Return true only when every declared field has a non-empty value."""
+    """Return true only when every declared field satisfies its output contract."""
     fields = output_schema.get("fields", []) if isinstance(output_schema, dict) else []
     if not fields:
         return True
+    if structured_response is None:
+        # No structured evidence at all: equivalent to an empty response, so a
+        # schema whose fields are all optional is still satisfied.
+        structured_response = {}
     if not isinstance(structured_response, dict):
         return False
     for field in fields:
         if not isinstance(field, dict):
             return False
         name = field.get("name")
-        if not name or name not in structured_response:
+        if not name:
+            return False
+        if name not in structured_response:
+            if field.get("required", True) is False:
+                continue
             return False
         value = structured_response[name]
-        if value is None or value == "" or value == [] or value == {}:
+        if value is None and field.get("nullable") is True:
+            continue
+        # A present empty value only satisfies a required field when its bounds
+        # explicitly allow it; an optional field may be present and empty.
+        if (
+            field.get("required", True) is not False
+            and (value is None or value == "" or value == [] or value == {})
+            and not explicitly_allows_empty_value(value, field)
+        ):
+            return False
+        if not value_satisfies_output_field_constraints(value, field):
             return False
     return True
 
@@ -1681,7 +1697,10 @@ def _structured_response_from_code_evidence(
             str(field.get(key, "")) for key in ("name", "label", "description") if field.get(key)
         ).lower()
         if field_type.startswith("list") and "sequence" in descriptor and sequence:
-            structured[name] = sequence
+            # A sequence outside the field's declared bounds would fail the
+            # whole response; leave the field unset instead.
+            if value_satisfies_output_field_constraints(sequence, field):
+                structured[name] = sequence
         elif field_type in {"integer", "int", "number"} and "step" in descriptor:
             if total_steps is not None:
                 structured[name] = total_steps
@@ -2008,40 +2027,6 @@ async def _run_verifier(
         score = progress_result.get("score", 0.0)
         v_reasoning = progress_result.get("reasoning", "")
         structured_response = progress_result.get("structured_response")
-
-        # Terminal-truncation override: when Claude Code's TUI collapses long
-        # output (e.g. "+225 lines (ctrl+o to expand)"), the grounded-evidence
-        # verifier cannot see the hidden lines and scores partial. The parent
-        # LLM monitoring Claude Code DID see the full unfiltered conversation
-        # and signaled completion (attempt_completion=True). When that signal
-        # is present AND the process didn't crash AND the visible output is
-        # truncated, accept the parent LLM's judgment instead of penalising
-        # the agent for terminal-display truncation it cannot control. Without
-        # this override the parent loop retries spawn_claude_code_agent on
-        # every Collatz/long-output task and burns 50s+ per retry, blowing
-        # the smoke-suite cap (claude-code-agent: 65s passing → 115s+ failing).
-        terminal_truncated = _terminal_output_is_truncated(final_output)
-        if (
-            score < 1.0
-            and attempt_completion
-            and (exit_code is None or exit_code == 0)
-            and terminal_truncated
-        ):
-            logger.info(
-                "[ClaudeCode] Verifier score override: parent LLM signaled completion + terminal truncated",
-                agent_id=agent_id,
-                task_id=task_id,
-                original_score=score,
-                attempt_completion=attempt_completion,
-                exit_code=exit_code,
-            )
-            override_note = (
-                f" [override: parent LLM signaled completion (attempt_completion=True, "
-                f"exit_code={exit_code}); terminal output truncated by Claude Code TUI "
-                f"so grounded-evidence score {score:.2f} reflects display limits, not task failure]"
-            )
-            v_reasoning = v_reasoning + override_note
-            score = 1.0
 
         await save_claude_code_message(
             agent_id=agent_id,

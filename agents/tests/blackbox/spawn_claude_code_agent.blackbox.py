@@ -275,47 +275,6 @@ def test_safe_time_handles_exception():
         assert service.safe_time() == 0.0
 
 
-# ── _terminal_output_is_truncated ────────────────────────────────────
-
-
-def test_terminal_truncation_detects_collapse_marker():
-    """Detects Claude Code's standard '+N lines (ctrl+o to expand)' marker."""
-    from domains.spawn_claude_code_agent.service import _terminal_output_is_truncated
-
-    sample = (
-        "● Bash(python3 -c \"...\")\n"
-        "  ⎿  27\n"
-        "     82\n"
-        "     41\n"
-        "     … +110 lines (ctrl+o to expand)\n"
-    )
-    assert _terminal_output_is_truncated(sample) is True
-
-
-def test_terminal_truncation_detects_high_line_count():
-    """A larger '+225 lines' marker (the failing-smoke case) is also detected."""
-    from domains.spawn_claude_code_agent.service import _terminal_output_is_truncated
-
-    sample = "  ⎿  27\n     82\n     … +225 lines (ctrl+o to expand)\n"
-    assert _terminal_output_is_truncated(sample) is True
-
-
-def test_terminal_truncation_no_marker_returns_false():
-    """Untruncated output (full sequence visible) yields False."""
-    from domains.spawn_claude_code_agent.service import _terminal_output_is_truncated
-
-    sample = "27\n82\n41\n124\n62\n31\nTotal steps: 6\n"
-    assert _terminal_output_is_truncated(sample) is False
-
-
-def test_terminal_truncation_handles_empty_output():
-    """Empty/None output is not truncated (no false positives)."""
-    from domains.spawn_claude_code_agent.service import _terminal_output_is_truncated
-
-    assert _terminal_output_is_truncated("") is False
-    assert _terminal_output_is_truncated(None) is False
-
-
 # ── _build_codex_evidence_summary ───────────────────────────────────
 
 
@@ -596,6 +555,70 @@ def test_structured_response_from_output_files_keeps_mixed_schema_file_fields():
     assert _structured_response_from_output_files(schema, files) == {
         "report": {"path": "/home/user/output/report.txt"}
     }
+
+
+def test_code_evidence_omits_optional_sequence_outside_its_bounds():
+    """An over-long optional sequence must not invalidate valid required fields."""
+    from domains.spawn_claude_code_agent.service import (
+        _structured_response_from_code_evidence,
+        _structured_response_satisfies_declared_schema,
+    )
+
+    terminal = "\n".join(["3", "10", "5", "16", "8", "4", "2", "1", "Total steps: 7"])
+    schema = {"fields": [
+        {"name": "total_steps", "type": "int", "description": "total step count"},
+        {"name": "collatz_sequence", "type": "list[int]", "description": "full sequence",
+         "required": False, "maxItems": 3},
+    ]}
+    structured = _structured_response_from_code_evidence(schema, [], [], terminal)
+    assert structured == {"total_steps": 7}, structured
+    assert _structured_response_satisfies_declared_schema(schema, structured)
+    unbounded = {"fields": [schema["fields"][0], {**schema["fields"][1], "maxItems": None}]}
+    assert _structured_response_from_code_evidence(unbounded, [], [], terminal)["collatz_sequence"] == [
+        3, 10, 5, 16, 8, 4, 2, 1,
+    ]
+
+
+def test_declared_schema_fast_path_enforces_bounds_and_nullable_fields():
+    """Code child fast paths must honor the same contract as the verifier."""
+    from domains.spawn_claude_code_agent.service import _structured_response_satisfies_declared_schema
+
+    schema = {"fields": [
+        {"name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
+         "properties": [{"name": "title", "type": "str", "minLength": 3}]},
+        {"name": "note", "type": "str", "nullable": True},
+    ]}
+    valid = {"items": [{"title": "Desk"}, {"title": "Lamp"}], "note": None}
+    assert _structured_response_satisfies_declared_schema(schema, valid)
+    assert not _structured_response_satisfies_declared_schema(schema, {**valid, "items": valid["items"][:1]})
+    assert not _structured_response_satisfies_declared_schema(schema, {**valid, "items": valid["items"] * 2})
+    assert not _structured_response_satisfies_declared_schema(
+        schema, {**valid, "items": [{"title": "No"}, valid["items"][1]]}
+    )
+    assert not _structured_response_satisfies_declared_schema(schema, {"items": valid["items"]})
+    optional_integer = {"fields": [
+        {"name": "items", "type": "list[str]", "required": True},
+        {"name": "steps", "type": "int", "required": False},
+    ]}
+    assert _structured_response_satisfies_declared_schema(optional_integer, {"items": ["done"]})
+    assert not _structured_response_satisfies_declared_schema(optional_integer, {"items": ["done"], "steps": None})
+    assert not _structured_response_satisfies_declared_schema(optional_integer, {"items": ["done"], "steps": "three"})
+    zero = {"fields": [{"name": "items", "type": "list[str]", "maxItems": 0}]}
+    assert _structured_response_satisfies_declared_schema(zero, {"items": []})
+    assert not _structured_response_satisfies_declared_schema(zero, {"items": ["extra"]})
+    optional_empty = {"fields": [
+        {"name": "items", "type": "list[str]", "required": True},
+        {"name": "note", "type": "str", "required": False},
+        {"name": "tags", "type": "list[str]", "required": False},
+        {"name": "links", "type": "list[str]", "required": False, "minItems": 1},
+    ]}
+    assert _structured_response_satisfies_declared_schema(optional_empty, {"items": ["done"], "note": "", "tags": []})
+    assert not _structured_response_satisfies_declared_schema(optional_empty, {"items": ["done"], "links": []})
+    assert not _structured_response_satisfies_declared_schema(optional_empty, {"items": [], "note": ""})
+    all_optional = {"fields": [{"name": "note", "type": "str", "required": False}]}
+    assert _structured_response_satisfies_declared_schema(all_optional, None)
+    assert _structured_response_satisfies_declared_schema(all_optional, {})
+    assert not _structured_response_satisfies_declared_schema(optional_empty, None)
 
 
 def test_build_code_event_context_uses_json_and_extracted_files():
@@ -1665,16 +1688,8 @@ async def test_run_verifier_uses_code_event_json_for_codex_context():
     assert "code_agent_events" in seen_context["context"][1]["text"]
 
 
-async def test_run_verifier_truncation_override_promotes_to_pass():
-    """When parent LLM signals completion AND terminal output is truncated, partial score → 1.0.
-
-    Regression for v11 smoke claude-code-agent failure: the verifier scored 0.5
-    because Claude Code's TUI collapsed the Collatz sequence ('+225 lines (ctrl+o
-    to expand)'), and the parent agent re-spawned spawn_claude_code_agent on
-    every retry, blowing the 114s smoke cap. The override accepts the parent
-    LLM's attempt_completion=True signal as proof of completion when the visible
-    terminal evidence is mechanically truncated.
-    """
+async def test_run_verifier_truncation_preserves_rejection():
+    """A truncated terminal and parent completion claim cannot override the verifier."""
     from domains.spawn_claude_code_agent import service
     from utils.terminal_filter import TerminalFilter
 
@@ -1712,9 +1727,8 @@ async def test_run_verifier_truncation_override_promotes_to_pass():
             attempt_completion=True,
             exit_code=None,
         )
-    assert score == 1.0, f"expected truncation override to 1.0, got {score}"
-    assert "override" in reasoning.lower()
-    assert "attempt_completion=True" in reasoning
+    assert score == 0.5
+    assert reasoning == "Cannot ground sequence_output: only first 3 of ~113 lines visible."
 
 
 async def test_run_verifier_no_override_when_no_truncation():
@@ -1750,7 +1764,7 @@ async def test_run_verifier_no_override_when_no_truncation():
             attempt_completion=True,
             exit_code=None,
         )
-    assert score == 0.5, "no truncation marker → no override; verifier score preserved"
+    assert score == 0.5
 
 
 async def test_run_verifier_no_override_when_attempt_completion_false():
@@ -1786,7 +1800,7 @@ async def test_run_verifier_no_override_when_attempt_completion_false():
             attempt_completion=False,
             exit_code=None,
         )
-    assert score == 0.5, "no attempt_completion signal → no override"
+    assert score == 0.5
 
 
 async def test_run_verifier_no_override_when_already_passing():
@@ -1823,7 +1837,7 @@ async def test_run_verifier_no_override_when_already_passing():
             exit_code=None,
         )
     assert score == 1.0
-    assert "override" not in reasoning.lower(), "should not annotate already-passing reasoning"
+    assert reasoning == "All fields populated."
 
 
 # ── _run_agentic_loop ────────────────────────────────────────────────
@@ -3625,10 +3639,6 @@ async def _run_all_tests():
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record("safe_time_ok", test_safe_time_returns_float)
     r.record("safe_time_fallback", test_safe_time_handles_exception)
-    r.record("trunc_detect_marker", test_terminal_truncation_detects_collapse_marker)
-    r.record("trunc_detect_high_count", test_terminal_truncation_detects_high_line_count)
-    r.record("trunc_no_marker", test_terminal_truncation_no_marker_returns_false)
-    r.record("trunc_handles_empty", test_terminal_truncation_handles_empty_output)
     r.record("codex_evidence_summary", test_codex_evidence_summary_extracts_paths_and_commands)
     r.record("codex_structured_fallback", test_codex_structured_response_synthesizes_all_fields)
     r.record("codex_structured_json_steps", test_codex_structured_response_uses_json_step_field)
@@ -3657,6 +3667,8 @@ async def _run_all_tests():
         "structured_from_output_mixed_schema",
         test_structured_response_from_output_files_keeps_mixed_schema_file_fields,
     )
+    r.record("declared_schema_fast_path_bounds", test_declared_schema_fast_path_enforces_bounds_and_nullable_fields)
+    r.record("code_evidence_omits_out_of_bounds_sequence", test_code_evidence_omits_optional_sequence_outside_its_bounds)
     r.record("code_event_context_json", test_build_code_event_context_uses_json_and_extracted_files)
     # build_usage_items
     r.record("usage_items_both", test_build_usage_items_both_llm_and_service)
@@ -3736,7 +3748,7 @@ async def _run_all_tests():
         test_run_verifier_uses_code_event_json_for_codex_context,
     )
     await r.record_async(
-        "run_verifier_truncation_override", test_run_verifier_truncation_override_promotes_to_pass
+        "run_verifier_truncation_preserves_rejection", test_run_verifier_truncation_preserves_rejection
     )
     await r.record_async("run_verifier_no_override_no_trunc", test_run_verifier_no_override_when_no_truncation)
     await r.record_async(

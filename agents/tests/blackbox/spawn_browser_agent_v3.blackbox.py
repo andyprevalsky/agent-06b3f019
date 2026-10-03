@@ -512,579 +512,30 @@ def test_should_skip_input_text_refocus_after_same_index_click():
     )
 
 
-def test_visible_result_completion_rewrites_post_submit_wait():
-    """c3762be3 already stated score 0.07 + bot verdict, then waited 6–10s.
+async def test_browser_activity_preserves_requested_start_url():
+    """Benchmark metadata must not replace the agent's browser destination."""
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
-    A post-submit wait after that reasoning must become attempt_completion so
-    the 420s smoke cap cannot be burned on PoW retries.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        forced_visible_result_completion_action,
-        should_force_visible_result_completion,
-    )
-
-    stated = (
-        'A risk score of "0.07" is shown, but there\'s a "Bot detected - form blocked" '
-        'message. The form was blocked with reason "pow_not_satisfied".'
-    )
-    prior_submit = ['click: {"params": {"index": 12}, "text": "Submit (Protected by Invisible"}']
-    assert should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning=stated,
-        action_summaries=prior_submit,
-    )
-    forced = forced_visible_result_completion_action(stated)
-    assert forced["action"] == "attempt_completion"
-    assert "0.07" in forced["params"]["reasoning"]
-
-
-def test_identical_verifier_reject_circuit_soft_accepts_complete_output():
-    """9f53aed4: identical 0.5 rejects with complete output must stop the loop.
-
-    Live example.com had no H1; verifier kept scoring 0.5 with the same
-    reasoning while already emitting main_heading + page_url. Soft-accept
-    after the streak so the browser agent completes instead of hub-pause.
-    Soft-accept is unverified (handler must not report success=True).
-    """
-    from domains.spawn_browser_agent_v3.verifier_reject_circuit import (
-        next_identical_reject_streak,
-        should_soft_accept_identical_verifier_reject,
-        structured_response_covers_schema,
-    )
-
-    schema = {
-        "fields": [
-            {"name": "main_heading", "type": "str", "required": True},
-            {"name": "page_url", "type": "str", "required": True},
-        ]
-    }
-    output = {
-        "main_heading": "No H1 exists on the inspected page",
-        "page_url": "https://example.com/",
-    }
-    fingerprint = ""
-    streak = 0
-    reason = (
-        "The live-page checks found zero H1 elements; Example Domain is the "
-        "document title, not an H1."
-    )
-    for _ in range(3):
-        fingerprint, streak = next_identical_reject_streak(
-            previous_fingerprint=fingerprint,
-            previous_streak=streak,
-            reasoning=reason,
-            score=0.5,
+    chosen_url = "https://www.bluebottlecoffee.com/us/eng/cafes/ferry-building"
+    with (
+        patch.dict(os.environ, {"BENCHMARK_ACTIVE_TASK_LIVE_TARGET": "https://order.online/fixture"}),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.WorldModelToolExecutionAdapter.from_env",
+            return_value=SimpleNamespace(should_simulate=lambda _action: False),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._spawn_browser_agent_activity_v3_real",
+            new_callable=AsyncMock,
+        ) as real_browser,
+    ):
+        real_browser.return_value = {"status": "completed"}
+        await spawn_browser_agent_activity_v3(
+            user_id="user", agent_id="agent", goal="Open the selected cafe", tool_call_id="tool",
+            start_url=chosen_url,
         )
-    assert streak == 3
-    assert should_soft_accept_identical_verifier_reject(
-        consecutive_identical=streak,
-        structured_response=output,
-        response_schema=schema,
-    )
-    assert not should_soft_accept_identical_verifier_reject(
-        consecutive_identical=2,
-        structured_response=output,
-        response_schema=schema,
-    )
-    assert not should_soft_accept_identical_verifier_reject(
-        consecutive_identical=3,
-        structured_response={"page_url": "https://example.com/"},
-        response_schema=schema,
-    )
-    # Optional-only schema must still require non-empty usable output.
-    optional_only = {
-        "fields": [
-            {"name": "notes", "type": "str", "required": False},
-        ]
-    }
-    assert not structured_response_covers_schema({}, optional_only)
-    assert not structured_response_covers_schema({"notes": ""}, optional_only)
-    assert structured_response_covers_schema({"notes": "seen"}, optional_only)
-    # Unknown keys (e.g. error) must not satisfy an optional-only schema.
-    assert not structured_response_covers_schema(
-        {"error": "extraction failed"}, optional_only
-    )
-    # Malformed fields collections must not fall through to schema-less accept.
-    assert not structured_response_covers_schema(
-        {"main_heading": "x"}, {"fields": {"name": "main_heading"}}
-    )
-    assert not structured_response_covers_schema({"main_heading": "x"}, {"fields": []})
-    # Score changes reset the streak even when reasoning matches.
-    fingerprint, streak = next_identical_reject_streak(
-        previous_fingerprint=fingerprint,
-        previous_streak=streak,
-        reasoning=reason,
-        score=0.9,
-    )
-    assert streak == 1
-    # Different reason resets the streak.
-    fingerprint, streak = next_identical_reject_streak(
-        previous_fingerprint=fingerprint,
-        previous_streak=streak,
-        reasoning="Need a screenshot of the cart total.",
-        score=0.5,
-    )
-    assert streak == 1
-    fingerprint, streak = next_identical_reject_streak(
-        previous_fingerprint=fingerprint,
-        previous_streak=streak,
-        reasoning=reason,
-        score=1.0,
-    )
-    assert streak == 0
 
-
-def test_handler_soft_accept_reports_unverified_not_verified_success():
-    """Soft-accept must not collapse into a verified success=True completion."""
-    from pathlib import Path
-
-    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
-    assert "completion_success = not verifier_soft_accepted" in source
-    assert '"verifier_soft_accepted": verifier_soft_accepted' in source
-    assert "Identical verifier reject circuit: completing " in source
-    assert "unverified with already-populated structured" in source
-    assert 'result.get("verifier_soft_accepted")' in source
-
-
-def test_handler_wires_identical_verifier_reject_circuit():
-    """attempt_completion path must import and call the reject circuit helpers."""
-    import ast
-    from pathlib import Path
-
-    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
-    tree = ast.parse(source)
-    imported = set()
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.module == "domains.spawn_browser_agent_v3.verifier_reject_circuit":
-            imported.update(alias.name for alias in node.names)
-        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("verifier_reject_circuit"):
-            imported.update(alias.name for alias in node.names)
-    # Relative import inside the package
-    if "should_soft_accept_identical_verifier_reject" not in imported:
-        assert "from .verifier_reject_circuit import" in source
-        assert "should_soft_accept_identical_verifier_reject" in source
-        assert "next_identical_reject_streak" in source
-    assert "Soft-accepting browser attempt_completion after" in source
-
-
-def test_visible_result_completion_rewrites_post_submit_scroll():
-    """b234cfa8 stated Risk Score 0.11 + bot verdict, then scrolled until 420s.
-
-    Idle scroll/screenshot after submit+stated result must also force completion;
-    wait-only rewriting leaves scroll loops uncapped.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    stated = (
-        'The form was submitted and results are showing: Risk Score 0.11, and a '
-        '"Bot detected - form blocked" message. Let me scroll to see full details.'
-    )
-    prior_submit = ['click: {"text": "Submit (Protected by Invisible"}']
-    assert should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning=stated,
-        action_summaries=prior_submit,
-    )
-    assert should_force_visible_result_completion(
-        action_name="screenshot",
-        last_reasoning=stated,
-        action_summaries=prior_submit,
-    )
-
-
-def test_visible_result_completion_does_not_rewrite_after_navigation():
-    """Submit → navigate → scroll must not complete against a stale score."""
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    stated = 'Risk Score 0.11, Bot detected - form blocked'
-    after_nav = [
-        'click: {"text": "Submit (Protected by Invisible"}',
-        'navigate: https://webdecoy.com/other',
-    ]
-    assert not should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning=stated,
-        action_summaries=after_nav,
-    )
-
-
-def test_visible_result_completion_does_not_rewrite_after_navback_or_open_new_tab():
-    """Producer names navback/open_new_tab must count as navigation.
-
-    service_actions records those exact action names. If the marker set only
-    has go_back/new_tab aliases, a later idle action can complete against the
-    pre-navigation score.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    stated = 'Risk Score 0.11, Bot detected - form blocked'
-    submit = {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"}
-    for nav_action in ("navback", "open_new_tab"):
-        assert not should_force_visible_result_completion(
-            action_name="scroll",
-            last_reasoning=stated,
-            action_entries=[submit, {"action": nav_action}],
-        ), nav_action
-
-
-def test_visible_result_completion_ignores_pre_navigation_evidence_after_later_submit():
-    """submit(A) → score A → navigate(B) → submit(B) → scroll must not use score A.
-
-    history_has_navigation_after_submit is false (no nav after latest submit),
-    but prior reasoning still describes page A. Only post-navigation evidence
-    (current-turn reasoning) may force completion.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    stale_score_a = 'Risk Score 0.07, Bot detected - form blocked (page A)'
-    history = [
-        'click: {"text": "Submit (Protected by Invisible"}',
-        'navigate: https://webdecoy.com/page-b',
-        'click: {"text": "Submit (Protected by Invisible"}',
-    ]
-    assert not should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning="Scrolling to inspect page B results.",
-        prior_reasoning_messages=[stale_score_a],
-        action_summaries=history,
-    )
-    # Fresh score stated on the current turn after the later submit is fine.
-    assert should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning='Risk Score 0.11, Bot detected - form blocked on page B',
-        prior_reasoning_messages=[stale_score_a],
-        action_summaries=history,
-    )
-
-
-def test_visible_result_completion_prefers_entries_over_concatenated_summaries():
-    """Passing both summaries and entries must not concatenate timelines.
-
-    Handler always passes both. Concatenating summaries then entries makes a
-    navigate that only appears in summaries look like it precedes a later
-    submit that only appears in entries (or vice versa), breaking index math.
-    Prefer action_entries when present.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    stated = 'Risk Score 0.11, Bot detected - form blocked'
-    # Summaries alone would show navigate AFTER submit (block force).
-    summaries = [
-        'click: {"text": "Submit (Protected by Invisible"}',
-        'navigate: https://webdecoy.com/other',
-    ]
-    # Entries alone: submit only, no navigate (would allow force).
-    entries = [
-        {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-    ]
-    # If concatenated (summaries+entries), last submit is in the entries half
-    # after navigate → nav_before_latest_submit true OR nav_after depending on
-    # indices. Preferring entries must allow force (no nav in entries).
-    assert should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning=stated,
-        action_summaries=summaries,
-        action_entries=entries,
-    )
-    # Summaries-only still respects navigate-after-submit.
-    assert not should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning=stated,
-        action_summaries=summaries,
-    )
-
-
-def test_visible_result_completion_does_not_rewrite_before_submit():
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    stated = 'A risk score of "0.07" is shown, Bot detected - form blocked'
-    assert not should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning=stated,
-        action_summaries=['click: {"text": "I\'m not a robot"}'],
-    )
-    assert not should_force_visible_result_completion(
-        action_name="click",
-        last_reasoning=stated,
-        action_summaries=['click: {"text": "Submit (Protected by Invisible"}'],
-    )
-    assert not should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning="Scrolling to bring the checkbox into view.",
-        action_summaries=['click: {"text": "Submit (Protected by Invisible"}'],
-    )
-    assert not should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning="Scrolling to bring the checkbox into view.",
-        action_summaries=['click: {"text": "Submit (Protected by Invisible"}'],
-    )
-
-
-def test_visible_result_completion_rewrites_post_submit_score_without_verdict():
-    """6ba2a6bd stated numeric score 0.11 after Submit, then scrolled/waited.
-
-    The earlier helper required a verdict marker and only rewrote `wait`, so
-    this trajectory burned the remaining 420s cap after the score was already
-    visible. Score-only + idle observation after submit must complete.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        forced_visible_result_completion_action,
-        should_force_visible_result_completion,
-    )
-
-    stated = 'The form was submitted and a score "0.07" appeared below the form.'
-    prior_submit = ['click: {"params": {"index": 12}, "text": "Submit (Protected by Invisible"}']
-    for action_name in ("scroll_down", "wait", "screenshot"):
-        assert should_force_visible_result_completion(
-            action_name=action_name,
-            last_reasoning=stated,
-            action_summaries=prior_submit,
-        ), action_name
-    forced = forced_visible_result_completion_action(stated)
-    assert forced["action"] == "attempt_completion"
-    assert "0.07" in forced["params"]["reasoning"]
-
-
-def test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score():
-    """15a85ea0 evaluate already returned score 0.15 + bot verdict, then waited.
-
-    The earlier helper only scanned LLM reasoning. This trajectory named
-    pow_not_satisfied in thinking (no 'risk score' words) and kept waiting /
-    inspecting PoW until the 420s cap. Post-submit evaluate/tool-result text
-    that already contains the visible score + form verdict must force
-    completion on the next idle action, including network/log inspection.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    pow_retry_reasoning = (
-        'The submission is being blocked with reason "pow_not_satisfied" — the '
-        "proof-of-work likely hasn't completed yet. Let me wait longer for the "
-        "background PoW to finish, then submit again."
-    )
-    evaluate_after_submit = {
-        "action": "evaluate",
-        "result": {
-            "success": True,
-            "message": (
-                "Executed JS, result: Invisible Mode\n"
-                "Submit (Protected by Invisible CAPTCHA)\n"
-                "0.15\n"
-                "Risk Score (lower = human)\n"
-                "Bot detected - form blocked\n"
-                '{\n  "reason": "pow_not_satisfied",\n'
-                '  "score": 0.14629999999999999,\n'
-                '  "success": false\n}'
-            ),
-        },
-    }
-    history = [
-        {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-        evaluate_after_submit,
-    ]
-    for action_name in ("wait", "screenshot", "read_network_requests", "read_logs"):
-        assert should_force_visible_result_completion(
-            action_name=action_name,
-            last_reasoning=pow_retry_reasoning,
-            action_entries=history,
-        ), action_name
-    # Static page chrome before submit (Risk Score label + version) must not force.
-    pre_submit_page = {
-        "action": "evaluate",
-        "result": {
-            "message": "Running v1.34.1\nRisk Score (lower = human)\nI'm not a robot\nVerified!"
-        },
-    }
-    assert not should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning="Waiting for the checkbox to settle.",
-        action_entries=[
-            pre_submit_page,
-            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-        ],
-    )
-
-
-def test_visible_result_completion_rewrites_recovery_after_allowed_result():
-    """A successful visible result must beat a redundant recovery request."""
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    result_dom = {
-        "action": "read_browser_state",
-        "result": {
-            "message": (
-                "0.02\nRisk Score (lower = human)\n"
-                "Form submission allowed!\n"
-                '{"action":"form_submit","recommendation":"allow","success":true}'
-            )
-        },
-    }
-    history = [
-        {"action": "click", "element_description": "[567] button 'Submit (Protected by Invisible'"},
-        result_dom,
-    ]
-
-    assert should_force_visible_result_completion(
-        action_name="recover_from_challenge",
-        last_reasoning="",
-        action_entries=history,
-    )
-    assert not should_force_visible_result_completion(
-        action_name="recover_from_challenge",
-        last_reasoning="",
-        action_entries=[history[0]],
-    )
-
-
-def test_visible_result_completion_uses_current_observed_dom_after_submit():
-    """A live post-submit DOM result must end redundant screenshot/scroll turns."""
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    submit = {"action": "click", "element_description": "[2716] button 'Submit (Protected by Invisible CAPTCHA)'"}
-    result_dom = "0.00\nRisk Score (lower = human)\nForm submission allowed!"
-    assert should_force_visible_result_completion(
-        action_name="screenshot",
-        last_reasoning="Let me take a screenshot to see the full results card.",
-        action_entries=[{"action": "goto"}, submit],
-        observed_dom=result_dom,
-    )
-    assert not should_force_visible_result_completion(
-        action_name="screenshot",
-        last_reasoning="",
-        action_entries=[{"action": "goto"}, submit],
-        observed_dom="Risk Score (lower = human)\nthreshold 0.15\nForm submission allowed!",
-    )
-    assert not should_force_visible_result_completion(
-        action_name="screenshot",
-        last_reasoning="",
-        action_entries=[{"action": "goto"}, submit, {"action": "goto"}],
-        observed_dom=result_dom,
-    )
-
-
-def test_visible_result_completion_ignores_submit_words_inside_observation_dumps():
-    """Page chrome saying 'click Submit' must not look like a later submit action."""
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    evaluate_with_chrome = {
-        "action": "evaluate",
-        "result": {
-            "message": (
-                "click the Submit button\n"
-                "0.15\n"
-                "Risk Score (lower = human)\n"
-                "Bot detected - form blocked"
-            )
-        },
-    }
-    assert should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning='Blocked with reason "pow_not_satisfied"; inspecting logs.',
-        action_entries=[
-            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-            evaluate_with_chrome,
-        ],
-    )
-
-
-def test_visible_result_completion_ignores_post_submit_version_decimal_without_score():
-    """Bot detected + v1.34.1 after submit is not a visible FCaptcha score."""
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        observation_states_visible_fcaptcha_result,
-        reasoning_states_visible_fcaptcha_result,
-        should_force_visible_result_completion,
-    )
-
-    version_only = (
-        "Running v1.34.1\nRisk Score (lower = human)\nBot detected - form blocked"
-    )
-    assert not observation_states_visible_fcaptcha_result(version_only)
-    assert not should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning='Blocked with reason "pow_not_satisfied"; inspecting logs.',
-        action_entries=[
-            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-            {"action": "evaluate", "result": {"message": version_only}},
-        ],
-    )
-    # v1.0.15 still contains a unit-interval token (`0.15`) after a dotted version.
-    version_unit_fragment = "Bot detected - form blocked; browser version v1.0.15"
-    assert not observation_states_visible_fcaptcha_result(version_unit_fragment)
-    assert not should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning="Risk Score; Bot detected",
-        action_entries=[
-            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-            {"action": "evaluate", "result": {"message": version_unit_fragment}},
-        ],
-    )
-    assert not observation_states_visible_fcaptcha_result("Bot detected; threshold 0.15")
-    assert reasoning_states_visible_fcaptcha_result("Risk Score: 0")
-    assert reasoning_states_visible_fcaptcha_result("Risk Score: 1.0")
-    assert reasoning_states_visible_fcaptcha_result(
-        'The form was submitted and a score "0.07" appeared below the form.'
-    )
-    assert reasoning_states_visible_fcaptcha_result("a score 0 appeared")
-    assert reasoning_states_visible_fcaptcha_result("a score 1 appeared")
-    assert reasoning_states_visible_fcaptcha_result("a score 1.0 appeared")
-    assert not reasoning_states_visible_fcaptcha_result("Risk Score; Bot detected")
-    assert not reasoning_states_visible_fcaptcha_result("threshold 0.15")
-    assert not reasoning_states_visible_fcaptcha_result("score v1.0")
-    assert not observation_states_visible_fcaptcha_result(
-        'Bot detected; {"score": 2, "success": false}'
-    )
-    assert not observation_states_visible_fcaptcha_result(
-        'Bot detected; {"score": 1.34, "success": false}'
-    )
-    assert observation_states_visible_fcaptcha_result(
-        'Bot detected; {"score": 0.15, "success": false}'
-    )
-    assert not observation_states_visible_fcaptcha_result("Bot detected; Risk Score: 0.15.2")
-    assert not observation_states_visible_fcaptcha_result("Bot detected; Risk Score: 1.0.15")
-    # Observation dumps stay labeled; bare "a score 0.07 appeared" is reasoning-only.
-    assert not observation_states_visible_fcaptcha_result(
-        'Bot detected - form blocked; a score "0.07" appeared below the form.'
-    )
-    # Static Risk Score chrome plus an unrelated 0.xx must not complete.
-    assert not observation_states_visible_fcaptcha_result(
-        "Bot detected - form blocked\nRisk Score (lower = human)\nthreshold 0.15"
-    )
-    assert not observation_states_visible_fcaptcha_result(
-        "Bot detected; Risk Score threshold: 0.15"
-    )
-    assert not observation_states_visible_fcaptcha_result(
-        "Bot detected; Risk Score threshold of 0.15"
-    )
-    # FCaptcha and Score often sit on adjacent evaluate lines after unescape.
-    multiline_fcaptcha = "Bot detected\nFCaptcha\nScore: 0.15"
-    assert observation_states_visible_fcaptcha_result(multiline_fcaptcha)
-    assert should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning='Blocked with reason "pow_not_satisfied"; waiting.',
-        action_entries=[
-            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-            {"action": "evaluate", "result": {"message": multiline_fcaptcha}},
-        ],
-    )
+    assert real_browser.await_args.kwargs["start_url"] == chosen_url
+    assert real_browser.await_args.kwargs["goal"] == "Open the selected cafe"
 
 
 def test_max_steps_best_effort_prefers_last_reasoning():
@@ -1356,10 +807,6 @@ def test_action_history_restores_across_activity_boundary():
 
 async def test_action_history_records_child_text_for_submit_button():
     from browser_tools.dom_service import ActionHistory
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        history_has_submit_click,
-        should_force_visible_result_completion,
-    )
 
     button = SimpleNamespace(
         tag_name="button",
@@ -1374,12 +821,6 @@ async def test_action_history_records_child_text_for_submit_button():
     await history.record_action(dom_service=dom, action="click", index=2716, result={"success": True})
     entries = history.get_entries()
     assert entries[0]["element_description"] == "[2716] button 'Submit (Protected by Invisible CAPTCHA)'"
-    assert history_has_submit_click(action_entries=entries)
-    assert should_force_visible_result_completion(
-        action_name="screenshot",
-        last_reasoning='I can see the risk score "0.07" is displayed',
-        action_entries=[{"action": "goto", "result": {"success": True}}, *entries],
-    )
 
 async def test_action_history_resume_preserves_monotonic_step_numbers():
     from browser_tools.dom_service import ActionHistory
@@ -10025,12 +9466,9 @@ async def test_action_history_record_action_accepts_tuple_coordinates():
     assert dict_entry.coordinates == {"x": 3, "y": 4}
 
 
-async def test_child_text_submit_click_can_complete_visible_result():
-    """A nested button label must survive into history for post-submit completion."""
+async def test_child_text_submit_click_is_recorded():
+    """A nested button label survives in the browser action history."""
     from browser_tools.dom_service import ActionHistory
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
 
     submit_button = SimpleNamespace(
         tag_name="button",
@@ -10045,11 +9483,6 @@ async def test_child_text_submit_click_can_complete_visible_result():
     click = await history.record_action(dom_service=dom, action="click", index=2713)
 
     assert "Submit (Protected by Invisible CAPTCHA)" in click.element_description
-    assert should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning='The form showed Risk Score: 0.07 and "Bot detected - form blocked".',
-        action_entries=history.get_entries(),
-    )
 
 
 async def test_execute_drag_records_through_real_action_history():
@@ -11287,6 +10720,128 @@ async def test_execute_action_request_payment_card_rejects_duplicate_after_card_
     assert "Do not call request_payment_card again" in out["error"]
     assert "card_number" in out["error"]
     assert "line_items" not in out["error"]
+
+_TEST_SHOP_ORIGIN = "https://rose-cloud-bench.ngrok.app"
+_TEST_SHOP_PAGE_IMAGES = [
+    f"https://placehold.co/320x220/png?text={name}"
+    for name in ("Aurora+Notebook", "Copper+Pen", "Ceramic+Mug", "Canvas+Tote", "Desk+Lamp")
+]
+
+
+def _test_shop_receipt(image_urls):
+    items = (
+        ("Aurora Notebook", "aurora-notebook", "4.8 stars", "1,284 reviews", 1200),
+        ("Ceramic Mug", "ceramic-mug", "4.6 stars", "932 reviews", 900),
+        ("Canvas Tote", "canvas-tote", "4.9 stars", "2,051 reviews", 1500),
+    )
+    return {
+        "merchant": "Rose Labs Test Payment",
+        "currency": "USD",
+        "line_items": [
+            {
+                "name": name,
+                "image_url": image_url,
+                "product_url": f"{_TEST_SHOP_ORIGIN}/p/{slug}",
+                "rating": rating,
+                "review_count": reviews,
+                "unit_price_cents": cents,
+                "quantity": 1,
+                "line_total_cents": cents,
+            }
+            for (name, slug, rating, reviews, cents), image_url in zip(items, image_urls)
+        ],
+        "fees": [{"label": "Tax", "amount_cents": 297}, {"label": "Shipping", "amount_cents": 499}],
+        "subtotal_cents": 3600,
+        "total_cents": 4396,
+    }
+
+
+async def test_execute_action_request_payment_card_rejects_image_url_not_rendered_on_page():
+    """Agent 638c2b87: the browser LLM reasoned `320x220` but emitted `220x220` for
+    Canvas Tote. The page never rendered that asset, so the approval must not show it."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    dom.get_page_image_urls = AsyncMock(return_value=list(_TEST_SHOP_PAGE_IMAGES))
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    receipt = _test_shop_receipt(
+        [
+            "https://placehold.co/320x220/png?text=Aurora+Notebook",
+            "https://placehold.co/320x220/png?text=Ceramic+Mug",
+            "https://placehold.co/220x220/png?text=Canvas+Tote",
+        ]
+    )
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "request_payment_card", "params": receipt},
+        current_url=f"{_TEST_SHOP_ORIGIN}/test_payment",
+        trusted_page_urls=[f"{_TEST_SHOP_ORIGIN}/test_payment"],
+    )
+
+    assert out.get("status") != "awaiting_payment_card_approval", out
+    assert out["success"] is False
+    assert "line_items[2].image_url" in out["error"]
+    assert "https://placehold.co/220x220/png?text=Canvas+Tote" in out["error"]
+    assert "line_items[0]" not in out["error"]
+    dom.get_page_image_urls.assert_awaited_once()
+
+
+async def test_execute_action_request_payment_card_accepts_image_urls_rendered_on_page():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    dom.get_page_image_urls = AsyncMock(return_value=list(_TEST_SHOP_PAGE_IMAGES))
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    receipt = _test_shop_receipt(
+        [
+            # Same asset over http: canonicalized downstream, so it is still the page image.
+            "http://placehold.co/320x220/png?text=Aurora+Notebook",
+            "https://placehold.co/320x220/png?text=Ceramic+Mug",
+            None,
+        ]
+    )
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "request_payment_card", "params": receipt},
+        current_url=f"{_TEST_SHOP_ORIGIN}/test_payment",
+        trusted_page_urls=[f"{_TEST_SHOP_ORIGIN}/test_payment"],
+    )
+
+    assert "error" not in out, out
+    assert out["status"] == "awaiting_payment_card_approval"
+    assert out["payment_request"] == receipt
+    dom.get_page_image_urls.assert_awaited_once()
+
+
+async def test_execute_action_request_payment_card_without_image_urls_skips_page_read():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    dom.get_page_image_urls = AsyncMock(return_value=[])
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "request_payment_card", "params": _test_shop_receipt([None, None, None])},
+        current_url=f"{_TEST_SHOP_ORIGIN}/test_payment",
+    )
+
+    assert out["status"] == "awaiting_payment_card_approval"
+    dom.get_page_image_urls.assert_not_awaited()
 
 async def test_execute_action_dropdown_options_missing_element():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -14328,9 +13883,6 @@ def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
 async def test_execute_click_preserves_submit_target_after_rerender():
     from browser_tools.dom_service import ActionHistory
     from domains.spawn_browser_agent_v3.service_actions import _execute_click
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
 
     element = SimpleNamespace(
         tag_name="button",
@@ -14368,16 +13920,9 @@ async def test_execute_click_preserves_submit_target_after_rerender():
     assert history.get_entries()[0]["element_description"] == (
         '<button "Submit (Protected by Invisible"'
     )
-    assert should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning='Risk Score: 0.07; Bot detected - form blocked.',
-        action_entries=history.get_entries(),
-    )
-    assert not should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning='Risk Score: 0.07; Bot detected - form blocked.',
-        action_entries=[{**history.get_entries()[0], "element_description": '<button "Checkbox">'}],
-    )
+    # The forced visible-result completion rewrite that used to consume this
+    # description was removed with the other benchmark-specific outcome
+    # rewrites; the description itself is the contract under test here.
 
 async def test_execute_click_with_element_humanizer():
     from domains.spawn_browser_agent_v3.service_actions import _execute_click
@@ -17249,6 +16794,89 @@ async def test_live_tab_looks_challenged_helpers():
         assert await live_tab_looks_challenged(_ChallengedPage()) is True
 
 
+async def test_live_tab_recovery_keeps_failed_cited_request():
+    """A healthy document cannot clear a still-failing first-party API request."""
+    import inspect
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.challenge_recovery import live_tab_looks_challenged
+
+    handler_source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    handler_ast = ast.parse(textwrap.dedent(handler_source))
+    clean_page_calls = [
+        node
+        for node in ast.walk(handler_ast)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "live_tab_looks_challenged"
+    ]
+    assert len(clean_page_calls) == 1
+    passed_inputs = {keyword.arg: keyword.value for keyword in clean_page_calls[0].keywords}
+    for keyword, expected_name in (
+        ("network_recorder", "browser_network_recorder"),
+        ("recovery_reason", "recovery_reason"),
+    ):
+        assert isinstance(passed_inputs.get(keyword), ast.Name)
+        assert passed_inputs[keyword].id == expected_name
+
+    url = "https://checkout.example.com/api/orders/confirm"
+
+    class _Page:
+        url = "https://checkout.example.com/cart"
+
+    class _Recorder:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def query_requests(self, *, url_pattern="", limit=100):
+            return [row for row in self.rows if url_pattern in row["url"]][:limit]
+
+    failed = {
+        "url": url,
+        "method": "POST",
+        "status": None,
+        "failed": True,
+        "failure": "net::ERR_TUNNEL_CONNECTION_FAILED",
+    }
+    reason = f"POST {url} failed with net::ERR_TUNNEL_CONNECTION_FAILED"
+    classifier = AsyncMock(return_value={"clean": True})
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        classifier,
+    ):
+        assert await live_tab_looks_challenged(
+            _Page(), network_recorder=_Recorder([failed]), recovery_reason=reason
+        ) is True
+        assert await live_tab_looks_challenged(
+            _Page(),
+            network_recorder=_Recorder(
+                [{"url": f"https://checkout.example.com/api/noise/{i}", "status": 200}
+                 for i in range(101)] + [failed]
+            ),
+            recovery_reason=reason,
+        ) is True
+        assert await live_tab_looks_challenged(
+            _Page(),
+            network_recorder=_Recorder([
+                {"url": url, "method": "POST", "status": None},
+                failed,
+            ]),
+            recovery_reason=reason,
+        ) is True
+        assert await live_tab_looks_challenged(
+            _Page(),
+            network_recorder=_Recorder([
+                {"url": url, "method": "POST", "status": 200},
+                failed,
+            ]),
+            recovery_reason=reason,
+        ) is False
+        assert await live_tab_looks_challenged(
+            _Page(), network_recorder=_Recorder([failed]), recovery_reason="unrelated challenge"
+        ) is False
+
+
 def test_url_looks_like_api_surface_guard():
     """Shape-only API refuse remains; host pinning is gone (Blue Bottle → order.online)."""
     from domains.spawn_browser_agent_v3.service_actions import (
@@ -18564,6 +18192,75 @@ def test_extract_media_candidates_prefers_checkout_product_jpeg_over_small_art()
     )
 
     assert candidates[0]["url"] == "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA540_.jpg"
+
+def test_extract_image_urls_from_dom_state_is_uncapped_and_keeps_every_srcset_candidate():
+    """Receipt grounding needs every rendered image, not the 12 ranked media candidates."""
+    from browser_tools.dom_service import _extract_image_urls_from_dom_state
+
+    thumbnails = [
+        SimpleNamespace(tag_name="img", attributes={"src": f"/img/item-{n}.png"}) for n in range(15)
+    ]
+    responsive = SimpleNamespace(
+        tag_name="source",
+        attributes={"srcset": "https://cdn.shop.example/tote-320.jpg 320w, https://cdn.shop.example/tote-640.jpg 640w"},
+    )
+    vector = SimpleNamespace(tag_name="img", attributes={"src": "https://cdn.shop.example/mug.svg"})
+    dynamic = SimpleNamespace(
+        tag_name="img",
+        attributes={"data-a-dynamic-image": json.dumps({"https://cdn.shop.example/lamp-679.jpg": [679, 679]})},
+    )
+    inline = SimpleNamespace(tag_name="img", attributes={"src": "data:image/png;base64,AAAA"})
+    link = SimpleNamespace(tag_name="a", attributes={"href": "https://cdn.shop.example/not-an-image.jpg"})
+    root = SimpleNamespace(
+        original_node=SimpleNamespace(tag_name="body", attributes={}),
+        children=[
+            SimpleNamespace(original_node=node, children=[])
+            for node in (*thumbnails, responsive, vector, dynamic, inline, link)
+        ],
+    )
+
+    urls = _extract_image_urls_from_dom_state(
+        SimpleNamespace(_root=root),
+        page_url="https://shop.example/checkout",
+    )
+
+    assert urls[:15] == [f"https://shop.example/img/item-{n}.png" for n in range(15)]
+    assert "https://cdn.shop.example/tote-320.jpg" in urls
+    assert "https://cdn.shop.example/tote-640.jpg" in urls
+    assert "https://cdn.shop.example/mug.svg" in urls
+    assert "https://cdn.shop.example/lamp-679.jpg" in urls
+    assert not any(url.startswith("data:") for url in urls)
+    assert "https://cdn.shop.example/not-an-image.jpg" not in urls
+    assert len(urls) == len(set(urls)) == 19
+    assert _extract_image_urls_from_dom_state(SimpleNamespace(_root=None), page_url="https://shop.example/") == []
+
+async def test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_screenshot():
+    from browser_tools.dom_service import DOMService
+
+    image = SimpleNamespace(tag_name="img", attributes={"src": "/img/tote.png"})
+    selector_map = {7: image}
+    snapshot = SimpleNamespace(
+        url="https://shop.example/checkout",
+        dom_state=SimpleNamespace(
+            _root=SimpleNamespace(original_node=image, children=[]),
+            selector_map=selector_map,
+        ),
+    )
+    service = DOMService.__new__(DOMService)
+    service._selector_map = {}
+    service._session = SimpleNamespace(get_browser_state_summary=AsyncMock(return_value=snapshot))
+
+    assert await service.get_page_image_urls() == ["https://shop.example/img/tote.png"]
+    service._session.get_browser_state_summary.assert_awaited_once_with(include_screenshot=False)
+    assert service._selector_map is selector_map
+
+    service._session = None
+    try:
+        await service.get_page_image_urls()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("a disconnected DOM service must not report an empty image set")
 
 def test_write_lock_notification_prompt_includes_media_candidates():
     from domains.spawn_browser_agent_v3.handler import _write_lock_notification_prompt
@@ -20914,7 +20611,7 @@ async def test_manager_passes_fast_mode_cache_for_browser_activity():
 
         def __await__(self):
             async def _result():
-                return {"success": True, "message": "done"}
+                return {"status": "completed", "success": True, "message": "done"}
 
             return _result().__await__()
 
@@ -21071,6 +20768,7 @@ async def test_manager_posts_output_files_after_finished_tool_event():
         def __await__(self):
             async def _result():
                 return {
+                    "status": "completed",
                     "success": True,
                     "message": "done",
                     "output_files": [{"id": "fp-browser"}],
@@ -21126,6 +20824,7 @@ async def test_manager_finished_tool_event_includes_structured_response_values()
         def __await__(self):
             async def _result():
                 return {
+                    "status": "completed",
                     "success": True,
                     "message": "done",
                     "structured_response": {
@@ -21171,6 +20870,7 @@ async def test_manager_finished_tool_event_includes_structured_response_values()
             events.append(event)
 
     finished_event = next(e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED)
+    assert finished_event.metadata["success"] is True
     assert finished_event.metadata["structured_response"] == {
         "selected_black_beanie_url": "https://amazon.com/item",
         "added_to_cart": True,
@@ -21236,6 +20936,7 @@ async def test_manager_failed_tool_event_includes_structured_response_values():
             events.append(event)
 
     failed_event = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
+    assert failed_event.metadata["success"] is False
     assert failed_event.message == "best effort only"
     assert failed_event.metadata["structured_response"] == {
         "selected_black_beanie_url": "https://amazon.com/item",
@@ -21286,7 +20987,7 @@ async def test_manager_auth_assistance_pauses_and_resumes():
             "step_count": 3,
         }
     )
-    second = _FakeActivityHandle({"success": True, "message": "done", "output_files": []})
+    second = _FakeActivityHandle({"status": "completed", "success": True, "message": "done", "output_files": []})
     start_calls = []
 
     async def fake_wait_condition(*_args, **_kwargs):
@@ -21413,6 +21114,7 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     )
     second = _FakeActivityHandle(
         {
+            "status": "completed",
             "success": True,
             "message": "Purchase completed.",
             "structured_response": {"purchase_complete": True},
@@ -21571,6 +21273,7 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
     )
     second = _FakeActivityHandle(
         {
+            "status": "completed",
             "success": True,
             "message": "Purchase completed.",
             "structured_response": {"purchase_complete": True},
@@ -23058,69 +22761,9 @@ async def run_all_tests():
         "should_skip_input_text_refocus_after_same_index_click",
         test_should_skip_input_text_refocus_after_same_index_click,
     )
-    r.record(
-        "visible_result_completion_rewrites_post_submit_wait",
-        test_visible_result_completion_rewrites_post_submit_wait,
-    )
-    r.record(
-        "identical_verifier_reject_circuit_soft_accepts",
-        test_identical_verifier_reject_circuit_soft_accepts_complete_output,
-    )
-    r.record(
-        "handler_soft_accept_reports_unverified_not_verified_success",
-        test_handler_soft_accept_reports_unverified_not_verified_success,
-    )
-    r.record(
-        "handler_wires_identical_verifier_reject_circuit",
-        test_handler_wires_identical_verifier_reject_circuit,
-    )
-    r.record(
-        "visible_result_completion_rewrites_post_submit_scroll",
-        test_visible_result_completion_rewrites_post_submit_scroll,
-    )
-    r.record(
-        "visible_result_completion_does_not_rewrite_after_navigation",
-        test_visible_result_completion_does_not_rewrite_after_navigation,
-    )
-    r.record(
-        "visible_result_completion_does_not_rewrite_after_navback_or_open_new_tab",
-        test_visible_result_completion_does_not_rewrite_after_navback_or_open_new_tab,
-    )
-    r.record(
-        "visible_result_completion_ignores_submit_words_inside_observation_dumps",
-        test_visible_result_completion_ignores_submit_words_inside_observation_dumps,
-    )
-    r.record(
-        "visible_result_completion_ignores_pre_navigation_evidence_after_later_submit",
-        test_visible_result_completion_ignores_pre_navigation_evidence_after_later_submit,
-    )
-    r.record(
-        "visible_result_completion_prefers_entries_over_concatenated_summaries",
-        test_visible_result_completion_prefers_entries_over_concatenated_summaries,
-    )
-    r.record(
-        "visible_result_completion_does_not_rewrite_before_submit",
-        test_visible_result_completion_does_not_rewrite_before_submit,
-    )
-    r.record(
-        "visible_result_completion_rewrites_post_submit_score_without_verdict",
-        test_visible_result_completion_rewrites_post_submit_score_without_verdict,
-    )
-    r.record(
-        "visible_result_completion_rewrites_wait_when_evaluate_already_has_score",
-        test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score,
-    )
-    r.record(
-        "visible_result_completion_rewrites_recovery_after_allowed_result",
-        test_visible_result_completion_rewrites_recovery_after_allowed_result,
-    )
-    r.record(
-        "visible_result_completion_uses_current_observed_dom_after_submit",
-        test_visible_result_completion_uses_current_observed_dom_after_submit,
-    )
-    r.record(
-        "visible_result_completion_ignores_post_submit_version_decimal_without_score",
-        test_visible_result_completion_ignores_post_submit_version_decimal_without_score,
+    await r.record_async(
+        "browser_activity_preserves_requested_start_url",
+        test_browser_activity_preserves_requested_start_url,
     )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
@@ -23841,8 +23484,8 @@ async def run_all_tests():
         test_action_history_record_action_accepts_tuple_coordinates,
     )
     await r.record_async(
-        "child_text_submit_click_can_complete_visible_result",
-        test_child_text_submit_click_can_complete_visible_result,
+        "child_text_submit_click_is_recorded",
+        test_child_text_submit_click_is_recorded,
     )
     await r.record_async(
         "execute_drag_records_through_real_action_history",
@@ -23902,6 +23545,18 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_request_payment_card_rejects_duplicate_after_card_ready",
         test_execute_action_request_payment_card_rejects_duplicate_after_card_ready,
+    )
+    await r.record_async(
+        "execute_action_request_payment_card_rejects_unrendered_image_url",
+        test_execute_action_request_payment_card_rejects_image_url_not_rendered_on_page,
+    )
+    await r.record_async(
+        "execute_action_request_payment_card_accepts_rendered_image_urls",
+        test_execute_action_request_payment_card_accepts_image_urls_rendered_on_page,
+    )
+    await r.record_async(
+        "execute_action_request_payment_card_no_image_urls_skips_page_read",
+        test_execute_action_request_payment_card_without_image_urls_skips_page_read,
     )
     await r.record_async("execute_action_dropdown_options_no_el", test_execute_action_dropdown_options_missing_element)
     await r.record_async("execute_action_select_dropdown_no_el", test_execute_action_select_dropdown_missing_element)
@@ -24422,6 +24077,10 @@ async def run_all_tests():
         test_goto_err_aborted_persists_download_to_session,
     )
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
+    await r.record_async(
+        "live_tab_recovery_keeps_failed_cited_request",
+        test_live_tab_recovery_keeps_failed_cited_request,
+    )
     r.record("api_surface_guard", test_url_looks_like_api_surface_guard)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
     await r.record_async("cross_origin_nav_allowed", test_execute_allows_cross_origin_navigation)
@@ -24741,6 +24400,14 @@ async def run_all_tests():
     r.record(
         "extract_media_candidates_prefers_product_jpeg",
         test_extract_media_candidates_prefers_checkout_product_jpeg_over_small_art,
+    )
+    r.record(
+        "extract_image_urls_from_dom_state_uncapped",
+        test_extract_image_urls_from_dom_state_is_uncapped_and_keeps_every_srcset_candidate,
+    )
+    await r.record_async(
+        "dom_service_get_page_image_urls_fresh_snapshot",
+        test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_screenshot,
     )
     r.record(
         "write_lock_notification_prompt_media_candidates",

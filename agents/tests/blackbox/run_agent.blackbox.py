@@ -866,16 +866,8 @@ async def test_verifier_score_1_returns_completed():
     assert finished_for_tc, "Expected FINISHED tool_result for attempt_completion in returned context"
 
 
-async def test_verifier_infra_soft_fail_accepts_attempt_completion():
-    """Execute-loop Rose deadline soft-fail must accept attempt_completion.
-
-    Repro: cuda-kernel-github-top100-code-agent k=3 r26 — ranking already in
-    context, attempt_completion verifier RoseDeadlineError'd / hit the 420s
-    fence, soft-failed at score=0.5 ("Progress check failed: ..."), and the
-    agent bounced into another multi-minute verify loop until the 4200s task
-    budget died. Infrastructure failure is not a missing-deliverable judgment
-    when the structured response already covers the schema.
-    """
+async def test_verifier_infra_soft_fail_does_not_accept_attempt_completion():
+    """A schema-shaped response cannot turn a verifier outage into success."""
     tool_calls = [{"tool": "attempt_completion"}]
     detected_tools = [("attempt_completion", "tc-ac-infra-1", 1.0)]
     schema = {
@@ -915,7 +907,7 @@ async def test_verifier_infra_soft_fail_accepts_attempt_completion():
         tool_calls,
         detected_tools,
         skip_verification=False,
-        max_iterations=3,
+        max_iterations=1,
         execute_tool_override=mock_execute_tool,
         verifier_score=0.5,
         verifier_reasoning=("Progress check failed: Verifier exceeded 420s total deadline"),
@@ -923,9 +915,9 @@ async def test_verifier_infra_soft_fail_accepts_attempt_completion():
         response_schema=schema,
     )
 
-    assert result["status"] == "completed"
-    assert result["score"] == 1.0
-    assert "infrastructure failed" in (result.get("message") or "").lower()
+    assert result["status"] == "max_iterations"
+    assert result.get("score") != 1.0
+    assert result.get("verifier_progress") == 0.5
     assert completion_calls == [("attempt_completion", {"_verification_pending": True}, "tc-ac-infra-1")]
 
 
@@ -1808,6 +1800,8 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
                 "toolCallId": "browser-one",
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "purchase_completed": True,
@@ -1937,6 +1931,8 @@ async def test_rejected_completed_child_handoff_returns_control_to_llm():
                 "toolCallId": "browser-one",
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "structured_response": child_result,
             },
         },
@@ -2063,6 +2059,8 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
                 "toolCallId": "browser-one",
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "structured_response": child_result,
             },
         },
@@ -2234,6 +2232,8 @@ async def test_pause_after_forced_completion_llm_still_dispatches_attempt_comple
                 "toolCallId": "browser-one",
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "structured_response": child_result,
             },
         },
@@ -2527,12 +2527,16 @@ async def run_all_tests():
     )
     await r.record_async("verifier_score_1_returns_completed", test_verifier_score_1_returns_completed)
     await r.record_async(
-        "verifier_infra_soft_fail_accepts_attempt_completion",
-        test_verifier_infra_soft_fail_accepts_attempt_completion,
+        "verifier_infra_soft_fail_does_not_accept_attempt_completion",
+        test_verifier_infra_soft_fail_does_not_accept_attempt_completion,
     )
     await r.record_async(
         "verifier_infra_soft_fail_rejects_malformed_structured_response",
         test_verifier_infra_soft_fail_rejects_malformed_structured_response,
+    )
+    await r.record_async(
+        "verifier_infra_soft_fail_trips_circuit_breaker_without_schema",
+        test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema,
     )
     await r.record_async("estimate_tokens", test_estimate_tokens)
     await r.record_async(

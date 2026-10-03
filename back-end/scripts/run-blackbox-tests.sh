@@ -86,6 +86,11 @@ RUNNER_CMD=(node --import tsx src/tests/blackbox/run.ts)
 RUNNER_LOG="$ARTIFACT_DIR/runner.log"
 MANIFEST_PATH="$ARTIFACT_DIR/manifest.json"
 USE_EXISTING_BACKEND="${BLACKBOX_TEST_USE_EXISTING_BACKEND:-${CONTRACT_TEST_USE_EXISTING_BACKEND:-0}}"
+if [[ "$USE_EXISTING_BACKEND" != "1" ]]; then
+  # This script owns both processes, so the share-link contract can use a
+  # local-only key without depending on a production benchmark secret.
+  export BENCHMARK_SHARE_SECRET="${BENCHMARK_SHARE_SECRET:-blackbox-local-benchmark-share-secret}"
+fi
 
 # --list only needs filesystem discovery; skip backend boot for speed.
 for arg in "$@"; do
@@ -287,6 +292,14 @@ BEGIN
       FROM "AgentAttentionRequest" attention
       WHERE attention.id = request.id
     );
+  END IF;
+  -- On system Postgres this database is shared with the local stack, whose
+  -- real provider quota failures persist process-global funded-key cooldowns.
+  -- Tests that exercise the funded routes assume no backoff is active.
+  IF to_regclass('"Integration"') IS NOT NULL THEN
+    DELETE FROM "Integration"
+    WHERE "userId" = '00000000-0000-0000-0000-000000000000'
+      AND name IN ('gpt_api_key_cooldown', 'anthropic_api_key_cooldown');
   END IF;
 END $$;
 SQL

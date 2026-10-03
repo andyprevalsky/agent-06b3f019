@@ -15,22 +15,60 @@ export const filePointerSchema = z.object({
   created_at: z.string(),
 });
 
+const outputFieldConstraints = {
+  minItems: z.number().int().min(0).optional(),
+  maxItems: z.number().int().min(0).optional(),
+  minLength: z.number().int().min(0).optional(),
+  maxLength: z.number().int().min(0).optional(),
+  nullable: z.boolean().optional(),
+};
+
+function validateOutputFieldConstraints(
+  field: {
+    type: string;
+    minItems?: number;
+    maxItems?: number;
+    minLength?: number;
+    maxLength?: number;
+  },
+  ctx: z.RefinementCtx
+): void {
+  for (const [lower, upper, label, applies] of [
+    [field.minItems, field.maxItems, 'Items', field.type.startsWith('list[')],
+    [field.minLength, field.maxLength, 'Length', field.type === 'str'],
+  ] as const) {
+    if ((lower !== undefined || upper !== undefined) && !applies) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${label} bounds do not apply to ${field.type}`,
+      });
+    }
+    if (lower !== undefined && upper !== undefined && lower > upper) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `min${label} must be <= max${label}` });
+    }
+  }
+}
+
 // Response schema field type
-export const NestedResponseSchemaFieldSchema = z.object({
-  name: z.string(),
-  type: z.enum([
-    'str',
-    'int',
-    'float',
-    'bool',
-    'list[str]',
-    'list[int]',
-    'file_pointer',
-    'list[file_pointer]',
-    'session_file_pointer',
-    'list[session_file_pointer]',
-  ]),
-});
+export const NestedResponseSchemaFieldSchema = z
+  .object({
+    name: z.string(),
+    type: z.enum([
+      'str',
+      'int',
+      'float',
+      'bool',
+      'list[str]',
+      'list[int]',
+      'file_pointer',
+      'list[file_pointer]',
+      'session_file_pointer',
+      'list[session_file_pointer]',
+    ]),
+    required: z.boolean().optional(), // Older schemas omit this; absence means required.
+    ...outputFieldConstraints,
+  })
+  .superRefine(validateOutputFieldConstraints);
 
 export const ResponseSchemaFieldSchema = z
   .object({
@@ -51,8 +89,10 @@ export const ResponseSchemaFieldSchema = z
     ]),
     required: z.boolean(),
     properties: z.array(NestedResponseSchemaFieldSchema).optional(),
+    ...outputFieldConstraints,
   })
   .superRefine((field, ctx) => {
+    validateOutputFieldConstraints(field, ctx);
     if (
       (field.type === 'object' || field.type === 'list[object]') &&
       (!field.properties || field.properties.length === 0)

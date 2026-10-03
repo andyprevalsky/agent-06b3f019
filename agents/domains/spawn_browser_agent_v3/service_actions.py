@@ -39,7 +39,7 @@ from domains.spawn_browser_agent_v3.service_crypto import (
     has_payment_card_secret_refs,
 )
 from utils.error_utils import extract_error_message
-from utils.purchase_approval import validate_product_url_for_pages
+from utils.purchase_approval import validate_image_url_for_page, validate_product_url_for_pages
 
 if TYPE_CHECKING:
     from browser_tools.dom_service import ActionHistory, DOMService
@@ -852,6 +852,21 @@ def _is_redundant_payment_approval_wait(thinking: Any, params: Any) -> bool:
     return any(marker in haystack for marker in _PAYMENT_APPROVAL_WAIT_MARKERS)
 
 
+async def _receipt_image_url_errors(
+    context: _ActionContext, payment_request: RequestPaymentCardBrowserTool
+) -> List[str]:
+    if not any(item.image_url for item in payment_request.line_items):
+        return []
+    page_image_urls = await context.dom_service.get_page_image_urls()
+    errors: List[str] = []
+    for item_index, item in enumerate(payment_request.line_items):
+        try:
+            validate_image_url_for_page(item.image_url, page_image_urls, context.current_url)
+        except ValueError as error:
+            errors.append(f"line_items[{item_index}].image_url {item.image_url}: {error}")
+    return errors
+
+
 async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[str, Any]:
     if has_payment_card_secret_refs(context.secret_refs):
         return {
@@ -881,6 +896,12 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
                 "for a rating that is not shown."
             )
         return {"success": False, "error": f"request_payment_card receipt is incomplete: {error}.{hint}"}
+    image_errors = await _receipt_image_url_errors(context, payment_request)
+    if image_errors:
+        return {
+            "success": False,
+            "error": f"request_payment_card receipt is incomplete: {'; '.join(image_errors)}.",
+        }
     return {
         "status": "awaiting_payment_card_approval",
         "payment_request": context.params,
