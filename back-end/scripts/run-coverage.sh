@@ -283,9 +283,10 @@ COV_LOG="$BACKEND_DIR/coverage/server.log"
 
 # Keep local blackbox coverage deterministic. back-end/.env points trace
 # archives at R2 for development/prod, but blackbox tests assert local archive
-# artifacts and fake provider boundaries.
+# artifacts and fake provider boundaries. Cloud VMs also inject
+# TRACE_ARCHIVE_BACKEND=r2 into the environment, so it must not be inherited.
 export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
-export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
+export TRACE_ARCHIVE_BACKEND="${BLACKBOX_TRACE_ARCHIVE_BACKEND:-local}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
