@@ -636,6 +636,90 @@ async def test_execute_dag_tool_llm_activity_args_match_signature():
     assert param_args[30] == "agent:agent-1:task:0:call:dag_param_populator"
 
 
+async def test_execute_dag_param_populator_never_adopts_a_stale_pending_context_slot():
+    """DAG param population must build ITS node's conversation, never a stale same-agent slot.
+
+    REGRESSION (2026-10-02, test-mass-agent-run-0): `_pending_llm_context` is keyed
+    only by agent_id and outlives a workflow that migrates to another worker. The
+    param populator wrote untagged slots and called call_llm_activity without a
+    token, so a slot left on a worker by another node (or by this workflow before it
+    migrated) was adopted as this node's prompt. The node's slot is now tagged with
+    its replay-stable tool_call_id and the activity receives the same token.
+    """
+    import json
+    from types import SimpleNamespace
+
+    from helpers.llm import _pending_llm_context, call_llm_activity
+
+    calls: list = []
+    slots_at_call: list = []
+    node_context = [{"role": "USER", "text": "DAG-NODE-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}]
+
+    def param_tool_calls(args):
+        slots_at_call.append(_pending_llm_context.get(args[0]))
+        return [{"tool": "web_search", "query": "x"}]
+
+    result, _events, _dag = await _run_execute_dag(
+        {"tasks": [{"goal": "Search", "tool_name": "web_search"}], "dependencies": {}},
+        param_tool_calls=param_tool_calls,
+        execute_activity_calls=calls,
+        context=node_context,
+    )
+    assert result["status"] == "completed"
+    param_args = next(c["args"] for c in calls if c["args"] and c["args"][8] == "dag_param_populator")
+    params = list(inspect.signature(call_llm_activity).parameters)
+    token = param_args[params.index("pending_context_token")] if len(param_args) > 32 else None
+    assert isinstance(token, str) and token.startswith("dag:"), f"param call carries no context token: {token!r}"
+    assert slots_at_call and slots_at_call[0][4] == token, "the DAG slot must carry the token passed to the activity"
+
+    sent: list = []
+    backend = AsyncMock(
+        return_value={
+            "agent": {"id": "agent-1"},
+            "messages": [{"role": "USER", "text": "BACKEND-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}],
+        }
+    )
+
+    async def capture_llm(**kwargs):
+        sent.append(json.dumps(kwargs["messages"]))
+        return (
+            SimpleNamespace(
+                response="",
+                tool_calls=[SimpleNamespace(model_dump=lambda: {"tool": "web_search", "query": "x"})],
+            ),
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            [],
+        )
+
+    stale_context = [{"role": "USER", "text": "STALE-OTHER-NODE-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}]
+    stale_slots = {
+        "legacy untagged slot": (stale_context, "test system prompt", None),
+        "another node's tagged slot": (stale_context, "test system prompt", None, "user-1", "dag:other-node"),
+    }
+    try:
+        with (
+            patch("helpers.llm.call_llm_structured_streaming", new=AsyncMock(side_effect=capture_llm)),
+            patch("helpers.fetch_config._fetch_agent_data_impl", new=backend),
+            patch("helpers.llm.asyncio.sleep", new=AsyncMock()),
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm.activity.in_activity", return_value=False),
+        ):
+            for label, stale in stale_slots.items():
+                _pending_llm_context["agent-1"] = stale
+                await call_llm_activity(*param_args)
+                assert "STALE-OTHER-NODE-CONTEXT" not in sent[-1], f"param call adopted a {label}"
+                assert "BACKEND-CONTEXT" in sent[-1], f"{label}: a token mismatch must refetch canonical context"
+
+            # Same worker: the node's own slot is used without a backend round trip.
+            fetches_before = backend.await_count
+            _pending_llm_context["agent-1"] = slots_at_call[0]
+            await call_llm_activity(*param_args)
+            assert "DAG-NODE-CONTEXT" in sent[-1]
+            assert backend.await_count == fetches_before
+    finally:
+        _pending_llm_context.pop("agent-1", None)
+
+
 async def test_execute_dag_alias_resolution_spawn_explore():
     """execute_dag resolves spawn_explore_agent alias to spawn_agent and applies type override."""
     plan_data = {
@@ -915,9 +999,7 @@ async def test_execute_dag_exhausted_alias_retry_never_replays_committed_sibling
         return {"message": "spawned"}
 
     async def on_tokens(prompt_tokens, completion_tokens, model, **kwargs):
-        token_calls.append(
-            (prompt_tokens, completion_tokens, model, kwargs["call_site"], kwargs["cache_sequence_id"])
-        )
+        token_calls.append((prompt_tokens, completion_tokens, model, kwargs["call_site"], kwargs["cache_sequence_id"]))
 
     result, _events, dag = await _run_execute_dag(
         plan_data,
@@ -938,7 +1020,8 @@ async def test_execute_dag_exhausted_alias_retry_never_replays_committed_sibling
     assert [(name, goal) for name, goal, _id in recorded] == [("spawn_agent", "Research Tokyo")]
     assert len(token_calls) == 3
     assert all(
-        call == (
+        call
+        == (
             10,
             2,
             "test-model",
@@ -1431,6 +1514,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_dag_tool_llm_activity_args_match_signature",
         test_execute_dag_tool_llm_activity_args_match_signature,
+    )
+    await r.record_async(
+        "execute_dag_param_populator_ignores_stale_pending_ctx",
+        test_execute_dag_param_populator_never_adopts_a_stale_pending_context_slot,
     )
     await r.record_async("execute_dag_alias_resolution_spawn_explore", test_execute_dag_alias_resolution_spawn_explore)
     await r.record_async(

@@ -11,8 +11,8 @@ symptoms:
   - "after reload: browser chip count never reached 0"
   - "Timeout 30000ms exceeded while waiting on the predicate"
   - "Agent channel (agent:...) status: TIMED_OUT"
-  - semantic spec fails under SEMANTIC_WORKERS=4 at high load average, passes solo in ~22s
   - "RENDERER UNRESPONSIVE: page probe"
+  - "direct_answer sample 5 exceeded the full-lifecycle ratchet"
 tags:
   - playwright
   - semantic-gate
@@ -53,6 +53,19 @@ Trace evidence (trace-relative ms):
   - realtime subscribe timers fired late (`TIMED_OUT` at 72.8s);
   - frames at 38.6s and 40.9s still show the pre-hydration landing page, and the
     frame at 72.8s shows "Loading AI Network".
+
+**Recurrence (same day, 23:37Z, `chat-lifecycle-latency.spec.ts` direct_answer
+sample 5, 1 worker, load1 ~62):** `first-response=7523ms lifecycle=7892ms`
+against the 6000ms ratchet while samples 1-4 were 633-1809ms. The backend served
+the request in ~0.5s (`POST /api/agents` arrived 23:37:53.691, Cerebras done
+54.192, ASSISTANT INSERT 54.262, page fetched it 54.538, test DELETE 54.676), so
+the ~7s elapsed before the browser's POST reached the backend. The backend log
+has no lines at all from 23:37:39.97 to 23:37:52.955 (the page's 10s
+`GET /api/agents` poll due ~49.97 never arrived), then ~50 buffered
+`POST /api/dev/log` requests landed at 53.68 and normally fast routes took
+99-213ms: the same host-overload stall, this time inside a latency sample.
+Adaptive worker sizing cannot help here because the ratchet already runs on one
+worker; the run was re-measured in the final deploy pass.
 
 ## Diagnosis
 
