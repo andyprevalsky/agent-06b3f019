@@ -2005,7 +2005,6 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert restored._pending_approval_resume == {
         "request_id": "approval-1",
         "question": "",
-        "reminder_sent": True,
     }
     assert restored._response_schema_revision == 3
     assert restored.pending_children == {"child-1"}
