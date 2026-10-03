@@ -1021,6 +1021,103 @@ async def test_agentcard_setup_targets_effective_benchmark_user():
     }
 
 
+async def test_agentcard_setup_retries_transient_upstream_failure():
+    """A one-off AgentCard 502 must not burn the setup attention and stall the run to timeout.
+
+    2026-10-03: AgentCard returned "Invalid or expired organization token" for one
+    list_cardholders call on a healthy secret (the next call 2s later succeeded). The
+    runner marked the setup attention seen before the fixture POST, swallowed the 502,
+    and agent-payment-setup-resume idled until its 900s cap.
+    """
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    class FakeResponse:
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self.text = body
+
+        def json(self):
+            return {"status": "connected"}
+
+    def fake_client(statuses):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, url, *, headers, json):
+                status = statuses[min(len(calls), len(statuses) - 1)]
+                calls.append(status)
+                body = (
+                    '{"error":"Benchmark AgentCard cardholder resolution failed: AgentCard '
+                    'Organization MCP list_cardholders failed: Invalid or expired organization token"}'
+                    if status == 502
+                    else '{"status":"connected"}'
+                )
+                return FakeResponse(status, body)
+
+        return FakeClient, calls
+
+    async def fake_headers():
+        return {"X-API-Key": "test"}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    with patch.object(bench, "_api_headers", fake_headers), patch.object(bench.asyncio, "sleep", fake_sleep):
+        client, calls = fake_client([502, 200])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            assert await bench.configure_benchmark_agentcard_setup("http://backend", "complete") == {
+                "status": "connected"
+            }
+        assert calls == [502, 200]
+        assert len(sleeps) == 1
+
+        client, calls = fake_client([502])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "complete")
+            except RuntimeError as error:
+                assert "Invalid or expired organization token" in str(error)
+            else:
+                raise AssertionError("a persistent 502 must raise with the upstream cause")
+        assert len(calls) == 1 + len(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+
+        client, calls = fake_client([409])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "complete")
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("a 409 not-ready cardholder is not transient")
+        assert calls == [409]
+
+
+def test_agentcard_setup_attention_failure_fails_the_task_with_its_cause():
+    """The poll loop must surface a failed setup fixture instead of swallowing it as a warning."""
+    import inspect
+
+    import benchmarks.run_benchmark as bench
+
+    source = inspect.getsource(bench)
+    handler = source[source.index('observed_kind == "agentcard_user_cardholder_onboarding_required"') :]
+    handler = handler[: handler.index("continue")]
+    assert "except RuntimeError as setup_error" in handler
+    assert "AgentCard setup fixture failed" in handler
+
+
 def test_payment_benchmark_rejects_retired_agentcard_api_key(tmp_path):
     """A legacy sk_* key must fail before the expensive lifecycle stack starts."""
     import pytest
@@ -19100,6 +19197,14 @@ async def run_all_tests():
     await r.record_async(
         "agentcard_setup_effective_benchmark_user",
         test_agentcard_setup_targets_effective_benchmark_user,
+    )
+    await r.record_async(
+        "agentcard_setup_retries_transient_upstream_failure",
+        test_agentcard_setup_retries_transient_upstream_failure,
+    )
+    r.record(
+        "agentcard_setup_attention_failure_fails_task",
+        test_agentcard_setup_attention_failure_fails_the_task_with_its_cause,
     )
     r.record(
         "isolated_benchmark_slow_first_sync",
