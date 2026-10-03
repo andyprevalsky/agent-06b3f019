@@ -21,15 +21,18 @@ import {
   readArchivedArtifact,
 } from '../../providers/traceArchive';
 import { assertLateArchiveManifestConvergence } from './archive-late-manifest.helper';
+import {
+  ARCHIVE_BENCHMARK_TASK,
+  purgeOrphanedArchiveMemories,
+  testCleanupLeavesNoPlannerMemoryRows,
+  trackSeededRootAgent,
+} from './archive-planner-memory.helper';
 
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
 const RUN_ID = process.env.BLACKBOX_TEST_RUN_ID || `${Date.now()}-${randomUUID().slice(0, 8)}`;
-const ARCHIVE_BENCHMARK_TASK = 'archive-blackbox';
-const seededRootAgentIds: string[] = [];
-
 interface SeededRun {
   userId: string;
   otherUserId: string;
@@ -94,7 +97,7 @@ async function seedRun(): Promise<SeededRun> {
   const userId = `archive-user-${RUN_ID}-${randomUUID()}`;
   const otherUserId = `archive-other-${RUN_ID}-${randomUUID()}`;
   const rootAgentId = randomUUID();
-  seededRootAgentIds.push(rootAgentId);
+  trackSeededRootAgent(rootAgentId);
   const childAgentId = randomUUID();
   const toolId = randomUUID();
   const messageId = randomUUID();
@@ -205,23 +208,6 @@ async function cleanup(seed: SeededRun): Promise<void> {
   await prisma.person.deleteMany({ where: { id: { in: [seed.personId, seed.otherPersonId] } } });
   await prisma.tool.deleteMany({ where: { id: seed.toolId } });
   await prisma.user.deleteMany({ where: { userId: { in: [seed.userId, seed.otherUserId] } } });
-}
-
-/**
- * Benchmark-tagged history rows are shared search corpus for every user, so rows orphaned by an
- * interrupted run crowd other domains' fixtures out of the planner-memory result limit.
- */
-async function purgeOrphanedArchiveMemories(): Promise<void> {
-  const rows = await prisma.plannerMemory.findMany({
-    where: { benchmarkTaskName: ARCHIVE_BENCHMARK_TASK },
-    select: { id: true },
-  });
-  const live = new Set(
-    ids(await prisma.agent.findMany({ where: { id: { in: ids(rows) } }, select: { id: true } }))
-  );
-  await prisma.plannerMemory.deleteMany({
-    where: { id: { in: ids(rows).filter((id) => !live.has(id)) } },
-  });
 }
 
 async function testFixtureScopeAndRestore(): Promise<void> {
@@ -606,11 +592,6 @@ async function testEmailProviderBoundaryArchivedWithAgentCorrelation(): Promise<
     }
     await cleanup(seed);
   }
-}
-
-async function testCleanupLeavesNoPlannerMemoryRows(): Promise<void> {
-  const leaked = await prisma.plannerMemory.count({ where: { id: { in: seededRootAgentIds } } });
-  assert.strictEqual(leaked, 0, `archive cleanup left ${leaked} planner-memory history row(s)`);
 }
 
 async function runAll(): Promise<void> {
