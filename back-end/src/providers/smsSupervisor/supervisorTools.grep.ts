@@ -6,7 +6,8 @@
  * goes in-process through the userDataSearch bridge (registered from
  * server.ts) and the LLM gets the same JSON. One asymmetry: the supervisor is
  * not an agent, so the agent_network source (which requires an agent_id) is
- * unavailable; an omitted source searches messages + network instead of the
+ * unavailable. agent_trajectories needs only the authenticated user and is
+ * available here; an omitted source searches messages + network instead of the
  * explore default of messages + network + agent_network.
  */
 
@@ -17,8 +18,15 @@ import type { ToolResult } from './supervisorTools';
 const log = createLogger('SmsSupervisorGrep');
 
 export interface GrepArgs {
-  pattern: string;
+  pattern?: string;
   source?: string | null;
+  role?: 'USER' | 'ASSISTANT' | 'TOOL' | null;
+  record_kind?: 'message' | 'llm_output' | 'llm_context' | 'all' | null;
+  surface?: 'WEB' | 'MAC_APP' | 'SMS' | 'WHATSAPP' | null;
+  trace_path?: string | null;
+  order?: 'newest_first' | 'oldest_first' | null;
+  page_after?: string | null;
+  until?: string | null;
   context?: number | null;
   '-B'?: number | null;
   '-A'?: number | null;
@@ -93,7 +101,11 @@ function mergeFanOutResults(results: UserDataGrepResult[], limit: number): UserD
 export async function executeGrepTool(args: GrepArgs, userId: string): Promise<ToolResult> {
   const params = toGrepParams(args);
   const startTime = Date.now();
-  log.info('Executing grep', { pattern: params.pattern, source: params.source ?? 'all', userId });
+  log.info('Executing grep', {
+    pattern: params.pattern ?? '',
+    source: params.source ?? 'all',
+    userId,
+  });
 
   if (params.source === 'agent_network') {
     return {
@@ -101,12 +113,22 @@ export async function executeGrepTool(args: GrepArgs, userId: string): Promise<T
       success: false,
       result: '',
       error:
-        "source 'agent_network' is not available in this surface. Supported sources: messages, network, transactions, documents.",
+        "source 'agent_network' is not available in this surface. Supported sources: messages, network, agent_trajectories, transactions, documents.",
     };
   }
 
   let result: UserDataGrepResult;
-  if (params.source === undefined) {
+  const trajectoryNarrowing =
+    params.role !== undefined ||
+    params.record_kind !== undefined ||
+    params.surface !== undefined ||
+    params.trace_path !== undefined ||
+    params.order !== undefined ||
+    params.page_after !== undefined ||
+    params.until !== undefined;
+  if (params.source === undefined && trajectoryNarrowing) {
+    result = await executeUserDataGrep(userId, { ...params, source: 'agent_trajectories' });
+  } else if (params.source === undefined) {
     if (params.filters !== undefined) {
       // Mirrors the domain's validateGrepInput: nested filters need an explicit source.
       return {
@@ -114,7 +136,7 @@ export async function executeGrepTool(args: GrepArgs, userId: string): Promise<T
         success: false,
         result: '',
         error:
-          'filters require an explicit source. Pick one of: messages, network, transactions, documents.',
+          'filters require an explicit source. Pick one of: messages, network, agent_trajectories, transactions, documents.',
       };
     }
     const perSource = await Promise.all(

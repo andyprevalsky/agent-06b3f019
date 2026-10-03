@@ -562,6 +562,78 @@ def extract_plan_from_context(context: List[Dict]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _is_hidden_or_internal_user(metadata: Dict[str, Any]) -> bool:
+    if metadata.get("hidden") is True:
+        return True
+    if metadata.get("isResponseSchemaUpdate") is True:
+        return True
+    return False
+
+
+def plan_superseded_by_new_user_instruction(context: List[Dict[str, Any]]) -> bool:
+    """Return True when a historical set_plan is not the work for this execute.
+
+    ``start_phase=execute`` means "skip planning and run the plan in history".
+    Chat re-escalation after a terminal status uses the same phase to mean
+    "this new instruction is simple — skip planning". Those collide: the
+    latest ``set_plan`` is still in the transcript, so execute_dag would
+    replay it instead of acting on the follow-up.
+
+    A plan artifact is not live work when either:
+    - it already posted ``completion_summary`` with ``isFinalSummary``, or
+    - a real USER instruction arrived after that ``set_plan`` (covers
+      FAILED / credit-kill re-escalation that never wrote Task Complete).
+
+    Hidden schema-refresh USER rows do not count. Mid-run rows before the
+    plan is written do not.
+    """
+    last_set_plan_idx: Optional[int] = None
+    last_final_summary_idx: Optional[int] = None
+    last_user_idx: Optional[int] = None
+    for idx, msg in enumerate(context):
+        if not isinstance(msg, dict):
+            continue
+        metadata = msg.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        role = str(msg.get("role") or "").upper()
+        if role == "USER" and not _is_hidden_or_internal_user(metadata):
+            last_user_idx = idx
+        if metadata.get("toolName") == "set_plan" and metadata.get("toolStatus") == "FINISHED":
+            last_set_plan_idx = idx
+        if (
+            metadata.get("toolName") == "completion_summary"
+            and metadata.get("toolStatus") == "FINISHED"
+            and metadata.get("isFinalSummary")
+        ):
+            last_final_summary_idx = idx
+    if last_final_summary_idx is not None:
+        return True
+    return (
+        last_set_plan_idx is not None
+        and last_user_idx is not None
+        and last_user_idx > last_set_plan_idx
+    )
+
+
+def latest_real_user_instruction(context: List[Dict[str, Any]]) -> Optional[str]:
+    """Return the latest non-hidden USER text, or None if there is none."""
+    last_text: Optional[str] = None
+    for msg in context:
+        if not isinstance(msg, dict):
+            continue
+        metadata = msg.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        role = str(msg.get("role") or "").upper()
+        if role != "USER" or _is_hidden_or_internal_user(metadata):
+            continue
+        text = str(msg.get("text") or "").strip()
+        if text:
+            last_text = text
+    return last_text
+
+
 def _metadata_matches_task(metadata: Dict[str, Any], task: DAGTask) -> bool:
     """Return whether a terminal tool row represents a planned DAG task."""
     tool_name = metadata.get("toolName")

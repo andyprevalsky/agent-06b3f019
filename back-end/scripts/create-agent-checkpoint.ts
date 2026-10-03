@@ -57,6 +57,7 @@ type Options = {
   priceLimitCents?: number;
   taskQueue?: string;
   noStart: boolean;
+  startPhase: 'execute' | 'execute_dag_resume';
   out?: string;
 };
 
@@ -66,7 +67,8 @@ function usage(): never {
   console.log(`usage: npx tsx scripts/create-agent-checkpoint.ts --source-json PATH [options]
 
 Clone an exported agent transcript into the local DB through a checkpoint message
-and optionally start AgentWorkflow at execute_dag_resume.
+and optionally start AgentWorkflow at execute_dag_resume (or --start-phase execute
+for a post-completion chat re-escalation replay).
 
 Options:
   --through-index N             Inclusive message index to clone. When omitted,
@@ -81,6 +83,10 @@ Options:
   --price-limit-cents N         Override cloned price limit.
   --task-queue NAME             Temporal task queue. Defaults to TEMPORAL_TASK_QUEUE.
   --no-start                    Clone only, do not start Temporal.
+  --start-phase execute|execute_dag_resume
+                                Workflow start phase when Temporal is started.
+                                Default execute_dag_resume. Use execute to replay
+                                a chat re-escalation after a completed run.
   --out PATH                    Manifest path. Default .context/benchmark-checkpoints/<id>.json
 `);
   process.exit(0);
@@ -91,6 +97,7 @@ function parseArgs(argv: string[]): Options {
     sourceJson: '',
     fastModeCacheEnabled: false,
     noStart: false,
+    startPhase: 'execute_dag_resume',
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -111,6 +118,13 @@ function parseArgs(argv: string[]): Options {
     else if (arg === '--price-limit-cents') opts.priceLimitCents = Number.parseInt(next(), 10);
     else if (arg === '--task-queue') opts.taskQueue = next();
     else if (arg === '--no-start') opts.noStart = true;
+    else if (arg === '--start-phase') {
+      const value = next();
+      if (value !== 'execute' && value !== 'execute_dag_resume') {
+        throw new Error('--start-phase must be execute or execute_dag_resume');
+      }
+      opts.startPhase = value;
+    }
     else if (arg === '--out') opts.out = next();
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -302,6 +316,10 @@ async function main() {
     100;
   const sourceKind = pick<string>(sourceAgent, 'source') || 'WEB';
   const responseSchema = pick<unknown>(sourceAgent, 'response_schema', 'responseSchema') ?? null;
+  const structuredResponse =
+    pick<unknown>(sourceAgent, 'structured_output', 'structuredResponse') ?? null;
+  const progress = pick<number>(sourceAgent, 'progress') ?? 0;
+  const statusMessage = pick<string>(sourceAgent, 'status_message', 'statusMessage') ?? null;
   const writeLockEnabled =
     pick<boolean>(sourceAgent, 'write_lock_enabled', 'writeLockEnabled') ?? true;
   const taskQueue = opts.taskQueue || process.env.TEMPORAL_TASK_QUEUE;
@@ -343,6 +361,9 @@ async function main() {
         source: sourceKind,
         reasoningMaxTokens,
         responseSchema: responseSchema as any,
+        structuredResponse: structuredResponse as any,
+        progress,
+        statusMessage,
         priceLimitCents,
         writeLockEnabled,
         fastModeCacheEnabled: opts.fastModeCacheEnabled,
@@ -424,7 +445,7 @@ async function main() {
       verifier: { type: verifierType },
       taskQueue,
       busId: newAgentId,
-      startPhase: 'execute_dag_resume' as any,
+      startPhase: opts.startPhase as any,
       priceLimitCents,
       fastModeCacheEnabled: opts.fastModeCacheEnabled,
     });
@@ -446,7 +467,7 @@ async function main() {
     cloned_tree_agent_count: treeAgents.length,
     task_queue: taskQueue || null,
     workflow_id: workflowId,
-    start_phase: opts.noStart ? null : 'execute_dag_resume',
+    start_phase: opts.noStart ? null : opts.startPhase,
     fast_mode_cache_enabled: opts.fastModeCacheEnabled,
     price_limit_cents: priceLimitCents,
     created_at: new Date().toISOString(),

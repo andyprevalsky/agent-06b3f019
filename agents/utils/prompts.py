@@ -343,6 +343,16 @@ For each present field and each required field:
 4. If no tool-result supports a field, mark it unpopulatable. Do NOT
    invent a value, and do NOT credit empty strings, "TODO",
    "[placeholder]", or null as populated.
+5. If the goal explicitly allows reporting that no item or source is available,
+   a tool result confirming zero matches or unavailable access supports that
+   negative finding. An explicit explanation grounded in that tool result can
+   populate a field asking for evidence or a path; never invent a positive
+   snippet or path. Apply this only when the goal permits a negative finding.
+6. If the goal requires a spawned explore agent to call a tool, its completed
+   spawn_agent result can support a permitted negative finding when it includes
+   the child's exact tool name, input filters, and quoted zero-match or
+   unavailable-access result. A bare child summary without those details is
+   insufficient. Do not treat this as evidence for a positive fact.
 
 Score using the 3-band rubric (1.0 / 0.5 / 0.0). A load-bearing field with
 no tool-result evidence forbids 1.0; if at least one required field cannot
@@ -472,6 +482,12 @@ def build_verifier_prompt(response_schema: dict = None) -> str:
         most precise tool-result value is NOT grounds to drop below
         1.0; pick the precise one yourself.
         Empty strings, null, or placeholder text do NOT count as populated.
+        When the goal explicitly permits a negative finding, a tool-grounded
+        explanation of absent evidence can populate the corresponding field;
+        do not require a positive path or snippet in that case.
+        For required delegated tool calls, a finished spawn_agent result with
+        the child's tool name, filters, and quoted zero-match or unavailable
+        result supports that negative finding; a bare summary does not.
 
         Always include the "output" field in your JSON response with your best
         extraction of these values, even for partial completion.

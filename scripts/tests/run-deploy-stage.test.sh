@@ -137,13 +137,15 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 run_stage --finish >"$TEST_ROOT/concurrent-finish.out" 2>&1 &
 finish_pid=$!
-# Under a loaded /deploy host the finish supervisor can take longer than 0.5s
-# to persist "finishing", or it can pass through that state so quickly the
-# 10x50ms poll misses it and only sees "finished". Either way admission is
-# closed; wait for one of those statuses instead of a single 0.5s snapshot.
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 \
-         21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+# Under a loaded /deploy host the finish supervisor can take seconds just to
+# start Python and persist "finishing", or it can pass through that state so
+# quickly a poll only sees "finished". Either way admission is closed. Wait on
+# the event itself: stop as soon as either status is written or the finish
+# process exits (it cannot exit cleanly without writing one), instead of a fixed
+# wall-clock window. The iteration cap only prevents a hung test.
+for _ in $(seq 1 600); do
     grep -Eq '"status": "(finishing|finished)"' "$RUN_ROOT/concurrent/metadata.json" && break
+    kill -0 "$finish_pid" 2>/dev/null || break
     sleep 0.05
 done
 grep -Eq '"status": "(finishing|finished)"' "$RUN_ROOT/concurrent/metadata.json" \

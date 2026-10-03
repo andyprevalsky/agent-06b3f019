@@ -4071,7 +4071,10 @@ class _LocalCodeSandbox:
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def _signal_sandbox(self, sig: signal.Signals) -> None:
-        with contextlib.suppress(ProcessLookupError):
+        # macOS answers EPERM rather than ESRCH once the group holds only
+        # zombies awaiting reaping; either way nothing is left to signal, and
+        # the test's own process listing proves the CLI actually ended.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(self._process.pid, sig)
 
 
