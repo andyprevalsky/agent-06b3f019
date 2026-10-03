@@ -6077,7 +6077,7 @@ def test_build_auth_options_prompt_section_minted_account_ref():
         [],
     )
 
-    assert "- Minted account: Email -> agent+example@example.com | Phone -> +19125550199 | enabled" in section
+    assert "- Minted account: Email -> agent+example@example.com (codes mailed here reach you automatically) | Phone -> +19125550199 | enabled" in section
     assert "use agent email" not in section
     assert refs == {}
     assert origins == {}

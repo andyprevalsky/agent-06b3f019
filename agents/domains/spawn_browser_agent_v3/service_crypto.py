@@ -890,10 +890,7 @@ def build_auth_options_prompt_section(
         match_text = f"; likely match: {match}" if match else ""
         lines.append(f"- Email OTP: available ({connected_text}{match_text})")
     else:
-        lines.append(
-            "- Email OTP: unavailable (none of the user's inboxes is connected; "
-            "mail to the minted address still arrives)"
-        )
+        lines.append("- Email OTP: unavailable (none of the user's inboxes is connected)")
 
     if minted:
         minted_id = minted.get("id") or minted.get("accountLabel") or minted.get("account_label") or minted.get("email")
@@ -922,7 +919,8 @@ def build_auth_options_prompt_section(
                 # "Sign-up": a first run typed the ref into sign-in forms when it read "New password".
                 password_clause = f" | Sign-up password ref (new accounts only): {new_password_ref}"
             lines.append(
-                f"- Minted account: Email -> {minted_email}{phone_clause}{password_clause} | {_disabled_label(minted)}"
+                f"- Minted account: Email -> {minted_email} (codes mailed here reach you automatically)"
+                f"{phone_clause}{password_clause} | {_disabled_label(minted)}"
             )
             credential_refs_by_secret_ref[str(minted_email)] = {
                 "kind": "minted_account",
