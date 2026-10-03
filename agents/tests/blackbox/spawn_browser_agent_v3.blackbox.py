@@ -9381,14 +9381,12 @@ async def test_execute_action_element_not_found():
     dom = MagicMock()
     dom.session = MagicMock()
     dom.selector_map = {}
-    dom.ensure_selector_map = AsyncMock(return_value={})
     dom.ensure_browser_overlays_suppressed = AsyncMock()
     ah = MagicMock()
     ah.record_action = AsyncMock()
     out = await execute_action(dom, ah, {"action": "click", "index": 5})
     assert out["success"] is False
     assert "index 5 not found" in out["error"]
-    dom.ensure_selector_map.assert_awaited_once()
 
 async def test_execute_action_unknown_action():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -11291,7 +11289,6 @@ async def test_execute_action_scroll_missing_element_index_errors():
     dom = MagicMock()
     dom.session = MagicMock()
     dom.selector_map = {}
-    dom.ensure_selector_map = AsyncMock(return_value={})
     dom.get_element_coordinates = AsyncMock(return_value=None)
     ah = MagicMock()
     ah.record_action = AsyncMock()
@@ -11404,92 +11401,6 @@ async def test_execute_action_input_text_delegates():
             {"action": "input_text", "index": 1, "params": {"text": "hi"}},
         )
     assert out == {"success": True, "message": ""}
-
-
-def _dom_service_with_snapshot(selector_map):
-    """Real DOMService on a reattached session whose next DOM build yields selector_map."""
-    from browser_tools.dom_service import DOMService
-
-    dom = DOMService(cdp_url="")
-    session = _fake_session_with_event_bus()
-    session.get_browser_state_summary = AsyncMock(
-        return_value=SimpleNamespace(dom_state=SimpleNamespace(selector_map=selector_map))
-    )
-    dom._session = session
-    dom.ensure_browser_overlays_suppressed = AsyncMock()
-    return dom, session
-
-
-async def test_execute_action_resolves_pre_resume_index_on_reattached_session():
-    """Agent 6de7eeaf: after AgentCard setup resumed the browser activity, the
-    model's first action was input_text(index=6, "card_number") using the index
-    from its pre-resume read_browser_state. The reattached DOMService had never
-    built a snapshot, so the lookup failed with "Element with index 6 not found"
-    although [6] was still the live card-number input; the model then typed the
-    literal ref through evaluate and looped until the benchmark timed out.
-    """
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    card_number = MagicMock()
-    card_number.tag_name = "input"
-    card_number.attributes = {"id": "card-number", "autocomplete": "cc-number"}
-    dom, session = _dom_service_with_snapshot({6: card_number})
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    typed_into = []
-
-    async def fake_input(**kwargs):
-        typed_into.append((kwargs["index"], kwargs["element"], kwargs["params"]["text"]))
-        return {"success": True, "message": "", "typed_text": "[encrypted_data]"}
-
-    with patch.object(service_actions, "_execute_input_text", side_effect=fake_input):
-        out = await service_actions.execute_action(
-            dom,
-            ah,
-            {"action": "input_text", "index": 6, "params": {"text": "card_number"}},
-            secret_refs={"card_number": "4242424242424190"},
-        )
-        again = await service_actions.execute_action(
-            dom,
-            ah,
-            {"action": "input_text", "index": 6, "params": {"text": "card_number"}},
-            secret_refs={"card_number": "4242424242424190"},
-        )
-
-    assert out["success"] is True, out
-    assert again["success"] is True, again
-    assert typed_into == [(6, card_number, "card_number"), (6, card_number, "card_number")]
-    session.get_browser_state_summary.assert_awaited_once_with(include_screenshot=False)
-
-
-async def test_execute_action_keeps_missing_index_error_after_snapshot_exists():
-    """An index absent from a snapshot this connection already built is really
-    gone; the lookup must report it without rebuilding the DOM per action."""
-    from domains.spawn_browser_agent_v3.service_actions import execute_action
-
-    dom, session = _dom_service_with_snapshot({7: MagicMock()})
-    dom._selector_map = {7: MagicMock()}
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-
-    out = await execute_action(dom, ah, {"action": "click", "index": 6})
-
-    assert out == {"success": False, "error": "Element with index 6 not found"}
-    session.get_browser_state_summary.assert_not_awaited()
-
-
-async def test_execute_action_reports_missing_index_when_fresh_snapshot_lacks_it():
-    from domains.spawn_browser_agent_v3.service_actions import execute_action
-
-    dom, session = _dom_service_with_snapshot({7: MagicMock()})
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-
-    out = await execute_action(dom, ah, {"action": "click", "index": 6})
-
-    assert out == {"success": False, "error": "Element with index 6 not found"}
-    session.get_browser_state_summary.assert_awaited_once_with(include_screenshot=False)
-    assert 7 in dom.selector_map
 
 async def test_execute_action_screenshot_returns_success():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -23721,18 +23632,6 @@ async def run_all_tests():
     await r.record_async("execute_action_goto_delegates", test_execute_action_goto_delegates)
     await r.record_async("execute_action_click_delegates", test_execute_action_click_delegates)
     await r.record_async("execute_action_input_text_delegates", test_execute_action_input_text_delegates)
-    await r.record_async(
-        "execute_action_resolves_pre_resume_index_on_reattached_session",
-        test_execute_action_resolves_pre_resume_index_on_reattached_session,
-    )
-    await r.record_async(
-        "execute_action_keeps_missing_index_error_after_snapshot_exists",
-        test_execute_action_keeps_missing_index_error_after_snapshot_exists,
-    )
-    await r.record_async(
-        "execute_action_reports_missing_index_when_fresh_snapshot_lacks_it",
-        test_execute_action_reports_missing_index_when_fresh_snapshot_lacks_it,
-    )
     await r.record_async("execute_action_screenshot", test_execute_action_screenshot_returns_success)
     await r.record_async("execute_action_exception_catches", test_execute_action_exception_catches)
 

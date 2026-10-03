@@ -1709,8 +1709,6 @@ async def execute_action(
         element = None
         if index is not None:
             element = dom_service.selector_map.get(index)
-            if not element and not dom_service.selector_map:
-                element = (await dom_service.ensure_selector_map()).get(index)
             if not element:
                 # Payment inputs inside open shadow roots can be visible in the
                 # browser state without a selector-map entry. Let the approved

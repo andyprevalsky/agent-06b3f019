@@ -20,7 +20,9 @@ tags:
   - selector-map
 sources:
   - PR #1401
-repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py
+  - commit dfebb6c88
+  - commit 21e0b1c63
+repro: cd agents && venv/bin/python scripts/run_blackbox_tests.py browser-step-timing
 status: fixed
 ---
 
@@ -34,14 +36,23 @@ AgentCard setup completed normally. At 01:00:34.5Z the card (ending 4190) was is
 
 From 01:00:48Z the browser model blamed shadow DOM and switched to raw JS. That path skips secret-ref substitution, so it typed the literal text `card_number`. The checkout returned 400 `card number is required` in a loop until the cap, and the runner paused the agent. Diagnostics showed 491s inside one browser tool call, no provider errors, and an 89% tree-wide cache hit (the reported 0% covers only the root call). The 6a run passed only because its model happened to read page state first after resuming, which filled the map.
 
-Local repro: `test_execute_action_resolves_pre_resume_index_on_reattached_session` runs `input_text` on a resumed `DOMService` with an empty map. On the old code it returns `{'success': False, 'error': 'Element with index 6 not found'}`, the exact production error; with the fix it passes. Archive searches for the symptom strings found only evaluator cases about recovered stale-index misses (2026-08-21) and no case about an empty map after resume.
+Local repro: the original repro test (removed along with the lazy fix; see Solution) ran `input_text` on a resumed `DOMService` with an empty map. On the old code it returned `{'success': False, 'error': 'Element with index 6 not found'}`, the exact production error. Main's `test_resumed_transcript_indexes_resolve_on_first_step` reproduces the same state. Archive searches for the symptom strings found only evaluator cases about recovered stale-index misses (2026-08-21) and no case about an empty map after resume.
 
 ## Solution
 
-- `DOMService.ensure_selector_map()` builds the map from one page-state capture (no screenshot) when this connection has never built one.
-- `execute_action` calls it only when the map is completely empty, before reporting an index as not found. An index missing from a populated map, or from the fresh snapshot, still returns the same error.
-- Three registered tests in the `spawn_browser_agent_v3` agents blackbox domain (which runs in deploy coverage) cover the resumed-session resolve, the populated-map miss, and the fresh-snapshot miss.
-- Cost at 10,000 agents: at most one extra page-state capture per resumed browser activity, only on its first indexed action, bounded by the existing action timeout. No shared state.
+Main fixed the same failure independently in `dfebb6c88`, and PR #1401 adopts that fix. When an activity restored a transcript, its first step observe builds the full DOM if the selector map is empty (`_restored_indexes_unresolved` and `_step_observe_needs_dom` in `agents/domains/spawn_browser_agent_v3/handler.py`). The `browser-step-timing` agents blackbox domain, which runs in deploy coverage, owns the regression:
+
+- `test_resumed_transcript_indexes_resolve_on_first_step` covers the resumed resolve, the warm-map skip, and a fresh activity that stays URL/title-only.
+- `test_resumed_transcript_observe_wired_once_per_activity` covers the loop wiring.
+
+This branch first shipped a lazy variant (`21e0b1c63`): `execute_action` built the map with `DOMService.ensure_selector_map()` on an indexed action against an empty map. Merging main showed that the two designs conflict:
+
+- Main's `test_execute_action_approved_payment_ref_recovers_from_stale_shadow_index` failed with `object MagicMock can't be used in 'await' expression`. Its DOM mock has no async `ensure_selector_map`.
+- Main's resume test failed its fresh-activity case, which requires `Element with index 6 not found` without a DOM build.
+
+Both failures were reproduced on the merged tree. The lazy path and its tests were removed, and both tests then pass, along with the full `spawn-browser-agent-v3` and `browser-step-timing` domains.
+
+Cost at 10,000 agents: one full DOM build on the first step of each resumed browser activity, only when its selector map is empty. No shared state.
 
 ## Human feedback
 
@@ -49,4 +60,4 @@ None recorded.
 
 ## Reusable lesson
 
-Any per-activity cache that resolves model-visible references must rebuild itself on first use after a resume; an empty cache is not evidence that the referenced object is gone.
+Any per-activity cache that resolves model-visible references must rebuild itself on first use after a resume; an empty cache is not evidence that the referenced object is gone. Before landing a fix for a shared smoke failure, check main and open branches for the same fix. Two mechanisms for one bug conflict once both are merged.
