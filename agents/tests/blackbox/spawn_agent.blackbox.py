@@ -3977,6 +3977,47 @@ async def test_spawn_explore_self_wrap_without_evidence_fails():
     assert result["error_reason"] == "explore completed without tool evidence"
 
 
+async def test_spawn_explore_self_deadline_tracks_depth_timeout():
+    """The explore wraps up just inside its own depth timeout, not a shorter cap.
+
+    The self-deadline used to be the 150s live parent wait minus slack. The
+    parent now waits the depth's whole activity timeout, so the explore keeps
+    researching until 15s before it: 585s for quick/medium, 1785s for deep.
+    """
+    from contextlib import asynccontextmanager
+    from unittest.mock import patch
+
+    from domains.spawn_agent import service
+
+    async def fake_run_agent(**kwargs):
+        return {"status": "completed", "final_response": "Grounded result https://example.com"}
+
+    for depth, expected in (("quick", 585), ("medium", 585), ("deep", 1785)):
+        delays: list[float] = []
+
+        @asynccontextmanager
+        async def recording_timeout(delay):
+            delays.append(delay)
+
+            class _Deadline:
+                @staticmethod
+                def expired() -> bool:
+                    return False
+
+            yield _Deadline()
+
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("loop.run_agent.run_agent", new=fake_run_agent),
+            patch.object(service.asyncio, "timeout", recording_timeout),
+        ):
+            await service.spawn_explore_agent_activity(
+                agent_id="a", user_id="u", goal="research Denver cost", model="m", depth=depth
+            )
+
+        assert delays == [expected], f"{depth} explore self-deadline was {delays}, expected {expected}s"
+
+
 async def test_spawn_explore_demo_keeps_full_activity_budget():
     """The live parent deadline does not truncate a demo explore."""
     from datetime import timedelta
@@ -5324,6 +5365,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_self_wrap_without_evidence_fails",
         test_spawn_explore_self_wrap_without_evidence_fails,
+    )
+    await r.record_async(
+        "spawn_explore_self_deadline_tracks_depth_timeout",
+        test_spawn_explore_self_deadline_tracks_depth_timeout,
     )
     await r.record_async(
         "explore_demo_keeps_full_activity_budget",
