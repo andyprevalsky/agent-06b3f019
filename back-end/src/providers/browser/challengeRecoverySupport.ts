@@ -44,7 +44,10 @@ export function compatiblePreferredBrowserConfig(
 ): PreferredBrowserConfig | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const candidate = raw as Partial<PreferredBrowserConfig>;
-  if (candidate.version !== 1 || !['kernel', 'steel'].includes(String(candidate.provider))) {
+  if (
+    candidate.version !== 1 ||
+    !['kernel', 'steel', 'browser-use'].includes(String(candidate.provider))
+  ) {
     return null;
   }
   const learnedLocation = candidate.proxyLocation;

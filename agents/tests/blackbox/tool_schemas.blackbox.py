@@ -222,7 +222,7 @@ def test_planner_response_schema_is_compact():
 
 
 def test_grep_tool_schema_exact_contract():
-    """Grep exposes only the v1 DB-backed grep params."""
+    """Grep exposes typed agent metadata queries alongside legacy filters."""
     from utils.tool_schemas import GrepTool
 
     schema = GrepTool.model_json_schema()
@@ -232,6 +232,11 @@ def test_grep_tool_schema_exact_contract():
         "pattern",
         "sources",
         "source",
+        "role",
+        "record_kind",
+        "surface",
+        "trace_path",
+        "until",
         "require_source_access",
         "-B",
         "-A",
@@ -241,6 +246,8 @@ def test_grep_tool_schema_exact_contract():
         "-i",
         "head_limit",
         "offset",
+        "order",
+        "page_after",
         "multiline",
         "filters",
         "person",
@@ -256,6 +263,7 @@ def test_grep_tool_schema_exact_contract():
         "whatsapp",
         "network",
         "agent_network",
+        "agent_trajectories",
         "transactions",
         "documents",
         "summary",
@@ -273,6 +281,11 @@ def test_grep_tool_schema_exact_contract():
 
     assert _enum_values(schema["properties"]["source"]) == expected_sources
     assert _enum_values(schema["properties"]["sources"]) == expected_sources
+    assert _enum_values(schema["properties"]["role"]) == {"USER", "ASSISTANT", "TOOL"}
+    assert _enum_values(schema["properties"]["record_kind"]) == {
+        "message", "llm_output", "llm_context", "all"
+    }
+    assert "pattern" not in schema.get("required", [])
 
     removed = {
         "path",
@@ -817,6 +830,35 @@ def test_response_schema_rejects_null_properties_for_object_fields():
         pass
 
 
+def test_response_schema_constraints_validate_at_tool_boundary():
+    from pydantic import ValidationError
+    from utils.tool_schemas import ResponseSchemaConfig
+
+    schema = ResponseSchemaConfig.model_validate({"fields": [
+        {"name": "items", "type": "list[object]", "required": True, "minItems": 2, "maxItems": 2,
+         "properties": [{"name": "note", "type": "str", "required": False, "maxLength": 20}]},
+    ]})
+    field = schema.model_dump()["fields"][0]
+    assert field["minItems"] == field["maxItems"] == 2
+    assert field["properties"][0]["required"] is False
+    assert field["properties"][0]["maxLength"] == 20
+
+    invalid = (
+        {"name": "items", "type": "list[str]", "required": True, "minItems": 3, "maxItems": 2},
+        {"name": "title", "type": "str", "required": True, "minItems": 1},
+        {"name": "items", "type": "list[str]", "required": True, "maxLength": 10},
+        {"name": "items", "type": "list[str]", "required": True, "minItems": -1},
+        {"name": "rows", "type": "list[object]", "required": True,
+         "properties": [{"name": "title", "type": "str", "minLength": 8, "maxLength": 2}]},
+    )
+    for item in invalid:
+        try:
+            ResponseSchemaConfig.model_validate({"fields": [item]})
+            raise AssertionError(f"Expected ValidationError for {item}")
+        except ValidationError:
+            pass
+
+
 def test_spawn_agent_browser_with_string_output_schema():
     """SpawnAgentTool accepts JSON-stringified output_schema (the exact failure
     mode that broke spawn-sub-agents smoke runs — see agent
@@ -1070,6 +1112,7 @@ async def run_all_tests():
         "response_schema_null_properties_object",
         test_response_schema_rejects_null_properties_for_object_fields,
     )
+    r.record("response_schema_constraints_validate", test_response_schema_constraints_validate_at_tool_boundary)
     r.record("spawn_agent_string_output_schema", test_spawn_agent_browser_with_string_output_schema)
     # render_tool_list
     r.record("render_tool_list_empty", test_render_tool_list_empty_registry)

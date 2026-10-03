@@ -226,6 +226,24 @@ def validate_browser_agents_terminated_with_recording(
         if not isinstance(task_id, str) or task_id not in browser_task_ids:
             continue
         action = str(meta.get("action_type") or "")
+        tool_name = str(meta.get("toolName") or "")
+        # Other task tools (spawn_claude_code_agent) emit task_started and
+        # task_complete too, but never record a browser.
+        browser_related = tool_name == "spawn_browser_agent" or (
+            not tool_name
+            and action
+            in {
+                "browser",
+                "session_init",
+                "session_started",
+                "task_started",
+                "recording",
+                "network_recording",
+                "task_complete",
+            }
+        )
+        if not browser_related:
+            continue
         state = tasks.setdefault(
             task_id, {"seen": False, "complete": False, "recording_ok": False}
         )
@@ -279,9 +297,13 @@ def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
             continue
         role = message.get("role")
         content = str(message.get("text") or "")
+        metadata = _message_metadata(message)
+        # Sub-agent rows render inside the collapsed sub-agent panel, not the
+        # root transcript a fresh share-link visitor sees.
         if (
             role not in ("USER", "ASSISTANT")
-            or _message_metadata(message).get("hidden")
+            or metadata.get("hidden")
+            or metadata.get("subAgentId")
         ):
             continue
         for line in content.splitlines():

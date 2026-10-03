@@ -2,6 +2,7 @@ import type { ProxyGeoLocation } from '../geoip';
 import type { KernelRecoveryProxySpecificity } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
 import type { BrowserProviderName } from './types';
+import { browserUseEnabled } from './config';
 
 export interface BrowserRecoveryConfig {
   key: string;
@@ -12,6 +13,20 @@ export interface BrowserRecoveryConfig {
   /** Create the Kernel session without a managed/shared proxy exit. */
   omitManagedProxy?: boolean;
   steelProxyMode?: 'managed' | 'fixed';
+}
+
+/** A transport failure can affect a provider's whole proxy fleet, so try the
+ * other provider's exits before spending time on more tiers of the same one.
+ * Keep every candidate as a fallback, and keep each provider's original order.
+ */
+export function alternateProviderFirst(
+  configs: BrowserRecoveryConfig[],
+  failedProvider: BrowserProviderName
+): BrowserRecoveryConfig[] {
+  return [
+    ...configs.filter((config) => config.provider !== failedProvider),
+    ...configs.filter((config) => config.provider === failedProvider),
+  ];
 }
 
 export function bestSpecificity(location: ProxyGeoLocation): KernelRecoveryProxySpecificity {
@@ -158,6 +173,11 @@ export function browserRecoveryCandidates(
       steelProxyMode: 'managed',
     },
     {
+      key: 'browser_use_residential_country',
+      provider: 'browser-use',
+      proxyMode: 'residential_country',
+    },
+    {
       key: 'kernel_isp',
       provider: 'kernel',
       proxyMode: `isp_${fallbackSpecificity}`,
@@ -173,4 +193,15 @@ export function browserRecoveryCandidates(
   // recovery cycle and burned agent-payment-production-purchase's 900s budget.
   // Steel-only for these hosts (order preserved: fixed then managed).
   return candidates.filter((candidate) => candidate.provider === 'steel');
+}
+
+/** Do not spend a recovery lane on a provider that cannot be provisioned. */
+export function availableBrowserRecoveryCandidates(
+  location: ProxyGeoLocation,
+  options?: { preferSteel?: boolean }
+): BrowserRecoveryConfig[] {
+  const candidates = browserRecoveryCandidates(location, options);
+  return browserUseEnabled() && process.env.BROWSER_USE_API_KEY?.trim()
+    ? candidates
+    : candidates.filter((candidate) => candidate.provider !== 'browser-use');
 }

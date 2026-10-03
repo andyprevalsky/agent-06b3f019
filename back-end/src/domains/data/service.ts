@@ -6,6 +6,7 @@
 import { isPostgresRegexError } from './regexSafety';
 import { buildAgentNetworkMatch, buildDocumentMatch, buildTransactionMatch } from './format';
 import { formatTimeAgo } from './format.snippets';
+import { sortMatches } from './grepSort';
 import {
   isMessageFamilySource,
   type GrepMatch,
@@ -19,6 +20,7 @@ import { AgentNotFoundError, InvalidPatternError, MissingAgentIdError } from './
 import { validateGrepInput } from './validate';
 import * as repo from './repo';
 import * as grepRepo from './grepRepo';
+import { searchTrajectorySource } from './trajectorySearchService';
 import { searchMessageSource } from './messageSearchService';
 import { searchNetworkSource } from './networkSearchService';
 import { createLogger } from '../../providers/logger';
@@ -52,7 +54,12 @@ async function searchSource(
   input: ValidatedGrepInput,
   source: ValidSource,
   agentId: string | undefined
-): Promise<{ total: number; matches: GrepMatch[] }> {
+): Promise<{
+  total: number;
+  matches: GrepMatch[];
+  hasMore?: boolean;
+  nextPageAfter?: string | null;
+}> {
   if (isMessageFamilySource(source)) {
     return searchMessageSource({ userId, input, source });
   }
@@ -131,6 +138,8 @@ async function searchSource(
     return { total, matches: rows.map((row) => buildDocumentMatch(row, input)) };
   }
 
+  if (source === 'agent_trajectories') return searchTrajectorySource(userId, input, agentId);
+
   const agentIds = await agentTreeIdsForGrep(userId, agentId);
   const agentNetworkFilters = input.filters.agentNetwork;
   const [total, rows] = await Promise.all([
@@ -141,6 +150,7 @@ async function searchSource(
       pathAgentId: agentNetworkFilters?.pathAgentId,
       pathRole: agentNetworkFilters?.pathRole,
       pathMessageId: agentNetworkFilters?.pathMessageId,
+      role: agentNetworkFilters?.role,
     }),
     grepRepo.searchAgentNetworkGrepRows({
       agentIds,
@@ -151,19 +161,10 @@ async function searchSource(
       pathAgentId: agentNetworkFilters?.pathAgentId,
       pathRole: agentNetworkFilters?.pathRole,
       pathMessageId: agentNetworkFilters?.pathMessageId,
+      role: agentNetworkFilters?.role,
     }),
   ]);
   return { total, matches: rows.map((row) => buildAgentNetworkMatch(row, input)) };
-}
-
-function sortMatches(matches: GrepMatch[], oldestFirst: boolean): GrepMatch[] {
-  return [...matches].sort((a, b) => {
-    const byTime = oldestFirst
-      ? Date.parse(a.timestamp) - Date.parse(b.timestamp)
-      : Date.parse(b.timestamp) - Date.parse(a.timestamp);
-    if (byTime !== 0) return byTime;
-    return a.path.localeCompare(b.path);
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -189,13 +190,21 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
   }
 
   const totalMatches = sourceResults.reduce((sum, result) => sum + result.total, 0);
-  const oldestFirst = input.sources.every(isMessageFamilySource);
-  const merged = sortMatches(
-    sourceResults.flatMap((result) => result.matches),
-    oldestFirst
-  );
+  const soleTrajectory = input.sources.length === 1 && input.sources[0] === 'agent_trajectories';
+  const oldestFirst = soleTrajectory
+    ? input.order === 'oldest_first'
+    : input.sources.every(isMessageFamilySource);
+  const merged = soleTrajectory
+    ? sourceResults[0].matches
+    : sortMatches(
+        sourceResults.flatMap((result) => result.matches),
+        oldestFirst
+      );
   const matches = merged.slice(input.offset, input.offset + input.headLimit);
-  const truncated = totalMatches > input.offset + matches.length;
+  const keysetPage = soleTrajectory && input.offset === 0;
+  const truncated = keysetPage
+    ? sourceResults[0].hasMore === true
+    : totalMatches > input.offset + matches.length;
   const summaries: GrepResult['summaries'] = {};
 
   if (input.sources.includes('transactions')) {
@@ -225,30 +234,33 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
   }
 
   log.info(
-    `grep: '${params.pattern}' -> ${matches.length}/${totalMatches} matches in ${input.sources.join(',')}`
+    `grep: '${input.pattern}' -> ${matches.length}/${totalMatches} matches in ${input.sources.join(',')}`
   );
 
   return {
     matches,
     total_matches: totalMatches,
     truncated,
-    pattern: params.pattern,
+    pattern: input.pattern,
     sources: input.sources,
     applied_limit: input.headLimit,
     applied_offset: input.offset,
     returned: matches.length,
     has_more: truncated,
-    next_offset: truncated ? input.offset + matches.length : null,
+    next_offset:
+      truncated && input.pageAfterMessageId === undefined ? input.offset + matches.length : null,
+    ...(keysetPage ? { next_page_after: sourceResults[0].nextPageAfter ?? null } : {}),
     display_order: oldestFirst ? 'oldest_first' : 'newest_first',
-    context_unit: oldestFirst
-      ? 'message_record'
-      : input.sources.some(isMessageFamilySource)
-        ? 'mixed'
-        : 'logical_line',
+    context_unit:
+      oldestFirst && !soleTrajectory
+        ? 'message_record'
+        : input.sources.some(isMessageFamilySource)
+          ? 'mixed'
+          : 'logical_line',
     ...(Object.keys(summaries).length > 0 ? { summaries } : {}),
     ...(matches.length === 0
       ? {
-          message: `No matches for '${params.pattern}' in ${input.sources.join(', ')}.`,
+          message: `No matches for '${input.pattern}' in ${input.sources.join(', ')}.`,
         }
       : {}),
   };

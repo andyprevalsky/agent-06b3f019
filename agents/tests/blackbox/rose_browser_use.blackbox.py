@@ -1836,6 +1836,8 @@ async def test_complete_browser_use_waterfall_only_path():
     assert openrouter_bodies
     body = openrouter_bodies[0]
     assert body["tool_choice"] == "auto"
+    assert body["max_tokens"] == 2048
+    assert body["temperature"] == 0.3
     assert body["tools"][0]["function"]["name"] == "click"
     assert body["tools"][0]["function"]["description"] == BROWSER_USE_TOOLS["click"]["description"]
     assert "# Available Actions" not in body["messages"][0]["content"]

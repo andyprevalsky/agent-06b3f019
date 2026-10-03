@@ -30,9 +30,9 @@ import {
   getWebSearchStreamTitleFromPartialRouterJson,
   type ClosedRouterAction,
 } from './routerJsonStream';
-import { delayedCacheStreamHedge, type CacheLookupResult } from './delayedCacheStreamHedge';
+import { delayedCacheStreamHedge } from './delayedCacheStreamHedge';
+import { isOpeningRouterTurn, readRouterFastCache } from './routerFastCache';
 import { isOaiDemoGoal } from '../fastCacheNormalizeOaiDemo';
-import { readRouterFastCache } from './routerFastCache';
 import type { ChatProviderRoute } from './phaseModels';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 import { ROUTER_JSON_SCHEMA } from './routerDecisionJsonSchema';
@@ -259,10 +259,10 @@ export async function callRouterLlm(params: {
   const fastModeWrite = fastMode.writeEnabled === true && fastMode.goal !== null;
   const providerFastMode = fastMode.providerFastMode !== false;
   let fcKey: string | null = null;
-  let fcRequest: Record<string, unknown> | null = null;
   let fcCacheWon = false;
+  const driftGoal = fastModeRead && isOpeningRouterTurn(openaiMessages) ? fastMode.goal : null;
   if ((fastModeRead || fastModeWrite) && fastMode.goal) {
-    fcRequest = {
+    fcKey = contentKey(fastMode.goal, 'chat_router', {
       model: params.model,
       temperature: ROUTER_TEMPERATURE,
       effort: 'minimal',
@@ -275,8 +275,7 @@ export async function callRouterLlm(params: {
       provider_fast_mode: providerFastMode,
       provider_route: params.providerRoute,
       messages: openaiMessages,
-    };
-    fcKey = contentKey(fastMode.goal, 'chat_router', fcRequest);
+    });
   }
   async function* syntheticChatStream(json: string): AsyncGenerator<CompletionChunk> {
     yield {
@@ -339,61 +338,28 @@ export async function callRouterLlm(params: {
           );
 
         let stream: AsyncIterable<CompletionChunk>;
-        if (skipFastCache && isOaiDemoGoal(fastMode.goal)) {
-          throw new Error(
-            'Fast Mode demo router cached decision was rejected; live routing is disabled'
-          );
-        }
-        if (fcKey && fastModeRead && !skipFastCache && fcRequest && fastMode.goal) {
+        if (fcKey && fastModeRead && !skipFastCache) {
           const cacheKey = fcKey;
-          const cacheRequest = fcRequest;
-          const cacheGoal = fastMode.goal;
-          const readCache = async (): Promise<CacheLookupResult<string>> => {
-            const hit = await readRouterFastCache({ goal: cacheGoal, request: cacheRequest });
-            if (hit.invalid) {
-              log.warn('fast_cache.chat_router_invalid', {
+          stream = delayedCacheStreamHedge({
+            readCache: () => readRouterFastCache({ agentId: params.agentId, cacheKey, driftGoal }),
+            createLive: (abortSignal) => createLiveStream(abortSignal),
+            createCached: syntheticChatStream,
+            isLiveCommitChunk: (chunk) => {
+              const delta = chunk.choices[0]?.delta;
+              return Boolean(delta?.content?.length || delta?.reasoning?.length);
+            },
+            awaitCacheFirst: isOaiDemoGoal(fastMode.goal),
+            hangTimeoutMs: ROUTER_CACHE_HANG_MS,
+            onCacheError: (error) =>
+              log.warn('fast_cache.chat_router_read_failed', {
                 agentId: params.agentId,
                 key: cacheKey,
-              });
-            }
-            if (hit.hit && hit.json) {
-              log.info('fast_cache.chat_router_hit', {
-                agentId: params.agentId,
-                key: hit.key ?? cacheKey,
-              });
-              return { hit: true, value: hit.json };
-            }
-            log.info('fast_cache.chat_router_miss', { agentId: params.agentId, key: cacheKey });
-            return { hit: false };
-          };
-          if (isOaiDemoGoal(cacheGoal)) {
-            // A cache transport error or missing demo row must never spend live
-            // tokens. The hedge intentionally falls through to live on errors.
-            const hit = await readCache();
-            if (!hit.hit) throw new Error(`Fast Mode demo router cache miss for ${cacheKey}`);
-            fcCacheWon = true;
-            stream = syntheticChatStream(hit.value);
-          } else {
-            stream = delayedCacheStreamHedge({
-              readCache,
-              createLive: (abortSignal) => createLiveStream(abortSignal),
-              createCached: syntheticChatStream,
-              isLiveCommitChunk: (chunk) => {
-                const delta = chunk.choices[0]?.delta;
-                return Boolean(delta?.content?.length || delta?.reasoning?.length);
-              },
-              hangTimeoutMs: ROUTER_CACHE_HANG_MS,
-              onCacheError: (error) =>
-                log.warn('fast_cache.chat_router_read_failed', {
-                  agentId: params.agentId,
-                  key: cacheKey,
-                  error: error instanceof Error ? error.message : String(error),
-                }),
-              onWinner: (winner) => {
-                fcCacheWon = winner === 'cache';
-              },
-            });
-          }
+                error: error instanceof Error ? error.message : String(error),
+              }),
+            onWinner: (winner) => {
+              fcCacheWon = winner === 'cache';
+            },
+          });
         } else {
           if (fcKey) {
             log.info('fast_cache.chat_router_write_only', { agentId: params.agentId, key: fcKey });

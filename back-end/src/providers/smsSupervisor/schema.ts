@@ -28,6 +28,9 @@ const increaseBudgetCallSchema = z.object({
   }),
 });
 
+export const START_PHASE_DESCRIPTION =
+  "Phase the agent starts in. 'execute' skips planning and the agent cannot ask the user anything: use it only when every input the goal needs is already known and one agent can finish it without splitting into parallel sub-tasks. Otherwise 'plan'. Prefer 'plan' when unsure.";
+
 const startNewAgentCallSchema = z.object({
   tool: z.literal('start_new_agent'),
   arguments: z.object({
@@ -38,6 +41,7 @@ const startNewAgentCallSchema = z.object({
       .describe(
         'Agent-run budget for LLM and metered tool calls only (default $1; usually under $2). Never include purchase cost; purchases are approved separately.'
       ),
+    start_phase: z.enum(['plan', 'execute']).describe(START_PHASE_DESCRIPTION),
   }),
 });
 

@@ -11,7 +11,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type Kernel from '@onkernel/sdk';
+import { InternalServerError, type Kernel } from '@onkernel/sdk';
 import {
   KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
@@ -19,6 +19,7 @@ import {
 } from '../../providers/browser/kernelProxy';
 import { prisma } from '../../providers/database';
 import type { ProxyGeoLocation } from '../../providers/geoip';
+import { retryWithBackoff } from '../../providers/retry';
 import {
   assert,
   type BrowserApiResponse,
@@ -42,13 +43,24 @@ export async function assertResumeReprovisionsDeletedProxy(options: {
   );
   assert(candidate !== undefined, `no managed proxy candidate for source ${String(proxySource)}`);
 
-  const doomed = await kernel.proxies.create(
+  // Kernel intermittently answers a valid proxy create with `500 failed to
+  // apply proxy config`; only that provider-side 5xx is retried.
+  const doomed = await retryWithBackoff(
+    () =>
+      kernel.proxies.create(
+        {
+          type: candidate.type,
+          name: `rose-blackbox-stale-${randomUUID()}`,
+          config: candidate.config,
+        },
+        KERNEL_CREATE_REQUEST_OPTIONS
+      ),
     {
-      type: candidate.type,
-      name: `rose-blackbox-stale-${randomUUID()}`,
-      config: candidate.config,
-    },
-    KERNEL_CREATE_REQUEST_OPTIONS
+      maxRetries: 3,
+      fixedDelays: [1_000, 2_000],
+      isRetryable: (error) => error instanceof InternalServerError,
+      component: 'browser-provider:stale-proxy-create',
+    }
   );
   const key = { provider: 'kernel', proxyKey: candidate.proxyKey };
   let doomedDeleted = false;

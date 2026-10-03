@@ -15,6 +15,7 @@ import {
   type NetworkSummaryEntry,
 } from './challengeClassifierNetwork';
 import { createKernelRecoverySession, releaseKernelRemoteSession } from './kernel';
+import { createBrowserUseRecoverySession, releaseBrowserUseRemoteSession } from './browserUse';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
 import { raceProbeAbort, sameSiteNavigationUrl } from './challengeRecoveryShared';
 import { restoredTunnelCandidate } from './challengeRecoveryTransport';
@@ -24,6 +25,7 @@ export { recoveryConfigKeyForSession, sameSiteNavigationUrl } from './challengeR
 
 export {
   bestSpecificity,
+  availableBrowserRecoveryCandidates,
   browserRecoveryCandidates,
   paymentCdnFocusedCandidates,
   recoverySearchPlan,
@@ -32,7 +34,7 @@ export {
 } from './challengeRecoveryCandidates';
 import {
   bestSpecificity,
-  browserRecoveryCandidates,
+  availableBrowserRecoveryCandidates,
   shouldPreferSteelForChallengeTarget,
   type BrowserRecoveryConfig,
 } from './challengeRecoveryCandidates';
@@ -132,14 +134,36 @@ export interface SuccessfulRecoveryCandidate {
 export interface BrowserConfigSearchRuntimeDependencies {
   createKernel: typeof createKernelRecoverySession;
   createSteel: typeof createSteelRecoverySession;
+  createBrowserUse: typeof createBrowserUseRecoverySession;
   releaseKernel: typeof releaseKernelRemoteSession;
   releaseSteel: typeof releaseSteelRemoteSession;
+  releaseBrowserUse: typeof releaseBrowserUseRemoteSession;
   probe: typeof probeCandidateBrowser;
 }
 
 export interface RecoveryStorageLane {
   key: string;
   storageState: Record<string, unknown>;
+}
+
+/** A response can emit headers and then never finish its body on a broken proxy.
+ * Network previews are advisory; they must not hold the candidate probe open.
+ */
+export async function boundedRecoveryResponseText(
+  response: { text: () => Promise<string> },
+  timeoutMs = 2_000
+): Promise<string | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      response.text(),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export async function probeCandidateBrowser(
@@ -225,7 +249,7 @@ export async function probeCandidateBrowser(
           try {
             const resourceType = req.resourceType();
             if (['xhr', 'fetch', 'document', 'script'].includes(resourceType)) {
-              const raw = await res.text();
+              const raw = await boundedRecoveryResponseText(res);
               if (raw) {
                 body = raw.slice(0, 200);
                 truncated = raw.length > 200;
@@ -408,8 +432,10 @@ export async function probeCandidateBrowser(
 export const browserConfigSearchRuntimeDependencies: BrowserConfigSearchRuntimeDependencies = {
   createKernel: createKernelRecoverySession,
   createSteel: createSteelRecoverySession,
+  createBrowserUse: createBrowserUseRecoverySession,
   releaseKernel: releaseKernelRemoteSession,
   releaseSteel: releaseSteelRemoteSession,
+  releaseBrowserUse: releaseBrowserUseRemoteSession,
   probe: probeCandidateBrowser,
 };
 
@@ -479,7 +505,7 @@ export async function probeCookieVariant(
             mod.getFingerprintInjectionData(billing.userId!)
           )
         : null;
-  const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
+  const configs = availableBrowserRecoveryCandidates(proxyLocation, { preferSteel });
   const cookieBlacklist = applyConfigBlacklist(configs, input.blockedConfigKeys);
   const config = cookieBlacklist.configs[0];
   if (!config) {
@@ -498,6 +524,11 @@ export async function probeCookieVariant(
             specificity: config.kernelSpecificity ?? bestSpecificity(proxyLocation),
           });
       session = { provider: 'kernel', ...created };
+    } else if (config.provider === 'browser-use') {
+      session = {
+        provider: 'browser-use',
+        ...(await dependencies.createBrowserUse(proxyLocation)),
+      };
     } else {
       const created = await dependencies.createSteel({
         proxyLocation,
@@ -536,6 +567,8 @@ export async function probeCookieVariant(
     if (session) {
       if (session.provider === 'kernel') {
         await dependencies.releaseKernel(session.sessionId).catch(() => {});
+      } else if (session.provider === 'browser-use') {
+        await dependencies.releaseBrowserUse(session.sessionId).catch(() => {});
       } else {
         await dependencies.releaseSteel(session.sessionId).catch(() => {});
       }

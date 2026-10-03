@@ -55,7 +55,16 @@ export interface Agent {
   write_lock_enabled: boolean;
 }
 
-export interface ResponseSchemaField {
+export interface ResponseSchemaFieldConstraints {
+  minItems?: number;
+  maxItems?: number;
+  minLength?: number;
+  maxLength?: number;
+  nullable?: boolean;
+  required?: boolean;
+}
+
+export interface ResponseSchemaField extends ResponseSchemaFieldConstraints {
   name: string;
   type:
     | 'str'
@@ -64,10 +73,21 @@ export interface ResponseSchemaField {
     | 'bool'
     | 'list[str]'
     | 'list[int]'
+    | 'object'
+    | 'list[object]'
     | 'file_pointer'
-    | 'list[file_pointer]';
+    | 'list[file_pointer]'
+    | 'session_file_pointer'
+    | 'list[session_file_pointer]';
   required: boolean;
-  description: string;
+  description?: string;
+  properties?: Array<
+    ResponseSchemaFieldConstraints & {
+      name: string;
+      type: ResponseSchemaField['type'];
+      description?: string;
+    }
+  >;
 }
 
 export interface ResponseSchema {

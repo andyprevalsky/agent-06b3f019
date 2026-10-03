@@ -419,10 +419,7 @@ async function activityCount(
  */
 async function assertColdHandoffHistoryStable(
   handle: ReturnType<Awaited<ReturnType<typeof getTemporalClient>>['workflow']['getHandle']>,
-  {
-    settleMs = 8_000,
-    observeMs = 2_000,
-  }: { settleMs?: number; observeMs?: number } = {}
+  { settleMs = 8_000, observeMs = 2_000 }: { settleMs?: number; observeMs?: number } = {}
 ): Promise<WorkflowHistoryMetrics> {
   const settleDeadline = Date.now() + settleMs;
   let last = await activityCount(handle);
@@ -1737,6 +1734,50 @@ async function cleanup(): Promise<void> {
     select: { id: true },
   });
   for (const row of rows) await prisma.agent.deleteMany({ where: { id: row.id } });
+}
+
+// A terminated run (tool or CI timeout, Ctrl-C) skips the `.finally` below and
+// would strand this run's synthetic agents and workflows in production. Remove
+// them by the run-unique user and queue, then exit with the signal's status.
+async function cleanupInterruptedRun(): Promise<void> {
+  const client = await getTemporalClient();
+  for await (const execution of client.workflow.list({
+    query: `TaskQueue = "${dormantQueue}" AND ExecutionStatus = "Running"`,
+  })) {
+    workflowIds.add(execution.workflowId);
+  }
+  const rows = await prisma.agent.findMany({
+    where: { userId },
+    select: { id: true, temporalWorkflowId: true },
+  });
+  for (const row of rows) {
+    agentIds.add(row.id);
+    if (row.temporalWorkflowId !== null) workflowIds.add(row.temporalWorkflowId);
+  }
+  await cleanup();
+}
+
+let interruptedBySignal = false;
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.once(signal, () => {
+    if (interruptedBySignal) return;
+    interruptedBySignal = true;
+    void withTimeout('interrupted_fixture_cleanup', cleanupInterruptedRun(), 120_000)
+      .catch((error: unknown) => {
+        process.stderr.write(
+          `fixture cleanup after ${signal} failed (user ${userId}): ${
+            error instanceof Error ? error.message : String(error)
+          }\n`
+        );
+      })
+      .finally(() => {
+        const release = deploymentLease === null ? Promise.resolve() : deploymentLease.release();
+        void release
+          .catch(() => undefined)
+          .then(() => prisma.$disconnect())
+          .finally(() => process.exit(signal === 'SIGINT' ? 130 : 143));
+      });
+  });
 }
 
 main()

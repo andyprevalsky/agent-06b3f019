@@ -37,7 +37,8 @@ import {
   testDetectCreditExhaustion_observedOpenAiWording,
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
-import * as fundedKeyCooldown from './funded-key-cooldown.support';
+import { waitForCodexOutput } from './codex-ws-output.support';
+import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
 import { waitForCodexOutput } from './codex-smoke-output.support';
 config();
 
@@ -212,7 +213,7 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
         name: 'gpt_api_key_cooldown',
       },
     });
-    await fundedKeyCooldown.waitForServerFundedKeyCooldown({
+    await waitForServerFundedKeyCooldown({
       baseUrl: BASE_URL,
       apiKey: API_KEY,
       key: 'gpt',
@@ -262,7 +263,24 @@ async function testSmoke_codexCompletesE2bTask() {
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
-  await fundedKeyCooldown.waitForUnusedFundedGptKeyCooldown(BASE_URL, API_KEY);
+  const sharedCooldown = await prisma.integration.findUnique({
+    where: {
+      userId_name_accountId: {
+        userId: '00000000-0000-0000-0000-000000000000',
+        name: 'gpt_api_key_cooldown',
+        accountId: '',
+      },
+    },
+    select: { rateLimitedUntil: true },
+  });
+  if (!cooldownIsLive(sharedCooldown)) {
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: false,
+    });
+  }
 
   try {
     const createRes = await request(`${BASE_URL}/api/codex-code-session/create`, {

@@ -1,8 +1,8 @@
 /**
  * Remote-browser selection for the compute-grants domain.
  *
- * Kernel is the DEFAULT. Steel stays reachable via
- * `COMPUTE_GRANT_BROWSER_PROVIDER=steel` so a provider outage does not block
+ * Kernel is the DEFAULT. Steel and Browser Use stay selectable via
+ * `COMPUTE_GRANT_BROWSER_PROVIDER` so a provider outage does not block
  * account connect or grant recovery -- the two paths that, when broken, silently
  * push every request onto paid models.
  *
@@ -16,12 +16,18 @@ import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import type { CdpProvider } from './minter';
 import { kernelCdpProvider, computeGrantBrowserProvider, openKernelCdpSession } from './kernelCdp';
 import { steelCdpProvider } from './steelCdp';
+import { browserUseCdpProvider, openBrowserUseCdpSession } from './browserUseCdp';
 
 export { computeGrantBrowserProvider };
 
 /** CdpProvider for minting, honouring the configured provider. */
 export function computeGrantCdpProvider(): CdpProvider {
-  return computeGrantBrowserProvider() === 'steel' ? steelCdpProvider() : kernelCdpProvider();
+  const provider = computeGrantBrowserProvider();
+  return provider === 'steel'
+    ? steelCdpProvider()
+    : provider === 'browser-use'
+      ? browserUseCdpProvider()
+      : kernelCdpProvider();
 }
 
 export interface ComputeGrantBrowser {
@@ -35,11 +41,12 @@ export interface ComputeGrantBrowser {
 /**
  * Open a remote browser for the connect flow, on the configured provider.
  *
- * Returns the same shape for Kernel and Steel so the connect flow has no
- * provider-specific branches: the two must stay interchangeable, because a
- * session captured on one provider is replayed by the other during minting.
+ * Returns the same shape for all providers so the connect flow has no
+ * provider-specific branches: all providers must stay interchangeable because a
+ * session captured on one can be replayed by another during minting.
  */
 export async function openComputeGrantBrowser(label: string): Promise<ComputeGrantBrowser> {
+  if (computeGrantBrowserProvider() === 'browser-use') return openBrowserUseCdpSession(label);
   if (computeGrantBrowserProvider() === 'steel') {
     const [{ createSteelRecoverySession }, { releaseSteelRemoteSession }] = await Promise.all([
       import('../../providers/steel/sessionRecovery'),

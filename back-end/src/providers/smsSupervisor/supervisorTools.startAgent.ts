@@ -21,9 +21,12 @@ interface ToolResult {
   error?: string;
 }
 
+export type StartPhase = 'plan' | 'execute';
+
 export interface StartNewAgentArgs {
   goal: string;
   budget_dollars?: number;
+  start_phase?: StartPhase | null;
 }
 
 export interface WebSearchArgs {
@@ -39,6 +42,7 @@ export async function commitStartNewAgent(
   const { args, provisionalId } = op;
   const { goal, budget_dollars } = args;
   const priceLimitCents = budget_dollars ? Math.round(budget_dollars * 100) : 100;
+  const startPhase: StartPhase = args.start_phase ?? 'plan';
 
   log.info('Starting new agent', {
     phase: 'start',
@@ -46,6 +50,7 @@ export async function commitStartNewAgent(
     provisionalId,
     goal: goal.substring(0, 100),
     priceLimitCents,
+    startPhase,
     attachmentCount: attachments.length,
   });
 
@@ -64,6 +69,7 @@ export async function commitStartNewAgent(
           reasoningMaxTokens: 2048,
           status: 'STARTING_UP',
           priceLimitCents,
+          workflowStartPhase: startPhase,
           // Match POST /api/agents default: Fast Mode on so Rose complete
           // calls get provider_fast_mode via the agent flag trickle-down.
           fastModeCacheEnabled: true,
@@ -194,6 +200,7 @@ export async function commitStartNewAgent(
       verifier: {
         type: 'FLOAT_LLM_JUDGE',
       },
+      startPhase,
       priceLimitCents,
       fastModeCacheEnabled: resolvedFastMode,
       memoryEnabled: resolvedMemory,

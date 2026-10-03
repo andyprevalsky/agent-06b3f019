@@ -29,9 +29,12 @@ import {
   expectInjectedSessionRecognized,
   hasUncaughtErrors,
   injectSemanticSession,
+  trackPageProbe,
 } from './helpers';
 
 const LIVE_VIEW_URL = 'https://example.com/semantic-browser-live-view';
+/** Per-wait budget for every chip-count step and the post-reload hydration gate. */
+const CHIP_SETTLE_TIMEOUT_MS = 30_000;
 
 async function postToolMessage(
   agentId: string,
@@ -55,12 +58,19 @@ async function postToolMessage(
  */
 async function expectChipCount(page: Page, expected: number, step: string): Promise<void> {
   const chips = page.locator('[data-testid="browser-status-chip"]');
-  await expect
-    .poll(() => chips.count(), {
-      timeout: 30_000,
-      message: `${step}: browser chip count never reached ${expected}`,
-    })
-    .toBe(expected);
+  const tracked = trackPageProbe(() => chips.count());
+  try {
+    await expect
+      .poll(tracked.probe, {
+        timeout: CHIP_SETTLE_TIMEOUT_MS,
+        message: `${step}: browser chip count never reached ${expected}`,
+      })
+      .toBe(expected);
+  } catch (err) {
+    // A frozen renderer never answers the probe, which otherwise reads exactly
+    // like a wrong chip count. Name which one happened.
+    throw new Error(`${tracked.describe()}\n${err instanceof Error ? err.message : String(err)}`);
+  }
   await page.waitForTimeout(2_000);
   expect(await chips.count(), `${step}: chip count did not hold at ${expected}`).toBe(expected);
 }
@@ -163,8 +173,15 @@ test.describe('browser-chip-count', () => {
 
       // ── Invariant: reload agrees with realtime ────────────────────────
       // The chip count must be derived purely from persisted messages, so a
-      // fresh hydration renders the same zero-chip state.
+      // fresh hydration renders the same zero-chip state. Zero chips is also
+      // true before the persisted messages load, so first wait for the three
+      // terminal Browser Agent cards (A done, B failed, retried call done);
+      // otherwise this step can pass before hydration has happened at all.
       await page.reload({ waitUntil: 'domcontentloaded' });
+      await expect(
+        page.locator('[data-testid="browser-agent-chip"]'),
+        'after reload: persisted browser terminal cards never hydrated',
+      ).toHaveCount(3, { timeout: CHIP_SETTLE_TIMEOUT_MS });
       await expectChipCount(page, 0, 'after reload');
 
       expect(hasUncaughtErrors(rec), 'Uncaught errors during chip-count flow').toEqual([]);

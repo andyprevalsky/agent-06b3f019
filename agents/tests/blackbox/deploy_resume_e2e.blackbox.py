@@ -422,8 +422,9 @@ class _BrowserServices:
         services = self
 
         class _DomService:
-            def __init__(self, cdp_url):
+            def __init__(self, cdp_url, downloads_path="/tmp/downloads"):
                 self.cdp_url = cdp_url
+                self.downloads_path = downloads_path
                 self.session = SimpleNamespace(get_current_page=AsyncMock(return_value=SimpleNamespace()))
                 self._session = SimpleNamespace(
                     get_or_create_cdp_session=AsyncMock(side_effect=RuntimeError("no logo overlay"))

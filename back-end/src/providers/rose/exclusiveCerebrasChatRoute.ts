@@ -99,7 +99,8 @@ function withBranchAbort(options: CompletionOptions, branchSignal: AbortSignal):
  * silent, so the normal fast path still makes one provider request. The fast
  * model leads: off Cerebras the same Qwen model streams at GPU-host speed
  * (measured 1.6–7.6s to first token). The fast model's guard is sized in
- * openrouterFastRoute.ts.
+ * openrouterFastRoute.ts. Structured generator responses use the first
+ * completed answer as the winner.
  */
 export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   poolSpec: PoolSpec;
@@ -107,6 +108,7 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   requestId: string;
   callSite?: string;
   hedgeDelayMs?: number;
+  latchOnComplete?: boolean;
 }): AsyncIterable<RoseStreamChunk> {
   const openrouterKey = process.env.OPENROUTER_API_KEY;
   if (!openrouterKey) {
@@ -119,30 +121,37 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
     primary: {
       name: 'openrouter-fast-chat',
       produce: (signal) =>
-        exclusiveOpenRouterFastChatCompletion({
-          options: withBranchAbort(params.options, signal),
-          openrouterKey,
-          requestId: params.requestId,
-          callSite: params.callSite,
-        }),
+        requireCompletedContent(
+          exclusiveOpenRouterFastChatCompletion({
+            options: withBranchAbort(params.options, signal),
+            openrouterKey,
+            requestId: params.requestId,
+            callSite: params.callSite,
+          })
+        ),
     },
     hedge: {
       name: 'openrouter-same-model',
       produce: (signal) =>
-        exclusiveOpenRouterCerebrasCompletion({
-          options: withBranchAbort(params.options, signal),
-          openrouterKey,
-          requestId: params.requestId,
-          callSite: params.callSite,
-          allowProviderFallback: true,
-        }),
+        requireCompletedContent(
+          exclusiveOpenRouterCerebrasCompletion({
+            options: withBranchAbort(params.options, signal),
+            openrouterKey,
+            requestId: params.requestId,
+            callSite: params.callSite,
+            allowProviderFallback: true,
+          })
+        ),
     },
     // The silent-stream path starts both together. A fast direct 429 uses a
     // short delay so a prompt fast reply wins without an extra request; a fast
     // model that is itself capped hands off to the spill without that wait.
     hedgeAfter: () => (params.hedgeDelayMs ? sleep(params.hedgeDelayMs) : Promise.resolve()),
     hedgeOnPrimaryFailure: true,
-    isContent: (chunk) => clearsChatStallGuard(chunk.kind),
+    // A generator answer is usable only after its final chunk. Router tool
+    // calls continue streaming at their first content chunk.
+    isContent: (chunk) =>
+      params.latchOnComplete ? chunk.kind === 'done' : clearsChatStallGuard(chunk.kind),
     onWinner: (name) => {
       winnerName = name;
     },
@@ -158,6 +167,19 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
     request_id: params.requestId,
     winner: winnerName,
   });
+}
+
+async function* requireCompletedContent(
+  stream: AsyncIterable<RoseStreamChunk>
+): AsyncIterable<RoseStreamChunk> {
+  let hasContent = false;
+  for await (const chunk of stream) {
+    if (clearsChatStallGuard(chunk.kind)) hasContent = true;
+    if (chunk.kind === 'done' && !hasContent) {
+      throw new Error('OpenRouter fallback completed without content');
+    }
+    yield chunk;
+  }
 }
 
 /**
@@ -319,6 +341,8 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
             requestId: params.requestId,
             callSite: params.callSite,
             hedgeDelayMs: 500,
+            latchOnComplete:
+              params.options.response_format?.json_schema?.name === 'generator_response',
           }),
         emit,
       });

@@ -7,7 +7,6 @@
 // reports the restored state before handing the backend to the next case.
 
 import { retryWithBackoff } from '../../providers/retry';
-import { prisma } from '../../providers/database';
 
 type FundedKey = 'gpt' | 'anthropic';
 
@@ -23,30 +22,6 @@ const POLL_INTERVAL_MS = 500;
 
 export function cooldownIsLive(row: { rateLimitedUntil: Date | null } | null): boolean {
   return row?.rateLimitedUntil instanceof Date && row.rateLimitedUntil.getTime() > Date.now();
-}
-
-export async function waitForUnusedFundedGptKeyCooldown(
-  baseUrl: string,
-  apiKey: string
-): Promise<void> {
-  const sharedCooldown = await prisma.integration.findUnique({
-    where: {
-      userId_name_accountId: {
-        userId: '00000000-0000-0000-0000-000000000000',
-        name: 'gpt_api_key_cooldown',
-        accountId: '',
-      },
-    },
-    select: { rateLimitedUntil: true },
-  });
-  if (!cooldownIsLive(sharedCooldown)) {
-    await waitForServerFundedKeyCooldown({
-      baseUrl,
-      apiKey,
-      key: 'gpt',
-      onCooldown: false,
-    });
-  }
 }
 
 export async function waitForServerFundedKeyCooldown(options: {
