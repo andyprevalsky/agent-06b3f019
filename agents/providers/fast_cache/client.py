@@ -37,9 +37,7 @@ _GET_BATCH_DELAY_S = 0.005
 _GET_BATCH_MAX_KEYS = 500
 _GET_BATCH_MAX_IN_FLIGHT = int(os.environ.get("FAST_CACHE_GET_BATCH_MAX_IN_FLIGHT", "16") or "16")
 _HTTP_MAX_CONNECTIONS = int(os.environ.get("FAST_CACHE_HTTP_MAX_CONNECTIONS", "80") or "80")
-_HTTP_MAX_KEEPALIVE_CONNECTIONS = int(
-    os.environ.get("FAST_CACHE_HTTP_MAX_KEEPALIVE_CONNECTIONS", "40") or "40"
-)
+_HTTP_MAX_KEEPALIVE_CONNECTIONS = int(os.environ.get("FAST_CACHE_HTTP_MAX_KEEPALIVE_CONNECTIONS", "40") or "40")
 _ARCHIVE_READ_MAX_CONCURRENCY = 4
 
 # A single pooled client per worker process. Creating a fresh httpx.AsyncClient per
@@ -451,9 +449,7 @@ def _position_http_semaphore() -> asyncio.Semaphore:
     return _position_http_sem
 
 
-def _position_memo_get(
-    goal_hash: str, call_site: str, step: int
-) -> Optional[tuple[Optional[Any], Optional[str]]]:
+def _position_memo_get(goal_hash: str, call_site: str, step: int) -> Optional[tuple[Optional[Any], Optional[str]]]:
     entry = _position_memo.get(_position_memo_key(goal_hash, call_site, step))
     if entry is None:
         return None
@@ -512,92 +508,101 @@ async def _fetch_position_http(
     call_site: str,
     step: int,
 ) -> tuple[Optional[Any], Optional[str]]:
-    """One get-position HTTP, single-flighted and memoized per durable slot."""
+    """One get-position HTTP, single-flighted and memoized per durable slot.
+
+    The HTTP round-trip runs in its own task that no caller owns. Every caller
+    (the first one included) awaits it through ``asyncio.shield`` so one
+    consumer's cancellation can never reach the shared fetch or its other
+    waiters. Without the shield, ``asyncio.wait_for`` cancelling a waiter
+    cancelled the shared future itself: the owner then hit
+    ``InvalidStateError`` on ``set_result`` and every later caller for that
+    slot raised ``CancelledError`` — a BaseException that escaped the
+    ``except Exception`` retry ladders in ``lookup_llm_cache`` and
+    ``call_temporal_activity_from_activity``, failed the whole explore
+    activity, and surfaced as a ``spawn_agent`` ERROR chip (RCA
+    2026-10-02, test-mass-agent-run-0). Conversely a cancelled owner used to
+    leave its waiters on a future nobody would ever resolve.
+    """
     memo_key = _position_memo_key(goal_hash, call_site, step)
     cached = _position_memo_get(goal_hash, call_site, step)
     if cached is not None:
         return cached
-    existing = _position_inflight.get(memo_key)
-    if existing is not None:
-        return await existing
+    fetch = _position_inflight.get(memo_key)
+    if fetch is None:
+        fetch = asyncio.get_running_loop().create_task(_fetch_position_http_once(goal_hash, call_site, step))
+        _position_inflight[memo_key] = fetch
 
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future[tuple[Optional[Any], Optional[str]]] = loop.create_future()
-    _position_inflight[memo_key] = future
-    try:
-        api_url, api_key = _backend()
-        body: dict[str, Any] = {"goalHash": goal_hash, "callSite": call_site, "step": int(step)}
-        last_error: Optional[Exception] = None
-        for attempt in range(_GET_MAX_ATTEMPTS):
-            async with _position_http_semaphore():
-                cached = _position_memo_get(goal_hash, call_site, step)
-                if cached is not None:
-                    future.set_result(cached)
-                    return cached
-                try:
-                    resp = await _shared_client().post(
-                        f"{api_url}/api/fast-cache/get-position",
-                        headers=backend_api_headers(api_key),
-                        json=body,
-                        timeout=_GET_TIMEOUT_S,
-                    )
-                except Exception as exc:
-                    last_error = exc
-                    logger.warning(
-                        "fast_cache.get_position_error",
-                        error=f"{type(exc).__name__}: {exc}"[:300],
-                        attempt=attempt + 1,
-                    )
-                    resp = None
-            if resp is None:
-                if attempt < _GET_MAX_ATTEMPTS - 1:
-                    await asyncio.sleep(_GET_RETRY_BACKOFF_S * (attempt + 1))
-                    continue
-                if last_error is not None:
-                    if not future.done():
-                        future.set_exception(last_error)
-                    raise last_error
-                error = RuntimeError("fast-cache get-position failed after retries")
-                if not future.done():
-                    future.set_exception(error)
-                raise error
-            if resp.status_code != 200:
-                if resp.status_code in {404, 405}:
-                    result = (None, None)
-                    _position_memo_put(goal_hash, call_site, step, None, None)
-                    future.set_result(result)
-                    return result
+        def _on_done(done: asyncio.Task[tuple[Optional[Any], Optional[str]]]) -> None:
+            if _position_inflight.get(memo_key) is done:
+                _position_inflight.pop(memo_key, None)
+            if not done.cancelled():
+                # Every live waiter re-raises this; mark it retrieved so an
+                # abandoned fetch does not log "exception was never retrieved".
+                done.exception()
+
+        fetch.add_done_callback(_on_done)
+    return await asyncio.shield(fetch)
+
+
+async def _fetch_position_http_once(
+    goal_hash: str,
+    call_site: str,
+    step: int,
+) -> tuple[Optional[Any], Optional[str]]:
+    """The single shared get-position round-trip behind ``_fetch_position_http``."""
+    api_url, api_key = _backend()
+    body: dict[str, Any] = {"goalHash": goal_hash, "callSite": call_site, "step": int(step)}
+    last_error: Optional[Exception] = None
+    for attempt in range(_GET_MAX_ATTEMPTS):
+        async with _position_http_semaphore():
+            cached = _position_memo_get(goal_hash, call_site, step)
+            if cached is not None:
+                return cached
+            try:
+                resp = await _shared_client().post(
+                    f"{api_url}/api/fast-cache/get-position",
+                    headers=backend_api_headers(api_key),
+                    json=body,
+                    timeout=_GET_TIMEOUT_S,
+                )
+            except Exception as exc:
+                last_error = exc
                 logger.warning(
-                    "fast_cache.get_position_failed",
-                    status=resp.status_code,
+                    "fast_cache.get_position_error",
+                    error=f"{type(exc).__name__}: {exc}"[:300],
                     attempt=attempt + 1,
                 )
-                if resp.status_code >= 500 and attempt < _GET_MAX_ATTEMPTS - 1:
-                    await asyncio.sleep(_GET_RETRY_BACKOFF_S * (attempt + 1))
-                    continue
-                error = RuntimeError(f"fast-cache get-position failed: {resp.status_code}")
-                if not future.done():
-                    future.set_exception(error)
-                raise error
-            data = resp.json()
-            if not data.get("hit"):
-                result = (None, None)
-            else:
-                result = (data.get("value"), data.get("key"))
-            _position_memo_put(goal_hash, call_site, step, result[0], result[1])
-            future.set_result(result)
-            return result
-        if last_error is not None:
-            if not future.done():
-                future.set_exception(last_error)
-            raise last_error
-        error = RuntimeError("fast-cache get-position failed after retries")
-        if not future.done():
-            future.set_exception(error)
-        raise error
-    finally:
-        if _position_inflight.get(memo_key) is future:
-            _position_inflight.pop(memo_key, None)
+                resp = None
+        if resp is None:
+            if attempt < _GET_MAX_ATTEMPTS - 1:
+                await asyncio.sleep(_GET_RETRY_BACKOFF_S * (attempt + 1))
+                continue
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("fast-cache get-position failed after retries")
+        if resp.status_code != 200:
+            if resp.status_code in {404, 405}:
+                _position_memo_put(goal_hash, call_site, step, None, None)
+                return (None, None)
+            logger.warning(
+                "fast_cache.get_position_failed",
+                status=resp.status_code,
+                attempt=attempt + 1,
+            )
+            if resp.status_code >= 500 and attempt < _GET_MAX_ATTEMPTS - 1:
+                await asyncio.sleep(_GET_RETRY_BACKOFF_S * (attempt + 1))
+                continue
+            raise RuntimeError(f"fast-cache get-position failed: {resp.status_code}")
+        data = resp.json()
+        if not data.get("hit"):
+            result: tuple[Optional[Any], Optional[str]] = (None, None)
+        else:
+            result = (data.get("value"), data.get("key"))
+        _position_memo_put(goal_hash, call_site, step, result[0], result[1])
+        return result
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("fast-cache get-position failed after retries")
 
 
 async def cache_get_position_fallback(
@@ -657,9 +662,7 @@ async def trajectory_prior_exists(
 # (read_enabled, goal, write_enabled, root_agent_id, root_goal, provider_fast_mode)
 # keyed by agent_id, so auto-resolution costs at most one backend lookup per agent
 # per worker process.
-_AGENT_FASTMODE: dict[
-    str, tuple[bool, Optional[str], bool, Optional[str], Optional[str], bool]
-] = {}
+_AGENT_FASTMODE: dict[str, tuple[bool, Optional[str], bool, Optional[str], Optional[str], bool]] = {}
 
 
 async def resolve_agent_fast_mode(
@@ -741,9 +744,7 @@ async def soft_complete_allowed_for_agent(
         return True
     if not agent_id:
         return False
-    _enabled, resolved_goal, _write_enabled, _root_id, root_goal, _pfm = await resolve_agent_fast_mode(
-        agent_id
-    )
+    _enabled, resolved_goal, _write_enabled, _root_id, root_goal, _pfm = await resolve_agent_fast_mode(agent_id)
     return normalize.soft_complete_allowed(goal or resolved_goal, root_goal=root_goal)
 
 
@@ -766,9 +767,7 @@ async def resolve_archive_root_agent_id() -> Optional[str]:
     agent_id = structlog.contextvars.get_contextvars().get("agent_id")
     if isinstance(agent_id, str):
         try:
-            _enabled, _goal, _write_enabled, resolved_root, _root_goal, _pfm = await resolve_agent_fast_mode(
-                agent_id
-            )
+            _enabled, _goal, _write_enabled, resolved_root, _root_goal, _pfm = await resolve_agent_fast_mode(agent_id)
             if resolved_root:
                 return resolved_root
         except Exception as exc:  # archive best-effort path
@@ -788,9 +787,14 @@ async def ensure_context(agent_id: Optional[str], goal: Optional[str] = None):
         return existing
     if not agent_id:
         return existing
-    enabled, resolved_goal, write_enabled, _root_agent_id, root_goal, provider_fast_mode = (
-        await resolve_agent_fast_mode(agent_id)
-    )
+    (
+        enabled,
+        resolved_goal,
+        write_enabled,
+        _root_agent_id,
+        root_goal,
+        provider_fast_mode,
+    ) = await resolve_agent_fast_mode(agent_id)
     g = goal or resolved_goal
     if g and (enabled or write_enabled):
         ctx = FastCacheContext(
@@ -816,8 +820,8 @@ async def ensure_position_context(agent_id: Optional[str], step: int):
 
     if not agent_id:
         return None
-    enabled, goal, write_enabled, _root_agent_id, root_goal, provider_fast_mode = (
-        await resolve_agent_fast_mode(agent_id)
+    enabled, goal, write_enabled, _root_agent_id, root_goal, provider_fast_mode = await resolve_agent_fast_mode(
+        agent_id
     )
     if goal and (enabled or write_enabled):
         ctx = FastCacheContext(

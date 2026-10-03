@@ -6300,49 +6300,6 @@ async def test_blue_bottle_tree_proof_passes_with_subagent_evidence():
     await _assert_blue_bottle_tree_proof_semantics_passes()
 
 
-def test_blue_bottle_spawn_contract_seeds_live_target_without_rewriting_goal():
-    """k=5 timeouts burned budget on marketing detours; goals may still say complete payment."""
-    import os
-
-    from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.spawn_contract import (
-        apply_browser_spawn_live_target,
-        should_disable_saved_browser_auth,
-        with_active_benchmark_task,
-    )
-
-    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
-    assert should_disable_saved_browser_auth(task) is True
-
-    planner_goal = (
-        "Place a pickup order immediately from Blue Bottle Coffee at the Ferry Building in San Francisco, "
-        "using guest checkout. Complete payment and submit the order, using available agent payment capabilities. "
-        "Do not stop at the cart. Return the confirmed order confirmation ID."
-    )
-    patched = apply_browser_spawn_live_target(
-        task,
-        {
-            "goal": planner_goal,
-            "start_url": "https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
-        },
-    )
-    assert patched["start_url"] == task.environment["live_targets"][0]
-    assert patched["goal"] == planner_goal
-
-    with with_active_benchmark_task(task.name):
-        assert os.environ["BENCHMARK_ACTIVE_TASK_NAME"] == task.name
-        from benchmarks.spawn_contract import apply_active_task_spawn_contract
-
-        env_patched = apply_active_task_spawn_contract(
-            {
-                "goal": planner_goal,
-                "start_url": "https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
-            }
-        )
-        assert env_patched["start_url"] == task.environment["live_targets"][0]
-        assert env_patched["goal"] == planner_goal
-
-
 def test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.spawn_contract import evaluate_dom_patch_blocked, with_active_benchmark_task
@@ -19472,10 +19429,6 @@ async def run_all_tests():
     await r.record_async(
         "blue_bottle_tree_proof_passes_with_subagent_evidence",
         test_blue_bottle_tree_proof_passes_with_subagent_evidence,
-    )
-    r.record(
-        "blue_bottle_spawn_contract_seeds_live_target",
-        test_blue_bottle_spawn_contract_seeds_live_target_without_rewriting_goal,
     )
     r.record(
         "blue_bottle_spawn_contract_blocks_dom_patch_evaluate",

@@ -4,6 +4,7 @@
 
 import { DEFAULT_RESTART_THRESHOLD } from '../../config';
 import { type Model, type ResponseSchemaField } from '../../hooks';
+import type { ResponseSchemaFieldConstraints } from '@/lib/api/types';
 
 /** Model context-window lookup with a safe 100k fallback. */
 export function getModelContextWindow(model: string, models: Model[]): number {
@@ -35,11 +36,37 @@ export function formatFieldType(type: ResponseSchemaField['type']): string {
       return 'string[]';
     case 'list[int]':
       return 'integer[]';
+    case 'object':
+      return 'object';
+    case 'list[object]':
+      return 'object[]';
     case 'file_pointer':
       return 'file';
     case 'list[file_pointer]':
       return 'file[]';
+    case 'session_file_pointer':
+      return 'session file';
+    case 'list[session_file_pointer]':
+      return 'session file[]';
     default:
       return type;
   }
+}
+
+export function formatFieldConstraints(field: ResponseSchemaFieldConstraints): string {
+  const details: string[] = [];
+  if (field.minItems !== undefined && field.minItems === field.maxItems) {
+    details.push(`exactly ${field.minItems} items`);
+  } else {
+    if (field.minItems !== undefined) details.push(`at least ${field.minItems} items`);
+    if (field.maxItems !== undefined) details.push(`at most ${field.maxItems} items`);
+  }
+  if (field.minLength !== undefined && field.minLength === field.maxLength) {
+    details.push(`exactly ${field.minLength} characters`);
+  } else {
+    if (field.minLength !== undefined) details.push(`at least ${field.minLength} characters`);
+    if (field.maxLength !== undefined) details.push(`at most ${field.maxLength} characters`);
+  }
+  if (field.nullable) details.push('nullable');
+  return details.join(' · ');
 }

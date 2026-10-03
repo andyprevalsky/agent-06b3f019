@@ -28,6 +28,11 @@ normalize_conductor_workspace_env
 source "$SCRIPT_DIR/local-db-container.sh"
 cd "$BACKEND_DIR"
 
+# This gate starts its own backend and signs its own benchmark-share fixtures.
+# Give both the server and blackbox runner the same local-only signing key when
+# no key was supplied; a production secret is not needed to verify the contract.
+export BENCHMARK_SHARE_SECRET="${BENCHMARK_SHARE_SECRET:-blackbox-local-benchmark-share-secret}"
+
 # Cursor Cloud (and similar) may inject BROWSER_PROVIDER into the process
 # environment. Node dotenv does not override existing vars, so a stale value
 # like "browserbase" wins over back-end/.env ("kernel") and the live

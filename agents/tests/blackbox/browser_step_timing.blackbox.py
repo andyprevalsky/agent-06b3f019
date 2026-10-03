@@ -453,6 +453,113 @@ def test_step_observe_builds_dom_only_for_dom_consumers():
     assert _step_observe_needs_dom(fast_mode_replay=True, browser_recorder=kernel) is True
 
 
+class _ResumedActivityDom:
+    """A DOMService as a resumed activity gets it: connected, no selector map yet."""
+
+    def __init__(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        self.session = MagicMock()
+        self.selector_map = {}
+        self.full_builds = 0
+        self.ensure_browser_overlays_suppressed = AsyncMock()
+
+    async def get_browser_state(self, include_screenshot=False):
+        self.full_builds += 1
+        self.selector_map = {6: object()}
+        return {
+            "url": "https://shop.example/checkout",
+            "title": "Checkout",
+            "dom_tree": "[6]<input id=card-number />",
+        }
+
+    async def get_page_identity(self):
+        return {"url": "https://shop.example/checkout", "title": "Checkout"}
+
+    async def get_element_coordinates(self, index):
+        return (10, 20) if index in self.selector_map else None
+
+
+async def _observe_then_act_on_index(dom, *, transcript_restored):
+    """The loop's step observe followed by an indexed action, as one step runs them."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _observe_step_page,
+        _restored_indexes_unresolved,
+        _step_observe_needs_dom,
+    )
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    needs_dom = _step_observe_needs_dom(
+        fast_mode_replay=False,
+        browser_recorder=SimpleNamespace(uses_kernel_replay=True),
+        restored_indexes_unresolved=_restored_indexes_unresolved(dom, transcript_restored=transcript_restored),
+    )
+    await _observe_step_page(dom, needs_dom=needs_dom)
+    action_history = MagicMock()
+    action_history.record_action = AsyncMock()
+    humanizer = MagicMock()
+    humanizer.scroll = AsyncMock()
+    result = await execute_action(
+        dom,
+        action_history,
+        {"action": "scroll", "index": 6, "params": {"direction": "down", "amount": 100}},
+        humanizer=humanizer,
+    )
+    return needs_dom, result
+
+
+async def test_resumed_transcript_indexes_resolve_on_first_step():
+    """agent-payment-setup-resume (agent c3cd93fd): the browser task paused for
+    payment approval after read_browser_state showed [6]<input id=card-number>,
+    resumed in a new activity, and its first action (input_text index 6) failed
+    "Element with index 6 not found" because the URL/title-only step observe
+    left the new connection's selector map empty.
+    """
+    dom = _ResumedActivityDom()
+    needs_dom, result = await _observe_then_act_on_index(dom, transcript_restored=True)
+    assert needs_dom is True
+    assert dom.full_builds == 1
+    assert result == {"success": True, "message": ""}, result
+
+    # The map is warm now (also true after an approved write-lock action was
+    # replayed): later steps go back to the URL/title-only observe.
+    needs_dom, result = await _observe_then_act_on_index(dom, transcript_restored=True)
+    assert needs_dom is False
+    assert dom.full_builds == 1
+    assert result["success"] is True
+
+    # A fresh task has cited no indexes, so its first observe stays light.
+    fresh = _ResumedActivityDom()
+    needs_dom, result = await _observe_then_act_on_index(fresh, transcript_restored=False)
+    assert needs_dom is False
+    assert fresh.full_builds == 0
+    assert result == {"success": False, "error": "Element with index 6 not found"}
+
+
+def test_resumed_transcript_observe_wired_once_per_activity():
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
+
+    source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
+    setup, loop = source.split("while iteration < MAX_ITERATIONS:", 1)
+    assert "restored_transcript_unobserved = bool(browser_turn_messages)" in setup
+    assert setup.index("browser_turn_messages.extend(resume_user_messages)") < setup.index(
+        "restored_transcript_unobserved = bool(browser_turn_messages)"
+    )
+    observe = loop[loop.index("observe_needs_dom = _step_observe_needs_dom(") :]
+    observe = observe[: observe.index('step_timer.mark("observe_state")')]
+    assert "transcript_restored=restored_transcript_unobserved" in observe
+    # Cleared only after the observe returned, so a timed-out observe retries it.
+    assert observe.index("_observe_step_page(dom_service, needs_dom=observe_needs_dom)") < observe.index(
+        "restored_transcript_unobserved = False"
+    )
+    assert loop.count("restored_transcript_unobserved = False") == 1
+
+
 class _CountingDom:
     def __init__(self):
         self.full_builds = 0
@@ -951,6 +1058,8 @@ async def run_all_tests():
     )
     r.record("speculative_state_wiring", test_speculative_state_wired_after_step_start_mutations)
     r.record("step_observe_dom_only_for_consumers", test_step_observe_builds_dom_only_for_dom_consumers)
+    await r.record_async("resumed_transcript_indexes_resolve", test_resumed_transcript_indexes_resolve_on_first_step)
+    r.record("resumed_transcript_observe_wiring", test_resumed_transcript_observe_wired_once_per_activity)
     await r.record_async(
         "light_observe_read_browser_state_builds_dom",
         test_light_step_observe_skips_dom_and_read_browser_state_builds_it,
