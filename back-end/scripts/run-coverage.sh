@@ -618,7 +618,9 @@ echo "Backend ready at $TEST_BASE_URL"
 # "Executable doesn't exist at .../chrome-headless-shell". Install before units.
 if command -v npx >/dev/null 2>&1; then
   echo "Ensuring Playwright Chromium is installed for coverage unit tests..."
-  npx playwright install chromium
+  # shellcheck source=../../scripts/lib/ensure-playwright-chromium.sh
+  . "$ROOT_DIR/scripts/lib/ensure-playwright-chromium.sh"
+  ensure_playwright_chromium npx playwright
 fi
 
 echo "Running blackbox and unit tests in parallel..."

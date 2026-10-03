@@ -266,8 +266,8 @@ require_text "$DEPLOY_COMMAND" 'ADMIN_HEALTH_LIVE_ONLY=1' "/deploy live Amplitud
 require_text "$DEPLOY_COMMAND" 'Missing credentials fail closed' "/deploy must document fail-closed live Amplitude credentials"
 require_text "$DEPLOY_COMMAND" "scripts/run-bench-hub-poller\$" "/deploy must classify poller-only changes into backend coverage"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'integration-health"' "backend coverage must isolate live credential health from deterministic coverage"
-require_text "$ROOT_DIR/agents/scripts/run-coverage.sh" 'playwright install chromium' "agents coverage must install the venv Playwright chromium revision before real-browser blackboxes"
-require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'playwright install chromium' "backend coverage must install Node Playwright Chromium before captcha-solve-indicator"
+require_text "$ROOT_DIR/agents/scripts/run-coverage.sh" 'ensure_playwright_chromium "$PYTHON_BIN" -m playwright' "agents coverage must ensure the venv Playwright chromium revision before real-browser blackboxes"
+require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'ensure_playwright_chromium npx playwright' "backend coverage must ensure Node Playwright Chromium before captcha-solve-indicator"
 require_text "$DEPLOY_COMMAND" 'Step 4c: Credential health check (runs unless explicitly overridden)' "/deploy must retain one focused credential probe unless the user explicitly overrides it"
 require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"credential-health"' "/deploy must record the focused credential probe"
 require_text "$DEPLOY_COMMAND" 'run-deploy-stage credential-health' "/deploy must record the focused credential probe"
@@ -505,5 +505,35 @@ wait_for_isolated_benchmarks "$bench_repo" 0 1 >/dev/null \
 if wait_for_isolated_benchmarks "$bench_repo" "10m" 1 >/dev/null 2>&1; then
   fail "a non-integer wait budget must fail closed"
 fi
+
+# ensure_playwright_chromium: skip the host-wide locked `playwright install`
+# when every dry-run install location is complete; install otherwise.
+# shellcheck source=../lib/ensure-playwright-chromium.sh
+. "$ROOT_DIR/scripts/lib/ensure-playwright-chromium.sh"
+pw_dir="$(mktemp -d "${TMPDIR:-/tmp}/ensure-pw.XXXXXX")"
+mkdir -p "$pw_dir/chromium-1" "$pw_dir/chromium_headless_shell-1"
+: >"$pw_dir/chromium-1/INSTALLATION_COMPLETE"
+fake_playwright() {
+  if [ "$1 $2" = "install --dry-run" ]; then
+    printf 'Chromium\n  Install location:    %s/chromium-1\n\nHeadless\n  Install location:    %s/chromium_headless_shell-1\n' "$pw_dir" "$pw_dir"
+    return 0
+  fi
+  echo "$*" >>"$pw_dir/installs"
+}
+ensure_playwright_chromium fake_playwright >/dev/null
+[ "$(cat "$pw_dir/installs" 2>/dev/null)" = "install chromium" ] || fail "a missing browser revision must run the real install"
+rm -f "$pw_dir/installs"
+: >"$pw_dir/chromium_headless_shell-1/INSTALLATION_COMPLETE"
+ensure_playwright_chromium fake_playwright >/dev/null
+[ ! -e "$pw_dir/installs" ] || fail "complete browser revisions must skip the host-wide locked install"
+unparseable_playwright() {
+  if [ "$1 $2" = "install --dry-run" ]; then
+    return 1
+  fi
+  echo "$*" >>"$pw_dir/installs"
+}
+ensure_playwright_chromium unparseable_playwright >/dev/null
+[ "$(cat "$pw_dir/installs" 2>/dev/null)" = "install chromium" ] || fail "an unreadable dry-run plan must fall back to the real install"
+rm -rf "$pw_dir"
 
 echo "All semantic deploy gate checks passed."

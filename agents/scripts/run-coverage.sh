@@ -24,8 +24,11 @@ MODE="${1:-check}"
 # chromium-1243 into the same ~/.cache/ms-playwright and can leave the
 # Python revision missing ("Executable doesn't exist at
 # chromium_headless_shell-1234"). Install the venv browsers before the
-# suite so a shared cache cannot fail the domain.
-"$PYTHON_BIN" -m playwright install chromium
+# suite so a shared cache cannot fail the domain. The helper skips the
+# host-wide locked install when the revision is already complete.
+# shellcheck source=../../scripts/lib/ensure-playwright-chromium.sh
+. "$AGENTS_DIR/../scripts/lib/ensure-playwright-chromium.sh"
+ensure_playwright_chromium "$PYTHON_BIN" -m playwright
 
 # Domain tests share process-global mock state. Give each domain a fresh process
 # inside a bounded worker pool, then merge their parallel coverage files before
