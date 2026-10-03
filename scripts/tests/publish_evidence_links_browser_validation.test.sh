@@ -73,6 +73,24 @@ assert list_snippets == {
     "assistant": ["Inspect the run before retrying"],
 }, list_snippets
 
+# Sub-agent stream rows (browser-use reasoning) render inside the collapsed
+# sub-agent panel, not the root transcript the share link opens.
+nested_snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "Buy the three named products at checkout"},
+        {
+            "role": "ASSISTANT",
+            "text": "I'm on the checkout page and the cart is ready",
+            "metadata": '{"subAgentId": "6d61c149-db71-5ee1-9f87-5d9dc6f1a1d3"}',
+        },
+        {"role": "ASSISTANT", "text": "Order tp_57735378 is confirmed"},
+    ]
+)
+assert nested_snippets == {
+    "user": ["Buy the three named products at checkout"],
+    "assistant": ["Order tp_57735378 is confirmed"],
+}, nested_snippets
+
 # No browser tasks → pass
 assert mod.validate_browser_agents_terminated_with_recording(agent, []) == []
 

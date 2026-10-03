@@ -279,9 +279,13 @@ def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
             continue
         role = message.get("role")
         content = str(message.get("text") or "")
+        metadata = _message_metadata(message)
+        # Sub-agent rows render inside the collapsed sub-agent panel, not the
+        # root transcript a fresh share-link visitor sees.
         if (
             role not in ("USER", "ASSISTANT")
-            or _message_metadata(message).get("hidden")
+            or metadata.get("hidden")
+            or metadata.get("subAgentId")
         ):
             continue
         for line in content.splitlines():
