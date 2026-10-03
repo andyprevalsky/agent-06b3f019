@@ -5928,6 +5928,733 @@ async def test_workflow_dag_failure_recovers_via_run_agent():
         _restore_workflow(original_workflow)
 
 
+def _completed_plan_followup_context(*, followup_text: str | None) -> List[Dict[str, Any]]:
+    """Prod-shaped transcript: completed DoorDash order plan, optional later USER."""
+    plan_payload = {
+        "type": "plan_artifact",
+        "join": "all",
+        "tasks": [
+            {
+                "goal": "Research the public DoorDash shopping route for ordering one package of Oral-B Glide dental floss.",
+                "tool_name": "spawn_explore_agent",
+            },
+            {
+                "goal": "Order one package of Oral-B Glide traditional dental floss through DoorDash.",
+                "tool_name": "spawn_browser_agent",
+            },
+        ],
+        "dependencies": {"1": [0]},
+    }
+    messages: List[Dict[str, Any]] = [
+        {
+            "role": "USER",
+            "text": "order me glide floss from doordash",
+            "metadata": None,
+        },
+        {
+            "role": "TOOL",
+            "text": "Plan created",
+            "metadata": {
+                "toolName": "set_plan",
+                "toolStatus": "FINISHED",
+                "data": plan_payload,
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Explore findings",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "toolStatus": "FINISHED",
+                "agentType": "explore",
+                "dagTaskIndex": 0,
+                "toolCallId": "explore-1",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Order confirmed dff187de-9b01-45a1-84f7-d9d493a4b070",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "dagTaskIndex": 1,
+                "toolCallId": "browser-1",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Your DoorDash order is confirmed.",
+            "metadata": {
+                "toolName": "completion_summary",
+                "toolStatus": "FINISHED",
+                "isFinalSummary": True,
+                "title": "Task Complete",
+            },
+        },
+    ]
+    if followup_text is not None:
+        messages.append(
+            {
+                "role": "USER",
+                "text": followup_text,
+                "metadata": None,
+            }
+        )
+    return messages
+
+
+def _compacted_completed_plan_followup_context(followup_text: str) -> List[Dict[str, Any]]:
+    """What poll_new_messages returns after projecting the last context_reset."""
+    return [
+        {
+            "role": "USER",
+            "text": "order me glide floss from doordash",
+            "metadata": {},
+        },
+        {
+            "role": "USER",
+            "text": "Compaction summary: ordered Oral-B Glide floss on DoorDash; confirmation dff187de.",
+            "metadata": {"compactionSummary": True},
+        },
+        {
+            "role": "TOOL",
+            "text": "Plan created",
+            "metadata": {
+                "toolName": "set_plan",
+                "toolStatus": "FINISHED",
+                "data": {
+                    "type": "plan_artifact",
+                    "join": "all",
+                    "tasks": [
+                        {
+                            "goal": "Research the public DoorDash shopping route for ordering floss.",
+                            "tool_name": "spawn_explore_agent",
+                        },
+                        {
+                            "goal": "Order one package of Oral-B Glide traditional dental floss through DoorDash.",
+                            "tool_name": "spawn_browser_agent",
+                        },
+                    ],
+                    "dependencies": {"1": [0]},
+                },
+            },
+        },
+        {
+            "role": "SYSTEM",
+            "text": "",
+            "metadata": {
+                "toolName": "context_reset",
+                "contextCompactionBoundary": True,
+                "excludeFromModel": True,
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Your DoorDash order is confirmed.",
+            "metadata": {
+                "toolName": "completion_summary",
+                "toolStatus": "FINISHED",
+                "isFinalSummary": True,
+            },
+        },
+        {
+            "role": "USER",
+            "text": followup_text,
+            "metadata": None,
+        },
+    ]
+
+
+async def test_workflow_execute_skips_stale_plan_after_completion_followup():
+    """Post-completion follow-up must not replay the completed DAG.
+
+    RCA agent 601d673f: after Task Complete, "get a refund..." re-escalated with
+    start_phase=execute. extract_plan_from_context still found the original
+    set_plan, and execute_dag re-ran explore+order instead of the refund.
+    """
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    followup = "get a refund, the doordasher delivered to the wrong location"
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": _completed_plan_followup_context(followup_text=followup),
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {
+                "response_schema": {
+                    "fields": [
+                        {"name": "order_confirmation_id", "type": "str", "required": True},
+                        {"name": "product_name", "type": "str", "required": True},
+                        {"name": "platform", "type": "str", "required": True},
+                    ]
+                },
+                "write_lock_enabled": True,
+            },
+            "set_response_schema_activity": {
+                "schema": {
+                    "fields": [
+                        {"name": "refund_confirmation_id", "type": "str", "required": True},
+                        {"name": "refund_status", "type": "str", "required": True},
+                    ]
+                },
+                "usage": {},
+            },
+            "generate_completion_summary": {
+                "summary": "Refund follow-up should not replay the order DAG.",
+                "tool_counts": {},
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_execute_dag = workflow_module.execute_dag
+    original_run_agent = workflow_module.run_agent
+    dag_calls = []
+    run_agent_calls = []
+
+    async def fake_execute_dag(**kwargs):
+        dag_calls.append(kwargs)
+        return {"status": "completed", "context": kwargs.get("context") or []}
+
+    async def fake_run_agent(**kwargs):
+        # run_agent polls the DB itself (initial_context is intentionally None
+        # after DAG skip). The poll fixture already contains the refund USER row.
+        run_agent_calls.append(kwargs)
+        return {
+            "status": "completed",
+            "context": _completed_plan_followup_context(followup_text=followup),
+            "structured_response": None,
+            "token_count": 3,
+            "context_size": 30,
+        }
+
+    workflow_module.execute_dag = fake_execute_dag
+    workflow_module.run_agent = fake_run_agent
+    try:
+        result = await wf.run(
+            "agent-stale-plan-followup",
+            "user-run-1",
+            "order me glide floss from doordash",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            None,
+            None,
+            0,
+            None,
+            "execute",
+            25,
+            250,
+            {},
+        )
+
+        assert dag_calls == [], (
+            "a USER message after completion_summary must not re-run the completed DAG; "
+            f"execute_dag was called {len(dag_calls)} time(s)"
+        )
+        assert run_agent_calls, "stale completed plan must fall through to run_agent with the new USER instruction"
+        assert result == {"status": "completed", "goal": "order me glide floss from doordash"}
+        schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
+        assert schema_calls, "superseded execute must regenerate output_schema from the new USER instruction"
+        assert schema_calls[0][1][1] == [followup], (
+            "schema generation must use the latest USER follow-up, not the persisted Agent.goal"
+        )
+        assert schema_calls[0][1][4] is False
+        assert wf.output_schema == {
+            "fields": [
+                {"name": "refund_confirmation_id", "type": "str", "required": True},
+                {"name": "refund_status", "type": "str", "required": True},
+            ]
+        }
+        assert wf._system_prompt_output_schema == wf.output_schema
+        schema_messages = [
+            c
+            for c in fake.activity_calls
+            if c[0] == "post_agent_message" and (c[1][3] or {}).get("isResponseSchemaUpdate") is True
+        ]
+        assert schema_messages, "regenerated schema must be posted as a hidden replacement USER row"
+    finally:
+        workflow_module.execute_dag = original_execute_dag
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_execute_nulled_schema_does_not_regenerate_from_old_goal():
+    """Backend-nulled schema must not be rebuilt from Agent.goal on execute follow-up."""
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    followup = "get a refund, the doordasher delivered to the wrong location"
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": _completed_plan_followup_context(followup_text=followup),
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {
+                "response_schema": None,
+                "write_lock_enabled": True,
+            },
+            "set_response_schema_activity": {
+                "schema": {
+                    "fields": [
+                        {"name": "refund_status", "type": "str", "required": True},
+                    ]
+                },
+                "usage": {},
+            },
+            "generate_completion_summary": {
+                "summary": "Refund follow-up should not replay the order DAG.",
+                "tool_counts": {},
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_execute_dag = workflow_module.execute_dag
+    original_run_agent = workflow_module.run_agent
+    dag_calls = []
+
+    async def fake_execute_dag(**kwargs):
+        dag_calls.append(kwargs)
+        return {"status": "completed", "context": kwargs.get("context") or []}
+
+    async def fake_run_agent(**kwargs):
+        return {
+            "status": "completed",
+            "context": _completed_plan_followup_context(followup_text=followup),
+            "structured_response": None,
+            "token_count": 3,
+            "context_size": 30,
+        }
+
+    workflow_module.execute_dag = fake_execute_dag
+    workflow_module.run_agent = fake_run_agent
+    try:
+        await wf.run(
+            "agent-nulled-schema-followup",
+            "user-run-1",
+            "order me glide floss from doordash",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            None,
+            None,
+            0,
+            None,
+            "execute",
+            25,
+            250,
+            {},
+        )
+        assert dag_calls == []
+        schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
+        assert schema_calls, "nulled schema must regenerate from the latest USER instruction"
+        assert all(c[1][1] == [followup] for c in schema_calls), (
+            "startup must not rebuild output_schema from the persisted Agent.goal"
+        )
+        assert wf.output_schema == {
+            "fields": [
+                {"name": "refund_status", "type": "str", "required": True},
+            ]
+        }
+    finally:
+        workflow_module.execute_dag = original_execute_dag
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_plan_followup_does_not_regenerate_schema_from_old_goal():
+    """start_phase=plan after a completed run must still ignore Agent.goal schema."""
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    followup = "get a refund, the doordasher delivered to the wrong location"
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": _completed_plan_followup_context(followup_text=followup),
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {
+                "response_schema": None,
+                "write_lock_enabled": True,
+            },
+            "set_response_schema_activity": {
+                "schema": {
+                    "fields": [
+                        {"name": "refund_status", "type": "str", "required": True},
+                    ]
+                },
+                "usage": {},
+            },
+            "generate_completion_summary": {
+                "summary": "Refund follow-up should plan against the new USER instruction.",
+                "tool_counts": {},
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_execute_dag = workflow_module.execute_dag
+    original_run_agent = workflow_module.run_agent
+    dag_calls = []
+
+    async def fake_execute_dag(**kwargs):
+        dag_calls.append(kwargs)
+        return {"status": "completed", "context": kwargs.get("context") or []}
+
+    async def fake_run_agent(**kwargs):
+        return {
+            "status": "completed",
+            "context": _completed_plan_followup_context(followup_text=followup),
+            "structured_response": None,
+            "token_count": 3,
+            "context_size": 30,
+        }
+
+    workflow_module.execute_dag = fake_execute_dag
+    workflow_module.run_agent = fake_run_agent
+    try:
+        await wf.run(
+            "agent-plan-followup-schema",
+            "user-run-1",
+            "order me glide floss from doordash",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            None,
+            None,
+            0,
+            None,
+            "plan",
+            25,
+            250,
+            {},
+        )
+        schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
+        assert schema_calls, "plan follow-up must generate output_schema from the latest USER"
+        assert all(c[1][1] == [followup] for c in schema_calls), (
+            "startup must not rebuild output_schema from the persisted Agent.goal"
+        )
+        assert dag_calls == [], "a superseded historical set_plan must not run during plan follow-up"
+        assert wf.output_schema == {
+            "fields": [
+                {"name": "refund_status", "type": "str", "required": True},
+            ]
+        }
+    finally:
+        workflow_module.execute_dag = original_execute_dag
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_execute_followup_reuses_last_context_compaction():
+    """A later root run must start from the last context_reset, not raw history."""
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    followup = "get a refund, the doordasher delivered to the wrong location"
+    projected = _compacted_completed_plan_followup_context(followup)
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": projected,
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {
+                "response_schema": None,
+                "write_lock_enabled": True,
+            },
+            "set_response_schema_activity": {
+                "schema": {
+                    "fields": [
+                        {"name": "refund_status", "type": "str", "required": True},
+                    ]
+                },
+                "usage": {},
+            },
+            "generate_completion_summary": {
+                "summary": "Refund follow-up should resume the last compaction.",
+                "tool_counts": {},
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_execute_dag = workflow_module.execute_dag
+    original_run_agent = workflow_module.run_agent
+    dag_calls = []
+    run_agent_calls = []
+
+    async def fake_execute_dag(**kwargs):
+        dag_calls.append(kwargs)
+        return {"status": "completed", "context": kwargs.get("context") or []}
+
+    async def fake_run_agent(**kwargs):
+        run_agent_calls.append(kwargs)
+        return {
+            "status": "completed",
+            "context": projected,
+            "structured_response": None,
+            "token_count": 3,
+            "context_size": 30,
+        }
+
+    workflow_module.execute_dag = fake_execute_dag
+    workflow_module.run_agent = fake_run_agent
+    try:
+        await wf.run(
+            "agent-compaction-followup",
+            "user-run-1",
+            "order me glide floss from doordash",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            None,
+            None,
+            0,
+            None,
+            "execute",
+            25,
+            250,
+            {},
+        )
+        assert dag_calls == [], "compacted completed plan must not replay the first-run DAG"
+        assert run_agent_calls, "follow-up must fall through to run_agent on the projected tail"
+        schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
+        assert schema_calls
+        assert all(c[1][1] == [followup] for c in schema_calls)
+        poll_calls = [c for c in fake.activity_calls if c[0] == "poll_new_messages"]
+        assert poll_calls, "fresh start must poll so the last context_reset can be projected"
+        assert any((m.get("metadata") or {}).get("compactionSummary") for m in projected)
+        assert any((m.get("metadata") or {}).get("contextCompactionBoundary") for m in projected)
+        assert wf.output_schema == {
+            "fields": [
+                {"name": "refund_status", "type": "str", "required": True},
+            ]
+        }
+    finally:
+        workflow_module.execute_dag = original_execute_dag
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_execute_still_runs_live_plan_without_later_user():
+    """A completed-looking transcript without a later USER still executes the plan.
+
+    start_phase=execute on a live plan (no post-completion follow-up) must keep
+    using extract_plan_from_context + execute_dag.
+    """
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    live_plan_context = [
+        {
+            "role": "USER",
+            "text": "order me glide floss from doordash",
+            "metadata": None,
+        },
+        {
+            "role": "TOOL",
+            "text": "Plan created",
+            "metadata": {
+                "toolName": "set_plan",
+                "toolStatus": "FINISHED",
+                "data": {
+                    "type": "plan_artifact",
+                    "join": "all",
+                    "tasks": [{"goal": "Order floss", "tool_name": "spawn_browser_agent"}],
+                    "dependencies": {},
+                },
+            },
+        },
+    ]
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": live_plan_context,
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {
+                "response_schema": {"fields": []},
+                "write_lock_enabled": True,
+            },
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_execute_dag = workflow_module.execute_dag
+    original_run_agent = workflow_module.run_agent
+    dag_calls = []
+
+    async def fake_execute_dag(**kwargs):
+        dag_calls.append(kwargs)
+        return {"status": "needs_llm", "context": kwargs.get("context") or [], "message": "continue"}
+
+    async def fake_run_agent(**kwargs):
+        return {
+            "status": "completed",
+            "context": kwargs.get("context") or [],
+            "structured_response": None,
+            "token_count": 1,
+            "context_size": 10,
+        }
+
+    workflow_module.execute_dag = fake_execute_dag
+    workflow_module.run_agent = fake_run_agent
+    try:
+        await wf.run(
+            "agent-live-plan",
+            "user-run-1",
+            "order me glide floss from doordash",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            None,
+            None,
+            0,
+            None,
+            "execute",
+            25,
+            250,
+            {},
+        )
+        assert len(dag_calls) == 1, "a live plan with no later USER must still run execute_dag"
+        assert not any(c[0] == "set_response_schema_activity" for c in fake.activity_calls), (
+            "a live plan must keep the persisted output_schema"
+        )
+    finally:
+        workflow_module.execute_dag = original_execute_dag
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_execute_skips_plan_after_user_followup_without_summary():
+    """Terminal re-escalation without Task Complete must not replay the old DAG."""
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    followup = "get a refund, the doordasher delivered to the wrong location"
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": [
+                msg
+                for msg in _completed_plan_followup_context(followup_text=followup)
+                if (msg.get("metadata") or {}).get("toolName") != "completion_summary"
+            ],
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {
+                "response_schema": {
+                    "fields": [
+                        {"name": "order_confirmation_id", "type": "str", "required": True},
+                    ]
+                },
+                "write_lock_enabled": True,
+            },
+            "set_response_schema_activity": {
+                "schema": {
+                    "fields": [
+                        {"name": "refund_status", "type": "str", "required": True},
+                    ]
+                },
+                "usage": {},
+            },
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_execute_dag = workflow_module.execute_dag
+    original_run_agent = workflow_module.run_agent
+    dag_calls = []
+
+    async def fake_execute_dag(**kwargs):
+        dag_calls.append(kwargs)
+        return {"status": "completed", "context": kwargs.get("context") or []}
+
+    async def fake_run_agent(**kwargs):
+        return {
+            "status": "completed",
+            "context": [],
+            "structured_response": None,
+            "token_count": 1,
+            "context_size": 10,
+        }
+
+    workflow_module.execute_dag = fake_execute_dag
+    workflow_module.run_agent = fake_run_agent
+    try:
+        await wf.run(
+            "agent-failed-plan-followup",
+            "user-run-1",
+            "order me glide floss from doordash",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            None,
+            None,
+            0,
+            None,
+            "execute",
+            25,
+            250,
+            {},
+        )
+        assert dag_calls == [], (
+            "a USER message after set_plan without completion_summary must not replay the DAG"
+        )
+        schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
+        assert schema_calls, "a USER follow-up after set_plan must regenerate output_schema"
+        assert schema_calls[0][1][1] == [followup]
+        assert wf.output_schema == {
+            "fields": [
+                {"name": "refund_status", "type": "str", "required": True},
+            ]
+        }
+    finally:
+        workflow_module.execute_dag = original_execute_dag
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
 async def test_workflow_handle_tool_event_forwards_to_helper():
     """_handle_tool_event invokes handle_tool_event helper with our execute_activity."""
     wf = _bare_workflow_instance()
@@ -8737,6 +9464,30 @@ async def run_all_tests():
     await r.record_async(
         "wf_dag_failure_recovers_via_run_agent",
         test_workflow_dag_failure_recovers_via_run_agent,
+    )
+    await r.record_async(
+        "wf_execute_skips_stale_plan_after_completion_followup",
+        test_workflow_execute_skips_stale_plan_after_completion_followup,
+    )
+    await r.record_async(
+        "wf_execute_nulled_schema_does_not_regenerate_from_old_goal",
+        test_workflow_execute_nulled_schema_does_not_regenerate_from_old_goal,
+    )
+    await r.record_async(
+        "wf_plan_followup_does_not_regenerate_schema_from_old_goal",
+        test_workflow_plan_followup_does_not_regenerate_schema_from_old_goal,
+    )
+    await r.record_async(
+        "wf_execute_followup_reuses_last_context_compaction",
+        test_workflow_execute_followup_reuses_last_context_compaction,
+    )
+    await r.record_async(
+        "wf_execute_still_runs_live_plan_without_later_user",
+        test_workflow_execute_still_runs_live_plan_without_later_user,
+    )
+    await r.record_async(
+        "wf_execute_skips_plan_after_user_followup_without_summary",
+        test_workflow_execute_skips_plan_after_user_followup_without_summary,
     )
     await r.record_async("wf_handle_tool_event_forwards", test_workflow_handle_tool_event_forwards_to_helper)
     await r.record_async(
