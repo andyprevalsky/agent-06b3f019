@@ -1697,7 +1697,10 @@ def _structured_response_from_code_evidence(
             str(field.get(key, "")) for key in ("name", "label", "description") if field.get(key)
         ).lower()
         if field_type.startswith("list") and "sequence" in descriptor and sequence:
-            structured[name] = sequence
+            # A sequence outside the field's declared bounds would fail the
+            # whole response; leave the field unset instead.
+            if value_satisfies_output_field_constraints(sequence, field):
+                structured[name] = sequence
         elif field_type in {"integer", "int", "number"} and "step" in descriptor:
             if total_steps is not None:
                 structured[name] = total_steps

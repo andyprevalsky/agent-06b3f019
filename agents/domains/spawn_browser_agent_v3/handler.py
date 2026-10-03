@@ -9184,7 +9184,11 @@ async def _spawn_browser_agent_activity_v3_real(
                     if score >= 1.0:
                         completion_tool_status = "FINISHED"
                         execution_time_ms = (safe_time() - start_time) * 1000
-                        structured_response = progress_result.get("structured_response")
+                        # A passing verifier call may omit the output it already
+                        # produced on an earlier call; keep that cached response.
+                        structured_response = (
+                            progress_result.get("structured_response") or latest_structured_response
+                        )
 
                         uploaded_paths = list(available_file_paths.values()) if available_file_paths else []
                         output_files = await extract_session_files(

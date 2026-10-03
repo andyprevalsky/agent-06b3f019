@@ -557,6 +557,28 @@ def test_structured_response_from_output_files_keeps_mixed_schema_file_fields():
     }
 
 
+def test_code_evidence_omits_optional_sequence_outside_its_bounds():
+    """An over-long optional sequence must not invalidate valid required fields."""
+    from domains.spawn_claude_code_agent.service import (
+        _structured_response_from_code_evidence,
+        _structured_response_satisfies_declared_schema,
+    )
+
+    terminal = "\n".join(["3", "10", "5", "16", "8", "4", "2", "1", "Total steps: 7"])
+    schema = {"fields": [
+        {"name": "total_steps", "type": "int", "description": "total step count"},
+        {"name": "collatz_sequence", "type": "list[int]", "description": "full sequence",
+         "required": False, "maxItems": 3},
+    ]}
+    structured = _structured_response_from_code_evidence(schema, [], [], terminal)
+    assert structured == {"total_steps": 7}, structured
+    assert _structured_response_satisfies_declared_schema(schema, structured)
+    unbounded = {"fields": [schema["fields"][0], {**schema["fields"][1], "maxItems": None}]}
+    assert _structured_response_from_code_evidence(unbounded, [], [], terminal)["collatz_sequence"] == [
+        3, 10, 5, 16, 8, 4, 2, 1,
+    ]
+
+
 def test_declared_schema_fast_path_enforces_bounds_and_nullable_fields():
     """Code child fast paths must honor the same contract as the verifier."""
     from domains.spawn_claude_code_agent.service import _structured_response_satisfies_declared_schema
@@ -3646,6 +3668,7 @@ async def _run_all_tests():
         test_structured_response_from_output_files_keeps_mixed_schema_file_fields,
     )
     r.record("declared_schema_fast_path_bounds", test_declared_schema_fast_path_enforces_bounds_and_nullable_fields)
+    r.record("code_evidence_omits_out_of_bounds_sequence", test_code_evidence_omits_optional_sequence_outside_its_bounds)
     r.record("code_event_context_json", test_build_code_event_context_uses_json_and_extracted_files)
     # build_usage_items
     r.record("usage_items_both", test_build_usage_items_both_llm_and_service)
