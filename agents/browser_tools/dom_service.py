@@ -501,6 +501,7 @@ class ActionHistory:
         params: Optional[Dict[str, Any]] = None,
         result: Optional[Dict[str, Any]] = None,
         screenshot: Optional[str] = None,
+        element_description_override: Optional[str] = None,
     ) -> ActionHistoryEntry:
         """Record an action with both index and coordinates.
 
@@ -546,9 +547,10 @@ class ActionHistory:
             except Exception as e:
                 logger.warning(f"Failed to get index for coords {coords_dict}: {e}")
 
-        # Get element description from selector map if available
-        element_description = None
-        if index is not None:
+        # Clicks can replace their target before the action is recorded. Keep
+        # the pre-action target when the caller captured one.
+        element_description = element_description_override
+        if element_description is None and index is not None:
             element = dom_service.selector_map.get(index)
             if element:
                 tag = getattr(element, "tag_name", None) or getattr(element, "node_name", "unknown")

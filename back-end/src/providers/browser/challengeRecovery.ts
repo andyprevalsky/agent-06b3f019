@@ -146,6 +146,26 @@ export interface RecoveryStorageLane {
   storageState: Record<string, unknown>;
 }
 
+/** A response can emit headers and then never finish its body on a broken proxy.
+ * Network previews are advisory; they must not hold the candidate probe open.
+ */
+export async function boundedRecoveryResponseText(
+  response: { text: () => Promise<string> },
+  timeoutMs = 2_000
+): Promise<string | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      response.text(),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export async function probeCandidateBrowser(
   session: RecoveryCandidateSession,
   targetUrl: string,
@@ -229,7 +249,7 @@ export async function probeCandidateBrowser(
           try {
             const resourceType = req.resourceType();
             if (['xhr', 'fetch', 'document', 'script'].includes(resourceType)) {
-              const raw = await res.text();
+              const raw = await boundedRecoveryResponseText(res);
               if (raw) {
                 body = raw.slice(0, 200);
                 truncated = raw.length > 200;

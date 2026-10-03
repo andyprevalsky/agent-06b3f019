@@ -15,6 +15,20 @@ export interface BrowserRecoveryConfig {
   steelProxyMode?: 'managed' | 'fixed';
 }
 
+/** A transport failure can affect a provider's whole proxy fleet, so try the
+ * other provider's exits before spending time on more tiers of the same one.
+ * Keep every candidate as a fallback, and keep each provider's original order.
+ */
+export function alternateProviderFirst(
+  configs: BrowserRecoveryConfig[],
+  failedProvider: BrowserProviderName
+): BrowserRecoveryConfig[] {
+  return [
+    ...configs.filter((config) => config.provider !== failedProvider),
+    ...configs.filter((config) => config.provider === failedProvider),
+  ];
+}
+
 export function bestSpecificity(location: ProxyGeoLocation): KernelRecoveryProxySpecificity {
   if (location.city) return 'city';
   if (location.state) return 'state';

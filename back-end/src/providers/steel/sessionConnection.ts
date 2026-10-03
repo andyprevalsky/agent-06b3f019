@@ -8,6 +8,19 @@ import { steelCdpConnectionUrl } from './urls';
 
 const SESSION_VALIDATION_TIMEOUT = 10000;
 const WS_BACKOFF_DELAYS = [100, 400, 800];
+export const STEEL_CDP_TIMEOUT_MESSAGE = 'Steel CDP connection timeout';
+
+/**
+ * Playwright CDP errors can embed the credential-bearing connect URL. Keep the
+ * failure cause for callers and logs, redact any URL, and give every timeout
+ * one stable message so replacement can recognize a CDP transport outage.
+ */
+function safeCdpFailure(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/timeout|timed out/i.test(message)) return new Error(STEEL_CDP_TIMEOUT_MESSAGE);
+  return new Error(message.replace(/\b(?:wss?|https?):\/\/\S+/gi, '<redacted-url>'));
+}
+
 type CdpConnector = (wsUrl: string) => Promise<Browser>;
 
 export type BrowserValidation =
@@ -133,7 +146,7 @@ export async function validateBrowserConnection(
           if (browser !== undefined) {
             await browser.close().catch(() => {});
           }
-          throw error;
+          throw safeCdpFailure(error);
         }
       },
       {

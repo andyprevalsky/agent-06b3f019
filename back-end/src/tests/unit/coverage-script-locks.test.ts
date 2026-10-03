@@ -156,9 +156,23 @@ const lockHolder = spawn('bash', ['scripts/run-coverage.sh', '--hold-coverage-lo
   stdio: 'ignore',
 });
 try {
+  // Wait for the owner to publish itself rather than a fixed window: a loaded
+  // host can take seconds to start the shell. Stop early if the holder exits;
+  // the cap stays inside its 30s hold. These synchronous waits block the event
+  // loop, so liveness is probed directly instead of through exitCode.
+  const holderAlive = (): boolean => {
+    try {
+      process.kill(lockHolder.pid ?? -1, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
   for (
     let attempt = 0;
-    attempt < 100 && readFileSync(runLockPath, { encoding: 'utf8', flag: 'a+' }).trim() === '';
+    attempt < 1250 &&
+    holderAlive() &&
+    readFileSync(runLockPath, { encoding: 'utf8', flag: 'a+' }).trim() === '';
     attempt++
   ) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
@@ -170,7 +184,8 @@ try {
   );
   for (
     let attempt = 0;
-    attempt < 100 &&
+    attempt < 1250 &&
+    holderAlive() &&
     (!existsSync(processGroupsPath) || readFileSync(processGroupsPath, 'utf8').trim() === '');
     attempt++
   ) {

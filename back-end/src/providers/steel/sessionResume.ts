@@ -21,7 +21,11 @@ import {
   steelCdpUrl,
   steelDebugUrl,
 } from './session';
-import { steelStartupProbe, validateBrowserConnection } from './sessionConnection';
+import {
+  STEEL_CDP_TIMEOUT_MESSAGE,
+  steelStartupProbe,
+  validateBrowserConnection,
+} from './sessionConnection';
 import { steelSessionTimeoutMs } from './sessionLifetime';
 import { steelCdpConnectionUrl } from './urls';
 
@@ -205,10 +209,14 @@ export async function recreateSession(
   let dropProxyCity = isKnownRejectedProxyCity(proxyGeo);
 
   let lastError: Error | null = null;
+  let attemptsMade = 0;
+  let consecutiveCdpTimeouts = 0;
   for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
+    attemptsMade = attempt;
     log.info(`  Steel session attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
     let createdSessionId: string | null = null;
     let committed = false;
+    let attemptCdpTimedOut = false;
     try {
       const proxySettings = buildSteelProxySettings(
         proxyGeo,
@@ -252,6 +260,7 @@ export async function recreateSession(
 
       const validationFailure = await dependencies.validateConnection(wsUrl, session.id);
       if (validationFailure !== null) {
+        attemptCdpTimedOut = validationFailure === STEEL_CDP_TIMEOUT_MESSAGE;
         throw new Error(`Session validation failed on attempt ${attempt}: ${validationFailure}`);
       }
 
@@ -327,6 +336,14 @@ export async function recreateSession(
       }
       lastError = error instanceof Error ? error : new Error('Unknown error');
       log.info(`  Steel session attempt ${attempt} failed: ${lastError.message}`);
+      consecutiveCdpTimeouts =
+        attemptCdpTimedOut || lastError.message === STEEL_CDP_TIMEOUT_MESSAGE
+          ? consecutiveCdpTimeouts + 1
+          : 0;
+      // Each timeout already includes three CDP handshakes against a distinct
+      // new session. Two in a row indicate a provider transport outage; leave
+      // the old session intact and let browser recovery try another provider.
+      if (consecutiveCdpTimeouts >= 2) break;
       if (!dropProxyCity && isInvalidSteelProxyConfiguration(error)) {
         dropProxyCity = true;
         rememberRejectedProxyCity(proxyGeo);
@@ -339,7 +356,7 @@ export async function recreateSession(
   }
 
   throw new Error(
-    `Failed to create Steel replacement after ${MAX_SESSION_RETRIES} attempts: ${lastError?.message}`
+    `Failed to create Steel replacement after ${attemptsMade} attempts: ${lastError?.message}`
   );
 }
 

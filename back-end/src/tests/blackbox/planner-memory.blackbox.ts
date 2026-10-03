@@ -357,20 +357,17 @@ export async function runTests(): Promise<boolean> {
             const hits = await search({
               goal: paraphrase,
               user_id: s.userId,
-              min_similarity: 0,
+              min_similarity: -1,
               limit: 50,
             });
             const hit = hits.find((c) => c.id === id);
             assert(hit, 'paraphrased request must retrieve the semantically matching run');
             const unrelated = hits.find((c) => c.id === unrelatedId);
-            // Search returns at most 50 rows, so an unrelated fixture can fall
-            // outside the result set as the shared benchmark corpus grows.
-            if (unrelated) {
-              assert(
-                hit.similarity > unrelated.similarity + 0.1,
-                `semantic match ${hit.similarity} must clearly outrank unrelated ${unrelated.similarity}`
-              );
-            }
+            assert(unrelated, 'with no floor every visible row is scored');
+            assert(
+              hit.similarity > unrelated.similarity + 0.1,
+              `semantic match ${hit.similarity} must clearly outrank unrelated ${unrelated.similarity}`
+            );
             // Default floor is the production cutoff (0.70): the unrelated run never surfaces.
             const defaults = await search({ goal: paraphrase, user_id: s.userId });
             assert(

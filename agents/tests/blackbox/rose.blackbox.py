@@ -3841,6 +3841,41 @@ async def test_waterfall_falls_through_then_succeeds():
     assert efforts == ["low", "low"]
 
 
+async def test_browser_qwen_prefers_cached_provider_without_affecting_flash():
+    """Browser Qwen prefers a cache-capable endpoint and retains fallback."""
+    bodies = []
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+
+    def handler(req):
+        bodies.append(json.loads(req.content.decode()))
+        return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    for pool_name in ("rose-1-browser-use", "rose-1-flash"):
+        await _drain(
+            waterfall_complete(
+                pool_spec=get_pool(pool_name),
+                messages=[{"role": "system", "content": "stable rules"}, {"role": "user", "content": "task"}],
+                openrouter_key="ork-test",
+                request_id=f"r-{pool_name}",
+                cache_namespace="browser-task:task-1:browser_use",
+            )
+        )
+
+    assert bodies[0]["model"] == "qwen/qwen3.8-27b"
+    assert bodies[0]["provider"] == {"order": ["novita"], "allow_fallbacks": True}
+    assert bodies[0]["session_id"] == "browser-task:task-1:browser_use"
+    assert bodies[1]["model"] == "qwen/qwen3.8-27b"
+    assert "provider" not in bodies[1]
+
+
 async def test_waterfall_skips_anthropic_for_response_format():
     """OpenRouter Anthropic rejects response_format; waterfall skips to next model."""
     sse_ok = "\n".join(
@@ -7200,6 +7235,10 @@ async def run_all_tests():
         test_openrouter_body_with_tools_preserves_tool_history,
     )
     await r.record_async("waterfall_falls_through_succeeds", test_waterfall_falls_through_then_succeeds)
+    await r.record_async(
+        "browser_qwen_cached_provider_with_fallback",
+        test_browser_qwen_prefers_cached_provider_without_affecting_flash,
+    )
     await r.record_async(
         "waterfall_skips_anthropic_response_format", test_waterfall_skips_anthropic_for_response_format
     )
