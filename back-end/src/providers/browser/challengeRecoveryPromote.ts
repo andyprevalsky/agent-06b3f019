@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
 import { createLogger } from '../logger';
+import { browserUseEnabled } from './config';
 import type {
   ChallengeClassifierBilling,
   ChallengeClassifierLlmUsage,
@@ -16,7 +17,7 @@ import { buildPreferredBrowserConfig, closeValidationBrowser } from './challenge
 import {
   alternateProviderFirst,
   bestSpecificity,
-  browserRecoveryCandidates,
+  availableBrowserRecoveryCandidates,
   shouldPreferSteelForChallengeTarget,
 } from './challengeRecoveryCandidates';
 import type { FingerprintInjectionData } from './fingerprintInjection';
@@ -92,7 +93,7 @@ export async function searchAndPromoteBrowserConfig(
   const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, {
     requirePaymentCdn: false,
   });
-  const candidates = browserRecoveryCandidates(proxyLocation, { preferSteel });
+  const candidates = availableBrowserRecoveryCandidates(proxyLocation, { preferSteel });
   const transportFailure =
     /^(?:critical third-party resource blocked|first-party request blocked by proxy tunnel)$/i.test(
       (input.recoveryReason ?? '').trim()
@@ -158,6 +159,15 @@ export async function searchAndPromoteBrowserConfig(
         }
         return { provider: 'kernel', ...session };
       }
+      if (config.provider === 'browser-use') {
+        const session = await dependencies.createBrowserUse(proxyLocation);
+        if (signal.aborted) {
+          await closeValidationBrowser(session);
+          await dependencies.releaseBrowserUse(session.sessionId).catch(() => {});
+          throw new Error('lane_aborted');
+        }
+        return { provider: 'browser-use', ...session };
+      }
       const session = await dependencies.createSteel({
         proxyLocation,
         proxyMode: config.steelProxyMode ?? 'managed',
@@ -196,6 +206,9 @@ export async function searchAndPromoteBrowserConfig(
       return probe;
     },
     promote: async ({ config, session }) => {
+      if (config.provider === 'browser-use' && !browserUseEnabled()) {
+        throw new Error('Browser Use is disabled by BROWSER_AGENT_BROWSER_USE_ENABLED');
+      }
       const updated = await runTransactionWithRetry(async (tx) => {
         const replaced = await tx.browserSession.updateMany({
           where: { id: current.id, sessionId: current.sessionId },
@@ -229,6 +242,8 @@ export async function searchAndPromoteBrowserConfig(
       if (!updated) throw new Error(`Browser task ${input.taskId} changed during config search`);
       if (current.provider === 'kernel') {
         await dependencies.releaseKernel(current.sessionId).catch(() => {});
+      } else if (current.provider === 'browser-use') {
+        await dependencies.releaseBrowserUse(current.sessionId).catch(() => {});
       } else {
         await dependencies.releaseSteel(current.sessionId).catch(() => {});
       }
@@ -236,6 +251,8 @@ export async function searchAndPromoteBrowserConfig(
     release: async (_config, session) => {
       await closeValidationBrowser(session).catch(() => {});
       if (session.provider === 'kernel') await dependencies.releaseKernel(session.sessionId);
+      else if (session.provider === 'browser-use')
+        await dependencies.releaseBrowserUse(session.sessionId);
       else await dependencies.releaseSteel(session.sessionId);
     },
   };

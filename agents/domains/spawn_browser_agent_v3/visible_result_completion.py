@@ -281,6 +281,7 @@ def should_force_visible_result_completion(
     *,
     action_name: str,
     last_reasoning: str,
+    observed_dom: str = "",
     prior_reasoning_messages: Iterable[str] | None = None,
     action_summaries: Iterable[Any] | None = None,
     action_entries: Iterable[Any] | None = None,
@@ -296,6 +297,11 @@ def should_force_visible_result_completion(
         return False
     if history_has_navigation_after_submit(summaries, entries):
         return False
+    # The current browser observation is stronger than model wording or older
+    # tool-result text. The result may have appeared after the last action even
+    # when the model asks for another screenshot before stating it aloud.
+    if observation_states_visible_fcaptcha_result(observed_dom):
+        return True
     # After navigate→submit, prior reasoning may still describe the old page.
     # Only the current turn's reasoning is trustworthy for the new page.
     if history_has_navigation_before_latest_submit(summaries, entries):

@@ -13,8 +13,19 @@ import { rotateSession as rotateSteelSession } from '../steel/sessionResume';
 import { getFingerprintInjectionData, listSessionFiles, uploadFileToSession } from '../steel/files';
 import { injectUserData } from '../steel/injection';
 import { compatiblePreferredBrowserConfig } from './challengeRecovery';
-import { selectedBrowserProvider } from './config';
+import { browserUseEnabled, selectedBrowserProvider } from './config';
 import { getOrCreateBrowserContext } from './context';
+import {
+  closeBrowserUseSession,
+  createBrowserUseSessionWithContext,
+  getBrowserUseSessionHealth,
+  listBrowserUseSessionFiles,
+  pressBrowserUseKeys,
+  readBrowserUseSessionFile,
+  resumeBrowserUseSession,
+  rotateBrowserUseSession,
+  uploadBrowserUseSessionFile,
+} from './browserUse';
 import {
   captureKernelScreenshot,
   closeKernelSession,
@@ -32,14 +43,15 @@ import {
 import type { KernelProxyType } from './kernelProxy';
 import type { RotationRecoveryAction, RotationStep } from './rotation';
 import { releaseSupersededBrowser } from './sessionCleanup';
-import type {
-  BrowserFileInfo,
-  BrowserProviderName,
-  BrowserProviderResumeSession,
-  BrowserProviderSession,
-  BrowserSessionHealth,
-  BrowserViewport,
-  BrowserViewportResizeResult,
+import {
+  storedBrowserProvider,
+  type BrowserFileInfo,
+  type BrowserProviderName,
+  type BrowserProviderResumeSession,
+  type BrowserProviderSession,
+  type BrowserSessionHealth,
+  type BrowserViewport,
+  type BrowserViewportResizeResult,
 } from './types';
 
 export {
@@ -62,6 +74,7 @@ export interface BrowserSessionCreationDependencies {
   defaultProvider: () => BrowserProviderName;
   createKernel: typeof createKernelSessionWithContext;
   createSteel: typeof createSteelSessionWithContext;
+  createBrowserUse: typeof createBrowserUseSessionWithContext;
 }
 
 export interface BrowserSessionCreationOptions {
@@ -81,6 +94,7 @@ const browserSessionCreationDependencies: BrowserSessionCreationDependencies = {
   defaultProvider: selectedBrowserProvider,
   createKernel: createKernelSessionWithContext,
   createSteel: createSteelSessionWithContext,
+  createBrowserUse: createBrowserUseSessionWithContext,
 };
 
 async function fetchProviderApi<T>(
@@ -104,7 +118,7 @@ async function providerForSession(sessionId: string): Promise<BrowserProviderNam
     select: { provider: true },
   });
   if (session === null) throw new Error(`Browser session not found: ${sessionId}`);
-  return session.provider === 'kernel' ? 'kernel' : 'steel';
+  return storedBrowserProvider(session.provider);
 }
 
 async function providerForTask(taskId: string): Promise<BrowserProviderName> {
@@ -113,7 +127,7 @@ async function providerForTask(taskId: string): Promise<BrowserProviderName> {
     select: { provider: true },
   });
   if (session === null) throw new Error(`Browser task not found: ${taskId}`);
-  return session.provider === 'kernel' ? 'kernel' : 'steel';
+  return storedBrowserProvider(session.provider);
 }
 
 export async function createSessionWithContext(
@@ -167,6 +181,12 @@ export async function createSessionWithContextUsingDependencies(
           : {}),
       });
     }
+    if (provider === 'browser-use') {
+      if (!browserUseEnabled()) {
+        throw new Error('Browser Use is disabled by BROWSER_AGENT_BROWSER_USE_ENABLED');
+      }
+      return dependencies.createBrowserUse(contextId, agentId, proxyLocation, startUrl, options);
+    }
 
     const session = await dependencies.createSteel(contextId, agentId, proxyLocation, startUrl, {
       ...options,
@@ -193,7 +213,7 @@ export async function createSessionWithContextUsingDependencies(
     return createForProvider('steel', null);
   }
 
-  if (preferred !== null) {
+  if (preferred !== null && (preferred.provider !== 'browser-use' || browserUseEnabled())) {
     try {
       return await createForProvider(preferred.provider, preferred);
     } catch (error) {
@@ -218,6 +238,10 @@ export async function closeSession(
     await closeKernelSession(sessionId, pause, currentUrl);
     return;
   }
+  if (provider === 'browser-use') {
+    await closeBrowserUseSession(sessionId, pause, currentUrl);
+    return;
+  }
   await closeSteelSession(sessionId, pause, currentUrl);
 }
 
@@ -227,6 +251,31 @@ export async function resumeSession(
 ): Promise<BrowserProviderResumeSession> {
   const provider = await providerForTask(taskId);
   if (provider === 'kernel') return resumeKernelSession(taskId);
+  if (provider === 'browser-use') {
+    if (!browserUseEnabled()) {
+      const previous = await prisma.browserSession.findUniqueOrThrow({
+        where: { id: taskId },
+        select: { sessionId: true },
+      });
+      const replacement = await resumeKernelSession(taskId);
+      await releaseSupersededBrowser({
+        taskId,
+        previousProvider: 'browser-use',
+        previousSessionId: previous.sessionId,
+        operation: 'resume',
+      });
+      return replacement;
+    }
+    const { previousSessionId, previousProvider, ...session } =
+      await resumeBrowserUseSession(taskId);
+    await releaseSupersededBrowser({
+      taskId,
+      previousProvider,
+      previousSessionId,
+      operation: 'resume',
+    });
+    return session;
+  }
 
   const replacement = await resumeSteelSession(taskId, options);
   const { previousSessionId, previousProvider, ...session } = replacement;
@@ -278,6 +327,26 @@ export async function rotateProxy(
     };
   }
 
+  if (step.provider === 'browser-use') {
+    if (!browserUseEnabled()) {
+      throw new Error('Browser Use is disabled by BROWSER_AGENT_BROWSER_USE_ENABLED');
+    }
+    const { previousSessionId, previousProvider, ...session } =
+      await rotateBrowserUseSession(taskId);
+    await releaseSupersededBrowser({
+      taskId,
+      previousProvider,
+      previousSessionId,
+      operation: 'rotation',
+    });
+    return {
+      ...session,
+      previousProvider,
+      recoveryAction: previousProvider === 'browser-use' ? 'ip_rotated' : 'provider_switched',
+      proxyType: 'residential',
+    };
+  }
+
   const replacement = await rotateSteelSession(taskId);
   const { previousSessionId, previousProvider, ...session } = replacement;
   await releaseSupersededBrowser({
@@ -313,6 +382,7 @@ export async function getSession(sessionId: string) {
 export async function getBrowserSessionHealth(sessionId: string): Promise<BrowserSessionHealth> {
   const provider = await providerForSession(sessionId);
   if (provider === 'kernel') return getKernelSessionHealth(sessionId);
+  if (provider === 'browser-use') return getBrowserUseSessionHealth(sessionId);
 
   const health = await getSteelSessionHealth(sessionId);
   return { provider: 'steel', ...health };
@@ -325,6 +395,16 @@ export async function getBrowserCaptchaTelemetry(taskId: string) {
     select: { provider: true, sessionId: true },
   });
   if (session === null) throw new Error(`Browser task not found: ${taskId}`);
+  if (session.provider === 'browser-use') {
+    return {
+      provider: 'browser-use' as const,
+      telemetryEnabled: false,
+      isSolving: null,
+      activeTaskCount: null,
+      pages: [],
+      latestOutcome: null,
+    };
+  }
   return session.provider === 'kernel'
     ? getKernelCaptchaTelemetry(session.sessionId)
     : getSteelCaptchaTelemetry(session.sessionId);
@@ -356,6 +436,9 @@ export async function uploadSessionFile(
   options: { directory?: string } = {}
 ): Promise<{ path: string; size: number }> {
   const provider = await providerForSession(sessionId);
+  if (provider === 'browser-use') {
+    return uploadBrowserUseSessionFile(sessionId, fileBuffer, filename, mimeType, options);
+  }
   // Steel's Files API owns /files; directory overrides only apply to Kernel.
   return provider === 'kernel'
     ? uploadKernelSessionFile(sessionId, fileBuffer, filename, options)
@@ -364,11 +447,13 @@ export async function uploadSessionFile(
 
 export async function listFiles(sessionId: string): Promise<BrowserFileInfo[]> {
   const provider = await providerForSession(sessionId);
+  if (provider === 'browser-use') return listBrowserUseSessionFiles(sessionId);
   return provider === 'kernel' ? listKernelSessionFiles(sessionId) : listSessionFiles(sessionId);
 }
 
 export async function readSessionFile(sessionId: string, filePath: string): Promise<Buffer> {
   const provider = await providerForSession(sessionId);
+  if (provider === 'browser-use') return readBrowserUseSessionFile(sessionId, filePath);
   if (provider === 'kernel') return readKernelSessionFile(sessionId, filePath);
 
   const apiKey = process.env.STEEL_API_KEY?.trim();
@@ -391,6 +476,20 @@ export async function captureScreenshot(sessionId: string): Promise<{
   const provider = await providerForSession(sessionId);
   if (provider === 'kernel') {
     return { provider, image: await captureKernelScreenshot(sessionId) };
+  }
+  if (provider === 'browser-use') {
+    const session = await prisma.browserSession.findUniqueOrThrow({ where: { sessionId } });
+    if (!session.wsUrl) throw new Error('Browser Use CDP URL unavailable for screenshot');
+    const { chromium } = await import('playwright');
+    const browser = await chromium.connectOverCDP(session.wsUrl);
+    try {
+      const context = browser.contexts()[0];
+      const page = context?.pages()[0];
+      if (!page) throw new Error('Browser Use session has no page for screenshot');
+      return { provider, image: await page.screenshot() };
+    } finally {
+      await browser.close().catch(() => {});
+    }
   }
 
   const apiKey = process.env.STEEL_API_KEY?.trim();
@@ -419,6 +518,7 @@ export async function pressSessionKeys(
   return pressSessionKeysUsingDependencies(sessionId, keys, {
     providerForSession,
     pressKernelKeys,
+    pressBrowserUseKeys,
   });
 }
 
@@ -428,11 +528,13 @@ export async function pressSessionKeysUsingDependencies(
   dependencies: {
     providerForSession: (sessionId: string) => Promise<BrowserProviderName>;
     pressKernelKeys: (sessionId: string, keys: string[]) => Promise<void>;
+    pressBrowserUseKeys: (sessionId: string, keys: string[]) => Promise<void>;
   }
 ): Promise<{ provider: BrowserProviderName; supported: boolean; pressed: boolean }> {
   const provider = await dependencies.providerForSession(sessionId);
-  if (provider !== 'kernel') return { provider, supported: false, pressed: false };
-  await dependencies.pressKernelKeys(sessionId, keys);
+  if (provider === 'kernel') await dependencies.pressKernelKeys(sessionId, keys);
+  else if (provider === 'browser-use') await dependencies.pressBrowserUseKeys(sessionId, keys);
+  else return { provider, supported: false, pressed: false };
   return { provider, supported: true, pressed: true };
 }
 

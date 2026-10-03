@@ -1914,8 +1914,11 @@ class RoseClient:
         the model does not return a parseable browser action.
         """
         pool_spec = get_pool("rose-1-browser-use")
-        max_tokens = 16000
-        temperature = 1.0
+        # A browser step needs one action. A 16k cap let a malformed Qwen
+        # response stream for 215s without a tool call (WebDecoy bench),
+        # consuming half the task deadline before the caller could retry.
+        max_tokens = 2048
+        temperature = 0.3
         state_actions = filter_browser_use_actions_for_state(available_actions, browser_state)
         tools = build_browser_use_tools(state_actions)
         # IMPORTANT: "auto", not "any". Forcing tool use ("any") forbids the model from

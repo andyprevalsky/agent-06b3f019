@@ -179,6 +179,28 @@ async function main(): Promise<void> {
     );
     assert.equal(throttledCalls, 2);
 
+    // The sandbox also returns HTTP 200 with a structured rate-limit error. A close_card response
+    // in this shape previously escaped as a successful tool call, then treasury-rails failed even
+    // though the provider would accept the close on the next window.
+    let structuredThrottleCalls = 0;
+    const structuredThrottleRuntime = new AgentCardOrgRuntime(async () => {
+      structuredThrottleCalls += 1;
+      if (structuredThrottleCalls === 1) {
+        return {
+          structuredContent: {
+            status: 'error',
+            message: 'close_card failed: API key rate limit exceeded, please try again later',
+          },
+        };
+      }
+      return { structuredContent: { status: 'CLOSED' } };
+    });
+    assert.deepEqual(
+      await structuredThrottleRuntime.callTool('close_card', { card_id: 'card_1' }),
+      { structuredContent: { status: 'CLOSED' } }
+    );
+    assert.equal(structuredThrottleCalls, 2, 'a structured MCP throttle must be retried');
+
     // A throttle that never clears stays bounded and surfaces as a typed 429 rather than an opaque
     // transport error, so callers can distinguish provider backpressure from a Rose defect.
     let exhaustedCalls = 0;

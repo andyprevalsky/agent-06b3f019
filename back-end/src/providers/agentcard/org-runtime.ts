@@ -148,7 +148,10 @@ function shouldRetryOrgMcpError(error: unknown): boolean {
   return looksLikeRateLimitError(error) || looksLikeTransientUnavailableError(error);
 }
 
-function mcpStructuredResultIsTransientlyUnavailable(result: unknown): string | undefined {
+function mcpStructuredResultRetryableError(
+  result: unknown,
+  toolName: string
+): AgentCardOrgRuntimeError | undefined {
   if (typeof result !== 'object' || result === null) return undefined;
   const record = result as Record<string, unknown>;
   const structured =
@@ -157,11 +160,22 @@ function mcpStructuredResultIsTransientlyUnavailable(result: unknown): string | 
       : record;
   const message = typeof structured.message === 'string' ? structured.message : '';
   const status = structured.status;
-  if (
-    (status === 'error' || status === 'unavailable') &&
-    /temporarily unavailable|service unavailable/i.test(message)
-  ) {
-    return message;
+  if (status !== 'error' && status !== 'unavailable') return undefined;
+  if (looksLikeRateLimitError(message)) {
+    return new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP ${toolName} is rate limited: ${message}`,
+      429,
+      'agentcard_org_mcp_rate_limited',
+      { tool: toolName, message }
+    );
+  }
+  if (/temporarily unavailable|service unavailable/i.test(message)) {
+    return new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP ${toolName} is temporarily unavailable: ${message}`,
+      503,
+      'agentcard_org_mcp_unavailable',
+      { tool: toolName, message }
+    );
   }
   return undefined;
 }
@@ -426,15 +440,8 @@ export class AgentCardOrgRuntime {
     for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
       try {
         const result = await this.callToolOnce(toolName, args);
-        const transient = mcpStructuredResultIsTransientlyUnavailable(result);
-        if (transient !== undefined) {
-          throw new AgentCardOrgRuntimeError(
-            `AgentCard Organization MCP ${toolName} is temporarily unavailable: ${transient}`,
-            503,
-            'agentcard_org_mcp_unavailable',
-            { tool: toolName, message: transient }
-          );
-        }
+        const retryableError = mcpStructuredResultRetryableError(result, toolName);
+        if (retryableError !== undefined) throw retryableError;
         return result;
       } catch (error) {
         if (!shouldRetryOrgMcpError(error)) throw error;

@@ -217,7 +217,26 @@ def _is_cloud_agent_lifecycle_tool(metadata: Dict[str, Any]) -> bool:
 
 # Same-machine optimization: passes large LLM context without Temporal serialization.
 # On cross-machine miss, call_llm_activity falls back to fetching from backend API.
-_pending_llm_context: Dict[str, Any] = {}  # agent_id -> (context, system_prompt, pre_resolved_ids)
+# agent_id -> (context, system_prompt, pre_resolved_ids[, user_id[, call_token]])
+_pending_llm_context: Dict[str, Any] = {}
+_PENDING_CONTEXT_TOKEN_INDEX = 4
+
+
+def pending_llm_context_for_call(context_key: str, call_token: Optional[str]) -> Any:
+    """Return this process's context slot only if it was written for this exact LLM call.
+
+    The slot is keyed by agent_id and outlives a workflow that migrates to another
+    worker (workflow-task timeout, sticky eviction). A later activity for the same agent
+    that lands back on the old worker must not build its prompt from that turn's stale
+    conversation, so tagged slots only match their own call token and token-less
+    callers only match untagged slots. A mismatch is a miss: the caller fetches the
+    canonical context from the backend.
+    """
+    pending = _pending_llm_context.get(context_key)
+    if pending is None:
+        return None
+    slot_token = pending[_PENDING_CONTEXT_TOKEN_INDEX] if len(pending) > _PENDING_CONTEXT_TOKEN_INDEX else None
+    return pending if slot_token == call_token else None
 
 
 def _add_cache_breakpoint_before_extra_user_message(messages: List[Dict[str, Any]]) -> bool:
@@ -5995,6 +6014,7 @@ async def call_llm_activity(
     cache_before_extra_user_message: bool = False,
     cache_sequence_id: Optional[str] = None,
     exclude_anthropic_family: bool = False,
+    pending_context_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -6027,6 +6047,9 @@ async def call_llm_activity(
             breakpoint. Explicit prefix markers are preserved.
         force_backend_context: If True, bypasses process-global pending context
             and fetches the canonical agent messages from the backend.
+        pending_context_token: Identity of the workflow's pending-context write for
+            this call. A same-agent slot with a different token is stale (left by a
+            workflow that migrated off this worker) and is treated as a miss.
         cache_before_extra_user_message: Mark the latest stable conversation
             block before appending extra_user_message. This lets productive
             param calls create/read one shared prefix without caching the unique
@@ -6066,13 +6089,15 @@ async def call_llm_activity(
         _context_key = None
         if isinstance(messages_or_agent_id, str):
             _context_key = messages_or_agent_id
-            pending = None if force_backend_context else _pending_llm_context.get(_context_key)
+            pending = (
+                None if force_backend_context else pending_llm_context_for_call(_context_key, pending_context_token)
+            )
             if pending is None and not force_backend_context:
                 await asyncio.sleep(0.5)
-                pending = _pending_llm_context.get(_context_key)
+                pending = pending_llm_context_for_call(_context_key, pending_context_token)
             if pending is not None:
                 if len(pending) >= 4:
-                    context, _sys_prompt, pre_resolved_ids, pending_user_id = pending
+                    context, _sys_prompt, pre_resolved_ids, pending_user_id = pending[:4]
                 else:
                     context, _sys_prompt, pre_resolved_ids = pending
                     pending_user_id = user_id
@@ -6103,7 +6128,14 @@ async def call_llm_activity(
                     user_id=user_id,
                 )
                 if not force_backend_context:
-                    _pending_llm_context[_context_key] = (context, system_prompt, None, user_id)
+                    # Same-process Temporal retries of this call reuse the fetched context.
+                    _pending_llm_context[_context_key] = (
+                        context,
+                        system_prompt,
+                        None,
+                        user_id,
+                        pending_context_token,
+                    )
             else:
                 raise ValueError(f"No pending LLM context for agent {_context_key} and no system_prompt provided")
         else:
@@ -6308,8 +6340,12 @@ async def call_llm_activity(
             tokens=usage.get("total_tokens", 0),
         )
 
-        # Clean up shared state on success
-        if _context_key and not force_backend_context:
+        # Clean up shared state on success -- only this call's slot, never another call's.
+        if (
+            _context_key
+            and not force_backend_context
+            and pending_llm_context_for_call(_context_key, pending_context_token) is not None
+        ):
             _pending_llm_context.pop(_context_key, None)
 
         return {

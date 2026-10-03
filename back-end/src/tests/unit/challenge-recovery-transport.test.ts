@@ -27,6 +27,17 @@ const evidence: TunnelCandidateEvidence = {
 
 assert.equal(restoredTunnelCandidate(evidence), true);
 assert.equal(
+  restoredTunnelCandidate({
+    ...evidence,
+    recoveryReason:
+      'Cloudflare tunnel connection is failing with ERR_TUNNEL_CONNECTION_FAILED on checkout POST.',
+    classifierReason:
+      'The Cloudflare tunnel connection failure to /api/test-payment/confirm remains unresolved; the payment submission endpoint is still blocked, preventing checkout completion despite the HTML shell being visually present.',
+  }),
+  true,
+  'a historical Cloudflare tunnel error does not override a successful candidate GET'
+);
+assert.equal(
   restoredTunnelCandidate({ ...evidence, recoveryReason: 'The checkout POST got HTTP 429.' }),
   false,
   'only a prior CONNECT failure can use this recovery path'
@@ -89,11 +100,31 @@ assert.equal(
 assert.equal(
   restoredTunnelCandidate({
     ...evidence,
+    cleanedDom: 'Cloudflare challenge: Verify you are human. ' + 'Please wait. '.repeat(12),
+  }),
+  false,
+  'a substantive visible challenge page cannot promote'
+);
+assert.equal(
+  restoredTunnelCandidate({
+    ...evidence,
     classifierReason:
       'The current page displays a CAPTCHA interstitial despite the restored tunnel.',
   }),
   false,
   'a current visible challenge cannot promote'
 );
+for (const challenge of ['Turnstile', 'blocked by Cloudflare', 'Verify you are human']) {
+  assert.equal(
+    restoredTunnelCandidate({ ...evidence, classifierReason: `Tunnel restored, but ${challenge}` }),
+    false,
+    `${challenge} in the current classifier result cannot promote`
+  );
+  assert.equal(
+    restoredTunnelCandidate({ ...evidence, cleanedDom: `${evidence.cleanedDom} ${challenge}` }),
+    false,
+    `${challenge} in the current DOM cannot promote`
+  );
+}
 
 process.stdout.write('PASS challenge recovery tunnel transport evidence\n');

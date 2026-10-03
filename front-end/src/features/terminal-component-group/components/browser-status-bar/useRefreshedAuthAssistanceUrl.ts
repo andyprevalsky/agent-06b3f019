@@ -1,5 +1,5 @@
 /**
- * Keeps auth-assistance browser embeds pointed at a live Steel session.
+ * Keeps auth-assistance browser embeds pointed at a live provider session.
  *
  * Browser auth requests can sit in the attention inbox long enough for the
  * original Steel debug URL to expire. This hook asks the backend to validate

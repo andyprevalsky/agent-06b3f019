@@ -2574,10 +2574,6 @@ async function runAll() {
       fn: testVerifyOtp_seededGenericTwilioError,
     },
     {
-      name: 'POST /verify-otp -- seeded Supabase phone_exists 422',
-      fn: testVerifyOtp_seededSupabasePhoneExists,
-    },
-    {
       name: 'POST /verify-otp -- seeded Supabase generic 5xx',
       fn: testVerifyOtp_seededSupabaseGenericError,
     },
@@ -2606,6 +2602,12 @@ async function runAll() {
   // running it in parallel let the SMS HTTP call leak into a later boundary
   // test's capture window and break its no-outbound assertion.
   const sequentialTests: { name: string; fn: () => Promise<void> }[] = [
+    {
+      // Supabase listUsers has one shared replay URL for every phone. Keep its
+      // seeded response out of the parallel pool so another case cannot win it.
+      name: 'POST /verify-otp -- seeded Supabase phone_exists 422',
+      fn: testVerifyOtp_seededSupabasePhoneExists,
+    },
     {
       // Agent creation + merge is slow and previously raced parallel seeded OTP
       // fixtures under full-suite concurrency ("Invalid code").

@@ -130,3 +130,22 @@ Once the visible score and form verdict are already on the page — in
 reasoning or a post-submit tool result — an idle wait or network inspect
 is budget burn, not progress. Force completion at that boundary instead
 of hoping the model stops retrying a third-party proof-of-work.
+
+## Recurrence 2026-10-01 (Browser Use provider)
+
+Browser Use agent `e11ac2dc-a522-4042-bbca-300e4e92ea1c` passed the live
+checkbox and submitted the invisible form. WebDecoy visibly showed risk score
+`0.00` and `Form submission allowed!`, but the agent kept taking screenshots and
+scrolling, then exceeded the unchanged 420-second task cap. The guard had no
+path for the current browser-observed DOM; the score existed there before the
+model chose its next tool.
+
+`should_force_visible_result_completion` now reads the current observed DOM
+after a real Submit click, while retaining the navigation and static-threshold
+guards. The owning-boundary test
+`test_visible_result_completion_uses_current_observed_dom_after_submit` failed
+before the change and passed after it. The full `spawn-browser-agent-v3` blackbox
+domain passed. The unchanged live WebDecoy benchmark then passed 1/1 with agent
+`1e54acd8-0d61-4fe5-b889-d7511a48ab8a`, run
+`a7474a47-c181-4572-bf03-232a1542c4a0`, task duration 358s, verifier 100%,
+and exact final score `0.00`.
