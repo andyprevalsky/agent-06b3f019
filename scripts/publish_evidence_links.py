@@ -279,9 +279,13 @@ def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
             continue
         role = message.get("role")
         content = str(message.get("text") or "")
+        meta = _message_metadata(message)
+        # The root FE transcript nests sub-agent rows inside their collapsed card
+        # (front-end filterMessagesForSubAgent), so their text is not on the page.
         if (
             role not in ("USER", "ASSISTANT")
-            or _message_metadata(message).get("hidden")
+            or meta.get("hidden")
+            or meta.get("subAgentId") is not None
         ):
             continue
         for line in content.splitlines():

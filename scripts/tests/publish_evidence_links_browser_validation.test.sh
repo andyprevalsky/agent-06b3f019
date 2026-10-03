@@ -20,8 +20,8 @@ assert spec.loader is not None
 spec.loader.exec_module(mod)
 
 # Avoid network probes in unit checks: stub URL/pointer reachability.
-mod._probe_recording_view_url = lambda url, timeout=20.0: url.startswith("https://ok/")  # type: ignore[assignment]
-mod._probe_recording_file_pointer = (  # type: ignore[assignment]
+mod._probe_recording_view_url = lambda url, timeout=20.0: url.startswith("https://ok/")
+mod._probe_recording_file_pointer = (
     lambda agent_id, pointer, timeout=30.0: isinstance(pointer, dict)
     and pointer.get("id") == "fp-ok"
 )
@@ -72,6 +72,44 @@ assert list_snippets == {
     "user": ["Open the benchmark link"],
     "assistant": ["Inspect the run before retrying"],
 }, list_snippets
+
+# The root FE transcript nests a sub-agent's stream inside its collapsed card,
+# so those rows are not page text (prod agent 96de1863-fd9d-40cd-9978-348643222007).
+sub_agent_snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "Use a browser agent to complete checkout"},
+        {"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [{"id": "c1"}]}},
+        {
+            "role": "ASSISTANT",
+            "text": "Let's start by reading the current state of the browser",
+            "metadata": {"streamId": "s1", "subAgentId": "browser-task-1"},
+        },
+        {
+            "role": "ASSISTANT",
+            "text": "Checkout finished on the root transcript",
+            "metadata": '{"subAgentId": null}',
+        },
+    ]
+)
+assert sub_agent_snippets == {
+    "user": ["Use a browser agent to complete checkout"],
+    "assistant": ["Checkout finished on the root transcript"],
+}, sub_agent_snippets
+
+only_sub_agent_snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "Use a browser agent to complete checkout"},
+        {
+            "role": "ASSISTANT",
+            "text": "We are on the test checkout page for payment",
+            "metadata": '{"subAgentId": "browser-task-1"}',
+        },
+    ]
+)
+assert only_sub_agent_snippets == {
+    "user": ["Use a browser agent to complete checkout"],
+    "assistant": [],
+}, only_sub_agent_snippets
 
 # No browser tasks → pass
 assert mod.validate_browser_agents_terminated_with_recording(agent, []) == []
@@ -150,7 +188,7 @@ failures = mod.validate_browser_agents_terminated_with_recording(
 assert failures == [], failures
 
 # Dead view URL → fail recording
-mod._probe_recording_view_url = lambda url, timeout=20.0: False  # type: ignore[assignment]
+mod._probe_recording_view_url = lambda url, timeout=20.0: False
 failures = mod.validate_browser_agents_terminated_with_recording(
     agent,
     [
