@@ -7502,6 +7502,30 @@ async def _apply_memory_fixtures(task: "BenchmarkTask", base_url: str) -> list[d
     return applied
 
 
+# The worker caches a user's context (their connected inboxes included) for
+# helpers.get_user_context.CACHE_TTL_MINUTES. A lane that connected a fixture
+# inbox therefore leaks it into the next lane's root agent as "the user's
+# connected email", even though the inbox was deleted with its site: an agent
+# then signed up with that address and waited on a code nobody could read.
+USER_CONTEXT_CACHE_SECONDS = 5 * 60 + 15
+_connected_inbox_released_at: Optional[float] = None
+
+
+async def _wait_out_connected_inbox_context(now: Callable[[], float] = time.monotonic) -> float:
+    """Sleep until the previous lane's fixture inbox has aged out of the worker's user context."""
+    global _connected_inbox_released_at
+    released_at = _connected_inbox_released_at
+    _connected_inbox_released_at = None
+    if released_at is None:
+        return 0.0
+    remaining = USER_CONTEXT_CACHE_SECONDS - (now() - released_at)
+    if remaining <= 0:
+        return 0.0
+    print(f"    ⏳ Waiting {remaining:.0f}s for the previous lane's connected inbox to leave the cached user context")
+    await asyncio.sleep(remaining)
+    return remaining
+
+
 async def _apply_auth_test_site(task: "BenchmarkTask", base_url: str) -> Optional[dict]:
     """Seed this run's Rose Shop site when the task declares one.
 
@@ -7515,6 +7539,7 @@ async def _apply_auth_test_site(task: "BenchmarkTask", base_url: str) -> Optiona
         return None
     if not _is_local_base_url(base_url):
         raise RuntimeError(f"{task.name}: the hosted auth test site only exists on a local benchmark stack")
+    await _wait_out_connected_inbox_context()
     manifest = await auth_test_site.create_site(
         base_url,
         await _api_headers(),
@@ -7571,9 +7596,12 @@ async def _run_auth_test_site_first_run(
 
 
 async def _release_auth_test_site(base_url: str, manifest: Optional[dict]) -> None:
+    global _connected_inbox_released_at
     auth_test_site.set_active_manifest(None)
     if not manifest:
         return
+    if (manifest.get("authOptionsPreview") or {}).get("emailOtpInboxes"):
+        _connected_inbox_released_at = time.monotonic()
     try:
         await auth_test_site.delete_site(base_url, await _api_headers(), str(manifest["siteId"]))
     except Exception as exc:

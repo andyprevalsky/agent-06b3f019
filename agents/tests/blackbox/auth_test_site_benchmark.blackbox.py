@@ -817,6 +817,49 @@ async def test_goal_names_the_account_and_first_run_precedes_the_graded_run() ->
             os.environ["BENCHMARK_FRONTEND_URL"] = previous_frontend
 
 
+async def test_lane_after_a_connected_inbox_waits_out_the_cached_user_context() -> None:
+    """The worker caches user context for five minutes. After the email-otp lane
+    the next lane's root agent still saw that lane's fixture inbox as the user's
+    connected email and signed up with it."""
+    import benchmarks.run_benchmark as rb
+    from benchmarks import auth_test_site
+
+    slept: list[float] = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    async def fake_delete(base_url, headers, site_id):
+        return None
+
+    async def fake_headers():
+        return {}
+
+    manifest = _manifest("email_otp")
+    manifest["authOptionsPreview"] = {**manifest.get("authOptionsPreview", {}), "emailOtpInboxes": ["a@mail.example"]}
+    plain = _manifest("password_retry")
+    with patch.object(rb.asyncio, "sleep", fake_sleep), patch.object(rb, "_api_headers", fake_headers), patch.object(
+        auth_test_site, "delete_site", fake_delete
+    ):
+        rb._connected_inbox_released_at = None
+        await rb._release_auth_test_site("http://localhost:1", plain)
+        assert await rb._wait_out_connected_inbox_context() == 0.0 and slept == [], "ordinary lanes add no wait"
+
+        await rb._release_auth_test_site("http://localhost:1", manifest)
+        released = rb._connected_inbox_released_at
+        assert released is not None
+        waited = await rb._wait_out_connected_inbox_context(now=lambda: released + 100)
+        assert abs(waited - (rb.USER_CONTEXT_CACHE_SECONDS - 100)) < 1 and slept == [waited], (waited, slept)
+        assert await rb._wait_out_connected_inbox_context() == 0.0, "the wait is paid once"
+
+        await rb._release_auth_test_site("http://localhost:1", manifest)
+        released = rb._connected_inbox_released_at
+        assert await rb._wait_out_connected_inbox_context(now=lambda: released + 3600) == 0.0, "already expired"
+    from helpers.get_user_context import CACHE_TTL_MINUTES
+
+    assert rb.USER_CONTEXT_CACHE_SECONDS > CACHE_TTL_MINUTES * 60, "the wait must outlast the worker's cache"
+
+
 async def test_stand_in_user_signs_in_or_declines_a_sign_in_help_request() -> None:
     from benchmarks import auth_assistance_user, auth_test_site
     from benchmarks import run_benchmark as rb
@@ -938,6 +981,10 @@ async def run_all_tests():
     runner.record(
         "outcome_check_grades_orders_accounts_and_second_runs",
         test_outcome_check_grades_orders_accounts_and_second_runs,
+    )
+    await runner.record_async(
+        "lane_after_a_connected_inbox_waits_out_the_cached_user_context",
+        test_lane_after_a_connected_inbox_waits_out_the_cached_user_context,
     )
     await runner.record_async(
         "goal_names_the_account_and_first_run_precedes_the_graded_run",
