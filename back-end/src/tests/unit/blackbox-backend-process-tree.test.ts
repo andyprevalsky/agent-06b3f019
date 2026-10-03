@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const helperPath = join(process.cwd(), '..', 'scripts', 'lib', 'process-tree.sh');
@@ -41,10 +42,12 @@ function runTree(
   command: string,
   minMembers: number,
   graceSeconds: number,
-  token?: string
+  token?: string,
+  pathPrefix?: string
 ): TreeRun {
   const script = `
 set -euo pipefail
+${pathPrefix ? `export PATH="${pathPrefix}:$PATH"` : ''}
 source "${helperPath}"
 ${command} >/dev/null 2>&1 &
 root=$!
@@ -130,7 +133,31 @@ assert.ok(
   'the cleanup trap must be installed before the backend starts'
 );
 
+// A loaded host makes every `ps` slow. The grace counted 0.1s sleeps, each also
+// paying a `ps` per pid, so a 1s grace took 13.8s at load average 90. Shim a
+// 0.4s `ps` to reproduce that deterministically: the grace is wall clock.
+const slowPsDir = mkdtempSync(join(tmpdir(), 'slow-ps-'));
+const slowPs = join(slowPsDir, 'ps');
+writeFileSync(slowPs, '#!/bin/sh\nsleep 0.4\nexec /bin/ps "$@"\n');
+chmodSync(slowPs, 0o755);
+let slowPsProof: TreeRun;
+try {
+  slowPsProof = runTree(`bash -c 'trap "" TERM; sleep 1000 & wait'`, 2, 1, undefined, slowPsDir);
+} finally {
+  rmSync(slowPsDir, { recursive: true, force: true });
+}
+assert.deepEqual(
+  slowPsProof.survivors,
+  [],
+  'a slow ps must not leave TERM-ignoring processes alive'
+);
+assert.ok(
+  slowPsProof.stopMs >= 900 && slowPsProof.stopMs < 4000,
+  `the grace must be wall clock even when each ps is slow (took ${slowPsProof.stopMs}ms)`
+);
+
 process.stdout.write(
   `blackbox-backend-process-tree: npx tree of ${npxTree.members.length} stopped in ` +
-    `${npxTree.stopMs}ms; TERM-ignoring tree killed after ${termProof.stopMs}ms\n`
+    `${npxTree.stopMs}ms; TERM-ignoring tree killed after ${termProof.stopMs}ms; ` +
+    `with slow ps after ${slowPsProof.stopMs}ms\n`
 );

@@ -269,7 +269,7 @@ def test_every_tool_model_appears_in_at_least_one_phase_list():
     # This exact-goal benchmark tool is injected into the root workflow's
     # execute list only for the Google OAuth video task. Adding it to a shared
     # phase list would expose the fixture to unrelated agents.
-    exact_goal_tools = {"google_oauth_demo"}
+    exact_goal_tools = {"google_workspace_run"}
     orphans = set(TOOL_MODELS.keys()) - union - exact_goal_tools
     assert not orphans, (
         f"Tool model(s) {sorted(orphans)} are registered in TOOL_MODELS but "

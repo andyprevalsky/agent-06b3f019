@@ -219,6 +219,9 @@ esac
 # real processes so the patterns and the kill path are pinned together.
 sweep_ws="$TMP_ROOT/sweep-ws"
 mkdir -p "$sweep_ws/front-end" "$sweep_ws/agents"
+# macOS resolves /var to /private/var in lsof cwd output. Use the same physical
+# path that the cleanup sweep reads for its worktree comparison.
+sweep_ws="$(cd "$sweep_ws" && pwd -P)"
 
 SWEEP_FIXTURE_PID=""
 spawn_sweep_fixture() {

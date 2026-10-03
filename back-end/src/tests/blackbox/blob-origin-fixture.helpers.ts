@@ -1,4 +1,8 @@
 import { PrismaClient } from '@prisma/client';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * The most one Postgres backend may hold while building a blob fixture. The
@@ -44,21 +48,69 @@ function singleConnectionUrl(): string {
 /**
  * Runs `work` on a fresh single-connection client and reports the peak RSS of
  * the Postgres backend that served it. Postgres reads its own
- * `/proc/self/status`, so this needs a superuser on a Linux server: the local
- * system and Docker test databases both qualify.
+ * `/proc/self/status` on Linux. macOS has no `/proc`, so sample that backend's
+ * RSS with `ps` while the fixture query is running.
  */
 export async function measureBackendPeak<T>(
   work: (client: PrismaClient) => Promise<T>
 ): Promise<{ result: T; backendPeakMb: number }> {
   const client = new PrismaClient({ datasources: { db: { url: singleConnectionUrl() } } });
   try {
-    const result = await work(client);
-    const rows = await client.$queryRawUnsafe<Array<{ peak_kb: string | null }>>(
-      `SELECT substring(pg_read_file('/proc/self/status') from 'VmHWM:\\s+(\\d+) kB') AS peak_kb`
+    let result: T;
+    let peakKb: number;
+    // The client can run on macOS while Postgres runs in a Linux container.
+    // Detect the server's filesystem instead of the Node process platform.
+    const [{ has_proc: hasProc }] = await client.$queryRawUnsafe<Array<{ has_proc: boolean }>>(
+      "SELECT pg_read_file('/proc/self/status', 0, 1, true) IS NOT NULL AS has_proc"
     );
-    const peakKb = Number(rows[0]?.peak_kb);
+    if (!hasProc) {
+      if (process.platform !== 'darwin') {
+        throw new Error('Postgres has no /proc/self/status and no platform RSS sampler');
+      }
+      const [{ pid }] = await client.$queryRawUnsafe<Array<{ pid: number }>>(
+        'SELECT pg_backend_pid() AS pid'
+      );
+      if (!Number.isInteger(pid) || pid <= 0)
+        throw new Error(`invalid Postgres backend PID: ${pid}`);
+      peakKb = 0;
+      let pending: Promise<void> | undefined;
+      let sampleError: Error | undefined;
+      const sample = async () => {
+        const { stdout } = await execFileAsync('ps', ['-o', 'rss=', '-p', String(pid)]);
+        const rssKb = Number(stdout.trim());
+        if (!Number.isFinite(rssKb) || rssKb <= 0)
+          throw new Error(`invalid backend RSS: ${stdout}`);
+        peakKb = Math.max(peakKb, rssKb);
+      };
+      const queueSample = () => {
+        if (pending || sampleError) return;
+        pending = sample()
+          .catch((error: Error) => {
+            sampleError = error;
+          })
+          .finally(() => {
+            pending = undefined;
+          });
+      };
+      await sample();
+      const timer = setInterval(queueSample, 25);
+      try {
+        result = await work(client);
+      } finally {
+        clearInterval(timer);
+        if (pending) await pending;
+        await sample();
+      }
+      if (sampleError) throw sampleError;
+    } else {
+      result = await work(client);
+      const rows = await client.$queryRawUnsafe<Array<{ peak_kb: string | null }>>(
+        `SELECT substring(pg_read_file('/proc/self/status') from 'VmHWM:\\s+(\\d+) kB') AS peak_kb`
+      );
+      peakKb = Number(rows[0]?.peak_kb);
+    }
     if (!Number.isFinite(peakKb) || peakKb <= 0) {
-      throw new Error(`could not read the Postgres backend's VmHWM (got ${rows[0]?.peak_kb})`);
+      throw new Error(`could not measure the Postgres backend's peak RSS (got ${peakKb})`);
     }
     return { result, backendPeakMb: Math.round(peakKb / 1024) };
   } finally {
