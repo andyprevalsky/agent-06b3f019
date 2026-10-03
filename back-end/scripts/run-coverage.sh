@@ -624,9 +624,23 @@ echo "Backend ready at $TEST_BASE_URL"
 # captcha-solve-indicator launches Node Playwright Chromium. Cloud images can
 # have the npm package without the matching browser revision, which fails as
 # "Executable doesn't exist at .../chrome-headless-shell". Install before units.
+# `install` always takes the machine-wide ms-playwright directory lock, which
+# goes stale on a loaded host shared by many worktrees and fails coverage before
+# any test runs. Skip it when every needed revision is already complete.
+playwright_chromium_installed() {
+  local locations location
+  locations="$(npx playwright install --dry-run chromium 2>/dev/null |
+    sed -n 's/^[[:space:]]*Install location:[[:space:]]*//p')" || return 1
+  [ -n "$locations" ] || return 1
+  while IFS= read -r location; do
+    [ -f "$location/INSTALLATION_COMPLETE" ] || return 1
+  done <<< "$locations"
+}
 if command -v npx >/dev/null 2>&1; then
   echo "Ensuring Playwright Chromium is installed for coverage unit tests..."
-  npx playwright install chromium
+  if ! playwright_chromium_installed; then
+    npx playwright install chromium
+  fi
 fi
 
 echo "Running blackbox and unit tests in parallel..."

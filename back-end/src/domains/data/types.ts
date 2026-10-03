@@ -1,6 +1,9 @@
-/**
- * Data domain types — Zod schemas, interfaces, type aliases.
- */
+import type {
+  AgentMetadataParams,
+  AgentNetworkGrepFilters,
+  AgentTrajectoryGrepFilters,
+} from './types.agent';
+export type { AgentNetworkGrepFilters, AgentTrajectoryGrepFilters } from './types.agent';
 
 export const DATA_SOURCE_CONFIGS = {
   messages: {
@@ -64,7 +67,16 @@ export const DATA_SOURCE_CONFIGS = {
     table: 'Message' as const,
     searchField: 'text',
     groupBy: 'agentId',
-    filters: ['path'] as const,
+    filters: ['path', 'role'] as const,
+    connector: null,
+    channel: null,
+  },
+  agent_trajectories: {
+    description: 'User-owned agent runs outside the current agent tree',
+    table: 'AgentTrajectorySearch' as const,
+    searchField: 'searchText',
+    groupBy: 'rootAgentId',
+    filters: ['path', 'since', 'until', 'role', 'surface', 'record_kind'] as const,
     connector: null,
     channel: null,
   },
@@ -146,8 +158,8 @@ export interface FormattedResult {
   messages: ThreadMessage[];
 }
 
-export interface GrepParams {
-  pattern: string;
+export interface GrepParams extends AgentMetadataParams {
+  pattern?: string;
   source?: string;
   sources?: string[];
   filters?: Record<string, unknown>;
@@ -171,6 +183,8 @@ export interface GrepLocation {
   source: ValidSource;
   path: string;
   agent_id?: string;
+  root_agent_id?: string;
+  surface?: string;
   message_id?: string;
   role?: 'SYSTEM' | 'ASSISTANT' | 'USER' | 'TOOL';
   thread?: string;
@@ -214,6 +228,7 @@ export interface GrepResult {
   returned: number;
   has_more: boolean;
   next_offset: number | null;
+  next_page_after?: string | null;
   display_order: 'oldest_first' | 'newest_first';
   context_unit: 'message_record' | 'logical_line' | 'mixed';
   summaries?: Partial<Record<ValidSource, unknown>>;
@@ -258,13 +273,6 @@ export interface NetworkGrepFilters {
   pathContact?: string;
 }
 
-/** `agent_network` narrowing. `path` addresses a depth/agent/role/message subtree. */
-export interface AgentNetworkGrepFilters {
-  pathAgentId?: string;
-  pathRole?: string;
-  pathMessageId?: string;
-}
-
 // Normalized, validated grep input shared by the service (validation) and the
 // formatter (snippet rendering).
 export interface ValidatedGrepInput {
@@ -279,56 +287,17 @@ export interface ValidatedGrepInput {
   contextAfter: number;
   headLimit: number;
   offset: number;
+  order: 'newest_first' | 'oldest_first';
+  pageAfterMessageId?: string;
+  pageAfterPath?: string;
   filters: {
     messages?: MessageGrepFilters;
     network?: NetworkGrepFilters;
     agentNetwork?: AgentNetworkGrepFilters;
+    agentTrajectories?: AgentTrajectoryGrepFilters;
     transactions?: TransactionGrepFilters;
     documents?: DocumentGrepFilters;
   };
 }
 
-export interface SummaryThreadInfo {
-  name: string;
-  message_count: number;
-  last_message: string;
-}
-
-export interface SummaryResult {
-  sources: {
-    messages: {
-      total_threads: number;
-      total_messages: number;
-      channels: Record<string, number>;
-      date_range: {
-        from: string | null;
-        to: string | null;
-      };
-      latest_message: {
-        timestamp: string;
-        channel: string;
-        from: string;
-        to: string;
-        text: string;
-      } | null;
-      threads: SummaryThreadInfo[];
-    };
-    transactions?: {
-      total_transactions: number;
-      account_count: number;
-      institutions: string[];
-      date_range: {
-        from: string | null;
-        to: string | null;
-      };
-    };
-    documents?: {
-      total_documents: number;
-      sources: Record<string, number>;
-      date_range: {
-        from: string | null;
-        to: string | null;
-      };
-    };
-  };
-}
+export type { SummaryResult, SummaryThreadInfo } from './types.summary';

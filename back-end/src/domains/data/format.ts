@@ -23,6 +23,8 @@ import {
   THREAD_SUFFIX,
 } from './path';
 
+export { buildAgentTrajectoryMatch } from './format.agent';
+
 function threadName(row: grepRepo.MessageGrepRow): string {
   const fullName = [row.firstName, row.lastName].filter(Boolean).join(' ');
   return firstNonEmpty(fullName, row.phoneNumber, row.email, row.personId);
@@ -162,7 +164,6 @@ export function buildAgentNetworkMatch(
     input,
   });
 }
-
 export function buildTransactionMatch(
   row: grepRepo.TransactionGrepRow,
   input: ValidatedGrepInput

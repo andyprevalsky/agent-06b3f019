@@ -358,7 +358,15 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
     ]) {
       const encrypted = encryptArtifact(
         artifactPath,
-        Buffer.from(`ciphertext:${artifactPath}`),
+        Buffer.from(
+          artifactPath.startsWith('llm/')
+            ? JSON.stringify({
+                root_agent_id: seed.rootAgentId,
+                agent_id: seed.rootAgentId,
+                messages: [{ role: 'assistant', content: 'Archived test LLM result' }],
+              })
+            : `ciphertext:${artifactPath}`
+        ),
         artifactPath.endsWith('.png.enc') ? 'image/png' : 'application/json'
       );
       assert(encrypted, 'expected test artifact encryption to be available');

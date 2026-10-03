@@ -120,6 +120,7 @@ def _normalize_reasoning_effort(effort: Optional[str]) -> str:
 def build_openrouter_body(
     *,
     model: str,
+    pool_name: Optional[str] = None,
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]],
     tool_choice: Any,
@@ -177,6 +178,12 @@ def build_openrouter_body(
         # stable, sibling-isolated sequence ID; reuse it so the first successful
         # turn pins later turns to the endpoint holding the warm provider cache.
         body["session_id"] = cache_namespace
+    if pool_name == "rose-1-browser-use" and model == "qwen/qwen3.8-27b":
+        # The default router sometimes chooses Qwen endpoints that report no
+        # prompt-cache reads across an append-only browser task. Novita returned
+        # repeated 7,424-token cache reads in a live three-turn browser-style
+        # probe. Keep OpenRouter's normal provider fallback for availability.
+        body["provider"] = {"order": ["novita"], "allow_fallbacks": True}
     return body
 
 
@@ -259,6 +266,7 @@ async def waterfall_complete(
         wire_effort = pool_spec.waterfall_reasoning_effort or effort
         body = build_openrouter_body(
             model=model,
+            pool_name=pool_spec.name,
             messages=messages,
             tools=tools,
             tool_choice=tool_choice,
