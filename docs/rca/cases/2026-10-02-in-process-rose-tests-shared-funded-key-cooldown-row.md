@@ -88,6 +88,13 @@ are both live. It requires that:
 - unrelated integration reads still reach the database;
 - the shared rows are never written or deleted.
 
+`2026-10-02-stack-funded-key-cooldown-leaked-into-coverage-db` (PR #1401)
+fixed the stale-stack half separately: coverage's database preparation now
+clears stack-persisted cooldown rows before the suites start. That does not
+cover rows written while coverage runs, such as the concurrent `integrations`
+case, or the `rose` resets deleting rows other cases assert, so both fixes
+stay.
+
 ## Human feedback
 
 None recorded.
