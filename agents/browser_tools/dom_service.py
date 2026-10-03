@@ -2099,6 +2099,20 @@ class DOMService:
             self._analyze_screenshot(screenshot_to_use, viewport_width, viewport_height)
         return result
 
+    async def ensure_selector_map(self) -> Dict[int, Any]:
+        """Return the selector map, building one if this connection has none.
+
+        Model-visible indices are backend node ids, so an index the model read
+        before the activity resumed onto a reattached session still names the
+        same live node; there is just no snapshot to resolve it against yet.
+        """
+        if self._selector_map or not self._session:
+            return self._selector_map
+        state = await self._session.get_browser_state_summary(include_screenshot=False)
+        if state.dom_state and state.dom_state.selector_map:
+            self._selector_map = state.dom_state.selector_map
+        return self._selector_map
+
     async def get_page_image_urls(self) -> List[str]:
         """Every image URL rendered on the current page, read from a fresh DOM snapshot."""
         if not self._session:

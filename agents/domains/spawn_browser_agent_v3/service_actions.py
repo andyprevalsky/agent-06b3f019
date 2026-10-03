@@ -1707,6 +1707,8 @@ async def execute_action(
         element = None
         if index is not None:
             element = dom_service.selector_map.get(index)
+            if not element and not dom_service.selector_map:
+                element = (await dom_service.ensure_selector_map()).get(index)
             if not element:
                 return {"success": False, "error": f"Element with index {index} not found"}
 
