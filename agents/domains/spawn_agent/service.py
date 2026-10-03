@@ -18,7 +18,6 @@ from temporalio import activity
 from domains.spawn_agent.config import (
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
-    LIVE_EXPLORE_PARENT_WAIT,
     explore_limits_for_depth,
     resolve_explore_depth,
     resolve_explore_oai_demo,
@@ -45,7 +44,7 @@ from utils.tool_schemas import get_explore_agent_tools
 
 logger = structlog.get_logger()
 
-# Return partial tool evidence before the live parent's 150s wait expires.
+# Return gathered tool evidence just before the depth's activity timeout.
 # Leave room to drain pending FE posts and persist the final explore chip.
 LIVE_EXPLORE_DRAIN_SLACK_SECONDS = 15
 
@@ -989,8 +988,11 @@ async def spawn_explore_agent_activity(
             else:
                 deadline_expired = False
                 try:
+                    # The parent waits this depth's whole activity timeout
+                    # (quick/medium 600s, deep 1800s); wrap up just inside it.
                     async with asyncio.timeout(
-                        LIVE_EXPLORE_PARENT_WAIT.total_seconds() - LIVE_EXPLORE_DRAIN_SLACK_SECONDS
+                        explore_limits_for_depth(effective_depth)[1].total_seconds()
+                        - LIVE_EXPLORE_DRAIN_SLACK_SECONDS
                     ) as deadline:
                         result = await run_agent_coro
                 except asyncio.TimeoutError:
@@ -1001,7 +1003,7 @@ async def spawn_explore_agent_activity(
                     # run_agent catches CancelledError and returns status="paused".
                     # The timeout context distinguishes that local wind-down from
                     # an external pause, which must keep its cancellation behavior.
-                    logger.info("Explore agent returning gathered evidence before parent wait")
+                    logger.info("Explore agent returning gathered evidence before its activity timeout")
                     result = {"status": "completed"}
     finally:
         _heartbeat_stop.set()

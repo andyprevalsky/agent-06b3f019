@@ -362,6 +362,7 @@ else
         npx tsx scripts/ensure-agent-network-grep-indexes.ts >/dev/null 2>&1 ) \
         || log "WARN: ensure-agent-network-grep-indexes.ts skipped/failed"
     if ( cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
+            NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
             npx tsx scripts/seed-local.ts ); then
         log "DB seeded from prod"
     else

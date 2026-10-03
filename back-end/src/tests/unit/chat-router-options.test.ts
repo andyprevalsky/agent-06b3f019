@@ -42,7 +42,17 @@ async function run(): Promise<void> {
   assert.equal(options.provider_route, 'direct-cerebras');
   assert.equal(options.provider_fast_mode, true);
   assert.equal(options.abort_signal, abortController.signal);
-  assert.equal(options.temperature, 0.3);
+  assert.equal(options.temperature, 0);
+  assert.equal(options.max_tokens, 1_024);
+  assert.equal(
+    buildRouterCompletionOptions({
+      model: phases.router,
+      messages: options.messages,
+      providerFastMode: true,
+    }).max_tokens,
+    undefined,
+    'other provider routes retain their existing output budget'
+  );
   assert.equal(options.effort, 'minimal');
   assert.equal(options.response_format?.json_schema.name, 'router_decision');
   assert.equal(options.response_format?.json_schema.strict, true);

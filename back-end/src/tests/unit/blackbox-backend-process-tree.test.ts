@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const helperPath = join(process.cwd(), '..', 'scripts', 'lib', 'cloudbench-env.sh');
+const processTreeHelperPath = join(process.cwd(), '..', 'scripts', 'lib', 'process-tree.sh');
 const runnerPath = join(process.cwd(), 'scripts', 'run-blackbox-tests.sh');
 const runner = readFileSync(runnerPath, 'utf8');
 const runnerCleanup = runner.match(/^cleanup\(\) \{\n[\s\S]*?^\}/m)?.[0];
@@ -124,10 +126,13 @@ function runTree(
   minMembers: number,
   graceSeconds: number,
   token?: string,
-  useRunnerCleanup = false
+  useRunnerCleanup = false,
+  pathPrefix?: string,
+  useWallClockHelper = false
 ): TreeRun {
   const script = `
 set -euo pipefail
+${pathPrefix ? `export PATH="${pathPrefix}:$PATH"` : ''}
 source "${helperPath}"
 PORT_LOCK_DIR=""
 ${runnerCleanup}
@@ -136,6 +141,7 @@ process_tree_pids() {
   echo "$pid"
   for child in $(pgrep -P "$pid" 2>/dev/null); do process_tree_pids "$child"; done
 }
+${useWallClockHelper ? `source "${processTreeHelperPath}"` : ''}
 ${command} >/dev/null 2>&1 &
 root=$!
 BACKEND_PID=$root
@@ -149,7 +155,13 @@ echo "root=$root"
 echo "members=$members"
 for pid in $members; do printf 'birth=%s\t%s\n' "$pid" "$(cloudbench_pid_start_time "$pid")"; done
 echo "started_ms=$(python3 -c 'import time; print(time.monotonic_ns() // 1000000)')"
-${useRunnerCleanup ? 'cleanup' : `cloudbench_terminate_tree_and_wait ${graceSeconds} "$root"`}
+${
+  useRunnerCleanup
+    ? 'cleanup'
+    : useWallClockHelper
+      ? `stop_process_tree "$root" ${graceSeconds}`
+      : `cloudbench_terminate_tree_and_wait ${graceSeconds} "$root"`
+}
 
 `;
   const result = spawnSync('bash', ['-c', script], { cwd: process.cwd(), encoding: 'utf8' });
@@ -228,7 +240,38 @@ assert.ok(
   'the cleanup trap must be installed before the backend starts'
 );
 
+// A loaded host makes every `ps` slow. The grace counted 0.1s sleeps, each also
+// paying a `ps` per pid, so a 1s grace took 13.8s at load average 90. Shim a
+// 0.4s `ps` to reproduce that deterministically: the grace is wall clock.
+const slowPsDir = mkdtempSync(join(tmpdir(), 'slow-ps-'));
+const slowPs = join(slowPsDir, 'ps');
+writeFileSync(slowPs, '#!/bin/sh\nsleep 0.4\nexec /bin/ps "$@"\n');
+chmodSync(slowPs, 0o755);
+let slowPsProof: TreeRun;
+try {
+  slowPsProof = runTree(
+    `bash -c 'trap "" TERM; sleep 1000 & wait'`,
+    2,
+    1,
+    undefined,
+    false,
+    slowPsDir,
+    true
+  );
+} finally {
+  rmSync(slowPsDir, { recursive: true, force: true });
+}
+assert.deepEqual(
+  slowPsProof.survivors,
+  [],
+  'a slow ps must not leave TERM-ignoring processes alive'
+);
+if (slowPsProof.stopMs < 900 || slowPsProof.stopMs >= 4000) {
+  process.stderr.write(`timing warning: slow-ps tree retired in ${slowPsProof.stopMs}ms\n`);
+}
+
 process.stdout.write(
   `blackbox-backend-process-tree: npx tree of ${npxTree.members.length} stopped in ` +
-    `${npxTree.stopMs}ms; TERM-ignoring tree killed after ${termProof.stopMs}ms\n`
+    `${npxTree.stopMs}ms; TERM-ignoring tree killed after ${termProof.stopMs}ms; ` +
+    `with slow ps after ${slowPsProof.stopMs}ms\n`
 );

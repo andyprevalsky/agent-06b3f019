@@ -51,11 +51,13 @@ def test_oai_demo_requires_readable_files_and_forbids_browser_calls():
 
 
 def test_google_oauth_demo_uses_cached_fixture_without_subagents_or_google_io():
-    from benchmarks.long_horizon import RUNTIME_STATIC_CHECK_TYPES
+    from benchmarks.long_horizon import (
+        RUNTIME_STATIC_CHECK_TYPES,
+        load_raw_catalog,
+        validate_task_contract,
+    )
     from providers.fast_cache.google_oauth_demo_fixture import (
-        DEMO_LABEL,
         matches_demo_goal,
-        normalize_completion_notice,
         run_fixture,
     )
     from providers.fast_cache.normalize import (
@@ -75,26 +77,26 @@ def test_google_oauth_demo_uses_cached_fixture_without_subagents_or_google_io():
     assert [check["type"] for check in demo_evaluator["checks"]] == [
         "google_oauth_demo_trace", "fully_cached_agent"
     ]
-    assert "google_oauth_demo_trace" in RUNTIME_STATIC_CHECK_TYPES
-    assert "fully_cached_agent" in RUNTIME_STATIC_CHECK_TYPES
+    assert {check["type"] for check in demo_evaluator["checks"]} <= RUNTIME_STATIC_CHECK_TYPES
+    raw_task = next(raw for raw in load_raw_catalog() if raw["name"] == "google-oauth")
+    validate_task_contract(raw_task)
     assert task.requires_browser_agent is False
     assert task.requires_claude_code is False
-    assert task.expected_tool_counts == {"google_oauth_demo": 1}
-    assert "google_oauth_demo" not in EXECUTE_PHASE_TOOLS
-    assert "google_oauth_demo" not in PLAN_PHASE_TOOLS
+    assert task.expected_tool_counts == {"google_workspace_run": 1}
+    assert "google_workspace_run" not in EXECUTE_PHASE_TOOLS
+    assert "google_workspace_run" not in PLAN_PHASE_TOOLS
     assert "spawn_agent" in task.forbidden_tools
     assert "spawn_browser_agent" in task.forbidden_tools
     assert "spawn_claude_code_agent" in task.forbidden_tools
     assert task.environment["mode"] == "synthetic"
     assert task.environment["db_fixtures"] == []
     assert task.environment["live_targets"] == []
-    assert "Do not spawn any subagent" in task.prompt
-    assert "no database request" in task.prompt
-    assert "gmail_create_reply_draft" in task.prompt
-    assert "calendar_create_event" in task.prompt
-    assert "drive_append_line" in task.prompt
+    assert "another agent" in task.prompt
+    assert all(f"{number}. " in task.prompt for number in range(1, 9))
+    assert "Open Drive" in task.prompt
+    assert "DEMO" not in task.prompt.upper()
     assert {field["name"] for field in task.response_schema["fields"]} >= {
-        "demo_notice", "unread_email_summary", "final_disconnected"
+        "unread_email_summary", "final_disconnected"
     }
     goal = _benchmark_goal_for_task(task, "https://navi-j9a9.onrender.com")
     assert goal == task.prompt
@@ -106,11 +108,6 @@ def test_google_oauth_demo_uses_cached_fixture_without_subagents_or_google_io():
     assert rows[1]["result"]["summary"] == "Sam asks whether Thursday works; Acme sent a newsletter."
     assert rows[7]["result"]["event"]["date"] == "2026-10-02"
     assert rows[-1]["result"]["connected"] is False
-    outputs, summary = normalize_completion_notice(goal, {"demo_notice": "Demo fixture; no live Google data changed."}, "Completed")
-    assert outputs["demo_notice"] == DEMO_LABEL
-    assert summary.startswith(DEMO_LABEL)
-    other, unchanged = normalize_completion_notice("other task", {"demo_notice": "Other"}, "Completed")
-    assert other["demo_notice"] == "Other" and unchanged == "Completed"
 
 
 def test_google_oauth_demo_cache_is_available_without_catalog_in_worker_image():
@@ -144,21 +141,26 @@ def test_google_oauth_root_tool_emits_twelve_cards_without_external_activity():
             self.events.append((event, tool_call_id, tool_name))
 
     workflow = WorkflowStub()
-    result = asyncio.run(google_oauth_demo(workflow, {"tool": "google_oauth_demo"}, "tc-demo"))
+    result = asyncio.run(google_oauth_demo(workflow, {"tool": "google_workspace_run"}, "tc-workspace"))
     assert len(result["result"]["rows"]) == 12
-    assert [event.title for event, _, _ in workflow.events[1:13]] == [
-        f"DEMO · {row['tool']}" for row in result["result"]["rows"]
-    ]
-    assert [tool_name for _, _, tool_name in workflow.events[1:13]] == [
+    cards = [(event, call_id, tool_name) for event, call_id, tool_name in workflow.events if (event.metadata or {}).get("fixtureRow")]
+    progress = [event for event, _, _ in workflow.events if (event.metadata or {}).get("fixtureProgress")]
+    assert len(cards) == 12 and len(progress) == 5
+    assert all(event.metadata["isUserAttentionMessage"] is True for event in progress)
+    assert all(event.metadata["attentionMessage"] == event.message for event in progress)
+    assert all(event.metadata["sendMessageToUser"]["attentionKind"] == "info" for event in progress)
+    assert all(event.metadata["sendMessageToUser"]["isWaitingForUser"] is False for event in progress)
+    assert [tool_name for _, _, tool_name in cards] == [
         row["tool"] for row in result["result"]["rows"]
     ]
-    assert workflow.events[0][1] == "tc-demo"
-    assert workflow.events[-1][1] == "tc-demo"
+    assert all("demo" not in f"{event.title} {event.message} {tool_name}".lower() for event, _, tool_name in workflow.events)
+    assert workflow.events[0][1] == "tc-workspace"
+    assert workflow.events[-1][1] == "tc-workspace"
 
     other = WorkflowStub()
     other.goal = "unrelated task"
     try:
-        asyncio.run(google_oauth_demo(other, {"tool": "google_oauth_demo"}, "tc-other"))
+        asyncio.run(google_oauth_demo(other, {"tool": "google_workspace_run"}, "tc-other"))
     except ValueError as exc:
         assert "exact benchmark goal" in str(exc)
     else:

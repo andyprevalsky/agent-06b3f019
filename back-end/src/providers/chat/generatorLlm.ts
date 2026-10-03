@@ -151,6 +151,9 @@ export function buildGeneratorCompletionOptions(params: ChatCompletionParams): C
     model: params.model,
     messages: params.messages,
     temperature: 0.7,
+    // Bound Cerebras's upfront token reservation while leaving room for a
+    // substantive answer and the structured response's reasoning field.
+    ...(params.providerRoute === 'direct-cerebras' ? { max_tokens: 4_096 } : {}),
     // Keep synchronous chat fallbacks latency-bounded. Cerebras disables
     // reasoning at its provider boundary; OpenRouter models such as Gemini
     // require reasoning, so request their smallest supported budget instead

@@ -54,10 +54,10 @@ function isTransientOrgMcpPollError(error: unknown): boolean {
 /**
  * Drain idle cardholder headroom into the pool before minting.
  *
- * A mint against existing residual can net (`transferred_cents: 0`, pool untouched). Even a
- * later full release does not prove fresh pool funding. Sweeping can remove idle residual,
- * but cannot reserve a globally shared cardholder's headroom. The issued transfer must still
- * prove the pool-funding invariant; an idle sweep alone cannot establish it.
+ * A mint against existing residual can net (`transferred_cents: 0`, pool untouched).
+ * Sweeping cannot reserve a globally shared cardholder's headroom, and unrelated residual
+ * recovery cannot prove this mint's funding. Sweep first, then retry once if the provider
+ * still nets headroom: at least one settled mint must prove a full pool debit on its own transfer.
  */
 async function sweepResidualHeadroom(timeoutMs = 60_000): Promise<number> {
   const deadline = Date.now() + timeoutMs;
@@ -124,10 +124,14 @@ async function waitForUnusedMintSettled(
   cardId: string,
   minReleasedCents: number,
   timeoutMs = 240_000
-): Promise<{ status: string; releasedCents: number }> {
+): Promise<MintTransferObservation & { transferredCents: number }> {
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
-  let last: MintTransferObservation = { status: 'not_found', releasedCents: 0 };
+  let last: MintTransferObservation & { transferredCents: number } = {
+    status: 'not_found',
+    releasedCents: 0,
+    transferredCents: 0,
+  };
   for (;;) {
     attempt += 1;
     try {
@@ -136,6 +140,7 @@ async function waitForUnusedMintSettled(
       if (transfer !== undefined) last = transfer;
       const outcome = unusedMintSettleOutcome(transfer, minReleasedCents);
       if (outcome.done) {
+        assert.ok(transfer !== undefined, `no org-wallet transfer found for ${cardId}`);
         if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
           console.log(
             `  (transfer ${outcome.status} with ${usd(outcome.settledCents)} on attempt ${attempt}; ` +
@@ -147,7 +152,7 @@ async function waitForUnusedMintSettled(
               `recover_funds not needed)`
           );
         }
-        return { status: outcome.status, releasedCents: outcome.settledCents };
+        return transfer;
       }
       if (Date.now() >= deadline) {
         console.error(
@@ -281,7 +286,22 @@ async function main(): Promise<void> {
       }
     ).structuredContent?.cardholders ?? [];
   assert.ok(cardholders.length > 0, 'sandbox org has no cardholders to test with');
-  const cardholderId = cardholders[0].id;
+  // An open card owned by another workspace holds this cardholder's recoverable headroom.
+  // Use an idle cardholder so the unused mint can reclaim without touching foreign cards.
+  let cardholderId: string | undefined;
+  for (const cardholder of cardholders) {
+    const cards =
+      (
+        (await callOrgTool('list_cards', { cardholder_id: cardholder.id, limit: 100 })) as {
+          structuredContent?: { cards?: Array<{ status: string }> };
+        }
+      ).structuredContent?.cards ?? [];
+    if (cards.every((card) => card.status !== 'OPEN')) {
+      cardholderId = cardholder.id;
+      break;
+    }
+  }
+  assert.ok(cardholderId !== undefined, 'sandbox org has no idle cardholder for reclaim proof');
 
   const preSweepCents = await sweepResidualHeadroom();
   if (preSweepCents > 0) {
@@ -291,73 +311,80 @@ async function main(): Promise<void> {
   }
 
   const mintCents = 1_300;
+  const createdCardIds = new Set<string>();
+  let provedPoolMint = false;
+  for (let mintAttempt = 1; mintAttempt <= 2; mintAttempt += 1) {
+    if (mintAttempt > 1) await sweepResidualHeadroom();
+    const minted = (await callOrgTool('create_card', {
+      cardholder_id: cardholderId,
+      amount_cents: mintCents,
+      funds_source: 'company_flow',
+      idempotency_key: `blackbox-treasury-${Date.now()}-${mintAttempt}`,
+    })) as { structuredContent?: { cardId?: string } };
+    const cardId = minted.structuredContent?.cardId;
+    assert.ok(cardId !== undefined, 'create_card returned no cardId');
+    createdCardIds.add(cardId);
+    record(`minted ${usd(mintCents)} card ${cardId}`);
 
-  const minted = (await callOrgTool('create_card', {
-    cardholder_id: cardholderId,
-    amount_cents: mintCents,
-    funds_source: 'company_flow',
-    idempotency_key: `blackbox-treasury-${Date.now()}`,
-  })) as { structuredContent?: { cardId?: string } };
-  const cardId = minted.structuredContent?.cardId;
-  assert.ok(cardId !== undefined, 'create_card returned no cardId');
-  const createdCardIds = new Set([cardId]);
-  record(`minted ${usd(mintCents)} card ${cardId}`);
-
-  let cardClosed = false;
-  try {
-    // Observation only: the provider does not promise immediate transfer visibility.
+    let cardClosed = false;
     try {
-      const issued = await readCardTransfer(cardId);
-      console.log(
-        `  issuance funding: found=${issued !== undefined} amount=${issued?.amountCents ?? 'missing'} ` +
-          `transferred=${issued?.transferredCents ?? 'missing'} ` +
-          `released=${issued?.releasedCents ?? 'missing'} status=${issued?.status ?? 'missing'}`
+      // Observation only: the provider does not promise immediate transfer visibility.
+      try {
+        const issued = await readCardTransfer(cardId);
+        console.log(
+          `  issuance funding: found=${issued !== undefined} amount=${issued?.amountCents ?? 'missing'} ` +
+            `transferred=${issued?.transferredCents ?? 'missing'} ` +
+            `released=${issued?.releasedCents ?? 'missing'} status=${issued?.status ?? 'missing'}`
+        );
+      } catch {
+        console.log('  issuance funding: read unavailable; terminal assertions remain required');
+      }
+      // An aggregate pool balance delta cannot prove what this card drew.
+      const closed = (await callOrgTool('close_card', { card_id: cardId })) as {
+        structuredContent?: { status?: string };
+      };
+      assert.equal(closed.structuredContent?.status, 'CLOSED', 'close_card did not report CLOSED');
+      cardClosed = true;
+      record('closed the card unused');
+
+      // Keep recovering while this exact card's transfer settles.
+      const settled = await waitForUnusedMintSettled(cardId, mintCents);
+      assert.ok(
+        settled.status === 'reclaimed' || settled.status === 'released',
+        `transfer for ${cardId} ended in "${settled.status}" — an unused card must reclaim/release, ` +
+          `not stay consumed`
       );
-    } catch {
-      console.log('  issuance funding: read unavailable; terminal assertions remain required');
-    }
-    // Assert on this card's transfer: the sandbox pool moves under concurrent
-    // benchmarks, so an aggregate balance delta cannot prove what this mint drew.
-    const closed = (await callOrgTool('close_card', { card_id: cardId })) as {
-      structuredContent?: { status?: string };
-    };
-    assert.equal(closed.structuredContent?.status, 'CLOSED', 'close_card did not report CLOSED');
-    cardClosed = true;
-    record('closed the card unused');
-
-    // Keep recovering while this exact card's transfer settles. Another
-    // cardholder's recover_funds yield is not evidence for this transfer.
-    const settled = await waitForUnusedMintSettled(cardId, mintCents);
-    const transfer = await readCardTransfer(cardId);
-    assert.equal(
-      transfer?.transferredCents,
-      mintCents,
-      `transfer for ${cardId} drew ${usd(transfer?.transferredCents ?? 0)} from the pool for a ` +
-        `${usd(mintCents)} mint`
-    );
-    record('mint drew from the pool');
-    assert.ok(
-      settled.status === 'reclaimed' || settled.status === 'released',
-      `transfer for ${cardId} ended in "${settled.status}" — an unused card must reclaim/release, ` +
-        `not stay consumed`
-    );
-    assert.ok(
-      settled.releasedCents >= mintCents,
-      `released ${usd(settled.releasedCents)} but the card held ${usd(mintCents)} — the full unused ` +
-        `amount must return to the pool`
-    );
-    record(
-      `transfer ${settled.status} in full: released ${usd(settled.releasedCents)} of ${usd(mintCents)}`
-    );
-  } finally {
-    try {
-      if (!cardClosed) await callOrgTool('close_card', { card_id: cardId });
+      assert.ok(
+        settled.releasedCents >= mintCents,
+        `released ${usd(settled.releasedCents)} but the card held ${usd(mintCents)} — the full unused ` +
+          `amount must return to the pool`
+      );
+      record(
+        `transfer ${settled.status} in full: released ${usd(settled.releasedCents)} of ${usd(mintCents)}`
+      );
+      assert.ok(
+        settled.transferredCents >= 0 && settled.transferredCents <= mintCents,
+        `transfer for ${cardId} reported an invalid pool debit ${settled.transferredCents}`
+      );
+      if (settled.transferredCents === mintCents) {
+        provedPoolMint = true;
+        record('mint drew from the pool');
+        break;
+      }
+      record(
+        `mint drew ${usd(settled.transferredCents)} from the pool and netted remaining cardholder headroom; retrying direct pool proof`
+      );
     } finally {
-      // The sandbox cardholder is shared. Cleanup may close only cards this test created.
-      const cleaned = await cleanupTreasuryRailCards(cardholderId, createdCardIds, callOrgTool);
-      if (cleaned > 0) record(`cleanup: closed ${cleaned} lingering open card(s)`);
+      try {
+        if (!cardClosed) await callOrgTool('close_card', { card_id: cardId });
+      } finally {
+        // The sandbox cardholder is shared. Cleanup may close only cards this test created.
+        const cleaned = await cleanupTreasuryRailCards(cardholderId, createdCardIds, callOrgTool);
+        if (cleaned > 0) record(`cleanup: closed ${cleaned} lingering open card(s)`);
+      }
     }
   }
+  assert.ok(provedPoolMint, 'two settled company_flow mints both netted existing headroom');
 
   console.log('\ntreasury-rails blackbox: all checks passed');
 }

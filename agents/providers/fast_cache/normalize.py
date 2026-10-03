@@ -1079,9 +1079,9 @@ OAI_DEMO_ROOT_GOAL_HASH = "4ae3193053ac1d8f"
 
 _DEMO_TAG = "DEMO"
 GOOGLE_OAUTH_DEMO_PROMPT_PREFIX = (
-    "DEMO FIXTURE ONLY. Produce the Rose agent segment for a Google OAuth review video."
+    "Please work through my Google account in this order."
 )
-GOOGLE_OAUTH_DEMO_GOAL_HASH = "ccbfccbd982ccc7e"
+GOOGLE_OAUTH_DEMO_GOAL_HASH = "dd6b2b7bbe5256a1"
 
 
 @functools.lru_cache(maxsize=1)

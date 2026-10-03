@@ -26,15 +26,9 @@ EXPLORE_DEPTH_LIMITS = {
     "deep": (50, timedelta(seconds=1800)),
 }
 EXPLORE_DEFAULT_DEPTH = "quick"
-# Live (non-demo) parent wait: historical explore p95≈171s / max≈292s. A hung
-# child at the full 600s activity timeout ties the parent past smoke caps
-# (parallel-tool-calls dynamic cap=600s). Three sequential explores must still
-# fit: 3 × (wait + cancel grace) < 540s so the parent can synthesize. Demo
-# trees keep the activity timeout so July Fast Mode deep replays can finish.
-LIVE_EXPLORE_PARENT_WAIT = timedelta(seconds=150)
-# After the parent wait expires we cancel the activity. Awaiting the handle
-# unbounded races the 600s activity timeout and the 600s smoke cap
-# (53831ac9: cancel at 360s, await blocked until 602s).
+# The parent waits the depth's full activity timeout. If the handle is still
+# open at that point, cancel and wait this long instead of awaiting it
+# unbounded (53831ac9: an unbounded await blocked past the activity timeout).
 EXPLORE_CANCEL_GRACE = timedelta(seconds=15)
 # Fast Mode replays July OAi-demo explore trajectories whose attempt_completion
 # typically lands around turn ~14 (many namespaces run to p:20–49). The live
@@ -51,20 +45,6 @@ def explore_limits_for_depth(depth: str | None) -> tuple[int, timedelta]:
     may batch multiple parallel searches.
     """
     return EXPLORE_DEPTH_LIMITS.get(depth or EXPLORE_DEFAULT_DEPTH, EXPLORE_DEPTH_LIMITS[EXPLORE_DEFAULT_DEPTH])
-
-
-def explore_parent_wait_timeout(activity_timeout: timedelta, *, oai_demo: bool) -> timedelta:
-    """How long the parent workflow waits for one explore activity.
-
-    Demo / Fast Mode mass-agent trees keep the full activity timeout. Live
-    trees cap the wait so a stuck child returns gathered evidence in time
-    for the parent to finish.
-    """
-    if oai_demo:
-        return activity_timeout
-    if activity_timeout <= LIVE_EXPLORE_PARENT_WAIT:
-        return activity_timeout
-    return LIVE_EXPLORE_PARENT_WAIT
 
 
 def resolve_explore_depth(
@@ -86,6 +66,7 @@ def resolve_explore_depth(
     if requested_depth in EXPLORE_DEPTH_LIMITS:
         return requested_depth
     return EXPLORE_DEFAULT_DEPTH
+
 
 # ── Network metadata ──
 NETWORK_CACHE_TTL_MINUTES = 5
@@ -142,9 +123,7 @@ def is_demo_cache_task(workflow_instance) -> bool:
     goal = str(getattr(workflow_instance, "goal", None) or "")
     cached = str(getattr(workflow_instance, "fast_cache_goal", None) or "")
     root_goal = str(getattr(workflow_instance, "root_goal", None) or "")
-    if any(
-        DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in blob for blob in (goal, cached, root_goal)
-    ):
+    if any(DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in blob for blob in (goal, cached, root_goal)):
         return True
     if _demo_cache_goal_hash is None or not _DEMO_CACHE_GOAL_HASHES:
         return False
@@ -170,6 +149,7 @@ def resolve_explore_oai_demo(goal: str | None, *, oai_demo: bool | None = None) 
     if oai_demo is not None:
         return bool(oai_demo)
     return is_oai_demo_goal(goal)
+
 
 # ── Explore message save ──
 SAVE_MESSAGE_TIMEOUT = 5.0
@@ -197,9 +177,7 @@ def is_disabled_general_purpose_planner_tool(tool_name: str | None) -> bool:
     return general_purpose_agent_disabled() and str(tool_name or "").strip() in _DISABLED_PLANNER_TOOLS
 
 
-def disabled_general_purpose_rejection_message(
-    *, agent_type: str | None = None, tool_name: str | None = None
-) -> str:
+def disabled_general_purpose_rejection_message(*, agent_type: str | None = None, tool_name: str | None = None) -> str:
     """User-facing rejection for a blocked general_purpose / for_each spawn."""
     label = agent_type or tool_name or "general_purpose"
     return (

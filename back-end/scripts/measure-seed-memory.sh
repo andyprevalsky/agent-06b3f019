@@ -408,11 +408,13 @@ for i in $(seq 1 "$RUNS"); do
     fi
     if [ "$(uname -s)" = "Darwin" ]; then
         SEED_PEAK_RSS_REPORT="$report" \
+            NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
             "$TIME_BIN" -l npx tsx scripts/seed-local.ts > "$log" 2>&1
         rc=$?
         os_peak_bytes="$(grep -oE '[0-9]+ +maximum resident set size' "$log" | grep -oE '^[0-9]+' | tail -1)"
     else
         SEED_PEAK_RSS_REPORT="$report" \
+            NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
             "$TIME_BIN" -v npx tsx scripts/seed-local.ts > "$log" 2>&1
         rc=$?
         os_peak_kb="$(grep -oE 'Maximum resident set size \(kbytes\):[[:space:]]*[0-9]+' "$log" | grep -oE '[0-9]+$' | tail -1)"

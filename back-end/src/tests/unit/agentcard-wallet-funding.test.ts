@@ -116,6 +116,134 @@ async function assertReleaseObserverSharesOneRetryBudget(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  // A closed unspent card can leave its own fully funded company transfer consumed until
+  // recover_funds pulls the cardholder's released residual. The observer must accelerate that
+  // transition, while still requiring THIS transfer's terminal state before reporting success.
+  let recovered = false;
+  const recoveryCalls: string[] = [];
+  const recoveryProvider = new AgentCardCompanyWalletFundingProvider(
+    async (name, args) => {
+      recoveryCalls.push(name);
+      if (name === 'recover_funds') {
+        assert.deepEqual(args, { cardholder_id: 'cardholder-own' });
+        recovered = true;
+        return { structuredContent: { status: 'completed', amount_cents: 4396 } };
+      }
+      assert.equal(name, 'list_transfers');
+      return {
+        structuredContent: {
+          transfers: [
+            {
+              id: 'owt-own',
+              card_id: 'card-own',
+              amount_cents: 4396,
+              transferred_cents: 4396,
+              released_cents: recovered ? 4396 : 0,
+              status: recovered ? 'reclaimed' : 'consumed',
+            },
+          ],
+        },
+      };
+    },
+    { attempts: 4, delayMs: 0 },
+    async () => 'cardholder-own'
+  );
+  const recoveredResult = await recoveryProvider.reclaimUserWalletFunding({
+    userId: 'user-own',
+    purchaseId: 'purchase-own',
+    amountCents: 4396,
+    currency: 'usd',
+    idempotencyKey: 'purchase-wallet-reclaim:purchase-own',
+    providerTransferId: 'owt-own',
+    cardId: 'card-own',
+    reason: 'agent_cleanup_unspent_card',
+  });
+  assert.deepEqual(recoveryCalls, ['list_transfers', 'recover_funds', 'list_transfers']);
+  assert.equal(recoveredResult.metadata?.status, 'release_confirmed');
+
+  let foreignRecoveryCalls = 0;
+  const foreignRecoveryProvider = new AgentCardCompanyWalletFundingProvider(
+    async (name) => {
+      if (name === 'recover_funds') {
+        foreignRecoveryCalls += 1;
+        return { structuredContent: { status: 'completed', amount_cents: 8792 } };
+      }
+      return {
+        structuredContent: {
+          transfers: [
+            {
+              id: 'owt-own',
+              card_id: 'card-own',
+              amount_cents: 4396,
+              transferred_cents: 4396,
+              released_cents: 0,
+              status: 'consumed',
+            },
+          ],
+        },
+      };
+    },
+    { attempts: 4, delayMs: 0 },
+    async () => 'cardholder-own'
+  );
+  await assert.rejects(
+    () =>
+      foreignRecoveryProvider.reclaimUserWalletFunding({
+        userId: 'user-own',
+        purchaseId: 'purchase-own',
+        amountCents: 4396,
+        currency: 'usd',
+        idempotencyKey: 'purchase-wallet-reclaim:purchase-own',
+        providerTransferId: 'owt-own',
+        cardId: 'card-own',
+        reason: 'agent_cleanup_unspent_card',
+      }),
+    (error: unknown) => error instanceof Error && /release is still pending/.test(error.message),
+    'a foreign residual recovery cannot substitute for this transfer release'
+  );
+  assert.ok(foreignRecoveryCalls > 0);
+
+  let wrongCardRecoveryCalls = 0;
+  const wrongCardProvider = new AgentCardCompanyWalletFundingProvider(
+    async (name) => {
+      if (name === 'recover_funds') {
+        wrongCardRecoveryCalls += 1;
+        return { structuredContent: { status: 'completed', amount_cents: 4396 } };
+      }
+      return {
+        structuredContent: {
+          transfers: [
+            {
+              id: 'owt-own',
+              card_id: 'card-foreign',
+              amount_cents: 4396,
+              transferred_cents: 4396,
+              released_cents: 0,
+              status: 'consumed',
+            },
+          ],
+        },
+      };
+    },
+    { attempts: 2, delayMs: 0 },
+    async () => 'cardholder-own'
+  );
+  await assert.rejects(
+    () =>
+      wrongCardProvider.reclaimUserWalletFunding({
+        userId: 'user-own',
+        purchaseId: 'purchase-own',
+        amountCents: 4396,
+        currency: 'usd',
+        idempotencyKey: 'purchase-wallet-reclaim:purchase-own',
+        providerTransferId: 'owt-own',
+        cardId: 'card-own',
+        reason: 'agent_cleanup_unspent_card',
+      }),
+    /release is still pending/
+  );
+  assert.equal(wrongCardRecoveryCalls, 0, 'foreign card must never trigger a residual sweep');
+
   let reads = 0;
   const calls: string[] = [];
   const provider = new AgentCardCompanyWalletFundingProvider(

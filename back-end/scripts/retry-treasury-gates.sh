@@ -22,7 +22,8 @@ log() {
 
 run_treasury() {
   local out="$LOG_DIR/treasury-attempt-${attempt}.log"
-  if npx tsx src/tests/blackbox/treasury-rails.blackbox.ts >"$out" 2>&1; then
+  if python3 scripts/with-agentcard-lock.py node --import tsx \
+    src/tests/blackbox/treasury-rails.blackbox.ts >"$out" 2>&1; then
     log "treasury-rails PASS (attempt $attempt)"
     return 0
   fi

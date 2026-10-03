@@ -15,6 +15,26 @@ import benchmarks.run_benchmark as rb
 _FAST_POLL_SECONDS = 0.05
 
 
+def test_sandbox_payment_preflight_sweeps_residual_before_task(monkeypatch):
+    calls = []
+
+    async def setup(_base_url, action):
+        calls.append(action)
+
+    monkeypatch.setattr(rb, "configure_benchmark_agentcard_setup", setup)
+    sandbox = next(task for task in rb.all_tasks() if task.name == "agent-payment-abandonment")
+    production = next(
+        task for task in rb.all_tasks() if task.name == "agent-payment-production-abandonment"
+    )
+
+    async def check():
+        await rb.prepare_sandbox_payment_residual(sandbox, "http://localhost:3001")
+        await rb.prepare_sandbox_payment_residual(production, "https://roselabs.ai")
+
+    asyncio.run(check())
+    assert calls == ["prepare-residual"]
+
+
 def _hold_sandbox_payment_lock(ready, release):
     async def hold():
         async with rb._sandbox_agentcard_payment_lock(poll_seconds=_FAST_POLL_SECONDS) as slot:

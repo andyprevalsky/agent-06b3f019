@@ -15621,7 +15621,10 @@ def test_isolated_backend_session_launcher_is_macos_portable(tmp_path: Path) -> 
     child.write_text(
         "import os, pathlib, signal, time\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        f"pathlib.Path({str(ready)!r}).write_text(f'{{os.getpid()}} {{os.getsid(0)}} {{os.getpgrp()}}')\n"
+        # Write then rename: the poll below can see a plain write_text's file
+        # before its contents land, then read an empty string under load.
+        f"pathlib.Path({str(ready) + '.tmp'!r}).write_text(f'{{os.getpid()}} {{os.getsid(0)}} {{os.getpgrp()}}')\n"
+        f"os.replace({str(ready) + '.tmp'!r}, {str(ready)!r})\n"
         "time.sleep(30)\n"
     )
     # Deliberately provide no setsid executable. The helper must establish a

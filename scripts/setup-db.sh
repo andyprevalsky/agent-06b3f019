@@ -516,7 +516,7 @@ setup_db_run_interruptible bash -c \
 
 echo "🌱 Syncing production data to local database..."
 setup_db_run_interruptible bash -c \
-    'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" npx tsx scripts/seed-local.ts' \
+    'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" npx tsx scripts/seed-local.ts' \
     "$LOCAL_DB_URL"
 
 echo "🗜️  Publishing synchronized DB for isolated local benchmarks..."
