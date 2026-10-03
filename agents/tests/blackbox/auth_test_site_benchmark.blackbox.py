@@ -845,7 +845,9 @@ async def test_stand_in_user_signs_in_or_declines_a_sign_in_help_request() -> No
     async def fake_headers() -> dict:
         return {"X-API-Key": "fixture-key"}
 
-    async def fake_sign_in(base_url, headers, req, task_id, credentials):
+    async def fake_sign_in(base_url, headers, req, task_id, credentials, sign_in_url=None):
+        # The stand-in knows the site's sign-in page: the agent may have left a code page open.
+        assert sign_in_url == "https://rose-x.ngrok.app/api/rose-shop/abc123/login?authRealm=rose-shop-abc123", sign_in_url
         calls.append(("sign_in", req["id"], task_id, credentials["email"], credentials["password"]))
         return "https://site/account"
 

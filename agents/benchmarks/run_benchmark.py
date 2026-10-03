@@ -3095,7 +3095,9 @@ async def _respond_as_user_to_auth_assistance(base_url: str, agent_id: str, req:
     if not isinstance(credentials, dict):
         raise RuntimeError("the site manifest carries no password for the user to type")
     task_id = await _browser_task_for_auth_assistance(base_url, agent_id, req)
-    landed = await auth_assistance_user.sign_in_as_user(base_url, headers, req, task_id, credentials)
+    landed = await auth_assistance_user.sign_in_as_user(
+        base_url, headers, req, task_id, credentials, auth_test_site.sign_in_url(auth_test_site.active_manifest())
+    )
     print(f"    🙋 Signed in as the user for sign-in-help request {req_id} (now on {landed})")
 
 

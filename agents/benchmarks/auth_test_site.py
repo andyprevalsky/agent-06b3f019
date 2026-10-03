@@ -330,6 +330,15 @@ def validate_manifest(scenario: str, manifest: dict) -> None:
             raise AuthTestSiteFixtureError(f"{scenario} must not have a reachable member account")
 
 
+def sign_in_url(manifest: Optional[dict]) -> Optional[str]:
+    """The site's own sign-in page: where a user goes when they want to type their password."""
+    entry = str((manifest or {}).get("entryUrl") or "")
+    if "?" not in entry:
+        return None
+    base, query = entry.split("?", 1)
+    return f"{base.rstrip('/')}/login?{query}"
+
+
 def resolve_goal(goal: str, manifest: Optional[dict]) -> str:
     if AUTH_TEST_SITE_URL_PLACEHOLDER not in goal and AUTH_TEST_SITE_ACCOUNT_PLACEHOLDER not in goal:
         return goal

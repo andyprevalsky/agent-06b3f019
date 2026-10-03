@@ -75,8 +75,13 @@ async def _live_cdp_url(base_url: str, headers: dict, task_id: str) -> str:
     return steel_cdp_connection_url(ws_url)
 
 
-async def _type_credentials(cdp_url: str, email: str, password: str) -> str:
-    """Sign in through the form the agent left open. Returns the URL the browser landed on."""
+async def _type_credentials(cdp_url: str, email: str, password: str, sign_in_url: Optional[str] = None) -> str:
+    """Sign in as the user would. Returns the URL the browser landed on.
+
+    The agent may leave the password form or a code-entry page open (the ladder
+    allows either). A user who knows their password and sees a code page goes
+    to the site's sign-in page themself.
+    """
     from playwright.async_api import async_playwright
 
     async with async_playwright() as playwright:
@@ -92,12 +97,21 @@ async def _type_credentials(cdp_url: str, email: str, password: str) -> str:
         if page is None:
             raise AuthAssistanceUserError("the live browser had no open page")
         password_input = page.locator("input[type=password]").first
+        left_open = page.url
         try:
             await password_input.wait_for(state="visible", timeout=SIGN_IN_FORM_TIMEOUT_MS)
         except Exception as exc:
-            raise AuthAssistanceUserError(
-                f"the agent did not leave a sign-in form open for the user (page: {page.url})"
-            ) from exc
+            if not sign_in_url:
+                raise AuthAssistanceUserError(
+                    f"the agent did not leave a sign-in form open for the user (page: {left_open})"
+                ) from exc
+            await page.goto(sign_in_url, wait_until="domcontentloaded")
+            try:
+                await password_input.wait_for(state="visible", timeout=SIGN_IN_FORM_TIMEOUT_MS)
+            except Exception as retry_exc:
+                raise AuthAssistanceUserError(
+                    f"no password form on the page the agent left open ({left_open}) or on {sign_in_url}"
+                ) from retry_exc
         email_input = page.locator("input[type=email]").first
         if await email_input.count() and await email_input.is_visible():
             await email_input.fill(email)
@@ -108,12 +122,21 @@ async def _type_credentials(cdp_url: str, email: str, password: str) -> str:
         return page.url
 
 
-async def sign_in_as_user(base_url: str, headers: dict, request: dict, task_id: str, credentials: dict) -> str:
+async def sign_in_as_user(
+    base_url: str,
+    headers: dict,
+    request: dict,
+    task_id: str,
+    credentials: dict,
+    sign_in_url: Optional[str] = None,
+) -> str:
     request_id = str(request.get("id") or "")
     if not request_id or not task_id:
         raise AuthAssistanceUserError("sign-in-help request is missing its id or browser task id")
     cdp_url = await _live_cdp_url(base_url, headers, task_id)
-    landed = await _type_credentials(cdp_url, str(credentials["email"]), str(credentials["password"]))
+    landed = await _type_credentials(
+        cdp_url, str(credentials["email"]), str(credentials["password"]), sign_in_url
+    )
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(
             f"{base_url.rstrip('/')}/api/auth-assistance/{request_id}/complete", headers=headers, json={}
