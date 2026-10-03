@@ -3114,6 +3114,9 @@ async def _execute_click(
             return write_lock_result
 
     if element:
+        # The click can re-render the target immediately (for example a form
+        # Submit button), removing it from selector_map before record_action.
+        clicked_element_description = get_element_description(element)
         asyncio.create_task(session.highlight_interaction_element(element))
 
         if humanizer and element_coords:
@@ -3142,6 +3145,7 @@ async def _execute_click(
             thinking=thinking,
             index=index,
             coordinates=element_coords,
+            element_description_override=clicked_element_description,
             result={"success": True},
         )
         return {"success": True, "message": ""}

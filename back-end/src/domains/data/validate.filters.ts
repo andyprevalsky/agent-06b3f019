@@ -10,7 +10,6 @@ import { InvalidGrepParamError } from './errors';
 import { parseGrepPath } from './path';
 import {
   DATA_SOURCE_CONFIGS,
-  type AgentNetworkGrepFilters,
   type DocumentGrepFilters,
   type GrepParams,
   type MessageGrepFilters,
@@ -163,23 +162,6 @@ export function parseMessageFilters(
           ...(parsedPath.messageId !== undefined ? { pathMessageId: parsedPath.messageId } : {}),
         }
       : {}),
-  };
-}
-
-export function parseAgentNetworkFilters(params: GrepParams): AgentNetworkGrepFilters | undefined {
-  const raw = requireFilterObject(params);
-  if (Object.keys(raw).length === 0) return undefined;
-  rejectUnsupportedFilters('agent_network', raw);
-  const rawPath = parseFilterString(raw, 'path');
-  if (rawPath === undefined) return undefined;
-  const parsed = parseGrepPath(rawPath);
-  if (parsed === null || parsed.source !== 'agent_network') {
-    throw new InvalidGrepParamError('filters.path');
-  }
-  return {
-    ...(parsed.agentId !== undefined ? { pathAgentId: parsed.agentId } : {}),
-    ...(parsed.role !== undefined ? { pathRole: parsed.role } : {}),
-    ...(parsed.messageId !== undefined ? { pathMessageId: parsed.messageId } : {}),
   };
 }
 

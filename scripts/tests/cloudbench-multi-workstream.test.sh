@@ -106,8 +106,18 @@ trap 'cleanup 143' TERM
 fail() {
     TEST_FAILED=1
     echo "FAIL: $1" >&2
-    for log in "$TMP_ROOT"/controller-*.log; do
+    # Controller logs report only the autoscaler's verdict; its own log and
+    # terminal markers live in the per-bench run dir and explain intermittent
+    # finalization failures. Dump the three newest so they outlive TMP_ROOT.
+    local autoscaler_logs
+    autoscaler_logs="$(find "$TMP_ROOT" -name autoscaler.log -type f -print 2>/dev/null |
+        xargs ls -t 2>/dev/null | head -3)"
+    for log in "$TMP_ROOT"/controller-*.log $autoscaler_logs; do
         [ -f "$log" ] || continue
+        if [ "$(basename "$log")" = "autoscaler.log" ]; then
+            echo "── $(dirname "$log") autoscaler markers: $(cd "$(dirname "$log")" &&
+                ls -1 autoscaler.* 2>/dev/null | tr '\n' ' ') ──" >&2
+        fi
         echo "── $log (tail) ──" >&2
         # Bound each dump: a wedged filesystem or special file must not
         # prevent EXIT cleanup from reaping hubs and releasing ports.
@@ -509,7 +519,33 @@ def run_fake_driver(mdir):
                 break
             time.sleep(0.1)
         if exit_code == 0:
-            time.sleep(8)
+            # The autoscaler polls metrics every ten seconds. A fixed eight
+            # second grace period can end the child before the lower target is
+            # durably observed, especially after a slow staging cleanup.
+            controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]
+            oscillating = os.path.exists(os.path.join(FAKE_DIR, "oscillate-worker-desired"))
+            expected_workers = "0" if oscillating else "1"
+            desired_pattern = os.path.join(
+                controller_ws, ".context", "fleet", "runs", "*",
+                bench, "desired-worker-count",
+            )
+            deadline = time.time() + 30
+            observed = False
+            while time.time() < deadline:
+                for desired_path in glob.glob(desired_pattern):
+                    try:
+                        with open(desired_path) as desired_file:
+                            observed = desired_file.read().strip() == expected_workers
+                    except OSError:
+                        observed = False
+                    if observed:
+                        break
+                if observed:
+                    break
+                time.sleep(0.1)
+            if not observed:
+                log("FATAL: autoscaler never persisted its lower worker target")
+                exit_code = 1
     if exit_code == 0 and os.path.exists(os.path.join(FAKE_DIR, "fail-worker-destroy-once")):
         deadline = time.time() + 30
         controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]

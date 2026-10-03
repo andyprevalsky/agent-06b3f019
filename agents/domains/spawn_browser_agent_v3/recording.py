@@ -2135,6 +2135,7 @@ _FINGERPRINT_POISON_REASON = "ip has used many different fingerprints"
 _PAYMENT_TUNNEL_FAILURE_REASON = "payment CDN blocked by proxy tunnel"
 _CRITICAL_RESOURCE_BLOCK_REASON = "critical third-party resource blocked"
 _API_CHALLENGE_HTML_REASON = "same-origin API returned Cloudflare challenge HTML"
+_FIRST_PARTY_TUNNEL_FAILURE_REASON = "first-party request blocked by proxy tunnel"
 # Network failures that mean "this exit cannot fetch the resource" — includes
 # ORB and classic proxy tunnel deaths.
 _RESOURCE_BLOCK_MARKERS = (
@@ -2183,6 +2184,14 @@ _MAX_CRITICAL_RESOURCE_PROVIDER_EXITS = 2
 # Backward-compat alias (tests + older call sites).
 _MAX_PAYMENT_CDN_PROVIDER_EXITS = _MAX_CRITICAL_RESOURCE_PROVIDER_EXITS
 _MAX_GENERIC_SCRIPT_PROVIDER_EXITS = 1
+# A repeat failure on the page itself is strong evidence that the browser exit
+# cannot reach it. Bound rotations independently of third-party script exits.
+_MAX_FIRST_PARTY_TUNNEL_PROVIDER_EXITS = 1
+_FIRST_PARTY_TUNNEL_FAILURE_MARKERS = (
+    "err_tunnel_connection_failed",
+    "err_proxy_connection_failed",
+    "err_proxy_connection_refused",
+)
 
 
 def _host_looks_like_script_cdn(url: str) -> bool:
@@ -2568,6 +2577,8 @@ class BrowserNetworkRecorder:
         self._payment_cdn_provider_exits = 0
         self._generic_script_provider_exits = 0
         self._api_challenge_provider_exits = 0
+        self._first_party_tunnel_provider_exits = 0
+        self._first_party_tunnel_failures: Dict[tuple[int, str, str, str], int] = {}
         self._cdp_client: Any = None
         self._network_cdp_session_id: str | None = None
         # CDP requestId values are scoped to one remote browser connection and
@@ -2670,6 +2681,7 @@ class BrowserNetworkRecorder:
         self._network_cdp_session_id = cdp_session.session_id
         self._network_generation += 1
         generation = self._network_generation
+        self._first_party_tunnel_failures.clear()
         cdp = cdp_client.register
         cdp.Network.requestWillBeSent(
             lambda event, session_id: self._on_request_will_be_sent(
@@ -3046,6 +3058,7 @@ class BrowserNetworkRecorder:
         url: str,
         document_url: str = "",
         resource_type: str = "",
+        method: str = "",
         browser_generation: int | None = None,
     ) -> None:
         """Retain classification fields for an in-flight request outside ``entries``."""
@@ -3057,6 +3070,7 @@ class BrowserNetworkRecorder:
             "url": url,
             "document_url": document_url or "",
             "resource_type": resource_type or "",
+            "method": method or "",
             "browser_generation": browser_generation,
         }
         self._prune_active_request_meta()
@@ -3256,6 +3270,7 @@ class BrowserNetworkRecorder:
                 url=url,
                 document_url=str(event.get("documentURL") or ""),
                 resource_type=resource_type,
+                method=str(request.get("method") or ""),
                 browser_generation=generation,
             )
             self._evict_overflow_entries()
@@ -3316,8 +3331,11 @@ class BrowserNetworkRecorder:
                 url=str(entry.get("url") or url),
                 document_url=str(entry.get("document_url") or ""),
                 resource_type=str(entry.get("resource_type") or resource_type or ""),
+                method=str(entry.get("method") or ""),
                 browser_generation=entry.get("browser_generation", generation),
             )
+            if _status_is_http_success(entry.get("status")):
+                self._clear_first_party_tunnel_failure(entry)
             self._evict_overflow_entries()
         except Exception as exc:
             logger.warning("Browser network response capture failed", error=str(exc))
@@ -3466,6 +3484,102 @@ class BrowserNetworkRecorder:
                         url=_redact_url_query(str(source.get("url") or "")),
                         error=event.get("errorText"),
                     )
+        self._record_first_party_tunnel_failure(
+            source,
+            error_text=str(event.get("errorText") or ""),
+            generation=entry_generation,
+        )
+
+    def _record_first_party_tunnel_failure(
+        self,
+        source: Mapping[str, Any],
+        *,
+        error_text: str,
+        generation: int,
+    ) -> None:
+        """Rotate after repeated transport failures on one page or its own API."""
+        if not hasattr(self, "_first_party_tunnel_failures"):
+            return
+        if not any(marker in error_text.lower() for marker in _FIRST_PARTY_TUNNEL_FAILURE_MARKERS):
+            return
+        if generation != self._network_generation or generation in self._rejected_network_generations:
+            return
+        resource_type = str(source.get("resource_type") or "").lower()
+        url = str(source.get("url") or "")
+        document_url = str(source.get("document_url") or "")
+        if resource_type == "document":
+            # A cross-origin frame is not evidence that the page's exit failed.
+            if document_url and not _same_origin(url, document_url):
+                return
+        elif resource_type not in {"fetch", "xhr"} or not _same_origin(url, document_url):
+            return
+        locator = _api_challenge_locator(url)
+        if not locator:
+            return
+        method = _normalize_http_method(source.get("method"))
+        kind = "document" if resource_type == "document" else "api"
+        key = (generation, locator, method, kind)
+        failures = self._first_party_tunnel_failures.get(key, 0) + 1
+        self._first_party_tunnel_failures[key] = failures
+        if failures < 2 or self._first_party_tunnel_provider_exits >= _MAX_FIRST_PARTY_TUNNEL_PROVIDER_EXITS:
+            return
+        self._first_party_tunnel_provider_exits += 1
+        self._rejected_network_generations.add(generation)
+        self._provider_exit_rejections.append(
+            {
+                "reason": _FIRST_PARTY_TUNNEL_FAILURE_REASON,
+                "url": _redact_url_query(url),
+                "browser_generation": generation,
+                "method": method,
+                "resource_type": resource_type,
+                "failure_ts_ms": int((time.monotonic() - self._started_at) * 1000),
+            }
+        )
+        logger.warning(
+            "Browser provider exit rejected: repeated first-party tunnel failure",
+            agent_id=self.agent_id,
+            task_id=self.task_id,
+            browser_generation=generation,
+            url=_redact_url_query(url),
+            resource_type=resource_type,
+            failures=failures,
+        )
+
+    def _clear_first_party_tunnel_failure(self, entry: Mapping[str, Any]) -> None:
+        """A later 2xx on the same endpoint makes a queued exit obsolete."""
+        if not hasattr(self, "_first_party_tunnel_failures"):
+            return
+        if not self._first_party_tunnel_failures:
+            return
+        generation = int(entry.get("browser_generation") or self._network_generation)
+        resource_type = str(entry.get("resource_type") or "").lower()
+        if resource_type not in {"document", "fetch", "xhr"}:
+            return
+        url = str(entry.get("url") or "")
+        kind = "document" if resource_type == "document" else "api"
+        key = (generation, _api_challenge_locator(url), _normalize_http_method(entry.get("method")), kind)
+        self._first_party_tunnel_failures.pop(key, None)
+        success_ts_ms = entry.get("response_ts_ms")
+        kept = []
+        for rejection in self._provider_exit_rejections:
+            superseded = (
+                rejection.get("reason") == _FIRST_PARTY_TUNNEL_FAILURE_REASON
+                and rejection.get("browser_generation") == generation
+                and _api_challenge_locator(str(rejection.get("url") or "")) == key[1]
+                and _normalize_http_method(rejection.get("method")) == key[2]
+                and ("document" if rejection.get("resource_type") == "document" else "api") == kind
+            )
+            if superseded:
+                try:
+                    superseded = int(success_ts_ms) > int(rejection.get("failure_ts_ms"))
+                except (TypeError, ValueError):
+                    superseded = False
+            if superseded:
+                self._first_party_tunnel_provider_exits = max(0, self._first_party_tunnel_provider_exits - 1)
+                self._rejected_network_generations.discard(generation)
+            else:
+                kept.append(rejection)
+        self._provider_exit_rejections = kept
 
     async def _fetch_response_body(
         self,

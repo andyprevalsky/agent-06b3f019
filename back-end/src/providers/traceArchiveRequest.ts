@@ -1,5 +1,13 @@
 const DEFAULT_R2_REQUEST_TIMEOUT_MS = 30_000;
 
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function retryDelayMs(attempt: number): number {
+  return 250 * attempt * attempt;
+}
+
 function requestTimeoutMs(): number {
   const parsed = Number.parseInt(process.env.TRACE_ARCHIVE_R2_REQUEST_TIMEOUT_MS ?? '', 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_R2_REQUEST_TIMEOUT_MS;

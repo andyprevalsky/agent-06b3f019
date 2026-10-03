@@ -184,7 +184,10 @@ const listener = spawn(
       'sock.listen()',
       "with open(sys.argv[1], 'w', encoding='utf-8') as handle:",
       '    handle.write(str(sock.getsockname()[1]))',
-      'time.sleep(30)',
+      // Hold the port until the finally block kills the fixture; a fixed
+      // lifetime freed it mid-test on a loaded host.
+      'while True:',
+      '    time.sleep(3600)',
     ].join('\n'),
     occupiedPortFile,
   ],
@@ -192,7 +195,12 @@ const listener = spawn(
 );
 try {
   waitForPath(occupiedPortFile, true);
-  const occupiedPort = Number(readFileSync(occupiedPortFile, 'utf8'));
+  let occupiedPort = 0;
+  for (let attempt = 0; attempt < 100 && occupiedPort === 0; attempt++) {
+    occupiedPort = Number(readFileSync(occupiedPortFile, 'utf8'));
+    if (occupiedPort === 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  assert.ok(occupiedPort > 0, 'fixture listener must publish a port before selection');
   const lockRoot = join(portFixtureRoot, 'locks');
   const endPort = occupiedPort + 20;
   const selectedPort = Number(
@@ -421,6 +429,7 @@ function runSqlHooks(workflowMigration: string): {
       recursive: true,
     });
     mkdirSync(join(migrations, '20260724002500_temporal_cleanup_utc_grace'), { recursive: true });
+    mkdirSync(join(migrations, '20260929120000_agent_trajectory_search'), { recursive: true });
     copyFileSync(
       join(process.cwd(), 'scripts', 'apply-local-runtime-sql-hooks.sh'),
       join(backend, 'scripts', 'apply-local-runtime-sql-hooks.sh')
@@ -432,6 +441,10 @@ function runSqlHooks(workflowMigration: string): {
     writeFileSync(
       join(migrations, '20260724002500_temporal_cleanup_utc_grace', 'migration.sql'),
       'SELECT utc_cleanup;\n'
+    );
+    writeFileSync(
+      join(migrations, '20260929120000_agent_trajectory_search', 'migration.sql'),
+      'SELECT trajectory_search;\n'
     );
     const fakeBin = join(root, 'bin');
     const psqlInput = join(root, 'psql-input.sql');
@@ -466,8 +479,8 @@ const appliedHooks = runSqlHooks(
 assert.equal(appliedHooks.status, 0, 'a well-formed workflow migration must apply');
 assert.match(
   appliedHooks.psqlInput,
-  /pg_advisory_xact_lock[\s\S]*CREATE TRIGGER workflow_guard;[\s\S]*SELECT utc_cleanup;/,
-  'the advisory lock, the marked workflow block, and the UTC cleanup must reach psql in order'
+  /pg_advisory_xact_lock[\s\S]*CREATE TRIGGER workflow_guard;[\s\S]*SELECT utc_cleanup;[\s\S]*SELECT trajectory_search;/,
+  'the advisory lock, the marked workflow block, the UTC cleanup, and the trajectory search projection must reach psql in order'
 );
 assert.doesNotMatch(
   appliedHooks.psqlInput,

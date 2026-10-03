@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 
 import { createStreamingCompletion } from '../../providers/rose';
+import { __resetGptApiKeyCooldown } from '../../providers/computeCredentials';
 import { postOpenAIResponsesStream, postOpenRouterStream } from '../../providers/rose/transport';
 import { withIsolatedFundedKeyCooldowns } from '../blackbox/funded-key-cooldown.support';
 
@@ -61,6 +62,7 @@ async function testCompletionAbortReachesPriorityOpenAiBody(): Promise<void> {
     resolveProviderStarted = resolve;
   });
   process.env.GPT_API_KEY = 'sk-test';
+  await __resetGptApiKeyCooldown();
 
   globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
     providerSignal = init?.signal as AbortSignal;

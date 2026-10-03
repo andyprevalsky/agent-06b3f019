@@ -29,6 +29,10 @@ export interface LaneConfigSearchOptions {
    * entry is blacklisted, the set expires and the full catalog is retried.
    */
   blockedConfigKeys?: Iterable<string>;
+  /** Bound one create + probe when a broken transport would otherwise stall failover. */
+  candidateDeadlineMs?: number;
+  /** End the whole candidate search before its HTTP caller's read deadline. */
+  searchDeadlineMs?: number;
 }
 
 /**
@@ -114,18 +118,27 @@ export async function runLaneConfigSearch(
     }
   };
 
-  const runWithAbort = async <T>(work: Promise<T>): Promise<T> => {
+  const runWithAbort = async <T>(
+    work: Promise<T>,
+    signal: AbortSignal = abort.signal
+  ): Promise<T> => {
     throwIfAborted();
+    const interruption = () =>
+      new Error(
+        abort.signal.aborted || claimLock.claimed ? 'lane_aborted' : 'candidate_deadline_exceeded'
+      );
+    if (signal.aborted) throw interruption();
     return await new Promise<T>((resolve, reject) => {
-      const onAbort = () => reject(new Error('lane_aborted'));
-      abort.signal.addEventListener('abort', onAbort, { once: true });
+      const onAbort = () => reject(interruption());
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
       work.then(
         (value) => {
-          abort.signal.removeEventListener('abort', onAbort);
+          signal.removeEventListener('abort', onAbort);
           resolve(value);
         },
         (error) => {
-          abort.signal.removeEventListener('abort', onAbort);
+          signal.removeEventListener('abort', onAbort);
           reject(error);
         }
       );
@@ -135,70 +148,85 @@ export async function runLaneConfigSearch(
   const runLane = async (lane: RecoveryStorageLane): Promise<SuccessfulRecoveryCandidate> => {
     for (const config of orderedConfigs) {
       throwIfAborted();
-      let session: RecoveryCandidateSession;
-      // Keep the create promise so a result that lands after abort can still be released.
-      const createPromise = dependencies.create(config, abort.signal);
+      const deadline = new AbortController();
+      const deadlineTimer = options.candidateDeadlineMs
+        ? setTimeout(() => deadline.abort(), options.candidateDeadlineMs)
+        : undefined;
+      const candidateSignal = deadlineTimer
+        ? AbortSignal.any([abort.signal, deadline.signal])
+        : abort.signal;
       try {
-        session = await runWithAbort(createPromise);
-      } catch (error) {
-        void createPromise
-          .then((lateSession) => dependencies.release(config, lateSession))
-          .catch(() => {});
-        if (error instanceof Error && error.message === 'lane_aborted') throw error;
-        log.warn('Challenge recovery lane candidate create failed', {
-          laneKey: lane.key,
-          configKey: config.key,
-          provider: config.provider,
-          proxyMode: config.proxyMode,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        continue;
-      }
-      const tracked = { config, session };
-      activeSessions.add(tracked);
-      if (abort.signal.aborted || claimLock.claimed) {
-        activeSessions.delete(tracked);
-        await dependencies.release(config, session).catch(() => {});
-        throw new Error('lane_aborted');
-      }
-      try {
-        const probe = await runWithAbort(dependencies.probe(config, session, lane, abort.signal));
-        log.info('Challenge recovery lane candidate probed', {
-          laneKey: lane.key,
-          configKey: config.key,
-          provider: config.provider,
-          proxyMode: config.proxyMode,
-          stablePasses: probe.stablePasses,
-          attempts: probe.attempts,
-          latencyMs: probe.latencyMs,
-        });
-        if (probe.stablePasses === probe.attempts && probe.attempts > 0) {
+        let session: RecoveryCandidateSession;
+        // Keep the create promise so a result that lands after abort can still be released.
+        const createPromise = dependencies.create(config, candidateSignal);
+        try {
+          session = await runWithAbort(createPromise, candidateSignal);
+        } catch (error) {
+          void createPromise
+            .then((lateSession) => dependencies.release(config, lateSession))
+            .catch(() => {});
+          if (error instanceof Error && error.message === 'lane_aborted') throw error;
+          log.warn('Challenge recovery lane candidate create failed', {
+            laneKey: lane.key,
+            configKey: config.key,
+            provider: config.provider,
+            proxyMode: config.proxyMode,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          continue;
+        }
+        const tracked = { config, session };
+        activeSessions.add(tracked);
+        if (candidateSignal.aborted || claimLock.claimed) {
+          activeSessions.delete(tracked);
+          await dependencies.release(config, session).catch(() => {});
+          if (abort.signal.aborted || claimLock.claimed) throw new Error('lane_aborted');
+          continue;
+        }
+        try {
+          const probe = await runWithAbort(
+            dependencies.probe(config, session, lane, candidateSignal),
+            candidateSignal
+          );
+          log.info('Challenge recovery lane candidate probed', {
+            laneKey: lane.key,
+            configKey: config.key,
+            provider: config.provider,
+            proxyMode: config.proxyMode,
+            stablePasses: probe.stablePasses,
+            attempts: probe.attempts,
+            latencyMs: probe.latencyMs,
+          });
+          if (probe.stablePasses === probe.attempts && probe.attempts > 0) {
+            const ownsSession = activeSessions.delete(tracked);
+            if (!ownsSession) {
+              throw new Error('lane_aborted');
+            }
+            return { config, session, probe };
+          }
+          if (activeSessions.delete(tracked)) {
+            await dependencies.release(config, session).catch(() => {});
+          }
+        } catch (error) {
+          // abort listener may already have cleared+released this session when a
+          // sibling won; only release locally when we still own the track entry.
           const ownsSession = activeSessions.delete(tracked);
-          if (!ownsSession) {
+          log.warn('Challenge recovery lane candidate probe failed', {
+            laneKey: lane.key,
+            configKey: config.key,
+            provider: config.provider,
+            proxyMode: config.proxyMode,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          if (ownsSession) {
+            await dependencies.release(config, session).catch(() => {});
+          }
+          if (abort.signal.aborted || claimLock.claimed) {
             throw new Error('lane_aborted');
           }
-          return { config, session, probe };
         }
-        if (activeSessions.delete(tracked)) {
-          await dependencies.release(config, session).catch(() => {});
-        }
-      } catch (error) {
-        // abort listener may already have cleared+released this session when a
-        // sibling won; only release locally when we still own the track entry.
-        const ownsSession = activeSessions.delete(tracked);
-        log.warn('Challenge recovery lane candidate probe failed', {
-          laneKey: lane.key,
-          configKey: config.key,
-          provider: config.provider,
-          proxyMode: config.proxyMode,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        if (ownsSession) {
-          await dependencies.release(config, session).catch(() => {});
-        }
-        if (abort.signal.aborted || claimLock.claimed) {
-          throw new Error('lane_aborted');
-        }
+      } finally {
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       }
     }
     throw new Error(`No stable browser configuration in lane ${lane.key}`);
@@ -206,12 +234,35 @@ export async function runLaneConfigSearch(
 
   return await new Promise<SuccessfulRecoveryCandidate>((resolve, reject) => {
     let settled = false;
+    let deadlineExpired = false;
     const laneErrors: string[] = [];
     let pendingLanes = lanes.length;
+    const failDeadline = () => {
+      if (settled) return;
+      settled = true;
+      abort.abort();
+      log.error('Challenge recovery search deadline exceeded', {
+        candidateCount: configs.length,
+        laneCount: lanes.length,
+        searchDeadlineMs: options.searchDeadlineMs,
+      });
+      reject(new Error('Challenge recovery search deadline exceeded'));
+    };
+    const searchDeadlineTimer = options.searchDeadlineMs
+      ? setTimeout(() => {
+          deadlineExpired = true;
+          if (!claimLock.claimed) failDeadline();
+        }, options.searchDeadlineMs)
+      : undefined;
+
+    const clearSearchDeadline = () => {
+      if (searchDeadlineTimer !== undefined) clearTimeout(searchDeadlineTimer);
+    };
 
     const finishFailure = () => {
       if (settled || claimLock.claimed) return;
       settled = true;
+      clearSearchDeadline();
       log.error('Challenge recovery found no stable browser configuration', {
         candidateCount: configs.length,
         laneCount: lanes.length,
@@ -252,8 +303,10 @@ export async function runLaneConfigSearch(
           } catch (error) {
             await dependencies.release(candidate.config, candidate.session).catch(() => {});
             claimLock.claimed = false;
+            if (deadlineExpired) failDeadline();
             throw error;
           }
+          clearSearchDeadline();
           if (!settled) {
             settled = true;
             resolve(candidate);

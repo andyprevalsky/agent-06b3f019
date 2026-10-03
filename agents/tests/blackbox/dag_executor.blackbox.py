@@ -213,6 +213,200 @@ def test_extract_plan_from_context_ignores_in_progress():
     assert extract_plan_from_context(context) is None
 
 
+def _plan_followup_context(*, include_final_summary: bool, later_user: bool, final_summary_flag: bool = True):
+    messages = [
+        {"role": "USER", "text": "order me glide floss from doordash", "metadata": None},
+        {
+            "role": "TOOL",
+            "text": "plan",
+            "metadata": {
+                "toolName": "set_plan",
+                "toolStatus": "FINISHED",
+                "data": {"tasks": [{"goal": "x", "tool_name": "spawn_explore_agent"}]},
+            },
+        },
+    ]
+    if include_final_summary:
+        messages.append(
+            {
+                "role": "TOOL",
+                "text": "done",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "isFinalSummary": final_summary_flag,
+                },
+            }
+        )
+    if later_user:
+        messages.append(
+            {
+                "role": "USER",
+                "text": "get a refund, the doordasher delivered to the wrong location",
+                "metadata": None,
+            }
+        )
+    return messages
+
+
+def test_plan_superseded_by_user_after_final_summary():
+    """USER after Task Complete makes the historical plan stale."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    assert plan_superseded_by_new_user_instruction(
+        _plan_followup_context(include_final_summary=True, later_user=True)
+    )
+
+
+def test_plan_superseded_by_final_summary_without_later_user():
+    """Task Complete alone makes the historical plan stale for a new execute."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    assert plan_superseded_by_new_user_instruction(
+        _plan_followup_context(include_final_summary=True, later_user=False)
+    )
+
+
+def test_plan_superseded_by_user_after_set_plan_without_summary():
+    """FAILED / credit-kill follow-up after set_plan stales the DAG without Task Complete."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    assert plan_superseded_by_new_user_instruction(
+        _plan_followup_context(include_final_summary=False, later_user=True)
+    )
+
+
+def test_plan_not_superseded_by_hidden_user_after_set_plan():
+    """Schema-refresh USER rows do not stale a live incomplete plan."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    context = _plan_followup_context(include_final_summary=False, later_user=False)
+    context.append(
+        {
+            "role": "USER",
+            "text": "generated schema",
+            "metadata": {"hidden": True, "isResponseSchemaUpdate": True},
+        }
+    )
+    assert not plan_superseded_by_new_user_instruction(context)
+
+
+def test_plan_not_superseded_by_non_final_summary_without_later_user():
+    """A non-final completion_summary without a later USER leaves the plan live."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    assert not plan_superseded_by_new_user_instruction(
+        _plan_followup_context(include_final_summary=True, later_user=False, final_summary_flag=False)
+    )
+
+
+def test_latest_real_user_instruction_skips_hidden_schema_updates():
+    """Hidden schema-refresh USER rows are not the latest real instruction."""
+    from loop.dag_executor import latest_real_user_instruction
+
+    context = _plan_followup_context(include_final_summary=True, later_user=True)
+    context.append(
+        {
+            "role": "USER",
+            "text": "generated schema",
+            "metadata": {"hidden": True, "isResponseSchemaUpdate": True},
+        }
+    )
+    assert latest_real_user_instruction(context) == "get a refund, the doordasher delivered to the wrong location"
+
+
+def test_latest_real_user_instruction_empty():
+    from loop.dag_executor import latest_real_user_instruction
+
+    assert latest_real_user_instruction([]) is None
+    assert latest_real_user_instruction([{"role": "TOOL", "text": "done", "metadata": {}}]) is None
+
+
+def _raw_history_with_compaction_checkpoint(*, followup: str) -> list[dict]:
+    """First-run history that compacted, then completed, then a new USER.
+
+    The huge raw tool dump must not re-enter the next root run. Polling
+    projects from the latest context_reset and keeps the post-checkpoint tail.
+    """
+    from helpers.context_compaction import build_context_compaction_metadata
+
+    compressed = [
+        {"role": "USER", "text": "order me glide floss from doordash", "metadata": {}},
+        {
+            "role": "USER",
+            "text": "Compaction summary: ordered Oral-B Glide floss on DoorDash; confirmation dff187de.",
+            "metadata": {"compactionSummary": True},
+        },
+        {
+            "role": "TOOL",
+            "text": "Plan created",
+            "metadata": {
+                "toolName": "set_plan",
+                "toolStatus": "FINISHED",
+                "data": {
+                    "type": "plan_artifact",
+                    "join": "all",
+                    "tasks": [
+                        {
+                            "goal": "Research the public DoorDash shopping route for ordering floss.",
+                            "tool_name": "spawn_explore_agent",
+                        }
+                    ],
+                    "dependencies": {},
+                },
+            },
+        },
+    ]
+    return [
+        {"role": "USER", "text": "order me glide floss from doordash", "metadata": {}},
+        {
+            "role": "TOOL",
+            "text": "Very large raw tool output from the first DoorDash order run",
+            "metadata": {},
+        },
+        {
+            "role": "TOOL",
+            "text": "Context compressed — continuing with summarized history.",
+            "metadata": {
+                "toolName": "context_reset",
+                "toolStatus": "FINISHED",
+                "contextCompaction": build_context_compaction_metadata(compressed),
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Your DoorDash order is confirmed.",
+            "metadata": {
+                "toolName": "completion_summary",
+                "toolStatus": "FINISHED",
+                "isFinalSummary": True,
+            },
+        },
+        {"role": "USER", "text": followup, "metadata": None},
+    ]
+
+
+def test_followup_after_compaction_projects_last_checkpoint_and_stales_plan():
+    """A later root run must resume the last compression, not the raw first-run dump."""
+    from helpers.context_compaction import project_model_context_after_compaction
+    from loop.dag_executor import (
+        extract_plan_from_context,
+        latest_real_user_instruction,
+        plan_superseded_by_new_user_instruction,
+    )
+
+    followup = "get a refund, the doordasher delivered to the wrong location"
+    raw = _raw_history_with_compaction_checkpoint(followup=followup)
+    projected = project_model_context_after_compaction(raw)
+
+    assert all(m.get("text") != "Very large raw tool output from the first DoorDash order run" for m in projected)
+    assert any((m.get("metadata") or {}).get("compactionSummary") for m in projected)
+    assert any((m.get("metadata") or {}).get("contextCompactionBoundary") for m in projected)
+    assert latest_real_user_instruction(projected) == followup
+    assert extract_plan_from_context(projected) is not None
+    assert plan_superseded_by_new_user_instruction(projected)
+
+
 def test_tool_aliases_constants():
     """TOOL_ALIASES and ALIAS_TYPE_OVERRIDES are correctly defined."""
     from loop.dag_executor import ALIAS_TYPE_OVERRIDES, TOOL_ALIASES
@@ -1384,6 +1578,32 @@ async def run_all_tests():
     r.record("extract_plan_from_context_found", test_extract_plan_from_context_found)
     r.record("extract_plan_from_context_empty", test_extract_plan_from_context_empty)
     r.record("extract_plan_from_context_ignores_in_progress", test_extract_plan_from_context_ignores_in_progress)
+    r.record("plan_superseded_by_user_after_final_summary", test_plan_superseded_by_user_after_final_summary)
+    r.record(
+        "plan_superseded_by_final_summary_without_later_user",
+        test_plan_superseded_by_final_summary_without_later_user,
+    )
+    r.record(
+        "plan_superseded_by_user_after_set_plan_without_summary",
+        test_plan_superseded_by_user_after_set_plan_without_summary,
+    )
+    r.record(
+        "plan_not_superseded_by_hidden_user_after_set_plan",
+        test_plan_not_superseded_by_hidden_user_after_set_plan,
+    )
+    r.record(
+        "plan_not_superseded_by_non_final_summary_without_later_user",
+        test_plan_not_superseded_by_non_final_summary_without_later_user,
+    )
+    r.record(
+        "latest_real_user_instruction_skips_hidden_schema_updates",
+        test_latest_real_user_instruction_skips_hidden_schema_updates,
+    )
+    r.record("latest_real_user_instruction_empty", test_latest_real_user_instruction_empty)
+    r.record(
+        "followup_after_compaction_projects_last_checkpoint_and_stales_plan",
+        test_followup_after_compaction_projects_last_checkpoint_and_stales_plan,
+    )
     r.record("tool_aliases_constants", test_tool_aliases_constants)
     r.record(
         "dag_foreach_alias_override_passes_spawn_agent_validation",
