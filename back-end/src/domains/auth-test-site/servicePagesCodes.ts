@@ -41,9 +41,24 @@ const CODE_PAGES: Record<CodePage, { verify: string; resend: string; label: stri
   sms: { verify: '/login/sms/verify', resend: '/login/sms', label: 'Sign-in code' },
 };
 
-function codeNotice(page: CodePage, target: string): string {
+/**
+ * A member who asks for a code is told it was sent; the hedge ("if … belongs
+ * to an account") is only for addresses the site does not know. Hedging at a
+ * known member made agents doubt the account instead of waiting for the code.
+ */
+function codeNotice(site: AuthTestSite, page: CodePage, target: string): string {
+  const digits = (value: string | null) => (value ?? '').replace(/\D/g, '');
+  const known = site.accounts.some(
+    (account) =>
+      (account.email === target ||
+        (digits(account.phone) !== '' && digits(account.phone) === digits(target))) &&
+      account.verified &&
+      !account.locked
+  );
   if (page === 'sms') {
-    return `If ${target} is on a ${AUTH_TEST_SITE_NAME} account, we texted it a 6-digit sign-in code. It expires in 10 minutes.`;
+    return known
+      ? `We texted a 6-digit sign-in code to ${target}. It expires in 10 minutes.`
+      : `If ${target} is on a ${AUTH_TEST_SITE_NAME} account, we texted it a 6-digit sign-in code. It expires in 10 minutes.`;
   }
   if (page === 'second_factor') {
     return `To finish signing in, enter the 6-digit verification code we emailed to ${target}. It expires in 10 minutes.`;
@@ -51,7 +66,9 @@ function codeNotice(page: CodePage, target: string): string {
   if (page === 'signup') {
     return `Almost done. Enter the 6-digit verification code we emailed to ${target} to finish creating your account.`;
   }
-  return `If ${target} belongs to a ${AUTH_TEST_SITE_NAME} account, a 6-digit sign-in code is on its way. It expires in 10 minutes.`;
+  return known
+    ? `We emailed a 6-digit sign-in code to ${target}. It expires in 10 minutes.`
+    : `If ${target} belongs to a ${AUTH_TEST_SITE_NAME} account, a 6-digit sign-in code is on its way. It expires in 10 minutes.`;
 }
 
 /** The code entry form shared by emailed sign-in codes, second factors, sign-up and texted codes. */
@@ -68,7 +85,7 @@ export function renderCodeEntryPage(
     site,
     'Enter your code',
     `    <h1>${page === 'sms' ? 'Check your phone' : 'Check your email'}</h1>
-    <p class="notice">${codeNotice(page, target)}</p>
+    <p class="notice">${codeNotice(site, page, target)}</p>
     ${banner('error', options.error)}
     <form method="post" action="${siteUrl(site, paths.verify)}">
       ${nextField(next)}
