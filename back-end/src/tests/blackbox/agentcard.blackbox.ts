@@ -17,6 +17,7 @@ import {
   refreshOrgCardholderStatus,
   startOrgCardholderOnboarding,
 } from '../../providers/agentcard/org-onboarding';
+import { AgentCardOrgRuntime } from '../../providers/agentcard/org-runtime';
 import { saveUserToken } from '../../providers/agentcard/store';
 
 config();
@@ -151,6 +152,57 @@ const tests: Array<[string, () => Promise<void>]> = [
       });
       assert(result.connected === false, 'failed KYC must not be reported as connected');
       assert(result.status === 'failed', 'failed KYC must remain observable as business state');
+    },
+  ],
+  [
+    'organization onboarding status recovers from a structured provider throttle',
+    async () => {
+      const names = [
+        'AGENTCARD_ORG_MCP_ACCESS_TOKEN',
+        'AGENTCARD_ORG_OAUTH_CLIENT_ID',
+        'AGENTCARD_ORG_OAUTH_CLIENT_SECRET',
+      ] as const;
+      const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+      try {
+        delete process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID;
+        delete process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET;
+        process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN = 'blackbox-org-token';
+        let calls = 0;
+        const runtime = new AgentCardOrgRuntime(async (_token, toolName, args) => {
+          assert(toolName === 'get_onboarding_session', `unexpected tool: ${toolName}`);
+          assert(args.session_id === 'session-throttled', 'wrong onboarding session queried');
+          calls += 1;
+          if (calls === 1) {
+            return {
+              structuredContent: {
+                status: 'error',
+                message:
+                  'get_onboarding_session failed: API key rate limit exceeded, please try again later',
+              },
+            };
+          }
+          return { structuredContent: { status: 'completed', cardholder_id: 'cardholder-ready' } };
+        });
+        const status = await refreshOrgCardholderStatus('agentcard-bb-structured-throttle', {
+          getOrgManagedCardholderId: async () => undefined,
+          getOrgOnboardingConfig: async () => ({
+            sessionId: 'session-throttled',
+            setupUrl: 'https://example.test/setup',
+          }),
+          callOrgTool: (toolName, args) => runtime.callTool(toolName, args),
+          saveOrgCardholderId: async (_userId, cardholderId) => {
+            assert(cardholderId === 'cardholder-ready', 'completed cardholder was not persisted');
+          },
+        });
+        assert(calls === 2, `expected one retry, got ${calls} calls`);
+        assert(status.connected === true, 'completed onboarding must report connected');
+        assert(status.cardholderId === 'cardholder-ready', 'wrong cardholder returned');
+      } finally {
+        for (const name of names) {
+          if (original[name] === undefined) delete process.env[name];
+          else process.env[name] = original[name];
+        }
+      }
     },
   ],
   [
