@@ -27,7 +27,7 @@ sources:
   - commit 006623782
   - commit 155b35a99
 repro: scripts/tests/run-public-tunnel-routing.test.sh
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -180,7 +180,14 @@ Residual risks:
   Cloud VMs share the `.cloud-env` identity. See the recurrence note on
   `2026-07-27-parallel-deploy-lanes-race-one-free-ngrok-endpoint`.
 
-Status stays `open` until the three payment smoke tasks pass on the fixed HEAD.
+On fixed HEAD `fcb24df39` (`/deploy` run `20261002-213707-2123940`), all three
+payment tasks passed behind Cloudflare quick tunnels.
+
+- Smoke passed `agent-payment-setup-resume` (117s) and
+  `agent-payment-new-user-journey` (114s) via
+  `atm-description-concrete-mtv.trycloudflare.com`.
+- The AgentCard lifecycle lane passed `agent-payment-abandonment` (249s) via
+  `discussions-perhaps-judy-blacks.trycloudflare.com`.
 
 10k-agent behavior is unchanged. This runs once per isolated stack startup (one
 lookup of a stable name and a few probes) and holds no shared state.
