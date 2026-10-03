@@ -4734,7 +4734,7 @@ def test_cleanup_unconfirmed_pool_claim_survives_successor_fleet(tmp_path: Path)
     the browser/session cleanup boundary.
     """
     fleet = FLEET_SCRIPT.read_text()
-    support = "".join(
+    support = _fleet_pid_identity_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",
@@ -6199,6 +6199,15 @@ def _extract_fleet_function(source: str, signature: str) -> str:
     return source[start:end]
 
 
+def _fleet_pid_identity_helpers(source: str) -> str:
+    """Birth-identity helpers that extracted owner/lock functions call; without
+    them a missing command silently reads every owner as dead."""
+    return f"source {shlex.quote(str(ENV_HELPER_SCRIPT))}\n" + "".join(
+        _extract_fleet_function(source, signature)
+        for signature in ("fleet_pid_start_time() {", "fleet_pid_matches_start() {")
+    )
+
+
 def _cloudbench_incremental_log_functions() -> str:
     source = CLOUD_SCRIPT.read_text()
     return "".join(
@@ -7550,7 +7559,9 @@ fleet_machines_json
     # bounded attempt can recover; no permanent mkdir-lock wedge is allowed.
     identity = _extract_fleet_function(fleet, "machines_snapshot_identity() {")
     registry_value = _extract_fleet_function(fleet, "registry_meta_value() {")
-    registry_alive = _extract_fleet_function(fleet, "registry_owner_alive() {")
+    registry_alive = _fleet_pid_identity_helpers(fleet) + _extract_fleet_function(
+        fleet, "registry_owner_alive() {"
+    )
     lock_acquire = _extract_fleet_function(fleet, "inventory_refresh_lock_acquire() {")
     lock_release = _extract_fleet_function(fleet, "inventory_refresh_lock_release() {")
     lock_script = f"""set -uo pipefail
@@ -7612,7 +7623,7 @@ def test_inventory_publishers_share_one_recoverable_atomic_lock(tmp_path: Path) 
     assert 'ln "$candidate" "$lock"' in acquire
     assert 'mkdir "$lock"' not in acquire
 
-    helpers = "".join(
+    helpers = _fleet_pid_identity_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",
@@ -7673,10 +7684,12 @@ def test_exceptional_inventory_refresh_coalesces_waiters(tmp_path: Path) -> None
     assert '"$prior"' in refresh
     assert '"2"' in refresh
 
-    helpers = "".join(
+    helpers = _fleet_pid_identity_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "machines_snapshot_identity() {",
+            "registry_meta_value() {",
+            "registry_owner_alive() {",
             "inventory_refresh_wait_tick() {",
             "inventory_refresh_lock_acquire() {",
             "inventory_refresh_lock_release() {",
@@ -7700,8 +7713,8 @@ CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS=3
 mkdir -p "$INVENTORY_INDEX/current"
 mkfifo "$INVENTORY_WAIT_FIFO"
 printf 'generation=.generation-one\n' > "$INVENTORY_INDEX/current/health"
-printf 'host=test-host\npid=%s\npid_start=live\ntoken=owner-token\n' "$$" > "$INVENTORY_REFRESH_LOCK"
 {helpers}
+printf 'host=test-host\npid=%s\npid_start=%s\ntoken=owner-token\n' "$$" "$(fleet_pid_start_time $$)" > "$INVENTORY_REFRESH_LOCK"
 _refresh_inventory_snapshot_unlocked() {{ printf 'called\n' >> "$CALLS"; }}
 ( sleep 0.2; printf 'generation=.generation-two\n' > "$INVENTORY_INDEX/current/health" ) &
 refresh_machines_snapshot_after .generation-one
@@ -7764,7 +7777,7 @@ with path.open("r+") as handle:
         time.sleep(0.02)
     assert ready.exists(), "fence holder did not initialize"
 
-    helpers = "".join(
+    helpers = _fleet_pid_identity_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",
