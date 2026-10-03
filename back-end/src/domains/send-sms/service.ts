@@ -4,19 +4,14 @@ import {
   claimToolSideEffect,
   markToolSideEffectFailed,
   markToolSideEffectSucceeded,
-  reclaimFailedToolSideEffect,
   type ToolSideEffectJson,
 } from '../../providers/toolSideEffects';
 import {
-  notifyAgentStarted,
-  notifyPlannerMessage,
-  notifyWriteLock,
-  notifyAgentCardSetup,
   notifyCompletion,
-  notifyCostLimit,
   buildCompletionSmsBody,
 } from '../../providers/smsSupervisor/outboundEvents';
 import * as repo from './repo';
+import { dispatchByEventType } from './service.dispatch';
 import type { NotifyInput } from './types';
 import {
   notificationChannelsFor,
@@ -27,7 +22,6 @@ import { getWhatsAppReachable } from '../../providers/whatsappReachability';
 
 const log = createLogger('SendSMS');
 const COMPLETION_SMS_OPERATION_TYPE = 'lifecycle-sms.completion';
-const WRITE_LOCK_SMS_OPERATION_TYPE = 'lifecycle-sms.write_lock';
 
 // ── Surge direct send ────────────────────────────────────────────────
 
@@ -255,152 +249,3 @@ async function dispatchCompletionOnce(
   });
   return { success: true, skipped: delivery.skipped };
 }
-
-/**
- * Cap write_lock SMS at the initial notification plus one extra reminder
- * per attention request. Temporal retries of the same kind reuse the claim.
- */
-async function dispatchWriteLockOnce(
-  data: NotifyInput,
-  payload: Record<string, unknown>,
-  channels: SupervisorChannel[]
-): Promise<void> {
-  const attentionRequestId = (payload.attention_request_id as string | undefined) ?? '';
-  const isReminder = payload.reminder === true;
-  const kind = isReminder ? 'reminder' : 'initial';
-  const operationKey =
-    attentionRequestId === ''
-      ? ''
-      : `${WRITE_LOCK_SMS_OPERATION_TYPE}:${attentionRequestId}:${kind}`;
-
-  if (operationKey !== '') {
-    let claim = await claimToolSideEffect({
-      operationKey,
-      operationType: WRITE_LOCK_SMS_OPERATION_TYPE,
-      request: {
-        user_id: data.user_id,
-        agent_id: data.agent_id,
-        attention_request_id: attentionRequestId,
-        kind,
-      },
-    });
-    if (claim.status === 'existing' && claim.record.status === 'FAILED') {
-      claim = await reclaimFailedToolSideEffect(operationKey);
-    }
-    if (claim.status === 'existing') {
-      log.info('Write-lock SMS already claimed, skipping duplicate', {
-        agentId: data.agent_id,
-        attentionRequestId,
-        kind,
-        status: claim.record.status,
-      });
-      return;
-    }
-    try {
-      await notifyWriteLock(
-        data.user_id,
-        { id: data.agent_id },
-        (payload.question as string | undefined) ?? '',
-        attentionRequestId,
-        (payload.workflow_id as string | undefined) ?? '',
-        payload.metadata,
-        channels,
-        isReminder
-      );
-      await markToolSideEffectSucceeded({
-        operationKey,
-        externalId: `${attentionRequestId}:${kind}`,
-      });
-    } catch (error) {
-      await markToolSideEffectFailed({
-        operationKey,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw error;
-    }
-    return;
-  }
-
-  await notifyWriteLock(
-    data.user_id,
-    { id: data.agent_id },
-    (payload.question as string | undefined) ?? '',
-    attentionRequestId,
-    (payload.workflow_id as string | undefined) ?? '',
-    payload.metadata,
-    channels,
-    isReminder
-  );
-}
-
-/* c8 ignore start -- dispatchByEventType delegates to smsSupervisor outboundEvents (excluded from coverage) */
-/** Route to the correct outbound event handler based on event_type. */
-async function dispatchByEventType(
-  data: NotifyInput,
-  payload: Record<string, unknown>,
-  agentGoal: string,
-  channels: SupervisorChannel[]
-): Promise<void> {
-  switch (data.event_type) {
-    case 'agent_started':
-      await notifyAgentStarted(
-        data.user_id,
-        {
-          id: data.agent_id,
-          // Prefer the payload's goal (the worker may have refined it), but fall
-          // back to the goal already read off the Agent row rather than to the
-          // literal string "Unknown goal" — a caller that omits `goal` otherwise
-          // texts the user `Started: "Unknown goal"` about their own request.
-          goal: (payload.goal as string | undefined) ?? agentGoal,
-        },
-        channels
-      );
-      break;
-
-    case 'planner_message':
-      await notifyPlannerMessage(
-        data.user_id,
-        { id: data.agent_id },
-        (payload.message as string | undefined) ?? '',
-        (payload.is_question as boolean | undefined) ?? false,
-        channels
-      );
-      break;
-
-    case 'write_lock':
-      await dispatchWriteLockOnce(data, payload, channels);
-      break;
-
-    case 'agentcard_setup': {
-      // Validate the runtime type: the cast above does not guarantee a string, and a
-      // missing/blank/non-string value would produce an unusable SMS or crash the
-      // notifier's `.trim()`. Skip malformed events instead of dispatching.
-      const setupUrl = payload.setup_url;
-      if (typeof setupUrl !== 'string' || setupUrl.trim() === '') {
-        log.warn('agentcard_setup event missing a valid setup_url, skipping', {
-          agentId: data.agent_id,
-        });
-        break;
-      }
-      await notifyAgentCardSetup(data.user_id, { id: data.agent_id }, setupUrl, channels);
-      break;
-    }
-
-    case 'cost_limit':
-      await notifyCostLimit(
-        data.user_id,
-        {
-          id: data.agent_id,
-          goal: agentGoal,
-          treeCostCents: (payload.tree_cost_cents as number | undefined) ?? 0,
-          priceLimitCents: (payload.price_limit_cents as number | undefined) ?? 0,
-        },
-        channels
-      );
-      break;
-
-    default:
-      log.warn('Unknown event type, skipping', { eventType: data.event_type });
-  }
-}
-/* c8 ignore stop */
