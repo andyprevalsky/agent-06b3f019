@@ -8,8 +8,8 @@ classification: third-party-failure
 problem_class: other
 first_bad_boundary: AgentCard sandbox org wallet — the closed card's mint transfer `owt_…` for card_0a398f4b38448e35214fd361 never left `consumed` within the 240s settle wait
 symptoms:
-  - "unused mint never reclaimed after 25 attempts; transfer for card_0a398f4b38448e35214fd361: {\"status\":\"consumed\",\"releasedCents\":0,\"transferredCents\":1300}"
-  - "treasury-rails blackbox FAILED: transfer for card_… ended in \"consumed\" — an unused card must reclaim/release, not stay consumed"
+  - 'unused mint never reclaimed after 25 attempts; transfer for card_0a398f4b38448e35214fd361: {"status":"consumed","releasedCents":0,"transferredCents":1300}'
+  - 'treasury-rails blackbox FAILED: transfer for card_… ended in "consumed" — an unused card must reclaim/release, not stay consumed'
 tags:
   - agentcard
   - treasury-rails
@@ -72,10 +72,51 @@ This was checked with a forced 20s deadline.
 The 240s deadline is unchanged.
 
 Still open:
+
 - If the provider row shows `substatus` stuck after recovery, report it to
   AgentCard.
 - If it shows netting against a concurrent mint, give this domain its own
   cardholder or make it exclusive with the other AgentCard minting domains.
+
+### Recurrence on 2026-10-03
+
+`/deploy` run `20261002-213707-2123940`, HEAD `894757474`, backend coverage
+failed `treasury-rails` again with the same symptom. Failure evidence is in
+`.context/test-runs/backend-coverage-failed-20261003-180703-3307025`.
+
+- The test minted $13.00 on card `card_3fe0cde76095b38c762acbbf` (transfer
+  `owt_ef9b047212c177aaca719afe`, 18:02:03Z) and closed it unused at
+  18:02:06Z.
+- Its sweeps recovered $14.48 at 18:02:17Z and again at 18:04:18Z, but never
+  this card's $13.00. The provider row at timeout was `consumed` /
+  `consumed`, `transferred_cents: 1300`, `released_cents: 0`,
+  `failure_reason: null`.
+- A read-only ledger check at 18:11:20Z still showed the transfer `consumed`
+  with 0 released.
+- The shared cardholder had two other mints in the window: 18:01:10Z
+  (`transferred_cents: 0`, netted entirely against idle residual, 1448
+  released) and 18:03:24Z (2123 transferred, 1448 released).
+- This machine issued neither. Its Step 5 stack was stopped at 17:57Z. The
+  coverage run's only live `create_card` and `close_card` were this test's,
+  because the `purchases` card mints are mocked. The only other process
+  running was the cloudbench suite, which uses a fake Fly API.
+- On HEAD `028def96f`, an hour earlier, the same test passed in the backend
+  coverage gate.
+
+This matches the 2026-10-03 recurrence recorded in
+`2026-09-03-shared-agentcard-cardholder-contention-closes-card-mid-checkout`.
+There, a foreign mint also netted against residual while this test's card
+stayed `consumed`, and the sweeps returned only foreign residuals ($14.48
+among them). That moves the "not ruled out" netting path above from a
+hypothesis to the observed pattern: the closed card stalls only while other
+consumers mint on the one shared cardholder. How AgentCard attributes the
+released value is not visible through the MCP.
+
+Still no timeout, assertion or benchmark change. Accepting pool or residual
+movement would reopen the foreign-residual false pass. The prevention remains
+a dedicated mint-capable sandbox cardholder for this gate, which needs an
+operator to provision. The gate was rerun on the same HEAD without code
+changes.
 
 ## Human feedback
 
