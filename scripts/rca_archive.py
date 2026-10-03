@@ -70,6 +70,7 @@ CLASSIFICATIONS = {
     "configuration-error",
     "test-bug",
     "model-intelligence-limitation",
+    "unresolved",
 }
 
 # Step 5a problem buckets from docs/root-cause-analysis.md, plus `other`.
@@ -309,6 +310,8 @@ def validate() -> list[str]:
             errors.append(
                 f"{rel}: `classification` 'undetermined' requires `status` 'open'"
             )
+        if classification == "unresolved" and status != "open":
+            errors.append(f"{rel}: `unresolved` classification requires `status: open`")
 
         symptoms = meta.get("symptoms")
         if isinstance(symptoms, list) and not 2 <= len(symptoms) <= 5:

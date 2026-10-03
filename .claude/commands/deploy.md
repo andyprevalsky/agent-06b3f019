@@ -1206,23 +1206,25 @@ Step 4a's coverage run deliberately keeps `BLACKBOX_SMOKE` unset and never spins
 real sandbox. Do NOT downgrade this to WARN, gate it behind a change classifier,
 or skip it because "claude-code wasn't touched."
 
-With the full stack from Step 5 still running (backend on `$CONDUCTOR_PORT`, DB on
-`$LOCAL_DB_PORT`), create the separate local database required by the standalone
-blackbox runner, then run the claude-code blackbox with the smoke phase enabled:
+With the full stack from Step 5 still running, resolve its actual backend and
+database ports from the live service manifest. Create the separate local
+database required by the standalone blackbox runner. This command runs in a
+fresh shell and chooses the runtime port for Docker or system Postgres:
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-source scripts/lib/workspace-env.sh
+. scripts/lib/workspace-env.sh
 normalize_conductor_workspace_env
-CONDUCTOR_PORT=$(jq -er '.ports.backend' .context/services.json)
-LOCAL_DB_PORT=$(jq -er '.database.runtime_port' .context/services.json)
+STACK_PORTS=$(bash scripts/resolve-deploy-stack-db.sh) || exit 1
+read -r CONDUCTOR_PORT SMOKE_DB_PORT <<< "$STACK_PORTS"
+export CONDUCTOR_PORT
 E2B_DB_NAME="victoria_$CONDUCTOR_WORKSPACE_NAME"
-if ! psql "postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$E2B_DB_NAME" \
+if ! psql "postgresql://postgres:postgres@localhost:$SMOKE_DB_PORT/$E2B_DB_NAME" \
   -At -c 'SELECT 1' >/dev/null 2>&1; then
-  PGPASSWORD=postgres createdb -h localhost -p "$LOCAL_DB_PORT" -U postgres "$E2B_DB_NAME"
+  PGPASSWORD=postgres createdb -h localhost -p "$SMOKE_DB_PORT" -U postgres "$E2B_DB_NAME"
 fi
 cd back-end && BLACKBOX_SMOKE=1 \
-  BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$E2B_DB_NAME" \
+  BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$SMOKE_DB_PORT/victoria_$CONDUCTOR_WORKSPACE_NAME" \
   bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- \
   bash scripts/run-blackbox-tests.sh claude-code
 ```

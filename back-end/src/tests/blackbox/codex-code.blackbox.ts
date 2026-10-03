@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
 import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
+import { testCodexWsServerOverlayUsesLocalSource } from './codex-code-overlay.case';
 import {
   testResolveCodexAuthEnvs_apiKeyFallback,
   testResolveCodexAuthEnvs_cooldownExcludesFundedKey,
@@ -413,6 +414,10 @@ async function runAll() {
     {
       name: 'template -- pins GPT-5.6-compatible Codex CLI',
       fn: testTemplate_pinsCodexCliForGpt56,
+    },
+    {
+      name: 'template -- overlays the local Codex fallback server for default and custom IDs',
+      fn: testCodexWsServerOverlayUsesLocalSource,
     },
     {
       name: 'auth -- revoked OAuth refresh token triggers funded-key fallback',

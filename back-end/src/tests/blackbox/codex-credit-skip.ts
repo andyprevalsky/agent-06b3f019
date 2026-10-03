@@ -36,6 +36,8 @@ export class CredentialExhaustionSkip extends Error {
 // depend on which leg reported the exhaustion.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
   /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|credit[_ ]balance[_ ]exhausted|credit balance is too low|billing (?:hard )?limit reached|missing payment method|team is blocked|payment method required|billing_not_active/i;
+const CODEX_OAUTH_REVOCATION_PATTERN =
+  /refresh_token_invalidated|token_revoked|refresh token (?:was )?revoked|access token could not be refreshed|your session has ended|log out and sign in again|oauth_refresh_invalid/i;
 
 /**
  * Detect whether a Codex smoke run terminated because every available credential
@@ -78,6 +80,16 @@ export function detectCodexCreditExhaustion(output: string, events: unknown[]): 
  */
 export function codexSmokeCreditSkipReason(output: string, events: unknown[]): string | null {
   if (output.includes('CODEX_E2B_DONE')) return null;
+  // A revoked OAuth token needs reauthentication even if the fallback key is
+  // also out of credits. Both paths have to fail from funding to earn a skip.
+  if (CODEX_OAUTH_REVOCATION_PATTERN.test(output)) return null;
+  for (const event of events) {
+    const typed = event as { message?: unknown; reason?: unknown; error?: unknown };
+    const nestedError = (typed?.error as { message?: unknown } | null | undefined)?.message;
+    for (const field of [typed?.message, typed?.reason, typed?.error, nestedError]) {
+      if (typeof field === 'string' && CODEX_OAUTH_REVOCATION_PATTERN.test(field)) return null;
+    }
+  }
   return detectCodexCreditExhaustion(output, events);
 }
 

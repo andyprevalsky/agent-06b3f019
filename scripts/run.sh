@@ -436,10 +436,13 @@ is_current_process_family() {
 
 process_cwd_in_this_worktree() {
     local pid=$1
-    local cwd
+    local cwd root
     cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
+    # macOS reports /private/var/... in lsof while $PWD may be /var/....
+    # Compare physical paths so workers without a worktree path in argv are found.
+    root=$(pwd -P)
     case "$cwd" in
-        "$PWD"|"$PWD"/*) return 0 ;;
+        "$root"|"$root"/*) return 0 ;;
     esac
     return 1
 }
@@ -2512,7 +2515,17 @@ launch_backend_service() {
                     set +e
                     cd back-end || exit 1
                     rm -f "$BACKEND_LOG_FILE"
-                    PORT="$BACKEND_PORT" npx tsx src/bootstrap.ts > "$BACKEND_LOG_FILE" 2>&1
+                    # Launch the server process directly. `npx tsx` adds npm and
+                    # tsx CLI parents; losing either parent ends this stack even
+                    # while the actual backend is still serving requests.
+                    # The tsx --import hook needs module.register (Node 18.19+
+                    # or 20.6+). Older supported Node versions use --loader.
+                    # Node 18.18 has --import but cannot load tsx through it.
+                    if node -e "process.exit(typeof require(\"node:module\").register === \"function\" ? 0 : 1)"; then
+                        PORT="$BACKEND_PORT" node --import tsx src/bootstrap.ts > "$BACKEND_LOG_FILE" 2>&1
+                    else
+                        PORT="$BACKEND_PORT" node --loader tsx src/bootstrap.ts > "$BACKEND_LOG_FILE" 2>&1
+                    fi
                     code=$?
                     if [ "$code" -ne 0 ]; then
                         printf "%s\n" back-end > "$FAIL_DIR/failed"

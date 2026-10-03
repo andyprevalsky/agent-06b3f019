@@ -4,6 +4,37 @@ import { prisma } from '../database';
 import type { ProxyGeoLocation } from '../geoip';
 
 export type KernelProxyType = 'residential' | 'mobile' | 'isp';
+export type KernelProxySpecificity = 'city' | 'state' | 'country';
+
+/** Preserve the last resolved managed proxy when a paused session resumes. */
+export function managedKernelProxyFromSource(
+  source: string | null
+): { type: KernelProxyType; specificity: KernelProxySpecificity } | undefined {
+  const match = /^kernel_(residential|mobile|isp)_(city|state|country)$/.exec(source ?? '');
+  if (match === null) return undefined;
+  return {
+    type: match[1] as KernelProxyType,
+    specificity: match[2] as KernelProxySpecificity,
+  };
+}
+
+export function kernelRecreateProxySelection(
+  source: string | null,
+  proxyTier: string | null,
+  rotationType?: KernelProxyType
+): {
+  forceManagedProxyType?: KernelProxyType;
+  exactManagedProxy?: { type: KernelProxyType; specificity: KernelProxySpecificity };
+} {
+  if (rotationType !== undefined) return { forceManagedProxyType: rotationType };
+  const recorded = managedKernelProxyFromSource(source);
+  if (recorded !== undefined) return { exactManagedProxy: recorded };
+  // Rows predating kernelProxySource retain only the tier, not the fallback geo.
+  if (source === null && (proxyTier === 'mobile' || proxyTier === 'residential')) {
+    return { forceManagedProxyType: proxyTier };
+  }
+  return {};
+}
 
 /**
  * Kernel's SDK defaults (`timeout=60_000`, `maxRetries=2`) multiply a slow

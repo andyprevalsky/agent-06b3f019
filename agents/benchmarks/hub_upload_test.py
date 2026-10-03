@@ -33,6 +33,7 @@ def _serve(record: list):
                     "path": self.path,
                     "api_key": self.headers.get("X-API-Key"),
                     "user_id": self.headers.get("X-User-Id"),
+                    "content_encoding": self.headers.get("Content-Encoding"),
                     "body": json.loads(decoded or b"{}"),
                 }
             )
@@ -138,8 +139,23 @@ def test_uploads_bundle_with_auth_headers(monkeypatch):
         assert record[0]["path"] == "/api/benchmarks/runs"
         assert record[0]["api_key"] == "test-key"
         assert record[0]["user_id"] == "user-1"
+        assert record[0]["content_encoding"] == "gzip"
         assert record[0]["body"]["run_id"] == "run-42"
         assert record[0]["body"]["source"] == "manual-run"
+    finally:
+        server.shutdown()
+
+
+def test_large_bundle_uploads_with_gzip(monkeypatch):
+    record: list = []
+    server, url = _serve(record)
+    try:
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", url)
+        monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "test-key")
+        assert upload_run_bundle({"run_id": "large-run", "tasks": [], "padding": "x" * (8 * 1024 * 1024)}, required=True)
+        assert len(record) == 1
+        assert record[0]["content_encoding"] == "gzip"
+        assert record[0]["body"]["padding"] == "x" * (8 * 1024 * 1024)
     finally:
         server.shutdown()
 

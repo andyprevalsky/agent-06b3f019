@@ -1,5 +1,12 @@
-import type { AgentStatus } from '@prisma/client';
+import { type AgentStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { DERIVED_RUN_STATE_RESET } from '../../providers/derivedRunState';
+
+export {
+  DERIVED_RUN_STATE_RESET,
+  followUpRunStateUpdate,
+  shouldSnapshotPreviousGoal,
+} from '../../providers/derivedRunState';
 
 /** Update an agent's fields. */
 export async function updateAgent(agentId: string, data: Record<string, unknown>) {
@@ -46,6 +53,7 @@ export async function clearWorkflowForTerminalAgent(
       temporalWorkflowId: null,
       temporalFirstExecutionRunId: null,
       status: 'ACTIVE',
+      ...DERIVED_RUN_STATE_RESET,
     },
   });
 }

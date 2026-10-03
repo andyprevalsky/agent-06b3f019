@@ -135,6 +135,31 @@ if (fs.existsSync(VALIDATOR)) {
         `rca_archive.py new did not scaffold the requested case.\n` +
           `    Command output:\n${result.trim()}`
       );
+    } else {
+      const scaffold = fs.readFileSync(probeCase, 'utf8');
+      fs.writeFileSync(
+        probeCase,
+        scaffold
+          .replace(/^classification: .*$/m, 'classification: unresolved')
+          .replace(/^status: open$/m, 'status: fixed')
+      );
+      try {
+        execFileSync('python3', [probeValidator, 'validate'], {
+          cwd: probeRoot,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        failures.push('RCA archive accepted an unresolved case marked fixed.');
+      } catch (error) {
+        const err = error as { stdout?: string; stderr?: string };
+        if (
+          !`${err.stdout ?? ''}\n${err.stderr ?? ''}`.includes(
+            '`unresolved` classification requires `status: open`'
+          )
+        ) {
+          failures.push('RCA archive did not report the unresolved/fixed classification error.');
+        }
+      }
     }
   } catch (error) {
     const err = error as { stdout?: string; stderr?: string };
