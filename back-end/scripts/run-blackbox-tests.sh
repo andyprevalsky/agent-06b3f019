@@ -60,8 +60,19 @@ PORT_LOCK_ROOT="$ARTIFACT_ROOT/.port-locks"
 mkdir -p "$ARTIFACT_DIR" "$PORT_LOCK_ROOT"
 export BLACKBOX_TEST_ARTIFACT_DIR="$ARTIFACT_DIR"
 export CONTRACT_TEST_ARTIFACT_DIR="$ARTIFACT_DIR"
-source "$ROOT_DIR/scripts/lib/blackbox-archive-env.sh"
-pin_blackbox_trace_archive_env "$ROOT_DIR"
+export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
+# Cursor Cloud injects TRACE_ARCHIVE_BACKEND=r2 from prod secrets. Force a
+# local backend so archive fixtures the test process writes are the same
+# files the isolated backend greps. `${VAR:-local}` cannot override an
+# already-set r2 value.
+case "${TRACE_ARCHIVE_BACKEND:-}" in
+  local|fake-r2) ;;
+  *)
+    echo "⚠️  TRACE_ARCHIVE_BACKEND='${TRACE_ARCHIVE_BACKEND:-}' is not a local blackbox backend; forcing local."
+    export TRACE_ARCHIVE_BACKEND=local
+    ;;
+esac
+export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES="${BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES:-weekly}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
 

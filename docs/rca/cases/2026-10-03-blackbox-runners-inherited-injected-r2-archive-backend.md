@@ -33,12 +33,12 @@ The test writes an archived trace through the local archive backend (`TRACE_ARCH
 
 The same inheritance meant the coverage backend uploaded test agents to the production bucket. `back-end/coverage/server.log` from the failing run shows 117 distinct finalized test roots with `manifest_ref=r2://...`. Every earlier coverage run on this VM did the same.
 
-Local repro: with the injected env still set, `run-blackbox-tests.sh agent-trajectories` fails on the old runner and passes with the fix. The new `scripts/tests/blackbox-archive-env.test.sh` fails on the old runner with `run-blackbox-tests.sh children saw: archive=r2|...` and passes on the fixed one.
+Local repro: with the injected env still set, `run-blackbox-tests.sh agent-trajectories` fails on the old runner and passes with the fix. `scripts/tests/blackbox-archive-env.test.sh` fails on the old runner (`1755b12b3`) with `run-blackbox-tests.sh children saw: archive=r2|...` and passes on the fixed one.
 
 ## Solution
 
-- `scripts/lib/blackbox-archive-env.sh` provides `pin_blackbox_trace_archive_env`, which always exports `TRACE_ARCHIVE_BACKEND=local` and keeps the existing defaults for the archive dir and enabled flag. Both runners call it in place of the overridable defaults.
-- `scripts/tests/blackbox-archive-env.test.sh` runs in the deploy structural gates. It covers the helper, drives the real `run-blackbox-tests.sh --list` with a fake `node` to check what child processes inherit, and checks that `run-coverage.sh` pins before it boots its backend.
+- Main landed the runner fix concurrently in `098cac3e9`: both runners now force `TRACE_ARCHIVE_BACKEND=local` unless it is already `local` or `fake-r2`. This branch adopts that guard instead of its own helper.
+- `scripts/tests/blackbox-archive-env.test.sh` runs in the deploy structural gates and checks behavior rather than script text. It drives the real `run-blackbox-tests.sh --list` with a fake `node` to see what child processes inherit (r2 becomes local; an explicit fake-r2 and dir are kept), runs the `run-coverage.sh` guard against an inherited r2, and checks that the guard runs before the coverage backend boots.
 - Open follow-up: the test bundles already uploaded from Cloud VMs remain in the production bucket. Removing them is a destructive production-data action that needs operator review (run the archive curation script with `--dry-run` first).
 - No 10,000-agent impact: test-harness only.
 

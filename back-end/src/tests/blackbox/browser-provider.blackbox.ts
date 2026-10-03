@@ -1,5 +1,8 @@
 #!/usr/bin/env tsx
 
+import nodeAssert from 'node:assert/strict';
+import { createSessionWithContextUsingDependencies } from '../../providers/browser';
+import { computeGrantBrowserProvider } from '../../domains/compute-grants/config';
 import { selectedBrowserProvider } from '../../providers/browser/config';
 import {
   kernelProxyCandidates,
@@ -10,7 +13,10 @@ import {
 import { steel } from '../../providers/steel/session';
 import {
   assert,
+  assertBrowserUseDownloadFetchIsBounded,
+  assertBrowserUseRolloutOptIn,
   assertKernelCityInventoryFallback,
+  assertStoredProviderFallback,
   assertKernelTimeoutFallback,
   isRetryableKernelNavigationError,
   withProvider,
@@ -22,10 +28,21 @@ import {
   isSteelSessionValidationFailure,
 } from './browser-provider-rotation.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
+import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
+import {
+  createBrowserUseRecoverySession,
+  browserUseProxyCountry,
+  getBrowserUseSessionHealth,
+  listBrowserUseSessionFiles,
+  readBrowserUseSessionFile,
+  releaseBrowserUseRemoteSession,
+} from '../../providers/browser/browserUse';
 
 const steelUrl = (steel as unknown as { baseURL: string }).baseURL;
+const browserUseFlagBeforeContractTests = process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
+process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
-const tests: Array<[string, () => void]> = [
+const tests: Array<[string, () => void | Promise<void>]> = [
   [
     'Kernel is the default provider',
     () =>
@@ -82,7 +99,154 @@ const tests: Array<[string, () => void]> = [
     () => assert(steelUrl === 'https://api.steel.dev', `stale Steel API: ${steelUrl}`),
   ],
   [
-    'rotate_ip uses the fixed Kernel residential, Kernel mobile, Steel, Steel ladder',
+    'Browser Use selection requires a configured API key',
+    () => {
+      const previous = process.env.BROWSER_USE_API_KEY;
+      delete process.env.BROWSER_USE_API_KEY;
+      try {
+        withProvider('browser-use', () => {
+          let message = '';
+          try {
+            selectedBrowserProvider();
+          } catch (error) {
+            message = error instanceof Error ? error.message : String(error);
+          }
+          assert(
+            message.includes('BROWSER_USE_API_KEY is required'),
+            'expected a Browser Use key error'
+          );
+        });
+      } finally {
+        if (previous === undefined) delete process.env.BROWSER_USE_API_KEY;
+        else process.env.BROWSER_USE_API_KEY = previous;
+      }
+    },
+  ],
+  [
+    'Browser Use rollout flag returns default browser selection to Kernel',
+    () => {
+      process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'false';
+      const previousKey = process.env.BROWSER_USE_API_KEY;
+      process.env.BROWSER_USE_API_KEY = 'test-key';
+      try {
+        withProvider('browser-use', () =>
+          assert(
+            selectedBrowserProvider() === 'kernel',
+            'disabled Browser Use must fall back to Kernel'
+          )
+        );
+      } finally {
+        process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
+        if (previousKey === undefined) delete process.env.BROWSER_USE_API_KEY;
+        else process.env.BROWSER_USE_API_KEY = previousKey;
+      }
+    },
+  ],
+  ['Browser Use requires an explicit enabled rollout value', assertBrowserUseRolloutOptIn],
+  [
+    'unknown legacy stored browser providers retain the Steel fallback',
+    assertStoredProviderFallback,
+  ],
+  [
+    'Browser Use signed download fetch is aborted by a bounded deadline',
+    assertBrowserUseDownloadFetchIsBounded,
+  ],
+  [
+    'Browser Use provisioning is blocked before any provider request when disabled',
+    async () => {
+      process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'false';
+      try {
+        await nodeAssert.rejects(
+          createBrowserUseRecoverySession({ country: 'US' }),
+          /BROWSER_AGENT_BROWSER_USE_ENABLED/
+        );
+      } finally {
+        process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
+      }
+    },
+  ],
+  [
+    'Browser Use default dispatch creates a Browser Use session',
+    async () => {
+      let calls = 0;
+      const session = await createSessionWithContextUsingDependencies(
+        'context-1',
+        'agent-1',
+        { country: 'US' },
+        'https://example.com',
+        { taskId: 'task-1' },
+        {
+          readPreferredConfig: async () => null,
+          defaultProvider: () => 'browser-use',
+          createKernel: async () => {
+            throw new Error('Kernel must not be selected');
+          },
+          createSteel: async () => {
+            throw new Error('Steel must not be selected');
+          },
+          createBrowserUse: async (contextId, agentId, location, url, options) => {
+            calls++;
+            assert(contextId === 'context-1' && agentId === 'agent-1', 'wrong Browser Use owner');
+            if (location === undefined) throw new Error('Browser Use proxy location was lost');
+            assert(
+              location.country === 'US' && url === 'https://example.com',
+              'wrong session input'
+            );
+            assert(options?.taskId === 'task-1', 'preallocated task ID was lost');
+            return {
+              provider: 'browser-use',
+              sessionId: 'browser-use-session',
+              debugUrl: 'https://browser-use.example/live',
+              taskId: 'task-1',
+              wsUrl: 'wss://browser-use.example/cdp',
+              proxySource: 'browser_use_residential_country',
+              proxyLocation: location,
+              profileId: null,
+              profileSource: 'test',
+              validationBrowser: null,
+            };
+          },
+        }
+      );
+      assert(calls === 1 && session.provider === 'browser-use', 'Browser Use was not dispatched');
+    },
+  ],
+  [
+    'compute-grant browser selection accepts Browser Use',
+    () => {
+      const previous = process.env.COMPUTE_GRANT_BROWSER_PROVIDER;
+      process.env.COMPUTE_GRANT_BROWSER_PROVIDER = 'browser-use';
+      try {
+        assert(
+          computeGrantBrowserProvider() === 'browser-use',
+          'compute grant rejected Browser Use'
+        );
+      } finally {
+        if (previous === undefined) delete process.env.COMPUTE_GRANT_BROWSER_PROVIDER;
+        else process.env.COMPUTE_GRANT_BROWSER_PROVIDER = previous;
+      }
+    },
+  ],
+  [
+    'compute-grant browser selection returns to Kernel when Browser Use is disabled',
+    () => {
+      const previous = process.env.COMPUTE_GRANT_BROWSER_PROVIDER;
+      process.env.COMPUTE_GRANT_BROWSER_PROVIDER = 'browser-use';
+      process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'false';
+      try {
+        assert(
+          computeGrantBrowserProvider() === 'kernel',
+          'disabled Browser Use must not block compute grants'
+        );
+      } finally {
+        process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
+        if (previous === undefined) delete process.env.COMPUTE_GRANT_BROWSER_PROVIDER;
+        else process.env.COMPUTE_GRANT_BROWSER_PROVIDER = previous;
+      }
+    },
+  ],
+  [
+    'rotate_ip uses the Kernel residential, Kernel mobile, Steel, Browser Use ladder',
     assertFixedRotationLadder,
   ],
   [
@@ -212,7 +376,7 @@ const tests: Array<[string, () => void]> = [
     'explicit Kernel proxy ID bypasses managed location proxies',
     () => {
       const mode = resolveKernelProxyMode('proxy-123');
-      assert(mode.kind === 'explicit', 'expected explicit proxy mode');
+      if (mode.kind !== 'explicit') throw new Error('expected explicit proxy mode');
       assert(mode.proxyId === 'proxy-123', 'expected configured proxy ID');
     },
   ],
@@ -237,7 +401,7 @@ async function main(): Promise<void> {
   let failed = 0;
   for (const [name, test] of tests) {
     try {
-      test();
+      await test();
       console.log(`PASS ${name}`);
     } catch (error) {
       failed++;
@@ -245,6 +409,126 @@ async function main(): Promise<void> {
     }
   }
 
+  try {
+    const previousFetch = globalThis.fetch;
+    const previousKey = process.env.BROWSER_USE_API_KEY;
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    process.env.BROWSER_USE_API_KEY = 'test-browser-use-key';
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(String(input));
+      calls.push({
+        method: init?.method ?? 'GET',
+        path: `${url.pathname}${url.search}`,
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      if (url.hostname === 'download.example') return new Response('file contents');
+      if (init?.method === 'POST') {
+        return Response.json(
+          {
+            id: '00000000-0000-4000-8000-000000000002',
+            cdpUrl: 'ws://127.0.0.1:9/unreachable',
+            liveUrl: 'https://live.browser-use.com/test',
+            status: 'active',
+            startedAt: '2026-10-01T00:00:00Z',
+            timeoutAt: '2026-10-01T04:00:00Z',
+          },
+          { status: 201 }
+        );
+      }
+      if (init?.method === 'PATCH') return Response.json({ status: 'stopped' });
+      if (url.pathname.endsWith('/downloads')) {
+        return Response.json({
+          files: [
+            {
+              path: 'report.pdf',
+              size: 13,
+              lastModified: '2026-10-01T00:00:00Z',
+              url: 'https://download.example/report.pdf',
+            },
+          ],
+          hasMore: false,
+          nextCursor: null,
+        });
+      }
+      return Response.json({
+        id: '00000000-0000-4000-8000-000000000002',
+        status: 'active',
+        startedAt: '2026-10-01T00:00:00Z',
+        timeoutAt: '2026-10-01T04:00:00Z',
+      });
+    }) as typeof fetch;
+    try {
+      await nodeAssert.rejects(
+        () => createBrowserUseRecoverySession({ country: 'US' }),
+        /Browser Use CDP validation failed/
+      );
+      assert(
+        calls[0]?.method === 'POST' && calls[0]?.path === '/api/v4/browsers',
+        'Browser Use create must use V4'
+      );
+      assert(
+        (calls[0]?.body as { proxyCountryCode?: string })?.proxyCountryCode === 'us',
+        'Browser Use proxy country was not sent'
+      );
+      assert(
+        browserUseProxyCountry({ country: 'GB', city: 'LONDON' }) === 'uk',
+        'Browser Use must map ISO GB to provider UK'
+      );
+      assert(
+        calls.some(
+          (call) => call.method === 'PATCH' && (call.body as { action?: string })?.action === 'stop'
+        ),
+        'failed Browser Use CDP validation leaked a paid session'
+      );
+      const health = await getBrowserUseSessionHealth('00000000-0000-4000-8000-000000000002');
+      assert(
+        health.provider === 'browser-use' && health.status === 'active',
+        'Browser Use health was not mapped'
+      );
+      const files = await listBrowserUseSessionFiles('00000000-0000-4000-8000-000000000002');
+      assert(
+        files.length === 1 && files[0]?.path === 'report.pdf',
+        'Browser Use downloads were not listed'
+      );
+      const data = await readBrowserUseSessionFile(
+        '00000000-0000-4000-8000-000000000002',
+        'report.pdf'
+      );
+      assert(data.toString() === 'file contents', 'Browser Use download URL was not fetched');
+      await releaseBrowserUseRemoteSession('00000000-0000-4000-8000-000000000002');
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (previousKey === undefined) delete process.env.BROWSER_USE_API_KEY;
+      else process.env.BROWSER_USE_API_KEY = previousKey;
+    }
+    console.log('PASS Browser Use V4 session, proxy, cleanup, health, and download contract');
+  } catch (error) {
+    failed++;
+    console.error(
+      `FAIL Browser Use V4 contract: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  failed += await runOptionalLiveBrowserUseProvider();
+
+  if (process.env.RUN_BROWSER_USE_HANDOFF_LIVE === '1') {
+    try {
+      const { runLiveBrowserUseHandoff } =
+        await import('./browser-provider.browser-use-handoff.live');
+      await runLiveBrowserUseHandoff();
+    } catch (error) {
+      failed++;
+      console.error(
+        `FAIL live Browser Use handoff: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  // Contract cases enable Browser Use inside this process. The live ladder must
+  // use the backend's original rollout setting or its expected next step drifts.
+  if (browserUseFlagBeforeContractTests === undefined)
+    delete process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
+  else process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = browserUseFlagBeforeContractTests;
   try {
     await runLiveProviderParity();
     if (process.env.TEST_BASE_URL) console.log('PASS live Kernel provider parity');

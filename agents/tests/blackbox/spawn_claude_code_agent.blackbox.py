@@ -2414,6 +2414,94 @@ def test_log_code_agent_event_promotes_claude_tool_use_to_info():
     fake_logger.debug.assert_not_called()
 
 
+def test_log_code_agent_event_surfaces_claude_cli_rate_limit_and_api_retry():
+    """CLI rate_limit_event + system.api_retry fields reach info logs (bounded, no session ids)."""
+    from domains.spawn_claude_code_agent import service
+
+    ids = {"agent_id": "agent-1", "task_id": "task-1", "sandbox_id": "sandbox-1"}
+    rate_limit_event = {
+        "version": 1,
+        "provider": "claude",
+        "type": "cli_message",
+        "raw_type": "rate_limit_event",
+        "cli_message": {
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": "allowed_warning",
+                "rateLimitType": "five_hour",
+                "utilization": 0.91,
+                "resetsAt": 1790988600,
+                "overageStatus": "rejected",
+                "overageDisabledReason": "out_of_credits",
+                "isUsingOverage": False,
+                "surpassedThreshold": 0.9,
+            },
+            "uuid": "11111111-1111-1111-1111-111111111111",
+            "session_id": "cli-session-should-not-be-logged",
+        },
+    }
+    api_retry_event = {
+        "version": 1,
+        "provider": "claude",
+        "type": "cli_message",
+        "raw_type": "system",
+        "cli_message": {
+            "type": "system",
+            "subtype": "api_retry",
+            "attempt": 2,
+            "max_retries": 10,
+            "retry_delay_ms": 1130,
+            "error_status": 529,
+            "error": "server_error" + "x" * 400,
+            "uuid": "22222222-2222-2222-2222-222222222222",
+            "session_id": "cli-session-should-not-be-logged",
+        },
+    }
+    unrelated_cli_event = {
+        "version": 1,
+        "provider": "claude",
+        "type": "cli_message",
+        "raw_type": "system",
+        "cli_message": {"type": "system", "subtype": "compact_boundary"},
+    }
+
+    fake_logger = MagicMock()
+    with patch.object(service, "logger", fake_logger):
+        service._log_code_agent_event(rate_limit_event, **ids)
+        service._log_code_agent_event(api_retry_event, **ids)
+        service._log_code_agent_event(unrelated_cli_event, **ids)
+
+    assert fake_logger.info.call_count == 2, fake_logger.info.call_args_list
+    (rl_args, rl_kwargs), (retry_args, retry_kwargs) = [(c.args, c.kwargs) for c in fake_logger.info.call_args_list]
+
+    assert rl_args[0] == "[ClaudeCode] CLI rate-limit status"
+    assert rl_kwargs == {
+        **ids,
+        "rate_limit_status": "allowed_warning",
+        "rate_limit_type": "five_hour",
+        "utilization": 0.91,
+        "resets_at": 1790988600,
+        "overage_status": "rejected",
+        "overage_resets_at": None,
+        "overage_disabled_reason": "out_of_credits",
+        "is_using_overage": False,
+        "surpassed_threshold": 0.9,
+    }
+
+    assert retry_args[0] == "[ClaudeCode] CLI API retry"
+    assert retry_kwargs["attempt"] == 2
+    assert retry_kwargs["max_retries"] == 10
+    assert retry_kwargs["retry_delay_ms"] == 1130
+    assert retry_kwargs["error_status"] == 529
+    assert retry_kwargs["error"].startswith("server_error")
+    assert len(retry_kwargs["error"]) == 200, "CLI-sourced log values must be truncated to 200 chars"
+    assert {k: retry_kwargs[k] for k in ids} == ids
+
+    logged = repr(fake_logger.info.call_args_list)
+    assert "cli-session-should-not-be-logged" not in logged
+    assert "compact_boundary" not in logged
+
+
 def test_codex_completed_turn_count_counts_unique_turn_completed_events():
     """Codex completed turns come from turn.completed SDK events, not status heartbeats."""
     from domains.spawn_claude_code_agent import service
@@ -3686,6 +3774,10 @@ async def _run_all_tests():
     r.record(
         "log_claude_tool_use_event",
         test_log_code_agent_event_promotes_claude_tool_use_to_info,
+    )
+    r.record(
+        "log_claude_cli_rate_limit_and_api_retry",
+        test_log_code_agent_event_surfaces_claude_cli_rate_limit_and_api_retry,
     )
     r.record("codex_completed_turn_count", test_codex_completed_turn_count_counts_unique_turn_completed_events)
     # spawn_claude_code_activity

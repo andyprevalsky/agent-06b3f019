@@ -107,7 +107,7 @@ export async function createAuthAssistanceRequest(
   const browserSessionId = session?.id ?? input.browserSessionId ?? null;
   const steelSessionId = session?.sessionId ?? input.steelSessionId ?? '';
   if (input.mode === 'live_view' && steelSessionId === '') {
-    throw new BadRequestError('A Steel session is required for live_view assistance');
+    throw new BadRequestError('A browser session is required for live_view assistance');
   }
 
   const handoff = handoffForMode(input.mode, steelSessionId, session?.debugUrl);
@@ -188,7 +188,7 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
       ? await repo.findSessionByBrowserSessionId(request.browserSessionId, userId)
       : await repo.findSessionBySteelSessionId(request.steelSessionId, userId);
   if (session === null)
-    throw new BadRequestError('Steel context is not available for this request');
+    throw new BadRequestError('Browser context is not available for this request');
   const liveSteelSessionId = session.sessionId;
 
   if (liveSteelSessionId.startsWith('local-')) {
@@ -255,7 +255,7 @@ export async function completeAuthAssistanceRequest(id: string, userId: string) 
   if (result.status === 'not_found') throw new NotFoundError('Auth assistance request not found');
   if (result.status === 'forbidden') throw new ForbiddenError('Not authorized');
   if (result.status === 'missing_steel_context') {
-    throw new BadRequestError('Steel context is not available for this live_view request');
+    throw new BadRequestError('Browser context is not available for this live_view request');
   }
 
   return {

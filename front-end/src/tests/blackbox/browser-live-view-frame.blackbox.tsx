@@ -33,6 +33,7 @@ import {
 
 const STEEL_PLAYER =
   'https://connect.steel.dev/v1/sessions/ef622b64-21ae-49c3-862b-b615e4ba9e52/player?interactive=false';
+const BROWSER_USE_PLAYER = 'https://live.browser-use.com/session/browser-use-test';
 
 function fullscreenProps() {
   return {
@@ -87,6 +88,15 @@ describe('live-view iframe containment', () => {
     expectSteelContentClip(stream, iframe);
   });
 
+  it('enables the fullscreen Browser Use viewer only during user control', () => {
+    const props = { ...fullscreenProps(), browserUrl: BROWSER_USE_PLAYER };
+    const { rerender } = renderWithProviders(<BrowserStatusBarFullscreen {...props} />);
+    expect(screen.getByTitle('Browser')).toHaveAttribute('inert');
+
+    rerender(<BrowserStatusBarFullscreen {...props} isUserControlling />);
+    expect(screen.getByTitle('Browser')).not.toHaveAttribute('inert');
+  });
+
   it('crops the inline Steel live view to the content viewport, not 16:9 or the chrome window', () => {
     renderWithProviders(
       <BrowserIframe
@@ -126,6 +136,8 @@ describe('live-view iframe containment', () => {
     );
 
     const iframe = screen.getByTitle('Preview');
+    expect(iframe).toHaveAttribute('inert');
+    expect(iframe).toHaveAttribute('tabindex', '-1');
     expect(iframe).not.toHaveStyle({ width: '1440px', height: '900px' });
     expect(iframe).toHaveStyle({
       width: `${STEEL_LIVE_VIEW_WINDOW.width}px`,

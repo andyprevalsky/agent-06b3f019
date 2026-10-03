@@ -780,6 +780,37 @@ def _append_bounded_verifier_checkpoint(
     return appended
 
 
+def _preserve_observed_interaction_for_verifier(
+    *,
+    action_name: str,
+    succeeded: bool,
+    awaiting_observation: bool,
+    observed_state: Dict[str, Any],
+    current_url: str,
+    verifier_checkpoints: List[Dict[str, Any]],
+) -> bool:
+    """Retain browser DOM proof when an agent observes a prior interaction's result.
+
+    A screenshot file path in action history is not viewable by the verifier.
+    The already-fetched DOM at a subsequent screenshot/read-state action is
+    browser ground truth and avoids another CDP round trip.
+    """
+    if not succeeded:
+        return awaiting_observation
+    if action_name in {"screenshot", "read_browser_state"} and awaiting_observation:
+        checkpoint = _browser_ground_truth_checkpoint(
+            observed_state, current_url, kind="preserved_evidence"
+        )
+        if _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint):
+            return False
+    if action_name in {
+        "goto", "click", "click_coordinates", "evaluate", "input_text", "select_dropdown",
+        "drag", "press_keys", "press_key", "upload_file", "submit_form",
+    }:
+        return True
+    return awaiting_observation
+
+
 def _replace_resume_image_blocks(value: Any) -> Any:
     """Replace image payloads with valid text blocks in simulated resume history."""
     if isinstance(value, dict):
@@ -1368,9 +1399,9 @@ def _rotation_storage_capture_timeout_seconds(raw_timeout: Any) -> float:
 async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[str, Any]]:
     """Capture browser auth/storage before rotate_ip replaces the remote browser.
 
-    Kernel profile persistence handles Kernel-to-Kernel rotations, but profiles
-    are provider-specific. Capturing Playwright storage here lets the later
-    Kernel-to-Steel recovery retain the same cookies, localStorage, and IndexedDB.
+    Provider profiles persist within one provider. Capturing Playwright storage
+    lets Kernel-to-Steel and Steel-to-Browser-Use recoveries retain the same
+    cookies, localStorage, and IndexedDB across providers.
     """
     if page is None or getattr(page, "context", None) is None:
         return None
@@ -1537,18 +1568,19 @@ async def _reconnect_browser_stack_after_rotation(
     old_driver_pid: Optional[int],
     fingerprint_injection: Optional[Any],
     agent_id: str,
+    provider: Optional[str] = None,
     config: Any = None,
     task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Tear down the current CDP/Playwright stack and reattach to `new_cdp_url`.
 
     Backs the rotate_ip tool: the backend recreates the browser session on a fresh
-    proxy (same persistent profile → cookies/login survive) and returns a new
-    ws_url; the agent must drop its live connection and reconnect to it. Fingerprint
+    proxy and returns a new ws_url; the agent must drop its live connection and
+    reconnect to it. Captured storage restores login across providers. Fingerprint
     injection is re-applied so the rotated IP does not pair with a fresh device
     fingerprint. Returns the new dom_service/pages/playwright handles + driver pid.
     """
-    from browser_tools.dom_service import DOMService
+    from browser_tools.dom_service import DOMService, browser_downloads_path_for_provider
 
     # 1. Tear down the old connection first so the previous Kernel session's CDP
     #    sockets + local Playwright driver are released before we attach anew.
@@ -1564,7 +1596,10 @@ async def _reconnect_browser_stack_after_rotation(
     # 2. Attach DOMService + Playwright to the rotated session.
     _disable_cdp_websocket_proxy()
     connection_cdp_url = steel_cdp_connection_url(new_cdp_url)
-    dom_service = DOMService(cdp_url=connection_cdp_url)
+    dom_service = DOMService(
+        cdp_url=connection_cdp_url,
+        downloads_path=browser_downloads_path_for_provider(provider),
+    )
     pw_instance = None
     pw_browser = None
     driver_pid = None
@@ -1945,11 +1980,30 @@ def _browser_action_tool_call_id(llm_result: Dict[str, Any]) -> str:
     return str(llm_result.get("tool_call_id") or uuid_module.uuid4())
 
 
+def _captcha_solver_wait_complete(
+    *,
+    provider: str,
+    elapsed_seconds: float,
+    page_still_challenged: bool,
+    saw_active_solver: bool,
+    inactive_polls: int,
+) -> bool:
+    if page_still_challenged:
+        return False
+    # Browser Use V4 exposes no in-flight solve status. Its own guidance says
+    # to leave a rendered CAPTCHA alone for about 10 seconds before inspecting
+    # or switching browsers; three fast null-telemetry polls are too short.
+    if provider == "browser-use" and elapsed_seconds < 10:
+        return False
+    return saw_active_solver or inactive_polls >= 3
+
+
 async def _wait_for_provider_captcha_solver(
     config: Any,
     task_id: str,
     *,
     page: Optional[Any] = None,
+    provider: str = "",
 ) -> None:
     """Give provider-native auto-solving the first chance before recovery probes.
 
@@ -1957,9 +2011,11 @@ async def _wait_for_provider_captcha_solver(
     live tab still looks challenged, keep waiting up to the 45s ceiling instead of
     treating three null polls as "solver done".
     """
-    deadline = asyncio.get_running_loop().time() + 45
+    started_at = asyncio.get_running_loop().time()
+    deadline = started_at + 45
     saw_active_solver = False
     inactive_polls = 0
+    last_provider = provider
     while asyncio.get_running_loop().time() < deadline:
         activity.heartbeat("Waiting for provider CAPTCHA auto-solver")
         page_still_challenged = False
@@ -1993,27 +2049,33 @@ async def _wait_for_provider_captcha_solver(
             telemetry = await fetch_browser_captcha_telemetry(config, task_id)
         except Exception as exc:
             logger.warning("CAPTCHA telemetry unavailable during challenge recovery", error=str(exc))
-            if page_still_challenged:
+            if page_still_challenged or (
+                last_provider == "browser-use"
+                and asyncio.get_running_loop().time() - started_at < 10
+            ):
                 await asyncio.sleep(2)
                 continue
             await asyncio.sleep(2)
             return
+        last_provider = str(telemetry.get("provider") or "")
         is_solving = telemetry.get("isSolving")
         if is_solving is True:
             saw_active_solver = True
             inactive_polls = 0
-        elif saw_active_solver and not page_still_challenged:
-            return
         elif page_still_challenged:
             # Hard WAF / Kernel-null telemetry: wait out the solver window on the
             # live challenged page instead of exiting after three idle polls.
             inactive_polls = 0
         else:
             inactive_polls += 1
-            # Steel can take a moment to register a new task. When the page is not
-            # challenged, three grace polls are enough for the solver-first wait.
-            if inactive_polls >= 3:
-                return
+        if is_solving is not True and _captcha_solver_wait_complete(
+            provider=last_provider,
+            elapsed_seconds=asyncio.get_running_loop().time() - started_at,
+            page_still_challenged=page_still_challenged,
+            saw_active_solver=saw_active_solver,
+            inactive_polls=inactive_polls,
+        ):
+            return
         await asyncio.sleep(2)
 
 
@@ -5958,7 +6020,7 @@ async def _spawn_browser_agent_activity_v3_real(
             agent_id=agent_id, resume_state=write_lock_resume_state
         )
 
-    from browser_tools.dom_service import ActionHistory, DOMService
+    from browser_tools.dom_service import ActionHistory, DOMService, browser_downloads_path_for_provider
     from browser_tools.humanizer import BrowserHumanizer
     from helpers.llm import check_progress
 
@@ -6022,6 +6084,7 @@ async def _spawn_browser_agent_activity_v3_real(
     write_lock_approvals: Dict[str, Dict] = {}
     auth_realm = auth_realm_from_url(start_url)
     verifier_checkpoints: List[Dict[str, Any]] = []
+    awaiting_observation_checkpoint = False
     # Eventim checkaddtocart POST can keep returning 403 challenge HTML while the
     # document GET looks clean — cookie-stage recovery then false-succeeds forever.
     # After one cookies_sanitized result, escalate subsequent recoveries to config search.
@@ -6516,7 +6579,12 @@ async def _spawn_browser_agent_activity_v3_real(
             nonlocal playwright_driver_pid
             _disable_cdp_websocket_proxy()
             connection_cdp_url = steel_cdp_connection_url(cdp_url)
-            _dom_service = DOMService(cdp_url=connection_cdp_url)
+            _dom_service = DOMService(
+                cdp_url=connection_cdp_url,
+                downloads_path=browser_downloads_path_for_provider(
+                    browser_session_metadata.get("provider")
+                ),
+            )
             _playwright_instance = None
             _playwright_browser = None
 
@@ -8163,6 +8231,7 @@ async def _spawn_browser_agent_activity_v3_real(
             if should_force_visible_result_completion(
                 action_name=action_name,
                 last_reasoning=thinking,
+                observed_dom=str(observe_page_state.get("dom_tree") or ""),
                 prior_reasoning_messages=reasoning_messages,
                 action_summaries=action_summary,
                 action_entries=action_entries,
@@ -8236,6 +8305,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             fingerprint_injection=replacement.get("fingerprint_injection")
                             or pending_fingerprint_injection,
                             agent_id=agent_id,
+                            provider=pending_browser_session_metadata.get("provider"),
                             config=config,
                             task_id=task_id,
                         )
@@ -8435,6 +8505,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     execution_time_ms,
                     usage_by_model,
                     fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                    provider=browser_session_metadata.get("provider"),
                 )
                 await _propagate_browser_credentials_with_progress(
                     config=config,
@@ -8663,7 +8734,10 @@ async def _spawn_browser_agent_activity_v3_real(
                         source_state=recovery_storage_state,
                         target_url=current_url,
                         wait_for_solver=lambda: _wait_for_provider_captcha_solver(
-                            config, task_id, page=input_page
+                            config,
+                            task_id,
+                            page=input_page,
+                            provider=str(browser_session_metadata.get("provider") or ""),
                         ),
                         probe=probe_cookie_variant_remote,
                         commit_cookie_removals=lambda keys: commit_cookie_removals(
@@ -8691,6 +8765,10 @@ async def _spawn_browser_agent_activity_v3_real(
                         new_cdp_url = config_result.get("ws_url")
                         if not isinstance(new_cdp_url, str) or not new_cdp_url:
                             raise RuntimeError("Challenge recovery selected a browser without a CDP URL")
+                        promoted_metadata = _updated_rotation_session_metadata(
+                            browser_session_metadata,
+                            dict(config_result),
+                        )
                         try:
                             reconnected = await _reconnect_browser_stack_after_rotation(
                                 new_cdp_url=new_cdp_url,
@@ -8700,6 +8778,8 @@ async def _spawn_browser_agent_activity_v3_real(
                                 old_driver_pid=playwright_driver_pid,
                                 fingerprint_injection=fingerprint_injection,
                                 agent_id=agent_id,
+                                provider=promoted_metadata.get("provider")
+                                or config_result.get("provider"),
                                 config=config,
                                 task_id=task_id,
                             )
@@ -8728,10 +8808,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         session_id = config_result.get("session_id", session_id)
                         browser_url = config_result.get("debug_url", browser_url)
                         cdp_url = new_cdp_url
-                        browser_session_metadata = _updated_rotation_session_metadata(
-                            browser_session_metadata,
-                            dict(config_result),
-                        )
+                        browser_session_metadata = promoted_metadata
                         # Preloaded winners already applied auth/origin state during
                         # candidate probes. Re-running origin restore clears
                         # localStorage and rewrites the challenged capture onto the
@@ -9272,6 +9349,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             execution_time_ms,
                             usage_by_model,
                             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                            provider=browser_session_metadata.get("provider"),
                         )
                         await _propagate_browser_credentials_with_progress(
                             config=config,
@@ -9952,6 +10030,14 @@ Based on this feedback, I need to continue working on the task and address the i
                 return resume_result
 
             if result.get("success", True):
+                awaiting_observation_checkpoint = _preserve_observed_interaction_for_verifier(
+                    action_name=action_name,
+                    succeeded=True,
+                    awaiting_observation=awaiting_observation_checkpoint,
+                    observed_state=observe_page_state,
+                    current_url=current_url,
+                    verifier_checkpoints=verifier_checkpoints,
+                )
                 logger.info(
                     f"Action {action_name} successful",
                     agent_id=agent_id,
@@ -10205,6 +10291,7 @@ Based on this feedback, I need to continue working on the task and address the i
             execution_time_ms,
             usage_by_model,
             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+            provider=browser_session_metadata.get("provider"),
         )
         await _propagate_browser_credentials_with_progress(
             config=config,

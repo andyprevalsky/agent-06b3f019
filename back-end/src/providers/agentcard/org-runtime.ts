@@ -151,7 +151,10 @@ function shouldRetryOrgMcpError(error: unknown): boolean {
   return looksLikeRateLimitError(error) || looksLikeTransientUnavailableError(error);
 }
 
-function mcpStructuredResultIsTransientlyUnavailable(result: unknown): string | undefined {
+function mcpStructuredResultRetryableError(
+  result: unknown,
+  toolName: string
+): AgentCardOrgRuntimeError | undefined {
   if (typeof result !== 'object' || result === null) return undefined;
   const record = result as Record<string, unknown>;
   const structured =
@@ -160,29 +163,39 @@ function mcpStructuredResultIsTransientlyUnavailable(result: unknown): string | 
       : record;
   const message = typeof structured.message === 'string' ? structured.message : '';
   const status = structured.status;
-  if (
-    (status === 'error' || status === 'unavailable') &&
-    /temporarily unavailable|service unavailable/i.test(message)
-  ) {
-    return message;
+  if (status !== 'error' && status !== 'unavailable') return undefined;
+  if (looksLikeRateLimitError(message)) {
+    return new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP ${toolName} is rate limited: ${message}`,
+      429,
+      'agentcard_org_mcp_rate_limited',
+      { tool: toolName, message }
+    );
+  }
+  if (/temporarily unavailable|service unavailable/i.test(message)) {
+    return new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP ${toolName} is temporarily unavailable: ${message}`,
+      503,
+      'agentcard_org_mcp_unavailable',
+      { tool: toolName, message }
+    );
   }
   return undefined;
 }
 
 /**
- * AgentCard also reports its upstream API-key throttle as an HTTP-200 tools/call result rather than
- * a transport 429 — `isError` text or a `{status:"error"}` body reading "<tool> failed: API key rate
- * limit exceeded, please try again later", with no `retryAfter` — so it never reaches the
- * thrown-error retry path on its own.
+ * AgentCard also reports its upstream API-key throttle as an HTTP-200 `isError` tools/call result
+ * without a structured status ("<tool> failed: API key rate limit exceeded, please try again
+ * later", no `retryAfter`), which {@link mcpStructuredResultRetryableError} cannot see.
  */
 function mcpToolResultRateLimitMessage(result: unknown): string | undefined {
   if (typeof result !== 'object' || result === null) return undefined;
   const record = result as Record<string, unknown>;
+  if (record.isError !== true) return undefined;
   const structured =
     typeof record.structuredContent === 'object' && record.structuredContent !== null
       ? (record.structuredContent as Record<string, unknown>)
       : record;
-  if (record.isError !== true && structured.status !== 'error') return undefined;
   const text = (Array.isArray(record.content) ? record.content : [])
     .map((part) => (part as { text?: unknown } | null)?.text)
     .filter((part): part is string => typeof part === 'string' && part !== '')
@@ -415,10 +428,10 @@ export class AgentCardOrgRuntime {
   /**
    * Calls an organization MCP tool, transparently recovering from the failure modes that are
    * expected on a healthy provider: a flaky MCP 401/403 on `tools/call` (retry once), a throttled
-   * request window (wait for the window to refill, bounded), a structured
-   * `{status:"error", message:"…temporarily unavailable"}` tools/call result (HTTP 200 with a
-   * sandbox outage), and a read whose tools/call result reports an upstream API-key throttle
-   * (retried exactly like a transport throttle). Everything else propagates untouched.
+   * request window (wait for the window to refill, bounded), a structured `{status:"error"}`
+   * tools/call result (HTTP 200) reporting a sandbox outage or rate limit, and a read whose
+   * text-only `isError` result reports an upstream API-key throttle (retried exactly like a
+   * transport throttle). Everything else propagates untouched.
    *
    * A throttle used to escape as a raw transport error, so every caller that lacked its own
    * rate-limit handling turned a few seconds of provider backpressure into a hard failure.
@@ -454,17 +467,10 @@ export class AgentCardOrgRuntime {
       const startedAtMs = Date.now();
       try {
         const result = await this.callToolOnce(toolName, args);
-        const transient = mcpStructuredResultIsTransientlyUnavailable(result);
-        if (transient !== undefined) {
-          throw new AgentCardOrgRuntimeError(
-            `AgentCard Organization MCP ${toolName} is temporarily unavailable: ${transient}`,
-            503,
-            'agentcard_org_mcp_unavailable',
-            { tool: toolName, message: transient }
-          );
-        }
-        // Only reads are replayed: a tool-level throttle can arrive after a multi-step mutation's
-        // earlier upstream steps already changed provider state.
+        const retryableError = mcpStructuredResultRetryableError(result, toolName);
+        if (retryableError !== undefined) throw retryableError;
+        // A text-only throttle carries no structured status, so only reads are replayed: it can
+        // arrive after a multi-step mutation's earlier upstream steps already changed provider state.
         const throttled = IDEMPOTENT_READ_TOOLS.has(toolName)
           ? mcpToolResultRateLimitMessage(result)
           : undefined;

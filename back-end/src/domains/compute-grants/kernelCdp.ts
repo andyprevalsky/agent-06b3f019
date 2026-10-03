@@ -1,8 +1,8 @@
 /**
  * Kernel-backed CDP provider for cloud grant minting and account connect.
  *
- * Kernel is the DEFAULT provider for this domain; Steel remains available behind
- * `COMPUTE_GRANT_BROWSER_PROVIDER=steel` as a fallback.
+ * Kernel is the DEFAULT provider for this domain; Steel and Browser Use remain
+ * available through `COMPUTE_GRANT_BROWSER_PROVIDER`.
  *
  * Isolated in its own file so the rest of the compute-grants domain never pulls
  * in the browser stack -- repo, service and orchestrator all stay runnable (and
