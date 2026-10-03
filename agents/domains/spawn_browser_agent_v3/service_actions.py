@@ -1710,11 +1710,6 @@ async def execute_action(
         if index is not None:
             element = dom_service.selector_map.get(index)
             if not element:
-                # A resumed browser activity restores the model's page transcript
-                # before the new DOMService has rebuilt its live selector map.
-                await dom_service.get_browser_state(include_screenshot=False)
-                element = dom_service.selector_map.get(index)
-            if not element:
                 # Payment inputs inside open shadow roots can be visible in the
                 # browser state without a selector-map entry. Let the approved
                 # card-ref path locate the field semantically across roots and

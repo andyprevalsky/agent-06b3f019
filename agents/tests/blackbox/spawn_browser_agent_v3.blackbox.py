@@ -9382,13 +9382,11 @@ async def test_execute_action_element_not_found():
     dom.session = MagicMock()
     dom.selector_map = {}
     dom.ensure_browser_overlays_suppressed = AsyncMock()
-    dom.get_browser_state = AsyncMock(return_value={"dom_tree": ""})
     ah = MagicMock()
     ah.record_action = AsyncMock()
     out = await execute_action(dom, ah, {"action": "click", "index": 5})
     assert out["success"] is False
     assert "index 5 not found" in out["error"]
-    dom.get_browser_state.assert_awaited_once_with(include_screenshot=False)
 
 async def test_execute_action_unknown_action():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -11291,7 +11289,6 @@ async def test_execute_action_scroll_missing_element_index_errors():
     dom = MagicMock()
     dom.session = MagicMock()
     dom.selector_map = {}
-    dom.get_browser_state = AsyncMock(return_value={"dom_tree": ""})
     dom.get_element_coordinates = AsyncMock(return_value=None)
     ah = MagicMock()
     ah.record_action = AsyncMock()
@@ -11305,7 +11302,6 @@ async def test_execute_action_scroll_missing_element_index_errors():
     )
     assert out["success"] is False
     assert out["error"] == "Element with index 34 not found"
-    dom.get_browser_state.assert_awaited_once_with(include_screenshot=False)
     hu.scroll.assert_not_awaited()
 
 
@@ -16280,79 +16276,6 @@ async def test_fill_payment_ref_via_titled_payment_iframe():
             assert value.replace(" ", "") == "4111111111111111"
         finally:
             await browser.close()
-
-
-class _ResumedBrowserDOMWithoutIndex:
-    """A resumed browser has model-visible indices but a fresh, empty DOM cache."""
-
-    def __init__(self, *, recoverable: bool):
-        self.session = object()
-        self.selector_map = {}
-        self.recoverable = recoverable
-        self.ensure_browser_overlays_suppressed = AsyncMock()
-        self.refreshes = 0
-
-    async def get_browser_state(self, include_screenshot=True):
-        assert include_screenshot is False
-        self.refreshes += 1
-        if self.recoverable:
-            self.selector_map = {7: object()}
-        return {"dom_tree": "[7]<input id=card-number />" if self.recoverable else ""}
-
-
-async def test_resumed_payment_ref_index_rebuilds_live_selector_map_once():
-    """An approved card ref must reach semantic fill after the activity resumes."""
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    dom = _ResumedBrowserDOMWithoutIndex(recoverable=True)
-    history = MagicMock()
-    history.record_action = AsyncMock()
-    direct_fill = AsyncMock(return_value={"filled": True, "selector": "input[autocomplete=cc-number]"})
-    with (
-        patch.object(service_actions, "wait_for_payment_ref_fields", AsyncMock(return_value=True)),
-        patch.object(service_actions, "_fill_payment_ref_directly", direct_fill),
-    ):
-        result = await service_actions.execute_action(
-            dom,
-            history,
-            {"action": "input_text", "index": 7, "params": {"text": "card_number"}},
-            secret_refs={
-                "card_number": "4242424242428693",
-                "card_name": "Rose Test",
-                "card_expiry": "12/30",
-                "card_cvv": "123",
-            },
-            write_lock_enabled=False,
-            current_url="https://shop.example.test/test_payment",
-        )
-
-    assert result["success"] is True
-    assert result["payment_ref_direct_fill"] is True
-    assert set(result["payment_refs_filled"]) == {
-        "card_number", "card_name", "card_expiry", "card_cvv"
-    }
-    assert dom.refreshes == 1
-    assert direct_fill.await_count == 4
-    history.record_action.assert_awaited_once()
-
-
-async def test_invalid_payment_ref_index_still_fails_after_one_live_refresh():
-    """A genuinely absent target must not fall through to focused secret typing."""
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    dom = _ResumedBrowserDOMWithoutIndex(recoverable=False)
-    interaction = AsyncMock()
-    with patch.object(service_actions, "_execute_interaction_action", interaction):
-        result = await service_actions.execute_action(
-            dom,
-            object(),
-            {"action": "input_text", "index": 7, "params": {"text": "card_number"}},
-            secret_refs={"card_number": "4242424242428693"},
-        )
-
-    assert result == {"success": False, "error": "Element with index 7 not found"}
-    assert dom.refreshes == 1
-    interaction.assert_not_awaited()
 
 
 async def test_execute_input_text_payment_secret_ref_fail_closed_without_target():
@@ -24104,14 +24027,6 @@ async def run_all_tests():
     await r.record_async(
         "fill_payment_ref_via_titled_payment_iframe",
         test_fill_payment_ref_via_titled_payment_iframe,
-    )
-    await r.record_async(
-        "resumed_payment_ref_index_rebuilds_live_selector_map_once",
-        test_resumed_payment_ref_index_rebuilds_live_selector_map_once,
-    )
-    await r.record_async(
-        "invalid_payment_ref_index_still_fails_after_one_live_refresh",
-        test_invalid_payment_ref_index_still_fails_after_one_live_refresh,
     )
     await r.record_async(
         "execute_input_text_payment_secret_ref_fail_closed_without_target",
