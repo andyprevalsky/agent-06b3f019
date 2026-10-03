@@ -328,3 +328,68 @@ async function indexArchivedTraceFromR2Unlocked(
     !finalized
   );
 }
+
+export interface LiveMessageBackfillBatch {
+  /** Highest Message.id scanned; pass it back as `afterId` for the next batch. */
+  lastMessageId: string | null;
+  scanned: number;
+  inserted: number;
+}
+
+/**
+ * Index one bounded, id-ordered batch of live SQL messages that predate the
+ * projection triggers. Each call scans at most `limit` messages through the
+ * primary key, so every statement stays far inside the pooler's statement
+ * timeout regardless of total message volume. Rows mirror the
+ * `sync_agent_trajectory_search` trigger; existing rows are left untouched.
+ */
+export async function backfillLiveMessageSearchBatch(
+  afterId: string | null,
+  limit: number
+): Promise<LiveMessageBackfillBatch> {
+  const batch = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT m.id FROM "Message" m
+    WHERE ${afterId === null ? Prisma.sql`TRUE` : Prisma.sql`m.id > ${afterId}`}
+    ORDER BY m.id
+    LIMIT ${limit}
+  `);
+  if (batch.length === 0) return { lastMessageId: afterId, scanned: 0, inserted: 0 };
+  const lastMessageId = batch[batch.length - 1].id;
+  const inserted = await prisma.$executeRaw(Prisma.sql`
+    WITH RECURSIVE batch AS (
+      SELECT m.id, m."agentId", m.role, m."createdAt", m.text
+      FROM "Message" m
+      WHERE ${afterId === null ? Prisma.sql`TRUE` : Prisma.sql`m.id > ${afterId}`}
+        AND m.id <= ${lastMessageId}
+    ),
+    lineage AS (
+      SELECT a.id AS agent_id, a.id, a."parentAgentId", ARRAY[a.id] AS visited, 0 AS depth
+      FROM "Agent" a
+      WHERE a.id IN (SELECT DISTINCT "agentId" FROM batch)
+      UNION ALL
+      SELECT lineage.agent_id, parent.id, parent."parentAgentId",
+             lineage.visited || parent.id, lineage.depth + 1
+      FROM lineage
+      JOIN "Agent" parent ON parent.id = lineage."parentAgentId"
+      WHERE NOT parent.id = ANY(lineage.visited)
+    ),
+    roots AS (
+      SELECT DISTINCT ON (agent_id) agent_id, id AS root_id
+      FROM lineage
+      ORDER BY agent_id, depth DESC
+    )
+    INSERT INTO "AgentTrajectorySearch" (
+      "messageId", "userId", "rootAgentId", "agentId", "surface", "role", "createdAt",
+      "searchText", "agentGoal", "agentTitle"
+    )
+    SELECT b.id, root."userId", roots.root_id, a.id, a.source::text, b.role::text,
+           b."createdAt", b.text, a.goal, a.title
+    FROM batch b
+    JOIN "Agent" a ON a.id = b."agentId"
+    JOIN roots ON roots.agent_id = a.id
+    JOIN "Agent" root ON root.id = roots.root_id
+    WHERE btrim(b.text) <> '' AND b.role::text <> 'SYSTEM' AND root."userId" IS NOT NULL
+    ON CONFLICT ("messageId") DO NOTHING
+  `);
+  return { lastMessageId, scanned: batch.length, inserted };
+}

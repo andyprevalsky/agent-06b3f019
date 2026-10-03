@@ -4,12 +4,65 @@ import 'dotenv/config';
 import { listArchiveBundleIdsStrict } from '../src/providers/traceArchiveAudit';
 import {
   ArchivedTraceNotFoundError,
+  backfillLiveMessageSearchBatch,
   indexArchivedTraceFromR2,
 } from '../src/providers/traceArchiveSearchIndex';
 import { prisma } from '../src/providers/database';
 
+/**
+ * Index live SQL messages written before the projection triggers existed, in
+ * id-ordered batches so no statement approaches the pooler's statement timeout.
+ * Idempotent and resumable: rerun with `--after <last cursor>` after an abort.
+ */
+async function backfillLiveMessages(args: string[]): Promise<void> {
+  const usage =
+    'Usage: backfill-agent-trajectory-search.ts --live-messages [--batch-size 1..10000] [--after <message id>]';
+  const sizeArg = args.indexOf('--batch-size');
+  const afterArg = args.indexOf('--after');
+  const batchSize = sizeArg >= 0 ? Number(args[sizeArg + 1]) : 2000;
+  const operands = new Set([sizeArg + 1, afterArg + 1].filter((index) => index > 0));
+  if (
+    !Number.isInteger(batchSize) ||
+    batchSize < 1 ||
+    batchSize > 10_000 ||
+    (afterArg >= 0 && (!args[afterArg + 1] || args[afterArg + 1].startsWith('-'))) ||
+    args.some(
+      (arg, index) => !operands.has(index) && arg !== '--batch-size' && arg !== '--after'
+    ) ||
+    args.filter((arg) => arg === '--batch-size' || arg === '--after').length !==
+      Number(sizeArg >= 0) + Number(afterArg >= 0)
+  ) {
+    throw new Error(usage);
+  }
+  let afterId: string | null = afterArg >= 0 ? args[afterArg + 1] : null;
+  let scanned = 0;
+  let inserted = 0;
+  let batches = 0;
+  for (;;) {
+    const batch = await backfillLiveMessageSearchBatch(afterId, batchSize);
+    if (batch.scanned === 0) break;
+    afterId = batch.lastMessageId;
+    scanned += batch.scanned;
+    inserted += batch.inserted;
+    batches += 1;
+    if (batches % 50 === 0) {
+      process.stderr.write(
+        `Scanned ${scanned} messages (${inserted} indexed); cursor ${afterId}\n`
+      );
+    }
+  }
+  await prisma.$executeRaw`ANALYZE "AgentTrajectorySearch"`;
+  process.stdout.write(
+    JSON.stringify({ mode: 'live-messages', scanned, inserted, batches, cursor: afterId }) + '\n'
+  );
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  if (args[0] === '--live-messages') {
+    await backfillLiveMessages(args.slice(1));
+    return;
+  }
   const usage =
     'Usage: backfill-agent-trajectory-search.ts [--root-agent-id <id> | --user-id <id> | --all-users] [--scan-r2 with --user-id or --all-users] [--concurrency 1..32]';
   const rootArg = args.indexOf('--root-agent-id');
