@@ -4,8 +4,9 @@
  * Mirrors agents/helpers/observability.py:
  *   .llm-dumps/<agent_id>/<timestamp>-<span_id>-<call_site>.json
  *
- * Production is detected the same way as the Python helper: Fly sets
- * FLY_APP_NAME. Dump failures are best-effort and never affect the LLM call.
+ * Production is Fly (FLY_APP_NAME, as in the Python helper) or Render, which sets
+ * NODE_ENV=production but not FLY_APP_NAME. Dump failures are best-effort and
+ * never affect the LLM call.
  */
 
 import fs from 'node:fs';
@@ -16,7 +17,10 @@ import { currentTraceContext } from './tracing';
 
 const log = createLogger('LlmDump');
 
-const IS_PRODUCTION = process.env.FLY_APP_NAME !== undefined;
+function isProduction(): boolean {
+  return process.env.FLY_APP_NAME !== undefined || process.env.NODE_ENV === 'production';
+}
+
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const DUMP_ROOT = path.join(REPO_ROOT, '.llm-dumps');
 
@@ -53,7 +57,7 @@ export interface LlmDumpPayload {
 }
 
 export function dumpLlmContext(payload: LlmDumpPayload): string | null {
-  if (IS_PRODUCTION) return null;
+  if (isProduction()) return null;
 
   try {
     const trace = currentTraceContext();
@@ -99,7 +103,7 @@ export function dumpLlmContext(payload: LlmDumpPayload): string | null {
 }
 
 export function updateLlmDump(dumpPath: string | null, patch: Record<string, unknown>): void {
-  if (IS_PRODUCTION || dumpPath === null) return;
+  if (isProduction() || dumpPath === null) return;
 
   try {
     const parsed = JSON.parse(fs.readFileSync(dumpPath, 'utf8')) as Record<string, unknown>;
