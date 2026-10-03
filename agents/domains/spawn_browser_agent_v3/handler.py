@@ -6359,7 +6359,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 "status": "completed",
                 "success": False,
                 "user_declined_auth": True,
-                "message": f"User declined to sign in to {auth_realm or 'the site'}; sign-in is still required.",
+                "message": f"User declined to sign in to {auth_realm or 'the site'}. Do not look for another way in; tell the user.",
                 "browser_url": browser_url,
                 "task_id": task_id,
                 "usage_items": [],
