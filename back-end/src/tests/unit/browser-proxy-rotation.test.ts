@@ -490,6 +490,7 @@ async function testCrossProviderLadderLabelsSteelExitIpReads(): Promise<void> {
       rotations_used: 4,
       rotations_remaining: 0,
       next_recovery: 'rotation_budget_exhausted',
+      browser_session_metadata: { provider: 'steel', steel_profile_id: 'profile-1' },
       session_id: 'steel-session-2',
       ws_url: 'wss://steel/2',
     },
