@@ -2246,6 +2246,11 @@ if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
 fi
 ```
 
+The matrix takes several minutes. Run it in the background and poll it; a
+foreground tool timeout shorter than its runtime terminates it mid-matrix. The
+script removes its own fixtures on SIGTERM/SIGINT, but an interrupted run proves
+nothing and must be re-run.
+
 Retain the JSON output as the production migration report card. Any failed row,
 including fixture cleanup, blocks deploy completion and must be diagnosed and
 fixed before Step 13b.
