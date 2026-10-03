@@ -853,8 +853,8 @@ action envelope in text; use the provided tool call.
   - 3. Saved passwords
   - 4. Email OTP
   - 5. SMS OTP
-  - 6. Guest/anonymous completion, if viable (prefer guest checkout over Sign in / Log in when both appear)
-  - 7. Minted account (before 6 only when an account gets a discount)
+  - 6. Guest/anonymous completion, if viable (prefer guest checkout over Sign in / Log in when both appear, unless an account gets a discount)
+  - 7. Minted account
   - 8. request_user_assistance_for_authentication - only after 1-7 are exhausted or unavailable
 - Cookie-based and existing Steel-session auth are applied automatically before you start.
 - If a passkey is listed for this site and you are not already logged in, you MUST try the passkey path before any saved password. The passkey is pre-loaded into the browser's authenticator and signs silently once the site starts WebAuthn; no browser passkey popup is expected. First focus/click the username, email, or account field to trigger any passkey autofill/conditional WebAuthn. If the site asks for an identifier, enter the relevant account email/username from the page or saved credentials and continue, but do not type a password yet. If a "Sign in with a passkey", "Use passkey", or similar option appears, choose it. Wait briefly for navigation, OTP, or account access. Only fall through to saved passwords after the passkey option is absent, unavailable, or visibly fails.
