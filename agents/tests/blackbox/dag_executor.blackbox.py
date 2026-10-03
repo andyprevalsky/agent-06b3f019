@@ -213,6 +213,200 @@ def test_extract_plan_from_context_ignores_in_progress():
     assert extract_plan_from_context(context) is None
 
 
+def _plan_followup_context(*, include_final_summary: bool, later_user: bool, final_summary_flag: bool = True):
+    messages = [
+        {"role": "USER", "text": "order me glide floss from doordash", "metadata": None},
+        {
+            "role": "TOOL",
+            "text": "plan",
+            "metadata": {
+                "toolName": "set_plan",
+                "toolStatus": "FINISHED",
+                "data": {"tasks": [{"goal": "x", "tool_name": "spawn_explore_agent"}]},
+            },
+        },
+    ]
+    if include_final_summary:
+        messages.append(
+            {
+                "role": "TOOL",
+                "text": "done",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "isFinalSummary": final_summary_flag,
+                },
+            }
+        )
+    if later_user:
+        messages.append(
+            {
+                "role": "USER",
+                "text": "get a refund, the doordasher delivered to the wrong location",
+                "metadata": None,
+            }
+        )
+    return messages
+
+
+def test_plan_superseded_by_user_after_final_summary():
+    """USER after Task Complete makes the historical plan stale."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    assert plan_superseded_by_new_user_instruction(
+        _plan_followup_context(include_final_summary=True, later_user=True)
+    )
+
+
+def test_plan_superseded_by_final_summary_without_later_user():
+    """Task Complete alone makes the historical plan stale for a new execute."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    assert plan_superseded_by_new_user_instruction(
+        _plan_followup_context(include_final_summary=True, later_user=False)
+    )
+
+
+def test_plan_superseded_by_user_after_set_plan_without_summary():
+    """FAILED / credit-kill follow-up after set_plan stales the DAG without Task Complete."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    assert plan_superseded_by_new_user_instruction(
+        _plan_followup_context(include_final_summary=False, later_user=True)
+    )
+
+
+def test_plan_not_superseded_by_hidden_user_after_set_plan():
+    """Schema-refresh USER rows do not stale a live incomplete plan."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    context = _plan_followup_context(include_final_summary=False, later_user=False)
+    context.append(
+        {
+            "role": "USER",
+            "text": "generated schema",
+            "metadata": {"hidden": True, "isResponseSchemaUpdate": True},
+        }
+    )
+    assert not plan_superseded_by_new_user_instruction(context)
+
+
+def test_plan_not_superseded_by_non_final_summary_without_later_user():
+    """A non-final completion_summary without a later USER leaves the plan live."""
+    from loop.dag_executor import plan_superseded_by_new_user_instruction
+
+    assert not plan_superseded_by_new_user_instruction(
+        _plan_followup_context(include_final_summary=True, later_user=False, final_summary_flag=False)
+    )
+
+
+def test_latest_real_user_instruction_skips_hidden_schema_updates():
+    """Hidden schema-refresh USER rows are not the latest real instruction."""
+    from loop.dag_executor import latest_real_user_instruction
+
+    context = _plan_followup_context(include_final_summary=True, later_user=True)
+    context.append(
+        {
+            "role": "USER",
+            "text": "generated schema",
+            "metadata": {"hidden": True, "isResponseSchemaUpdate": True},
+        }
+    )
+    assert latest_real_user_instruction(context) == "get a refund, the doordasher delivered to the wrong location"
+
+
+def test_latest_real_user_instruction_empty():
+    from loop.dag_executor import latest_real_user_instruction
+
+    assert latest_real_user_instruction([]) is None
+    assert latest_real_user_instruction([{"role": "TOOL", "text": "done", "metadata": {}}]) is None
+
+
+def _raw_history_with_compaction_checkpoint(*, followup: str) -> list[dict]:
+    """First-run history that compacted, then completed, then a new USER.
+
+    The huge raw tool dump must not re-enter the next root run. Polling
+    projects from the latest context_reset and keeps the post-checkpoint tail.
+    """
+    from helpers.context_compaction import build_context_compaction_metadata
+
+    compressed = [
+        {"role": "USER", "text": "order me glide floss from doordash", "metadata": {}},
+        {
+            "role": "USER",
+            "text": "Compaction summary: ordered Oral-B Glide floss on DoorDash; confirmation dff187de.",
+            "metadata": {"compactionSummary": True},
+        },
+        {
+            "role": "TOOL",
+            "text": "Plan created",
+            "metadata": {
+                "toolName": "set_plan",
+                "toolStatus": "FINISHED",
+                "data": {
+                    "type": "plan_artifact",
+                    "join": "all",
+                    "tasks": [
+                        {
+                            "goal": "Research the public DoorDash shopping route for ordering floss.",
+                            "tool_name": "spawn_explore_agent",
+                        }
+                    ],
+                    "dependencies": {},
+                },
+            },
+        },
+    ]
+    return [
+        {"role": "USER", "text": "order me glide floss from doordash", "metadata": {}},
+        {
+            "role": "TOOL",
+            "text": "Very large raw tool output from the first DoorDash order run",
+            "metadata": {},
+        },
+        {
+            "role": "TOOL",
+            "text": "Context compressed — continuing with summarized history.",
+            "metadata": {
+                "toolName": "context_reset",
+                "toolStatus": "FINISHED",
+                "contextCompaction": build_context_compaction_metadata(compressed),
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Your DoorDash order is confirmed.",
+            "metadata": {
+                "toolName": "completion_summary",
+                "toolStatus": "FINISHED",
+                "isFinalSummary": True,
+            },
+        },
+        {"role": "USER", "text": followup, "metadata": None},
+    ]
+
+
+def test_followup_after_compaction_projects_last_checkpoint_and_stales_plan():
+    """A later root run must resume the last compression, not the raw first-run dump."""
+    from helpers.context_compaction import project_model_context_after_compaction
+    from loop.dag_executor import (
+        extract_plan_from_context,
+        latest_real_user_instruction,
+        plan_superseded_by_new_user_instruction,
+    )
+
+    followup = "get a refund, the doordasher delivered to the wrong location"
+    raw = _raw_history_with_compaction_checkpoint(followup=followup)
+    projected = project_model_context_after_compaction(raw)
+
+    assert all(m.get("text") != "Very large raw tool output from the first DoorDash order run" for m in projected)
+    assert any((m.get("metadata") or {}).get("compactionSummary") for m in projected)
+    assert any((m.get("metadata") or {}).get("contextCompactionBoundary") for m in projected)
+    assert latest_real_user_instruction(projected) == followup
+    assert extract_plan_from_context(projected) is not None
+    assert plan_superseded_by_new_user_instruction(projected)
+
+
 def test_tool_aliases_constants():
     """TOOL_ALIASES and ALIAS_TYPE_OVERRIDES are correctly defined."""
     from loop.dag_executor import ALIAS_TYPE_OVERRIDES, TOOL_ALIASES
@@ -636,6 +830,90 @@ async def test_execute_dag_tool_llm_activity_args_match_signature():
     assert param_args[30] == "agent:agent-1:task:0:call:dag_param_populator"
 
 
+async def test_execute_dag_param_populator_never_adopts_a_stale_pending_context_slot():
+    """DAG param population must build ITS node's conversation, never a stale same-agent slot.
+
+    REGRESSION (2026-10-02, test-mass-agent-run-0): `_pending_llm_context` is keyed
+    only by agent_id and outlives a workflow that migrates to another worker. The
+    param populator wrote untagged slots and called call_llm_activity without a
+    token, so a slot left on a worker by another node (or by this workflow before it
+    migrated) was adopted as this node's prompt. The node's slot is now tagged with
+    its replay-stable tool_call_id and the activity receives the same token.
+    """
+    import json
+    from types import SimpleNamespace
+
+    from helpers.llm import _pending_llm_context, call_llm_activity
+
+    calls: list = []
+    slots_at_call: list = []
+    node_context = [{"role": "USER", "text": "DAG-NODE-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}]
+
+    def param_tool_calls(args):
+        slots_at_call.append(_pending_llm_context.get(args[0]))
+        return [{"tool": "web_search", "query": "x"}]
+
+    result, _events, _dag = await _run_execute_dag(
+        {"tasks": [{"goal": "Search", "tool_name": "web_search"}], "dependencies": {}},
+        param_tool_calls=param_tool_calls,
+        execute_activity_calls=calls,
+        context=node_context,
+    )
+    assert result["status"] == "completed"
+    param_args = next(c["args"] for c in calls if c["args"] and c["args"][8] == "dag_param_populator")
+    params = list(inspect.signature(call_llm_activity).parameters)
+    token = param_args[params.index("pending_context_token")] if len(param_args) > 32 else None
+    assert isinstance(token, str) and token.startswith("dag:"), f"param call carries no context token: {token!r}"
+    assert slots_at_call and slots_at_call[0][4] == token, "the DAG slot must carry the token passed to the activity"
+
+    sent: list = []
+    backend = AsyncMock(
+        return_value={
+            "agent": {"id": "agent-1"},
+            "messages": [{"role": "USER", "text": "BACKEND-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}],
+        }
+    )
+
+    async def capture_llm(**kwargs):
+        sent.append(json.dumps(kwargs["messages"]))
+        return (
+            SimpleNamespace(
+                response="",
+                tool_calls=[SimpleNamespace(model_dump=lambda: {"tool": "web_search", "query": "x"})],
+            ),
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            [],
+        )
+
+    stale_context = [{"role": "USER", "text": "STALE-OTHER-NODE-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}]
+    stale_slots = {
+        "legacy untagged slot": (stale_context, "test system prompt", None),
+        "another node's tagged slot": (stale_context, "test system prompt", None, "user-1", "dag:other-node"),
+    }
+    try:
+        with (
+            patch("helpers.llm.call_llm_structured_streaming", new=AsyncMock(side_effect=capture_llm)),
+            patch("helpers.fetch_config._fetch_agent_data_impl", new=backend),
+            patch("helpers.llm.asyncio.sleep", new=AsyncMock()),
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm.activity.in_activity", return_value=False),
+        ):
+            for label, stale in stale_slots.items():
+                _pending_llm_context["agent-1"] = stale
+                await call_llm_activity(*param_args)
+                assert "STALE-OTHER-NODE-CONTEXT" not in sent[-1], f"param call adopted a {label}"
+                assert "BACKEND-CONTEXT" in sent[-1], f"{label}: a token mismatch must refetch canonical context"
+
+            # Same worker: the node's own slot is used without a backend round trip.
+            fetches_before = backend.await_count
+            _pending_llm_context["agent-1"] = slots_at_call[0]
+            await call_llm_activity(*param_args)
+            assert "DAG-NODE-CONTEXT" in sent[-1]
+            assert backend.await_count == fetches_before
+    finally:
+        _pending_llm_context.pop("agent-1", None)
+
+
 async def test_execute_dag_alias_resolution_spawn_explore():
     """execute_dag resolves spawn_explore_agent alias to spawn_agent and applies type override."""
     plan_data = {
@@ -915,9 +1193,7 @@ async def test_execute_dag_exhausted_alias_retry_never_replays_committed_sibling
         return {"message": "spawned"}
 
     async def on_tokens(prompt_tokens, completion_tokens, model, **kwargs):
-        token_calls.append(
-            (prompt_tokens, completion_tokens, model, kwargs["call_site"], kwargs["cache_sequence_id"])
-        )
+        token_calls.append((prompt_tokens, completion_tokens, model, kwargs["call_site"], kwargs["cache_sequence_id"]))
 
     result, _events, dag = await _run_execute_dag(
         plan_data,
@@ -938,7 +1214,8 @@ async def test_execute_dag_exhausted_alias_retry_never_replays_committed_sibling
     assert [(name, goal) for name, goal, _id in recorded] == [("spawn_agent", "Research Tokyo")]
     assert len(token_calls) == 3
     assert all(
-        call == (
+        call
+        == (
             10,
             2,
             "test-model",
@@ -1007,6 +1284,39 @@ async def test_execute_dag_rejects_multiple_param_tool_calls():
     assert result["status"] == "needs_llm"
     assert recorded == []
     assert dag.tasks[0].state.value == "FAILED"
+
+
+async def test_execute_dag_generation_handoff_does_not_start_dependents():
+    """A deploy yield is not task success — dependents must not create more approvals.
+
+    Prod agent 262669d8 handed off call_phone_number #1, then the DAG treated
+    ``success: True, generation_handoff: True`` as completed and started three
+    more phone-call approvals, each leaving another pending attn_id.
+    """
+    plan_data = {
+        "tasks": [
+            {"goal": "Place the initial call", "tool_name": "call_phone_number"},
+            {"goal": "Conditional retry #1", "tool_name": "call_phone_number"},
+        ],
+        "dependencies": {"1": [0]},
+    }
+    started: list[str] = []
+
+    async def execute_tool(name, params, tool_call_id):
+        started.append(tool_call_id)
+        return {
+            "success": True,
+            "generation_handoff": True,
+            "handoff_task_queue": "navi-agent-tasks-live",
+            "message": "new code version deployed, retry this tool",
+        }
+
+    result, _events, dag = await _run_execute_dag(plan_data, execute_tool_impl=execute_tool)
+
+    assert result["status"] == "generation_handoff"
+    assert result["handoff_task_queue"] == "navi-agent-tasks-live"
+    assert len(started) == 1
+    assert dag.tasks[1].state.value != "COMPLETED"
 
 
 async def test_execute_dag_tool_failure_returns_needs_llm():
@@ -1148,7 +1458,7 @@ async def test_execute_dag_terminalizes_canceled_sibling_tool_event():
 
 def test_oai_demo_reasoning_fast_mode_step_uses_july_slot():
     """Leftover GPs must not shift catalog-demo assemble-final off July p:6."""
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
     from loop.dag_executor import (
         DAGTask,
         OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP,
@@ -1249,7 +1559,7 @@ async def test_execute_dag_strict_readonly_populate_miss_skips_without_error():
 
 async def test_execute_dag_skips_oai_demo_leftover_gp_after_for_each():
     """Catalog demo leftover GPs after for_each must not spawn — they desync assemble-final cache."""
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
 
     leftover_goal = "Create a 90-day content calendar for Andy Prevalsky"
     plan_data = {
@@ -1351,6 +1661,32 @@ async def run_all_tests():
     r.record("extract_plan_from_context_found", test_extract_plan_from_context_found)
     r.record("extract_plan_from_context_empty", test_extract_plan_from_context_empty)
     r.record("extract_plan_from_context_ignores_in_progress", test_extract_plan_from_context_ignores_in_progress)
+    r.record("plan_superseded_by_user_after_final_summary", test_plan_superseded_by_user_after_final_summary)
+    r.record(
+        "plan_superseded_by_final_summary_without_later_user",
+        test_plan_superseded_by_final_summary_without_later_user,
+    )
+    r.record(
+        "plan_superseded_by_user_after_set_plan_without_summary",
+        test_plan_superseded_by_user_after_set_plan_without_summary,
+    )
+    r.record(
+        "plan_not_superseded_by_hidden_user_after_set_plan",
+        test_plan_not_superseded_by_hidden_user_after_set_plan,
+    )
+    r.record(
+        "plan_not_superseded_by_non_final_summary_without_later_user",
+        test_plan_not_superseded_by_non_final_summary_without_later_user,
+    )
+    r.record(
+        "latest_real_user_instruction_skips_hidden_schema_updates",
+        test_latest_real_user_instruction_skips_hidden_schema_updates,
+    )
+    r.record("latest_real_user_instruction_empty", test_latest_real_user_instruction_empty)
+    r.record(
+        "followup_after_compaction_projects_last_checkpoint_and_stales_plan",
+        test_followup_after_compaction_projects_last_checkpoint_and_stales_plan,
+    )
     r.record("tool_aliases_constants", test_tool_aliases_constants)
     r.record(
         "dag_foreach_alias_override_passes_spawn_agent_validation",
@@ -1399,6 +1735,10 @@ async def run_all_tests():
         "execute_dag_tool_llm_activity_args_match_signature",
         test_execute_dag_tool_llm_activity_args_match_signature,
     )
+    await r.record_async(
+        "execute_dag_param_populator_ignores_stale_pending_ctx",
+        test_execute_dag_param_populator_never_adopts_a_stale_pending_context_slot,
+    )
     await r.record_async("execute_dag_alias_resolution_spawn_explore", test_execute_dag_alias_resolution_spawn_explore)
     await r.record_async(
         "execute_dag_repairs_stale_cached_explore_alias_without_live_retry",
@@ -1428,6 +1768,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_dag_rejects_multiple_param_tool_calls",
         test_execute_dag_rejects_multiple_param_tool_calls,
+    )
+    await r.record_async(
+        "execute_dag_generation_handoff_does_not_start_dependents",
+        test_execute_dag_generation_handoff_does_not_start_dependents,
     )
     await r.record_async("execute_dag_tool_failure_returns_needs_llm", test_execute_dag_tool_failure_returns_needs_llm)
     await r.record_async(

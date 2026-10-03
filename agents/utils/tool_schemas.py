@@ -15,6 +15,7 @@ from pydantic import (
     WithJsonSchema,
     create_model,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -27,6 +28,10 @@ from utils.prompts import (
     PLANNER_TASK_IDX_DESCRIPTION,
     PLANNER_TASK_TOOL_NAME_DESCRIPTION,
     SELF_CONTAINED_GOAL_RULE,
+)
+from utils.response_schema_constraints import (
+    bounds_from_entries,
+    coerce_direct_bounds_to_entries,
 )
 from utils.user_facing_writing_prompt import user_facing_text_description
 
@@ -143,12 +148,39 @@ ResponseSchemaPrimitiveType = Literal[
 ]
 
 
+class ResponseSchemaBound(BaseModel):
+    kind: Literal["minItems", "maxItems", "minLength", "maxLength"] = Field(
+        description="minItems/maxItems bound lists; minLength/maxLength bound strings."
+    )
+    value: int = Field(ge=0, description="Nonnegative bound value.")
+
+
 class ResponseSchemaNestedFieldConfig(BaseModel):
     """Configuration for a nested field in an object output."""
 
     name: str = Field(description="Field name in snake_case.")
     type: ResponseSchemaPrimitiveType = Field(description="Nested field type.")
     description: str = Field(default="", description="Optional semantic description; not used for object shape.")
+    required: bool = Field(default=True, description="False when this property may be omitted entirely.")
+    constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Declared bounds; empty when none.")
+    nullable: bool = Field(default=False, description="Whether null is a valid value; the field remains required.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_bounds(cls, value: Any) -> Any:
+        return coerce_direct_bounds_to_entries(value)
+
+    @model_validator(mode="after")
+    def _validate_constraints(self):
+        bounds_from_entries(self.type, self.constraints)
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        data.pop("constraints", None)
+        data.update(bounds_from_entries(self.type, self.constraints))
+        return data
 
 
 class ResponseSchemaFieldConfig(BaseModel):
@@ -177,6 +209,13 @@ class ResponseSchemaFieldConfig(BaseModel):
         default_factory=list,
         description="Explicit subfields for object/list[object] outputs. Required when type is object or list[object].",
     )
+    constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Declared bounds; empty when none.")
+    nullable: bool = Field(default=False, description="Whether null is a valid value; the field remains required.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_bounds(cls, value: Any) -> Any:
+        return coerce_direct_bounds_to_entries(value)
 
     @field_validator("properties", mode="before")
     @classmethod
@@ -187,14 +226,25 @@ class ResponseSchemaFieldConfig(BaseModel):
     def _object_fields_require_properties(self):
         if self.type in ("object", "list[object]") and not self.properties:
             raise ValueError("object and list[object] output_schema fields require explicit properties")
+        bounds_from_entries(self.type, self.constraints)
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        data.pop("constraints", None)
+        data.update(bounds_from_entries(self.type, self.constraints))
+        return data
 
 
 class ResponseSchemaConfig(BaseModel):
     """Structured output schema defining what data the agent must return when complete."""
 
     fields: List[ResponseSchemaFieldConfig] = Field(
-        description="List of output fields that the agent must return when complete."
+        description=(
+            "Output fields. Use file_pointer for open-ended multi-attribute collections; keep small results inline. "
+            "constraints set size bounds; required=false permits omission."
+        )
     )
 
     @model_validator(mode="before")
@@ -372,6 +422,14 @@ class WebFetchTool(BaseModel):
     )
 
 
+class GoogleOAuthDemoTool(BaseModel):
+    """Run the single synthetic Google OAuth video fixture on the root agent."""
+
+    tool: Literal["google_oauth_demo"] = Field(
+        description="Emit twelve in-memory DEMO cards for Gmail, Calendar, Drive, and disconnect."
+    )
+
+
 class ApiRequestTool(BaseModel):
     """Call a public HTTP API and return the full response body."""
 
@@ -432,10 +490,11 @@ class GrepTool(BaseModel):
     """Search local data sources with regex grep semantics."""
 
     tool: Literal["grep"]
-    pattern: str = Field(
+    pattern: Optional[str] = Field(
+        default=None,
         description=(
-            "Regular expression pattern to search for. Plain text works as a literal regex. "
-            "Use -i for case-insensitive matching and multiline for cross-line patterns."
+            "Regular expression over record text. Omit for agent_trajectories or "
+            "agent_network to list recent records using metadata filters."
         ),
     )
     sources: Optional[
@@ -448,6 +507,7 @@ class GrepTool(BaseModel):
                 "whatsapp",
                 "network",
                 "agent_network",
+                "agent_trajectories",
                 "transactions",
                 "documents",
                 "summary",
@@ -466,6 +526,13 @@ class GrepTool(BaseModel):
             "messages is the umbrella over all communication channels (use only when the channel "
             "is genuinely unknown). network searches contact records. agent_network searches all "
             "message roles in the current agent tree and returns role/location metadata. "
+            "agent_trajectories searches prior user-owned agent runs across chat, SMS, and "
+            "Temporal; it excludes the current agent tree. Results carry a trace path, "
+            "message role, and agent title as separate fields. "
+            "Trajectory record_kind=message is a stored agent message; llm_output is a model "
+            "response; llm_context is text passed to a model and may replay earlier turns. "
+            "Ordinary results include messages and outputs; record_kind=all includes replayed "
+            "inputs. "
             "transactions searches synced Plaid transaction rows. documents searches synced "
             "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents. "
             "summary returns a compact, precomputed inventory with message counts, date ranges, "
@@ -487,6 +554,7 @@ class GrepTool(BaseModel):
             "whatsapp",
             "network",
             "agent_network",
+            "agent_trajectories",
             "transactions",
             "documents",
             "summary",
@@ -494,6 +562,34 @@ class GrepTool(BaseModel):
     ] = Field(
         default=None,
         description="Legacy single-source alias for `sources`. Prefer `sources` (a list of the exact sources the task needs).",
+    )
+    role: Optional[Literal["USER", "ASSISTANT", "TOOL"]] = Field(
+        default=None,
+        description="Message role in agent_trajectories or agent_network. Implies agent_trajectories when sources are omitted.",
+    )
+    record_kind: Optional[Literal["message", "llm_output", "llm_context", "all"]] = Field(
+        default=None,
+        description="Agent trajectory record kind; message is the stored conversation record.",
+    )
+    surface: Optional[Literal["WEB", "MAC_APP", "SMS", "WHATSAPP"]] = Field(
+        default=None,
+        description="Agent trajectory origin surface.",
+    )
+    trace_path: Optional[str] = Field(
+        default=None,
+        description="Agent trajectory root path/UUID searches its entire child tree; a child path narrows to that agent, and a message path to one message.",
+    )
+    order: Optional[Literal["newest_first", "oldest_first"]] = Field(
+        default=None,
+        description="Order messages in one agent_trajectories search. Defaults to newest_first.",
+    )
+    page_after: Optional[str] = Field(
+        default=None,
+        description="For the next page of one agent_trajectories search, pass the previous result's next_page_after path with the same query and order.",
+    )
+    until: Optional[str] = Field(
+        default=None,
+        description="Latest timestamp for agent trajectory results (ISO 8601).",
     )
     require_source_access: Optional[bool] = Field(
         default=None,
@@ -551,6 +647,7 @@ class GrepTool(BaseModel):
             "  messages (and email, gmail, imessage, whatsapp): person, since, path\n"
             "  network: path\n"
             "  agent_network: path\n"
+            "  agent_trajectories: path, since, until, role, surface, record_kind\n"
             "  transactions: since, until, account, min_amount, max_amount, "
             "status ('posted', 'pending', or 'all'), include_pending_in_totals, path\n"
             "  documents: document_source, since, until, tag, path\n"
@@ -571,8 +668,8 @@ class GrepTool(BaseModel):
     since: Optional[str] = Field(
         default=None,
         description=(
-            "messages source only: only return messages at or after this time. "
-            "ISO 8601 timestamp or a relative form like 7d, 24h, 30m. Ignored for other sources."
+            "Messages or agent trajectories at or after this time. "
+            "ISO 8601 timestamp or a relative form like 7d, 24h, 30m."
         ),
     )
     model_config = ConfigDict(populate_by_name=True)
@@ -1122,6 +1219,7 @@ TOOL_MODELS: ToolRegistry = {
     "people_search": PeopleSearchTool,
     "web_fetch": WebFetchTool,
     "api_request": ApiRequestTool,
+    "google_oauth_demo": GoogleOAuthDemoTool,
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
     "spawn_agent": SpawnAgentTool,
@@ -1154,7 +1252,7 @@ EXPLORE_AGENT_TOOLS = ["web_search", "people_search", "web_fetch", "grep", "api_
 
 def get_explore_agent_tools() -> list[str]:
     """Explore tool names for injection, honoring ROSE_DISABLE_API_REQUEST."""
-    from domains.api_request.config import api_request_disabled
+    from utils.kill_switches import api_request_disabled
 
     if not api_request_disabled():
         return list(EXPLORE_AGENT_TOOLS)
@@ -1236,7 +1334,7 @@ def get_tool_models(*, phase: Optional[str] = None) -> ToolRegistry:
     ``ROSE_DISABLE_GENERAL_PURPOSE_AGENT`` is set so the LLM cannot select
     general_purpose / for_each.
     """
-    from domains.spawn_agent.config import general_purpose_agent_disabled
+    from utils.kill_switches import general_purpose_agent_disabled
 
     if phase == "plan":
         return dict(PLAN_TOOL_MODELS)
@@ -1248,7 +1346,7 @@ def get_tool_models(*, phase: Optional[str] = None) -> ToolRegistry:
 
 def get_planner_assignable_tools() -> list[str]:
     """Planner-assignable tool names, stripping GPA aliases when disabled."""
-    from domains.spawn_agent.config import general_purpose_agent_disabled
+    from utils.kill_switches import general_purpose_agent_disabled
 
     if not general_purpose_agent_disabled():
         return list(PLANNER_ASSIGNABLE_TOOLS)
@@ -1265,7 +1363,7 @@ def get_planner_assignable_tools() -> list[str]:
 
 def get_planner_response_model() -> Type[BaseModel]:
     """PlannerResponse model, with GPA aliases removed when the kill-switch is on."""
-    from domains.spawn_agent.config import general_purpose_agent_disabled
+    from utils.kill_switches import general_purpose_agent_disabled
 
     if not general_purpose_agent_disabled():
         return PlannerResponse

@@ -1,14 +1,22 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
+import { setInterval as every } from 'node:timers/promises';
 
 import { buildRouterCompletionOptions } from '../../providers/chat/routerLlm';
 import {
+  chatRouterCompletionTimeoutMs,
   createRouterCompletionDeadline,
   DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
   streamBeforeRouterCompletionDeadline,
 } from '../../providers/chat/routerCompletionDeadline';
 import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
+import {
+  CHAT_TIMEOUT_MS,
+  DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS,
+} from '../../providers/rose/cerebrasRoute';
+import { DEFAULT_CEREBRAS_CHAT_HEDGE_MS } from '../../providers/rose/exclusiveCerebrasChatRoute';
+import { DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS } from '../../providers/rose/openrouterFastRoute';
 import {
   parsePartialRouterDecisionJson,
   parseRouterDecisionAfterDeadline,
@@ -57,12 +65,44 @@ async function run(): Promise<void> {
     parseRouterDecisionJson('start_superintelligence(goal="ok", mode="plan");do_bad()')
   );
 
-  assert.equal(DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS, 3_000);
   assert.equal(
     parseRouterDecisionAfterDeadline('', ''),
     null,
     'a silent provider must surface the router deadline rather than inventing a decision'
   );
+
+  assert.equal(CHAT_TIMEOUT_MS, 15_000, 'chat gets 15s from the start of each request');
+  assert.equal(DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS, CHAT_TIMEOUT_MS);
+  assert.equal(
+    DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS,
+    8_000,
+    'direct Cerebras gets 8s from the start of its request'
+  );
+  assert.ok(
+    DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS < DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
+    'ending direct Cerebras must leave the failover racing inside the router attempt'
+  );
+  assert.equal(
+    DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS,
+    CHAT_TIMEOUT_MS,
+    'the failover branch that serves a Cerebras stall must not give up before the router does'
+  );
+  assert.ok(
+    DEFAULT_CEREBRAS_CHAT_HEDGE_MS < DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS,
+    'the hedge must start the failover while Cerebras is still racing'
+  );
+  const savedCompletion = process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS;
+  delete process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS;
+  assert.equal(chatRouterCompletionTimeoutMs(), 15_000);
+  process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS = '400';
+  assert.equal(chatRouterCompletionTimeoutMs(), 400);
+  for (const invalid of ['nope', '-1', '0']) {
+    process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS = invalid;
+    assert.equal(chatRouterCompletionTimeoutMs(), 15_000, `invalid override ${invalid}`);
+  }
+  if (savedCompletion === undefined) delete process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS;
+  else process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS = savedCompletion;
+
   assert.deepEqual(
     parsePartialRouterDecisionJson(
       '{"reasoning":"closed explanation","action":"direct_answer","query":"","goal":"","mode":"plan"'
@@ -118,10 +158,33 @@ async function run(): Promise<void> {
     'deadline recovery must fall back to complete fields from a partial response'
   );
 
-  const deadline = createRouterCompletionDeadline(5);
-  await new Promise<void>((resolve) => deadline.signal.addEventListener('abort', () => resolve()));
-  assert.equal(deadline.expired(), true, 'the completion deadline must abort a trickling stream');
-  deadline.dispose();
+  const silent = createRouterCompletionDeadline(20);
+  await new Promise<void>((resolve) => silent.signal.addEventListener('abort', () => resolve()));
+  assert.equal(silent.expired(), true, 'a silent stream must end at the deadline');
+  silent.dispose();
+
+  async function* trickle(): AsyncGenerator<number> {
+    let chunk = 0;
+    for await (const step of every(10, 1)) {
+      chunk += step;
+      yield chunk;
+    }
+  }
+  const tricklingStartedAt = performance.now();
+  const trickling = createRouterCompletionDeadline(150);
+  let trickled = 0;
+  for await (const chunk of streamBeforeRouterCompletionDeadline(trickle(), trickling)) {
+    trickled = chunk;
+  }
+  const trickledFor = Math.round(performance.now() - tricklingStartedAt);
+  assert.ok(trickled > 3, 'precondition: the stream kept making progress');
+  assert.equal(trickling.expired(), true);
+  // libuv arms timers from the event loop's cached clock, so a 150ms timer can
+  // fire a few milliseconds before 150ms of wall time have elapsed.
+  assert.ok(
+    trickledFor >= 140 && trickledFor < 400,
+    `the deadline runs from the attempt start; progress must not extend it (${trickledFor}ms)`
+  );
 
   let iteratorClosed = false;
   const uncooperativeStream: AsyncIterable<string> = {
@@ -148,7 +211,9 @@ async function run(): Promise<void> {
   assert.equal(iteratorClosed, true, 'deadline expiry must close an uncooperative iterator');
   hardDeadline.dispose();
 
-  process.stdout.write('PASS chat Router fallback is reasoning- and completion-bounded\n');
+  process.stdout.write(
+    'PASS chat Router fallback is reasoning- and completion-bounded at the 15s chat timeout\n'
+  );
 }
 
 void run().catch((error: unknown) => {

@@ -35,7 +35,8 @@
  *   - referential integrity: SmsShortcode has no FKs; agent lookup is a soft check
  *   - event/job cardinality: no async events emitted by these endpoints
  *   - duplication prevention: completion notifications are deduplicated per agent;
- *     other lifecycle event types remain intentionally repeatable
+ *     write_lock notifications allow the initial SMS plus one reminder per
+ *     attention request and skip any further send for the same kind
  *   - tenant isolation: all endpoints are internal (API key auth), not user-scoped
  *   - time/clock: no timestamps in response
  *   - call ordering: each endpoint makes at most 1 outbound Surge call
@@ -1151,7 +1152,7 @@ async function testBoundary_notifyCostLimitIncludesTaskGoal() {
     const body = JSON.parse(call.requestBody!);
     assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
     assert(
-      body.body.includes(`budget limit for "${goal}"`),
+      body.body.includes(`"${goal}" at the $1.50 budget limit`),
       `Expected cost-limit message to include task goal, got: ${body.body.substring(0, 160)}`
     );
     assert(
@@ -1204,6 +1205,61 @@ async function testBoundary_notifyWriteLockNaturalLanguageOnly() {
       `Expected no attention request id in SMS, got: ${body.body}`
     );
   } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
+async function testBoundary_notifyWriteLockAllowsOneReminderThenStops() {
+  const token = captureToken('notify-write-lock-reminder-cap');
+  const agent = await createNotifyAgent('write lock reminder cap agent');
+  const attentionRequestId = `attn-bb-${crypto.randomUUID()}`;
+  const question = 'Can I place the reminder-cap order for $19?';
+  const notify = (reminder: boolean) =>
+    request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'write_lock',
+        agent_id: agent.id,
+        payload: {
+          question,
+          attention_request_id: attentionRequestId,
+          workflow_id: 'wf-write-lock-reminder-cap',
+          reminder,
+        },
+      }),
+    });
+  try {
+    assertStatus((await notify(false)).status, 200);
+    assertStatus((await notify(false)).status, 200);
+    assertStatus((await notify(true)).status, 200);
+    assertStatus((await notify(true)).status, 200);
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, question);
+    if (surgeCalls.length === 0) {
+      console.log('    [skipped] No Surge calls -- Surge may not be configured');
+      return;
+    }
+    assert(surgeCalls.length === 2, `Expected initial + one reminder, got ${surgeCalls.length}`);
+    const initialBody = JSON.parse(surgeCalls[0]?.requestBody ?? '{}') as { body?: string };
+    const reminderBody = JSON.parse(surgeCalls[1]?.requestBody ?? '{}') as { body?: string };
+    assert(
+      initialBody.body?.includes(question) === true,
+      `Expected initial write-lock question, got: ${initialBody.body ?? ''}`
+    );
+    assert(
+      initialBody.body?.includes('Still waiting for your approval.') !== true,
+      `Expected no reminder prefix on the initial SMS, got: ${initialBody.body ?? ''}`
+    );
+    assert(
+      reminderBody.body?.includes('Still waiting for your approval.') === true,
+      `Expected reminder prefix, got: ${reminderBody.body ?? ''}`
+    );
+  } finally {
+    await prisma.toolSideEffect.deleteMany({
+      where: { operationKey: { startsWith: `lifecycle-sms.write_lock:${attentionRequestId}:` } },
+    });
     await prisma.agent.deleteMany({ where: { id: agent.id } });
   }
 }
@@ -1272,7 +1328,7 @@ async function testBoundary_notifyWriteLockStripsMarkdownAndKeepsFullDraft() {
       `Expected no markdown asterisks in SMS body, got: ${body.body}`
     );
     assert(
-      body.body.includes('Rose wants to send an Email'),
+      body.body.includes("I'm ready to send an Email"),
       `Expected plain Email label, got: ${body.body}`
     );
     assert(
@@ -1308,7 +1364,7 @@ async function testBoundary_notifyAgentCardSetupIncludesSetupLink() {
     });
     assertStatus(res.status, 200, res.data);
     const calls = await readCapturesForToken(token);
-    const surgeCalls = filterSurgeCalls(calls, 'One Time Agent Payment Setup');
+    const surgeCalls = filterSurgeCalls(calls, 'one-time AgentCard setup');
     if (surgeCalls.length === 0) {
       console.log('    [skipped] No Surge calls -- Surge may not be configured');
       return;
@@ -1319,7 +1375,7 @@ async function testBoundary_notifyAgentCardSetupIncludesSetupLink() {
     const body = JSON.parse(call.requestBody!);
     assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
     assert(
-      body.body.includes('One Time Agent Payment Setup'),
+      body.body.includes('one-time AgentCard setup'),
       `Expected setup label, got: ${body.body}`
     );
     assert(body.body.includes(setupUrl), `Expected setup link in SMS, got: ${body.body}`);
@@ -1394,11 +1450,7 @@ async function testBoundary_notifyWriteLockStructuredMms() {
     };
     assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
     assert(
-      body.body?.includes('Approval needed') === true,
-      `Expected approval header: ${body.body}`
-    );
-    assert(
-      body.body?.includes('Rose needs your approval for Amazon checkout.') === true,
+      body.body?.includes('I need your approval to check out at Amazon.') === true,
       `Expected carrier-safe checkout approval copy: ${body.body}`
     );
     assert(
@@ -1487,9 +1539,8 @@ async function testBoundary_notifyWriteLockGenericWriteReturn() {
     const body = JSON.parse(call.requestBody!) as { to?: string; body?: string };
     assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
     const text = body.body ?? '';
-    assert(text.includes('Approval needed'), `Expected approval header: ${text}`);
     assert(
-      text.includes('Rose wants to confirm Amazon return for Carhartt beanie on Amazon.'),
+      text.includes('I need your approval to confirm Amazon return for Carhartt beanie on Amazon.'),
       `Expected return action header: ${text}`
     );
     assert(!/checkout/i.test(text), `Expected no purchase checkout wording: ${text}`);
@@ -1563,7 +1614,7 @@ async function testBoundary_notifyWriteLockPaymentCardEnriched() {
     assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
     const text = body.body ?? '';
     assert(
-      text.includes('Rose needs your approval for Nopa Fish checkout.'),
+      text.includes('I need your approval to check out at Nopa Fish.'),
       `Expected merchant in payment-card SMS: ${text}`
     );
     assert(text.includes(itemName), `Expected item name: ${text}`);
@@ -1672,7 +1723,8 @@ async function testBoundary_notifyCompletionPreviewForBenchmark() {
     const lines = result.messagePreview?.split('\n') ?? [];
     assert(lines.length === 8, `Expected an 8-line completion preview, got ${lines.length}`);
     assert(
-      lines[0] === 'Done: Blue Bottle order was completed with the requested pickup configuration.',
+      lines[0] ===
+        'I finished the task: Blue Bottle order was completed with the requested pickup configuration.',
       `Expected normalized completion summary, got: ${lines[0] ?? ''}`
     );
     for (let index = 1; index <= 6; index += 1) {
@@ -1981,6 +2033,10 @@ async function runAll() {
         {
           name: 'notify write_lock uses natural language only',
           fn: testBoundary_notifyWriteLockNaturalLanguageOnly,
+        },
+        {
+          name: 'notify write_lock allows one reminder then stops',
+          fn: testBoundary_notifyWriteLockAllowsOneReminderThenStops,
         },
         {
           name: 'notify write_lock strips markdown and keeps full draft',

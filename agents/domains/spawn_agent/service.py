@@ -16,9 +16,9 @@ import structlog.contextvars
 from temporalio import activity
 
 from domains.spawn_agent.config import (
-    EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
+    LIVE_EXPLORE_PARENT_WAIT,
     explore_limits_for_depth,
     resolve_explore_depth,
     resolve_explore_oai_demo,
@@ -27,12 +27,16 @@ from domains.spawn_agent.repo import (
     _resolve_explore_attachments_activity as _resolve_explore_attachments_activity,
 )
 from domains.spawn_agent.repo import (
+    fetch_explore_tool_evidence as fetch_explore_tool_evidence,
+)
+from domains.spawn_agent.repo import (
     fetch_full_network_metadata as fetch_full_network_metadata,
 )
 from domains.spawn_agent.repo import (
     save_explore_message,
 )
 from domains.spawn_agent.types import VALID_AGENT_TYPES
+from helpers.activity_heartbeat import heartbeat_resume_details
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
@@ -40,6 +44,10 @@ from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 from utils.tool_schemas import get_explore_agent_tools
 
 logger = structlog.get_logger()
+
+# Return partial tool evidence before the live parent's 150s wait expires.
+# Leave room to drain pending FE posts and persist the final explore chip.
+LIVE_EXPLORE_DRAIN_SLACK_SECONDS = 15
 
 COMMON_CSV_HEADER_NAMES = {
     "address",
@@ -219,6 +227,16 @@ def compile_explore_wrap_up(
         return text
     parts = [_fallback_trace_text(item) for item in tool_call_results or []]
     return _bounded_explore_parts([part for part in parts if part], budget)
+
+
+def compile_explore_grep_evidence(tool_call_results: List[Any], *, budget: int = 6_000) -> str:
+    """Keep bounded, original grep results beside an explore agent's summary."""
+    grep_results = [
+        str(item).strip()
+        for item in tool_call_results
+        if str(item).lstrip().startswith("[grep]")
+    ]
+    return _bounded_explore_parts(list(dict.fromkeys(grep_results))[-3:], budget)
 
 
 _SOURCE_GOAL_TERMS = {
@@ -532,12 +550,14 @@ async def spawn_explore_agent_activity(
     # source_connect gate per unavailable source after this explore returns.
     unavailable_sources_collected: List[Dict] = []
 
+    # Every heartbeat replaces the details a timeout hands the parent, so the
+    # latest evidence also rides on beats from the LLM helpers run_agent calls.
+    resume_details: Dict[str, Any] = {}
+
     def _heartbeat_payload() -> Dict[str, Any]:
         compiled = compile_explore_wrap_up("", tool_call_results)
-        return {
-            "result": compiled,
-            "tool_call_results": list(tool_call_results[-8:]),
-        }
+        resume_details.update(result=compiled, tool_call_results=list(tool_call_results[-8:]))
+        return dict(resume_details)
 
     async def _heartbeat_loop() -> None:
         """Keep the activity alive during wrap-up LLM calls; details hold evidence."""
@@ -588,6 +608,9 @@ async def spawn_explore_agent_activity(
     # Background FE posts so fanout does not serialize on createMessage.
     # Fast Mode does not change this — cache only mocks external lib calls.
     _pending_fe_posts: "list[asyncio.Task]" = []
+    # A timeout can cancel the awaiter while a threshold drain is in progress.
+    # Keep those drains alive until final cleanup has observed their results.
+    _inflight_fe_drains: "list[asyncio.Task[None]]" = []
     # Tail of the in-flight post chain for each chip, keyed by toolCallId.
     _fe_post_chain: "dict[str, asyncio.Task]" = {}
     _FE_POST_DRAIN_THRESHOLD = 64
@@ -629,7 +652,10 @@ async def spawn_explore_agent_activity(
                 metadata["agentType"] = "explore"
                 metadata["subAgentId"] = task_id
                 tool_call_id = metadata.get("toolCallId")
-                chain_key = str(tool_call_id) if tool_call_id else None
+                # DEMO fixture cards have distinct visible IDs but belong to
+                # one ordered tool call. Preserve their script order in the FE.
+                chain_id = metadata.get("demoParentToolCallId") or tool_call_id
+                chain_key = str(chain_id) if chain_id else None
             _dispatch_fe_post(
                 chain_key,
                 lambda: call_temporal_activity_from_activity(activity_fn, args=args, **kwargs),
@@ -681,7 +707,9 @@ async def spawn_explore_agent_activity(
 
     async def _maybe_drain_pending_fe_posts() -> None:
         if len(_pending_fe_posts) >= _FE_POST_DRAIN_THRESHOLD:
-            await _drain_pending_fe_posts()
+            drain = asyncio.create_task(_drain_pending_fe_posts())
+            _inflight_fe_drains.append(drain)
+            await asyncio.shield(drain)
 
     # Send the system prompt verbatim. Contact + message-thread context is
     # fetched on-demand via the grep tool (network / agent_network_* / messages
@@ -779,7 +807,7 @@ async def spawn_explore_agent_activity(
                     ):
                         unavailable_sources_collected.append(normalized)
         elif tool_name == "api_request":
-            from domains.api_request.config import api_request_disabled
+            from utils.kill_switches import api_request_disabled
 
             if api_request_disabled():
                 return {
@@ -802,7 +830,7 @@ async def spawn_explore_agent_activity(
                 # ends the leaf so the chip does not fill with 50 rejects.
                 if completion_no_evidence_rejects >= 2 and _oai_demo:
                     return {"success": True, "message": "Completion accepted"}
-                from domains.api_request.config import api_request_disabled
+                from utils.kill_switches import api_request_disabled
 
                 evidence_tools = "web_search, people_search, web_fetch, or grep"
                 if not api_request_disabled():
@@ -923,38 +951,58 @@ async def spawn_explore_agent_activity(
     # exactly the error path where visibility matters most.
     result: Dict[str, Any] = {}
     try:
-        result = await run_agent(
-            agent_id=agent_id,
-            user_id=user_id,
-            system_prompt=explore_system_prompt,
-            verifier_prompt_generator=explore_verifier_prompt,
-            model=model,
-            tools=get_explore_agent_tools(),
-            initial_context=[{"role": "USER", "text": initial_user_text}],
-            task_id=task_id,
-            is_inside_temporal_activity=True,
-            execute_tool=explore_execute_tool,
-            post_message=explore_post_message,
-            max_iterations=resolved_max_iterations,
-            winddown_window=EXPLORE_WINDDOWN_WINDOW,
-            max_context_tokens=max_context_tokens,
-            skip_verification=True,
-            skip_blueprint_query=True,
-            skip_status_updates=True,
-            claude_token=claude_token,
-            gpt_token=gpt_token,
-            gpt_account_id=gpt_account_id,
-            get_gpt_token_source=(lambda: gpt_token_source),
-            get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
-            on_tokens=on_tokens,
-            call_site_override="explore_agent",
-            cache_sequence_id=explore_cache_sequence_id,
-            # Fast Mode: key this explore agent by ITS OWN goal (not the shared parent
-            # agent_id), so the N parallel explore agents under one sub-agent don't all
-            # collide on (parent_goal, explore_agent, iteration) and bust each other.
-            fast_mode_cache_enabled=_explore_fast_mode_enabled,
-            goal_text=_explore_fast_mode_goal,
-        )
+        with heartbeat_resume_details(resume_details):
+            run_agent_coro = run_agent(
+                agent_id=agent_id,
+                user_id=user_id,
+                system_prompt=explore_system_prompt,
+                verifier_prompt_generator=explore_verifier_prompt,
+                model=model,
+                tools=get_explore_agent_tools(),
+                initial_context=[{"role": "USER", "text": initial_user_text}],
+                task_id=task_id,
+                is_inside_temporal_activity=True,
+                execute_tool=explore_execute_tool,
+                post_message=explore_post_message,
+                max_iterations=resolved_max_iterations,
+                winddown_window=EXPLORE_WINDDOWN_WINDOW,
+                max_context_tokens=max_context_tokens,
+                skip_verification=True,
+                skip_blueprint_query=True,
+                skip_status_updates=True,
+                claude_token=claude_token,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                get_gpt_token_source=(lambda: gpt_token_source),
+                get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
+                on_tokens=on_tokens,
+                call_site_override="explore_agent",
+                cache_sequence_id=explore_cache_sequence_id,
+                # Fast Mode: key this explore agent by ITS OWN goal (not the shared parent
+                # agent_id), so the N parallel explore agents under one sub-agent don't all
+                # collide on (parent_goal, explore_agent, iteration) and bust each other.
+                fast_mode_cache_enabled=_explore_fast_mode_enabled,
+                goal_text=_explore_fast_mode_goal,
+            )
+            if _oai_demo:
+                result = await run_agent_coro
+            else:
+                deadline_expired = False
+                try:
+                    async with asyncio.timeout(
+                        LIVE_EXPLORE_PARENT_WAIT.total_seconds() - LIVE_EXPLORE_DRAIN_SLACK_SECONDS
+                    ) as deadline:
+                        result = await run_agent_coro
+                except asyncio.TimeoutError:
+                    deadline_expired = True
+                else:
+                    deadline_expired = deadline.expired()
+                if deadline_expired:
+                    # run_agent catches CancelledError and returns status="paused".
+                    # The timeout context distinguishes that local wind-down from
+                    # an external pause, which must keep its cancellation behavior.
+                    logger.info("Explore agent returning gathered evidence before parent wait")
+                    result = {"status": "completed"}
     finally:
         _heartbeat_stop.set()
         heartbeat_task.cancel()
@@ -962,9 +1010,20 @@ async def spawn_explore_agent_activity(
             await heartbeat_task
         except (asyncio.CancelledError, Exception):
             pass
-        # Flush any backgrounded FE posts before returning/propagating so the FE
-        # receives every tool message even though they no longer blocked the leaf loop.
-        await _drain_pending_fe_posts()
+        # A timed-out explore may have been awaiting a threshold drain. Its
+        # shielded posts must finish before a final drain or activity return.
+        drain_error: BaseException | None = None
+        if _inflight_fe_drains:
+            results = await asyncio.shield(
+                asyncio.gather(*_inflight_fe_drains, return_exceptions=True)
+            )
+            drain_error = next((item for item in results if isinstance(item, BaseException)), None)
+        # Flush posts queued after the last threshold drain as well.
+        try:
+            await _drain_pending_fe_posts()
+        finally:
+            if drain_error is not None:
+                raise drain_error
 
     # Defensive fallback: when the explore agent terminates with attempt_completion
     # but leaves result empty, the parent receives no evidence. Synthesize a

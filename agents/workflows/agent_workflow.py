@@ -60,6 +60,8 @@ with workflow.unsafe.imports_passed_through():
     from helpers.generation_handoff import (
         DEPLOY_INTERRUPTED_TOOL_MESSAGE,
         GenerationHandoffRequested,
+        pending_tool_record,
+        pending_tool_resumes_fit,
         should_handoff_to_generation,
     )
     from helpers.handle_tool_event import handle_tool_event
@@ -76,8 +78,15 @@ with workflow.unsafe.imports_passed_through():
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
     from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
-    from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
+    from loop.dag_executor import (
+        TaskDAG,
+        execute_dag,
+        extract_plan_from_context,
+        latest_real_user_instruction,
+        plan_superseded_by_new_user_instruction,
+    )
     from loop.run_agent import _run_verifier, run_agent
+    from providers.fast_cache.google_oauth_demo_fixture import matches_demo_goal, normalize_completion_notice
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
     from tools.attempt_completion import attempt_completion
     from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
@@ -92,10 +101,15 @@ with workflow.unsafe.imports_passed_through():
 
     # Tool executors (map tool name → workflow helper)
     from tools.grep import grep
+    from tools.google_oauth_demo import google_oauth_demo
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
-    from tools.request_user_approval import UserRejectedError, request_user_approval_direct
+    from tools.request_user_approval import (
+        UserRejectedError,
+        request_user_approval_direct,
+        stash_pending_approvals_from_context,
+    )
     from tools.request_user_signup import request_user_signup
     from tools.send_message_to_user import send_message_to_user
     from tools.set_plan import set_plan
@@ -169,6 +183,7 @@ def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
 
 # Tool name → executor function mapping
 TOOL_EXECUTORS = {
+    "google_oauth_demo": google_oauth_demo,
     "spawn_agent": spawn_agent,  # Unified: browser/code/general_purpose/explore
     "wait_for": wait_for,
     "send_message_to_user": send_message_to_user,
@@ -672,6 +687,28 @@ def _structured_from_payload(payload: Any, names: List[str]) -> Dict[str, Any]:
     return found
 
 
+def _canonical_pending_approval_resume(pending_approval: Any) -> Optional[Dict[str, Any]]:
+    """Normalize approval resume so serialize and restore stay symmetric."""
+    if isinstance(pending_approval, dict):
+        raw_requests = pending_approval.get("requests")
+        if isinstance(raw_requests, list):
+            return {"requests": list(raw_requests)}
+        request_id = pending_approval.get("request_id")
+        if isinstance(request_id, str) and request_id:
+            question = pending_approval.get("question")
+            entry: Dict[str, Any] = {
+                "request_id": request_id,
+                "question": question if isinstance(question, str) else "",
+            }
+            if pending_approval.get("reminder_sent") is True:
+                entry["reminder_sent"] = True
+            return entry
+        return None
+    if isinstance(pending_approval, str) and pending_approval:
+        return {"request_id": pending_approval, "question": ""}
+    return None
+
+
 @workflow.defn
 class AgentWorkflow:
     """
@@ -719,6 +756,9 @@ class AgentWorkflow:
         self._has_new_messages: bool = False
         self._last_signal_response: Optional[str] = None  # Stores response from receive_user_response signal
         self._signal_responses: dict = {}  # Per-request responses keyed by attention request ID
+        # In-flight approval identity that must be re-armed after continue_as_new.
+        # Creating a new attn_id on retry is how SMS approves a stale row.
+        self._pending_approval_resume: Optional[Dict[str, str]] = None
         # Free-form feedback can change the required final shape after the run
         # starts. Revisions let prompt/verifier boundaries refresh exactly once
         # per accepted batch while still catching feedback that arrives during
@@ -839,6 +879,14 @@ class AgentWorkflow:
         self.iteration_offset: int = 0
         self._deployment_initialized: bool = False
         self._deployment_validation: bool = False
+        # Cooperative cutover can carry an in-flight tool call (a browser task
+        # paused at a step boundary or waiting on approval/auth) across
+        # continue_as_new instead of interrupting it. Only run_agent turns
+        # park; the DAG treats any tool return as that task's completion.
+        self._tool_parking_enabled: bool = False
+        self._active_tool_calls: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+        self._pending_tool_resumes: List[Dict[str, Any]] = []
+        self._tool_resume_hints: Dict[str, Dict[str, Any]] = {}
 
     @staticmethod
     def _serialized_datetime(value: Optional[datetime]) -> Optional[str]:
@@ -938,6 +986,9 @@ class AgentWorkflow:
         )
         if isinstance(runtime.get("signal_responses"), dict):
             self._signal_responses = dict(runtime["signal_responses"])
+        self._pending_approval_resume = _canonical_pending_approval_resume(
+            runtime.get("pending_approval_resume")
+        )
         if isinstance(runtime.get("response_schema_feedback"), list):
             self._response_schema_feedback = [
                 value for value in runtime["response_schema_feedback"] if isinstance(value, str)
@@ -1036,6 +1087,17 @@ class AgentWorkflow:
             self._cost_limit_wrapup_pending = runtime.get("cost_limit_wrapup_pending") is True
         if "cost_limit_wrapup_consumed" in runtime:
             self._cost_limit_wrapup_consumed = runtime.get("cost_limit_wrapup_consumed") is True
+        pending_tool_resumes = runtime.get("pending_tool_resumes")
+        if isinstance(pending_tool_resumes, list):
+            self._pending_tool_resumes = [
+                record
+                for record in pending_tool_resumes
+                if isinstance(record, dict)
+                and isinstance(record.get("tool_name"), str)
+                and isinstance(record.get("tool_call_id"), str)
+                and isinstance(record.get("tool_args"), dict)
+                and isinstance(record.get("resume"), dict)
+            ]
 
     def _maybe_arm_cost_limit_wrapup_after_browser(
         self,
@@ -1145,6 +1207,9 @@ class AgentWorkflow:
                 "has_new_messages": self._has_new_messages,
                 "last_signal_response": self._last_signal_response,
                 "signal_responses": dict(self._signal_responses),
+                "pending_approval_resume": _canonical_pending_approval_resume(
+                    self._pending_approval_resume
+                ),
                 "response_schema_feedback": list(self._response_schema_feedback),
                 "response_schema_revision": self._response_schema_revision,
                 "response_schema_applied_revision": self._response_schema_applied_revision,
@@ -1189,6 +1254,7 @@ class AgentWorkflow:
                 "root_goal": self.root_goal,
                 "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
                 "cost_limit_wrapup_consumed": self._cost_limit_wrapup_consumed,
+                "pending_tool_resumes": list(self._pending_tool_resumes),
             },
         }
 
@@ -1912,7 +1978,35 @@ class AgentWorkflow:
         # startup generation keeps that initial cache prefix stable; later user
         # feedback revisions take the non-blocking context-message path below.
         is_sub_agent = bool(parent_workflow_id or parent_agent_id or fetched_parent_agent_id)
-        if response_schema is None and self.goal and not is_sub_agent:
+        startup_execute_context: Optional[List[Dict[str, Any]]] = None
+        # Chat re-escalation after a terminal run starts a new workflow with
+        # plan|execute and no resume_state. continue_as_new / deploy resume
+        # keep the live schema and plan — a later USER there is mid-run
+        # feedback, not a new task.
+        is_fresh_start = resume_state is None and start_phase in ("plan", "execute")
+        prior_run_superseded = False
+        if is_fresh_start and not is_sub_agent:
+            startup_execute_context = await workflow.execute_activity(
+                poll_new_messages,
+                args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            startup_execute_context = filter_internal_subagent_messages(startup_execute_context)
+            prior_run_superseded = plan_superseded_by_new_user_instruction(startup_execute_context)
+            if prior_run_superseded:
+                # A completed or followed-up run's schema is not live. Chat
+                # persist has already moved Agent.goal to the router task;
+                # still skip generate-from-row here so a stale leftover cannot
+                # win a race, then regenerate from the latest USER below.
+                response_schema = None
+                self.output_schema = None
+        if (
+            response_schema is None
+            and self.goal
+            and not is_sub_agent
+            and not prior_run_superseded
+        ):
             try:
                 generated = await workflow.execute_activity(
                     set_response_schema_activity,
@@ -1941,6 +2035,10 @@ class AgentWorkflow:
                 workflow.logger.warning(f"Failed to generate response_schema at startup: {e}")
         elif response_schema is None and is_sub_agent:
             workflow.logger.info("Skipping response_schema generation for sub-agent")
+
+        if prior_run_superseded and startup_execute_context is not None:
+            await self._regenerate_output_schema_for_new_instruction(startup_execute_context)
+            response_schema = self.output_schema
 
         # Freeze the schema used in the main-agent system prompt. Any later
         # feedback-driven revision is appended at the conversation tail so the
@@ -1978,7 +2076,11 @@ class AgentWorkflow:
         # Tool lists from centralized source of truth
         # =====================================================================
         plan_tools = PLAN_PHASE_TOOLS
-        execute_tools = EXECUTE_PHASE_TOOLS
+        execute_tools = (
+            ["google_oauth_demo", "attempt_completion"]
+            if matches_demo_goal(self.goal)
+            else EXECUTE_PHASE_TOOLS
+        )
 
         # Determine whether to skip PLAN phase and/or DAG. ``execute_dag_resume``
         # is a local checkpoint/debug phase: it keeps the persisted plan, marks
@@ -2029,7 +2131,7 @@ class AgentWorkflow:
             self._disabled_tools = execute_tools
             workflow.logger.info(f"▶ PLAN phase: {len(plan_tools)} tools")
 
-            plan_result = await run_agent(
+            plan_result = await self._run_agent_turns(
                 agent_id=agent_id,
                 user_id=user_id,
                 system_prompt=self.build_system_prompt,
@@ -2090,6 +2192,8 @@ class AgentWorkflow:
         # Get context from PLAN phase (or poll if skipped)
         if not skip_plan:
             execute_context = plan_result.get("context", [])
+        elif startup_execute_context is not None:
+            execute_context = startup_execute_context
         else:
             # Poll messages to get context if we skipped PLAN
             # Use epoch timestamp to get ALL messages (not None - that crashes poll_new_messages)
@@ -2106,6 +2210,16 @@ class AgentWorkflow:
             workflow.logger.info("[DAG] Skipping DAG (continued after context reset)")
         else:
             plan_data = extract_plan_from_context(execute_context)
+            if (
+                resume_state is None
+                and start_phase in ("plan", "execute")
+                and plan_data
+                and plan_superseded_by_new_user_instruction(execute_context)
+            ):
+                workflow.logger.info(
+                    "[DAG] Skipping stale plan superseded by a newer USER instruction after completion_summary"
+                )
+                plan_data = None
             if plan_data:
                 workflow.logger.info("[DAG] Found plan, attempting DAG execution")
                 try:
@@ -2157,6 +2271,12 @@ class AgentWorkflow:
                     # The completed path must use the attempt_completion tool so
                     # the UI and transcript show the same visible completion
                     # attempt as an LLM-initiated finish.
+                    if dag_result["status"] == "generation_handoff":
+                        workflow.logger.info(
+                            "[DAG] Cooperative generation handoff during planned task — "
+                            "continue_as_new before dependents or post-DAG completion"
+                        )
+                        return await self._handle_incomplete(dag_result, "EXECUTE")
                     if dag_result["status"] == "completed":
                         workflow.logger.info("[DAG] Tasks completed, attempting completion")
                         await self._flush_pending_messages()
@@ -2216,7 +2336,7 @@ class AgentWorkflow:
         # Refresh compute token before execute phase (may have expired during PLAN)
         await self._refresh_compute_token(user_id)
 
-        execute_result = await run_agent(
+        execute_result = await self._run_agent_turns(
             agent_id=agent_id,
             user_id=user_id,
             system_prompt=self.build_system_prompt,
@@ -2230,7 +2350,7 @@ class AgentWorkflow:
             wait_for_messages=self._wait_for_messages,
             on_context_overflow=self._handle_context_overflow,
             check_credits=self._check_credits,
-                check_generation_handoff=self._check_generation_handoff,
+            check_generation_handoff=self._check_generation_handoff,
             post_message=self._post_message,
             poll_messages=self._poll_messages,
             execute_tool=self._execute_tool,
@@ -2602,6 +2722,71 @@ class AgentWorkflow:
                 raise RuntimeError("Response schema refresh did not start")
             await task
 
+    async def _regenerate_output_schema_for_new_instruction(self, context: List[Dict[str, Any]]) -> None:
+        """Replace a completed-run schema with one generated from the latest USER.
+
+        Chat re-escalation nulls Agent.responseSchema before Temporal start.
+        Mid-run refresh still preserves fields. A superseded fresh start is a
+        new task, so generate from the latest real USER text only.
+        """
+        latest = latest_real_user_instruction(context)
+        if not latest:
+            return
+        try:
+            generated = await workflow.execute_activity(
+                set_response_schema_activity,
+                args=[
+                    self.agent_id,
+                    [latest],
+                    self._active_compute_token_payload(),
+                    self.fast_mode_cache_enabled,
+                    False,
+                ],
+                start_to_close_timeout=timedelta(seconds=90),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Failed to regenerate output_schema after superseded plan: {e}")
+            return
+        schema = generated.get("schema") if isinstance(generated, dict) else None
+        if not (isinstance(schema, dict) and schema.get("fields")):
+            return
+        if schema == self.output_schema:
+            return
+        schema_message = format_required_output_schema_user_message(schema)
+        idempotency_key = str(workflow.uuid4())
+        self._response_schema_internal_signal_keys.add(idempotency_key)
+        try:
+            await workflow.execute_activity(
+                post_agent_message,
+                args=[
+                    self.agent_id,
+                    (
+                        f"{RESPONSE_SCHEMA_UPDATE_PREFIX}\n"
+                        "This replaces every earlier output-schema requirement.\n\n"
+                        f"{schema_message}"
+                    ),
+                    "USER",
+                    {
+                        "hidden": True,
+                        "isResponseSchemaUpdate": True,
+                        "responseSchemaRevision": self._response_schema_revision,
+                        "idempotencyKey": idempotency_key,
+                    },
+                ],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Failed to persist regenerated output_schema context message: {e}")
+            return
+        self.output_schema = schema
+        self._system_prompt_output_schema = schema
+        self.message_count += 1
+        workflow.logger.info(
+            f"Regenerated output_schema from latest USER instruction with {len(schema['fields'])} field(s)"
+        )
+
     async def build_system_prompt(self) -> str:
         """Build system prompt for the current phase.
 
@@ -2712,11 +2897,86 @@ class AgentWorkflow:
         live_queue = (pointer or {}).get("task_queue")
         current_queue = workflow.info().task_queue
         if should_handoff_to_generation(current_queue, live_queue):
-            workflow.logger.info(
-                f"Generation handoff required: current={current_queue} live={live_queue}"
-            )
+            workflow.logger.info(f"Generation handoff required: current={current_queue} live={live_queue}")
             return live_queue
         return None
+
+    def _park_pending_tool(self, tool_call_id: str, resume: Dict[str, Any]) -> bool:
+        """Carry one in-flight tool call across the coming generation handoff.
+
+        Called by a tool at the moment it observes the handoff (see
+        ``helpers.generation_handoff.park_pending_tool``). Returns False when
+        the tool must instead close its chip with DEPLOY_INTERRUPTED.
+        """
+        if not self._tool_parking_enabled:
+            return False
+        active = self._active_tool_calls.get(tool_call_id)
+        if active is None:
+            return False
+        tool_name, tool_args = active
+        records = [record for record in self._pending_tool_resumes if record.get("tool_call_id") != tool_call_id]
+        records.append(pending_tool_record(tool_name, tool_args, tool_call_id, resume))
+        if not pending_tool_resumes_fit(records):
+            workflow.logger.warning(f"Parked tool records exceed the handoff budget; interrupting {tool_name}")
+            return False
+        self._pending_tool_resumes = records
+        workflow.logger.info(f"Parked {tool_name} ({tool_call_id}) for generation handoff")
+        return True
+
+    def _take_tool_resume(self, tool_call_id: str) -> Optional[Dict[str, Any]]:
+        """Return (once) the resume payload a previous generation parked for this call."""
+        return self._tool_resume_hints.pop(tool_call_id, None)
+
+    async def _resume_pending_tools(self) -> Optional[str]:
+        """Re-enter tool calls the previous generation parked, before the next LLM turn.
+
+        Each call re-runs through ``_execute_tool`` with its original arguments
+        and tool_call_id, so it posts its own result row exactly as if it had
+        never been interrupted. Returns the live queue when a resumed tool had
+        to hand off again.
+
+        Re-entry repeats the APPROVAL_REQUIRED_TOOLS gate, so a tool in that
+        map must never park; it would ask the user to approve the same call twice.
+        """
+        records, self._pending_tool_resumes = self._pending_tool_resumes, []
+        if not records:
+            return None
+        workflow.logger.info(f"Resuming {len(records)} tool call(s) parked by the previous generation")
+        self._tool_resume_hints = {record["tool_call_id"]: record["resume"] for record in records}
+        try:
+            results = await asyncio.gather(
+                *(
+                    self._execute_tool(record["tool_name"], dict(record["tool_args"]), record["tool_call_id"])
+                    for record in records
+                )
+            )
+        finally:
+            self._tool_resume_hints = {}
+        for result in results:
+            if isinstance(result, dict) and result.get("generation_handoff"):
+                handoff_queue = result.get("handoff_task_queue")
+                if isinstance(handoff_queue, str) and handoff_queue.strip():
+                    return handoff_queue.strip()
+        return None
+
+    async def _run_agent_turns(self, **run_agent_kwargs: Any) -> Dict:
+        """Run the LLM loop for one phase with tool parking enabled.
+
+        Parked tool calls from the previous generation finish first so their
+        results are in the conversation before the next LLM call.
+        """
+        self._tool_parking_enabled = True
+        try:
+            handoff_queue = await self._resume_pending_tools()
+            if handoff_queue:
+                return {
+                    "status": "generation_handoff",
+                    "handoff_task_queue": handoff_queue,
+                    "context": list(self.context),
+                }
+            return await run_agent(**run_agent_kwargs)
+        finally:
+            self._tool_parking_enabled = False
 
     async def _wait_for_unpause_or_handoff(self) -> Optional[str]:
         """Block until unpaused, re-checking generation handoff every 30s.
@@ -3294,6 +3554,7 @@ class AgentWorkflow:
             executor = TOOL_EXECUTORS[tool_name]
             paused_before_tool = self.is_paused
             cost_limit_before_tool = self._cost_limit_reached
+            self._active_tool_calls[tool_call_id] = (tool_name, dict(tool_args))
 
             # Tools migrated to new signature: (execute_activity, tool_call, tool_call_id, agent_id, user_id)
             # These return results and call handle_tool_event internally
@@ -3433,6 +3694,17 @@ class AgentWorkflow:
 
         except GenerationHandoffRequested as exc:
             # In-tool wait yielded so the top-of-loop checkpoint can continue_as_new.
+            if exc.parked:
+                # The tool parked itself with _park_pending_tool; its chip stays
+                # open and the next generation re-enters this exact call.
+                workflow.logger.info(f"Tool {tool_name} parked for generation handoff")
+                return {
+                    "success": True,
+                    "message": "",
+                    "generation_handoff": True,
+                    "handoff_task_queue": exc.task_queue,
+                    "pending_tool_resume": True,
+                }
             # The tool already closed its chip with DEPLOY_INTERRUPTED; do not ERROR.
             workflow.logger.info(f"Tool {tool_name} interrupted for generation handoff")
             return {
@@ -3490,6 +3762,7 @@ class AgentWorkflow:
             )
             return {"error": True, "message": error_msg}
         finally:
+            self._active_tool_calls.pop(tool_call_id, None)
             # Remove tool from in-use and broadcast tree state
             self.tools_in_use.discard(tool_display)
             await self._update_tree_state()
@@ -4637,6 +4910,9 @@ class AgentWorkflow:
         if result["status"] == "generation_handoff":
             # Cooperative cutover: current tools/LLM finished; move to the live
             # generation queue before the next LLM call. Do NOT terminate.
+            # Cancelled sibling approval waits never enter GenerationHandoffRequested,
+            # so re-arm every still-open approval chip from the transcript.
+            stash_pending_approvals_from_context(self)
             handoff_queue = result.get("handoff_task_queue")
             if not isinstance(handoff_queue, str) or not handoff_queue.strip():
                 workflow.logger.error("generation_handoff missing handoff_task_queue; failing open")
@@ -5232,6 +5508,9 @@ class AgentWorkflow:
             # summary is already observable.
             # Suppress the automatic tree broadcast here; otherwise _post_message
             # would emit its default ACTIVE state after we latched _is_finished.
+            structured_response, summary = normalize_completion_notice(
+                self.goal, structured_response, summary
+            )
             formatted_outputs = self._format_outputs(structured_response)
             await self._post_message(
                 "",

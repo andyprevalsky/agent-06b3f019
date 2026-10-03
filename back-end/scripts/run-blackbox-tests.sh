@@ -47,6 +47,7 @@ codex_funded_fallback_configured() {
 # Docker database and silently fall back to a shared system Postgres instance.
 cd "$ROOT_DIR"
 source scripts/lib/workspace-env.sh
+source scripts/lib/run-process-cleanup.sh
 normalize_conductor_workspace_env
 cd "$BACKEND_DIR"
 source "$SCRIPT_DIR/local-db-container.sh"
@@ -60,7 +61,17 @@ mkdir -p "$ARTIFACT_DIR" "$PORT_LOCK_ROOT"
 export BLACKBOX_TEST_ARTIFACT_DIR="$ARTIFACT_DIR"
 export CONTRACT_TEST_ARTIFACT_DIR="$ARTIFACT_DIR"
 export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
-export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
+# Cursor Cloud injects TRACE_ARCHIVE_BACKEND=r2 from prod secrets. Force a
+# local backend so archive fixtures the test process writes are the same
+# files the isolated backend greps. `${VAR:-local}` cannot override an
+# already-set r2 value.
+case "${TRACE_ARCHIVE_BACKEND:-}" in
+  local|fake-r2) ;;
+  *)
+    echo "⚠️  TRACE_ARCHIVE_BACKEND='${TRACE_ARCHIVE_BACKEND:-}' is not a local blackbox backend; forcing local."
+    export TRACE_ARCHIVE_BACKEND=local
+    ;;
+esac
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES="${BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES:-weekly}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
@@ -75,6 +86,11 @@ RUNNER_CMD=(node --import tsx src/tests/blackbox/run.ts)
 RUNNER_LOG="$ARTIFACT_DIR/runner.log"
 MANIFEST_PATH="$ARTIFACT_DIR/manifest.json"
 USE_EXISTING_BACKEND="${BLACKBOX_TEST_USE_EXISTING_BACKEND:-${CONTRACT_TEST_USE_EXISTING_BACKEND:-0}}"
+if [[ "$USE_EXISTING_BACKEND" != "1" ]]; then
+  # This script owns both processes, so the share-link contract can use a
+  # local-only key without depending on a production benchmark secret.
+  export BENCHMARK_SHARE_SECRET="${BENCHMARK_SHARE_SECRET:-blackbox-local-benchmark-share-secret}"
+fi
 
 # --list only needs filesystem discovery; skip backend boot for speed.
 for arg in "$@"; do
@@ -83,6 +99,12 @@ for arg in "$@"; do
     exit $?
   fi
 done
+
+# A standalone blackbox run starts its own backend. Keep the benchmark-share
+# bearer-link fixture self-contained when no share key was exported.
+if [[ "$USE_EXISTING_BACKEND" != "1" && -z "${BENCHMARK_SHARE_SECRET:-}" ]]; then
+  export BENCHMARK_SHARE_SECRET="$(openssl rand -hex 32)"
+fi
 
 # Fixture-backed domains write deterministic outbound responses into the
 # fast-forward cache. When the full suite targets an existing backend, prove
@@ -275,7 +297,7 @@ END $$;
 SQL
     fi
     echo "Syncing Prisma schema to local test database..."
-    npx prisma generate >/dev/null
+    bash "$SCRIPT_DIR/sync-prisma-client.sh"
     npx prisma db push --skip-generate --accept-data-loss >/dev/null
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
     # Credential seeding and smoke execution are separate controls. A caller may
@@ -362,7 +384,25 @@ BASE_PORT="${CONDUCTOR_PORT:-55000}"
 START_PORT="${BLACKBOX_TEST_BACKEND_START_PORT:-${CONTRACT_TEST_BACKEND_START_PORT:-$((BASE_PORT + 100))}}"
 PORT="${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-$START_PORT}}"
 PORT_LOCK_DIR=""
+BACKEND_PID=""
 
+source "$ROOT_DIR/scripts/lib/process-tree.sh"
+cleanup() {
+  stop_process_tree "$BACKEND_PID"
+  BACKEND_PID=""
+
+  if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
+    rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
+  fi
+}
+# Bash resumes the script after a signal trap returns, so INT/TERM must exit
+# (and let the EXIT trap clean up) rather than release the lock and keep going.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Sets PORT and PORT_LOCK_DIR in the caller's shell; running it in a command
+# substitution would drop PORT_LOCK_DIR and leave the lock behind forever.
 reserve_port() {
   local candidate="$1"
 
@@ -373,7 +413,7 @@ reserve_port() {
         rmdir "$lock_dir" >/dev/null 2>&1 || true
       else
         PORT_LOCK_DIR="$lock_dir"
-        echo "$candidate"
+        PORT="$candidate"
         return 0
       fi
     fi
@@ -382,13 +422,13 @@ reserve_port() {
 }
 
 if [[ -z "${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-}}" ]]; then
-  PORT="$(reserve_port "$START_PORT")"
+  reserve_port "$START_PORT"
 else
-  PORT_LOCK_DIR="$PORT_LOCK_ROOT/$PORT"
-  if ! mkdir "$PORT_LOCK_DIR" 2>/dev/null; then
+  if ! mkdir "$PORT_LOCK_ROOT/$PORT" 2>/dev/null; then
     echo "❌ Failed to reserve requested black-box test port $PORT"
     exit 1
   fi
+  PORT_LOCK_DIR="$PORT_LOCK_ROOT/$PORT"
 fi
 
 export TEST_BASE_URL="http://localhost:$PORT"
@@ -432,18 +472,6 @@ PORT="$PORT" \
 DISABLE_GMAIL_SYNC=1 \
 node --import tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
-
-cleanup() {
-  if kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
-    kill "$BACKEND_PID" >/dev/null 2>&1 || true
-    wait "$BACKEND_PID" 2>/dev/null || true
-  fi
-
-  if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
-    rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup EXIT INT TERM
 
 READY=0
 for _ in $(seq 1 120); do

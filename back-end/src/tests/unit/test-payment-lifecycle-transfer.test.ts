@@ -5,6 +5,7 @@
  */
 import assert from 'node:assert/strict';
 import { PurchaseSpendStatus } from '@prisma/client';
+import { TestPaymentError } from '../../domains/test-payment/errors';
 import { getTestPaymentLifecycle } from '../../domains/test-payment/lifecycle';
 import { mapOrgTransfer } from '../../domains/test-payment/lifecycleOrgTransfer';
 
@@ -216,6 +217,26 @@ async function main(): Promise<void> {
     ]);
     assert.equal(mapped?.id, 'owt-good');
     assert.equal(mapped?.releasedCents, 10);
+  });
+
+  await test('missing transfers error carries the provider message', async () => {
+    assert.throws(
+      () =>
+        mapOrgTransfer({ cardId: 'card-1' }, [
+          { structuredContent: { status: 'error', message: 'API key rate limit exceeded' } },
+        ]),
+      (error: unknown) =>
+        error instanceof TestPaymentError &&
+        error.statusCode === 502 &&
+        error.message ===
+          'AgentCard lifecycle response missing transfers: API key rate limit exceeded'
+    );
+    assert.throws(
+      () => mapOrgTransfer({ cardId: 'card-1' }, [{ structuredContent: {} }]),
+      (error: unknown) =>
+        error instanceof TestPaymentError &&
+        error.message === 'AgentCard lifecycle response missing transfers'
+    );
   });
 }
 

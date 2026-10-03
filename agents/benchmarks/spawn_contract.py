@@ -1,7 +1,6 @@
 """Benchmark browser-spawn contract helpers.
 
-Guest-checkout payment-boundary tasks waste wall-clock when the browser starts
-on marketing/search detours instead of ``environment.live_targets``,
+Guest-checkout payment-boundary tasks can waste wall-clock when
 saved-session auth churn runs on tasks with no live fixture, or ``evaluate``
 mutates menu labels to fake unavailable modifiers.
 
@@ -15,19 +14,13 @@ replay-surface hash never includes ``agents/benchmarks/``.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any, Mapping, Optional
+from typing import TYPE_CHECKING, Optional
 
 from helpers.browser_spawn_contract import (
     BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH_ENV,
     BENCHMARK_ACTIVE_TASK_ENV,
-    BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV,
-    active_benchmark_live_target,
     active_benchmark_task_name,
-    apply_active_task_spawn_contract,
-    apply_live_target_to_tool_call,
-    copy_tool_call,
     evaluate_dom_patch_blocked,
-    primary_live_target,
 )
 
 if TYPE_CHECKING:
@@ -41,15 +34,10 @@ _GUEST_CHECKOUT_MARKERS = (
 
 # Re-export workflow-safe helpers for harness / test callers.
 __all__ = [
-    "active_benchmark_live_target",
     "active_benchmark_task",
     "active_benchmark_task_name",
-    "apply_active_task_spawn_contract",
-    "apply_browser_spawn_live_target",
-    "copy_tool_call",
     "evaluate_dom_patch_blocked",
     "guest_checkout_without_live_fixture",
-    "primary_live_target",
     "should_disable_saved_browser_auth",
     "tasks_require_disabled_saved_browser_auth",
     "with_active_benchmark_task",
@@ -86,14 +74,6 @@ def guest_checkout_without_live_fixture(task: "BenchmarkTask") -> bool:
     return any(marker in prompt_blob for marker in _GUEST_CHECKOUT_MARKERS)
 
 
-def apply_browser_spawn_live_target(
-    task: "BenchmarkTask",
-    tool_call: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Seed browser ``start_url`` from the task's declared live target when needed."""
-    return apply_live_target_to_tool_call(primary_live_target(task.environment), tool_call)
-
-
 def should_disable_saved_browser_auth(task: "BenchmarkTask") -> bool:
     return guest_checkout_without_live_fixture(task)
 
@@ -123,39 +103,28 @@ def tasks_require_disabled_saved_browser_auth(
     return False
 
 
-def _set_active_task_env(task_name: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+def _set_active_task_env(task_name: str) -> tuple[Optional[str], Optional[str]]:
     previous_name = os.environ.get(BENCHMARK_ACTIVE_TASK_ENV)
-    previous_live_target = os.environ.get(BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV)
     previous_block_dom = os.environ.get(BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH_ENV)
     from benchmarks.benchmark_tasks import get_task_by_name
 
     os.environ[BENCHMARK_ACTIVE_TASK_ENV] = task_name
     task = get_task_by_name(task_name)
-    live_target = primary_live_target(task.environment)
-    if live_target:
-        os.environ[BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV] = live_target
-    else:
-        os.environ.pop(BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV, None)
     if getattr(task, "success_on_payment_card_request", False):
         os.environ[BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH_ENV] = "1"
     else:
         os.environ.pop(BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH_ENV, None)
-    return previous_name, previous_live_target, previous_block_dom
+    return previous_name, previous_block_dom
 
 
 def _restore_active_task_env(
     previous_name: Optional[str],
-    previous_live_target: Optional[str],
     previous_block_dom: Optional[str],
 ) -> None:
     if previous_name is None:
         os.environ.pop(BENCHMARK_ACTIVE_TASK_ENV, None)
     else:
         os.environ[BENCHMARK_ACTIVE_TASK_ENV] = previous_name
-    if previous_live_target is None:
-        os.environ.pop(BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV, None)
-    else:
-        os.environ[BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV] = previous_live_target
     if previous_block_dom is None:
         os.environ.pop(BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH_ENV, None)
     else:

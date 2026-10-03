@@ -28,11 +28,12 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Type, cast
 
-import httpx
 import structlog
 from pydantic import BaseModel
 
 from config import load_config
+from helpers.activity_heartbeat import safe_heartbeat
+from helpers.http_client import get_http_client
 from providers.rose.browser_use import (
     build_browser_use_messages,
     build_browser_use_tools,
@@ -177,14 +178,15 @@ async def _anthropic_api_key_on_cooldown() -> bool:
     if not base:
         return False
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(
-                f"{base}/api/integrations/compute-code/anthropic-key/cooldown",
-                headers={"X-API-Key": cfg.backend.api_key or ""},
-            )
-            if resp.status_code == 200 and resp.json().get("onCooldown") is True:
-                _anthropic_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
-                return True
+        client = get_http_client()
+        resp = await client.get(
+            f"{base}/api/integrations/compute-code/anthropic-key/cooldown",
+            timeout=5.0,
+            headers={"X-API-Key": cfg.backend.api_key or ""},
+        )
+        if resp.status_code == 200 and resp.json().get("onCooldown") is True:
+            _anthropic_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
+            return True
     except Exception:
         return False
     return False
@@ -200,12 +202,13 @@ async def _mark_anthropic_api_key_cooldown(reason: str) -> None:
     if not base:
         return
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
-                f"{base}/api/integrations/compute-code/token/rate-limited",
-                headers={"X-API-Key": cfg.backend.api_key or "", "Content-Type": "application/json"},
-                json={"type": "anthropic", "source": "pool", "failureReason": reason},
-            )
+        client = get_http_client()
+        await client.post(
+            f"{base}/api/integrations/compute-code/token/rate-limited",
+            timeout=5.0,
+            headers={"X-API-Key": cfg.backend.api_key or "", "Content-Type": "application/json"},
+            json={"type": "anthropic", "source": "pool", "failureReason": reason},
+        )
     except Exception:
         logger.warning("rose.anthropic_apikey.cooldown_mark_failed", reason=reason)
 
@@ -235,14 +238,15 @@ async def _gpt_api_key_on_cooldown() -> bool:
     if not base:
         return False
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(
-                f"{base}/api/integrations/compute-code/gpt-key/cooldown",
-                headers={"X-API-Key": cfg.backend.api_key or ""},
-            )
-            if resp.status_code == 200 and resp.json().get("onCooldown") is True:
-                _gpt_api_key_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
-                return True
+        client = get_http_client()
+        resp = await client.get(
+            f"{base}/api/integrations/compute-code/gpt-key/cooldown",
+            timeout=5.0,
+            headers={"X-API-Key": cfg.backend.api_key or ""},
+        )
+        if resp.status_code == 200 and resp.json().get("onCooldown") is True:
+            _gpt_api_key_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
+            return True
     except Exception:
         return False
     return False
@@ -256,13 +260,14 @@ async def _mark_gpt_api_key_cooldown(reason: str) -> None:
     if not base:
         return
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                f"{base}/api/integrations/compute-code/token/rate-limited",
-                headers={"X-API-Key": cfg.backend.api_key or "", "Content-Type": "application/json"},
-                json={"type": "gpt_api_key", "source": "pool", "failureReason": reason},
-            )
-            resp.raise_for_status()
+        client = get_http_client()
+        resp = await client.post(
+            f"{base}/api/integrations/compute-code/token/rate-limited",
+            timeout=5.0,
+            headers={"X-API-Key": cfg.backend.api_key or "", "Content-Type": "application/json"},
+            json={"type": "gpt_api_key", "source": "pool", "failureReason": reason},
+        )
+        resp.raise_for_status()
     except Exception:
         logger.warning("rose.gpt_apikey.cooldown_mark_failed", reason=reason)
 
@@ -392,10 +397,7 @@ async def _mark_direct_auth_stalled(
 def _safe_heartbeat(message: str) -> None:
     """Emit a Temporal activity heartbeat if we're inside an activity,
     otherwise silently skip. Matches the pattern in `helpers/llm.py`."""
-    with contextlib.suppress(Exception):
-        from temporalio import activity
-
-        activity.heartbeat(message)
+    safe_heartbeat(message)
 
 
 def _cache_input_accounting(
@@ -641,9 +643,7 @@ class RoseClient:
         agent_id = kwargs.get("agent_id")
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
-        exclude_anthropic_family = anthropic_family_excluded(
-            bool(kwargs.get("_exclude_anthropic_family", False))
-        )
+        exclude_anthropic_family = anthropic_family_excluded(bool(kwargs.get("_exclude_anthropic_family", False)))
         if exclude_anthropic_family != bool(kwargs.get("_exclude_anthropic_family", False)):
             kwargs = {**kwargs, "_exclude_anthropic_family": exclude_anthropic_family}
 
@@ -680,9 +680,7 @@ class RoseClient:
             try:
                 from providers.fast_cache.rose_cache import lookup_llm_cache
 
-                stored, hit_key = await lookup_llm_cache(
-                    ctx, call_site, _fc_request_key_material(kwargs)
-                )
+                stored, hit_key = await lookup_llm_cache(ctx, call_site, _fc_request_key_material(kwargs))
             except FastCacheLookupError as exc:
                 logger.warning(
                     "fast_cache.get_error",
@@ -825,7 +823,9 @@ class RoseClient:
         messages: List[Dict[str, Any]],
         response_model: Optional[Type[BaseModel]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
-        context_tools: Optional[List[Dict[str, Any]]] = None,  # Declared-only tools legalizing forked tool history (never called)
+        context_tools: Optional[
+            List[Dict[str, Any]]
+        ] = None,  # Declared-only tools legalizing forked tool history (never called)
         tool_choice: Any = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
@@ -913,9 +913,7 @@ class RoseClient:
                         },
                         # Effective wire effort: callers may omit; body builders
                         # always stamp DEFAULT_REASONING_EFFORT (xhigh).
-                        "reasoning_effort": (
-                            effort if effort is not None else DEFAULT_REASONING_EFFORT
-                        ),
+                        "reasoning_effort": (effort if effort is not None else DEFAULT_REASONING_EFFORT),
                         "response_model": response_model.__name__ if response_model else None,
                         "direct_auth": {
                             "claude": claude_auth is not None,
@@ -1172,9 +1170,7 @@ class RoseClient:
                             break
                         now = time.monotonic()
                         if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
-                            _safe_heartbeat(
-                                f"rose.complete waiting call_site={call_site} request_id={rid}"
-                            )
+                            _safe_heartbeat(f"rose.complete waiting call_site={call_site} request_id={rid}")
                             last_heartbeat = now
                         if now >= wait_deadline:
                             timed_out = True
@@ -1201,13 +1197,9 @@ class RoseClient:
                     return
                 if timed_out:
                     if outer_deadline_limited:
-                        raise RoseDeadlineError(
-                            f"rose.complete deadline exceeded after {deadline_s}s"
-                        )
+                        raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s")
                     if saw_productive_chunk:
-                        raise RoseDeadlineError(
-                            f"rose.complete idle for {progress_timeout}s (deadline {deadline_s}s)"
-                        )
+                        raise RoseDeadlineError(f"rose.complete idle for {progress_timeout}s (deadline {deadline_s}s)")
                     raise RoseStallError(f"rose.complete TTFT exceeded {ttft_budget}s")
                 assert chunk is not None
                 now = time.monotonic()
@@ -1922,8 +1914,11 @@ class RoseClient:
         the model does not return a parseable browser action.
         """
         pool_spec = get_pool("rose-1-browser-use")
-        max_tokens = 16000
-        temperature = 1.0
+        # A browser step needs one action. A 16k cap let a malformed Qwen
+        # response stream for 215s without a tool call (WebDecoy bench),
+        # consuming half the task deadline before the caller could retry.
+        max_tokens = 2048
+        temperature = 0.3
         state_actions = filter_browser_use_actions_for_state(available_actions, browser_state)
         tools = build_browser_use_tools(state_actions)
         # IMPORTANT: "auto", not "any". Forcing tool use ("any") forbids the model from

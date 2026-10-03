@@ -46,8 +46,8 @@ function testWriteLockFallbackStripsMarkdownAndKeepsFullDraft(): void {
   const body = formatPaymentApprovalBody(null, null, INCIDENT_APPROVAL_QUESTION, agentUrl);
 
   assert.equal(body.includes('**'), false, `SMS body leaked markdown asterisks:\n${body}`);
-  assert.match(body, /^Approval needed:/);
-  assert.match(body, /Rose wants to send an Email/);
+  assert.match(body, /^I need your approval before I continue:/);
+  assert.match(body, /I'm ready to send an Email/);
   assert.match(body, /To: sr-team@a16z\.com/);
   assert.match(body, /From: andy@roselabs\.ai/);
   assert.match(body, /Subject: LLM and Cloud Credit Amounts/);
@@ -57,7 +57,7 @@ function testWriteLockFallbackStripsMarkdownAndKeepsFullDraft(): void {
   );
   assert.match(body, /Thanks,\nAndy/);
   assert.match(body, /Reply to approve/);
-  assert.match(body, /View agent: https:\/\/roselabs\.ai\/\?agent-id=eab955b6/);
+  assert.match(body, /Review in Rose: https:\/\/roselabs\.ai\/\?agent-id=eab955b6/);
 }
 
 function testWriteLockFallbackDoesNotTruncateLongDraft(): void {
@@ -113,13 +113,15 @@ function testGenericWriteReturnSmsIncludesRefundDetails(): void {
     AGENT_URL
   );
 
-  assert.match(body, /^Approval needed\n/);
-  assert.match(body, /Rose wants to confirm Amazon return for Carhartt beanie on Amazon\./);
+  assert.match(
+    body,
+    /^I need your approval to confirm Amazon return for Carhartt beanie on Amazon\./
+  );
   assert.doesNotMatch(body, /checkout/i);
   assert.match(body, /Action: Confirm return/);
   assert.match(body, /Target: Carhartt Mens Knit Cuffed Beanie Hat/);
   assert.match(body, /Change: Refund \$10\.84 to original payment method via Whole Foods Dropoff/);
-  assert.match(body, /View agent: https:\/\/roselabs\.ai\/\?agent-id=demo/);
+  assert.match(body, /Review in Rose: https:\/\/roselabs\.ai\/\?agent-id=demo/);
 }
 
 function testMessageSmsIncludesRecipientsSubjectAndBody(): void {
@@ -136,7 +138,7 @@ function testMessageSmsIncludesRecipientsSubjectAndBody(): void {
     },
   };
   const body = formatPaymentApprovalBody(null, notification, 'unused', AGENT_URL);
-  assert.match(body, /Rose wants to send email on Gmail\./);
+  assert.match(body, /I need your approval to send email on Gmail\./);
   assert.doesNotMatch(body, /checkout/i);
   assert.match(body, /To: alex@example\.com/);
   assert.match(body, /Subject: Dinner Friday/);
@@ -155,7 +157,7 @@ function testSocialPostSmsIncludesAudienceAndBody(): void {
     },
   };
   const body = formatPaymentApprovalBody(null, notification, 'unused', AGENT_URL);
-  assert.match(body, /Rose wants to post publicly on X\./);
+  assert.match(body, /I need your approval to post publicly on X\./);
   assert.doesNotMatch(body, /checkout/i);
   assert.match(body, /Destination: your profile/);
   assert.match(body, /Audience: Public/);
@@ -175,7 +177,7 @@ function testPaymentFieldSmsIncludesMerchantWithoutSecretsBanner(): void {
     },
   };
   const body = formatPaymentApprovalBody(null, notification, 'unused', AGENT_URL);
-  assert.match(body, /Rose wants to enter payment details on Delta\./);
+  assert.match(body, /I need your approval to enter payment details on Delta\./);
   assert.doesNotMatch(body, /checkout/i);
   assert.match(body, /Merchant: Delta Air Lines/);
   assert.match(body, /Amount: \$412\.30/);
@@ -204,7 +206,7 @@ function testPurchaseSmsKeepsCarrierSafeCheckoutHeader(): void {
     },
   };
   const body = formatPaymentApprovalBody(null, notification, 'unused', AGENT_URL);
-  assert.match(body, /Rose needs your approval for Amazon checkout\./);
+  assert.match(body, /I need your approval to check out at Amazon\./);
   assert.match(body, /Item: Carhartt Mens Knit Cuffed Beanie Hat, Black/);
   assert.match(body, /Total: \$21\.71/);
 }
@@ -219,8 +221,8 @@ function testSparseNotificationFallsBackToRenderedQuestion(): void {
   const question =
     '**Approval Needed**\n\nRose wants to confirm return on **Amazon**.\nAction: Confirm return\nTarget: Beanie';
   const body = formatPaymentApprovalBody(null, notification as never, question, AGENT_URL);
-  assert.match(body, /^Approval needed:/);
-  assert.match(body, /Rose wants to confirm return on Amazon/);
+  assert.match(body, /^I need your approval before I continue:/);
+  assert.match(body, /I'm ready to confirm return on Amazon/);
   assert.match(body, /Action: Confirm return/);
   assert.match(body, /Target: Beanie/);
   assert.equal(body.includes('**'), false);

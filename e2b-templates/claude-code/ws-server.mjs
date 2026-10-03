@@ -67,6 +67,12 @@ let eventBuffer = [];
 // Track connected clients
 const clients = new Set();
 
+// After the CLI exits the server keeps serving its final buffer so an agent
+// activity that detached for a deploy (or crashed and is retried after its 5m
+// heartbeat timeout) can reattach and read the result. Closing the session
+// (SIGTERM / sandbox kill) still exits immediately.
+const REATTACH_LINGER_MS = 15 * 60 * 1000;
+
 // Create WebSocket server
 const wss = new WebSocketServer({ port: PORT });
 
@@ -80,9 +86,6 @@ wss.on("listening", () => {
 });
 
 wss.on("connection", (ws) => {
-  log("info", "Client connected", { total: clients.size + 1 });
-  clients.add(ws);
-
   // Send full buffer to new client
   if (outputBuffer.length > 0) {
     ws.send(JSON.stringify({ type: "buffer", data: outputBuffer }));
@@ -90,6 +93,15 @@ wss.on("connection", (ws) => {
   if (eventBuffer.length > 0) {
     ws.send(JSON.stringify({ type: "code_agent_events", data: eventBuffer }));
   }
+  if (exitAnnounced) {
+    log("info", "Served final buffer to reattaching client");
+    ws.send(exitMessage(finalExitCode));
+    ws.close();
+    return;
+  }
+
+  clients.add(ws);
+  log("info", "Client connected", { total: clients.size });
 
   // Handle incoming messages (stdin from parent agent)
   ws.on("message", (data) => {
@@ -162,31 +174,51 @@ function appendEvent(event) {
 // Handle shutdown gracefully
 let processExited = false;
 let shuttingDown = false;
+let exitAnnounced = false;
+let finalExitCode = 0;
+let lingerTimer = null;
 
-async function shutdown(exitCode = 0) {
-  // Idempotent: the child close handler, the child error handler, and the
-  // stdin error handler can all race to trigger shutdown. Only the first wins.
-  if (shuttingDown) return;
-  shuttingDown = true;
-  log("info", "Starting graceful shutdown", { exitCode });
+function exitMessage(exitCode) {
+  // Sent directly, not wrapped in data
+  return JSON.stringify({ type: "exit", code: exitCode });
+}
 
-  // Notify clients with exit code (sent directly, not wrapped in data)
+function announceExit(exitCode) {
+  // Idempotent: the child close handler, the child error handler, and a
+  // signal can all race to end the run. Only the first records the result.
+  if (exitAnnounced) return;
+  exitAnnounced = true;
+  finalExitCode = exitCode;
   appendEvent({
     type: "final",
     status: exitCode === 0 ? "completed" : "failed",
     exit_code: exitCode,
   });
-  const exitMessage = JSON.stringify({ type: "exit", code: exitCode });
   for (const client of clients) {
     if (client.readyState === 1) {
-      client.send(exitMessage);
+      client.send(exitMessage(exitCode));
     }
-  }
-
-  // Close all client connections
-  for (const client of clients) {
     client.close();
   }
+}
+
+function finishRun(exitCode) {
+  announceExit(exitCode);
+  if (lingerTimer || shuttingDown) return;
+  log("info", "Serving final buffer for reattach", {
+    exitCode,
+    lingerMs: REATTACH_LINGER_MS,
+  });
+  lingerTimer = setTimeout(() => shutdown(exitCode), REATTACH_LINGER_MS);
+}
+
+async function shutdown(exitCode = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (lingerTimer) clearTimeout(lingerTimer);
+  log("info", "Starting graceful shutdown", { exitCode });
+
+  announceExit(exitCode);
 
   // Close server
   wss.close(() => {
@@ -502,6 +534,14 @@ async function runClaudeCli() {
       ...process.env,
       HOME: home,
       NO_COLOR: "1",
+      // The CLI's streaming idle watchdog is off unless this is set. Without
+      // it a silently dropped /v1/messages stream hangs the session forever
+      // (the SDK request timeout only covers the initial fetch, not the
+      // body). Enabled, the CLI aborts after CLAUDE_STREAM_IDLE_TIMEOUT_MS
+      // (its 90s default) and retries non-streaming. Forced on for every
+      // session (E2B overlay and the local fallback both spawn here). See
+      // docs/rca/cases/2026-10-02-claude-code-cli-launched-without-stream-idle-watchdog.md
+      CLAUDE_ENABLE_STREAM_WATCHDOG: "1",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -549,7 +589,7 @@ async function runClaudeCli() {
     appendEvent({ type: "stderr", text: chunk });
   });
 
-  child.on("error", async (err) => {
+  child.on("error", (err) => {
     processExited = true;
     appendOutput("stderr", `[Claude] Failed: ${err.message}\n`);
     appendEvent({
@@ -561,10 +601,10 @@ async function runClaudeCli() {
       error: err.message,
       stack: err.stack,
     });
-    await shutdown(1);
+    finishRun(1);
   });
 
-  child.on("close", async (code) => {
+  child.on("close", (code) => {
     if (stdoutRemainder.trim()) {
       try {
         const message = JSON.parse(stdoutRemainder);
@@ -580,7 +620,7 @@ async function runClaudeCli() {
     processExited = true;
     const exitCode = Number.isInteger(code) ? code : 1;
     log("info", "Claude Code CLI exited", { exitCode, sawResult });
-    await shutdown(exitCode);
+    finishRun(exitCode);
   });
 }
 

@@ -330,6 +330,35 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     assert "18 passed" in result.stdout
 
 
+def test_run_benchmark_task_selection_suite_is_in_permanent_gate():
+    """Run the whole task-selection/identity/AgentCard-slot suite in a fresh interpreter.
+
+    The AgentCard sandbox slot cases need real separate processes (flock is per
+    open file description), so they cannot run in-process here.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    behavioral_suite = repo_root / "agents/benchmarks/run_benchmark_task_selection_test.py"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-v", str(behavioral_suite)],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    for case in (
+        "test_sandbox_payment_lock_slot0_is_the_legacy_lock_path",
+        "test_sandbox_payment_lock_single_slot_serializes_separate_benchmark_processes",
+        "test_sandbox_payment_lock_two_slots_admit_two_processes_and_block_a_third",
+        "test_sandbox_payment_lock_legacy_holder_on_slot0_leaves_new_slots_free",
+        "test_sandbox_payment_lock_announces_wait_once_jitters_polls_and_hands_off",
+    ):
+        assert f"{case} PASSED" in result.stdout, f"{case} did not run and pass:\n{result.stdout}"
+
+
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
     repo_root = Path(__file__).resolve().parents[3]
     patch_script = repo_root / "scripts" / "create-worktree-patch.sh"
@@ -1458,7 +1487,7 @@ def test_timeout_early_fail_pauses_agent_before_payment_cleanup():
 
     import benchmarks.run_benchmark as bench
 
-    source = inspect.getsource(bench.run_single_task)
+    source = inspect.getsource(bench._run_single_task_as_run_user)
     poll_index = source.index("await poll_agent(")
     cleanup_index = source.index("ensure_payment_lifecycle_cleanup", poll_index)
     pause_index = source.index("pause_agent(base_url, agent_id)", poll_index)
@@ -1585,7 +1614,7 @@ async def test_payment_abandonment_seals_browser_before_hub_archive():
     assert unsealed is open_data
     assert error == "Failed to pause payment-abandonment agent before Hub archive"
 
-    source = inspect.getsource(bench.run_single_task)
+    source = inspect.getsource(bench._run_single_task_as_run_user)
     cleanup_index = source.index("ensure_payment_lifecycle_cleanup")
     seal_index = source.index("_seal_payment_abandonment_browser_for_archive", cleanup_index)
     archive_index = source.index("finalize_archive_and_score_world_model", cleanup_index)
@@ -2379,7 +2408,7 @@ async def test_run_record_tool_usage_waits_for_late_subagent_cost():
     assert usage["llm_call_count"] == settled["llm_call_count"]
     assert reads > 1
     # The run record itself must consume the settled read, not a raw single fetch.
-    assert "_get_settled_tool_usage(" in inspect.getsource(bench.run_single_task)
+    assert "_get_settled_tool_usage(" in inspect.getsource(bench._run_single_task_as_run_user)
 
 
 async def test_settled_tool_usage_returns_promptly_and_stays_bounded():
@@ -6276,49 +6305,6 @@ async def test_blue_bottle_tree_proof_passes_with_subagent_evidence():
     await _assert_blue_bottle_tree_proof_semantics_passes()
 
 
-def test_blue_bottle_spawn_contract_seeds_live_target_without_rewriting_goal():
-    """k=5 timeouts burned budget on marketing detours; goals may still say complete payment."""
-    import os
-
-    from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.spawn_contract import (
-        apply_browser_spawn_live_target,
-        should_disable_saved_browser_auth,
-        with_active_benchmark_task,
-    )
-
-    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
-    assert should_disable_saved_browser_auth(task) is True
-
-    planner_goal = (
-        "Place a pickup order immediately from Blue Bottle Coffee at the Ferry Building in San Francisco, "
-        "using guest checkout. Complete payment and submit the order, using available agent payment capabilities. "
-        "Do not stop at the cart. Return the confirmed order confirmation ID."
-    )
-    patched = apply_browser_spawn_live_target(
-        task,
-        {
-            "goal": planner_goal,
-            "start_url": "https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
-        },
-    )
-    assert patched["start_url"] == task.environment["live_targets"][0]
-    assert patched["goal"] == planner_goal
-
-    with with_active_benchmark_task(task.name):
-        assert os.environ["BENCHMARK_ACTIVE_TASK_NAME"] == task.name
-        from benchmarks.spawn_contract import apply_active_task_spawn_contract
-
-        env_patched = apply_active_task_spawn_contract(
-            {
-                "goal": planner_goal,
-                "start_url": "https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
-            }
-        )
-        assert env_patched["start_url"] == task.environment["live_targets"][0]
-        assert env_patched["goal"] == planner_goal
-
-
 def test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.spawn_contract import evaluate_dom_patch_blocked, with_active_benchmark_task
@@ -8250,12 +8236,78 @@ def test_tamy_identity_fixture_declaration_drives_the_run_user():
     )
     assert bench._live_fixture_run_user_id(catalog_task) == TAMY_IDENTITY_USER_ID
     assert catalog_task.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES, (
-        "the fixture changes BENCHMARK_RUN_USER_ID process-wide and must not overlap siblings"
+        "the identity fixture overlays shared DB rows and must not overlap siblings"
     )
     assert catalog_task.environment["required_injectable_cookie_domains"] == [
         "amazon.com.mx",
         "amazon.com",
     ]
+
+
+async def test_sibling_task_cleanup_cannot_revert_a_concurrent_run_identity():
+    """A sibling finishing mid-run must not swap another task's run user.
+
+    Regression (agent-payment-new-user-journey, pre-deploy smoke): chat-mode
+    started first with no override, the payment task then switched the run user
+    to its synthetic new user, and chat-mode's cleanup restored its stale
+    "unset" snapshot. The payment task's attention polling fell back to the dev
+    user, never saw its own payment_approval, and the tree stalled for 515s.
+    """
+    import copy
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    base = get_task_by_name("chat-mode")
+    owner = copy.copy(base)
+    owner.name = "run-identity-owner"
+    sibling = copy.copy(base)
+    sibling.name = "run-identity-sibling"
+    scoped_user = "5f0c2a7e-0000-4000-8000-0000000000aa"
+
+    owner_started = asyncio.Event()
+    sibling_finished = asyncio.Event()
+    observed: dict[str, str] = {}
+
+    async def fake_apply_live_fixtures(task, _base_url):
+        if task.name == owner.name:
+            owner_started.set()
+            await sibling_finished.wait()
+            observed["owner"] = bench._current_benchmark_user_id()
+            raise RuntimeError("owner observed its run user")
+        await owner_started.wait()
+        raise RuntimeError("sibling finished")
+
+    original_apply = bench._apply_live_fixtures
+    original_user_for_task = bench._benchmark_user_id_for_task
+    original_env = os.environ.pop("BENCHMARK_RUN_USER_ID", None)
+    try:
+        bench._apply_live_fixtures = fake_apply_live_fixtures
+        bench._benchmark_user_id_for_task = lambda name, base_url=None: (
+            scoped_user if name == owner.name else None
+        )
+        base_url = "http://localhost:54121"
+        sibling_run = asyncio.create_task(bench.run_single_task(base_url, sibling))
+        await asyncio.sleep(0)
+        owner_run = asyncio.create_task(bench.run_single_task(base_url, owner))
+        sibling_result = await sibling_run
+        sibling_finished.set()
+        owner_result = await owner_run
+    finally:
+        bench._apply_live_fixtures = original_apply
+        bench._benchmark_user_id_for_task = original_user_for_task
+        leaked = os.environ.pop("BENCHMARK_RUN_USER_ID", None)
+        if original_env is not None:
+            os.environ["BENCHMARK_RUN_USER_ID"] = original_env
+
+    assert sibling_result.failure_reason.startswith("sibling finished")
+    assert owner_result.failure_reason.startswith("owner observed its run user")
+    assert observed.get("owner") == scoped_user, (
+        "the owner task must keep its own run user after a sibling finishes; "
+        f"got {observed.get('owner')!r}"
+    )
+    assert leaked is None, "a task-scoped run user must not leak into the process environment"
+    assert bench._current_benchmark_user_id() == bench.USER_ID
 
 
 def test_live_fixture_fails_when_live_auth_refresh_fails():
@@ -18417,6 +18469,10 @@ async def run_all_tests():
         test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate,
     )
     r.record(
+        "run_benchmark_task_selection_suite_permanent_gate",
+        test_run_benchmark_task_selection_suite_is_in_permanent_gate,
+    )
+    r.record(
         "cloudbench_patch_includes_untracked_files",
         test_cloudbench_worktree_patch_includes_tracked_and_untracked_files,
     )
@@ -19380,10 +19436,6 @@ async def run_all_tests():
         test_blue_bottle_tree_proof_passes_with_subagent_evidence,
     )
     r.record(
-        "blue_bottle_spawn_contract_seeds_live_target",
-        test_blue_bottle_spawn_contract_seeds_live_target_without_rewriting_goal,
-    )
-    r.record(
         "blue_bottle_spawn_contract_blocks_dom_patch_evaluate",
         test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate,
     )
@@ -19550,6 +19602,10 @@ async def run_all_tests():
     r.record(
         "tamy_identity_fixture_declaration_drives_run_user",
         test_tamy_identity_fixture_declaration_drives_the_run_user,
+    )
+    await r.record_async(
+        "sibling_cleanup_cannot_revert_run_identity",
+        test_sibling_task_cleanup_cannot_revert_a_concurrent_run_identity,
     )
     r.record(
         "live_fixture_auth_failure_is_fatal",
@@ -19799,5 +19855,25 @@ async def run_all_tests():
     r.record(
         "agent_latency_baseline_lookup_dedupes_immature_keys",
         test_agent_latency_baseline_lookup_deduplicates_immature_span_keys,
+    )
+    r.record(
+        "payment_setup_resume_exclusive_beside_event_ticket",
+        test_payment_setup_resume_stays_exclusive_beside_event_ticket,
+    )
+    r.record(
+        "browser_hub_archive_waits_for_recording",
+        test_agent_messages_ready_for_browser_hub_archive_waits_for_recording,
+    )
+    r.record(
+        "no_browser_agents_static_ignores_skipped_spawn",
+        test_no_browser_agents_static_ignores_skipped_spawn_and_walks_tree,
+    )
+    r.record(
+        "local_port_range_excludes_ephemeral_window",
+        test_local_automatic_port_range_excludes_reported_ephemeral_window,
+    )
+    r.record(
+        "code_agent_sdk_evidence_chips_are_grounded_steps",
+        test_code_agent_sdk_evidence_chips_count_as_grounded_steps,
     )
     return r.all_passed

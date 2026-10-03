@@ -9,6 +9,7 @@ import ast
 import asyncio
 import base64
 import contextlib
+import copy
 import json
 import os
 import sys
@@ -32,6 +33,23 @@ from _test_utils import (
 )
 
 AGENTS_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_browser_use_captcha_wait_does_not_rotate_before_solver_window():
+    from domains.spawn_browser_agent_v3.handler import _captcha_solver_wait_complete
+
+    common = {
+        "page_still_challenged": False,
+        "saw_active_solver": False,
+        "inactive_polls": 3,
+    }
+    assert not _captcha_solver_wait_complete(provider="browser-use", elapsed_seconds=6, **common)
+    assert _captcha_solver_wait_complete(provider="browser-use", elapsed_seconds=10, **common)
+    assert _captcha_solver_wait_complete(provider="kernel", elapsed_seconds=6, **common)
+    assert not _captcha_solver_wait_complete(
+        provider="browser-use", elapsed_seconds=45, page_still_challenged=True,
+        saw_active_solver=False, inactive_polls=20,
+    )
 
 # ========================================
 # Helpers: build a real encrypted envelope
@@ -226,7 +244,7 @@ def test_browser_spawn_goal_uses_tool_call_goal_verbatim():
 
 def test_browser_fast_mode_timeout_is_demo_only():
     """Live Fast Mode purchases keep 30m; only the OAi demo gets the 3m ceiling."""
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
     from domains.spawn_browser_agent_v3.config import (
         ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
         ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE,
@@ -494,551 +512,30 @@ def test_should_skip_input_text_refocus_after_same_index_click():
     )
 
 
-def test_visible_result_completion_rewrites_post_submit_wait():
-    """c3762be3 already stated score 0.07 + bot verdict, then waited 6–10s.
+async def test_browser_activity_preserves_requested_start_url():
+    """Benchmark metadata must not replace the agent's browser destination."""
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
-    A post-submit wait after that reasoning must become attempt_completion so
-    the 420s smoke cap cannot be burned on PoW retries.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        forced_visible_result_completion_action,
-        should_force_visible_result_completion,
-    )
-
-    stated = (
-        'A risk score of "0.07" is shown, but there\'s a "Bot detected - form blocked" '
-        'message. The form was blocked with reason "pow_not_satisfied".'
-    )
-    prior_submit = ['click: {"params": {"index": 12}, "text": "Submit (Protected by Invisible"}']
-    assert should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning=stated,
-        action_summaries=prior_submit,
-    )
-    forced = forced_visible_result_completion_action(stated)
-    assert forced["action"] == "attempt_completion"
-    assert "0.07" in forced["params"]["reasoning"]
-
-
-def test_identical_verifier_reject_circuit_soft_accepts_complete_output():
-    """9f53aed4: identical 0.5 rejects with complete output must stop the loop.
-
-    Live example.com had no H1; verifier kept scoring 0.5 with the same
-    reasoning while already emitting main_heading + page_url. Soft-accept
-    after the streak so the browser agent completes instead of hub-pause.
-    Soft-accept is unverified (handler must not report success=True).
-    """
-    from domains.spawn_browser_agent_v3.verifier_reject_circuit import (
-        next_identical_reject_streak,
-        should_soft_accept_identical_verifier_reject,
-        structured_response_covers_schema,
-    )
-
-    schema = {
-        "fields": [
-            {"name": "main_heading", "type": "str", "required": True},
-            {"name": "page_url", "type": "str", "required": True},
-        ]
-    }
-    output = {
-        "main_heading": "No H1 exists on the inspected page",
-        "page_url": "https://example.com/",
-    }
-    fingerprint = ""
-    streak = 0
-    reason = (
-        "The live-page checks found zero H1 elements; Example Domain is the "
-        "document title, not an H1."
-    )
-    for _ in range(3):
-        fingerprint, streak = next_identical_reject_streak(
-            previous_fingerprint=fingerprint,
-            previous_streak=streak,
-            reasoning=reason,
-            score=0.5,
+    chosen_url = "https://www.bluebottlecoffee.com/us/eng/cafes/ferry-building"
+    with (
+        patch.dict(os.environ, {"BENCHMARK_ACTIVE_TASK_LIVE_TARGET": "https://order.online/fixture"}),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.WorldModelToolExecutionAdapter.from_env",
+            return_value=SimpleNamespace(should_simulate=lambda _action: False),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._spawn_browser_agent_activity_v3_real",
+            new_callable=AsyncMock,
+        ) as real_browser,
+    ):
+        real_browser.return_value = {"status": "completed"}
+        await spawn_browser_agent_activity_v3(
+            user_id="user", agent_id="agent", goal="Open the selected cafe", tool_call_id="tool",
+            start_url=chosen_url,
         )
-    assert streak == 3
-    assert should_soft_accept_identical_verifier_reject(
-        consecutive_identical=streak,
-        structured_response=output,
-        response_schema=schema,
-    )
-    assert not should_soft_accept_identical_verifier_reject(
-        consecutive_identical=2,
-        structured_response=output,
-        response_schema=schema,
-    )
-    assert not should_soft_accept_identical_verifier_reject(
-        consecutive_identical=3,
-        structured_response={"page_url": "https://example.com/"},
-        response_schema=schema,
-    )
-    # Optional-only schema must still require non-empty usable output.
-    optional_only = {
-        "fields": [
-            {"name": "notes", "type": "str", "required": False},
-        ]
-    }
-    assert not structured_response_covers_schema({}, optional_only)
-    assert not structured_response_covers_schema({"notes": ""}, optional_only)
-    assert structured_response_covers_schema({"notes": "seen"}, optional_only)
-    # Unknown keys (e.g. error) must not satisfy an optional-only schema.
-    assert not structured_response_covers_schema(
-        {"error": "extraction failed"}, optional_only
-    )
-    # Malformed fields collections must not fall through to schema-less accept.
-    assert not structured_response_covers_schema(
-        {"main_heading": "x"}, {"fields": {"name": "main_heading"}}
-    )
-    assert not structured_response_covers_schema({"main_heading": "x"}, {"fields": []})
-    # Score changes reset the streak even when reasoning matches.
-    fingerprint, streak = next_identical_reject_streak(
-        previous_fingerprint=fingerprint,
-        previous_streak=streak,
-        reasoning=reason,
-        score=0.9,
-    )
-    assert streak == 1
-    # Different reason resets the streak.
-    fingerprint, streak = next_identical_reject_streak(
-        previous_fingerprint=fingerprint,
-        previous_streak=streak,
-        reasoning="Need a screenshot of the cart total.",
-        score=0.5,
-    )
-    assert streak == 1
-    fingerprint, streak = next_identical_reject_streak(
-        previous_fingerprint=fingerprint,
-        previous_streak=streak,
-        reasoning=reason,
-        score=1.0,
-    )
-    assert streak == 0
 
-
-def test_handler_soft_accept_reports_unverified_not_verified_success():
-    """Soft-accept must not collapse into a verified success=True completion."""
-    from pathlib import Path
-
-    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
-    assert "completion_success = not verifier_soft_accepted" in source
-    assert '"verifier_soft_accepted": verifier_soft_accepted' in source
-    assert "Identical verifier reject circuit: completing " in source
-    assert "unverified with already-populated structured" in source
-    assert 'result.get("verifier_soft_accepted")' in source
-
-
-def test_handler_wires_identical_verifier_reject_circuit():
-    """attempt_completion path must import and call the reject circuit helpers."""
-    import ast
-    from pathlib import Path
-
-    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
-    tree = ast.parse(source)
-    imported = set()
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.module == "domains.spawn_browser_agent_v3.verifier_reject_circuit":
-            imported.update(alias.name for alias in node.names)
-        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("verifier_reject_circuit"):
-            imported.update(alias.name for alias in node.names)
-    # Relative import inside the package
-    if "should_soft_accept_identical_verifier_reject" not in imported:
-        assert "from .verifier_reject_circuit import" in source
-        assert "should_soft_accept_identical_verifier_reject" in source
-        assert "next_identical_reject_streak" in source
-    assert "Soft-accepting browser attempt_completion after" in source
-
-
-def test_visible_result_completion_rewrites_post_submit_scroll():
-    """b234cfa8 stated Risk Score 0.11 + bot verdict, then scrolled until 420s.
-
-    Idle scroll/screenshot after submit+stated result must also force completion;
-    wait-only rewriting leaves scroll loops uncapped.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    stated = (
-        'The form was submitted and results are showing: Risk Score 0.11, and a '
-        '"Bot detected - form blocked" message. Let me scroll to see full details.'
-    )
-    prior_submit = ['click: {"text": "Submit (Protected by Invisible"}']
-    assert should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning=stated,
-        action_summaries=prior_submit,
-    )
-    assert should_force_visible_result_completion(
-        action_name="screenshot",
-        last_reasoning=stated,
-        action_summaries=prior_submit,
-    )
-
-
-def test_visible_result_completion_does_not_rewrite_after_navigation():
-    """Submit → navigate → scroll must not complete against a stale score."""
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    stated = 'Risk Score 0.11, Bot detected - form blocked'
-    after_nav = [
-        'click: {"text": "Submit (Protected by Invisible"}',
-        'navigate: https://webdecoy.com/other',
-    ]
-    assert not should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning=stated,
-        action_summaries=after_nav,
-    )
-
-
-def test_visible_result_completion_does_not_rewrite_after_navback_or_open_new_tab():
-    """Producer names navback/open_new_tab must count as navigation.
-
-    service_actions records those exact action names. If the marker set only
-    has go_back/new_tab aliases, a later idle action can complete against the
-    pre-navigation score.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    stated = 'Risk Score 0.11, Bot detected - form blocked'
-    submit = {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"}
-    for nav_action in ("navback", "open_new_tab"):
-        assert not should_force_visible_result_completion(
-            action_name="scroll",
-            last_reasoning=stated,
-            action_entries=[submit, {"action": nav_action}],
-        ), nav_action
-
-
-def test_visible_result_completion_ignores_pre_navigation_evidence_after_later_submit():
-    """submit(A) → score A → navigate(B) → submit(B) → scroll must not use score A.
-
-    history_has_navigation_after_submit is false (no nav after latest submit),
-    but prior reasoning still describes page A. Only post-navigation evidence
-    (current-turn reasoning) may force completion.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    stale_score_a = 'Risk Score 0.07, Bot detected - form blocked (page A)'
-    history = [
-        'click: {"text": "Submit (Protected by Invisible"}',
-        'navigate: https://webdecoy.com/page-b',
-        'click: {"text": "Submit (Protected by Invisible"}',
-    ]
-    assert not should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning="Scrolling to inspect page B results.",
-        prior_reasoning_messages=[stale_score_a],
-        action_summaries=history,
-    )
-    # Fresh score stated on the current turn after the later submit is fine.
-    assert should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning='Risk Score 0.11, Bot detected - form blocked on page B',
-        prior_reasoning_messages=[stale_score_a],
-        action_summaries=history,
-    )
-
-
-def test_visible_result_completion_prefers_entries_over_concatenated_summaries():
-    """Passing both summaries and entries must not concatenate timelines.
-
-    Handler always passes both. Concatenating summaries then entries makes a
-    navigate that only appears in summaries look like it precedes a later
-    submit that only appears in entries (or vice versa), breaking index math.
-    Prefer action_entries when present.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    stated = 'Risk Score 0.11, Bot detected - form blocked'
-    # Summaries alone would show navigate AFTER submit (block force).
-    summaries = [
-        'click: {"text": "Submit (Protected by Invisible"}',
-        'navigate: https://webdecoy.com/other',
-    ]
-    # Entries alone: submit only, no navigate (would allow force).
-    entries = [
-        {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-    ]
-    # If concatenated (summaries+entries), last submit is in the entries half
-    # after navigate → nav_before_latest_submit true OR nav_after depending on
-    # indices. Preferring entries must allow force (no nav in entries).
-    assert should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning=stated,
-        action_summaries=summaries,
-        action_entries=entries,
-    )
-    # Summaries-only still respects navigate-after-submit.
-    assert not should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning=stated,
-        action_summaries=summaries,
-    )
-
-
-def test_visible_result_completion_does_not_rewrite_before_submit():
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    stated = 'A risk score of "0.07" is shown, Bot detected - form blocked'
-    assert not should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning=stated,
-        action_summaries=['click: {"text": "I\'m not a robot"}'],
-    )
-    assert not should_force_visible_result_completion(
-        action_name="click",
-        last_reasoning=stated,
-        action_summaries=['click: {"text": "Submit (Protected by Invisible"}'],
-    )
-    assert not should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning="Scrolling to bring the checkbox into view.",
-        action_summaries=['click: {"text": "Submit (Protected by Invisible"}'],
-    )
-    assert not should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning="Scrolling to bring the checkbox into view.",
-        action_summaries=['click: {"text": "Submit (Protected by Invisible"}'],
-    )
-
-
-def test_visible_result_completion_rewrites_post_submit_score_without_verdict():
-    """6ba2a6bd stated numeric score 0.11 after Submit, then scrolled/waited.
-
-    The earlier helper required a verdict marker and only rewrote `wait`, so
-    this trajectory burned the remaining 420s cap after the score was already
-    visible. Score-only + idle observation after submit must complete.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        forced_visible_result_completion_action,
-        should_force_visible_result_completion,
-    )
-
-    stated = 'The form was submitted and a score "0.07" appeared below the form.'
-    prior_submit = ['click: {"params": {"index": 12}, "text": "Submit (Protected by Invisible"}']
-    for action_name in ("scroll_down", "wait", "screenshot"):
-        assert should_force_visible_result_completion(
-            action_name=action_name,
-            last_reasoning=stated,
-            action_summaries=prior_submit,
-        ), action_name
-    forced = forced_visible_result_completion_action(stated)
-    assert forced["action"] == "attempt_completion"
-    assert "0.07" in forced["params"]["reasoning"]
-
-
-def test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score():
-    """15a85ea0 evaluate already returned score 0.15 + bot verdict, then waited.
-
-    The earlier helper only scanned LLM reasoning. This trajectory named
-    pow_not_satisfied in thinking (no 'risk score' words) and kept waiting /
-    inspecting PoW until the 420s cap. Post-submit evaluate/tool-result text
-    that already contains the visible score + form verdict must force
-    completion on the next idle action, including network/log inspection.
-    """
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    pow_retry_reasoning = (
-        'The submission is being blocked with reason "pow_not_satisfied" — the '
-        "proof-of-work likely hasn't completed yet. Let me wait longer for the "
-        "background PoW to finish, then submit again."
-    )
-    evaluate_after_submit = {
-        "action": "evaluate",
-        "result": {
-            "success": True,
-            "message": (
-                "Executed JS, result: Invisible Mode\n"
-                "Submit (Protected by Invisible CAPTCHA)\n"
-                "0.15\n"
-                "Risk Score (lower = human)\n"
-                "Bot detected - form blocked\n"
-                '{\n  "reason": "pow_not_satisfied",\n'
-                '  "score": 0.14629999999999999,\n'
-                '  "success": false\n}'
-            ),
-        },
-    }
-    history = [
-        {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-        evaluate_after_submit,
-    ]
-    for action_name in ("wait", "screenshot", "read_network_requests", "read_logs"):
-        assert should_force_visible_result_completion(
-            action_name=action_name,
-            last_reasoning=pow_retry_reasoning,
-            action_entries=history,
-        ), action_name
-    # Static page chrome before submit (Risk Score label + version) must not force.
-    pre_submit_page = {
-        "action": "evaluate",
-        "result": {
-            "message": "Running v1.34.1\nRisk Score (lower = human)\nI'm not a robot\nVerified!"
-        },
-    }
-    assert not should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning="Waiting for the checkbox to settle.",
-        action_entries=[
-            pre_submit_page,
-            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-        ],
-    )
-
-
-def test_visible_result_completion_rewrites_recovery_after_allowed_result():
-    """A successful visible result must beat a redundant recovery request."""
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    result_dom = {
-        "action": "read_browser_state",
-        "result": {
-            "message": (
-                "0.02\nRisk Score (lower = human)\n"
-                "Form submission allowed!\n"
-                '{"action":"form_submit","recommendation":"allow","success":true}'
-            )
-        },
-    }
-    history = [
-        {"action": "click", "element_description": "[567] button 'Submit (Protected by Invisible'"},
-        result_dom,
-    ]
-
-    assert should_force_visible_result_completion(
-        action_name="recover_from_challenge",
-        last_reasoning="",
-        action_entries=history,
-    )
-    assert not should_force_visible_result_completion(
-        action_name="recover_from_challenge",
-        last_reasoning="",
-        action_entries=[history[0]],
-    )
-
-
-def test_visible_result_completion_ignores_submit_words_inside_observation_dumps():
-    """Page chrome saying 'click Submit' must not look like a later submit action."""
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
-
-    evaluate_with_chrome = {
-        "action": "evaluate",
-        "result": {
-            "message": (
-                "click the Submit button\n"
-                "0.15\n"
-                "Risk Score (lower = human)\n"
-                "Bot detected - form blocked"
-            )
-        },
-    }
-    assert should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning='Blocked with reason "pow_not_satisfied"; inspecting logs.',
-        action_entries=[
-            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-            evaluate_with_chrome,
-        ],
-    )
-
-
-def test_visible_result_completion_ignores_post_submit_version_decimal_without_score():
-    """Bot detected + v1.34.1 after submit is not a visible FCaptcha score."""
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        observation_states_visible_fcaptcha_result,
-        reasoning_states_visible_fcaptcha_result,
-        should_force_visible_result_completion,
-    )
-
-    version_only = (
-        "Running v1.34.1\nRisk Score (lower = human)\nBot detected - form blocked"
-    )
-    assert not observation_states_visible_fcaptcha_result(version_only)
-    assert not should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning='Blocked with reason "pow_not_satisfied"; inspecting logs.',
-        action_entries=[
-            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-            {"action": "evaluate", "result": {"message": version_only}},
-        ],
-    )
-    # v1.0.15 still contains a unit-interval token (`0.15`) after a dotted version.
-    version_unit_fragment = "Bot detected - form blocked; browser version v1.0.15"
-    assert not observation_states_visible_fcaptcha_result(version_unit_fragment)
-    assert not should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning="Risk Score; Bot detected",
-        action_entries=[
-            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-            {"action": "evaluate", "result": {"message": version_unit_fragment}},
-        ],
-    )
-    assert not observation_states_visible_fcaptcha_result("Bot detected; threshold 0.15")
-    assert reasoning_states_visible_fcaptcha_result("Risk Score: 0")
-    assert reasoning_states_visible_fcaptcha_result("Risk Score: 1.0")
-    assert reasoning_states_visible_fcaptcha_result(
-        'The form was submitted and a score "0.07" appeared below the form.'
-    )
-    assert reasoning_states_visible_fcaptcha_result("a score 0 appeared")
-    assert reasoning_states_visible_fcaptcha_result("a score 1 appeared")
-    assert reasoning_states_visible_fcaptcha_result("a score 1.0 appeared")
-    assert not reasoning_states_visible_fcaptcha_result("Risk Score; Bot detected")
-    assert not reasoning_states_visible_fcaptcha_result("threshold 0.15")
-    assert not reasoning_states_visible_fcaptcha_result("score v1.0")
-    assert not observation_states_visible_fcaptcha_result(
-        'Bot detected; {"score": 2, "success": false}'
-    )
-    assert not observation_states_visible_fcaptcha_result(
-        'Bot detected; {"score": 1.34, "success": false}'
-    )
-    assert observation_states_visible_fcaptcha_result(
-        'Bot detected; {"score": 0.15, "success": false}'
-    )
-    assert not observation_states_visible_fcaptcha_result("Bot detected; Risk Score: 0.15.2")
-    assert not observation_states_visible_fcaptcha_result("Bot detected; Risk Score: 1.0.15")
-    # Observation dumps stay labeled; bare "a score 0.07 appeared" is reasoning-only.
-    assert not observation_states_visible_fcaptcha_result(
-        'Bot detected - form blocked; a score "0.07" appeared below the form.'
-    )
-    # Static Risk Score chrome plus an unrelated 0.xx must not complete.
-    assert not observation_states_visible_fcaptcha_result(
-        "Bot detected - form blocked\nRisk Score (lower = human)\nthreshold 0.15"
-    )
-    assert not observation_states_visible_fcaptcha_result(
-        "Bot detected; Risk Score threshold: 0.15"
-    )
-    assert not observation_states_visible_fcaptcha_result(
-        "Bot detected; Risk Score threshold of 0.15"
-    )
-    # FCaptcha and Score often sit on adjacent evaluate lines after unescape.
-    multiline_fcaptcha = "Bot detected\nFCaptcha\nScore: 0.15"
-    assert observation_states_visible_fcaptcha_result(multiline_fcaptcha)
-    assert should_force_visible_result_completion(
-        action_name="wait",
-        last_reasoning='Blocked with reason "pow_not_satisfied"; waiting.',
-        action_entries=[
-            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
-            {"action": "evaluate", "result": {"message": multiline_fcaptcha}},
-        ],
-    )
+    assert real_browser.await_args.kwargs["start_url"] == chosen_url
+    assert real_browser.await_args.kwargs["goal"] == "Open the selected cafe"
 
 
 def test_max_steps_best_effort_prefers_last_reasoning():
@@ -1151,42 +648,33 @@ async def test_browser_verifier_context_grounds_in_final_state():
     assert "PRESERVED PAGE EVIDENCE" in ctx[0]["text"]
     assert "Six-foot cable; supports 100 watts" in ctx[0]["text"]
     assert "browser ground truth, not an agent claim" in ctx[0]["text"]
-    assert "after a successful evaluate" in ctx[0]["text"]
+    assert "during the run" in ctx[0]["text"]
     # Final-state screenshot rides through as a multimodal image reference.
     screenshot_msg = next(m for m in ctx if m.get("metadata", {}).get("toolName") == "final_screenshot")
     assert screenshot_msg["metadata"]["screenshot_b64"] == "ZmFrZS1iNjQ="
 
 
-async def test_evaluate_always_preserves_browser_evidence_checkpoint():
-    """Every successful evaluate snapshots live DOM for the verifier — no flag."""
-    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
-    from domains.spawn_browser_agent_v3.handler import (
-        _append_bounded_verifier_checkpoint,
-        _capture_preserved_evidence_after_evaluate,
-    )
+def test_evaluate_does_not_snapshot_dom_behind_the_model():
+    """The browser LLM owns its context: evaluate returns only its JS result."""
+    import inspect
 
-    class _FakeDom:
-        async def get_browser_state(self, include_screenshot=False):
-            assert include_screenshot is False
-            return {
-                "url": "https://shop.example/item/cable",
-                "title": "Cable",
-                "dom_tree": "<main>Six-foot cable; supports 100 watts; $19.99</main>",
-            }
+    from domains.spawn_browser_agent_v3 import handler
+
+    assert not hasattr(handler, "_capture_preserved_evidence_after_evaluate")
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    assert 'kind="preserved_evidence"' not in source
+    after_action = source[source.index('step_timer.mark("execute_action")') :]
+    success_branch = after_action[after_action.index('if result.get("success", True):') :]
+    success_branch = success_branch[: success_branch.index('step_timer.mark("post_action_bookkeeping")')]
+    assert 'action_name == "evaluate"' not in success_branch
+    assert "get_browser_state" not in success_branch
+
+
+def test_verifier_checkpoints_stay_bounded():
+    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+    from domains.spawn_browser_agent_v3.handler import _append_bounded_verifier_checkpoint
 
     checkpoints: list = []
-    state = await _capture_preserved_evidence_after_evaluate(
-        dom_service=_FakeDom(),
-        verifier_checkpoints=checkpoints,
-        current_url="https://shop.example/item/cable",
-    )
-    assert state is not None
-    assert len(checkpoints) == 1
-    assert checkpoints[0]["kind"] == "preserved_evidence"
-    assert "100 watts" in checkpoints[0]["dom_tree"]
-    assert "preserve_evidence" not in str(checkpoints)
-
-    # Cap retains the most recent VERIFIER_CHECKPOINT_MAX distinct snapshots.
     for i in range(VERIFIER_CHECKPOINT_MAX + 5):
         _append_bounded_verifier_checkpoint(
             checkpoints,
@@ -1202,30 +690,91 @@ async def test_evaluate_always_preserves_browser_evidence_checkpoint():
     assert checkpoints[-1]["dom_tree"] == f"<main>product-{VERIFIER_CHECKPOINT_MAX + 4}</main>"
 
 
+def test_observed_interaction_keeps_earlier_browser_result_for_verifier():
+    """A later final page must not erase proof observed after a click or evaluate."""
+    from domains.spawn_browser_agent_v3.handler import _preserve_observed_interaction_for_verifier
+
+    checkpoints: list = []
+    pending = _preserve_observed_interaction_for_verifier(
+        action_name="click",
+        succeeded=True,
+        awaiting_observation=False,
+        observed_state={"dom_tree": "<main>Before click</main>"},
+        current_url="https://example.com",
+        verifier_checkpoints=checkpoints,
+    )
+    assert pending and not checkpoints
+    pending = _preserve_observed_interaction_for_verifier(
+        action_name="wait",
+        succeeded=True,
+        awaiting_observation=pending,
+        observed_state={"dom_tree": "<main>Processing</main>"},
+        current_url="https://example.com",
+        verifier_checkpoints=checkpoints,
+    )
+    assert pending and not checkpoints
+    pending = _preserve_observed_interaction_for_verifier(
+        action_name="screenshot",
+        succeeded=True,
+        awaiting_observation=pending,
+        observed_state={"dom_tree": "<main>Verified</main>", "title": "Verification"},
+        current_url="https://example.com",
+        verifier_checkpoints=checkpoints,
+    )
+    assert not pending
+    assert checkpoints == [{
+        "url": "https://example.com",
+        "title": "Verification",
+        "dom_tree": "<main>Verified</main>",
+        "kind": "preserved_evidence",
+    }]
+    pending = _preserve_observed_interaction_for_verifier(
+        action_name="evaluate",
+        succeeded=True,
+        awaiting_observation=False,
+        observed_state={"dom_tree": "<main>Before evaluate</main>"},
+        current_url="https://example.com",
+        verifier_checkpoints=checkpoints,
+    )
+    assert pending and len(checkpoints) == 1
+    pending = _preserve_observed_interaction_for_verifier(
+        action_name="read_browser_state",
+        succeeded=True,
+        awaiting_observation=pending,
+        observed_state={"dom_tree": "<main>Evaluated result</main>", "title": "Result"},
+        current_url="https://example.com",
+        verifier_checkpoints=checkpoints,
+    )
+    assert not pending
+    assert checkpoints[-1]["dom_tree"] == "<main>Evaluated result</main>"
+
+
 def test_evaluate_tool_schema_has_no_preserve_evidence_flag():
     from browser_tools.schemas import EvaluateTool
     from providers.rose.browser_use import BROWSER_USE_TOOLS, build_browser_use_system_prompt, build_browser_use_tools
 
     fields = EvaluateTool.model_fields
     assert "preserve_evidence" not in fields
-    assert "always retains" in fields["code"].description.lower() or "snapshot" in fields["code"].description.lower()
+    assert "snapshot" not in (EvaluateTool.__doc__ or "").lower()
+    assert "snapshot" not in fields["code"].description.lower()
 
     evaluate_desc = BROWSER_USE_TOOLS["evaluate"]["description"]
     assert "preserve_evidence" not in evaluate_desc
-    assert "bounded browser-extracted DOM snapshot" in evaluate_desc
+    assert "snapshot" not in evaluate_desc.lower()
     assert "use `extract`" not in evaluate_desc
     assert "NOT for extracting visible content" not in evaluate_desc
 
     tools = build_browser_use_tools(["evaluate"])
     assert len(tools) == 1
     assert "preserve_evidence" not in tools[0]["input_schema"].get("properties", {})
-    assert "bounded browser-extracted DOM snapshot" in tools[0]["description"]
+    assert "snapshot" not in tools[0]["description"].lower()
     assert "use `extract`" not in tools[0]["description"]
 
     prompt = build_browser_use_system_prompt([])
     assert "# Evidence Retention" in prompt
-    assert "preserve flag" in prompt.lower() or "do not pass a preserve flag" in prompt
+    assert "preserve flag" not in prompt.lower()
     assert "preserve_evidence=true" not in prompt
+    assert "after a successful `evaluate`" not in prompt
 
 
 def test_action_history_restores_across_activity_boundary():
@@ -1254,6 +803,24 @@ def test_action_history_restores_across_activity_boundary():
             "result": {"success": True},
         }
     ]
+
+
+async def test_action_history_records_child_text_for_submit_button():
+    from browser_tools.dom_service import ActionHistory
+
+    button = SimpleNamespace(
+        tag_name="button",
+        text_content="",
+        get_all_children_text=lambda: "Submit (Protected by Invisible CAPTCHA)",
+    )
+    dom = SimpleNamespace(
+        selector_map={2716: button},
+        get_element_coordinates=AsyncMock(return_value=(500, 300)),
+    )
+    history = ActionHistory()
+    await history.record_action(dom_service=dom, action="click", index=2716, result={"success": True})
+    entries = history.get_entries()
+    assert entries[0]["element_description"] == "[2716] button 'Submit (Protected by Invisible CAPTCHA)'"
 
 async def test_action_history_resume_preserves_monotonic_step_numbers():
     from browser_tools.dom_service import ActionHistory
@@ -1289,7 +856,7 @@ def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state
     # Keep a tight window around the fetch so a distant unused assignment cannot
     # satisfy the positive asserts while a nearby UnboundLocalError regresses.
     start = src.index(marker)
-    block = src[start : start + 1200]
+    block = src[start : start + 2000]
     assert (
         "auth_runtime_state.observe_page_text(observe_page_state.get(\"title\")"
         in block
@@ -1545,15 +1112,14 @@ async def test_browser_agent_recording_marks_do_not_block_on_slow_screenshots():
             )
             recorder.frames_dir.mkdir(parents=True)
             recorder._loop_task = asyncio.create_task(asyncio.sleep(60))
-            await asyncio.wait_for(
-                recorder.mark("Submit started", action="click", metadata={"step": 1, "phase": "start"}),
-                timeout=0.5,
-            )
-            await asyncio.wait_for(
-                recorder.mark("Submit finished", action="click", metadata={"step": 1, "phase": "finish"}),
-                timeout=0.5,
-            )
-            assert page.screenshot_calls == 2
+            for label, phase in (("Submit started", "start"), ("Submit finished", "finish")):
+                started = time_module.monotonic()
+                await recorder.mark(label, action="click", metadata={"step": 1, "phase": phase})
+                # Marks run twice per step; the bounded 200ms capture must not
+                # be on the step's critical path.
+                assert time_module.monotonic() - started < 0.05
+            await recorder.flush_marks()
+            assert page.screenshot_calls >= 1
             assert recorder.frames == []
             await recorder.record_observation(
                 iteration=1,
@@ -1804,6 +1370,7 @@ async def test_browser_agent_recording_mark_survives_wiped_frames_dir():
 
             # Must not raise — this is the Place-order finish mark path.
             await recorder.mark("Clicked <button \"Place order $1.00\">", action="click")
+            await recorder.flush_marks()
 
             assert recorder.frames_dir.exists()
             assert len(recorder.frames) == frames_before_wipe + 1
@@ -2191,6 +1758,7 @@ async def test_browser_agent_recording_survives_kernel_to_steel_recovery():
                     session_metadata={"provider": "steel"},
                 )
                 await recorder.mark("post-recovery checkout", action="recovery")
+                await recorder.flush_marks()
 
                 assert any(frame["label"] == "post-recovery checkout" for frame in recorder.frames), (
                     "the promoted Steel half of the recording was dropped"
@@ -3521,6 +3089,38 @@ def test_mouse_input_synthesis_rejects_unrealistic_sample_jumps():
         ]
         assert max(steps) <= 62
         assert max(velocities) <= MIMIC_MAX_VELOCITY_PX_PER_S + 60
+
+
+def test_mouse_path_duration_tracks_request_within_velocity_cap():
+    """A stroke takes about as long as its peak-velocity bound allows, not a
+    slow linear crawl, and long moves stay near human Fitts'-law times
+    (350px used to take ~1.85s at p50, 800px ~1.9s)."""
+    import math
+    import random
+    import statistics
+
+    from browser_tools.input_synthesis import MIMIC_MAX_VELOCITY_PX_PER_S, synthesize_mouse_path
+
+    for distance, p50_ceiling_s in ((60, 0.2), (350, 0.55), (800, 1.1)):
+        requested = max(0.08, min(0.95, 0.05 + distance / 1100))
+        totals = []
+        for seed in range(120):
+            path = synthesize_mouse_path(
+                (100, 300),
+                (100 + distance, 300),
+                screen=(1280, 800),
+                frequency_hz=105,
+                duration_s=requested,
+                rng=random.Random(seed),
+            )
+            totals.append(sum(sample.delay_s for sample in path))
+            velocities = [
+                math.hypot(b.x - a.x, b.y - a.y) / b.delay_s for a, b in zip(path, path[1:])
+            ]
+            assert max(velocities) <= MIMIC_MAX_VELOCITY_PX_PER_S + 1e-6
+            halfway = next(i for i, s in enumerate(path) if s.x - 100 >= distance / 2)
+            assert sum(s.delay_s for s in path[: halfway + 1]) < 0.75 * totals[-1] or distance < 100
+        assert statistics.median(totals) <= p50_ceiling_s, (distance, statistics.median(totals))
 
 def test_idle_mouse_drift_stays_near_anchor_and_inside_viewport():
     import random
@@ -6238,13 +5838,13 @@ def test_payment_card_approval_finishes_original_browser_tool_result():
     assert not _resolve_payment_card_tool_result_for_resume(turns, refs, "1111")
 
 
-def test_large_payment_request_resumes_with_parseable_finished_tool_result():
+async def test_large_payment_request_resumes_with_parseable_finished_tool_result():
     from domains.spawn_browser_agent_v3.handler import (
         _append_browser_turn_messages,
-        _compact_browser_turn_messages_for_resume,
         _resolve_payment_card_tool_result_for_resume,
         _simulated_browser_resume_payload,
     )
+    from domains.spawn_browser_agent_v3.resume_store import hydrate_resume_context, persist_resume_context
 
     request = {
         "merchant": "Example Shop",
@@ -6259,7 +5859,10 @@ def test_large_payment_request_resumes_with_parseable_finished_tool_result():
         result={"success": True, "status": "awaiting_payment_card_approval", "payment_request": request},
         tool_call_id="payment-call-large",
     )
-    real_turns = _compact_browser_turn_messages_for_resume(turns)
+    persisted = await persist_resume_context(
+        agent_id="agent-1", task_id="task-1", state={"browser_turn_messages": copy.deepcopy(turns)}
+    )
+    real_turns = (await hydrate_resume_context(agent_id="agent-1", resume_state=persisted))["browser_turn_messages"]
     simulated_turns = _simulated_browser_resume_payload(
         browser_state={},
         action_entries=[],
@@ -7703,7 +7306,7 @@ def test_passkeys_rearmed_before_each_step_state_observe():
     window = source[start : observe + 120]
     assert "ensure_browser_overlays_suppressed()" in window
     assert window.index("ensure_browser_overlays_suppressed()") < window.index(
-        "get_browser_state("
+        "_observe_step_page("
     )
 
 async def test_provider_handoff_replaces_humanizer_without_leaking_idle_work():
@@ -7809,8 +7412,9 @@ async def test_provider_reconnect_cleans_partial_new_stack_on_focus_failure():
     class _NewDom:
         last_instance = None
 
-        def __init__(self, cdp_url):
+        def __init__(self, cdp_url, downloads_path=None):
             self.cdp_url = cdp_url
+            self.downloads_path = downloads_path
             self.connect = AsyncMock()
             self.disconnect = AsyncMock()
             self.session = SimpleNamespace(get_current_page=AsyncMock(return_value=SimpleNamespace()))
@@ -7844,6 +7448,7 @@ async def test_provider_reconnect_cleans_partial_new_stack_on_focus_failure():
                 old_driver_pid=11,
                 fingerprint_injection=None,
                 agent_id="agent-1",
+                provider="browser-use",
             )
         except RuntimeError as exc:
             assert "focus sync failed" in str(exc)
@@ -7851,6 +7456,7 @@ async def test_provider_reconnect_cleans_partial_new_stack_on_focus_failure():
             raise AssertionError("expected focus synchronization failure")
 
     old_dom.disconnect.assert_awaited_once()
+    assert _NewDom.last_instance.downloads_path == "/tmp/downloads"
     assert stop_mock.await_count == 2
     stop_mock.assert_any_await(old_browser, old_playwright, "agent-1", driver_pid=11)
     stop_mock.assert_any_await(
@@ -8459,6 +8065,14 @@ def test_build_usage_items():
     with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}):
         steel_items = build_usage_items(0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1)
     assert steel_items[1]["provider"] == "Steel.dev Browser"
+    # Rotation can switch providers mid-run; the session metadata overrides
+    # the deployment default when attributing browser time.
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):
+        browser_use_items = build_usage_items(
+            0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1,
+            provider="browser-use",
+        )
+    assert browser_use_items[1]["provider"] == "Browser Use Browser"
 
 
 def test_build_usage_items_zeros_kernel_under_fast_mode():
@@ -8781,7 +8395,7 @@ def test_real_browser_path_attributes_every_token_to_its_actual_model():
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_usage_items"
     ]
-    assert len(build_calls) == 4, f"expected 4 build_usage_items call sites, found {len(build_calls)}"
+    assert len(build_calls) == 5, f"expected 5 build_usage_items call sites, found {len(build_calls)}"
     for build_call in build_calls:
         forwarded = [ast.unparse(a) for a in build_call.args] + [
             *(ast.unparse(k.value) for k in build_call.keywords),
@@ -9714,6 +9328,10 @@ def test_site_write_lock_grant_prefers_merchant_url_over_kernel_proxy_current_ur
         time_module.time(),
     )
     assert SITE_WRITE_LOCK_APPROVAL_KEY not in kernel_sh_only
+    browser_use_only = grant_site_write_lock_approvals(
+        {}, "https://live.browser-use.com/session/abc", time_module.time()
+    )
+    assert SITE_WRITE_LOCK_APPROVAL_KEY not in browser_use_only
 
 def test_get_element_description_none():
     from domains.spawn_browser_agent_v3.service_actions import get_element_description
@@ -9923,12 +9541,9 @@ async def test_action_history_record_action_accepts_tuple_coordinates():
     assert dict_entry.coordinates == {"x": 3, "y": 4}
 
 
-async def test_child_text_submit_click_can_complete_visible_result():
-    """A nested button label must survive into history for post-submit completion."""
+async def test_child_text_submit_click_is_recorded():
+    """A nested button label survives in the browser action history."""
     from browser_tools.dom_service import ActionHistory
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
 
     submit_button = SimpleNamespace(
         tag_name="button",
@@ -9943,11 +9558,6 @@ async def test_child_text_submit_click_can_complete_visible_result():
     click = await history.record_action(dom_service=dom, action="click", index=2713)
 
     assert "Submit (Protected by Invisible CAPTCHA)" in click.element_description
-    assert should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning='The form showed Risk Score: 0.07 and "Bot detected - form blocked".',
-        action_entries=history.get_entries(),
-    )
 
 
 async def test_execute_drag_records_through_real_action_history():
@@ -10852,6 +10462,113 @@ async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear(
     recorder.query_requests(clear=True)
     assert recorder._ignored_request_ids == set()
 
+
+def test_repeated_first_party_tunnel_failure_rotates_browser_exit():
+    """A broken checkout exit should recover before repeated manual waits and reloads."""
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _FIRST_PARTY_TUNNEL_FAILURE_REASON,
+    )
+
+    recorder = BrowserNetworkRecorder(
+        browser_session=MagicMock(),
+        agent_id="agent",
+        task_id="task",
+        session_id="session",
+        output_dir=Path("/tmp/browser-tunnel-test"),
+    )
+    recorder._network_generation = 1
+    checkout_url = "https://shop.example.test/test_payment"
+    confirm_url = "https://shop.example.test/api/test-payment/confirm"
+
+    def fail(request_id, url, *, resource_type="Fetch", document_url=checkout_url):
+        generation = recorder._network_generation
+        recorder._on_request_will_be_sent(
+            {
+                "requestId": request_id,
+                "type": resource_type,
+                "documentURL": document_url,
+                "request": {"url": url, "method": "GET" if resource_type == "Document" else "POST"},
+            },
+            None,
+            generation,
+        )
+        recorder._on_loading_failed(
+            {"requestId": request_id, "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+            None,
+            generation,
+        )
+
+    # A third-party analytics failure cannot declare the checkout exit broken.
+    fail("analytics-1", "https://api2.amplitude.com/2/httpapi")
+    fail("analytics-2", "https://api2.amplitude.com/2/httpapi")
+    assert recorder.pop_provider_exit_rejection() is None
+
+    fail("confirm-1", confirm_url)
+    assert recorder.pop_provider_exit_rejection() is None
+    fail("confirm-2", confirm_url)
+    rejection = recorder.pop_provider_exit_rejection()
+    assert rejection is not None
+    assert rejection["reason"] == _FIRST_PARTY_TUNNEL_FAILURE_REASON
+    assert rejection["url"] == confirm_url
+    assert rejection["browser_generation"] == 1
+
+    # The one-exit cap prevents loops even if the replacement also fails.
+    recorder._network_generation = 2
+    fail("document-1", checkout_url, resource_type="Document", document_url="")
+    fail("document-2", checkout_url, resource_type="Document", document_url="")
+    assert recorder.pop_provider_exit_rejection() is None
+
+
+def test_retried_document_tunnel_failure_clears_after_success():
+    """A successful retry cancels a queued rotation; unrelated 2xx does not."""
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder(
+        browser_session=MagicMock(),
+        agent_id="agent",
+        task_id="task",
+        session_id="session",
+        output_dir=Path("/tmp/browser-tunnel-test"),
+    )
+    recorder._network_generation = 1
+    page_url = "https://shop.example.test/test_payment"
+
+    def request(request_id, url):
+        recorder._on_request_will_be_sent(
+            {"requestId": request_id, "type": "Document", "request": {"url": url, "method": "GET"}},
+            None,
+            1,
+        )
+
+    for request_id in ("failed-1", "failed-2"):
+        request(request_id, page_url)
+        recorder._on_loading_failed(
+            {"requestId": request_id, "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+            None,
+            1,
+        )
+    assert len(recorder._provider_exit_rejections) == 1
+    recorder._provider_exit_rejections[0]["failure_ts_ms"] = -1
+
+    request("other-ok", "https://shop.example.test/other")
+    recorder._on_response_received(
+        {"requestId": "other-ok", "type": "Document", "response": {"url": "https://shop.example.test/other", "status": 200}},
+        None,
+        1,
+    )
+    assert len(recorder._provider_exit_rejections) == 1
+
+    request("retry-ok", page_url)
+    recorder._on_response_received(
+        {"requestId": "retry-ok", "type": "Document", "response": {"url": page_url, "status": 200}},
+        None,
+        1,
+    )
+    assert recorder.pop_provider_exit_rejection() is None
+    assert recorder._rejected_network_generations == set()
+    assert recorder._first_party_tunnel_provider_exits == 0
+
 async def test_execute_action_read_network_requests():
     """execute_action forwards every filter/detail flag to the recorder and errors
     only when no recorder is attached (never a silent success)."""
@@ -11539,6 +11256,36 @@ async def test_execute_action_scroll_missing_element_index_errors():
     assert out["success"] is False
     assert out["error"] == "Element with index 34 not found"
     hu.scroll.assert_not_awaited()
+
+
+async def test_execute_action_approved_payment_ref_recovers_from_stale_shadow_index():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    dom = MagicMock()
+    dom.session = _fake_session_with_event_bus()
+    dom.selector_map = {}
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
+    ah = MagicMock()
+    card_refs = {
+        "card_number": "4111111111111111",
+        "card_name": "Rose Labs",
+        "card_expiry": "12/30",
+        "card_cvv": "123",
+    }
+    filled = {"success": True, "payment_ref_direct_fill": True, "payment_refs_filled": list(card_refs)}
+    with patch.object(service_actions, "_try_direct_payment_ref_fill", AsyncMock(return_value=filled)) as direct_fill:
+        out = await service_actions.execute_action(
+            dom,
+            ah,
+            {"action": "input_text", "index": 8, "params": {"text": "card_number"}},
+            secret_refs=card_refs,
+            current_url="https://checkout.example.com/pay",
+        )
+
+    assert out == filled
+    direct_fill.assert_awaited_once()
+    assert direct_fill.await_args.kwargs["index"] is None
+    assert direct_fill.await_args.kwargs["text"] == card_refs["card_number"]
 
 async def test_execute_action_extract_disabled():
     from domains.spawn_browser_agent_v3 import service_actions
@@ -12992,6 +12739,120 @@ async def test_chrome_download_trusts_inline_disposition_png():
         assert uploads[0]["content"] == b"PNG!"
 
 
+async def test_browser_use_navigation_download_survives_missing_initial_chrome_event():
+    """A Browser Use attachment must become a native download when CDP misses it."""
+    from domains.spawn_browser_agent_v3.download_persist import (
+        persist_navigation_download_via_page_fetch,
+    )
+
+    expressions = []
+
+    async def evaluate(*, params, session_id):
+        expressions.append(params["expression"])
+        if len(expressions) == 1:
+            return {"result": {"value": {
+                "ok": True,
+                "base64": base64.b64encode(b"PDF!").decode(),
+                "filename": "report.pdf",
+                "contentType": "application/pdf",
+                "disposition": 'attachment; filename="report.pdf"',
+            }}}
+        return {"result": {"value": True}}
+
+    cdp = SimpleNamespace(
+        session_id="cdp",
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=evaluate))),
+    )
+    session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp))
+    native = {"path": "/tmp/downloads/report.pdf", "size": 4, "filename": "report.pdf"}
+    with patch(
+        "domains.spawn_browser_agent_v3.download_persist.wait_for_browser_use_download",
+        new=AsyncMock(side_effect=[None, native]),
+    ) as listing:
+        result = await persist_navigation_download_via_page_fetch(
+            session=session,
+            url="https://example.com/report.pdf",
+            session_id="browser-use-session",
+            config=_fake_config(),
+            provider="browser-use",
+        )
+    assert result is not None and result["path"] == native["path"]
+    assert len(expressions) == 2 and "link.click()" in expressions[1]
+    assert listing.await_count == 2
+
+
+async def test_browser_use_oversized_page_fetch_only_blocks_missing_native_download():
+    """The size cap gates re-materializing credentialed bytes, never a native download."""
+    from domains.spawn_browser_agent_v3.download_persist import (
+        _MAX_PERSIST_BYTES,
+        persist_navigation_download_via_page_fetch,
+    )
+
+    def harness():
+        expressions = []
+
+        async def evaluate(*, params, session_id):
+            expressions.append(params["expression"])
+            if len(expressions) == 1:
+                return {
+                    "result": {
+                        "value": {
+                            "ok": True,
+                            "size": _MAX_PERSIST_BYTES + 1,
+                            "base64": base64.b64encode(b"BIG!").decode(),
+                            "filename": "export.zip",
+                            "contentType": "application/zip",
+                            "disposition": 'attachment; filename="export.zip"',
+                        }
+                    }
+                }
+            return {"result": {"value": True}}
+
+        cdp = SimpleNamespace(
+            session_id="cdp",
+            cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=evaluate))),
+        )
+        return expressions, SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp))
+
+    native = {"path": "/tmp/downloads/export.zip", "size": _MAX_PERSIST_BYTES + 1, "filename": "export.zip"}
+
+    # No native download: the oversized payload must not be pushed back through
+    # an in-page blob click, even if that click would have produced a file.
+    expressions, session = harness()
+    with patch(
+        "domains.spawn_browser_agent_v3.download_persist.wait_for_browser_use_download",
+        new=AsyncMock(side_effect=[None, native]),
+    ) as listing:
+        rejected = await persist_navigation_download_via_page_fetch(
+            session=session,
+            url="https://example.com/export.zip",
+            session_id="browser-use-session",
+            config=_fake_config(),
+            provider="browser-use",
+        )
+    assert rejected is None
+    assert len(expressions) == 1, "oversized payload was re-triggered as a blob download"
+    assert listing.await_count == 1
+
+    # Native download present: the size cap must not hide the provider's file.
+    expressions, session = harness()
+    with patch(
+        "domains.spawn_browser_agent_v3.download_persist.wait_for_browser_use_download",
+        new=AsyncMock(return_value=native),
+    ) as listing:
+        kept = await persist_navigation_download_via_page_fetch(
+            session=session,
+            url="https://example.com/export.zip",
+            session_id="browser-use-session",
+            config=_fake_config(),
+            provider="browser-use",
+        )
+    assert kept is not None and kept["path"] == native["path"]
+    assert kept["content_type"] == "application/zip"
+    assert kept["source_url"] == "https://example.com/export.zip"
+    assert len(expressions) == 1 and listing.await_count == 1
+
+
 async def test_materialize_prefers_provider_file_path_before_page_fetch():
     """CDP filePath should be read via provider Files API before page-fetch fallback."""
     from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
@@ -13067,6 +12928,33 @@ async def test_materialize_prefers_provider_file_path_before_page_fetch():
     assert page_fetch_calls == [], "provider filePath read must short-circuit page fetch"
 
 
+async def test_browser_use_download_persister_uses_native_file_listing():
+    """Browser Use publishes Chrome downloads directly; no upload API round trip is needed."""
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+
+    persister = BrowserDownloadPersister(
+        browser_session=SimpleNamespace(),
+        session_id="browser-use-session",
+        config=_fake_config(),
+        provider="browser-use",
+    )
+    listing = [{"path": "downloads/report.txt", "size": 3}]
+    with patch(
+        "domains.spawn_browser_agent_v3.repo.list_session_files",
+        new=AsyncMock(return_value=listing),
+    ):
+        result = await persister._materialize_chrome_download(
+            meta={
+                "guid": "download-guid",
+                "url": "data:text/plain,abc",
+                "suggested_filename": "report.txt",
+            }
+        )
+    assert result is not None
+    assert result["path"] == "downloads/report.txt"
+    assert result["size"] == 3
+
+
 async def test_browser_download_persister_ignores_network_fetch_heuristics():
     """Network.responseReceived must not be registered — no invented page-asset downloads."""
     from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
@@ -13121,7 +13009,7 @@ async def test_browser_download_persister_ignores_network_fetch_heuristics():
         async def get_or_create_cdp_session(self, *a, **kw):
             return cdp_session
 
-    for provider in ("kernel", "steel"):
+    for provider in ("kernel", "steel", "browser-use"):
         with patch.dict(os.environ, {"BROWSER_PROVIDER": provider}, clear=False):
             persister = await BrowserDownloadPersister.create(
                 browser_session=_BrowserSession(),
@@ -13146,6 +13034,8 @@ def test_dom_service_defaults_downloads_path_from_browser_provider_env():
         assert DOMService(cdp_url="wss://example").downloads_path == KERNEL_DOWNLOADS_PATH
     with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}, clear=False):
         assert DOMService(cdp_url="wss://example").downloads_path == STEEL_DOWNLOADS_PATH
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "browser-use"}, clear=False):
+        assert DOMService(cdp_url="wss://example").downloads_path == KERNEL_DOWNLOADS_PATH
     assert DOMService(cdp_url="wss://example", downloads_path="/custom").downloads_path == "/custom"
 
 
@@ -13911,7 +13801,7 @@ async def test_bounded_browser_cleanup_retains_abandoned_tasks():
 
 
 def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
-    """Completion, approvals, handoffs, cancellation, and errors all capture usage."""
+    """Completion, approvals, handoffs, deploy drains, cancellation, and errors all capture usage."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
@@ -13921,24 +13811,71 @@ def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
     lines = post_injection.splitlines()
     capture_disconnects = [line for line in lines if "await disconnect_browser_after_passkey_capture(" in line]
 
-    assert len(capture_disconnects) == 7
+    assert len(capture_disconnects) == 8
     assert not any("await dom_service.disconnect()" in line for line in lines)
 
+
 def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
-    """Approval and auth handoffs must carry recorded passkey IDs into the next activity."""
+    """Approval, auth handoff, and deploy-drain resumes carry recorded passkey IDs forward."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
 
     activity_source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     manager_source = inspect.getsource(handler.SpawnBrowserAgentManagerV3.execute_tool)
+    drain_resume_source = inspect.getsource(handler._drain_resume_state)
 
-    assert activity_source.count('"recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids)') == 3
+    assert activity_source.count('"recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids)') == 4
     assert manager_source.count('"recorded_passkey_credential_ids": result.get(') == 3
+    assert drain_resume_source.count('"recorded_passkey_credential_ids": result.get(') == 1
     assert "(write_lock_resume_state or {}).get(" in activity_source
     assert '"recorded_passkey_credential_ids", []' in activity_source
 
 # ── _execute_click ───────────────────────────────────────────────────
+
+async def test_execute_click_preserves_submit_target_after_rerender():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.service_actions import _execute_click
+
+    element = SimpleNamespace(
+        tag_name="button",
+        attributes={},
+        get_all_children_text=lambda: "Submit (Protected by Invisible CAPTCHA)",
+    )
+    dom = MagicMock()
+    dom.selector_map = {1887: element}
+    dom.get_click_coordinates = AsyncMock(return_value=(448, 680))
+    session = MagicMock()
+    session.highlight_interaction_element = AsyncMock()
+    humanizer = MagicMock()
+
+    async def click_and_rerender(_x, _y):
+        dom.selector_map.clear()
+
+    humanizer.click_at_coords = AsyncMock(side_effect=click_and_rerender)
+    history = ActionHistory()
+    result = await _execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=history,
+        element=element,
+        index=1887,
+        coords=None,
+        thinking="Submitting the form now.",
+        humanizer=humanizer,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        current_url="https://example.com/demo",
+        system_name="Rose",
+    )
+
+    assert result["success"] is True
+    assert history.get_entries()[0]["element_description"] == (
+        '<button "Submit (Protected by Invisible"'
+    )
+    # The forced visible-result completion rewrite that used to consume this
+    # description was removed with the other benchmark-specific outcome
+    # rewrites; the description itself is the contract under test here.
 
 async def test_execute_click_with_element_humanizer():
     from domains.spawn_browser_agent_v3.service_actions import _execute_click
@@ -13969,6 +13906,153 @@ async def test_execute_click_with_element_humanizer():
     )
     assert out == {"success": True, "message": ""}
     hu.click_at_coords.assert_awaited_once_with(10, 20)
+
+async def test_execute_click_reports_missing_dom_delivery_after_humanized_click():
+    from domains.spawn_browser_agent_v3.service_actions import _execute_click
+
+    class Page:
+        url = "https://example.com/checkout"
+
+        async def evaluate(self, script, args):
+            if "addEventListener" in script:
+                return True
+            if "removeEventListener" in script:
+                return False
+            raise AssertionError("unexpected page evaluation")
+
+    page = Page()
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=page)
+    dom = MagicMock()
+    dom.get_click_coordinates = AsyncMock(return_value=(120, 757))
+    history = MagicMock()
+    history.record_action = AsyncMock()
+    humanizer = MagicMock()
+    humanizer.click_at_coords = AsyncMock()  # CDP accepted input, but the page saw no click.
+    element = MagicMock()
+    element.node_name = "BUTTON"
+    element.node_value = ""
+    element.attributes = {}
+    element.absolute_position = None
+    element.target_id = "tab"
+    element.frame_id = None
+    element.session_id = None
+
+    result = await _execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=history,
+        element=element,
+        index=21,
+        coords=None,
+        thinking=None,
+        humanizer=humanizer,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        current_url=page.url,
+        system_name="Rose",
+    )
+
+    assert result["success"] is False
+    assert "did not reach" in result["error"]
+    session.event_bus.dispatch.assert_called_once()
+    history.record_action.assert_not_awaited()
+
+async def test_execute_click_retries_via_browser_session_after_input_misses_page():
+    from domains.spawn_browser_agent_v3.service_actions import _execute_click
+
+    class Page:
+        url = "https://example.com/checkout"
+        delivered = False
+
+        async def evaluate(self, script, args):
+            if "addEventListener" in script:
+                return True
+            if "removeEventListener" in script:
+                return self.delivered
+            raise AssertionError("unexpected page evaluation")
+
+    page = Page()
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=page)
+
+    def deliver_to_focused_page(_event):
+        page.delivered = True
+        return _make_awaitable_event(None)
+
+    session.event_bus.dispatch.side_effect = deliver_to_focused_page
+    dom = MagicMock()
+    dom.get_click_coordinates = AsyncMock(return_value=(120, 757))
+    history = MagicMock()
+    history.record_action = AsyncMock()
+    humanizer = MagicMock()
+    humanizer.click_at_coords = AsyncMock()  # Input transport is bound to another page.
+    element = MagicMock()
+    element.node_name = "BUTTON"
+    element.node_value = ""
+    element.attributes = {}
+    element.absolute_position = None
+    element.target_id = "tab"
+    element.frame_id = None
+    element.session_id = None
+
+    result = await _execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=history,
+        element=element,
+        index=21,
+        coords=None,
+        thinking=None,
+        humanizer=humanizer,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        current_url=page.url,
+        system_name="Rose",
+    )
+
+    assert result == {"success": True, "message": ""}
+    session.event_bus.dispatch.assert_called_once()
+    history.record_action.assert_awaited_once()
+
+async def test_click_receipt_declines_parent_document_for_iframe_control():
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.service_actions import _arm_click_receipt
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content(
+                '<iframe style="position:absolute;left:70px;top:736px;width:110px;height:44px" '
+                'srcdoc="<button>Pay</button>"></iframe>'
+            )
+            session = MagicMock()
+            session.get_page = AsyncMock(return_value=page)
+            assert await _arm_click_receipt(session, {"x": 120, "y": 757}) is None
+        finally:
+            await browser.close()
+
+
+async def test_click_receipt_accepts_motor_variance_on_same_control():
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.service_actions import _arm_click_receipt, _read_click_receipt
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content('<button style="position:absolute;left:50px;top:50px;width:120px;height:60px">Pay</button>')
+            session = MagicMock()
+            session.get_page = AsyncMock(return_value=page)
+            receipt = await _arm_click_receipt(session, {"x": 100, "y": 80})
+            assert receipt is not None
+            await page.mouse.click(112, 80)
+            assert await _read_click_receipt(receipt) is True
+        finally:
+            await browser.close()
 
 async def test_execute_click_with_element_humanizer_missing_coords_refuses_fallback():
     from domains.spawn_browser_agent_v3.service_actions import _execute_click
@@ -16663,6 +16747,89 @@ async def test_live_tab_looks_challenged_helpers():
         assert await live_tab_looks_challenged(_ChallengedPage()) is True
 
 
+async def test_live_tab_recovery_keeps_failed_cited_request():
+    """A healthy document cannot clear a still-failing first-party API request."""
+    import inspect
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.challenge_recovery import live_tab_looks_challenged
+
+    handler_source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    handler_ast = ast.parse(textwrap.dedent(handler_source))
+    clean_page_calls = [
+        node
+        for node in ast.walk(handler_ast)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "live_tab_looks_challenged"
+    ]
+    assert len(clean_page_calls) == 1
+    passed_inputs = {keyword.arg: keyword.value for keyword in clean_page_calls[0].keywords}
+    for keyword, expected_name in (
+        ("network_recorder", "browser_network_recorder"),
+        ("recovery_reason", "recovery_reason"),
+    ):
+        assert isinstance(passed_inputs.get(keyword), ast.Name)
+        assert passed_inputs[keyword].id == expected_name
+
+    url = "https://checkout.example.com/api/orders/confirm"
+
+    class _Page:
+        url = "https://checkout.example.com/cart"
+
+    class _Recorder:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def query_requests(self, *, url_pattern="", limit=100):
+            return [row for row in self.rows if url_pattern in row["url"]][:limit]
+
+    failed = {
+        "url": url,
+        "method": "POST",
+        "status": None,
+        "failed": True,
+        "failure": "net::ERR_TUNNEL_CONNECTION_FAILED",
+    }
+    reason = f"POST {url} failed with net::ERR_TUNNEL_CONNECTION_FAILED"
+    classifier = AsyncMock(return_value={"clean": True})
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        classifier,
+    ):
+        assert await live_tab_looks_challenged(
+            _Page(), network_recorder=_Recorder([failed]), recovery_reason=reason
+        ) is True
+        assert await live_tab_looks_challenged(
+            _Page(),
+            network_recorder=_Recorder(
+                [{"url": f"https://checkout.example.com/api/noise/{i}", "status": 200}
+                 for i in range(101)] + [failed]
+            ),
+            recovery_reason=reason,
+        ) is True
+        assert await live_tab_looks_challenged(
+            _Page(),
+            network_recorder=_Recorder([
+                {"url": url, "method": "POST", "status": None},
+                failed,
+            ]),
+            recovery_reason=reason,
+        ) is True
+        assert await live_tab_looks_challenged(
+            _Page(),
+            network_recorder=_Recorder([
+                {"url": url, "method": "POST", "status": 200},
+                failed,
+            ]),
+            recovery_reason=reason,
+        ) is False
+        assert await live_tab_looks_challenged(
+            _Page(), network_recorder=_Recorder([failed]), recovery_reason="unrelated challenge"
+        ) is False
+
+
 def test_url_looks_like_api_surface_guard():
     """Shape-only API refuse remains; host pinning is gone (Blue Bottle → order.online)."""
     from domains.spawn_browser_agent_v3.service_actions import (
@@ -17416,6 +17583,38 @@ async def test_execute_screenshot_success():
     uploaded = Image.open(BytesIO(uploaded_bytes))
     assert uploaded.size == (1283, 800)
     session.get_or_create_cdp_session.assert_not_called()
+
+
+async def test_browser_use_screenshots_get_distinct_remote_names():
+    """Repeated screenshots must not collide in Chrome's downloads directory."""
+    from domains.spawn_browser_agent_v3 import service_actions
+    from PIL import Image
+
+    image_buffer = BytesIO()
+    Image.new("RGB", (8, 8), color="white").save(image_buffer, format="PNG")
+    screenshot_b64 = base64.b64encode(image_buffer.getvalue()).decode()
+    upload_mock = AsyncMock(side_effect=lambda _config, _sid, name, *_args: {"path": f"/tmp/downloads/{name}"})
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot",
+            AsyncMock(return_value={"provider": "browser-use", "base64_image": screenshot_b64}),
+        ),
+        patch("domains.spawn_browser_agent_v3.repo.upload_file_to_session", upload_mock),
+    ):
+        paths = []
+        for _ in range(2):
+            result = await service_actions._execute_screenshot(
+                session=MagicMock(),
+                dom_service=MagicMock(),
+                action_history=MagicMock(record_action=AsyncMock()),
+                thinking=None,
+                session_id="sid",
+                config=_fake_config(),
+            )
+            paths.append(result["file_path"])
+    assert paths[0] != paths[1]
+    assert all(path.startswith("/tmp/downloads/screenshot-") and path.endswith(".png") for path in paths)
+
 
 async def test_execute_screenshot_requires_steel_image():
     """Missing provider screenshot data fails instead of falling back to CDP."""
@@ -18833,8 +19032,9 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refr
     fetch_mock = AsyncMock(return_value=session_info)
     connected_cdp_urls = []
 
-    def capture_refreshed_cdp(*, cdp_url):
+    def capture_refreshed_cdp(*, cdp_url, downloads_path):
         connected_cdp_urls.append(cdp_url)
+        assert downloads_path in ("/tmp/downloads", "/files")
         raise RuntimeError("stop-after-refreshed-cdp-selection")
 
     with (
@@ -19221,74 +19421,84 @@ async def test_browser_supervisor_snapshot_reads_lightweight_page_state():
     assert "Opt out of all" in message
     assert "Only accepting scheduled orders" in message
 
+
+class _FakeDomSession:
+    async def get_current_page(self):
+        return SimpleNamespace()
+
+
+class _FakeDomService:
+    last_instance = None
+
+    def __init__(self, cdp_url, downloads_path="/tmp/downloads"):
+        self.cdp_url = cdp_url
+        self.downloads_path = downloads_path
+        self.session = _FakeDomSession()
+        self._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(side_effect=RuntimeError("skip logo")))
+        self.selector_map = {}
+        self.disconnect = AsyncMock()
+        self._captcha_poll = None
+        _FakeDomService.last_instance = self
+
+    async def connect(self):
+        return None
+
+    async def get_browser_state(self, include_screenshot=False):
+        return {"url": "https://example.com/login", "screenshot": None}
+
+    async def get_page_identity(self):
+        return {"url": "https://example.com/login", "title": ""}
+
+    async def get_current_url(self, *, fallback: str = ""):
+        return fallback or "https://example.com/login"
+
+    async def ensure_browser_overlays_suppressed(self):
+        return None
+
+    def start_captcha_telemetry_indicator(self, poll_phase):
+        self._captcha_poll = poll_phase
+
+
+class _FakeHumanizer:
+    last_instance = None
+
+    def __init__(self, *args, **kwargs):
+        self.cursor_observer = None
+        self.idle_started = False
+        _FakeHumanizer.last_instance = self
+
+    def set_cursor_observer(self, observer):
+        self.cursor_observer = observer
+
+    async def initialize_cursor(self, *args, **kwargs):
+        return None
+
+    def start_idle_movement(self):
+        self.idle_started = True
+        return None
+
+    async def close(self):
+        return None
+
+
+class _FakePlaywright:
+    def __init__(self, browser):
+        self.chromium = SimpleNamespace(connect_over_cdp=AsyncMock(return_value=browser))
+        self.stop = AsyncMock()
+
+
+class _FakeAsyncPlaywright:
+    def __init__(self, instance):
+        self._instance = instance
+
+    async def start(self):
+        return self._instance
+
+
 async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
-
-    class _FakeDomSession:
-        async def get_current_page(self):
-            return SimpleNamespace()
-
-    class _FakeDomService:
-        last_instance = None
-
-        def __init__(self, cdp_url):
-            self.cdp_url = cdp_url
-            self.session = _FakeDomSession()
-            self._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(side_effect=RuntimeError("skip logo")))
-            self.selector_map = {}
-            self.disconnect = AsyncMock()
-            self._captcha_poll = None
-            _FakeDomService.last_instance = self
-
-        async def connect(self):
-            return None
-
-        async def get_browser_state(self, include_screenshot=False):
-            return {"url": "https://example.com/login", "screenshot": None}
-
-        async def get_current_url(self, *, fallback: str = ""):
-            return fallback or "https://example.com/login"
-
-        async def ensure_browser_overlays_suppressed(self):
-            return None
-
-        def start_captcha_telemetry_indicator(self, poll_phase):
-            self._captcha_poll = poll_phase
-
-    class _FakeHumanizer:
-        last_instance = None
-
-        def __init__(self, *args, **kwargs):
-            self.cursor_observer = None
-            self.idle_started = False
-            _FakeHumanizer.last_instance = self
-
-        def set_cursor_observer(self, observer):
-            self.cursor_observer = observer
-
-        async def initialize_cursor(self, *args, **kwargs):
-            return None
-
-        def start_idle_movement(self):
-            self.idle_started = True
-            return None
-
-        async def close(self):
-            return None
-
-    class _FakePlaywright:
-        def __init__(self, browser):
-            self.chromium = SimpleNamespace(connect_over_cdp=AsyncMock(return_value=browser))
-            self.stop = AsyncMock()
-
-    class _FakeAsyncPlaywright:
-        def __init__(self, instance):
-            self._instance = instance
-
-        async def start(self):
-            return self._instance
 
     fake_browser = SimpleNamespace(
         contexts=[SimpleNamespace(pages=[SimpleNamespace()])],
@@ -19482,6 +19692,309 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
     assert _FakeHumanizer.last_instance is not None
     assert callable(_FakeHumanizer.last_instance.cursor_observer)
     assert _FakeHumanizer.last_instance.idle_started is True
+
+
+async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
+    """A deploy SIGTERM mid-step must end the activity at the next step boundary.
+
+    Agent 3efa7cae: a deploy stopped the worker machine while a browser task
+    was mid-run. The activity kept stepping until the process died, Temporal
+    reported a heartbeat timeout, and the single-attempt browser task failed.
+    Graceful shutdown flags running activities instead; the real step loop must
+    finish the in-flight step, keep the Steel session alive, and return the
+    same resume payload a write-lock pause returns so a live worker continues
+    from the next step.
+    """
+    from contextlib import ExitStack
+
+    from structlog.testing import capture_logs
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    env = ActivityEnvironment()
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://live",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "user_settings": {},
+    }
+    llm_step = AsyncMock(
+        return_value={
+            "action": {"action": "scroll", "thinking": "Looking for the cart", "params": {"direction": "down"}},
+            "usage": {"prompt_tokens": 900, "completion_tokens": 60, "actual_model": "rose-1-browser-use"},
+            "mode": "waterfall",
+        }
+    )
+    executed_steps = []
+
+    async def execute_step_while_deploy_lands(*args, **kwargs):
+        executed_steps.append(args[2] if len(args) > 2 else kwargs.get("unified_action"))
+        env.worker_shutdown()
+        return {"success": True, "message": "Scrolled down", "current_url": "https://example.com/cart"}
+
+    close_mock = AsyncMock()
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation", llm_step),
+        patch("domains.spawn_browser_agent_v3.handler.execute_action", side_effect=execute_step_while_deploy_lands),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        captured = stack.enter_context(capture_logs())
+        result = await env.run(
+            spawn_browser_agent_activity_v3,
+            user_id="user-1",
+            agent_id="agent-1",
+            goal="Add the socks to the cart",
+            tool_call_id="tool-1",
+            task_id="task-1",
+            output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False,
+            start_url="https://example.com",
+        )
+
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == WORKER_SHUTDOWN, result
+    step_phases = [entry for entry in captured if entry.get("event") == "browser.step.phases"]
+    assert [entry.get("step") for entry in step_phases] == [1], (
+        f"the step that ran before the drain yield must report its phases: {step_phases}"
+    )
+    assert "execute_action" in step_phases[0]["phases_ms"], step_phases[0]
+    assert llm_step.await_count == 1, "the activity must not start another step after the drain began"
+    assert len(executed_steps) == 1, executed_steps
+    assert result["step_count"] == 1, result
+    assert result["session_id"] == "session-1" and result["cdp_url"] == "ws://live", result
+    assert result["task_id"] == "task-1", result
+    close_mock.assert_not_awaited()
+    assert result["current_url"] == "https://example.com/cart", result
+    assert "https://example.com/cart" in result.get("visited_urls", []), result
+    turn_tool_calls = [
+        call["function"]["name"]
+        for message in result.get("browser_turn_messages", [])
+        for call in message.get("tool_calls") or []
+    ]
+    assert turn_tool_calls == ["scroll"], f"the completed step must ride the resume payload: {turn_tool_calls}"
+    assert result.get("reasoning_messages") == ["Looking for the cart"], result
+    llm_usage = [item for item in result.get("usage_items") or [] if item.get("type") == "llm"]
+    assert llm_usage and llm_usage[0]["input_tokens"] == 900, result.get("usage_items")
+
+
+async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
+    """Run a drained task resumed at step 3 on the live Steel session the backend let it reuse."""
+    from contextlib import ExitStack
+
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    env = ActivityEnvironment()
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    session_info = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://live",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "user_settings": {},
+        "same_session_available": True,
+        "browser_session_health": {"provider": "steel", "sessionId": "session-1", "status": "live", "ttlMs": ttl_ms},
+    }
+    llm_step = AsyncMock(
+        return_value={
+            "action": {"action": "scroll", "thinking": "Looking for the cart", "params": {"direction": "down"}},
+            "usage": {"prompt_tokens": 900, "completion_tokens": 60, "actual_model": "rose-1-browser-use"},
+            "mode": "waterfall",
+        }
+    )
+
+    async def execute_step(*args, **kwargs):
+        await on_step(env)
+        return {"success": True, "message": "Scrolled down", "current_url": "https://example.com/cart"}
+
+    resume_mock = AsyncMock()
+    close_mock = AsyncMock()
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_info)),
+        patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation", llm_step),
+        patch("domains.spawn_browser_agent_v3.handler.execute_action", side_effect=execute_step),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        result = await env.run(
+            spawn_browser_agent_activity_v3,
+            user_id="user-1",
+            agent_id="agent-1",
+            goal="Add the socks to the cart",
+            tool_call_id="tool-1",
+            task_id="task-1",
+            session_id="session-1",
+            cdp_url="ws://live",
+            is_resume=True,
+            output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False,
+            start_url="https://example.com",
+            write_lock_resume_state={
+                "approval_type": BROWSER_DRAIN_YIELD_STATUS,
+                "pending_action": None,
+                "write_lock_approvals": {},
+                "step_count": 3,
+                "session_id": "session-1",
+                "cdp_url": "ws://live",
+                "task_id": "task-1",
+                "auth_realm": "example.com",
+            },
+        )
+    return result, llm_step, resume_mock, close_mock
+
+
+async def test_browser_task_on_reused_session_yields_before_the_provider_releases_it():
+    """A resumed task must leave a reused Steel session before its lifetime runs out.
+
+    Steel releases a session at its absolute lifetime even with CDP attached.
+    A resumed or retried activity gets a fresh time budget but may reattach a
+    session created by an earlier invocation. Prod agent 3efa7cae lost CDP
+    mid-run when the session it was driving expired. The step loop must
+    checkpoint while the session still outlives one more step plus teardown,
+    so the manager restarts the task on a replacement session.
+    """
+    from domains.spawn_browser_agent_v3.config import (
+        BROWSER_DRAIN_YIELD_STATUS,
+        BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
+        BROWSER_SESSION_EXPIRING,
+        BROWSER_SESSION_MIN_REMAINING_SECONDS,
+        BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+        BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+    )
+
+    assert BROWSER_SESSION_MIN_REMAINING_SECONDS >= (
+        BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS
+        + BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS
+        + BROWSER_DISCONNECT_TIMEOUT_SECONDS
+    ), "a reused session must outlive one supervised step plus teardown"
+
+    async def step_takes_time(env):
+        await asyncio.sleep(0.2)
+
+    result, llm_step, resume_mock, close_mock = await _resume_drained_browser_task_on_reused_session(
+        BROWSER_SESSION_MIN_REMAINING_SECONDS * 1000 + 100, step_takes_time
+    )
+
+    assert llm_step.await_count == 1, (
+        f"the task must not start a step the session may not outlive; it ran {llm_step.await_count} steps"
+    )
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == BROWSER_SESSION_EXPIRING, result
+    assert result["step_count"] == 4, result
+    assert result["session_id"] == "session-1" and result["task_id"] == "task-1", result
+    assert result["current_url"] == "https://example.com/cart", result
+    resume_mock.assert_not_awaited()
+    close_mock.assert_not_awaited()
+
+
+async def test_browser_task_keeps_stepping_on_a_reused_session_with_time_left():
+    """Session lifetime alone must not interrupt a task whose session outlives the next step."""
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS, BROWSER_SESSION_MIN_REMAINING_SECONDS
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    steps = []
+
+    async def deploy_lands_on_the_second_step(env):
+        steps.append(len(steps) + 1)
+        if len(steps) == 2:
+            env.worker_shutdown()
+
+    result, llm_step, resume_mock, close_mock = await _resume_drained_browser_task_on_reused_session(
+        (BROWSER_SESSION_MIN_REMAINING_SECONDS + 600) * 1000, deploy_lands_on_the_second_step
+    )
+
+    assert llm_step.await_count == 2, "a session with time left must keep serving steps"
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == WORKER_SHUTDOWN, result
+    assert result["step_count"] == 5, result
+    resume_mock.assert_not_awaited()
+    close_mock.assert_not_awaited()
+
+
+async def test_session_lifetime_is_tracked_only_for_the_reused_session():
+    from domains.spawn_browser_agent_v3.handler import _reused_session_deadline, _session_expiring
+
+    reused = {"session_id": "session-1", "same_session_available": True, "browser_session_health": {"ttlMs": 1000}}
+    deadline = _reused_session_deadline(reused)
+    assert deadline is not None and deadline[0] == "session-1", deadline
+    assert _session_expiring(deadline, "session-1")
+    assert not _session_expiring(deadline, "session-2"), "a mid-task replacement has a fresh lifetime"
+    assert not _session_expiring(None, "session-1")
+    for info in (
+        {**reused, "browser_session_health": {"ttlMs": None}},
+        {**reused, "browser_session_health": {"ttlMs": True}},
+        {**reused, "browser_session_health": None},
+        {**reused, "same_session_available": False},
+        {"session_id": "replacement", "browser_session_health": {"ttlMs": 1000}},
+    ):
+        assert _reused_session_deadline(info) is None, info
+
 
 async def test_failed_steel_auth_restart_invalidates_before_credential_isolated_resume():
     from domains.spawn_browser_agent_v3.handler import _restart_after_failed_steel_auth
@@ -19696,6 +20209,372 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
         "task_id": expected_task_id,
     }
 
+
+class _SequencedActivityHandle:
+    def __init__(self, result):
+        self._result = result
+
+    def done(self):
+        return True
+
+    def cancel(self):
+        raise AssertionError("a finished browser activity must not be cancelled")
+
+    def __await__(self):
+        async def _result():
+            return self._result
+
+        return _result().__await__()
+
+
+def _drained_browser_result(yield_reason: str) -> dict:
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+
+    return {
+        "status": BROWSER_DRAIN_YIELD_STATUS,
+        "yield_reason": yield_reason,
+        "current_url": "https://shop.example.com/cart",
+        "write_lock_approvals": {"shop.example.com": {"approved_at": 1.0}},
+        "step_count": 4,
+        "session_id": "steel-1",
+        "cdp_url": "wss://steel/1",
+        "task_id": "task-1",
+        "auth_realm": "shop.example.com",
+        "recorded_passkey_credential_ids": [],
+        "browser_turn_messages": [{"role": "assistant", "content": "opened cart"}],
+        "visited_urls": ["https://shop.example.com/cart"],
+        "usage_items": [
+            {"type": "llm", "model": "browser-pre-drain", "input_tokens": 700, "output_tokens": 90},
+            {"type": "service", "provider": "Steel.dev Browser", "cost_cents": 1.5},
+        ],
+    }
+
+
+_COMPLETED_BROWSER_RESULT = {
+    "success": True,
+    "status": "completed",
+    "message": "Cart total is $12",
+    "task_id": "task-1",
+    "session_id": "steel-1",
+    "usage_items": [{"type": "llm", "model": "browser-post-drain", "input_tokens": 300, "output_tokens": 40}],
+}
+
+
+async def _run_browser_manager_through_drain(workflow_instance, yield_reason: str):
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+
+    results = [_drained_browser_result(yield_reason), dict(_COMPLETED_BROWSER_RESULT)]
+    start_calls = []
+
+    def fake_start_activity(*args, **kwargs):
+        start_calls.append(kwargs["args"])
+        return _SequencedActivityHandle(results[len(start_calls) - 1])
+
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", side_effect=fake_start_activity),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", AsyncMock(return_value=None)),
+    ):
+        events = [
+            event
+            async for event in SpawnBrowserAgentManagerV3().execute_tool(
+                workflow_instance,
+                {"goal": "Check the cart total", "start_url": "https://shop.example.com"},
+                "tool-1",
+            )
+        ]
+    return start_calls, events
+
+
+def _assert_restarted_from_drain_checkpoint(start_calls) -> dict:
+    assert len(start_calls) == 2, f"expected the drained task to restart exactly once, got {len(start_calls)}"
+    resumed = start_calls[1]
+    assert resumed[4] == "task-1", "the restart must keep the browser task identity"
+    assert resumed[5] == "steel-1" and resumed[6] == "wss://steel/1", "the restart must reattach the live session"
+    assert resumed[7] is True, "the restart must resume, not start a new browser task"
+    resume_state = resumed[12]
+    assert resume_state["step_count"] == 4, resume_state
+    assert resume_state["pending_action"] is None, resume_state
+    assert resume_state["write_lock_approvals"] == {"shop.example.com": {"approved_at": 1.0}}, resume_state
+    assert resume_state["browser_turn_messages"] == [{"role": "assistant", "content": "opened cart"}], resume_state
+    assert resume_state["visited_urls"] == ["https://shop.example.com/cart"], resume_state
+    return resume_state
+
+
+def _assert_drain_billed_once_and_chip_completed(events) -> None:
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
+    from tools.base import EventType, MessageStatus
+
+    usage_events = [event for event in events if event.type == EventType.USAGE]
+    assert len(usage_events) == 1, "pre-drain browser usage must be billed exactly once"
+    assert [item["model"] for item in usage_events[0].data["usage"]["llm"]] == ["browser-pre-drain"]
+    assert [item["cost_cents"] for item in usage_events[0].data["usage"]["service"]] == [1.5]
+    titles = [event.title for event in events if event.type == EventType.POST_MESSAGE]
+    assert titles.count("Starting up a browser") == 1, titles
+    assert all(event.message != DEPLOY_INTERRUPTED_TOOL_MESSAGE for event in events), titles
+    final = events[-1]
+    assert final.title == "Browser automation complete" and final.status == MessageStatus.FINISHED, final
+    assert [item["model"] for item in final.data["usage"]["llm"]] == ["browser-post-drain"]
+
+
+async def test_manager_restarts_drained_browser_task_from_same_step_on_rolling_deploy():
+    """Worker drain without a generation change restarts on a live worker of the same queue."""
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        _check_generation_handoff=AsyncMock(return_value=None),
+    )
+    start_calls, events = await _run_browser_manager_through_drain(workflow_instance, WORKER_SHUTDOWN)
+
+    resume_state = _assert_restarted_from_drain_checkpoint(start_calls)
+    assert "generation_yield" not in resume_state, "a rolling-deploy restart may drain again on the next deploy"
+    _assert_drain_billed_once_and_chip_completed(events)
+
+
+async def test_manager_finishes_on_current_generation_when_parking_is_unavailable():
+    """A superseded task that cannot park (DAG turn) finishes here instead of yielding every step."""
+    from helpers.activity_generation_drain import GENERATION_SUPERSEDED
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        _check_generation_handoff=AsyncMock(return_value="navi-agent-tasks-gen-new"),
+        _park_pending_tool=lambda tool_call_id, resume: False,
+    )
+    start_calls, events = await _run_browser_manager_through_drain(workflow_instance, GENERATION_SUPERSEDED)
+
+    resume_state = _assert_restarted_from_drain_checkpoint(start_calls)
+    assert resume_state.get("generation_yield") is False, resume_state
+    _assert_drain_billed_once_and_chip_completed(events)
+
+
+async def _run_manager_with_parked_activity(
+    activity_result, *, approval_error=None, start_activity_error=None
+):
+    """Drive one browser tool call whose activity returns ``activity_result``.
+
+    The approval/attention wait raises ``approval_error``; ``start_activity_error``
+    fails the manager before any browser activity starts.
+    """
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+
+    class _DoneActivityHandle:
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("done activity should not be cancelled")
+
+        def __await__(self):
+            async def _result():
+                return dict(activity_result)
+
+            return _result().__await__()
+
+    async def fake_execute_activity(activity_name, *args, **kwargs):
+        if activity_name == "lookup_purchase_activity":
+            return {"found": False, "reusable": False, "purchase": None}
+        raise AssertionError(f"unexpected activity: {activity_name}")
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="22222222-2222-4222-8222-222222222222",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+    )
+    start_activity = (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            side_effect=start_activity_error,
+        )
+        if start_activity_error is not None
+        else patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            return_value=_DoneActivityHandle(),
+        )
+    )
+    events = []
+    raised = None
+    with (
+        start_activity,
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.wait_condition",
+            AsyncMock(return_value=None),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.execute_activity",
+            side_effect=fake_execute_activity,
+        ),
+        patch(
+            "tools.request_user_approval.request_user_approval_direct",
+            AsyncMock(side_effect=approval_error),
+        ),
+    ):
+        try:
+            async for event in SpawnBrowserAgentManagerV3().execute_tool(
+                workflow_instance, {"goal": "Buy one probe item"}, "tool-1"
+            ):
+                events.append(event)
+        except Exception as exc:
+            raised = exc
+    return workflow_instance, events, raised
+
+
+_PARKED_BROWSER_ROW = {
+    "current_url": "https://roselabs.ai/test_payment",
+    "write_lock_approvals": {},
+    "step_count": 4,
+    "session_id": "session-1",
+    "browser_url": "https://kernel.example/live",
+    "task_id": "task-1",
+}
+_AWAITING_PURCHASE_WRITE_APPROVAL = {
+    **_PARKED_BROWSER_ROW,
+    "status": "awaiting_write_approval",
+    "approval_type": "purchase",
+    "question": "Approve checkout?",
+    "pending_action": {"action": "click", "index": 7, "params": {}},
+}
+_AWAITING_PAYMENT_CARD_APPROVAL = {
+    **_PARKED_BROWSER_ROW,
+    "status": "awaiting_payment_card_approval",
+    "payment_request": {
+        "merchant": "Rose Labs Test Store",
+        "line_items": [
+            {
+                "name": "Probe item",
+                "product_url": "https://roselabs.ai/test_payment",
+                "rating": "4.7 stars",
+                "review_count": "84 reviews",
+                "quantity": 1,
+                "line_total_cents": 100,
+            }
+        ],
+        "subtotal_cents": 100,
+        "total_cents": 100,
+    },
+}
+_TASK_SCOPED_TERMINAL = {
+    "toolName": "spawn_browser_agent",
+    "action_type": "task_complete",
+    "task_id": "task-1",
+    "browser_url": "https://kernel.example/live",
+    "session_id": "session-1",
+}
+
+
+async def _assert_generation_handoff_terminal_is_task_scoped(parked_result):
+    from helpers.generation_handoff import (
+        DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+        GenerationHandoffRequested,
+    )
+    from tools.base import MessageStatus
+
+    _, events, raised = await _run_manager_with_parked_activity(
+        parked_result, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
+    )
+
+    assert isinstance(raised, GenerationHandoffRequested)
+    terminal = events[-1]
+    assert terminal.message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+    assert terminal.status == MessageStatus.FINISHED
+    assert terminal.metadata == _TASK_SCOPED_TERMINAL
+
+
+async def test_manager_generation_handoff_during_payment_card_approval_is_task_scoped():
+    """A deploy handoff mid-browser-call must close that browser task durably.
+
+    Production agent f2e7166d (2026-10-02, agent-payment-production-abandonment)
+    was parked on its payment-card approval when a cooperative cutover raised
+    GenerationHandoffRequested. The manager posted task_complete with no
+    task_id, so the browser's task-scoped rows never got the publisher's
+    terminal and the durable-evidence seal failed before Hub archive.
+    """
+    await _assert_generation_handoff_terminal_is_task_scoped(_AWAITING_PAYMENT_CARD_APPROVAL)
+
+
+async def test_manager_generation_handoff_during_write_approval_is_task_scoped():
+    await _assert_generation_handoff_terminal_is_task_scoped(_AWAITING_PURCHASE_WRITE_APPROVAL)
+
+
+async def test_manager_generation_handoff_terminal_falls_back_to_preallocated_task_id():
+    from domains.spawn_browser_agent_v3.handler import _stable_browser_task_id
+    from helpers.generation_handoff import GenerationHandoffRequested
+
+    result_without_task_id = {
+        key: value for key, value in _AWAITING_PURCHASE_WRITE_APPROVAL.items() if key != "task_id"
+    }
+    workflow_instance, events, raised = await _run_manager_with_parked_activity(
+        result_without_task_id, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
+    )
+
+    assert isinstance(raised, GenerationHandoffRequested)
+    assert events[-1].metadata["action_type"] == "task_complete"
+    assert events[-1].metadata["task_id"] == _stable_browser_task_id(
+        workflow_instance.agent_id, "tool-1"
+    )
+
+
+async def test_manager_failure_terminal_is_task_scoped():
+    from tools.base import MessageStatus
+
+    _, events, raised = await _run_manager_with_parked_activity(
+        _AWAITING_PURCHASE_WRITE_APPROVAL, approval_error=RuntimeError("approval service unavailable")
+    )
+
+    assert raised is None
+    terminal = events[-1]
+    assert terminal.status == MessageStatus.ERROR
+    assert terminal.message == "approval service unavailable"
+    assert terminal.metadata == _TASK_SCOPED_TERMINAL
+
+
+async def test_manager_failure_before_activity_start_names_no_task():
+    """No browser activity ran, so no task posted rows the terminal could close."""
+    _, events, raised = await _run_manager_with_parked_activity(
+        _AWAITING_PURCHASE_WRITE_APPROVAL, start_activity_error=RuntimeError("worker unavailable")
+    )
+
+    assert raised is None
+    assert events[-1].title == "Browser automation failed"
+    assert events[-1].metadata == {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
+
+
+async def test_manager_write_lock_rejection_terminal_is_task_scoped():
+    from tools.request_user_approval import UserRejectedError
+
+    _, events, raised = await _run_manager_with_parked_activity(
+        _AWAITING_PURCHASE_WRITE_APPROVAL,
+        approval_error=UserRejectedError(rejection_message="not now"),
+    )
+
+    assert raised is None
+    terminal = events[-1]
+    assert terminal.title == "Action blocked by user"
+    assert terminal.metadata == {**_TASK_SCOPED_TERMINAL, "code": "write_lock_rejected"}
+
+
+async def test_manager_auth_assistance_failure_terminal_is_task_scoped():
+    from tools.base import MessageStatus
+
+    _, events, raised = await _run_manager_with_parked_activity(
+        {**_PARKED_BROWSER_ROW, "status": "awaiting_auth_assistance", "base_site": "Example"}
+    )
+
+    assert raised is None
+    terminal = events[-1]
+    assert terminal.title == "Authentication assistance failed"
+    assert terminal.status == MessageStatus.ERROR
+    assert terminal.metadata == {**_TASK_SCOPED_TERMINAL, "code": "auth_assistance_failed"}
+
 async def test_manager_passes_fast_mode_cache_for_browser_activity():
     """Browser activities must receive the workflow Fast Mode flag (re-enabled).
 
@@ -19713,7 +20592,7 @@ async def test_manager_passes_fast_mode_cache_for_browser_activity():
 
         def __await__(self):
             async def _result():
-                return {"success": True, "message": "done"}
+                return {"status": "completed", "success": True, "message": "done"}
 
             return _result().__await__()
 
@@ -19762,7 +20641,7 @@ async def test_manager_passes_fast_mode_cache_for_browser_activity():
 
 
 async def test_manager_uses_three_minute_ceiling_only_for_demo_fast_mode():
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
 
     class _FakeActivityHandle:
@@ -19870,6 +20749,7 @@ async def test_manager_posts_output_files_after_finished_tool_event():
         def __await__(self):
             async def _result():
                 return {
+                    "status": "completed",
                     "success": True,
                     "message": "done",
                     "output_files": [{"id": "fp-browser"}],
@@ -19925,6 +20805,7 @@ async def test_manager_finished_tool_event_includes_structured_response_values()
         def __await__(self):
             async def _result():
                 return {
+                    "status": "completed",
                     "success": True,
                     "message": "done",
                     "structured_response": {
@@ -19970,6 +20851,7 @@ async def test_manager_finished_tool_event_includes_structured_response_values()
             events.append(event)
 
     finished_event = next(e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED)
+    assert finished_event.metadata["success"] is True
     assert finished_event.metadata["structured_response"] == {
         "selected_black_beanie_url": "https://amazon.com/item",
         "added_to_cart": True,
@@ -20035,6 +20917,7 @@ async def test_manager_failed_tool_event_includes_structured_response_values():
             events.append(event)
 
     failed_event = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
+    assert failed_event.metadata["success"] is False
     assert failed_event.message == "best effort only"
     assert failed_event.metadata["structured_response"] == {
         "selected_black_beanie_url": "https://amazon.com/item",
@@ -20174,7 +21057,7 @@ async def test_manager_auth_assistance_pauses_and_resumes():
             "step_count": 3,
         }
     )
-    second = _FakeActivityHandle({"success": True, "message": "done", "output_files": []})
+    second = _FakeActivityHandle({"status": "completed", "success": True, "message": "done", "output_files": []})
     start_calls = []
 
     async def fake_wait_condition(*_args, **_kwargs):
@@ -20301,6 +21184,7 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     )
     second = _FakeActivityHandle(
         {
+            "status": "completed",
             "success": True,
             "message": "Purchase completed.",
             "structured_response": {"purchase_complete": True},
@@ -20459,6 +21343,7 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
     )
     second = _FakeActivityHandle(
         {
+            "status": "completed",
             "success": True,
             "message": "Purchase completed.",
             "structured_response": {"purchase_complete": True},
@@ -20841,6 +21726,13 @@ async def test_manager_payment_gate_agentcard_setup_required_prompts_and_retries
     assert "Agent payment setup complete" in setup_titles
     # Second mint still setup_required → prompt once more and stop (no card issued).
     assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+    final = events[-1]
+    assert final.title == "One Time Agent Payment Setup"
+    assert final.metadata["action_type"] == "task_complete"
+    assert final.metadata["code"] == "agentcard_user_setup_required"
+    assert final.metadata["task_id"] == "task-1"
+    first_setup = next(e for e in events if getattr(e, "title", "") == "One Time Agent Payment Setup")
+    assert first_setup.metadata["action_type"] == "agentcard_user_setup_required"
 
 async def test_manager_payment_gate_agentcard_setup_times_out_when_never_connected():
     events, activity_calls, _, _ = await _drive_payment_card_gate(
@@ -20852,6 +21744,13 @@ async def test_manager_payment_gate_agentcard_setup_times_out_when_never_connect
     assert "resolve_attention_request_activity" not in activity_calls
     assert any(getattr(e, "title", "") == "One Time Agent Payment Setup" for e in events)
     assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+    final = events[-1]
+    assert final.title == "Agent payment setup not completed"
+    assert final.metadata["action_type"] == "task_complete"
+    assert final.metadata["code"] == "agentcard_setup_timed_out"
+    assert final.metadata["task_id"] == "task-1"
+    # FE/evidence terminal only: the setup request stays the parent's tool result.
+    assert final.metadata["excludeFromModel"] is True
 
 async def test_manager_payment_gate_subscription_rejected_cancels_purchase():
     events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
@@ -20860,7 +21759,9 @@ async def test_manager_payment_gate_subscription_rejected_cancels_purchase():
     )
     assert gate_keys == ["subscription"]
     cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
-    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+    assert cancelled.metadata["action_type"] == "task_complete"
+    assert cancelled.metadata["code"] == "purchase_cancelled"
+    assert cancelled.metadata["task_id"] == "task-1"
     assert activity_calls.count("mint_purchase_card_activity") == 1
 
 async def test_manager_payment_gate_subscription_still_inactive_after_retry_blocks():
@@ -20870,7 +21771,9 @@ async def test_manager_payment_gate_subscription_still_inactive_after_retry_bloc
     )
     assert gate_keys == ["subscription"]
     blocked = next(e for e in events if getattr(e, "title", "") == "Subscription still inactive")
-    assert blocked.metadata["action_type"] == "purchase_blocked"
+    assert blocked.metadata["action_type"] == "task_complete"
+    assert blocked.metadata["code"] == "purchase_blocked"
+    assert blocked.metadata["task_id"] == "task-1"
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 async def test_manager_payment_gate_subscription_checkout_failure_still_raises_gate():
@@ -20885,7 +21788,9 @@ async def test_manager_payment_gate_subscription_checkout_failure_still_raises_g
     assert gate_payloads[0]["action"]["url"] == "https://roselabs.ai/subscribe"
     assert "mint_subscription_checkout_activity" in activity_calls
     cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
-    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+    assert cancelled.metadata["action_type"] == "task_complete"
+    assert cancelled.metadata["code"] == "purchase_cancelled"
+    assert cancelled.metadata["task_id"] == "task-1"
 
 async def test_manager_payment_gate_above_max_limit_errors_without_subscribe_gate():
     from tools.base import MessageStatus
@@ -20918,7 +21823,9 @@ async def test_manager_payment_gate_kyc_rejected_cancels_purchase():
     )
     assert gate_keys == ["kyc"]
     cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
-    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+    assert cancelled.metadata["action_type"] == "task_complete"
+    assert cancelled.metadata["code"] == "purchase_cancelled"
+    assert cancelled.metadata["task_id"] == "task-1"
 
 async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
     events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
@@ -20927,7 +21834,9 @@ async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
     )
     assert gate_keys == ["kyc"]
     blocked = next(e for e in events if getattr(e, "title", "") == "Identity verification still incomplete")
-    assert blocked.metadata["action_type"] == "purchase_blocked"
+    assert blocked.metadata["action_type"] == "task_complete"
+    assert blocked.metadata["code"] == "purchase_blocked"
+    assert blocked.metadata["task_id"] == "task-1"
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 async def test_manager_payment_gate_retries_company_funding_and_mints():
@@ -20971,7 +21880,9 @@ async def test_manager_payment_gate_reports_company_funding_deadline():
     )
     assert activity_calls.count("mint_purchase_card_activity") == 2
     delayed = next(e for e in events if getattr(e, "title", "") == "Payment funding is delayed")
-    assert delayed.metadata["action_type"] == "purchase_funding_delayed"
+    assert delayed.metadata["action_type"] == "task_complete"
+    assert delayed.metadata["code"] == "purchase_funding_delayed"
+    assert delayed.metadata["task_id"] == "task-1"
 
 # ========================================
 # Runner
@@ -21644,6 +22555,37 @@ async def test_browser_resume_store_preserves_inline_and_external_snapshots():
         assert await resume_store.hydrate_resume_context(agent_id="agent", resume_state=pointer) == large | pointer
 
 
+async def test_browser_resume_store_keeps_parked_snapshots_small_enough_to_carry():
+    """A parked browser task rides continue_as_new beside the conversation (2MB cap).
+
+    Mid-size snapshots go to the archive so the parked call stays small; when the
+    archive is unreachable they stay inline (still under Temporal's payload cap)
+    rather than failing the pause. Only oversize snapshots fail closed.
+    """
+    from domains.spawn_browser_agent_v3 import resume_store
+
+    def snapshot(content_bytes: int) -> dict:
+        return {"browser_turn_messages": [{"role": "user", "content": "x" * content_bytes}]}
+
+    small = snapshot(resume_store._PREFERRED_INLINE_BYTES - 1_000)
+    mid = snapshot(resume_store._PREFERRED_INLINE_BYTES + 10_000)
+    oversize = snapshot(resume_store._INLINE_LIMIT_BYTES + 10_000)
+
+    stored_paths = []
+    with patch.object(resume_store, "_store_part", side_effect=lambda agent_id, path, body: stored_paths.append(path)):
+        assert await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=small) == small
+        assert stored_paths == [], "snapshots under the preferred inline size never touch the archive"
+        pointer = await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=mid)
+        assert set(pointer) == {"browser_resume_context_ref"}, pointer
+        assert pointer["browser_resume_context_ref"]["paths"] == stored_paths
+
+    archive_down = resume_store.BrowserResumeStoreError("Browser resume archive write failed")
+    with patch.object(resume_store, "_store_part", side_effect=archive_down):
+        assert await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=mid) == mid
+        with pytest.raises(resume_store.BrowserResumeStoreError, match="archive write failed"):
+            await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=oversize)
+
+
 def test_final_screenshot_fetch_isolated_from_verifier_errors():
     """Confirmed completion must survive a final-screenshot capture failure."""
     from pathlib import Path
@@ -21669,8 +22611,9 @@ def test_handoff_autofill_invalidates_observe_page_state_prefetch():
         "observe_page_state = {}",
         autofill,
     )
-    prefetch = source.index("prefetched_browser_state=observe_page_state", autofill)
+    prefetch = source.index("prefetched_browser_state = observe_page_state", autofill)
     assert invalidate < prefetch
+    assert autofill < source.index("state_prefetch.start(dom_service)", autofill) < prefetch
 
 
 def test_browser_tool_events_declare_action_type():
@@ -21699,6 +22642,14 @@ def test_browser_tool_events_declare_action_type():
     untyped_lines = []
     typed_count = 0
     for node in ast.walk(tree):
+        # The shared terminal producer always declares action_type=task_complete.
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_browser_task_terminal_metadata"
+        ):
+            typed_count += 1
+            continue
         if not isinstance(node, ast.Dict):
             continue
         literal_items = {
@@ -21767,6 +22718,10 @@ def test_browser_tool_events_declare_action_type():
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
+    r.record(
+        "browser_use_captcha_wait_does_not_rotate_before_solver_window",
+        test_browser_use_captcha_wait_does_not_rotate_before_solver_window,
+    )
 
     r.record(
         "payment_card_tool_args_raise_typed_validation_error",
@@ -21876,65 +22831,9 @@ async def run_all_tests():
         "should_skip_input_text_refocus_after_same_index_click",
         test_should_skip_input_text_refocus_after_same_index_click,
     )
-    r.record(
-        "visible_result_completion_rewrites_post_submit_wait",
-        test_visible_result_completion_rewrites_post_submit_wait,
-    )
-    r.record(
-        "identical_verifier_reject_circuit_soft_accepts",
-        test_identical_verifier_reject_circuit_soft_accepts_complete_output,
-    )
-    r.record(
-        "handler_soft_accept_reports_unverified_not_verified_success",
-        test_handler_soft_accept_reports_unverified_not_verified_success,
-    )
-    r.record(
-        "handler_wires_identical_verifier_reject_circuit",
-        test_handler_wires_identical_verifier_reject_circuit,
-    )
-    r.record(
-        "visible_result_completion_rewrites_post_submit_scroll",
-        test_visible_result_completion_rewrites_post_submit_scroll,
-    )
-    r.record(
-        "visible_result_completion_does_not_rewrite_after_navigation",
-        test_visible_result_completion_does_not_rewrite_after_navigation,
-    )
-    r.record(
-        "visible_result_completion_does_not_rewrite_after_navback_or_open_new_tab",
-        test_visible_result_completion_does_not_rewrite_after_navback_or_open_new_tab,
-    )
-    r.record(
-        "visible_result_completion_ignores_submit_words_inside_observation_dumps",
-        test_visible_result_completion_ignores_submit_words_inside_observation_dumps,
-    )
-    r.record(
-        "visible_result_completion_ignores_pre_navigation_evidence_after_later_submit",
-        test_visible_result_completion_ignores_pre_navigation_evidence_after_later_submit,
-    )
-    r.record(
-        "visible_result_completion_prefers_entries_over_concatenated_summaries",
-        test_visible_result_completion_prefers_entries_over_concatenated_summaries,
-    )
-    r.record(
-        "visible_result_completion_does_not_rewrite_before_submit",
-        test_visible_result_completion_does_not_rewrite_before_submit,
-    )
-    r.record(
-        "visible_result_completion_rewrites_post_submit_score_without_verdict",
-        test_visible_result_completion_rewrites_post_submit_score_without_verdict,
-    )
-    r.record(
-        "visible_result_completion_rewrites_wait_when_evaluate_already_has_score",
-        test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score,
-    )
-    r.record(
-        "visible_result_completion_rewrites_recovery_after_allowed_result",
-        test_visible_result_completion_rewrites_recovery_after_allowed_result,
-    )
-    r.record(
-        "visible_result_completion_ignores_post_submit_version_decimal_without_score",
-        test_visible_result_completion_ignores_post_submit_version_decimal_without_score,
+    await r.record_async(
+        "browser_activity_preserves_requested_start_url",
+        test_browser_activity_preserves_requested_start_url,
     )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
@@ -21945,15 +22844,21 @@ async def run_all_tests():
     await r.record_async(
         "browser_verifier_context_grounds_final_state", test_browser_verifier_context_grounds_in_final_state
     )
-    await r.record_async(
-        "evaluate_always_preserves_browser_evidence_checkpoint",
-        test_evaluate_always_preserves_browser_evidence_checkpoint,
+    r.record("evaluate_does_not_snapshot_dom", test_evaluate_does_not_snapshot_dom_behind_the_model)
+    r.record("verifier_checkpoints_stay_bounded", test_verifier_checkpoints_stay_bounded)
+    r.record(
+        "observed_interaction_keeps_earlier_browser_result_for_verifier",
+        test_observed_interaction_keeps_earlier_browser_result_for_verifier,
     )
     r.record(
         "evaluate_tool_schema_has_no_preserve_evidence_flag",
         test_evaluate_tool_schema_has_no_preserve_evidence_flag,
     )
     r.record("action_history_restores_across_activity", test_action_history_restores_across_activity_boundary)
+    await r.record_async(
+        "action_history_records_child_text_for_submit_button",
+        test_action_history_records_child_text_for_submit_button,
+    )
     await r.record_async(
         "action_history_resume_monotonic_steps",
         test_action_history_resume_preserves_monotonic_step_numbers,
@@ -22653,8 +23558,8 @@ async def run_all_tests():
         test_action_history_record_action_accepts_tuple_coordinates,
     )
     await r.record_async(
-        "child_text_submit_click_can_complete_visible_result",
-        test_child_text_submit_click_can_complete_visible_result,
+        "child_text_submit_click_is_recorded",
+        test_child_text_submit_click_is_recorded,
     )
     await r.record_async(
         "execute_drag_records_through_real_action_history",
@@ -22684,6 +23589,8 @@ async def run_all_tests():
         "network_recorder_terminal_requests_bounded",
         test_network_recorder_terminal_requests_do_not_accumulate_after_clear,
     )
+    r.record("repeated_first_party_tunnel_failure", test_repeated_first_party_tunnel_failure_rotates_browser_exit)
+    r.record("retried_document_tunnel_failure", test_retried_document_tunnel_failure_clears_after_success)
     await r.record_async(
         "api_challenge_html_provider_exit",
         test_api_challenge_html_triggers_provider_exit_rejection,
@@ -22778,6 +23685,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_scroll_missing_element_index_errors",
         test_execute_action_scroll_missing_element_index_errors,
+    )
+    await r.record_async(
+        "execute_action_approved_payment_ref_recovers_from_stale_shadow_index",
+        test_execute_action_approved_payment_ref_recovers_from_stale_shadow_index,
     )
     await r.record_async("execute_action_extract_disabled", test_execute_action_extract_disabled)
     await r.record_async("execute_action_goto_delegates", test_execute_action_goto_delegates)
@@ -22930,6 +23841,10 @@ async def run_all_tests():
         test_browser_download_persister_materializes_despite_same_basename_upload,
     )
     await r.record_async(
+        "browser_use_download_persister_native_listing",
+        test_browser_use_download_persister_uses_native_file_listing,
+    )
+    await r.record_async(
         "browser_download_persister_ignores_network_fetch",
         test_browser_download_persister_ignores_network_fetch_heuristics,
     )
@@ -22940,6 +23855,14 @@ async def run_all_tests():
     await r.record_async(
         "chrome_download_trusts_inline_disposition_png",
         test_chrome_download_trusts_inline_disposition_png,
+    )
+    await r.record_async(
+        "browser_use_navigation_download_recovery",
+        test_browser_use_navigation_download_survives_missing_initial_chrome_event,
+    )
+    await r.record_async(
+        "browser_use_oversized_page_fetch_only_blocks_missing_native",
+        test_browser_use_oversized_page_fetch_only_blocks_missing_native_download,
     )
     await r.record_async(
         "materialize_prefers_provider_file_path",
@@ -22953,7 +23876,24 @@ async def run_all_tests():
         "browser_activity_memory_cleanup_clears_buffers",
         test_browser_activity_memory_cleanup_clears_retained_buffers,
     )
+    await r.record_async("execute_click_preserves_submit_target_after_rerender", test_execute_click_preserves_submit_target_after_rerender)
     await r.record_async("execute_click_element_humanizer", test_execute_click_with_element_humanizer)
+    await r.record_async(
+        "execute_click_missing_dom_delivery",
+        test_execute_click_reports_missing_dom_delivery_after_humanized_click,
+    )
+    await r.record_async(
+        "execute_click_session_retry_after_missed_input",
+        test_execute_click_retries_via_browser_session_after_input_misses_page,
+    )
+    await r.record_async(
+        "click_receipt_skips_iframe_control",
+        test_click_receipt_declines_parent_document_for_iframe_control,
+    )
+    await r.record_async(
+        "click_receipt_accepts_motor_variance_on_same_control",
+        test_click_receipt_accepts_motor_variance_on_same_control,
+    )
     await r.record_async(
         "execute_click_element_humanizer_missing_coords",
         test_execute_click_with_element_humanizer_missing_coords_refuses_fallback,
@@ -23199,6 +24139,10 @@ async def run_all_tests():
         test_goto_err_aborted_persists_download_to_session,
     )
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
+    await r.record_async(
+        "live_tab_recovery_keeps_failed_cited_request",
+        test_live_tab_recovery_keeps_failed_cited_request,
+    )
     r.record("api_surface_guard", test_url_looks_like_api_surface_guard)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
     await r.record_async("cross_origin_nav_allowed", test_execute_allows_cross_origin_navigation)
@@ -23247,6 +24191,10 @@ async def run_all_tests():
     await r.record_async("execute_close_tab_explicit_id", test_execute_close_tab_with_explicit_id)
 
     await r.record_async("execute_screenshot_success", test_execute_screenshot_success)
+    await r.record_async(
+        "browser_use_screenshots_get_distinct_remote_names",
+        test_browser_use_screenshots_get_distinct_remote_names,
+    )
     await r.record_async(
         "execute_screenshot_requires_steel_image",
         test_execute_screenshot_requires_steel_image,
@@ -23401,6 +24349,7 @@ async def run_all_tests():
         "mouse_input_synthesis_velocity_guard",
         test_mouse_input_synthesis_rejects_unrealistic_sample_jumps,
     )
+    r.record("mouse_path_duration_tracks_request", test_mouse_path_duration_tracks_request_within_velocity_cap)
     r.record("idle_mouse_drift", test_idle_mouse_drift_stays_near_anchor_and_inside_viewport)
     r.record(
         "mouse_click_synthesis_duration",
@@ -23655,6 +24604,22 @@ async def run_all_tests():
         test_spawn_browser_activity_failed_steel_auth_recovers_same_run,
     )
     await r.record_async(
+        "activity_checkpoints_at_step_boundary_on_worker_shutdown",
+        test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
+    )
+    await r.record_async(
+        "reused_session_yields_before_provider_releases_it",
+        test_browser_task_on_reused_session_yields_before_the_provider_releases_it,
+    )
+    await r.record_async(
+        "reused_session_with_time_left_keeps_stepping",
+        test_browser_task_keeps_stepping_on_a_reused_session_with_time_left,
+    )
+    await r.record_async(
+        "session_lifetime_tracked_only_for_reused_session",
+        test_session_lifetime_is_tracked_only_for_the_reused_session,
+    )
+    await r.record_async(
         "failed_steel_auth_credential_isolated_restart",
         test_failed_steel_auth_restart_invalidates_before_credential_isolated_resume,
     )
@@ -23669,6 +24634,42 @@ async def run_all_tests():
     await r.record_async(
         "manager_cancelled_pause_preserves_task_id",
         test_manager_cancelled_browser_pause_preserves_preallocated_task_id,
+    )
+    await r.record_async(
+        "manager_restarts_drained_task_same_step_rolling_deploy",
+        test_manager_restarts_drained_browser_task_from_same_step_on_rolling_deploy,
+    )
+    await r.record_async(
+        "manager_finishes_here_when_parking_unavailable",
+        test_manager_finishes_on_current_generation_when_parking_is_unavailable,
+    )
+    await r.record_async(
+        "manager_handoff_during_payment_card_approval_is_task_scoped",
+        test_manager_generation_handoff_during_payment_card_approval_is_task_scoped,
+    )
+    await r.record_async(
+        "manager_handoff_during_write_approval_is_task_scoped",
+        test_manager_generation_handoff_during_write_approval_is_task_scoped,
+    )
+    await r.record_async(
+        "manager_handoff_terminal_falls_back_to_preallocated_task_id",
+        test_manager_generation_handoff_terminal_falls_back_to_preallocated_task_id,
+    )
+    await r.record_async(
+        "manager_failure_terminal_is_task_scoped",
+        test_manager_failure_terminal_is_task_scoped,
+    )
+    await r.record_async(
+        "manager_failure_before_activity_start_names_no_task",
+        test_manager_failure_before_activity_start_names_no_task,
+    )
+    await r.record_async(
+        "manager_write_lock_rejection_terminal_is_task_scoped",
+        test_manager_write_lock_rejection_terminal_is_task_scoped,
+    )
+    await r.record_async(
+        "manager_auth_assistance_failure_terminal_is_task_scoped",
+        test_manager_auth_assistance_failure_terminal_is_task_scoped,
     )
     await r.record_async(
         "manager_passes_fast_mode_cache",
@@ -23802,6 +24803,18 @@ async def run_all_tests():
     await r.record_async(
         "browser_resume_store_preserves_inline_and_external_snapshots",
         test_browser_resume_store_preserves_inline_and_external_snapshots,
+    )
+    await r.record_async(
+        "browser_resume_store_keeps_parked_snapshots_small",
+        test_browser_resume_store_keeps_parked_snapshots_small_enough_to_carry,
+    )
+    await r.record_async(
+        "large_payment_request_resumes_with_parseable_result",
+        test_large_payment_request_resumes_with_parseable_finished_tool_result,
+    )
+    await r.record_async(
+        "browser_agent_yields_when_ownership_is_already_user",
+        test_browser_agent_yields_when_ownership_is_already_user,
     )
     r.record(
         "final_screenshot_fetch_isolated_from_verifier_errors",

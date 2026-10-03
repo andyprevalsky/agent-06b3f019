@@ -562,6 +562,78 @@ def extract_plan_from_context(context: List[Dict]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _is_hidden_or_internal_user(metadata: Dict[str, Any]) -> bool:
+    if metadata.get("hidden") is True:
+        return True
+    if metadata.get("isResponseSchemaUpdate") is True:
+        return True
+    return False
+
+
+def plan_superseded_by_new_user_instruction(context: List[Dict[str, Any]]) -> bool:
+    """Return True when a historical set_plan is not the work for this execute.
+
+    ``start_phase=execute`` means "skip planning and run the plan in history".
+    Chat re-escalation after a terminal status uses the same phase to mean
+    "this new instruction is simple — skip planning". Those collide: the
+    latest ``set_plan`` is still in the transcript, so execute_dag would
+    replay it instead of acting on the follow-up.
+
+    A plan artifact is not live work when either:
+    - it already posted ``completion_summary`` with ``isFinalSummary``, or
+    - a real USER instruction arrived after that ``set_plan`` (covers
+      FAILED / credit-kill re-escalation that never wrote Task Complete).
+
+    Hidden schema-refresh USER rows do not count. Mid-run rows before the
+    plan is written do not.
+    """
+    last_set_plan_idx: Optional[int] = None
+    last_final_summary_idx: Optional[int] = None
+    last_user_idx: Optional[int] = None
+    for idx, msg in enumerate(context):
+        if not isinstance(msg, dict):
+            continue
+        metadata = msg.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        role = str(msg.get("role") or "").upper()
+        if role == "USER" and not _is_hidden_or_internal_user(metadata):
+            last_user_idx = idx
+        if metadata.get("toolName") == "set_plan" and metadata.get("toolStatus") == "FINISHED":
+            last_set_plan_idx = idx
+        if (
+            metadata.get("toolName") == "completion_summary"
+            and metadata.get("toolStatus") == "FINISHED"
+            and metadata.get("isFinalSummary")
+        ):
+            last_final_summary_idx = idx
+    if last_final_summary_idx is not None:
+        return True
+    return (
+        last_set_plan_idx is not None
+        and last_user_idx is not None
+        and last_user_idx > last_set_plan_idx
+    )
+
+
+def latest_real_user_instruction(context: List[Dict[str, Any]]) -> Optional[str]:
+    """Return the latest non-hidden USER text, or None if there is none."""
+    last_text: Optional[str] = None
+    for msg in context:
+        if not isinstance(msg, dict):
+            continue
+        metadata = msg.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        role = str(msg.get("role") or "").upper()
+        if role != "USER" or _is_hidden_or_internal_user(metadata):
+            continue
+        text = str(msg.get("text") or "").strip()
+        if text:
+            last_text = text
+    return last_text
+
+
 def _metadata_matches_task(metadata: Dict[str, Any], task: DAGTask) -> bool:
     """Return whether a terminal tool row represents a planned DAG task."""
     tool_name = metadata.get("toolName")
@@ -721,10 +793,29 @@ async def execute_dag(
             del task_to_index[completed_future]
 
             try:
-                success = completed_future.result()
+                task_result = completed_future.result()
             except Exception as e:
                 workflow.logger.error(f"[DAG] Task {task_index} raised exception: {e}", exc_info=True)
-                success = False
+                task_result = False
+
+            if isinstance(task_result, dict) and task_result.get("generation_handoff"):
+                workflow.logger.info(
+                    f"[DAG] Task {task_index} interrupted for generation handoff — "
+                    "canceling remaining DAG work"
+                )
+                remaining = list(pending_tasks.values())
+                for pending in remaining:
+                    pending.cancel()
+                if remaining:
+                    await asyncio.gather(*remaining, return_exceptions=True)
+                return {
+                    "status": "generation_handoff",
+                    "handoff_task_queue": task_result.get("handoff_task_queue"),
+                    "context": context,
+                    "message": f"Planned task {task_index + 1} interrupted for generation handoff.",
+                }
+
+            success = bool(task_result)
 
             if not success:
                 # Error already posted to context by execute_tool/handle_tool_event
@@ -798,7 +889,7 @@ async def _execute_single_task(
     tool_names: Optional[List[str]] = None,
     param_cache_seed_event: Optional[asyncio.Event] = None,
     param_cache_seed_lock: Optional[asyncio.Lock] = None,
-) -> bool:
+) -> bool | dict[str, Any]:
     """
     Execute a single task from the DAG.
 
@@ -811,7 +902,8 @@ async def _execute_single_task(
     - Emits IN_PROGRESS, calls tool, emits FINISHED
 
     Returns:
-        True if successful, False if failed
+        True if successful, False if failed, or a generation_handoff payload
+        when the tool yielded for cooperative cutover.
     """
     from activities.reasoning import execute_reasoning_activity
 
@@ -976,7 +1068,11 @@ async def _execute_single_task(
             # Store a reusable context snapshot for same-machine activity pickup.
             # call_llm_activity removes the entry after a successful call, so a
             # locally rejected contract attempt must restore it before retrying.
-            pending_context = (list(context), system_prompt_text, None)
+            # Tag it with this node's replay-stable tool_call_id: a slot left on a
+            # worker by an earlier node, or by this workflow before it migrated
+            # off that worker, must never be adopted as this call's conversation.
+            pending_context_token = f"dag:{tool_call_id}"
+            pending_context = (list(context), system_prompt_text, None, user_id, pending_context_token)
             _pending_llm_context[agent_id] = pending_context
 
             # Keep the exact execute-phase tool schema so every param-populator
@@ -1021,6 +1117,9 @@ async def _execute_single_task(
                 False,
                 True,
                 f"agent:{agent_id}:task:{task.index}:call:dag_param_populator",
+                # Appended last: older replayed histories fall back to the defaults.
+                False,
+                pending_context_token,
             ]
 
             async def track_param_usage(param_usage: Dict[str, Any]) -> None:
@@ -1162,6 +1261,21 @@ async def _execute_single_task(
 
             # Execute tool (uses existing flow - posts result to context)
             result = await execute_tool(actual_tool, params, tool_call_id)
+
+            # A cooperative cutover is not task success. Returning True here
+            # marks the node COMPLETED and starts dependents, which then raise
+            # their own approval waits and leave more pending attn_ids.
+            if isinstance(result, dict) and result.get("generation_handoff"):
+                handoff_queue = result.get("handoff_task_queue")
+                if isinstance(handoff_queue, str) and handoff_queue.strip():
+                    return {
+                        "generation_handoff": True,
+                        "handoff_task_queue": handoff_queue.strip(),
+                    }
+                workflow.logger.warning(
+                    f"[DAG] Task {task.index} reported generation_handoff without a queue"
+                )
+                return False
 
             # Check for error status
             # _execute_tool returns {"error": True} on exception, {"success": False} on tool failure

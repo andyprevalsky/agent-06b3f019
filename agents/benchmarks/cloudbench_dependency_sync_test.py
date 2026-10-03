@@ -6953,7 +6953,9 @@ if grep -Fxq vol_exact "$VOLUMES"; then exit 30; fi
         text=True,
         capture_output=True,
         check=False,
-        timeout=10,
+        # This fake Fly recovery executes many shell subprocesses even though
+        # sleep is stubbed. Leave room for a loaded deploy host to schedule them.
+        timeout=30,
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
@@ -8318,8 +8320,8 @@ def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> No
     child_dir.mkdir()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    fake_npx = bin_dir / "npx"
-    fake_npx.write_text(
+    fake_node = bin_dir / "node"
+    fake_node.write_text(
         "#!/usr/bin/env bash\n"
         'count=$(cat "$LAUNCHES")\n'
         "count=$((count + 1))\n"
@@ -8327,14 +8329,14 @@ def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> No
         'echo "$count" > "$LAUNCHES"\n'
         'exec python3 "$LAUNCHER" "$CHILD_DIR/child-$count"\n'
     )
-    fake_npx.chmod(0o755)
+    fake_node.chmod(0o755)
     script = f"""set -eo pipefail
 BACKEND_PORT=3001
 BACKEND_LOG_FILE="$CHILD_DIR/backend.log"
 FAIL_DIR="$CHILD_DIR/fail"
 mkdir -p "$FAIL_DIR"
 # Keep this below the production warm-start budget (60), but large enough to
-# cover the deterministic delayed second launch in the fake npx wrapper.
+# cover the deterministic delayed second launch in the fake Node wrapper.
 CLOUDBENCH_BACKEND_START_READY_ATTEMPTS=10
 BACKEND_INDEX=0
 PIDS=("")
@@ -8443,10 +8445,15 @@ def test_isolated_backend_session_launcher_is_macos_portable(tmp_path: Path) -> 
     )
     try:
         deadline = time.time() + 5
-        while time.time() < deadline and not ready.exists():
+        values: list[str] = []
+        while time.time() < deadline:
+            if ready.exists():
+                values = ready.read_text().split()
+                if len(values) == 3:
+                    break
             time.sleep(0.05)
-        assert ready.exists(), "session-owned child did not start"
-        pid, sid, pgid = (int(value) for value in ready.read_text().split())
+        assert len(values) == 3, "session-owned child did not publish its process identity"
+        pid, sid, pgid = (int(value) for value in values)
         assert pid == process.pid
         assert sid == process.pid
         assert pgid == process.pid

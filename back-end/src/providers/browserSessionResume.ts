@@ -17,7 +17,8 @@ import {
   selectRotationStep,
   type RotationStep,
 } from './browser/rotation';
-import type { BrowserProviderName } from './browser/types';
+import { storedBrowserProvider } from './browser/types';
+import { browserUseEnabled } from './browser/config';
 
 export class ProxyRotationExhaustedError extends Error {
   constructor(public readonly cap: number) {
@@ -312,6 +313,9 @@ async function assembleResumeResponse(taskId: string, result: RecreatedSession) 
 
 function buildRotationMessage(step: RotationStep, used: number, remaining: number): string {
   const left = `${remaining} rotation${remaining === 1 ? '' : 's'} remaining.`;
+  if (step.recoveryAction === 'provider_switched' && step.provider === 'browser-use') {
+    return `Switched to Browser Use with a new country-level residential proxy session (${used}/${ROTATION_CAP}). Login and cookies preserved. ${left}`;
+  }
   if (step.recoveryAction === 'provider_switched') {
     return (
       `Switched from Kernel to Steel with a fresh Steel residential IP ` +
@@ -324,6 +328,9 @@ function buildRotationMessage(step: RotationStep, used: number, remaining: numbe
       `Rotated to another fresh Steel residential IP (${used}/${ROTATION_CAP}) — same region, ` +
       `login and cookies preserved. ${left}`
     );
+  }
+  if (step.provider === 'browser-use') {
+    return `Started a new Browser Use residential proxy session (${used}/${ROTATION_CAP}) in the same country. Login and cookies preserved. ${left}`;
   }
   if (step.proxyType === 'mobile') {
     return (
@@ -340,7 +347,7 @@ function buildRotationMessage(step: RotationStep, used: number, remaining: numbe
 /**
  * rotate_ip tool backend. Atomically advances the per-run rotation counter (keyed
  * to the stable BrowserSession row id), enforces the cap, selects the tier
- * (Kernel residential -> Kernel mobile -> Steel residential -> Steel residential),
+ * (Kernel residential -> Kernel mobile -> Steel residential -> Browser Use residential),
  * recreates the session, and returns the resume-shaped response plus escalation
  * state the agent reasons over. Provider choice is server-owned, not model-owned.
  */
@@ -381,9 +388,8 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
     throw new ProxyRotationExhaustedError(ROTATION_CAP);
   }
 
-  const currentProvider: BrowserProviderName =
-    reserved[0]?.provider === 'kernel' ? 'kernel' : 'steel';
-  const step = selectRotationStep(rotationsUsed, currentProvider);
+  const currentProvider = storedBrowserProvider(reserved[0]!.provider);
+  const step = selectRotationStep(rotationsUsed, currentProvider, browserUseEnabled());
 
   log.info('Executing browser recovery rotation', {
     taskId,
@@ -427,7 +433,7 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
   const response = await assembleResumeResponse(taskId, result);
   const rotationsRemaining = ROTATION_CAP - rotationsUsed;
   const effectiveStep: RotationStep = {
-    provider: result.provider === 'kernel' ? 'kernel' : 'steel',
+    provider: result.provider === 'local' ? 'steel' : result.provider,
     proxyType: result.proxyType,
     recoveryAction: result.recoveryAction,
   };
@@ -435,7 +441,11 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
     rotationsRemaining === 0
       ? 'rotation_budget_exhausted'
       : rotationStepLabel(
-          selectRotationStep(rotationsUsed + 1, result.provider === 'kernel' ? 'kernel' : 'steel')
+          selectRotationStep(
+            rotationsUsed + 1,
+            result.provider === 'local' ? 'steel' : result.provider,
+            browserUseEnabled()
+          )
         );
 
   return {

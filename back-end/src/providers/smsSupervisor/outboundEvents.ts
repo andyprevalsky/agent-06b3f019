@@ -6,7 +6,7 @@
  *
  * Fires for ROOT agents of any source (SMS, web, mac-app, API). Benchmark/eval
  * runs are suppressed centrally in the send-sms dispatcher (Agent.isBenchmark).
- * Every message carries the per-agent deep link via getAgentUrl.
+ * Events with a run link use the per-agent deep link from getAgentUrl.
  */
 
 import { createLogger } from '../logger';
@@ -346,7 +346,8 @@ export async function notifyWriteLock(
   attentionRequestId: string,
   _workflowId: string,
   metadata?: unknown,
-  channels: SupervisorChannel[] = ['SMS']
+  channels: SupervisorChannel[] = ['SMS'],
+  isReminder = false
 ): Promise<void> {
   const startTime = Date.now();
 
@@ -354,6 +355,7 @@ export async function notifyWriteLock(
     userId,
     agentId: agent.id,
     attentionRequestId,
+    isReminder,
     questionPreview: question.substring(0, 100),
   });
 
@@ -366,7 +368,8 @@ export async function notifyWriteLock(
   const notification = getWriteLockNotification(metadata);
   const paymentCard = getRequestPaymentCard(metadata);
   const agentUrl = getAgentUrl(agent.id);
-  const message = formatPaymentApprovalBody(paymentCard, notification, question, agentUrl);
+  const body = formatPaymentApprovalBody(paymentCard, notification, question, agentUrl);
+  const message = isReminder ? `Still waiting for your approval.\n\n${body}` : body;
   const mediaUrl = getWriteLockMediaUrl(notification) ?? getPaymentCardMediaUrl(paymentCard);
   const rehostedMediaUrl = mediaUrl ? await rehostMmsAttachmentUrl(userId, mediaUrl) : null;
 
@@ -405,6 +408,7 @@ export async function notifyWriteLock(
     userId,
     agentPrefix: agent.id.substring(0, 6),
     attentionRequestId,
+    isReminder,
     channel: rehostedMediaUrl ? 'mms' : 'sms',
     hasPaymentCard: paymentCard !== null,
     hasStructuredNotification: notification !== null,

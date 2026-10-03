@@ -196,7 +196,7 @@ human attention, social credibility, or monetary capital. Behave like a world-cl
 You are a single agent that is a part of a network of agents working on interconnected tasks generated through recursive
 task decomposition.
 
-Irreversible, external, destructive, and privacy-sensitive actions 100% ARE allowed, that is because you are in a harness that automatically detects those behaviors and escalates them for human approval. This is to allow you to bias completely towards action with the confidence that an external entity will ensure any attempted actions are safe, asking for permission in this case is much worse than asking for forgiveness.
+Irreversible, external, destructive, and privacy-sensitive actions 100% ARE allowed, that is because you are in a harness that automatically detects those behaviors and escalates them for human approval. This is to allow you to bias completely towards action with the confidence that an external entity will ensure any attempted actions are safe, asking for permission in this case is much worse than asking for forgiveness. In browser sessions the approval prompt fires when the browser agent clicks the final commit control itself (Place order, Pay, Send, Post, etc.), so when a task needs the user's approval first, tell the browser agent to carry the flow through that click and never tell it not to click.
 
 Context is available to you primarily through spawn_agent(type="explore"), this explore agent's purpose is to acquire factual information. It has grep tools that can search over the web & user messages, web searches, and much much more. MANDATORY: All load-bearing information must be grounded by being retrieved from an explore agent or because it came from a user.
 
@@ -260,23 +260,41 @@ def format_required_output_schema_user_message(
 
     fields_desc = "\n".join(
         [
-            f"- {f['name']} ({f['type']}, {'required' if f.get('required') else 'optional'}): {f.get('description', '')}"
+            f"- {f['name']} ({_format_output_field_contract(f)}, "
+            f"{'required' if f.get('required', True) else 'optional'}): {f.get('description', '')}"
             for f in response_schema["fields"]
         ]
     )
     if for_decomposition:
         return (
             "Required output schema:\n"
-            "The final plan must ensure the following data is gathered before completion:\n"
+            "The final plan must gather required data before completion; optional fields may be omitted:\n"
             f"{fields_desc}"
         )
     return (
         "Required output schema:\n"
-        "Gather this evidence in your tool results before calling attempt_completion, "
-        "which takes no arguments; these fields are extracted from your tool history, "
-        "not passed to it:\n"
+        "Gather required evidence in your tool results before calling attempt_completion, "
+        "which takes no arguments. Optional fields may be omitted. Present fields are extracted "
+        "from your tool history, not passed to it:\n"
         f"{fields_desc}"
     )
+
+
+def _format_output_field_contract(field: Dict[str, Any]) -> str:
+    parts = [str(field.get("type", "str"))]
+    for key in ("minItems", "maxItems", "minLength", "maxLength"):
+        if field.get(key) is not None:
+            parts.append(f"{key}={field[key]}")
+    if field.get("nullable") is True:
+        parts.append("nullable")
+    properties = field.get("properties")
+    if isinstance(properties, list) and properties:
+        nested = ", ".join(
+            f"{item['name']}: {_format_output_field_contract(item)}"
+            for item in properties if isinstance(item, dict) and item.get("name")
+        )
+        parts.append(f"properties={{{nested}}}")
+    return ", ".join(parts)
 
 
 def format_required_output_schema_system_section(
@@ -308,7 +326,7 @@ You do not receive:
 # General Scoring Rubric (3-band)
 
 - 1.0: every required output schema field can be populated accurately from grounded tool evidence in a single transformation pass (parse, compute, format).
-- 0.5: some fields populatable, but at least one is unverifiable from current evidence; the agent should produce more evidence.
+- 0.5: some fields populatable, but at least one required field is unverifiable from current evidence; the agent should produce more evidence.
 - 0.0: no fields populatable from evidence; the agent has not produced usable output.
 - User refusal: if a tool result shows the user declined a step the goal requires, score 1.0 and leave the blocked fields empty.
 
@@ -318,7 +336,7 @@ yourself when populating `output`; the agent does not need to pre-format.
 
 # Evidence-First Evaluation
 
-For each field:
+For each present field and each required field:
 1. What does the schema require (type + meaning)?
 2. Which tool-result contains the evidence?
 3. What concrete value does it yield (most precise number/string; do your
@@ -326,6 +344,16 @@ For each field:
 4. If no tool-result supports a field, mark it unpopulatable. Do NOT
    invent a value, and do NOT credit empty strings, "TODO",
    "[placeholder]", or null as populated.
+5. If the goal explicitly allows reporting that no item or source is available,
+   a tool result confirming zero matches or unavailable access supports that
+   negative finding. An explicit explanation grounded in that tool result can
+   populate a field asking for evidence or a path; never invent a positive
+   snippet or path. Apply this only when the goal permits a negative finding.
+6. If the goal requires a spawned explore agent to call a tool, its completed
+   spawn_agent result can support a permitted negative finding when it includes
+   the child's exact tool name, input filters, and quoted zero-match or
+   unavailable-access result. A bare child summary without those details is
+   insufficient. Do not treat this as evidence for a positive fact.
 
 Score using the 3-band rubric (1.0 / 0.5 / 0.0). A load-bearing field with
 no tool-result evidence forbids 1.0; if at least one required field cannot
@@ -350,7 +378,7 @@ grounded tool evidence.
 
 # Feedback Instructions (when score < 1.0)
 
-In `reasoning`, for each unpopulatable `output` field, name the missing
+In `reasoning`, for each unpopulatable required `output` field, name the missing
 tool-result evidence and recommend the agent produce it via any tool that
 emits a verifiable TOOL message (do NOT prescribe a specific tool). An
 `attempt_completion` call is itself NOT proof; only the tool results that
@@ -427,32 +455,40 @@ def build_verifier_prompt(response_schema: dict = None) -> str:
         return _VERIFIER_STATIC_PROMPT + SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
     fields_desc = "\n".join(
-        [f"  - {f['name']} ({f['type']}): {f.get('description', '')}" for f in response_schema["fields"]]
+        [f"  - {f['name']} ({_format_output_field_contract(f)}, {'required' if f.get('required', True) else 'optional'}): {f.get('description', '')}" for f in response_schema["fields"]]
     )
     num_fields = len(response_schema["fields"])
+    num_required = sum(f.get("required", True) is not False for f in response_schema["fields"])
     fields_block = dedent(
         f"""
 
         # Structured Output Required
 
-        This task has {num_fields} total required `output` field(s):
+        This task has {num_fields} `output` field(s), including {num_required} required field(s):
         {fields_desc}
 
-        For each field, find the most precise value in the tool-result
-        evidence and transform it into the required type yourself (round,
+        For each field with evidence, find the most precise value in the tool-result
+        evidence and transform it into the declared type yourself (round,
         parse, or extract as needed; the agent doesn't have to format it
-        perfectly).
+        perfectly). Omit optional keys without evidence; do not use JSON null
+        as a substitute for omission.
 
         Score using the 3-band rubric:
-          - 1.0 if ALL {num_fields} fields can be populated from grounded
+          - 1.0 if ALL {num_required} required fields can be populated from grounded
             tool evidence in a single transformation pass.
-          - 0.5 if some fields populatable but at least one is unverifiable
+          - 0.5 if some fields populatable but at least one required field is unverifiable
             from current evidence.
           - 0.0 if no fields populatable from evidence.
         Cosmetic mismatch between the agent's reported value and the
         most precise tool-result value is NOT grounds to drop below
         1.0; pick the precise one yourself.
         Empty strings, null, or placeholder text do NOT count as populated.
+        When the goal explicitly permits a negative finding, a tool-grounded
+        explanation of absent evidence can populate the corresponding field;
+        do not require a positive path or snippet in that case.
+        For required delegated tool calls, a finished spawn_agent result with
+        the child's tool name, filters, and quoted zero-match or unavailable
+        result supports that negative finding; a bare summary does not.
 
         Always include the "output" field in your JSON response with your best
         extraction of these values, even for partial completion.

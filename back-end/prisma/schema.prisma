@@ -192,6 +192,28 @@ model Message {
   @@index([createdAt])
 }
 
+/// Search projection of live messages and finalized R2 trace bundles. Archive
+/// rows deliberately have no FK to Message: archived traces remain searchable
+/// after operational Agent/Message rows are purged.
+model AgentTrajectorySearch {
+  messageId   String   @id
+  userId      String
+  rootAgentId String
+  agentId     String
+  surface     String
+  role        String
+  createdAt   DateTime
+  searchText  String
+  agentGoal   String   @default("")
+  agentTitle  String?
+  archivePath String?
+  traceKind   String   @default("message")
+
+  @@index([userId, createdAt(sort: Desc), messageId(sort: Desc)])
+  @@index([userId, rootAgentId, createdAt(sort: Desc), messageId(sort: Desc)], map: "AgentTrajectorySearch_user_root_time_idx")
+  @@index([userId, role, traceKind, createdAt(sort: Desc), messageId(sort: Desc)], map: "AgentTrajectorySearch_user_role_kind_time_idx")
+}
+
 model Waitlist {
   id           String    @id @default(uuid())
   name         String    @default("")
@@ -510,6 +532,9 @@ model BrowserSession {
   // 'residential' | 'mobile' after a rotation. See docs/plans/active/rotate-ip-tool.md.
   proxyRotationCount     Int                  @default(0)
   proxyTier              String?
+  // The managed Kernel proxy that actually resolved. Resume must keep its tier
+  // and location specificity even if a more specific proxy becomes available.
+  kernelProxySource      String?
   context                BrowserContext       @relation(fields: [contextId], references: [id], onDelete: Cascade)
 
   @@index([contextId])

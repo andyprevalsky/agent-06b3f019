@@ -24,12 +24,16 @@ import structlog
 from providers.fast_cache import client as cache_client
 from providers.fast_cache.context import cache_writes_disabled, current_context
 from providers.fast_cache.normalize import (
-    is_oai_demo_bound_child_goal,
-    is_oai_demo_goal_text,
+    GOOGLE_OAUTH_DEMO_PROMPT_PREFIX,
+    google_oauth_demo_goal_hash,
     rewrite_oai_demo_display_names,
+)
+from providers.fast_cache.normalize import (
+    goal_hash as normalize_goal_hash,
 )
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import get_pool
+from utils.oai_demo import is_oai_demo_bound_child_goal, is_oai_demo_goal
 
 if TYPE_CHECKING:
     from providers.rose.types import StreamChunk
@@ -204,7 +208,7 @@ async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     stored = coerce_cached_llm_payload(stored)
     ctx = current_context()
     if ctx is not None and (
-        is_oai_demo_goal_text(ctx.goal or "") or is_oai_demo_goal_text(ctx.root_goal or "")
+        is_oai_demo_goal(ctx.goal or "") or is_oai_demo_goal(ctx.root_goal or "")
     ):
         stored = rewrite_oai_demo_display_names(stored)
     yield SimpleNamespace(
@@ -557,7 +561,7 @@ def is_july_explore_site(ctx: Any, call_site: str) -> bool:
     """
     if (call_site or "").strip() != "explore_agent":
         return False
-    from domains.spawn_agent.oai_demo_july import (
+    from utils.oai_demo_july import (
         extract_oai_demo_creator_name,
         july_explore_goal_hash_for_goal,
     )
@@ -575,7 +579,7 @@ def is_july_gp_execute_site(ctx: Any, call_site: str) -> bool:
     """
     if (call_site or "").strip() not in {"execute_loop", "plan_loop"}:
         return False
-    from domains.spawn_agent.oai_demo_july import july_gp_goal_hash_for_goal
+    from utils.oai_demo_july import july_gp_goal_hash_for_goal
 
     goal = getattr(ctx, "goal", None) or ""
     return is_oai_demo_bound_child_goal(goal) and bool(july_gp_goal_hash_for_goal(goal))
@@ -779,7 +783,7 @@ async def july_explore_resolve(
     """
     if (call_site or "").strip() != "explore_agent":
         return stored, hit_key
-    from domains.spawn_agent.oai_demo_july import july_explore_goal_hash_for_goal
+    from utils.oai_demo_july import july_explore_goal_hash_for_goal
 
     hashes = [ctx.goal_hash]
     alt = july_explore_goal_hash_for_goal(getattr(ctx, "goal", None) or "")
@@ -896,6 +900,16 @@ async def cached_complete(
         complete_kwargs = {**complete_kwargs, "provider_fast_mode": bool(ctx.provider_fast_mode)}
 
     key = ctx.llm_key(call_site, request_key_material(complete_kwargs))
+    seed_google_oauth_demo = False
+    if ctx.should_write and (
+        ctx.goal.startswith(GOOGLE_OAUTH_DEMO_PROMPT_PREFIX)
+        or (ctx.root_goal or "").startswith(GOOGLE_OAUTH_DEMO_PROMPT_PREFIX)
+    ):
+        demo_goal_hash = google_oauth_demo_goal_hash()
+        seed_google_oauth_demo = ctx.goal_hash == demo_goal_hash or (
+            ctx.root_goal is not None
+            and normalize_goal_hash(ctx.root_goal) == demo_goal_hash
+        )
     if ctx.read_enabled:
         lookup_failed = False
         try:
@@ -947,7 +961,7 @@ async def cached_complete(
                     async for chunk in _replay(derived):
                         yield chunk
                     return
-            if site in {"completion_summary", "context_compression"}:
+            if site in {"completion_summary", "context_compression"} and not seed_google_oauth_demo:
                 terminal = soft_complete_on_miss(site)
                 if terminal is not None and ctx.soft_complete_allowed:
                     logger.info(
@@ -964,6 +978,7 @@ async def cached_complete(
             if (
                 soft is not None
                 and ctx.soft_complete_allowed
+                and not seed_google_oauth_demo
                 and await cache_client.trajectory_prior_exists(ctx.goal_hash, call_site, ctx.base_step)
             ):
                 # True warm end-of-trajectory: July namespace has no p:N+1.
@@ -990,6 +1005,7 @@ async def cached_complete(
             if (
                 soft is not None
                 and ctx.soft_complete_allowed
+                and not seed_google_oauth_demo
                 and not is_july_gp_execute_site(ctx, call_site)
                 and not is_july_explore_site(ctx, call_site)
             ):

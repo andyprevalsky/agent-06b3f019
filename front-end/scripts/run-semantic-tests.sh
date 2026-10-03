@@ -27,14 +27,89 @@ FRONTEND_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_DIR="$(dirname "$FRONTEND_DIR")"
 
 apply_local_semantic_db_urls() {
-  if [[ -n "${LOCAL_DB_PORT:-}" ]]; then
-    if [[ -z "${SEMANTIC_DATABASE_URL:-}" ]]; then
-      export SEMANTIC_DATABASE_URL="postgresql://postgres:postgres@localhost:${LOCAL_DB_PORT}/victoria?connection_limit=50&pool_timeout=30"
-    fi
+  # The semantic command runs in a fresh shell, so LOCAL_DB_PORT exported while
+  # starting run.sh may be absent here. An explicit database URL is authoritative.
+  # Otherwise require the running stack's exact backend manifest: guessing the
+  # default Postgres port can seed a different database from the live backend.
+  if [[ -n "${SEMANTIC_DATABASE_URL:-}" ]]; then
     if [[ -z "${SEMANTIC_DIRECT_URL:-}" ]]; then
       export SEMANTIC_DIRECT_URL="$SEMANTIC_DATABASE_URL"
     fi
+    return 0
   fi
+  if [[ -z "${LOCAL_DB_PORT:-}" ]]; then
+    local manifest_port=""
+    if [[ -f "$REPO_DIR/.context/services.json" ]]; then
+      manifest_port=$(jq -er --arg backend "${BACKEND_URL:-}" \
+        'select(.status == "running" and .urls.backend == $backend) | .database.runtime_port' \
+        "$REPO_DIR/.context/services.json" 2>/dev/null) || manifest_port=""
+    fi
+    if [[ ! "$manifest_port" =~ ^[0-9]+$ ]] || (( manifest_port < 1 || manifest_port > 65535 )); then
+      echo "FAIL: Cannot identify the running stack database for ${BACKEND_URL:-unset}; set SEMANTIC_DATABASE_URL or LOCAL_DB_PORT" >&2
+      return 1
+    fi
+    export LOCAL_DB_PORT="$manifest_port"
+  fi
+  if [[ ! "$LOCAL_DB_PORT" =~ ^[0-9]+$ ]] || (( LOCAL_DB_PORT < 1 || LOCAL_DB_PORT > 65535 )); then
+    echo "FAIL: LOCAL_DB_PORT must be a valid TCP port, got $LOCAL_DB_PORT" >&2
+    return 1
+  fi
+  export SEMANTIC_DATABASE_URL="postgresql://postgres:postgres@localhost:${LOCAL_DB_PORT}/victoria?connection_limit=50&pool_timeout=30"
+  if [[ -z "${SEMANTIC_DIRECT_URL:-}" ]]; then
+    export SEMANTIC_DIRECT_URL="$SEMANTIC_DATABASE_URL"
+  fi
+}
+
+# Local semantic runs share this machine with other Conductor workspaces whose
+# load may never drop below the core count, so the runner never waits for
+# headroom: it sizes Playwright concurrency to the headroom it measures.
+# RCA 2026-10-02-semantic-renderer-stall-consumed-chip-poll-budget: at load ~56
+# on 14 cores, four Chromium workers left one renderer frozen for 34s.
+# Prints "cpus|load1|mem_free_pct"; a field is empty when it cannot be read.
+probe_semantic_host_capacity() {
+  python3 - <<'PY'
+import os
+import subprocess
+
+cpus = os.cpu_count() or ""
+try:
+    load = f"{os.getloadavg()[0]:.2f}"
+except OSError:
+    load = ""
+mem = ""
+try:
+    out = subprocess.run(["sysctl", "-n", "kern.memorystatus_level"],
+                         capture_output=True, text=True, timeout=5).stdout.strip()
+    mem = out if out.isdigit() else ""
+except (OSError, subprocess.SubprocessError):
+    pass
+if not mem:
+    try:
+        with open("/proc/meminfo") as fh:
+            info = {k: int(v.split()[0]) for k, v in (line.split(":", 1) for line in fh)}
+        mem = str(info["MemAvailable"] * 100 // info["MemTotal"])
+    except (OSError, KeyError, ValueError, ZeroDivisionError):
+        pass
+print(f"{cpus}|{load}|{mem}")
+PY
+}
+
+# Prints the Playwright worker count for the measured capacity: never above the
+# request, one worker per whole idle core, one worker when free memory is below
+# SEMANTIC_MIN_MEM_FREE_PCT, and never below one. Unknown inputs never cap.
+# Args: requested cpus load1 mem_free_pct
+semantic_workers_for_capacity() {
+  awk -v req="$1" -v cpus="$2" -v load="$3" -v mem="$4" \
+    -v min_mem="${SEMANTIC_MIN_MEM_FREE_PCT:-20}" 'BEGIN {
+    n = req + 0
+    if (cpus != "" && load != "") {
+      slots = int(cpus - load)
+      if (slots < n) n = slots
+    }
+    if (mem != "" && mem + 0 < min_mem + 0) n = 1
+    if (n < 1) n = 1
+    print n
+  }'
 }
 
 cd "$FRONTEND_DIR"
@@ -141,6 +216,14 @@ else
   # Postgres the running backend uses (LOCAL_DB_PORT on isolated deploy stacks).
   apply_local_semantic_db_urls
 
+  # Isolated benchmark runs in this worktree (the /deploy smoke and AgentCard
+  # lanes) drain the shared Cerebras quota; its 429s push router decisions past
+  # the 5s ratchet. Wait before generating the session so it cannot expire.
+  if [[ "${1:-}" == "chat-lifecycle-latency" ]]; then
+    . "$REPO_DIR/scripts/lib/isolated-benchmarks.sh"
+    wait_for_isolated_benchmarks "$REPO_DIR" "${SEMANTIC_LATENCY_BENCH_WAIT_S:-3600}" 30
+  fi
+
   if ! curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
     echo "FAIL: Backend not healthy at http://localhost:$BACKEND_PORT/health" >&2
     exit 1
@@ -194,6 +277,15 @@ if ! [[ "$SEMANTIC_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
+# Shared-host sizing is local-only: the production gate runs on a dedicated CI
+# runner whose worker counts chat-lifecycle-ratchet.yml pins explicitly.
+if [[ "$PROD_MODE" -eq 0 ]]; then
+  IFS='|' read -r HOST_CPUS HOST_LOAD1 HOST_MEM_FREE_PCT <<< "$(probe_semantic_host_capacity || true)"
+  REQUESTED_SEMANTIC_WORKERS="$SEMANTIC_WORKERS"
+  SEMANTIC_WORKERS=$(semantic_workers_for_capacity "$REQUESTED_SEMANTIC_WORKERS" "${HOST_CPUS:-}" "${HOST_LOAD1:-}" "${HOST_MEM_FREE_PCT:-}")
+  echo "  Semantic workers: requested=$REQUESTED_SEMANTIC_WORKERS effective=$SEMANTIC_WORKERS (cpus=${HOST_CPUS:-unknown} load1=${HOST_LOAD1:-unknown} mem_free_pct=${HOST_MEM_FREE_PCT:-unknown} min_mem_free_pct=${SEMANTIC_MIN_MEM_FREE_PCT:-20})"
+fi
+
 # Resolve the test runner from this package explicitly. In the root npm
 # workspace, `npx playwright` can select the backend's Playwright CLI while the
 # specs import the frontend's @playwright/test singleton, making every suite
@@ -209,7 +301,7 @@ if [[ -x "$FRONTEND_DIR/node_modules/.bin/playwright" ]]; then
 fi
 PLAYWRIGHT_CLI=""
 if [[ -z "$PLAYWRIGHT_BIN" ]]; then
-  PLAYWRIGHT_CLI="$(cd "$FRONTEND_DIR" && node -e "
+  PLAYWRIGHT_CLI="$(cd "$FRONTEND_DIR" 2>/dev/null || exit 0; node -e "
     const path = require('path');
     const pkgPath = require.resolve('@playwright/test/package.json');
     const bin = require(pkgPath).bin;

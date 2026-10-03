@@ -29,7 +29,16 @@ async function syncCaptchaSolveIndicator(entry: PendingConnect): Promise<void> {
   const telemetry =
     provider === 'kernel'
       ? await getKernelCaptchaTelemetry(entry.steelSessionId)
-      : await getSteelCaptchaTelemetry(entry.steelSessionId);
+      : provider === 'steel'
+        ? await getSteelCaptchaTelemetry(entry.steelSessionId)
+        : {
+            provider: 'browser-use' as const,
+            telemetryEnabled: false,
+            isSolving: null,
+            activeTaskCount: null,
+            pages: [],
+            latestOutcome: null,
+          };
   let kernelWidgets = false;
   if (telemetry.isSolving === null && telemetry.provider === 'kernel') {
     kernelWidgets = (await entry.cdp.evaluate<boolean>(CAPTCHA_WIDGET_PRESENT_SCRIPT)) === true;

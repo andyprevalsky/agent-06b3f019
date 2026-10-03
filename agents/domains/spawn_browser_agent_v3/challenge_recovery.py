@@ -22,8 +22,13 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
 from urllib.parse import urlparse
+
+from domains.spawn_browser_agent_v3.challenge_urls import (
+    blocked_resource_urls_for_verify,
+    urls_cited_in_recovery_reason,
+)
 
 StorageState = Dict[str, Any]
 CookieKey = Tuple[str, str, str]
@@ -639,6 +644,10 @@ async def live_tab_looks_challenged(
     """
     from domains.spawn_browser_agent_v3.challenge_llm_classifier import classify_page_after_settle
 
+    page_url = str(getattr(page, "url", "") or "")
+    if cited_first_party_transport_failure(page_url, network_recorder, recovery_reason):
+        return True
+
     try:
         result = await classify_page_after_settle(
             page,
@@ -664,47 +673,63 @@ async def live_tab_looks_challenged(
     return not bool(result.get("clean"))
 
 
-def target_looks_like_payment_document(_url: str) -> bool:
-    """Deprecated: path allowlists are forbidden. Always False."""
+_NETWORK_ROUTE_FAILURE_MARKERS = (
+    "err_tunnel_connection_failed",
+    "err_proxy_connection_failed",
+    "err_proxy_connection_refused",
+)
+
+
+def cited_first_party_transport_failure(
+    page_url: str,
+    network_recorder: Any,
+    recovery_reason: str | None,
+) -> bool:
+    """Keep recovery available when a cited first-party request cannot route.
+
+    A loaded document can be stale while a later fetch or form submit fails.
+    The recorder is newest-first; a later success on the same method and URL
+    resolves the failure without rotating the browser.
+    """
+    cited_urls = set(urls_cited_in_recovery_reason(recovery_reason))
+    query = getattr(network_recorder, "query_requests", None)
+    page_host = (urlparse(page_url).hostname or "").lower()
+    if not cited_urls or not page_host or not callable(query):
+        return False
+    seen: set[tuple[str, str]] = set()
+    for cited_url in cited_urls:
+        try:
+            rows = query(url_pattern=cited_url, limit=100)
+        except Exception:
+            return False
+        if not isinstance(rows, list):
+            return False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_url = str(row.get("url") or "")
+            parsed = urlparse(raw_url)
+            if (parsed.hostname or "").lower() != page_host:
+                continue
+            normalized = blocked_resource_urls_for_verify((raw_url,))
+            if not normalized or normalized[0] != cited_url:
+                continue
+            # An in-flight retry has not resolved the earlier failure.
+            if row.get("status") is None and not row.get("failed"):
+                continue
+            key = (str(row.get("method") or "").upper(), normalized[0])
+            if key in seen:
+                continue
+            seen.add(key)
+            failure = str(row.get("failure") or "").lower()
+            if row.get("failed") and any(marker in failure for marker in _NETWORK_ROUTE_FAILURE_MARKERS):
+                return True
     return False
 
 
-_URL_IN_TEXT_RE = re.compile(r"https?://[^\s)\]\"'<>]+", re.IGNORECASE)
-
-
-def urls_cited_in_recovery_reason(recovery_reason: str | None) -> Tuple[str, ...]:
-    """Extract normalized http(s) URLs embedded in the agent recovery reason."""
-    text = (recovery_reason or "").strip()
-    if not text:
-        return ()
-    raw_urls = [match.group(0).rstrip(".,;") for match in _URL_IN_TEXT_RE.finditer(text)]
-    return blocked_resource_urls_for_verify(raw_urls)
-
-
-def blocked_resource_url_from_recovery_reason(recovery_reason: str | None) -> str:
-    """First cited absolute URL to re-verify after promote, if any."""
-    urls = urls_cited_in_recovery_reason(recovery_reason)
-    return urls[0] if urls else ""
-
-
-def blocked_resource_urls_for_verify(urls: Sequence[str] | None) -> Tuple[str, ...]:
-    """Deduped absolute http(s) URLs from the failures that triggered recovery."""
-    cleaned: List[str] = []
-    seen: set[str] = set()
-    for raw in urls or ():
-        value = str(raw or "").strip()
-        if not value.startswith(("http://", "https://")):
-            continue
-        parsed = urlparse(value)
-        if not parsed.hostname:
-            continue
-        # Drop query/fragment noise; keep path so script probes stay accurate.
-        normalized = f"{parsed.scheme}://{parsed.hostname.lower()}{parsed.path or '/'}"
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        cleaned.append(normalized)
-    return tuple(cleaned)
+def target_looks_like_payment_document(_url: str) -> bool:
+    """Deprecated: path allowlists are forbidden. Always False."""
+    return False
 
 
 def _url_looks_like_script(url: str) -> bool:

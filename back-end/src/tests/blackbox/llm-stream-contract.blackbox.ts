@@ -11,6 +11,7 @@ import {
 } from '../../providers/rose/structuredOutput';
 import {
   __resetAnthropicApiKeyCooldown,
+  __resetGptApiKeyCooldown,
   createStreamingCompletion,
 } from '../../providers/rose/client';
 import {
@@ -153,6 +154,7 @@ async function testCompletionClientPreservesItemProvenance(): Promise<void> {
 
   try {
     await __resetAnthropicApiKeyCooldown();
+    await __resetGptApiKeyCooldown();
     const stream = await createStreamingCompletion({
       model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'Return structured output' }],
@@ -183,6 +185,7 @@ async function testCompletionClientPreservesItemProvenance(): Promise<void> {
     else process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
     if (originalCerebrasKey === undefined) delete process.env.CEREBRAS_API_KEY;
     else process.env.CEREBRAS_API_KEY = originalCerebrasKey;
+    await __resetGptApiKeyCooldown();
   }
 }
 

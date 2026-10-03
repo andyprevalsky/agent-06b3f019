@@ -21,6 +21,7 @@ import re
 import time
 import traceback
 import uuid as uuid_module
+import weakref
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 
@@ -33,6 +34,7 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
 from config import load_config
+from helpers.activity_generation_drain import GENERATION_SUPERSEDED, activity_drain_reason
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,
@@ -41,12 +43,15 @@ from helpers.file_resolution import (
 from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
+    park_pending_tool,
+    take_tool_resume,
 )
 from helpers.messages import stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
 from helpers.user_profile import build_user_profile_sections
 from helpers.wait_condition_or_handoff import (
+    live_handoff_queue,
     sleep_or_generation_handoff,
     wait_condition_or_generation_handoff,
 )
@@ -56,6 +61,7 @@ from providers.fast_cache.browser_use_cache import cached_browser_decision
 from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import format_browser_state_for_tool
+from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
 from utils.error_utils import extract_error_message
@@ -79,9 +85,11 @@ from .challenge_recovery import (
     verify_live_page_cleared_challenge,
 )
 from .config import (
-    ACTION_LOOP_DELAY_SECONDS,
     BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+    BROWSER_DRAIN_YIELD_STATUS,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
+    BROWSER_SESSION_EXPIRING,
+    BROWSER_SESSION_MIN_REMAINING_SECONDS,
     BROWSER_STATE_SOFT_ATTEMPTS,
     BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
     BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
@@ -186,17 +194,10 @@ from .service_crypto import (
     is_usable_email_otp,
     mask_secret_values,
 )
+from .state_prefetch import BrowserStatePrefetch
 from .step_timing import StepPhaseTimer
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .types import ClaudeTokenState
-from .verifier_reject_circuit import (
-    next_identical_reject_streak,
-    should_soft_accept_identical_verifier_reject,
-)
-from .visible_result_completion import (
-    forced_visible_result_completion_action,
-    should_force_visible_result_completion,
-)
 
 logger = structlog.get_logger()
 
@@ -213,6 +214,36 @@ def _stable_browser_task_id(agent_id: str, tool_call_id: str) -> str:
             f"rose-browser-task:{agent_id}:{tool_call_id}",
         )
     )
+
+
+def _browser_task_terminal_metadata(
+    result: Any,
+    started_task_id: Optional[str],
+    *,
+    code: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Task-scoped ``task_complete`` metadata for a manager-side browser end.
+
+    Durable evidence (``publish_evidence_links``, the payment-abandonment seal)
+    requires every browser task that posted rows to close with ``task_complete``
+    under its own task_id. When the activity returns parked (awaiting approval,
+    payment, or auth) it posts no terminal, so every manager exit after that —
+    pause, rejection, purchase outcome, deploy handoff, failure — owns it.
+    ``started_task_id`` is the id the manager handed the activity; ``None``
+    before any activity starts, so a pre-activity failure never names a task
+    that posted no rows. ``code`` preserves the specific outcome.
+    """
+    source = result if isinstance(result, dict) else {}
+    metadata: Dict[str, Any] = {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
+    task_id = source.get("task_id") or started_task_id
+    if task_id:
+        metadata["task_id"] = task_id
+    for key in ("browser_url", "session_id"):
+        if source.get(key):
+            metadata[key] = source[key]
+    if code:
+        metadata["code"] = code
+    return metadata
 
 
 _background_browser_cleanup_tasks: set[asyncio.Task] = set()
@@ -748,55 +779,35 @@ def _append_bounded_verifier_checkpoint(
     return appended
 
 
-async def _capture_preserved_evidence_after_evaluate(
+def _preserve_observed_interaction_for_verifier(
     *,
-    dom_service: Any,
-    verifier_checkpoints: List[Dict[str, Any]],
+    action_name: str,
+    succeeded: bool,
+    awaiting_observation: bool,
+    observed_state: Dict[str, Any],
     current_url: str,
-) -> Optional[Dict[str, Any]]:
-    """Always-on: snapshot live DOM after a successful evaluate for the verifier.
+    verifier_checkpoints: List[Dict[str, Any]],
+) -> bool:
+    """Retain browser DOM proof when an agent observes a prior interaction's result.
 
-    No model flag. The JS return value is not trusted as proof; only the
-    browser-extracted DOM checkpoint is.
+    A screenshot file path in action history is not viewable by the verifier.
+    The already-fetched DOM at a subsequent screenshot/read-state action is
+    browser ground truth and avoids another CDP round trip.
     """
-    if dom_service is None:
-        return None
-    # Bound + one retry: a frozen renderer must not stall the activity past the
-    # supervisor step budget, and a single transient CDP blip should not drop
-    # the only DOM proof the verifier will see after navigation.
-    last_error: Optional[BaseException] = None
-    state: Any = None
-    for attempt in range(2):
-        try:
-            state = await asyncio.wait_for(
-                dom_service.get_browser_state(include_screenshot=False),
-                timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
-            )
-            last_error = None
-            break
-        except asyncio.TimeoutError as exc:
-            last_error = exc
-            logger.warning(
-                "Timed out refreshing browser state for preserved evaluate evidence",
-                attempt=attempt + 1,
-                timeout_s=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            last_error = exc
-            logger.warning(
-                "Failed to refresh browser state for preserved evaluate evidence",
-                attempt=attempt + 1,
-                error=str(exc)[:200],
-            )
-    if last_error is not None or not isinstance(state, dict):
-        return None
-    checkpoint = _browser_ground_truth_checkpoint(
-        state,
-        str(state.get("url") or current_url or ""),
-        kind="preserved_evidence",
-    )
-    _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
-    return state
+    if not succeeded:
+        return awaiting_observation
+    if action_name in {"screenshot", "read_browser_state"} and awaiting_observation:
+        checkpoint = _browser_ground_truth_checkpoint(
+            observed_state, current_url, kind="preserved_evidence"
+        )
+        if _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint):
+            return False
+    if action_name in {
+        "goto", "click", "click_coordinates", "evaluate", "input_text", "select_dropdown",
+        "drag", "press_keys", "press_key", "upload_file", "submit_form",
+    }:
+        return True
+    return awaiting_observation
 
 
 def _replace_resume_image_blocks(value: Any) -> Any:
@@ -1387,9 +1398,9 @@ def _rotation_storage_capture_timeout_seconds(raw_timeout: Any) -> float:
 async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[str, Any]]:
     """Capture browser auth/storage before rotate_ip replaces the remote browser.
 
-    Kernel profile persistence handles Kernel-to-Kernel rotations, but profiles
-    are provider-specific. Capturing Playwright storage here lets the later
-    Kernel-to-Steel recovery retain the same cookies, localStorage, and IndexedDB.
+    Provider profiles persist within one provider. Capturing Playwright storage
+    lets Kernel-to-Steel and Steel-to-Browser-Use recoveries retain the same
+    cookies, localStorage, and IndexedDB across providers.
     """
     if page is None or getattr(page, "context", None) is None:
         return None
@@ -1556,18 +1567,19 @@ async def _reconnect_browser_stack_after_rotation(
     old_driver_pid: Optional[int],
     fingerprint_injection: Optional[Any],
     agent_id: str,
+    provider: Optional[str] = None,
     config: Any = None,
     task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Tear down the current CDP/Playwright stack and reattach to `new_cdp_url`.
 
     Backs the rotate_ip tool: the backend recreates the browser session on a fresh
-    proxy (same persistent profile → cookies/login survive) and returns a new
-    ws_url; the agent must drop its live connection and reconnect to it. Fingerprint
+    proxy and returns a new ws_url; the agent must drop its live connection and
+    reconnect to it. Captured storage restores login across providers. Fingerprint
     injection is re-applied so the rotated IP does not pair with a fresh device
     fingerprint. Returns the new dom_service/pages/playwright handles + driver pid.
     """
-    from browser_tools.dom_service import DOMService
+    from browser_tools.dom_service import DOMService, browser_downloads_path_for_provider
 
     # 1. Tear down the old connection first so the previous Kernel session's CDP
     #    sockets + local Playwright driver are released before we attach anew.
@@ -1583,7 +1595,10 @@ async def _reconnect_browser_stack_after_rotation(
     # 2. Attach DOMService + Playwright to the rotated session.
     _disable_cdp_websocket_proxy()
     connection_cdp_url = steel_cdp_connection_url(new_cdp_url)
-    dom_service = DOMService(cdp_url=connection_cdp_url)
+    dom_service = DOMService(
+        cdp_url=connection_cdp_url,
+        downloads_path=browser_downloads_path_for_provider(provider),
+    )
     pw_instance = None
     pw_browser = None
     driver_pid = None
@@ -1717,11 +1732,49 @@ async def _discard_replacement_browser_stack(
     )
 
 
+class TabFocusCache:
+    """Per-activity memo for tab focus sync.
+
+    A Playwright page keeps its CDP target id for its whole life, so resolving
+    it once per page replaces a per-step CDP session + Target.getTargetInfo
+    round trip for every open tab. ``foreground`` remembers the last
+    (target, tab count) brought to front: an unchanged pair means nothing could
+    have taken the foreground from the agent, while a new/closed tab forces
+    a fresh bring_to_front.
+    """
+
+    def __init__(self) -> None:
+        self.target_ids: "weakref.WeakKeyDictionary[Any, str]" = weakref.WeakKeyDictionary()
+        self.foreground: Optional[Tuple[str, int]] = None
+
+
+async def _page_target_id(context: Any, page: Any, cache: Optional[TabFocusCache]) -> Optional[str]:
+    if cache is not None:
+        with contextlib.suppress(TypeError):
+            cached = cache.target_ids.get(page)
+            if cached:
+                return cached
+    cdp_session = None
+    try:
+        cdp_session = await context.new_cdp_session(page)
+        target_info = await cdp_session.send("Target.getTargetInfo")
+        target_id = target_info.get("targetInfo", {}).get("targetId")
+    finally:
+        if cdp_session is not None:
+            with contextlib.suppress(Exception):
+                await cdp_session.detach()
+    if target_id and cache is not None:
+        with contextlib.suppress(TypeError):
+            cache.target_ids[page] = target_id
+    return target_id
+
+
 async def _synchronize_playwright_page_with_agent_focus(
     *,
     dom_service: Any,
     playwright_browser: Any,
     current_page: Any,
+    focus_cache: Optional[TabFocusCache] = None,
 ) -> Any:
     """Make Playwright input and the provider live view follow browser-use focus.
 
@@ -1738,25 +1791,22 @@ async def _synchronize_playwright_page_with_agent_focus(
         return current_page
 
     pages = getattr(contexts[0], "pages", None) or []
+    foreground_key = (focused_target_id, len(pages))
     for page in pages:
-        cdp_session = None
         try:
-            cdp_session = await contexts[0].new_cdp_session(page)
-            target_info = await cdp_session.send("Target.getTargetInfo")
-            target_id = target_info.get("targetInfo", {}).get("targetId")
+            target_id = await _page_target_id(contexts[0], page, focus_cache)
             if target_id != focused_target_id:
                 continue
-            await page.bring_to_front()
+            if focus_cache is None or focus_cache.foreground != foreground_key or page is not current_page:
+                await page.bring_to_front()
+                if focus_cache is not None:
+                    focus_cache.foreground = foreground_key
             return page
         except Exception as exc:
             logger.debug(
                 "Unable to compare Playwright page with browser-use focus",
                 error=str(exc),
             )
-        finally:
-            if cdp_session is not None:
-                with contextlib.suppress(Exception):
-                    await cdp_session.detach()
 
     return current_page
 
@@ -1771,12 +1821,14 @@ async def _rebind_browser_tab_runtime(
     browser_recorder: Any,
     cursor_observer: Any,
     humanizer_factory: Any = None,
+    focus_cache: Optional[TabFocusCache] = None,
 ) -> Tuple[Any, Any]:
     """Atomically move live view, recorder, and synthesized input to agent focus."""
     focused_page = await _synchronize_playwright_page_with_agent_focus(
         dom_service=dom_service,
         playwright_browser=playwright_browser,
         current_page=current_page,
+        focus_cache=focus_cache,
     )
     if focused_page is current_page:
         return current_page, humanizer
@@ -1817,6 +1869,100 @@ async def _replace_browser_humanizer(
     return rebound_humanizer
 
 
+def _harvest_otp_poll(task: Optional["asyncio.Task[int]"]) -> Optional["asyncio.Task[int]"]:
+    """Collect a finished background OTP poll without ever waiting on it.
+
+    Returns the task while it is still in flight, ``None`` once it has been
+    harvested (or never started) so the caller can start the next poll. A
+    failed poll never fails the step.
+    """
+    if task is None or not task.done():
+        return task
+    if task.cancelled():
+        return None
+    error = task.exception()
+    if error is not None:
+        logger.warning("Failed to fetch OTPs", error=str(error)[:200])
+    elif task.result():
+        logger.info("Appended OTP user messages", count=task.result())
+    return None
+
+
+async def _drain_otp_poll(task: Optional["asyncio.Task[int]"], *, grace_s: float = 2.0) -> None:
+    """Let an in-flight OTP poll finish its credential-ref writes, then stop it."""
+    if task is None:
+        return
+    if not task.done():
+        await asyncio.wait({task}, timeout=grace_s)
+        task.cancel()
+    task.add_done_callback(_harvest_otp_poll)
+
+
+def _restored_indexes_unresolved(dom_service: Any, *, transcript_restored: bool) -> bool:
+    """Whether a resumed transcript cites [index] values this connection cannot resolve.
+
+    An activity that resumes a browser task (write approval, payment card,
+    deploy drain) restores the model's transcript, including the [index]
+    values of the last read_browser_state, but connects a new DOMService whose
+    selector map is empty until its first DOM build.
+    """
+    return transcript_restored and not getattr(dom_service, "selector_map", None)
+
+
+def _step_observe_needs_dom(
+    *,
+    fast_mode_replay: bool,
+    browser_recorder: Any,
+    restored_indexes_unresolved: bool = False,
+) -> bool:
+    """Whether the per-step observe must build the full DOM.
+
+    The browser LLM never receives page state implicitly (it calls
+    read_browser_state, which builds its own DOM), so the step-start observe
+    only needs URL/title. Two consumers still need the full tree every step:
+    Fast Mode replay remaps cached targets against the live selector map, and
+    file-based recorders persist per-iteration DOM observations for the world
+    model corpus (Kernel replay recorders ignore observations). A resumed
+    activity needs it once, so the indexes its restored transcript already
+    cites resolve against this connection's selector map.
+    """
+    if fast_mode_replay or restored_indexes_unresolved:
+        return True
+    return browser_recorder is not None and not getattr(browser_recorder, "uses_kernel_replay", False)
+
+
+async def _take_speculative_browser_state(
+    state_prefetch: BrowserStatePrefetch,
+    dom_service: Any,
+) -> Optional[Dict[str, Any]]:
+    """Speculative DOM build for read_browser_state, if still on the same page."""
+    if not state_prefetch.in_flight or dom_service is None:
+        state_prefetch.discard()
+        return None
+    try:
+        live_url = (await dom_service.get_page_identity()).get("url")
+    except Exception:
+        state_prefetch.discard()
+        return None
+    try:
+        # The build already overlapped the LLM call; one still running after
+        # the soft budget is stalled, and the fresh build that replaces it keeps
+        # the full action timeout for challenge freezes.
+        return await asyncio.wait_for(
+            state_prefetch.take(dom_service, live_url),
+            timeout=BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Speculative browser state build timed out; building fresh")
+        return None
+
+
+async def _observe_step_page(dom_service: Any, *, needs_dom: bool) -> Dict[str, Any]:
+    if needs_dom:
+        return await dom_service.get_browser_state(include_screenshot=False)
+    return await dom_service.get_page_identity()
+
+
 async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
     """Yield browser ownership until the user explicitly hands it back.
 
@@ -1851,11 +1997,30 @@ def _browser_action_tool_call_id(llm_result: Dict[str, Any]) -> str:
     return str(llm_result.get("tool_call_id") or uuid_module.uuid4())
 
 
+def _captcha_solver_wait_complete(
+    *,
+    provider: str,
+    elapsed_seconds: float,
+    page_still_challenged: bool,
+    saw_active_solver: bool,
+    inactive_polls: int,
+) -> bool:
+    if page_still_challenged:
+        return False
+    # Browser Use V4 exposes no in-flight solve status. Its own guidance says
+    # to leave a rendered CAPTCHA alone for about 10 seconds before inspecting
+    # or switching browsers; three fast null-telemetry polls are too short.
+    if provider == "browser-use" and elapsed_seconds < 10:
+        return False
+    return saw_active_solver or inactive_polls >= 3
+
+
 async def _wait_for_provider_captcha_solver(
     config: Any,
     task_id: str,
     *,
     page: Optional[Any] = None,
+    provider: str = "",
 ) -> None:
     """Give provider-native auto-solving the first chance before recovery probes.
 
@@ -1863,9 +2028,11 @@ async def _wait_for_provider_captcha_solver(
     live tab still looks challenged, keep waiting up to the 45s ceiling instead of
     treating three null polls as "solver done".
     """
-    deadline = asyncio.get_running_loop().time() + 45
+    started_at = asyncio.get_running_loop().time()
+    deadline = started_at + 45
     saw_active_solver = False
     inactive_polls = 0
+    last_provider = provider
     while asyncio.get_running_loop().time() < deadline:
         activity.heartbeat("Waiting for provider CAPTCHA auto-solver")
         page_still_challenged = False
@@ -1899,27 +2066,33 @@ async def _wait_for_provider_captcha_solver(
             telemetry = await fetch_browser_captcha_telemetry(config, task_id)
         except Exception as exc:
             logger.warning("CAPTCHA telemetry unavailable during challenge recovery", error=str(exc))
-            if page_still_challenged:
+            if page_still_challenged or (
+                last_provider == "browser-use"
+                and asyncio.get_running_loop().time() - started_at < 10
+            ):
                 await asyncio.sleep(2)
                 continue
             await asyncio.sleep(2)
             return
+        last_provider = str(telemetry.get("provider") or "")
         is_solving = telemetry.get("isSolving")
         if is_solving is True:
             saw_active_solver = True
             inactive_polls = 0
-        elif saw_active_solver and not page_still_challenged:
-            return
         elif page_still_challenged:
             # Hard WAF / Kernel-null telemetry: wait out the solver window on the
             # live challenged page instead of exiting after three idle polls.
             inactive_polls = 0
         else:
             inactive_polls += 1
-            # Steel can take a moment to register a new task. When the page is not
-            # challenged, three grace polls are enough for the solver-first wait.
-            if inactive_polls >= 3:
-                return
+        if is_solving is not True and _captcha_solver_wait_complete(
+            provider=last_provider,
+            elapsed_seconds=asyncio.get_running_loop().time() - started_at,
+            page_still_challenged=page_still_challenged,
+            saw_active_solver=saw_active_solver,
+            inactive_polls=inactive_polls,
+        ):
+            return
         await asyncio.sleep(2)
 
 
@@ -2164,7 +2337,11 @@ def _browser_prompt_cache_namespace(task_id: Optional[str], call_site: str) -> O
     return f"browser-task:{task_id}:{logical_lane}"
 
 
-async def _call_browser_use_with_rotation(  # noqa: C901
+def _compute_token_source(source: Optional[str]) -> ComputeTokenSource:
+    return "pool" if source == "pool" else "user"
+
+
+async def _call_browser_use_with_rotation(
     *,
     rose_client: RoseClient,
     task: str,
@@ -2220,7 +2397,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     claude_auth = (
         ClaudeAuthContext(
             token=token_state.access_token or "",
-            source=token_state.source or "user",  # type: ignore[arg-type]
+            source=_compute_token_source(token_state.source),
             user_id=user_id,
             pool_token_id=token_state.pool_token_id,
             max_rotations=0,  # activity drives rotation; client does one attempt
@@ -2231,7 +2408,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     gpt_auth = (
         GptAuthContext(
             token=gpt_token or "",
-            source=gpt_token_source or "user",  # type: ignore[arg-type]
+            source=_compute_token_source(gpt_token_source),
             user_id=user_id,
             account_id=gpt_account_id,
             pool_token_id=gpt_token_pool_id,
@@ -2300,7 +2477,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
         activity.heartbeat(f"Step {iteration} - retrying Rose API (rotation {rotations})")
         rotated_auth = ClaudeAuthContext(
             token=token_state.access_token or "",
-            source=token_state.source or "user",  # type: ignore[arg-type]
+            source=_compute_token_source(token_state.source),
             user_id=user_id,
             pool_token_id=token_state.pool_token_id,
             max_rotations=0,
@@ -3762,7 +3939,7 @@ async def _install_fast_mode_network_cache(
 
 async def _finalize_kernel_replay_for_fe(
     *,
-    browser_recorder: BrowserAgentRecorder,
+    browser_recorder: BrowserAgentRecorder | SimulatedBrowserRecorder,
     agent_id: str,
     task_id: str,
     user_id: Optional[str],
@@ -3807,7 +3984,7 @@ async def _finalize_kernel_replay_for_fe(
                     filename=f"browser-recording-{task_id}.mp4",
                     mime_type="video/mp4",
                 )
-        except Exception as exc:  # noqa: BLE001 — stitch/upload is best-effort
+        except Exception as exc:  # stitch/upload is best-effort
             logger.warning(
                 "Replay stitch/upload failed; falling back to segment URLs",
                 agent_id=agent_id,
@@ -3850,7 +4027,7 @@ async def _finalize_kernel_replay_for_fe(
 
 async def _finalize_browser_recording_for_fe(
     *,
-    browser_recorder: BrowserAgentRecorder,
+    browser_recorder: BrowserAgentRecorder | SimulatedBrowserRecorder,
     agent_id: str,
     task_id: Optional[str],
     user_id: str,
@@ -3909,7 +4086,7 @@ async def _finalize_browser_recording_for_fe(
                     bytes=len(html_bytes),
                     has_pointer=bool(recording_file_pointer),
                 )
-        except Exception as exc:  # noqa: BLE001 — recording upload is best-effort
+        except Exception as exc:  # recording upload is best-effort
             logger.warning(
                 "Browser recording upload failed",
                 agent_id=agent_id,
@@ -3954,7 +4131,7 @@ async def _finalize_browser_recording_for_fe(
 
 async def _finalize_browser_recording_for_fe_resilient(
     *,
-    browser_recorder: BrowserAgentRecorder,
+    browser_recorder: BrowserAgentRecorder | SimulatedBrowserRecorder,
     agent_id: str,
     task_id: Optional[str],
     user_id: str,
@@ -3997,7 +4174,7 @@ async def _finalize_browser_recording_for_fe_resilient(
                 timeout_seconds=timeout_seconds,
             )
             return None
-        except Exception as exc:  # noqa: BLE001 — final cleanup should not mask the activity result
+        except Exception as exc:  # final cleanup should not mask the activity result
             logger.warning(
                 "Browser recording finalization failed after cancellation",
                 agent_id=agent_id,
@@ -4014,7 +4191,7 @@ async def _finalize_browser_recording_for_fe_resilient(
             timeout_seconds=timeout_seconds,
         )
         return None
-    except Exception as exc:  # noqa: BLE001 — final cleanup should not mask the activity result
+    except Exception as exc:  # final cleanup should not mask the activity result
         logger.warning(
             "Browser recording finalization failed",
             agent_id=agent_id,
@@ -4260,7 +4437,7 @@ def _schedule_browser_cleanup(
                 agent_id,
                 driver_pid=playwright_driver_pid,
             )
-        except Exception as exc:  # noqa: BLE001 - background cleanup must never crash the worker loop
+        except Exception as exc:  # background cleanup must never crash the worker loop
             logger.warning(
                 "Browser cleanup failed in background",
                 agent_id=agent_id,
@@ -4342,7 +4519,7 @@ async def drain_background_browser_cleanups(
 
 @activity.defn
 @traced("spawn_browser_agent_activity_v3")
-async def spawn_browser_agent_activity_v3(  # noqa: C901
+async def spawn_browser_agent_activity_v3(
     user_id: str,
     agent_id: str,
     goal: str,
@@ -4372,11 +4549,6 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     # answer browser actions using the parent's whole-agent output contract.
     # The tool-call namespace remains stable across write-lock resumes, whose
     # payload also restores the exact browser session id.
-    from helpers.browser_spawn_contract import apply_active_task_spawn_contract
-
-    contracted = apply_active_task_spawn_contract({"start_url": start_url, "goal": goal})
-    start_url = str(contracted.get("start_url") or start_url or "")
-    goal = str(contracted.get("goal") or goal or "")
     world_model = WorldModelToolExecutionAdapter.from_env(
         agent_id=f"{agent_id}:browser:{tool_call_id}",
         inherit_explicit_session=False,
@@ -4865,6 +5037,63 @@ def _copy_browser_resume_continuity_fields(source: Dict[str, Any], target: Dict[
             target[key] = source[key]
 
 
+_BROWSER_PAUSE_STATUSES = frozenset(
+    {
+        "awaiting_write_approval",
+        "awaiting_payment_card_approval",
+        "awaiting_auth_assistance",
+        BROWSER_DRAIN_YIELD_STATUS,
+    }
+)
+_PAYMENT_RESUME_FIELDS = ("payment_card_refs", "payment_card_last4")
+
+
+def _payment_resume_fields(resume_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Minted-card fields every later resume of the same browser task must keep."""
+    return {key: resume_state[key] for key in _PAYMENT_RESUME_FIELDS if resume_state and resume_state.get(key)}
+
+
+def _reused_session_deadline(session_info: Dict[str, Any]) -> Optional[Tuple[str, float]]:
+    """(session id, monotonic release time) of a reused provider session with a lifetime."""
+    if session_info.get("same_session_available") is not True:
+        return None
+    health = session_info.get("browser_session_health")
+    ttl_ms = health.get("ttlMs") if isinstance(health, dict) else None
+    session_id = session_info.get("session_id")
+    if not isinstance(session_id, str) or isinstance(ttl_ms, bool) or not isinstance(ttl_ms, (int, float)):
+        return None
+    return session_id, time.monotonic() + ttl_ms / 1000
+
+
+def _session_expiring(deadline: Optional[Tuple[str, float]], session_id: Optional[str]) -> bool:
+    if deadline is None or deadline[0] != session_id:
+        return False
+    return deadline[1] - time.monotonic() < BROWSER_SESSION_MIN_REMAINING_SECONDS
+
+
+def _drain_resume_state(result: Dict[str, Any], prior_resume: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Resume state that restarts a drained browser task at its next step."""
+    prior = prior_resume or {}
+    resume_state: Dict[str, Any] = {
+        "pending_action": None,
+        "write_lock_approvals": result.get("write_lock_approvals", {}),
+        # Only a payment resume changes activity startup (card refs + merchant
+        # unlock); any other value continues the step loop unchanged.
+        "approval_type": "payment" if prior.get("approval_type") == "payment" else BROWSER_DRAIN_YIELD_STATUS,
+        "step_count": result.get("step_count", 0),
+        "session_id": result.get("session_id"),
+        "cdp_url": result.get("cdp_url"),
+        "task_id": result.get("task_id"),
+        "auth_realm": result.get("auth_realm"),
+        "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
+        **_payment_resume_fields(prior),
+    }
+    if prior.get("generation_yield") is False or result.get("yield_reason") == GENERATION_SUPERSEDED:
+        resume_state["generation_yield"] = False
+    _copy_browser_resume_continuity_fields(result, resume_state)
+    return resume_state
+
+
 def _copy_simulated_browser_resume_fields(source: Dict[str, Any], target: Dict[str, Any]) -> None:
     if not source.get("world_model_simulated"):
         return
@@ -5091,7 +5320,7 @@ def _simulated_browser_usage_items(
     return items
 
 
-async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
+async def _spawn_browser_agent_activity_v3_simulated(
     *,
     user_id: str,
     agent_id: str,
@@ -5242,7 +5471,7 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
     async def finalize_recording() -> None:
         if recorder:
             await _finalize_browser_recording_for_fe_resilient(
-                browser_recorder=recorder,  # type: ignore[arg-type]
+                browser_recorder=recorder,
                 agent_id=agent_id,
                 task_id=task_id,
                 user_id=user_id,
@@ -5655,8 +5884,6 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                 status=MessageStatus.FINISHED if transition.get("success", True) else MessageStatus.ERROR,
             )
             await browser_stream.finish_tools(status="FINISHED" if transition.get("success", True) else "ERROR")
-            if ACTION_LOOP_DELAY_SECONDS > 0:
-                await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)
 
         await finalize_recording()
         return {
@@ -5735,7 +5962,7 @@ async def _publish_browser_session_metadata_message(
     raise RuntimeError("Backend did not acknowledge required browser session metadata after 3 attempts")
 
 
-async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
+async def _spawn_browser_agent_activity_v3_real(
     user_id: str,
     agent_id: str,
     goal: str,
@@ -5830,7 +6057,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             agent_id=agent_id, resume_state=write_lock_resume_state
         )
 
-    from browser_tools.dom_service import ActionHistory, DOMService
+    from browser_tools.dom_service import ActionHistory, DOMService, browser_downloads_path_for_provider
     from browser_tools.humanizer import BrowserHumanizer
     from helpers.llm import check_progress
 
@@ -5894,6 +6121,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     write_lock_approvals: Dict[str, Dict] = {}
     auth_realm = auth_realm_from_url(start_url)
     verifier_checkpoints: List[Dict[str, Any]] = []
+    awaiting_observation_checkpoint = False
     # Eventim checkaddtocart POST can keep returning 403 challenge HTML while the
     # document GET looks clean — cookie-stage recovery then false-succeeds forever.
     # After one cookies_sanitized result, escalate subsequent recoveries to config search.
@@ -6025,6 +6253,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             payment_card_last4,
         )
     otp_user_messages: List[Dict[str, str]] = []
+    # The background OTP poll writes here, not into credential_refs_by_secret_ref,
+    # because a realm transition rebinds that dict while a poll is in flight.
+    otp_credential_refs: Dict[str, Dict[str, str]] = {}
     seen_otp_codes: set[str] = set()
     otp_task_started_monotonic = time.monotonic()
     available_file_paths: Dict[str, str] = {}
@@ -6112,6 +6343,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # ``finally`` teardown, but must NOT emit task_complete — the browser task
     # resumes in a later activity call and the FE chip must stay open.
     browser_task_paused_for_resume = False
+    otp_poll_task: Optional["asyncio.Task[int]"] = None
+    state_prefetch = BrowserStatePrefetch()
 
     try:
         if (write_lock_resume_state or {}).get("approval_type") == AUTH_ASSISTANCE_DECLINED:
@@ -6159,6 +6392,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             task_id=task_id,
             has_write_lock_resume_state=write_lock_resume_state is not None,
         )
+        reused_session_deadline: Optional[Tuple[str, float]] = None
         if is_resume and task_id:
             is_auth_assistance_resume = (
                 write_lock_resume_state is not None
@@ -6253,6 +6487,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     session_info["resume_mode"] = "new_steel_session_after_unavailable"
                     session_info["same_session_unavailable_reason"] = unavailable_reason
             session_id = session_info.get("session_id")
+            reused_session_deadline = _reused_session_deadline(session_info)
             browser_url = session_info.get("debug_url")
             cdp_url = session_info.get("ws_url")
             fingerprint_injection = session_info.get("fingerprint_injection")
@@ -6404,7 +6639,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             nonlocal playwright_driver_pid
             _disable_cdp_websocket_proxy()
             connection_cdp_url = steel_cdp_connection_url(cdp_url)
-            _dom_service = DOMService(cdp_url=connection_cdp_url)
+            _dom_service = DOMService(
+                cdp_url=connection_cdp_url,
+                downloads_path=browser_downloads_path_for_provider(
+                    browser_session_metadata.get("provider")
+                ),
+            )
             _playwright_instance = None
             _playwright_browser = None
 
@@ -7031,8 +7271,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         rose_client = BrowserStreamingRoseClient()
         iteration = resume_step_count
         consecutive_api_failures = 0
-        identical_verifier_reject_fingerprint = ""
-        identical_verifier_reject_streak = 0
         browser_turn_messages.extend(resume_user_messages)
         otp_history_count = 0
         supervisor_recovery_count = 0
@@ -7232,14 +7470,95 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             return True
 
         observe_page_state: Dict[str, Any] = {}
+        # Cleared by the first step observe; see _restored_indexes_unresolved.
+        restored_transcript_unobserved = bool(browser_turn_messages)
         consecutive_budget_free = 0
         consecutive_keystroke_free = 0
+        allow_generation_yield = (write_lock_resume_state or {}).get("generation_yield") is not False
+        drain_checkpoint_failed = False
         step_timer = StepPhaseTimer(agent_id=agent_id, task_id=task_id)
+        tab_focus_cache = TabFocusCache()
         while iteration < MAX_ITERATIONS:
+            # Drain checkpoint. Between steps, with no approved action still
+            # owed, the task is fully captured by the same resume payload a
+            # write-lock pause returns, so the manager can restart it at this
+            # step on a live worker (rolling deploy), generation (cutover), or
+            # replacement session (the reused one is about to be released)
+            # instead of dying mid-step. Every invocation runs at least one
+            # step before it may yield again.
+            if iteration > resume_step_count and pending_write_lock_action is None and not drain_checkpoint_failed:
+                drain_reason = await activity_drain_reason(allow_generation_handoff=allow_generation_yield)
+                if not drain_reason and _session_expiring(reused_session_deadline, session_id):
+                    drain_reason = BROWSER_SESSION_EXPIRING
+                if drain_reason:
+                    try:
+                        drain_continuity = await persist_resume_context(
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            state=_browser_resume_continuity_state(
+                                action_history=action_history,
+                                visited_urls=visited_urls,
+                                verifier_checkpoints=verifier_checkpoints,
+                                browser_turn_messages=browser_turn_messages,
+                                reasoning_messages=reasoning_messages,
+                                action_summary=action_summary,
+                                auth_runtime_state=auth_runtime_state,
+                            ),
+                        )
+                    except Exception as checkpoint_error:
+                        drain_checkpoint_failed = True
+                        logger.warning(
+                            "Browser drain checkpoint failed; continuing on this worker",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            drain_reason=drain_reason,
+                            error=extract_error_message(checkpoint_error),
+                        )
+                    else:
+                        logger.info(
+                            "Browser task yielding at step boundary",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            session_id=session_id,
+                            drain_reason=drain_reason,
+                            step_count=iteration,
+                        )
+                        if dom_service:
+                            try:
+                                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
+                            except Exception as e:
+                                logger.warning(f"Failed to disconnect browser before drain yield: {e}")
+                            dom_service = None
+                        browser_task_paused_for_resume = True
+                        step_timer.finish()
+                        return {
+                            "status": BROWSER_DRAIN_YIELD_STATUS,
+                            "yield_reason": drain_reason,
+                            "current_url": current_url,
+                            "write_lock_approvals": write_lock_approvals,
+                            "step_count": iteration,
+                            "session_id": session_id,
+                            "cdp_url": cdp_url,
+                            "task_id": task_id,
+                            "browser_url": browser_url,
+                            "auth_realm": auth_realm,
+                            "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
+                            "usage_items": build_usage_items(
+                                total_input_tokens,
+                                total_output_tokens,
+                                model_pricing,
+                                (safe_time() - start_time) * 1000,
+                                usage_by_model,
+                                fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                            ),
+                            **drain_continuity,
+                        }
             iteration += 1
             step_timer.start_step(iteration)
             activity.heartbeat(f"Step {iteration}")
-            await _wait_for_browser_user_control(config, task_id)
+            if await _wait_for_browser_user_control(config, task_id):
+                tab_focus_cache.foreground = None
+                state_prefetch.discard()
             step_timer.mark("user_control_wait")
 
             # TAB/INPUT/LIVE-VIEW STATE MACHINE:
@@ -7255,14 +7574,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 humanizer=humanizer,
                 browser_recorder=browser_recorder,
                 cursor_observer=observe_cursor,
+                focus_cache=tab_focus_cache,
             )
             step_timer.mark("tab_rebind")
 
             # Handle pending write lock action
             if pending_write_lock_action:
+                state_prefetch.discard()
                 if await _wait_for_browser_user_control(config, task_id):
                     # The approved target may have changed under user control;
                     # retain it and re-resolve against a fresh DOM next step.
+                    tab_focus_cache.foreground = None
                     continue
                 logger.info("Executing pending write lock action after approval")
                 unified_action, _, current_url = await _prepare_pending_write_lock_action(
@@ -7335,27 +7657,31 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
                 continue
 
-            # 0. Fetch recent OTPs and append unseen codes as USER messages.
-            try:
-                new_otp_count = await _fetch_and_append_recent_otp_user_messages(
-                    user_id=user_id,
-                    api_url=config.backend.api_url,
-                    api_key=config.backend.api_key,
-                    seen_otp_codes=seen_otp_codes,
-                    otp_user_messages=otp_user_messages,
-                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    task_elapsed_seconds=time.monotonic() - otp_task_started_monotonic,
+            # 0. Recent OTPs are polled in the background (backend HTTP); the
+            # step never waits on it. Codes a finished poll found are appended
+            # as USER messages here, at a turn boundary, and the next poll starts.
+            otp_poll_task = _harvest_otp_poll(otp_poll_task)
+            if otp_credential_refs:
+                credential_refs_by_secret_ref.update(otp_credential_refs)
+                otp_credential_refs.clear()
+            if len(otp_user_messages) > otp_history_count:
+                browser_turn_messages.extend(otp_user_messages[otp_history_count:])
+                otp_history_count = len(otp_user_messages)
+            if otp_poll_task is None:
+                otp_poll_task = asyncio.create_task(
+                    _fetch_and_append_recent_otp_user_messages(
+                        user_id=user_id,
+                        api_url=config.backend.api_url,
+                        api_key=config.backend.api_key,
+                        seen_otp_codes=seen_otp_codes,
+                        otp_user_messages=otp_user_messages,
+                        credential_refs_by_secret_ref=otp_credential_refs,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        task_elapsed_seconds=time.monotonic() - otp_task_started_monotonic,
+                    )
                 )
-                if new_otp_count:
-                    logger.info("Appended OTP user messages", count=new_otp_count)
-                if len(otp_user_messages) > otp_history_count:
-                    browser_turn_messages.extend(otp_user_messages[otp_history_count:])
-                    otp_history_count = len(otp_user_messages)
-            except Exception as e:
-                logger.warning("Failed to fetch OTPs", error=str(e))
-            step_timer.mark("otp_fetch")
+            step_timer.mark("otp_poll")
 
             # One guarded state fetch supplies URL + observe text (avoid double DOM).
             activity.heartbeat(f"Step {iteration} - resolving page state")
@@ -7374,11 +7700,22 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         timeout=BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
                     )
                 step_timer.mark("overlay_suppress")
+                observe_needs_dom = _step_observe_needs_dom(
+                    fast_mode_replay=bool(fast_mode_cache_enabled),
+                    browser_recorder=browser_recorder,
+                    restored_indexes_unresolved=_restored_indexes_unresolved(
+                        dom_service,
+                        transcript_restored=restored_transcript_unobserved,
+                    ),
+                )
                 observe_page_state = await asyncio.wait_for(
-                    dom_service.get_browser_state(include_screenshot=False),
+                    _observe_step_page(dom_service, needs_dom=observe_needs_dom),
                     timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                 )
+                restored_transcript_unobserved = False
+                step_timer.annotate(observe_dom=observe_needs_dom)
                 current_url = str(observe_page_state.get("url") or current_url)
+                step_timer.mark("observe_state")
             except asyncio.TimeoutError:
                 recovered = await _recover_browser_step(
                     f"browser_url_timeout_{BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS}s",
@@ -7395,7 +7732,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 if recovered:
                     continue
                 raise
-            step_timer.mark("observe_state")
             await record_passkey_usage_once()
             step_timer.mark("passkey_usage")
             auth_runtime_state.observe_page_text(observe_page_state.get("title") or "")
@@ -7685,6 +8021,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             action_entries=action_entries,
                         )
                 step_timer.mark("record_observation")
+                if not observe_needs_dom:
+                    state_prefetch.start(dom_service)
 
                 # Fast Mode: replay the recorded decision when the browser request
                 # fingerprint matches. The live browser session still executes the
@@ -7877,6 +8215,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
             if await _wait_for_browser_user_control(config, task_id):
                 # Never execute an action planned against the pre-handoff DOM.
+                tab_focus_cache.foreground = None
+                state_prefetch.discard()
                 await browser_stream.finish_tools(status="ERROR")
                 continue
 
@@ -7954,22 +8294,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     stream_id=llm_result.get("_thinking_stream_id"),
                 )
 
-            if should_force_visible_result_completion(
-                action_name=action_name,
-                last_reasoning=thinking,
-                prior_reasoning_messages=reasoning_messages,
-                action_summaries=action_summary,
-                action_entries=action_entries,
-            ):
-                logger.info(
-                    "Forcing attempt_completion after visible FCaptcha result already stated",
-                    rejected_action=action_name,
-                    iteration=iteration,
-                )
-                unified_action = forced_visible_result_completion_action(thinking)
-                llm_result = {**llm_result, "action": unified_action}
-                action_name = "attempt_completion"
-
             action_summary.append(_summarize_browser_action_history_entry(action_name, unified_action))
             if len(action_summary) > 20:
                 action_summary[:] = action_summary[-20:]
@@ -8030,6 +8354,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             fingerprint_injection=replacement.get("fingerprint_injection")
                             or pending_fingerprint_injection,
                             agent_id=agent_id,
+                            provider=pending_browser_session_metadata.get("provider"),
                             config=config,
                             task_id=task_id,
                         )
@@ -8229,6 +8554,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     execution_time_ms,
                     usage_by_model,
                     fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                    provider=browser_session_metadata.get("provider"),
                 )
                 await _propagate_browser_credentials_with_progress(
                     config=config,
@@ -8293,13 +8619,25 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
 
                 provider_exit_rejected = bool(recovery_params.get("provider_exit_rejected"))
+                # The recorder attaches in the background; the clean-page check
+                # needs it to see a cited first-party transport failure.
+                if browser_network_recorder is None and network_recorder_task is not None:
+                    with contextlib.suppress(Exception):
+                        browser_network_recorder = await asyncio.wait_for(
+                            asyncio.shield(network_recorder_task),
+                            timeout=10,
+                        )
                 # If the live tab is already clean and this was not a hard
                 # provider-exit rejection, skip — avoids recovery loops the model
                 # invents from third-party network noise on an otherwise fine page.
                 if (
                     not provider_exit_rejected
                     and input_page is not None
-                    and not await live_tab_looks_challenged(input_page)
+                    and not await live_tab_looks_challenged(
+                        input_page,
+                        network_recorder=browser_network_recorder,
+                        recovery_reason=recovery_reason,
+                    )
                 ):
                     skip_message = (
                         "Current page does not look challenged"
@@ -8457,7 +8795,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         source_state=recovery_storage_state,
                         target_url=current_url,
                         wait_for_solver=lambda: _wait_for_provider_captcha_solver(
-                            config, task_id, page=input_page
+                            config,
+                            task_id,
+                            page=input_page,
+                            provider=str(browser_session_metadata.get("provider") or ""),
                         ),
                         probe=probe_cookie_variant_remote,
                         commit_cookie_removals=lambda keys: commit_cookie_removals(
@@ -8485,6 +8826,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         new_cdp_url = config_result.get("ws_url")
                         if not isinstance(new_cdp_url, str) or not new_cdp_url:
                             raise RuntimeError("Challenge recovery selected a browser without a CDP URL")
+                        promoted_metadata = _updated_rotation_session_metadata(
+                            browser_session_metadata,
+                            dict(config_result),
+                        )
                         try:
                             reconnected = await _reconnect_browser_stack_after_rotation(
                                 new_cdp_url=new_cdp_url,
@@ -8494,6 +8839,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 old_driver_pid=playwright_driver_pid,
                                 fingerprint_injection=fingerprint_injection,
                                 agent_id=agent_id,
+                                provider=promoted_metadata.get("provider")
+                                or config_result.get("provider"),
                                 config=config,
                                 task_id=task_id,
                             )
@@ -8522,10 +8869,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         session_id = config_result.get("session_id", session_id)
                         browser_url = config_result.get("debug_url", browser_url)
                         cdp_url = new_cdp_url
-                        browser_session_metadata = _updated_rotation_session_metadata(
-                            browser_session_metadata,
-                            dict(config_result),
-                        )
+                        browser_session_metadata = promoted_metadata
                         # Preloaded winners already applied auth/origin state during
                         # candidate probes. Re-running origin restore clears
                         # localStorage and rewrites the challenged capture onto the
@@ -8875,64 +9219,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     if progress_result.get("structured_response") is not None:
                         latest_structured_response = progress_result["structured_response"]
 
-                    (
-                        identical_verifier_reject_fingerprint,
-                        identical_verifier_reject_streak,
-                    ) = next_identical_reject_streak(
-                        previous_fingerprint=identical_verifier_reject_fingerprint,
-                        previous_streak=identical_verifier_reject_streak,
-                        reasoning=v_reasoning,
-                        score=float(score or 0.0),
-                    )
-                    # Stuck 0.5 with a fully populated structured output is not
-                    # actionable "need more evidence" — break the loop so the
-                    # browser agent stops instead of hub-pausing (browser-smoke
-                    # 9f53aed4: identical H1-absent rejects ×4). Soft-accept is
-                    # *unverified*: keep structured output for the parent but
-                    # never report verified success=True.
-                    soft_accept_structured_response = (
-                        progress_result.get("structured_response")
-                        or latest_structured_response
-                    )
-                    verifier_soft_accepted = False
-                    soft_accept_original_score = float(score or 0.0)
-                    if (
-                        float(score or 0.0) < 1.0
-                        and should_soft_accept_identical_verifier_reject(
-                            consecutive_identical=identical_verifier_reject_streak,
-                            structured_response=soft_accept_structured_response,
-                            response_schema=remote_session_schema,
-                        )
-                    ):
-                        logger.warning(
-                            "Soft-accepting browser attempt_completion after "
-                            f"{identical_verifier_reject_streak} identical "
-                            "verifier rejects with complete structured output "
-                            "(unverified)",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            score=score,
-                        )
-                        verifier_soft_accepted = True
-                        score = 1.0  # branch gate only; display uses original score
-                        v_reasoning = (
-                            "Identical verifier reject circuit: completing "
-                            "unverified with already-populated structured "
-                            f"output. Original score was "
-                            f"{progress_result.get('score', 0.0)}; "
-                            f"reasoning: {v_reasoning}"
-                        )
-                        identical_verifier_reject_fingerprint = ""
-                        identical_verifier_reject_streak = 0
-
-                    display_score = (
-                        soft_accept_original_score
-                        if verifier_soft_accepted
-                        else float(score or 0.0)
-                    )
-                    progress_title = f"\u2696\ufe0f Progress: {display_score * 100:.0f}%"
-                    if verifier_soft_accepted:
-                        progress_title += " (unverified)"
+                    progress_title = f"\u2696\ufe0f Progress: {float(score or 0.0) * 100:.0f}%"
 
                     await save_browser_action_message(
                         agent_id=agent_id,
@@ -8946,21 +9233,18 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     if browser_recorder:
                         await browser_recorder.mark(
-                            f"Verifier progress: {display_score * 100:.0f}%"
-                            + (" (unverified)" if verifier_soft_accepted else ""),
+                            f"Verifier progress: {float(score or 0.0) * 100:.0f}%",
                             action="verify",
                         )
 
                     if score >= 1.0:
                         completion_tool_status = "FINISHED"
                         execution_time_ms = (safe_time() - start_time) * 1000
-                        # Soft-accept may validate latest_structured_response
-                        # when this verifier call omitted structured_response.
+                        # A passing verifier call may omit the output it already
+                        # produced on an earlier call; keep that cached response.
                         structured_response = (
-                            progress_result.get("structured_response")
-                            or soft_accept_structured_response
+                            progress_result.get("structured_response") or latest_structured_response
                         )
-                        completion_success = not verifier_soft_accepted
 
                         uploaded_paths = list(available_file_paths.values()) if available_file_paths else []
                         output_files = await extract_session_files(
@@ -9021,7 +9305,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         await close_browser_session(config, session_id, pause=False)
 
                         context_message = build_context_summary(
-                            success=completion_success,
+                            success=True,
                             close_reasoning=close_reasoning,
                             visited_urls=visited_urls,
                             reasoning_messages=reasoning_messages,
@@ -9032,23 +9316,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             browser_url=current_url,
                             structured_response=structured_response,
                         )
-                        if verifier_soft_accepted:
-                            context_message = (
-                                f"{context_message}\n\n"
-                                "[verifier_soft_accepted] Completion is unverified "
-                                f"(original verifier score "
-                                f"{soft_accept_original_score:.2f}). Structured "
-                                "output is preserved for the parent; do not treat "
-                                "this as a verified success."
-                            )
-
                         await save_browser_action_message(
                             agent_id=agent_id,
-                            title=(
-                                "\u2713 Task Completed (unverified)"
-                                if verifier_soft_accepted
-                                else "\u2713 Task Completed"
-                            ),
+                            title="\u2713 Task Completed",
                             task_id=task_id,
                             message=context_message,
                             status=MessageStatus.FINISHED,
@@ -9066,6 +9336,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             execution_time_ms,
                             usage_by_model,
                             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                            provider=browser_session_metadata.get("provider"),
                         )
                         await _propagate_browser_credentials_with_progress(
                             config=config,
@@ -9073,14 +9344,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             task_id=task_id,
                             browser_url=browser_url,
                             status="completed",
-                            success=completion_success,
+                            success=True,
                             message=context_message,
                         )
 
                         return {
                             "status": "completed",
-                            "success": completion_success,
-                            "verifier_soft_accepted": verifier_soft_accepted,
+                            "success": True,
                             "message": context_message,
                             "browser_url": browser_url,
                             "task_id": task_id,
@@ -9254,6 +9524,13 @@ Based on this feedback, I need to continue working on the task and address the i
                 with contextlib.suppress(Exception):
                     browser_network_recorder = network_recorder_task.result()
 
+            prefetched_browser_state = observe_page_state
+            if action_name == "read_browser_state" and "dom_tree" not in observe_page_state:
+                speculative_state = await _take_speculative_browser_state(state_prefetch, dom_service)
+                step_timer.annotate(state_prefetch="hit" if speculative_state else "miss")
+                prefetched_browser_state = speculative_state or observe_page_state
+            else:
+                state_prefetch.discard()
             step_timer.mark("pre_action_bookkeeping")
             step_timer.annotate(action=action_name)
             activity.heartbeat(f"Step {iteration} - executing {action_name}")
@@ -9279,7 +9556,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_network_recorder=browser_network_recorder,
                         current_auth_realm=auth_realm,
                         prepare_credentials_for_url=_prepare_credentials_for_url,
-                        prefetched_browser_state=observe_page_state,
+                        prefetched_browser_state=prefetched_browser_state,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
@@ -9367,6 +9644,7 @@ Based on this feedback, I need to continue working on the task and address the i
                             humanizer=humanizer,
                             browser_recorder=browser_recorder,
                             cursor_observer=observe_cursor,
+                            focus_cache=tab_focus_cache,
                         )
                 result = {
                     "success": False,
@@ -9413,6 +9691,10 @@ Based on this feedback, I need to continue working on the task and address the i
             step_timer.mark("execute_action")
             # Nothing a tool read back from the page may carry a secret the tool typed.
             result = mask_secret_values(result, secret_refs)
+            state_prefetch.arm(
+                action_name,
+                success=isinstance(result, dict) and bool(result.get("success", True)),
+            )
             if isinstance(result, dict) and result.get("current_url"):
                 current_url = str(result.get("current_url") or "")
                 if current_url and (not visited_urls or current_url != visited_urls[-1]):
@@ -9752,21 +10034,20 @@ Based on this feedback, I need to continue working on the task and address the i
                 return resume_result
 
             if result.get("success", True):
+                awaiting_observation_checkpoint = _preserve_observed_interaction_for_verifier(
+                    action_name=action_name,
+                    succeeded=True,
+                    awaiting_observation=awaiting_observation_checkpoint,
+                    observed_state=observe_page_state,
+                    current_url=current_url,
+                    verifier_checkpoints=verifier_checkpoints,
+                )
                 logger.info(
                     f"Action {action_name} successful",
                     agent_id=agent_id,
                     title=title_done,
                     task_id=task_id,
                 )
-                if action_name == "evaluate":
-                    preserved_state = await _capture_preserved_evidence_after_evaluate(
-                        dom_service=dom_service,
-                        verifier_checkpoints=verifier_checkpoints,
-                        current_url=current_url,
-                    )
-                    if preserved_state:
-                        browser_state = preserved_state
-                        current_url = str(preserved_state.get("url") or current_url or "")
                 if input_page and _botsigged_diagnostics_enabled(start_url):
                     with contextlib.suppress(Exception):
                         await _capture_botsigged_diagnostics(
@@ -9875,8 +10156,6 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
 
             step_timer.mark("post_action_bookkeeping")
-            await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)
-            step_timer.mark("loop_delay")
 
         step_timer.finish()
         # Max iterations reached
@@ -10016,6 +10295,7 @@ Based on this feedback, I need to continue working on the task and address the i
             execution_time_ms,
             usage_by_model,
             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+            provider=browser_session_metadata.get("provider"),
         )
         await _propagate_browser_credentials_with_progress(
             config=config,
@@ -10165,6 +10445,8 @@ Based on this feedback, I need to continue working on the task and address the i
         raise
     finally:
         stop_browser_activity_heartbeat(_heartbeat_token)
+        await _drain_otp_poll(otp_poll_task)
+        state_prefetch.discard()
         diagnostics_finalized = False
         if browser_network_recorder is None and network_recorder_task is not None:
             try:
@@ -10266,7 +10548,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
     tool_name = "spawn_browser_agent"
 
-    async def execute_tool(  # noqa: C901
+    async def execute_tool(
         self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn browser agent with browser-use + Rose API."""
@@ -10327,22 +10609,30 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 )
                 attachments = [_fp_dict(fp) for fp in filename_to_pointer.values()]
 
+        # A previous generation parked this exact tool call across a deploy
+        # (continue_as_new). Its chip is still open; resume from the parked
+        # state instead of starting a new browser task.
+        resume_hint = take_tool_resume(workflow_instance, tool_call_id)
 
         logger.info(
             "Browser agent starting (v3)",
             goal=goal,
             has_output_schema=output_schema is not None,
             num_attachments=len(attachments),
+            resumed_phase=(resume_hint or {}).get("phase"),
         )
 
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="Starting up a browser",
-            message="",
-            status=MessageStatus.IN_PROGRESS,
-            metadata={"toolName": "spawn_browser_agent", "action_type": "session_starting"},
-        )
+        if resume_hint is None:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Starting up a browser",
+                message="",
+                status=MessageStatus.IN_PROGRESS,
+                metadata={"toolName": "spawn_browser_agent", "action_type": "session_starting"},
+            )
 
+        result = None
+        activity_task_id: Optional[str] = None
         try:
             write_lock_enabled = getattr(workflow_instance, "write_lock_enabled", True)
             system_name = getattr(workflow_instance, "system_name", "Rose")
@@ -10374,112 +10664,184 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
             write_lock_resume_state = None
             current_start_url = start_url
-            result = None
+            parked_result = None
+            parked_approval = None
+            if resume_hint is not None:
+                write_lock_resume_state = resume_hint.get("write_lock_resume_state")
+                current_start_url = resume_hint.get("current_start_url") or start_url
+                parked_result = resume_hint.get("parked_result")
+                parked_approval = resume_hint.get("approval")
+
+            def park_browser_task(phase: str, resume_state: Optional[Dict[str, Any]], **parked: Any) -> bool:
+                return park_pending_tool(
+                    workflow_instance,
+                    tool_call_id,
+                    {
+                        "phase": phase,
+                        "write_lock_resume_state": resume_state,
+                        "current_start_url": current_start_url,
+                        **parked,
+                    },
+                )
+
+            def park_browser_approval(phase: str) -> Callable[[Dict[str, str]], bool]:
+                # The approval branches only read the card refs from the prior
+                # resume state; the paused result carries everything else.
+                def park(approval: Dict[str, str]) -> bool:
+                    return park_browser_task(
+                        phase,
+                        _payment_resume_fields(write_lock_resume_state),
+                        parked_result=result,
+                        approval=approval,
+                    )
+
+                return park
 
             while True:
-                known_task_id = (
-                    write_lock_resume_state.get("task_id")
-                    if isinstance(write_lock_resume_state, dict)
-                    else None
-                ) or _stable_browser_task_id(agent_id, tool_call_id)
-                activity_args = [
-                    user_id,
-                    agent_id,
-                    goal,
-                    tool_call_id,
-                    known_task_id,
-                    (write_lock_resume_state.get("session_id") if write_lock_resume_state else None),
-                    (write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None),
-                    write_lock_resume_state is not None,
-                    output_schema,
-                    attachments if attachments else None,
-                    write_lock_enabled,
-                    current_start_url,
-                    write_lock_resume_state,
-                    system_name,
-                    bool(active_claude_token) and not bool(active_gpt_token),
-                    active_gpt_token,
-                    active_gpt_account_id,
-                    active_gpt_source,
-                    active_gpt_pool_id,
-                    bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)),
-                ]
-                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
-                if world_model_mode != "real":
-                    activity_args.append(world_model_mode)
-                async with span(
-                    "browser_activity_wait",
-                    agent_id=agent_id,
-                    tool_call_id=tool_call_id,
-                    tool_name="spawn_browser_agent",
-                    is_resume=write_lock_resume_state is not None,
-                    span_source="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
-                    span_key="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
-                ):
-                    fm_enabled = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
-                    browser_timeout_minutes = browser_start_to_close_timeout_minutes(
-                        fast_mode=fm_enabled,
-                        goal=goal,
-                        workflow_instance=workflow_instance,
-                    )
-                    activity_handle = workflow.start_activity(
-                        spawn_browser_agent_activity_v3,
-                        args=activity_args,
-                        start_to_close_timeout=timedelta(minutes=browser_timeout_minutes),
-                        heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
-                        cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
-                        retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS),
-                    )
-
+                reentered_pause = parked_result is not None
+                if reentered_pause:
+                    # Re-enter the pause branch the previous generation parked in
+                    # (approval / auth wait) without running the activity again.
+                    result, parked_result = parked_result, None
                     was_cancelled = False
-                    # The workflow allocates task_id before starting the activity,
-                    # so TRY_CANCEL cannot erase the ownership key along with the
-                    # activity return value.
-                    # cutover-class: activity-bound — cannot continue_as_new until browser activity ends
-                    await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)  # noqa: B023
-                    if workflow_instance.is_paused and not activity_handle.done():
-                        logger.info("\U0001f534 Cancelling browser agent due to pause")
-                        activity_handle.cancel()
-                        was_cancelled = True
+                    known_task_id = result.get("task_id") or _stable_browser_task_id(agent_id, tool_call_id)
+                    activity_task_id = known_task_id
+                else:
+                    known_task_id = (
+                        write_lock_resume_state.get("task_id") if isinstance(write_lock_resume_state, dict) else None
+                    ) or _stable_browser_task_id(agent_id, tool_call_id)
+                    activity_args = [
+                        user_id,
+                        agent_id,
+                        goal,
+                        tool_call_id,
+                        known_task_id,
+                        (write_lock_resume_state.get("session_id") if write_lock_resume_state else None),
+                        (write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None),
+                        write_lock_resume_state is not None,
+                        output_schema,
+                        attachments if attachments else None,
+                        write_lock_enabled,
+                        current_start_url,
+                        write_lock_resume_state,
+                        system_name,
+                        bool(active_claude_token) and not bool(active_gpt_token),
+                        active_gpt_token,
+                        active_gpt_account_id,
+                        active_gpt_source,
+                        active_gpt_pool_id,
+                        bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)),
+                    ]
+                    world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+                    if world_model_mode != "real":
+                        activity_args.append(world_model_mode)
+                    async with span(
+                        "browser_activity_wait",
+                        agent_id=agent_id,
+                        tool_call_id=tool_call_id,
+                        tool_name="spawn_browser_agent",
+                        is_resume=write_lock_resume_state is not None,
+                        span_source="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
+                        span_key="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
+                    ):
+                        fm_enabled = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+                        browser_timeout_minutes = browser_start_to_close_timeout_minutes(
+                            fast_mode=fm_enabled,
+                            goal=goal,
+                            workflow_instance=workflow_instance,
+                        )
+                        activity_handle = workflow.start_activity(
+                            spawn_browser_agent_activity_v3,
+                            args=activity_args,
+                            start_to_close_timeout=timedelta(minutes=browser_timeout_minutes),
+                            heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
+                            cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                            retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS),
+                        )
+                        activity_task_id = known_task_id
 
-                    try:
-                        result = await activity_handle
-                    except (asyncio.CancelledError, ActivityError) as e:
-                        if isinstance(e, ActivityError) and not isinstance(
-                            e.cause, (asyncio.CancelledError, TemporalCancelledError)
-                        ):
-                            raise
-                        was_cancelled = True
-                        result = {
-                            "status": "cancelled",
-                            "message": "Browser agent cancelled by user",
-                        }
-                        if known_task_id:
-                            result["task_id"] = known_task_id
+                        was_cancelled = False
+                        # The workflow allocates task_id before starting the activity,
+                        # so TRY_CANCEL cannot erase the ownership key along with the
+                        # activity return value.
+                        # cutover-class: activity-bound — cannot continue_as_new until browser activity ends
+                        await workflow.wait_condition(
+                            lambda handle=activity_handle: handle.done() or workflow_instance.is_paused
+                        )
+                        if workflow_instance.is_paused and not activity_handle.done():
+                            logger.info("\U0001f534 Cancelling browser agent due to pause")
+                            activity_handle.cancel()
+                            was_cancelled = True
+
+                        try:
+                            result = await activity_handle
+                        except (asyncio.CancelledError, ActivityError) as e:
+                            if isinstance(e, ActivityError) and not isinstance(
+                                e.cause, (asyncio.CancelledError, TemporalCancelledError)
+                            ):
+                                raise
+                            was_cancelled = True
+                            result = {
+                                "status": "cancelled",
+                                "message": "Browser agent cancelled by user",
+                            }
+                            if known_task_id:
+                                result["task_id"] = known_task_id
+
+                    pause_usage_items = (result or {}).get("usage_items")
+                    if (result or {}).get("status") in _BROWSER_PAUSE_STATUSES and pause_usage_items:
+                        # Each activity call reports only its own tokens; a paused
+                        # call's usage is billed here because the final result
+                        # will not include it.
+                        yield ToolEvent(
+                            type=EventType.USAGE,
+                            data={"usage": browser_usage_items_to_tool_usage(pause_usage_items)},
+                        )
 
                 if was_cancelled or (result and result.get("status") == "cancelled"):
                     logger.info("\U0001f534 Browser agent cancelled")
-                    pause_metadata = {
-                        "toolName": "spawn_browser_agent",
-                        "action_type": "task_complete",
-                    }
-                    if result:
-                        if result.get("task_id"):
-                            pause_metadata["task_id"] = result["task_id"]
-                        elif known_task_id:
-                            pause_metadata["task_id"] = known_task_id
-                        if result.get("browser_url"):
-                            pause_metadata["browser_url"] = result["browser_url"]
-                        if result.get("session_id"):
-                            pause_metadata["session_id"] = result["session_id"]
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
                         title="Browser Session Paused",
                         message="User paused the browser agent",
                         status=MessageStatus.ERROR,
-                        metadata=pause_metadata,
+                        metadata=_browser_task_terminal_metadata(result, activity_task_id),
                     )
                     return
+
+                if result and result.get("status") == BROWSER_DRAIN_YIELD_STATUS:
+                    # The activity checkpointed at a step boundary because a deploy
+                    # is draining its worker or superseded its generation. Restart
+                    # it from that step: on a live worker of this queue, or on the
+                    # live generation after continue_as_new carries this tool call.
+                    write_lock_resume_state = _drain_resume_state(result, write_lock_resume_state)
+                    handoff_queue = await live_handoff_queue(workflow_instance)
+                    if handoff_queue:
+                        if park_browser_task(
+                            "activity",
+                            {k: v for k, v in write_lock_resume_state.items() if k != "generation_yield"},
+                        ):
+                            logger.info(
+                                "Browser task parked for generation handoff",
+                                agent_id=agent_id,
+                                task_id=result.get("task_id"),
+                                step_count=result.get("step_count"),
+                                yield_reason=result.get("yield_reason"),
+                                handoff_task_queue=handoff_queue,
+                            )
+                            raise GenerationHandoffRequested(handoff_queue, parked=True)
+                        # Parking is unavailable here (DAG turn or payload budget):
+                        # finish on this generation instead of yielding every step.
+                        write_lock_resume_state["generation_yield"] = False
+                    logger.info(
+                        "Browser task drained at a step boundary; restarting from the same step",
+                        agent_id=agent_id,
+                        task_id=result.get("task_id"),
+                        step_count=result.get("step_count"),
+                        yield_reason=result.get("yield_reason"),
+                        generation_yield=write_lock_resume_state.get("generation_yield", True),
+                    )
+                    continue
 
                 if result and result.get("status") == "awaiting_write_approval":
                     logger.info(
@@ -10494,6 +10856,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     )
 
                     try:
+                        approval_resume, parked_approval = parked_approval, None
                         approval_response = await request_user_approval_direct(
                             workflow_instance,
                             question=result["question"],
@@ -10504,6 +10867,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "writeLockNotification": result.get("write_lock_notification"),
                                 "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
                             },
+                            park=park_browser_approval("write_approval"),
+                            resume_request=approval_resume,
                         )
 
                         approval_type = result.get("approval_type", "unknown")
@@ -10597,11 +10962,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             title="Action blocked by user",
                             message=error_msg,
                             status=MessageStatus.FINISHED,
-                            metadata={
-                                "toolName": "spawn_browser_agent",
-                                "action_type": "write_lock_rejected",
-                                "task_id": result.get("task_id"),
-                            },
+                            metadata=_browser_task_terminal_metadata(
+                                result, activity_task_id, code="write_lock_rejected"
+                            ),
                         )
                         return
 
@@ -10661,6 +11024,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     # write_lock") and H-06 site unlock was never gated on a real
                     # approval. Reuse still applies at mint; this only restores the
                     # approval UX / benchmark contract.
+                    approval_resume, parked_approval = parked_approval, None
                     approval_response = await request_user_approval_direct(
                         workflow_instance,
                         question=build_payment_question(payment_payload),
@@ -10675,6 +11039,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
                             "reusablePurchase": bool(lookup_result.get("reusable")),
                         },
+                        park=park_browser_approval("payment_approval"),
+                        resume_request=approval_resume,
                     )
                     logger.info(
                         "Browser payment approval granted",
@@ -10793,31 +11159,38 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             setup_action=setup_info["setup_action"],
                             attention_request_id=setup_info["setup_attention"].get("attention_request_id"),
                         )
+                        setup_metadata: Dict[str, Any] = {
+                            "toolName": "spawn_browser_agent",
+                            "task_id": result.get("task_id"),
+                            "action_type": f"agentcard_user_{setup_info['agentcard_status']}",
+                            "agentCardSetup": {
+                                "status": setup_info["agentcard_status"],
+                                "setupAction": setup_info["setup_action"],
+                                "connectUrl": setup_info["connect_url"],
+                                "setupUrl": setup_info["primary_setup_url"],
+                                "setupTool": card.get("setupTool"),
+                                "setupStatus": card.get("setupStatus"),
+                                "setupSessionId": card.get("setupSessionId"),
+                            },
+                            "agentCardSetupAttentionRequestId": setup_info["setup_attention"].get(
+                                "attention_request_id"
+                            ),
+                            "previousPaymentApprovalAttentionRequestId": approval_response.get(
+                                "attention_request_id"
+                            ),
+                        }
+                        if waited_for_agentcard_setup:
+                            setup_metadata.update(
+                                _browser_task_terminal_metadata(
+                                    result, activity_task_id, code=setup_metadata["action_type"]
+                                )
+                            )
                         yield ToolEvent(
                             type=EventType.POST_MESSAGE,
                             title=setup_info["setup_title"],
                             message=setup_info["setup_question"],
                             status=MessageStatus.FINISHED,
-                            metadata={
-                                "toolName": "spawn_browser_agent",
-                                "task_id": result.get("task_id"),
-                                "action_type": f"agentcard_user_{setup_info['agentcard_status']}",
-                                "agentCardSetup": {
-                                    "status": setup_info["agentcard_status"],
-                                    "setupAction": setup_info["setup_action"],
-                                    "connectUrl": setup_info["connect_url"],
-                                    "setupUrl": setup_info["primary_setup_url"],
-                                    "setupTool": card.get("setupTool"),
-                                    "setupStatus": card.get("setupStatus"),
-                                    "setupSessionId": card.get("setupSessionId"),
-                                },
-                                "agentCardSetupAttentionRequestId": setup_info["setup_attention"].get(
-                                    "attention_request_id"
-                                ),
-                                "previousPaymentApprovalAttentionRequestId": approval_response.get(
-                                    "attention_request_id"
-                                ),
-                            },
+                            metadata=setup_metadata,
                         )
 
                         if waited_for_agentcard_setup:
@@ -10844,6 +11217,19 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "Timed out waiting for AgentCard setup",
                                 agentcard_status=setup_info["agentcard_status"],
                                 attention_request_id=setup_info["setup_attention"].get("attention_request_id"),
+                            )
+                            yield ToolEvent(
+                                type=EventType.POST_MESSAGE,
+                                title="Agent payment setup not completed",
+                                message="",
+                                status=MessageStatus.FINISHED,
+                                metadata={
+                                    **_browser_task_terminal_metadata(
+                                        result, activity_task_id, code="agentcard_setup_timed_out"
+                                    ),
+                                    # The setup request above stays the parent's tool result.
+                                    "excludeFromModel": True,
+                                },
                             )
                             return
 
@@ -10953,10 +11339,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 title="Purchase cancelled",
                                 message="A subscription is required to complete purchases — cancelled for now.",
                                 status=MessageStatus.FINISHED,
-                                metadata={
-                                    "toolName": "spawn_browser_agent",
-                                    "action_type": "purchase_cancelled",
-                                },
+                                metadata=_browser_task_terminal_metadata(
+                                    result, activity_task_id, code="purchase_cancelled"
+                                ),
                             )
                             return
 
@@ -10968,10 +11353,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 title="Subscription still inactive",
                                 message="I couldn't confirm an active subscription yet, so I can't complete the purchase.",
                                 status=MessageStatus.FINISHED,
-                                metadata={
-                                    "toolName": "spawn_browser_agent",
-                                    "action_type": "purchase_blocked",
-                                },
+                                metadata=_browser_task_terminal_metadata(
+                                    result, activity_task_id, code="purchase_blocked"
+                                ),
                             )
                             return
 
@@ -10998,10 +11382,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 title="Purchase cancelled",
                                 message="Identity verification is required to issue a card — cancelled for now.",
                                 status=MessageStatus.FINISHED,
-                                metadata={
-                                    "toolName": "spawn_browser_agent",
-                                    "action_type": "purchase_cancelled",
-                                },
+                                metadata=_browser_task_terminal_metadata(
+                                    result, activity_task_id, code="purchase_cancelled"
+                                ),
                             )
                             return
 
@@ -11012,10 +11395,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 title="Identity verification still incomplete",
                                 message="I couldn't confirm completed identity verification yet, so I can't issue the card.",
                                 status=MessageStatus.FINISHED,
-                                metadata={
-                                    "toolName": "spawn_browser_agent",
-                                    "action_type": "purchase_blocked",
-                                },
+                                metadata=_browser_task_terminal_metadata(
+                                    result, activity_task_id, code="purchase_blocked"
+                                ),
                             )
                             return
 
@@ -11029,11 +11411,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "creating another charge."
                             ),
                             status=MessageStatus.FINISHED,
-                            metadata={
-                                "toolName": "spawn_browser_agent",
-                                "task_id": result.get("task_id"),
-                                "action_type": "purchase_funding_delayed",
-                            },
+                            metadata=_browser_task_terminal_metadata(
+                                result, activity_task_id, code="purchase_funding_delayed"
+                            ),
                         )
                         return
 
@@ -11138,31 +11518,32 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         base_site=base_site,
                     )
 
-                    yield ToolEvent(
-                        type=EventType.POST_MESSAGE,
-                        title=f"Requesting User Assistance for {base_site} Login",
-                        message="",
-                        status=MessageStatus.IN_PROGRESS,
-                        metadata={
-                            "toolName": "spawn_browser_agent",
-                            "action_type": "auth_assistance",
-                            "task_id": result.get("task_id"),
-                            "requestUserAuthentication": {
-                                "requestId": request_id,
-                                "authRealm": result.get("auth_realm"),
-                                "steelSessionId": result.get("session_id"),
-                                "taskId": result.get("task_id"),
-                                "handoffMode": result.get("handoff_mode"),
-                                "browserUrl": result.get("browser_url"),
-                                "liveViewUrl": (
-                                    auth_request.get("liveViewUrl")
-                                    or auth_request.get("live_view_url")
-                                    or auth_handoff.get("liveViewUrl")
-                                    or auth_handoff.get("live_view_url")
-                                ),
+                    if not reentered_pause:
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title=f"Requesting User Assistance for {base_site} Login",
+                            message="",
+                            status=MessageStatus.IN_PROGRESS,
+                            metadata={
+                                "toolName": "spawn_browser_agent",
+                                "action_type": "auth_assistance",
+                                "task_id": result.get("task_id"),
+                                "requestUserAuthentication": {
+                                    "requestId": request_id,
+                                    "authRealm": result.get("auth_realm"),
+                                    "steelSessionId": result.get("session_id"),
+                                    "taskId": result.get("task_id"),
+                                    "handoffMode": result.get("handoff_mode"),
+                                    "browserUrl": result.get("browser_url"),
+                                    "liveViewUrl": (
+                                        auth_request.get("liveViewUrl")
+                                        or auth_request.get("live_view_url")
+                                        or auth_handoff.get("liveViewUrl")
+                                        or auth_handoff.get("live_view_url")
+                                    ),
+                                },
                             },
-                        },
-                    )
+                        )
 
                     if not request_id:
                         yield ToolEvent(
@@ -11170,10 +11551,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             title="Authentication assistance failed",
                             message="Backend did not return an auth assistance request id.",
                             status=MessageStatus.ERROR,
-                            metadata={
-                                "toolName": "spawn_browser_agent",
-                                "action_type": "auth_assistance",
-                            },
+                            metadata=_browser_task_terminal_metadata(
+                                result, activity_task_id, code="auth_assistance_failed"
+                            ),
                         )
                         return
 
@@ -11181,14 +11561,26 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     if hasattr(workflow_instance, "_update_tree_state"):
                         await workflow_instance._update_tree_state(status="PAUSED")
 
-                    await wait_condition_or_generation_handoff(
-                        lambda request_id=request_id: (
-                            request_id in getattr(workflow_instance, "_signal_responses", {})
-                            or not workflow_instance.is_paused
-                        ),
-                        workflow_instance,
-                        workflow_mod=workflow,
-                    )
+                    try:
+                        await wait_condition_or_generation_handoff(
+                            lambda request_id=request_id: (
+                                request_id in getattr(workflow_instance, "_signal_responses", {})
+                                or not workflow_instance.is_paused
+                            ),
+                            workflow_instance,
+                            workflow_mod=workflow,
+                        )
+                    except GenerationHandoffRequested as exc:
+                        # The live-view handoff request stays open; the next
+                        # generation re-waits on the same request id (signal
+                        # responses and the paused state ride continue_as_new).
+                        if park_browser_task(
+                            "auth_assistance",
+                            _payment_resume_fields(write_lock_resume_state),
+                            parked_result=result,
+                        ):
+                            raise GenerationHandoffRequested(exc.task_queue, parked=True) from None
+                        raise
                     user_declined = False
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
                         signal_response = workflow_instance._signal_responses.pop(request_id, None)
@@ -11249,25 +11641,22 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             tool_usage: Dict[str, list] = browser_usage_items_to_tool_usage(result.get("usage_items"))
 
             output_files = result.get("output_files", [])
-            # Soft-accepted verifier rejects complete with success=False but still
-            # terminate cleanly (FINISHED + structured_response) so the parent can
-            # decide — do not surface ERROR (which historically triggered respawns).
-            # A user declining sign-in help is likewise a clean end, not a tool
-            # error: the parent reports it instead of respawning the browser.
+            verified_completion = result.get("status") == "completed" and result.get("success") is True
+            # A user declining sign-in help is a clean end, not a tool error: the
+            # parent reports it instead of respawning the browser.
+            user_declined_auth = bool(result.get("user_declined_auth"))
             final_status = (
-                MessageStatus.FINISHED
-                if result.get("success", True)
-                or result.get("verifier_soft_accepted")
-                or result.get("user_declined_auth")
-                else MessageStatus.ERROR
+                MessageStatus.FINISHED if verified_completion or user_declined_auth else MessageStatus.ERROR
             )
             # Declare terminality explicitly. The front-end must never have to
             # infer "this browser task is over" from a missing action_type — a
             # workflow-scope progress event would look identical.
-            final_metadata = {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
-            if result.get("verifier_soft_accepted"):
-                final_metadata["verifierSoftAccepted"] = True
-            if result.get("user_declined_auth"):
+            final_metadata = {
+                "toolName": "spawn_browser_agent",
+                "action_type": "task_complete",
+                "success": verified_completion,
+            }
+            if user_declined_auth:
                 final_metadata["authAssistanceDeclined"] = True
             for key in (
                 "task_id",
@@ -11323,20 +11712,21 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         file_pointer=fp,
                     )
 
-        except GenerationHandoffRequested:
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="Browser automation interrupted",
-                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
-                status=MessageStatus.FINISHED,
-                metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete"},
-            )
+        except GenerationHandoffRequested as exc:
+            if not exc.parked:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Browser automation interrupted",
+                    message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    status=MessageStatus.FINISHED,
+                    metadata=_browser_task_terminal_metadata(result, activity_task_id),
+                )
             raise
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):
                 raise
 
-            last_result = locals().get("result")
+            last_result = result
             logger.error(
                 "Browser manager failed",
                 agent_id=agent_id,
@@ -11359,7 +11749,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 title="Browser automation failed",
                 message=extract_error_message(e),
                 status=MessageStatus.ERROR,
-                metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete"},
+                metadata=_browser_task_terminal_metadata(result, activity_task_id),
             )
 
 
@@ -11372,7 +11762,7 @@ _manager: Optional[SpawnBrowserAgentManagerV3] = None
 
 def get_manager() -> SpawnBrowserAgentManagerV3:
     """Get or create spawn_browser_agent manager singleton."""
-    global _manager  # noqa: PLW0603
+    global _manager
     if _manager is None:
         _manager = SpawnBrowserAgentManagerV3()
     return _manager

@@ -52,6 +52,11 @@ export function respondTestPaymentError(
   context: Record<string, unknown> = {}
 ): void {
   if (error instanceof TestPaymentError) {
+    // A 5xx TestPaymentError wraps an upstream failure (e.g. AgentCard rejecting the org token),
+    // and the HTTP access line carries only the status, so the cause must be logged here.
+    if (error.statusCode >= 500) {
+      log.error(fallbackMessage, { ...context, error: error.message, status: error.statusCode });
+    }
     res.status(error.statusCode).json({ error: error.message });
     return;
   }

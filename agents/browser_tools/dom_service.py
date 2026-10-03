@@ -49,18 +49,140 @@ def normalize_action_coordinates(coordinates: Optional[Any]) -> Optional[Dict[st
     )
 
 
+DOM_TREES_TIMEOUT_SECONDS = 10.0
+DOM_TREES_GRACE_SECONDS = 2.0
+
+
+async def _no_pending_network_requests(self: Any) -> list:
+    return []
+
+
+def disable_browser_use_pending_request_probe() -> None:
+    """Drop browser-use's per-observe "pending network requests" evaluate.
+
+    It reads ``performance.getEntriesByType('resource')`` and keeps entries with
+    ``responseEnd === 0``, but resource-timing entries are only recorded once a
+    resource finishes, so the list is practically always empty and its 0.3s
+    stability sleep never fires. The probe still costs one Runtime.evaluate
+    over every resource entry before each DOM build (Amazon: ~50ms p50, ~0.5s
+    p90), and nothing here reads ``pending_network_requests``.
+    """
+    from browser_use.browser.watchdogs.dom_watchdog import DOMWatchdog
+
+    DOMWatchdog._get_pending_network_requests = _no_pending_network_requests
+
+
+async def _get_all_trees_without_serial_probes(self: Any, target_id: Any) -> Any:
+    """browser-use ``DomService._get_all_trees`` minus its serial page evaluates.
+
+    Upstream runs three Runtime.evaluate calls one after another before the
+    parallel snapshot / DOM / AX requests: a ``document.readyState`` read whose
+    result is discarded, an iframe scroll-position read that is only logged,
+    and a ``getEventListeners`` walk over every element. Each waits on the
+    renderer main thread (listener walk: up to ~2.8s p90 on retail pages).
+    Clickability still comes from tags, ARIA/AX properties, cursor style, and
+    attributes; the agent can also act by coordinates.
+    """
+    from browser_use.dom.enhanced_snapshot import REQUIRED_COMPUTED_STYLES
+    from browser_use.dom.views import TargetAllTrees
+    from browser_use.utils import create_task_with_error_handling
+
+    cdp_session = await self.browser_session.get_or_create_cdp_session(target_id=target_id, focus=False)
+
+    def snapshot_request() -> Any:
+        return cdp_session.cdp_client.send.DOMSnapshot.captureSnapshot(
+            params={
+                "computedStyles": REQUIRED_COMPUTED_STYLES,
+                "includePaintOrder": True,
+                "includeDOMRects": True,
+                "includeBlendedBackgroundColors": False,
+                "includeTextColorOpacities": False,
+            },
+            session_id=cdp_session.session_id,
+        )
+
+    def dom_tree_request() -> Any:
+        return cdp_session.cdp_client.send.DOM.getDocument(
+            params={"depth": -1, "pierce": True}, session_id=cdp_session.session_id
+        )
+
+    factories = {
+        "snapshot": snapshot_request,
+        "dom_tree": dom_tree_request,
+        "ax_tree": lambda: self._get_ax_tree_for_all_frames(target_id),
+        "device_pixel_ratio": lambda: self._get_viewport_ratio(target_id),
+    }
+    started = time.time()
+    tasks = {key: create_task_with_error_handling(factory(), name=f"get_{key}") for key, factory in factories.items()}
+    # Upstream cancels and re-sends slow requests after 10s, but a cancelled CDP
+    # request keeps running in the renderer, so the retry doubles the work on an
+    # already-stalled main thread. Give the originals the extra 2s instead.
+    _, pending = await asyncio.wait(tasks.values(), timeout=DOM_TREES_TIMEOUT_SECONDS)
+    if pending:
+        _, pending = await asyncio.wait(pending, timeout=DOM_TREES_GRACE_SECONDS)
+        for task in pending:
+            task.cancel()
+
+    # The AX tree only enriches names/roles; a page structure without it is
+    # still usable, so only the snapshot / DOM / viewport are required.
+    results: Dict[str, Any] = {}
+    failed: List[str] = []
+    for key, task in tasks.items():
+        if task.done() and not task.cancelled():
+            try:
+                results[key] = task.result()
+                continue
+            except Exception as exc:
+                logger.warning("CDP request %s failed: %s", key, exc)
+        else:
+            logger.warning("CDP request %s timed out", key)
+        if key == "ax_tree":
+            results[key] = {"nodes": []}
+        else:
+            failed.append(key)
+    if failed:
+        raise TimeoutError(f"CDP requests failed or timed out: {', '.join(failed)}")
+
+    snapshot = results["snapshot"]
+    if snapshot and "documents" in snapshot and len(snapshot["documents"]) > self.max_iframes:
+        logger.warning("Limiting DOM snapshot to the first %s of %s frames", self.max_iframes, len(snapshot["documents"]))
+        snapshot["documents"] = snapshot["documents"][: self.max_iframes]
+
+    return TargetAllTrees(
+        snapshot=snapshot,
+        dom_tree=results["dom_tree"],
+        ax_tree=results["ax_tree"],
+        device_pixel_ratio=results["device_pixel_ratio"],
+        cdp_timing={
+            "iframe_scroll_detection_ms": 0.0,
+            "js_listener_detection_ms": 0.0,
+            "cdp_parallel_calls_ms": (time.time() - started) * 1000,
+            "snapshot_processing_ms": 0.0,
+        },
+        js_click_listener_backend_ids=None,
+    )
+
+
+def drop_browser_use_serial_dom_probes() -> None:
+    from browser_use.dom.service import DomService
+
+    DomService._get_all_trees = _get_all_trees_without_serial_probes
+
+
 def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
     """Return the CDP download directory for the active browser provider.
 
     ``Browser.setDownloadBehavior`` must write into a directory the provider's
-    session-file listing actually exposes. Using Steel's ``/files`` on Kernel
-    makes downloads invisible to ``session_files`` / attempt_completion.
+    session-file listing actually exposes. Kernel and Browser Use use
+    ``/tmp/downloads``; Steel uses ``/files``.
     """
     import os
 
     resolved = (provider if provider is not None else os.getenv("BROWSER_PROVIDER", "kernel")).strip().lower()
     if resolved == "steel":
         return STEEL_DOWNLOADS_PATH
+    if resolved == "browser-use":
+        return KERNEL_DOWNLOADS_PATH
     return KERNEL_DOWNLOADS_PATH
 
 
@@ -379,6 +501,7 @@ class ActionHistory:
         params: Optional[Dict[str, Any]] = None,
         result: Optional[Dict[str, Any]] = None,
         screenshot: Optional[str] = None,
+        element_description_override: Optional[str] = None,
     ) -> ActionHistoryEntry:
         """Record an action with both index and coordinates.
 
@@ -424,9 +547,10 @@ class ActionHistory:
             except Exception as e:
                 logger.warning(f"Failed to get index for coords {coords_dict}: {e}")
 
-        # Get element description from selector map if available
-        element_description = None
-        if index is not None:
+        # Clicks can replace their target before the action is recorded. Keep
+        # the pre-action target when the caller captured one.
+        element_description = element_description_override
+        if element_description is None and index is not None:
             element = dom_service.selector_map.get(index)
             if element:
                 tag = getattr(element, "tag_name", None) or getattr(element, "node_name", "unknown")
@@ -527,7 +651,7 @@ class DOMService:
             viewport_width: Browser viewport width (WXGA default)
             viewport_height: Browser viewport height (WXGA default)
             downloads_path: CDP download directory. Defaults to the path for
-                ``BROWSER_PROVIDER`` (Kernel ``/tmp/downloads``, Steel ``/files``).
+                ``BROWSER_PROVIDER`` (Kernel/Browser Use ``/tmp/downloads``, Steel ``/files``).
         """
         self.cdp_url = cdp_url
         self.viewport_width = viewport_width
@@ -585,6 +709,9 @@ class DOMService:
         try:
             from browser_use.browser.profile import BrowserProfile
             from browser_use.browser.session import BrowserSession
+
+            disable_browser_use_pending_request_probe()
+            drop_browser_use_serial_dom_probes()
 
             # Create profile with CDP URL for remote browser.
             # downloads_path must match the provider's session-file root:
@@ -1867,6 +1994,25 @@ class DOMService:
         except Exception as error:
             logger.warning(f"Failed to read current URL: {error}")
             return fallback
+
+    async def get_page_identity(self) -> Dict[str, Any]:
+        """Return ``{url, title}`` of the focused tab without touching the renderer.
+
+        Reads browser-use's target info (kept current by Target.targetInfoChanged),
+        the same source ``get_browser_state`` takes its URL from. A renderer
+        round trip here would queue behind page JS / an in-flight DOM snapshot
+        on the main thread (0.8-3.6s on Amazon vs 45ms idle). Frozen renderers
+        are caught by the action timeouts instead. The result deliberately has
+        no ``dom_tree`` key.
+        """
+        if not self._session:
+            raise RuntimeError("Not connected. Call connect() first.")
+        if not self._session.agent_focus_target_id:
+            raise RuntimeError("No focused target")
+        return {
+            "url": str(await self._session.get_current_page_url() or ""),
+            "title": str(await self._session.get_current_page_title() or ""),
+        }
 
     async def get_browser_state(self, include_screenshot: bool = True) -> Dict[str, Any]:
         """Get current browser state with full context like browser-use provides.

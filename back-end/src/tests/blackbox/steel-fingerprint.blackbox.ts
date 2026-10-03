@@ -15,9 +15,13 @@ import {
   buildSteelProxySettings,
   isInvalidSteelProxyConfiguration,
 } from '../../providers/steel/session';
+import { STEEL_CDP_TIMEOUT_MESSAGE } from '../../providers/steel/sessionConnection';
 import { navigateToSavedUrl, recreateSession } from '../../providers/steel/sessionResume';
 import type { FingerprintData } from '../../providers/steel/types';
-import { testConnectionErrorRetriesOnReplacement } from './steel-fingerprint.connection-retry.behavior';
+import {
+  testConnectionErrorRetriesOnReplacement,
+  testRawCdpFailureClassification,
+} from './steel-fingerprint.connection-retry.behavior';
 import {
   testSavedSteelProfileIsReadOnlyDuringBenchmarkIsolation,
   testSavedSteelProfilePersistenceByEnvironment,
@@ -227,7 +231,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
             proxySource: 'steel',
           };
         },
-        validateConnection: async () => true,
+        validateConnection: async () => null,
       }
     );
 
@@ -281,7 +285,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
             profileId: 'steel-auth-profile',
           };
         },
-        validateConnection: async () => true,
+        validateConnection: async () => null,
       }
     );
     assert(
@@ -315,7 +319,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
               profileId: 'steel-force-fresh-profile',
             };
           },
-          validateConnection: async () => true,
+          validateConnection: async () => null,
         }
       );
     } finally {
@@ -361,7 +365,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
               profileId: 'wrong-profile',
             };
           },
-          validateConnection: async () => true,
+          validateConnection: async () => null,
           releaseSession: async () => {
             mismatchReleaseCount += 1;
           },
@@ -380,6 +384,67 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       'profile mismatch wrote a replacement BrowserSession binding'
     );
 
+    const replacementWritesBeforeOutage = replacementWrites.length;
+    const createdDuringOutage: string[] = [];
+    const releasedDuringOutage: string[] = [];
+    let outageFailure: unknown;
+    try {
+      await recreateSession(
+        'replacement-city-retry-task',
+        { forceManagedRotation: true },
+        {
+          createSession: async () => {
+            const id = `steel-cdp-unreachable-${createdDuringOutage.length + 1}`;
+            createdDuringOutage.push(id);
+            return { id, debugUrl: 'https://steel.example/debug', profileId: 'steel-auth-profile' };
+          },
+          validateConnection: async () => {
+            throw new Error('Steel CDP connection timeout');
+          },
+          releaseSession: async (id) => {
+            releasedDuringOutage.push(id);
+          },
+        }
+      );
+    } catch (error) {
+      outageFailure = error;
+    }
+    assert(
+      outageFailure instanceof Error &&
+        outageFailure.message.includes('Steel CDP connection timeout'),
+      'replacement obscured the provider transport cause'
+    );
+    assert(
+      createdDuringOutage.length === 2 &&
+        JSON.stringify(releasedDuringOutage) === JSON.stringify(createdDuringOutage),
+      'replacement did not stop after two failed sessions and release both'
+    );
+    assert(
+      replacementWrites.length === replacementWritesBeforeOutage,
+      'CDP outage replaced the working BrowserSession binding'
+    );
+
+    // The production validator reports the timeout as its failure value rather
+    // than throwing; replacement must recognize that as the same outage.
+    const reportedOutageSessions: string[] = [];
+    await recreateSession(
+      'replacement-city-retry-task',
+      { forceManagedRotation: true },
+      {
+        createSession: async () => {
+          const id = `steel-cdp-timeout-reported-${reportedOutageSessions.length + 1}`;
+          reportedOutageSessions.push(id);
+          return { id, debugUrl: 'https://steel.example/debug', profileId: 'steel-auth-profile' };
+        },
+        validateConnection: async () => STEEL_CDP_TIMEOUT_MESSAGE,
+        releaseSession: async () => {},
+      }
+    ).catch(() => {});
+    assert(
+      reportedOutageSessions.length === 2,
+      `replacement created ${reportedOutageSessions.length} sessions through a reported CDP timeout outage`
+    );
+
     let cleanupCreateAttempts = 0;
     let cleanupFailure: unknown;
     try {
@@ -395,7 +460,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
               profileId: null,
             };
           },
-          validateConnection: async () => false,
+          validateConnection: async () => 'Connection timeout',
           releaseSession: async () => {
             throw new Error('release unavailable after bounded retries');
           },
@@ -514,6 +579,10 @@ async function main(): Promise<void> {
     {
       name: 'Steel replacement retries transient Connection error',
       fn: testConnectionErrorRetriesOnReplacement,
+    },
+    {
+      name: 'raw Steel CDP failures retain timeout and authentication categories',
+      fn: testRawCdpFailureClassification,
     },
     {
       name: 'saved URL navigation closes its browser after failure',

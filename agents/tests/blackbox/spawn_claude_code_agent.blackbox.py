@@ -6,8 +6,17 @@ behaviour, and the attachment-resolution logic in the handler.
 """
 
 import asyncio
+import contextlib
+import dataclasses
 import json
 import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -264,47 +273,6 @@ def test_safe_time_handles_exception():
     with patch.object(service, "time") as mock_time:
         mock_time.time.side_effect = RuntimeError("no time in sandbox")
         assert service.safe_time() == 0.0
-
-
-# ── _terminal_output_is_truncated ────────────────────────────────────
-
-
-def test_terminal_truncation_detects_collapse_marker():
-    """Detects Claude Code's standard '+N lines (ctrl+o to expand)' marker."""
-    from domains.spawn_claude_code_agent.service import _terminal_output_is_truncated
-
-    sample = (
-        "● Bash(python3 -c \"...\")\n"
-        "  ⎿  27\n"
-        "     82\n"
-        "     41\n"
-        "     … +110 lines (ctrl+o to expand)\n"
-    )
-    assert _terminal_output_is_truncated(sample) is True
-
-
-def test_terminal_truncation_detects_high_line_count():
-    """A larger '+225 lines' marker (the failing-smoke case) is also detected."""
-    from domains.spawn_claude_code_agent.service import _terminal_output_is_truncated
-
-    sample = "  ⎿  27\n     82\n     … +225 lines (ctrl+o to expand)\n"
-    assert _terminal_output_is_truncated(sample) is True
-
-
-def test_terminal_truncation_no_marker_returns_false():
-    """Untruncated output (full sequence visible) yields False."""
-    from domains.spawn_claude_code_agent.service import _terminal_output_is_truncated
-
-    sample = "27\n82\n41\n124\n62\n31\nTotal steps: 6\n"
-    assert _terminal_output_is_truncated(sample) is False
-
-
-def test_terminal_truncation_handles_empty_output():
-    """Empty/None output is not truncated (no false positives)."""
-    from domains.spawn_claude_code_agent.service import _terminal_output_is_truncated
-
-    assert _terminal_output_is_truncated("") is False
-    assert _terminal_output_is_truncated(None) is False
 
 
 # ── _build_codex_evidence_summary ───────────────────────────────────
@@ -587,6 +555,70 @@ def test_structured_response_from_output_files_keeps_mixed_schema_file_fields():
     assert _structured_response_from_output_files(schema, files) == {
         "report": {"path": "/home/user/output/report.txt"}
     }
+
+
+def test_code_evidence_omits_optional_sequence_outside_its_bounds():
+    """An over-long optional sequence must not invalidate valid required fields."""
+    from domains.spawn_claude_code_agent.service import (
+        _structured_response_from_code_evidence,
+        _structured_response_satisfies_declared_schema,
+    )
+
+    terminal = "\n".join(["3", "10", "5", "16", "8", "4", "2", "1", "Total steps: 7"])
+    schema = {"fields": [
+        {"name": "total_steps", "type": "int", "description": "total step count"},
+        {"name": "collatz_sequence", "type": "list[int]", "description": "full sequence",
+         "required": False, "maxItems": 3},
+    ]}
+    structured = _structured_response_from_code_evidence(schema, [], [], terminal)
+    assert structured == {"total_steps": 7}, structured
+    assert _structured_response_satisfies_declared_schema(schema, structured)
+    unbounded = {"fields": [schema["fields"][0], {**schema["fields"][1], "maxItems": None}]}
+    assert _structured_response_from_code_evidence(unbounded, [], [], terminal)["collatz_sequence"] == [
+        3, 10, 5, 16, 8, 4, 2, 1,
+    ]
+
+
+def test_declared_schema_fast_path_enforces_bounds_and_nullable_fields():
+    """Code child fast paths must honor the same contract as the verifier."""
+    from domains.spawn_claude_code_agent.service import _structured_response_satisfies_declared_schema
+
+    schema = {"fields": [
+        {"name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
+         "properties": [{"name": "title", "type": "str", "minLength": 3}]},
+        {"name": "note", "type": "str", "nullable": True},
+    ]}
+    valid = {"items": [{"title": "Desk"}, {"title": "Lamp"}], "note": None}
+    assert _structured_response_satisfies_declared_schema(schema, valid)
+    assert not _structured_response_satisfies_declared_schema(schema, {**valid, "items": valid["items"][:1]})
+    assert not _structured_response_satisfies_declared_schema(schema, {**valid, "items": valid["items"] * 2})
+    assert not _structured_response_satisfies_declared_schema(
+        schema, {**valid, "items": [{"title": "No"}, valid["items"][1]]}
+    )
+    assert not _structured_response_satisfies_declared_schema(schema, {"items": valid["items"]})
+    optional_integer = {"fields": [
+        {"name": "items", "type": "list[str]", "required": True},
+        {"name": "steps", "type": "int", "required": False},
+    ]}
+    assert _structured_response_satisfies_declared_schema(optional_integer, {"items": ["done"]})
+    assert not _structured_response_satisfies_declared_schema(optional_integer, {"items": ["done"], "steps": None})
+    assert not _structured_response_satisfies_declared_schema(optional_integer, {"items": ["done"], "steps": "three"})
+    zero = {"fields": [{"name": "items", "type": "list[str]", "maxItems": 0}]}
+    assert _structured_response_satisfies_declared_schema(zero, {"items": []})
+    assert not _structured_response_satisfies_declared_schema(zero, {"items": ["extra"]})
+    optional_empty = {"fields": [
+        {"name": "items", "type": "list[str]", "required": True},
+        {"name": "note", "type": "str", "required": False},
+        {"name": "tags", "type": "list[str]", "required": False},
+        {"name": "links", "type": "list[str]", "required": False, "minItems": 1},
+    ]}
+    assert _structured_response_satisfies_declared_schema(optional_empty, {"items": ["done"], "note": "", "tags": []})
+    assert not _structured_response_satisfies_declared_schema(optional_empty, {"items": ["done"], "links": []})
+    assert not _structured_response_satisfies_declared_schema(optional_empty, {"items": [], "note": ""})
+    all_optional = {"fields": [{"name": "note", "type": "str", "required": False}]}
+    assert _structured_response_satisfies_declared_schema(all_optional, None)
+    assert _structured_response_satisfies_declared_schema(all_optional, {})
+    assert not _structured_response_satisfies_declared_schema(optional_empty, None)
 
 
 def test_build_code_event_context_uses_json_and_extracted_files():
@@ -1656,16 +1688,8 @@ async def test_run_verifier_uses_code_event_json_for_codex_context():
     assert "code_agent_events" in seen_context["context"][1]["text"]
 
 
-async def test_run_verifier_truncation_override_promotes_to_pass():
-    """When parent LLM signals completion AND terminal output is truncated, partial score → 1.0.
-
-    Regression for v11 smoke claude-code-agent failure: the verifier scored 0.5
-    because Claude Code's TUI collapsed the Collatz sequence ('+225 lines (ctrl+o
-    to expand)'), and the parent agent re-spawned spawn_claude_code_agent on
-    every retry, blowing the 114s smoke cap. The override accepts the parent
-    LLM's attempt_completion=True signal as proof of completion when the visible
-    terminal evidence is mechanically truncated.
-    """
+async def test_run_verifier_truncation_preserves_rejection():
+    """A truncated terminal and parent completion claim cannot override the verifier."""
     from domains.spawn_claude_code_agent import service
     from utils.terminal_filter import TerminalFilter
 
@@ -1703,9 +1727,8 @@ async def test_run_verifier_truncation_override_promotes_to_pass():
             attempt_completion=True,
             exit_code=None,
         )
-    assert score == 1.0, f"expected truncation override to 1.0, got {score}"
-    assert "override" in reasoning.lower()
-    assert "attempt_completion=True" in reasoning
+    assert score == 0.5
+    assert reasoning == "Cannot ground sequence_output: only first 3 of ~113 lines visible."
 
 
 async def test_run_verifier_no_override_when_no_truncation():
@@ -1741,7 +1764,7 @@ async def test_run_verifier_no_override_when_no_truncation():
             attempt_completion=True,
             exit_code=None,
         )
-    assert score == 0.5, "no truncation marker → no override; verifier score preserved"
+    assert score == 0.5
 
 
 async def test_run_verifier_no_override_when_attempt_completion_false():
@@ -1777,7 +1800,7 @@ async def test_run_verifier_no_override_when_attempt_completion_false():
             attempt_completion=False,
             exit_code=None,
         )
-    assert score == 0.5, "no attempt_completion signal → no override"
+    assert score == 0.5
 
 
 async def test_run_verifier_no_override_when_already_passing():
@@ -1814,7 +1837,7 @@ async def test_run_verifier_no_override_when_already_passing():
             exit_code=None,
         )
     assert score == 1.0
-    assert "override" not in reasoning.lower(), "should not annotate already-passing reasoning"
+    assert reasoning == "All fields populated."
 
 
 # ── _run_agentic_loop ────────────────────────────────────────────────
@@ -1832,16 +1855,22 @@ class _FakeWsClient:
         on_stdin_error,
         on_event=None,
         heartbeat_fn=None,
+        on_events_replay=None,
     ):
         self.on_output = on_output
         self.on_exit = on_exit
         self.on_event = on_event
+        self.on_events_replay = on_events_replay
         self._reconnects_exhausted = False
         self._connected = True
         self._sent = []
+        self.disconnected = False
 
     async def connect(self):
         return True
+
+    async def disconnect(self):
+        self.disconnected = True
 
     async def listen(self):
         # Feed output so silence detection kicks in, then exit immediately.
@@ -2069,8 +2098,8 @@ async def test_run_agentic_loop_in_flight_bash_extends_sdk_idle_timeout():
 
     with (
         patch.object(service, "ClaudeCodeWsClient", HangDuringBash),
-        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
-        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 0.35),
+        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.2),
+        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 1.0),
         patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
         patch.object(service, "MAX_RUNTIME_S", 30),
         patch("temporalio.activity.heartbeat"),
@@ -2092,10 +2121,12 @@ async def test_run_agentic_loop_in_flight_bash_extends_sdk_idle_timeout():
 
     assert exit_code == -1
     assert attempt is False
-    assert elapsed >= 0.25, (
-        f"in-flight Bash idle extension should survive short 0.05s idle, took {elapsed:.2f}s"
+    # Base idle is wide enough that a loaded event loop still delivers the Bash
+    # tool_use before it can fire (0.05s flaked under the 30-way suite).
+    assert elapsed >= 0.8, (
+        f"in-flight Bash idle extension should survive short 0.2s idle, took {elapsed:.2f}s"
     )
-    assert elapsed < 2.0, f"in-flight Bash idle should still break, took {elapsed:.2f}s"
+    assert elapsed < 3.0, f"in-flight Bash idle should still break, took {elapsed:.2f}s"
     assert any("SDK idle timeout" in s for s in summary), summary
     assert any(e.get("name") == "Bash" for e in events), events
 
@@ -2395,6 +2426,94 @@ def test_log_code_agent_event_promotes_claude_tool_use_to_info():
     assert kwargs["event_type"] == "tool_use"
     assert kwargs["tool_name"] == "Bash"
     fake_logger.debug.assert_not_called()
+
+
+def test_log_code_agent_event_surfaces_claude_cli_rate_limit_and_api_retry():
+    """CLI rate_limit_event + system.api_retry fields reach info logs (bounded, no session ids)."""
+    from domains.spawn_claude_code_agent import service
+
+    ids = {"agent_id": "agent-1", "task_id": "task-1", "sandbox_id": "sandbox-1"}
+    rate_limit_event = {
+        "version": 1,
+        "provider": "claude",
+        "type": "cli_message",
+        "raw_type": "rate_limit_event",
+        "cli_message": {
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": "allowed_warning",
+                "rateLimitType": "five_hour",
+                "utilization": 0.91,
+                "resetsAt": 1790988600,
+                "overageStatus": "rejected",
+                "overageDisabledReason": "out_of_credits",
+                "isUsingOverage": False,
+                "surpassedThreshold": 0.9,
+            },
+            "uuid": "11111111-1111-1111-1111-111111111111",
+            "session_id": "cli-session-should-not-be-logged",
+        },
+    }
+    api_retry_event = {
+        "version": 1,
+        "provider": "claude",
+        "type": "cli_message",
+        "raw_type": "system",
+        "cli_message": {
+            "type": "system",
+            "subtype": "api_retry",
+            "attempt": 2,
+            "max_retries": 10,
+            "retry_delay_ms": 1130,
+            "error_status": 529,
+            "error": "server_error" + "x" * 400,
+            "uuid": "22222222-2222-2222-2222-222222222222",
+            "session_id": "cli-session-should-not-be-logged",
+        },
+    }
+    unrelated_cli_event = {
+        "version": 1,
+        "provider": "claude",
+        "type": "cli_message",
+        "raw_type": "system",
+        "cli_message": {"type": "system", "subtype": "compact_boundary"},
+    }
+
+    fake_logger = MagicMock()
+    with patch.object(service, "logger", fake_logger):
+        service._log_code_agent_event(rate_limit_event, **ids)
+        service._log_code_agent_event(api_retry_event, **ids)
+        service._log_code_agent_event(unrelated_cli_event, **ids)
+
+    assert fake_logger.info.call_count == 2, fake_logger.info.call_args_list
+    (rl_args, rl_kwargs), (retry_args, retry_kwargs) = [(c.args, c.kwargs) for c in fake_logger.info.call_args_list]
+
+    assert rl_args[0] == "[ClaudeCode] CLI rate-limit status"
+    assert rl_kwargs == {
+        **ids,
+        "rate_limit_status": "allowed_warning",
+        "rate_limit_type": "five_hour",
+        "utilization": 0.91,
+        "resets_at": 1790988600,
+        "overage_status": "rejected",
+        "overage_resets_at": None,
+        "overage_disabled_reason": "out_of_credits",
+        "is_using_overage": False,
+        "surpassed_threshold": 0.9,
+    }
+
+    assert retry_args[0] == "[ClaudeCode] CLI API retry"
+    assert retry_kwargs["attempt"] == 2
+    assert retry_kwargs["max_retries"] == 10
+    assert retry_kwargs["retry_delay_ms"] == 1130
+    assert retry_kwargs["error_status"] == 529
+    assert retry_kwargs["error"].startswith("server_error")
+    assert len(retry_kwargs["error"]) == 200, "CLI-sourced log values must be truncated to 200 chars"
+    assert {k: retry_kwargs[k] for k in ids} == ids
+
+    logged = repr(fake_logger.info.call_args_list)
+    assert "cli-session-should-not-be-logged" not in logged
+    assert "compact_boundary" not in logged
 
 
 def test_codex_completed_turn_count_counts_unique_turn_completed_events():
@@ -2827,7 +2946,9 @@ async def test_spawn_activity_codex_double_exhaustion_is_terminal_and_persisted(
 
 
 async def test_spawn_activity_cancelled_cleanup():
-    """CancelledError triggers cleanup path and returns 'cancelled' status."""
+    """A requested cancel triggers the cleanup path and returns 'cancelled' status."""
+    from temporalio.testing import ActivityEnvironment
+
     from domains.spawn_claude_code_agent import service
 
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
@@ -2835,6 +2956,7 @@ async def test_spawn_activity_cancelled_cleanup():
     fake_collector = AsyncMock()
     fake_collector.start = AsyncMock()
     fake_collector.stop = AsyncMock()
+    env = ActivityEnvironment()
 
     async def fake_create_session(**kwargs):
         return {
@@ -2846,33 +2968,37 @@ async def test_spawn_activity_cancelled_cleanup():
         }
 
     async def fake_loop(**kwargs):
-        raise asyncio.CancelledError()
+        env.cancel()
+        await asyncio.sleep(30)
 
-    async def fake_close(**kwargs):
-        return {}
+    close_session = AsyncMock(return_value={})
 
     with (
         patch.object(service, "SandboxLogCollector", lambda *a, **kw: fake_collector),
         patch.object(service, "create_e2b_session", side_effect=fake_create_session),
         patch.object(service, "_run_agentic_loop", side_effect=fake_loop),
-        patch.object(service, "close_e2b_session", side_effect=fake_close),
+        patch.object(service, "close_e2b_session", close_session),
         patch.object(service, "persist_terminal_output", AsyncMock()),
         patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
         patch(
             "helpers.model_pricing.get_model_pricing_with_fallback",
             AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
         ),
-        patch("temporalio.activity.heartbeat"),
     ):
-        result = await service.spawn_claude_code_activity(
-            user_id="u",
-            agent_id="a",
-            goal="g",
-            tool_call_id="tc",
-            output_schema={"fields": []},
+        result = await asyncio.wait_for(
+            env.run(
+                service.spawn_claude_code_activity,
+                user_id="u",
+                agent_id="a",
+                goal="g",
+                tool_call_id="tc",
+                output_schema={"fields": []},
+            ),
+            timeout=10,
         )
     assert result["status"] == "cancelled"
     assert result["task_id"] == "t"
+    close_session.assert_awaited_once()
     fake_collector.stop.assert_awaited()
 
 
@@ -3513,10 +3639,6 @@ async def _run_all_tests():
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record("safe_time_ok", test_safe_time_returns_float)
     r.record("safe_time_fallback", test_safe_time_handles_exception)
-    r.record("trunc_detect_marker", test_terminal_truncation_detects_collapse_marker)
-    r.record("trunc_detect_high_count", test_terminal_truncation_detects_high_line_count)
-    r.record("trunc_no_marker", test_terminal_truncation_no_marker_returns_false)
-    r.record("trunc_handles_empty", test_terminal_truncation_handles_empty_output)
     r.record("codex_evidence_summary", test_codex_evidence_summary_extracts_paths_and_commands)
     r.record("codex_structured_fallback", test_codex_structured_response_synthesizes_all_fields)
     r.record("codex_structured_json_steps", test_codex_structured_response_uses_json_step_field)
@@ -3545,6 +3667,8 @@ async def _run_all_tests():
         "structured_from_output_mixed_schema",
         test_structured_response_from_output_files_keeps_mixed_schema_file_fields,
     )
+    r.record("declared_schema_fast_path_bounds", test_declared_schema_fast_path_enforces_bounds_and_nullable_fields)
+    r.record("code_evidence_omits_out_of_bounds_sequence", test_code_evidence_omits_optional_sequence_outside_its_bounds)
     r.record("code_event_context_json", test_build_code_event_context_uses_json_and_extracted_files)
     # build_usage_items
     r.record("usage_items_both", test_build_usage_items_both_llm_and_service)
@@ -3624,7 +3748,7 @@ async def _run_all_tests():
         test_run_verifier_uses_code_event_json_for_codex_context,
     )
     await r.record_async(
-        "run_verifier_truncation_override", test_run_verifier_truncation_override_promotes_to_pass
+        "run_verifier_truncation_preserves_rejection", test_run_verifier_truncation_preserves_rejection
     )
     await r.record_async("run_verifier_no_override_no_trunc", test_run_verifier_no_override_when_no_truncation)
     await r.record_async(
@@ -3662,6 +3786,10 @@ async def _run_all_tests():
     r.record(
         "log_claude_tool_use_event",
         test_log_code_agent_event_promotes_claude_tool_use_to_info,
+    )
+    r.record(
+        "log_claude_cli_rate_limit_and_api_retry",
+        test_log_code_agent_event_surfaces_claude_cli_rate_limit_and_api_retry,
     )
     r.record("codex_completed_turn_count", test_codex_completed_turn_count_counts_unique_turn_completed_events)
     # spawn_claude_code_activity
@@ -3728,6 +3856,86 @@ async def _run_all_tests():
     r.record(
         "claude_code_max_runtime_cuda_kernel_headroom",
         test_claude_code_max_runtime_leaves_cuda_kernel_bench_headroom,
+    )
+    await r.record_async(
+        "cc_local_sandbox_stop_ends_its_cli",
+        test_local_code_sandbox_stop_ends_the_claude_cli_it_spawned,
+    )
+    await r.record_async(
+        "cc_drain_detaches_and_reattaches_same_sandbox",
+        test_claude_code_detaches_on_worker_drain_and_reattaches_same_sandbox,
+    )
+    await r.record_async(
+        "cc_crash_retry_reattaches_from_heartbeat",
+        test_claude_code_retry_after_worker_crash_reattaches_from_heartbeat,
+    )
+    await r.record_async(
+        "cc_unreachable_session_closed_before_fresh_start",
+        test_claude_code_unreachable_session_is_closed_before_a_fresh_start,
+    )
+    await r.record_async(
+        "cc_reattach_survives_transient_probe_failure",
+        test_claude_code_reattach_survives_a_transient_probe_failure,
+    )
+    await r.record_async(
+        "cc_cancel_during_drain_detach_closes_sandbox",
+        test_claude_code_cancel_during_drain_detach_still_closes_the_sandbox,
+    )
+    await r.record_async(
+        "cc_closes_sandbox_when_no_attempt_will_reattach",
+        test_claude_code_closes_the_sandbox_when_no_attempt_will_reattach,
+    )
+    await r.record_async(
+        "cc_pause_during_reattach_probe_closes_sandbox",
+        test_claude_code_pause_during_reattach_probe_closes_the_sandbox,
+    )
+    await r.record_async(
+        "cc_new_sandbox_rides_heartbeat_before_first_write",
+        test_claude_code_new_sandbox_rides_the_heartbeat_before_anything_else_can_fail,
+    )
+    await r.record_async(
+        "cc_llm_heartbeats_keep_code_session",
+        test_llm_heartbeats_inside_a_code_session_keep_the_session,
+    )
+    await r.record_async(
+        "cc_reconnect_replay_does_not_duplicate_events",
+        test_run_agentic_loop_reconnect_replay_does_not_duplicate_events,
+    )
+    r.record(
+        "cc_sandbox_ws_servers_linger_past_heartbeat_timeout",
+        test_sandbox_ws_servers_linger_past_the_activity_heartbeat_timeout,
+    )
+    await r.record_async(
+        "cc_manager_reattaches_after_worker_drain_on_same_queue",
+        test_cc_manager_reattaches_after_worker_drain_on_same_queue,
+    )
+    await r.record_async(
+        "cc_manager_parks_code_session_for_generation_handoff",
+        test_cc_manager_parks_code_session_for_generation_handoff,
+    )
+    await r.record_async(
+        "cc_manager_finishes_on_superseded_generation_without_parking",
+        test_cc_manager_finishes_on_superseded_generation_when_parking_unavailable,
+    )
+    await r.record_async(
+        "cc_manager_parked_reentry_reattaches_without_a_new_chip",
+        test_cc_manager_parked_reentry_reattaches_without_a_new_chip,
+    )
+    await r.record_async(
+        "cc_manager_pause_after_drain_closes_detached_sandbox",
+        test_cc_manager_pause_after_drain_closes_the_detached_sandbox,
+    )
+    await r.record_async(
+        "cc_manager_cancel_before_reattach_closes_detached_sandbox",
+        test_cc_manager_cancel_before_reattach_closes_the_detached_sandbox,
+    )
+    await r.record_async(
+        "cc_manager_leaves_cleanup_to_attached_activity",
+        test_cc_manager_leaves_cleanup_to_an_activity_that_held_the_sandbox,
+    )
+    await r.record_async(
+        "cc_manager_closes_sandbox_when_last_attempt_times_out",
+        test_cc_manager_closes_the_sandbox_when_the_last_attempt_times_out,
     )
     teardown_mock()
     return r.all_passed
@@ -3856,6 +4064,1079 @@ def test_claude_code_max_runtime_leaves_cuda_kernel_bench_headroom():
     assert MAX_RUNTIME_S == 1800
     assert task_timeout >= 4200
     assert task_timeout - MAX_RUNTIME_S >= 900
+
+
+# ── Deploy drain: detach from the sandbox, reattach to the same run ──────────
+
+_STUB_CLAUDE_CLI = r"""
+import json
+import os
+import sys
+import time
+
+sys.stdin.read()
+gate = os.environ["STUB_CLAUDE_GATE"]
+
+
+def emit(message):
+    print(json.dumps(message), flush=True)
+
+
+def wait_for(name):
+    while not os.path.exists(os.path.join(gate, name)):
+        time.sleep(0.05)
+
+
+emit({"type": "system", "subtype": "init", "session_id": "stub", "cwd": os.getcwd(), "model": "stub",
+      "tools": ["Write"], "permissionMode": "bypassPermissions"})
+emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "step 1: drafted half of answer.txt"}]}})
+wait_for("continue")
+emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "step 2: finished answer.txt"}]}})
+wait_for("exit")
+emit({"type": "result", "subtype": "success", "result": "answer is 42", "usage": {}})
+"""
+
+_CC_STEP_TEXTS = ["step 1: drafted half of answer.txt", "step 2: finished answer.txt"]
+_CC_SCHEMA = {"fields": [{"name": "answer", "type": "str", "required": True}]}
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class _LocalCodeSandbox:
+    """The production ws-server.mjs on localhost, running a scripted ``claude`` CLI.
+
+    Like an E2B sandbox it outlives any single activity attempt, so a test can
+    drop the activity mid-run and attach a new one to the same Claude Code run.
+    The CLI blocks on gate files so the test decides when it continues/exits.
+    """
+
+    def __init__(self) -> None:
+        self._tmp = Path(tempfile.mkdtemp(prefix="cc-sandbox-"))
+        self.port = _free_port()
+        self.ws_url = f"ws://127.0.0.1:{self.port}"
+        self._log_path = self._tmp / "ws-server.log"
+        self._process: subprocess.Popen | None = None
+
+    async def start(self) -> None:
+        node = shutil.which("node")
+        assert node, "node is required to run the Claude Code ws-server under test"
+        server = Path(__file__).resolve().parents[3] / "e2b-templates" / "claude-code" / "ws-server.mjs"
+        bin_dir = self._tmp / "bin"
+        home = self._tmp / "home"
+        bin_dir.mkdir()
+        home.mkdir()
+        (self._tmp / "stub_claude.py").write_text(_STUB_CLAUDE_CLI)
+        cli = bin_dir / "claude"
+        cli.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{self._tmp / "stub_claude.py"}" "$@"\n')
+        cli.chmod(0o755)
+        env = {
+            "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+            "HOME": str(home),
+            "PORT": str(self.port),
+            "CLAUDE_CODE_GOAL": "Write answer.txt with the answer",
+            "ANTHROPIC_API_KEY": "stub-key",
+            "STUB_CLAUDE_GATE": str(self._tmp),
+        }
+        with self._log_path.open("w") as log:
+            self._process = subprocess.Popen(
+                [node, str(server)],
+                cwd=home,
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        for _ in range(200):
+            assert self._process.poll() is None, f"ws-server exited at startup:\n{self.log()}"
+            with contextlib.suppress(OSError), socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"ws-server never listened on {self.port}:\n{self.log()}")
+
+    def release(self, gate: str) -> None:
+        (self._tmp / gate).touch()
+
+    def log(self) -> str:
+        return self._log_path.read_text() if self._log_path.exists() else ""
+
+    async def wait_for_log(self, needle: str, timeout: float = 15.0) -> None:
+        for _ in range(int(timeout / 0.05)):
+            if needle in self.log():
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"ws-server never logged {needle!r}:\n{self.log()}")
+
+    @property
+    def cli_script(self) -> Path:
+        return self._tmp / "stub_claude.py"
+
+    def stop(self) -> None:
+        # The ws-server leaves its CLI running on SIGTERM; E2B kills the whole
+        # sandbox, so the stand-in signals the server's entire process group.
+        if self._process is not None:
+            self._signal_sandbox(signal.SIGTERM)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self._process.wait(timeout=5)
+            self._signal_sandbox(signal.SIGKILL)
+            self._process.wait()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _signal_sandbox(self, sig: signal.Signals) -> None:
+        # macOS answers EPERM rather than ESRCH once the group holds only
+        # zombies awaiting reaping; either way nothing is left to signal, and
+        # the test's own process listing proves the CLI actually ended.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(self._process.pid, sig)
+
+
+def _pids_running(marker: str) -> list[int]:
+    listing = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, check=True).stdout
+    return [int(line.split(None, 1)[0]) for line in listing.splitlines() if marker in line]
+
+
+async def test_local_code_sandbox_stop_ends_the_claude_cli_it_spawned():
+    """Stopping the stand-in sandbox must end its CLI the way an E2B kill does.
+
+    stop() terminated only the ws-server, so every test run orphaned its stub
+    CLI, which then polled the deleted gate files forever (28 survivors had
+    piled up on one dev VM).
+    """
+    sandbox = _LocalCodeSandbox()
+    await sandbox.start()
+    marker = str(sandbox.cli_script)
+    try:
+        await sandbox.wait_for_log("Starting Claude Code CLI")
+        for _ in range(100):
+            if _pids_running(marker):
+                break
+            await asyncio.sleep(0.05)
+        assert _pids_running(marker), f"the stub CLI never started:\n{sandbox.log()}"
+    finally:
+        sandbox.stop()
+    for _ in range(40):
+        if not _pids_running(marker):
+            return
+        await asyncio.sleep(0.05)
+    survivors = _pids_running(marker)
+    for pid in survivors:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+    raise AssertionError(f"stop() left the sandbox's CLI running: pids={survivors}")
+
+
+class _CCBoundaryRecorder:
+    """Records every backend/sandbox boundary the Claude Code activity crosses."""
+
+    def __init__(self, ws_url: str, live_queue: str = "test") -> None:
+        self.ws_url = ws_url
+        self.live_queue = live_queue
+        self.created: list[dict] = []
+        self.closed: list[dict] = []
+        self.titles: list[str] = []
+        self.persisted: list[str] = []
+        self.verified_events: list[list[dict]] = []
+        self.logged: list[dict] = []
+        self.collector = AsyncMock()
+
+    async def create_session(self, **kwargs):
+        self.created.append(kwargs)
+        return {"task_id": "cc-task-1", "sandbox_id": "sb-1", "ws_url": self.ws_url, "uploaded_files": []}
+
+    async def close_session(self, **kwargs):
+        self.closed.append(kwargs)
+        return {"output_files": [], "usage": None}
+
+    async def save_message(self, **kwargs):
+        self.titles.append(kwargs.get("title"))
+
+    async def persist_output(self, task_id, output, *args, **kwargs):
+        self.persisted.append(output)
+
+    async def verifier(self, **kwargs):
+        self.verified_events.append([dict(event) for event in kwargs["code_events"]])
+        return (1.0, "answer.txt contains 42", {"answer": "42"}, 0, 0)
+
+    async def queue_pointer(self, **kwargs):
+        return {"task_queue": self.live_queue}
+
+    @contextlib.contextmanager
+    def patched(self):
+        from domains.spawn_claude_code_agent import service
+        from helpers.activity_generation_drain import reset_live_queue_cache
+
+        reset_live_queue_cache()
+        with (
+            patch.object(service, "create_e2b_session", side_effect=self.create_session),
+            patch.object(service, "close_e2b_session", side_effect=self.close_session),
+            patch.object(service, "save_claude_code_message", side_effect=self.save_message),
+            patch.object(service, "persist_terminal_output", side_effect=self.persist_output),
+            patch.object(service, "_run_verifier", side_effect=self.verifier),
+            patch.object(service, "_log_code_agent_event", side_effect=lambda event, **kw: self.logged.append(event)),
+            patch.object(service, "REATTACH_PROBE_BACKOFF_S", 0.05),
+            patch.object(service, "SandboxLogCollector", lambda *a, **kw: self.collector),
+            patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
+            patch(
+                "helpers.model_pricing.get_model_pricing_with_fallback",
+                AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+            ),
+            patch("helpers.activity_generation_drain.read_agent_queue_pointer", side_effect=self.queue_pointer),
+        ):
+            yield
+        reset_live_queue_cache()
+
+
+def _cc_activity_args(*resume: dict) -> list:
+    return [
+        "user-cc",
+        "agent-cc",
+        "Write answer.txt with the answer",
+        "tc-cc",
+        _CC_SCHEMA,
+        None,  # attachments
+        "rose-labs/rose-1-flash",
+        None,  # github_repo_url
+        None,  # legacy credential slot
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        False,  # fast_mode_cache_enabled
+        *resume,
+    ]
+
+
+async def _wait_for_heartbeat(beats: list, predicate, what: str, timeout: float = 15.0) -> tuple:
+    for _ in range(int(timeout / 0.05)):
+        for beat in reversed(beats):
+            if predicate(beat):
+                return beat
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"activity never heartbeated {what}; got {beats[-5:]}")
+
+
+def _assert_full_run_seen_once(events: list[dict]) -> None:
+    texts = [event.get("text") for event in events if event.get("type") == "agent_message"]
+    assert texts == _CC_STEP_TEXTS, f"reattached run must see every step exactly once, got {texts}"
+    results = [event for event in events if event.get("type") == "result"]
+    assert len(results) == 1 and results[0].get("text") == "answer is 42", results
+    finals = [event for event in events if event.get("type") == "final"]
+    assert len(finals) == 1 and finals[0].get("exit_code") == 0, finals
+
+
+async def test_claude_code_detaches_on_worker_drain_and_reattaches_same_sandbox():
+    """A deploy drain must not end a Claude Code run that is still working.
+
+    Rolling deploys SIGTERM the worker; the activity used to keep monitoring
+    until the 5m grace expired, then took the pause path: close_e2b_session
+    killed the sandbox and the parent read "cancelled by user". The run must
+    instead detach (sandbox untouched) and a new activity must reattach to the
+    same sandbox — even when Claude Code finished while nothing was attached —
+    and see the whole run exactly once.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    sandbox = _LocalCodeSandbox()
+    await sandbox.start()
+    recorder = _CCBoundaryRecorder(sandbox.ws_url)
+    try:
+        with recorder.patched():
+            beats: list = []
+            draining = ActivityEnvironment()
+            draining.on_heartbeat = lambda *details: beats.append(details)
+            first = asyncio.create_task(draining.run(service.spawn_claude_code_activity, *_cc_activity_args()))
+            await _wait_for_heartbeat(beats, lambda b: b[0] == "Processing Claude Code output", "a sandbox message")
+
+            draining.worker_shutdown()
+            done, _ = await asyncio.wait({first}, timeout=10)
+            if not done:
+                draining.cancel()  # the worker's shutdown grace ran out
+                outcome = await first
+                raise AssertionError(
+                    "activity ignored the worker drain until its grace expired, then returned "
+                    f"{outcome.get('status')!r} ({outcome.get('message')!r}) and closed the sandbox "
+                    f"{len(recorder.closed)} time(s)"
+                )
+            yielded = first.result()
+
+            from domains.spawn_claude_code_agent.config import CODE_AGENT_DRAIN_YIELD_STATUS
+            from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+            assert yielded["status"] == CODE_AGENT_DRAIN_YIELD_STATUS, yielded
+            assert yielded["yield_reason"] == WORKER_SHUTDOWN, yielded
+            assert recorder.closed == [], f"a drain must leave the sandbox running, closed={recorder.closed}"
+            assert "Session Cancelled" not in recorder.titles, recorder.titles
+            session = yielded["code_session"]
+            assert session["task_id"] == "cc-task-1" and session["sandbox_id"] == "sb-1", session
+            assert session["ws_url"] == sandbox.ws_url and session["code_provider"] == "claude", session
+
+            # Claude Code keeps working and finishes while no activity is attached.
+            sandbox.release("continue")
+            sandbox.release("exit")
+            await sandbox.wait_for_log("Claude Code CLI exited")
+            await asyncio.sleep(0.5)
+
+            resumed = ActivityEnvironment()
+            outcome = await asyncio.wait_for(
+                resumed.run(service.spawn_claude_code_activity, *_cc_activity_args(session)), timeout=30
+            )
+        assert len(recorder.created) == 1, f"reattach must not create another sandbox, created={recorder.created}"
+        assert outcome["status"] == "completed" and outcome["success"] is True, outcome
+        assert outcome["task_id"] == "cc-task-1", outcome
+        assert outcome["structured_response"] == {"answer": "42"}, outcome
+        assert len(recorder.verified_events) == 1
+        _assert_full_run_seen_once(recorder.verified_events[0])
+        # Events produced while nothing was attached reach the worker only in the
+        # reattach replay; they must still land in retained logs, once.
+        assert recorder.logged == recorder.verified_events[0], (
+            f"every sandbox event must be logged exactly once, logged={[e.get('type') for e in recorder.logged]}"
+        )
+        assert recorder.titles.count("Claude Code Started") == 1, recorder.titles
+        assert [call["task_id"] for call in recorder.closed] == ["cc-task-1"], recorder.closed
+        assert recorder.persisted and all(text in recorder.persisted[-1] for text in _CC_STEP_TEXTS), recorder.persisted
+    finally:
+        sandbox.stop()
+
+
+def _carries_session(beat: tuple, task_id: str = "cc-task-1") -> bool:
+    return any(
+        isinstance(detail, dict)
+        and any(isinstance(value, dict) and value.get("task_id") == task_id for value in detail.values())
+        for detail in beat[1:]
+    )
+
+
+async def test_claude_code_retry_after_worker_crash_reattaches_from_heartbeat():
+    """A Temporal retry after a dead worker resumes the sandbox it was attached to.
+
+    SIGKILL/OOM gives the activity no chance to yield. Temporal retries after
+    the heartbeat timeout, and the retry used to call create_e2b_session again:
+    Claude Code restarted from scratch and the first sandbox leaked. Every
+    heartbeat must carry the session so the retry reattaches instead; the
+    timed-out attempt must not close the sandbox the retry is reattaching to;
+    and the retry must prefer that heartbeat session over the scheduled
+    resume_session, whose sandbox the first attempt had already replaced.
+    """
+    from temporalio.activity import ActivityCancellationDetails
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    stale = {
+        "task_id": "cc-task-old",
+        "sandbox_id": "sb-old",
+        "ws_url": f"ws://127.0.0.1:{_free_port()}",
+        "code_provider": "claude",
+    }
+    sandbox = _LocalCodeSandbox()
+    await sandbox.start()
+    recorder = _CCBoundaryRecorder(sandbox.ws_url)
+    try:
+        with recorder.patched():
+            beats: list = []
+            crashing = ActivityEnvironment()
+            crashing.on_heartbeat = lambda *details: beats.append(details)
+            first = asyncio.create_task(crashing.run(service.spawn_claude_code_activity, *_cc_activity_args(stale)))
+            await _wait_for_heartbeat(beats, lambda b: b[0] == "Processing Claude Code output", "a sandbox message")
+            # The first beat of an attempt is sent at once and later ones are
+            # throttled, so a beat without the session can be the last one the
+            # server holds when the worker dies.
+            assert beats and all(_carries_session(beat) for beat in beats), (
+                f"every heartbeat must carry the attached session, got {[b[0] for b in beats if not _carries_session(b)]}"
+            )
+            last_beat = beats[-1]
+
+            crashing.cancel(cancellation_details=ActivityCancellationDetails(timed_out=True))
+            first_outcome = None
+            with contextlib.suppress(asyncio.CancelledError):
+                first_outcome = await first
+            assert first_outcome is None, f"a timed-out attempt must not report the run cancelled: {first_outcome}"
+            assert [call["task_id"] for call in recorder.closed] == ["cc-task-old"], (
+                f"a timed-out attempt must leave its sandbox for the retry, closed={recorder.closed}"
+            )
+            assert "Session Cancelled" not in recorder.titles, recorder.titles
+
+            sandbox.release("continue")
+            sandbox.release("exit")
+            await sandbox.wait_for_log("Claude Code CLI exited")
+
+            retry = ActivityEnvironment()
+            retry.info = dataclasses.replace(retry.info, attempt=2, heartbeat_details=list(last_beat))
+            outcome = await asyncio.wait_for(
+                retry.run(service.spawn_claude_code_activity, *_cc_activity_args(stale)), timeout=30
+            )
+        assert len(recorder.created) == 1, f"retry must reattach, not create a sandbox: {recorder.created}"
+        assert outcome["status"] == "completed" and outcome["task_id"] == "cc-task-1", outcome
+        _assert_full_run_seen_once(recorder.verified_events[-1])
+        assert [call["task_id"] for call in recorder.closed] == ["cc-task-old", "cc-task-1"], recorder.closed
+    finally:
+        sandbox.stop()
+
+
+async def test_claude_code_reattach_survives_a_transient_probe_failure():
+    """One failed handshake must not discard a live sandbox and rerun the task."""
+    from aiohttp import web
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    requests = 0
+
+    async def flaky(request):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            return web.Response(status=503, text="proxy warming up")
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.close()
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/", flaky)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = _free_port()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    live = {
+        "task_id": "cc-task-live",
+        "sandbox_id": "sb-live",
+        "ws_url": f"ws://127.0.0.1:{port}/",
+        "code_provider": "claude",
+    }
+
+    async def attached_loop(**kwargs):
+        assert kwargs["task_id"] == "cc-task-live", kwargs["task_id"]
+        return (0, False, [], 0, 0, [{"type": "result", "status": "completed", "text": "answer is 42"}])
+
+    recorder = _CCBoundaryRecorder(ws_url="ws://unused")
+    try:
+        with recorder.patched(), patch.object(service, "_run_agentic_loop", side_effect=attached_loop):
+            outcome = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_cc_activity_args(live)), timeout=30
+            )
+    finally:
+        await runner.cleanup()
+    assert requests >= 2, requests
+    assert recorder.created == [], f"a reachable sandbox must be reattached, created={recorder.created}"
+    assert [call["task_id"] for call in recorder.closed] == ["cc-task-live"], recorder.closed
+    assert outcome["status"] == "completed" and outcome["task_id"] == "cc-task-live", outcome
+
+
+async def test_claude_code_cancel_during_drain_detach_still_closes_the_sandbox():
+    """A pause that lands while the activity is detaching still cleans up.
+
+    The drain return used to sit in a sibling ``except`` of the cancel handler,
+    so a cancel raised while it stopped the log collector escaped every
+    cleanup: the sandbox stayed open and no task_id reached the chip.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    sandbox = _LocalCodeSandbox()
+    await sandbox.start()
+    recorder = _CCBoundaryRecorder(sandbox.ws_url)
+    try:
+        with recorder.patched():
+            beats: list = []
+            env = ActivityEnvironment()
+            env.on_heartbeat = lambda *details: beats.append(details)
+            running = asyncio.create_task(env.run(service.spawn_claude_code_activity, *_cc_activity_args()))
+            await _wait_for_heartbeat(beats, lambda b: b[0] == "Processing Claude Code output", "a sandbox message")
+
+            async def stop_then_get_paused():
+                env.cancel()
+                await asyncio.sleep(5)
+
+            recorder.collector.stop.side_effect = stop_then_get_paused
+            env.worker_shutdown()
+            try:
+                outcome = await asyncio.wait_for(running, timeout=15)
+            except asyncio.CancelledError:
+                raise AssertionError(
+                    f"the cancel escaped the drain detach with no cleanup; closed={recorder.closed}"
+                ) from None
+        assert outcome["status"] == "cancelled" and outcome["task_id"] == "cc-task-1", outcome
+        assert [call["task_id"] for call in recorder.closed] == ["cc-task-1"], recorder.closed
+        assert "Session Cancelled" in recorder.titles, recorder.titles
+    finally:
+        sandbox.stop()
+
+
+async def test_claude_code_closes_the_sandbox_when_no_attempt_will_reattach():
+    """A cancel that no retry follows must not leave the sandbox running.
+
+    Restart and deploy replacement terminate the workflow, which the attempt
+    sees as a ``not_found`` cancel. Leaving the sandbox open for a retry that
+    is never scheduled kept the old CLI working (and pushing to the same repo)
+    next to the replacement run until E2B's own timeout. The same holds for
+    the last attempt the retry policy allows. A paused activity or an attempt
+    with retries left must still keep it for the reattach.
+    """
+    from temporalio.activity import ActivityCancellationDetails
+    from temporalio.common import RetryPolicy
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    last_attempt = {"attempt": 5, "retry_policy": RetryPolicy(maximum_attempts=5)}
+    cases = [
+        ("workflow terminated", ActivityCancellationDetails(not_found=True), {}, True),
+        ("activity reset", ActivityCancellationDetails(reset=True), {}, True),
+        ("last attempt timed out", ActivityCancellationDetails(timed_out=True), last_attempt, True),
+        ("last attempt's worker shut down", ActivityCancellationDetails(worker_shutdown=True), last_attempt, True),
+        (
+            "timed out with attempts left",
+            ActivityCancellationDetails(timed_out=True),
+            {"attempt": 2, "retry_policy": RetryPolicy(maximum_attempts=5)},
+            False,
+        ),
+        ("paused on the last attempt", ActivityCancellationDetails(paused=True), last_attempt, False),
+    ]
+    for label, details, info_overrides, closes in cases:
+        env = ActivityEnvironment()
+        env.info = dataclasses.replace(env.info, **info_overrides)
+
+        async def cancelled_loop(_env=env, _details=details, **kwargs):
+            _env.cancel(cancellation_details=_details)
+            await asyncio.sleep(30)
+
+        recorder = _CCBoundaryRecorder(ws_url="ws://unused")
+        outcome = None
+        with recorder.patched(), patch.object(service, "_run_agentic_loop", side_effect=cancelled_loop):
+            with contextlib.suppress(asyncio.CancelledError):
+                outcome = await asyncio.wait_for(
+                    env.run(service.spawn_claude_code_activity, *_cc_activity_args()), timeout=10
+                )
+        assert outcome is None, f"{label}: a cancel the workflow did not request is not a user cancel: {outcome}"
+        assert "Session Cancelled" not in recorder.titles, (label, recorder.titles)
+        expected = ["cc-task-1"] if closes else []
+        assert [call["task_id"] for call in recorder.closed] == expected, (
+            f"{label}: expected the sandbox {'closed' if closes else 'kept for the reattach'}, closed={recorder.closed}"
+        )
+
+
+async def test_claude_code_pause_during_reattach_probe_closes_the_sandbox():
+    """A pause that lands while a retry probes its old sandbox still closes it.
+
+    The retry only learned the task_id after the probe, so the cancel handler
+    found nothing to close and the sandbox from the crashed attempt kept running.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    live = {"task_id": "cc-task-live", "sandbox_id": "sb-live", "ws_url": "ws://sb-live", "code_provider": "claude"}
+    env = ActivityEnvironment()
+
+    async def paused_during_probe(*args, **kwargs):
+        env.cancel()
+        await asyncio.sleep(30)
+
+    recorder = _CCBoundaryRecorder(ws_url="ws://unused")
+    with recorder.patched(), patch.object(service, "ws_endpoint_reachable", side_effect=paused_during_probe):
+        outcome = await asyncio.wait_for(
+            env.run(service.spawn_claude_code_activity, *_cc_activity_args(live)), timeout=10
+        )
+    assert outcome["status"] == "cancelled" and outcome["task_id"] == "cc-task-live", outcome
+    assert [call["task_id"] for call in recorder.closed] == ["cc-task-live"], recorder.closed
+    assert recorder.created == [], recorder.created
+
+
+async def test_claude_code_new_sandbox_rides_the_heartbeat_before_anything_else_can_fail():
+    """A crash right after the sandbox is created must not hide it from the retry.
+
+    Two backend writes sat between create_e2b_session and the first heartbeat
+    carrying the session; a worker that died inside them left the retry with
+    no record of the sandbox, so it created a second one and the first leaked.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    beats: list = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+    recorder = _CCBoundaryRecorder(ws_url="ws://unused")
+    seen_at_first_write: list[bool] = []
+    record_title = recorder.save_message
+
+    async def save_message(**kwargs):
+        if not seen_at_first_write:
+            seen_at_first_write.append(any(_carries_session(beat) for beat in beats))
+        await record_title(**kwargs)
+
+    async def finished_loop(**kwargs):
+        return (0, False, [], 0, 0, [{"type": "result", "status": "completed", "text": "answer is 42"}])
+
+    with (
+        recorder.patched(),
+        patch.object(service, "save_claude_code_message", side_effect=save_message),
+        patch.object(service, "_run_agentic_loop", side_effect=finished_loop),
+    ):
+        outcome = await asyncio.wait_for(env.run(service.spawn_claude_code_activity, *_cc_activity_args()), timeout=10)
+    assert outcome["status"] == "completed", outcome
+    assert seen_at_first_write == [True], (
+        f"the session must be heartbeated before the first backend write, beats={[b[0] for b in beats]}"
+    )
+
+
+async def test_llm_heartbeats_inside_a_code_session_keep_the_session():
+    """Heartbeats from LLM helpers the activity calls must not wipe its session.
+
+    Each heartbeat replaces the details the retry reads. The parent-LLM call
+    inside the Claude Code loop heartbeats through the Rose client and
+    helpers.llm, which used to send no details at all.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from helpers.activity_heartbeat import heartbeat_resume_details
+    from helpers.llm import _safe_heartbeat as llm_heartbeat
+    from providers.rose.client import _safe_heartbeat as rose_heartbeat
+
+    session = {"code_session": {"task_id": "cc-task-1"}}
+    beats: list = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+
+    async def beat_from_listener_task():
+        rose_heartbeat("child task beat")
+
+    async def body():
+        with heartbeat_resume_details(session):
+            rose_heartbeat("OpenRouter streaming chunk 3")
+            llm_heartbeat("LLM streaming... 120 chars")
+            await asyncio.create_task(beat_from_listener_task())
+        llm_heartbeat("after the session closed")
+
+    await env.run(body)
+    assert [beat[1:] for beat in beats[:3]] == [(session,)] * 3, beats
+    assert beats[3] == ("after the session closed",), beats[3]
+
+
+async def test_claude_code_unreachable_session_is_closed_before_a_fresh_start():
+    """When the old sandbox is gone, close it and start one fresh session."""
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    recorder = _CCBoundaryRecorder(ws_url=f"ws://127.0.0.1:{_free_port()}")
+    stale = {
+        "task_id": "cc-task-old",
+        "sandbox_id": "sb-old",
+        "ws_url": f"ws://127.0.0.1:{_free_port()}",
+        "code_provider": "claude",
+    }
+
+    async def fresh_loop(**kwargs):
+        return (0, False, [], 0, 0, [{"type": "result", "status": "completed", "text": "answer is 42"}])
+
+    with recorder.patched(), patch.object(service, "_run_agentic_loop", side_effect=fresh_loop):
+        outcome = await asyncio.wait_for(
+            ActivityEnvironment().run(service.spawn_claude_code_activity, *_cc_activity_args(stale)), timeout=60
+        )
+    assert [call["task_id"] for call in recorder.closed] == ["cc-task-old", "cc-task-1"], recorder.closed
+    assert len(recorder.created) == 1, recorder.created
+    assert recorder.titles.count("Claude Code Started") == 1, recorder.titles
+    assert outcome["status"] == "completed" and outcome["task_id"] == "cc-task-1", outcome
+
+
+async def test_run_agentic_loop_reconnect_replay_does_not_duplicate_events():
+    """ws-server resends its whole event buffer on every connect; keep one copy."""
+    from aiohttp import web
+
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    first_events = [{"type": "agent_message", "text": "a"}, {"type": "agent_message", "text": "b"}]
+    all_events = [*first_events, {"type": "result", "status": "completed", "text": "c"}]
+    connections = 0
+
+    async def handler(request):
+        nonlocal connections
+        connections += 1
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        if connections == 1:
+            await ws.send_str(json.dumps({"type": "code_agent_events", "data": first_events}))
+        else:
+            await ws.send_str(json.dumps({"type": "code_agent_events", "data": all_events}))
+            await ws.send_str(json.dumps({"type": "exit", "code": 0}))
+        await ws.close()
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = _free_port()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    try:
+        with patch("temporalio.activity.heartbeat"):
+            exit_code, _attempt, _history, _in, _out, events = await asyncio.wait_for(
+                service._run_agentic_loop(
+                    agent_id="a",
+                    task_id="t",
+                    sandbox_id="sb",
+                    goal="g",
+                    ws_url=f"ws://127.0.0.1:{port}/",
+                    terminal=TerminalFilter(cols=80, rows=50),
+                    model="rose-labs/rose-1-flash",
+                    claude_token=None,
+                    action_summary=[],
+                    tool_call_id="tc",
+                ),
+                timeout=30,
+            )
+    finally:
+        await runner.cleanup()
+    assert connections == 2, connections
+    assert exit_code == 0
+    assert events == all_events, f"replayed events must replace, not append: {events}"
+
+
+def test_sandbox_ws_servers_linger_past_the_activity_heartbeat_timeout():
+    """Every code sandbox keeps its final result reachable for a crash retry.
+
+    The retry after a dead worker starts only once the activity heartbeat
+    timeout passes. If the ws-server exits sooner after the CLI finishes, the
+    retry finds nothing to reattach to and reruns the task in a new sandbox.
+    """
+    import re
+
+    from domains.spawn_claude_code_agent.config import CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S, MAX_RUNTIME_S
+
+    servers = sorted((Path(__file__).resolve().parents[3] / "e2b-templates").glob("*/ws-server.mjs"))
+    assert len(servers) >= 2, f"expected the Claude Code and Codex ws-servers, found {servers}"
+    for server in servers:
+        src = server.read_text()
+        match = re.search(r"const REATTACH_LINGER_MS = ([\d\s*]+);", src)
+        assert match, f"{server.parent.name}/ws-server.mjs must define REATTACH_LINGER_MS"
+        linger_ms = 1
+        for factor in match.group(1).split("*"):
+            linger_ms *= int(factor)
+        assert (CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S + 60) * 1000 <= linger_ms <= MAX_RUNTIME_S * 1000, (
+            f"{server.parent.name} lingers {linger_ms}ms; a retry starts after {CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S}s"
+        )
+        assert re.search(r"setTimeout\(\s*\(\)\s*=>\s*shutdown\([^)]*\),\s*REATTACH_LINGER_MS\s*\)", src), (
+            f"{server.parent.name}/ws-server.mjs must shut down only after REATTACH_LINGER_MS"
+        )
+
+
+_DRAINED_SESSION = {
+    "task_id": "cc-task-1",
+    "sandbox_id": "sb-1",
+    "ws_url": "wss://sb-1.e2b.app",
+    "code_provider": "claude",
+    "started_at": 100.0,
+    "loop_started_at": 105.0,
+}
+_CC_COMPLETED = {
+    "status": "completed",
+    "success": True,
+    "message": "done",
+    "task_id": "cc-task-1",
+    "output_files": [],
+    "code_provider": "claude",
+}
+
+
+def _drain_yield(reason: str) -> dict:
+    from domains.spawn_claude_code_agent.config import CODE_AGENT_DRAIN_YIELD_STATUS
+
+    return {
+        "status": CODE_AGENT_DRAIN_YIELD_STATUS,
+        "yield_reason": reason,
+        "code_session": dict(_DRAINED_SESSION),
+        "task_id": "cc-task-1",
+        "code_provider": "claude",
+    }
+
+
+class _SequencedCCWorkflow(_FakeCCWorkflow):
+    """Each start_activity returns the next scripted activity result."""
+
+    def __init__(self, *results):
+        super().__init__(None)
+        self._results = list(results)
+        self.started: list[list] = []
+        self.provider_resolutions = 0
+        self.closed_sessions: list[dict] = []
+
+    def start_activity(self, fn, args=None, **kwargs):
+        assert self._results, f"unexpected activity start #{len(self.started) + 1}"
+        self.started.append(list(args))
+        result = self._results.pop(0)
+        if isinstance(result, BaseException):
+            return _FakeActivityHandle(raise_exc=result)
+        return _FakeActivityHandle(result=result)
+
+    async def execute_activity(self, fn, args=None, **kwargs):
+        if fn.__name__ == "close_detached_code_session_activity":
+            self.closed_sessions.append(args[1])
+            return True
+        self.provider_resolutions += 1
+        return await super().execute_activity(fn, args=args, **kwargs)
+
+
+class _HandoffCCWorkflowInstance(_FakeCCWorkflowInstance):
+    def __init__(self, *, live_queue=None, can_park=True, resume=None):
+        super().__init__()
+        self._live_queue = live_queue
+        self._can_park = can_park
+        self._resume = resume
+        self.parked: list[tuple[str, dict]] = []
+
+    async def _check_generation_handoff(self):
+        return self._live_queue
+
+    def _park_pending_tool(self, tool_call_id, resume):
+        if not self._can_park:
+            return False
+        self.parked.append((tool_call_id, resume))
+        return True
+
+    def _take_tool_resume(self, tool_call_id):
+        resume, self._resume = self._resume, None
+        return resume
+
+
+def _cc_titles(events) -> list:
+    return [getattr(event, "title", None) for event in events]
+
+
+async def test_cc_manager_reattaches_after_worker_drain_on_same_queue():
+    """A drained activity restarts against the same sandbox, not a new session."""
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    fake = _SequencedCCWorkflow(_drain_yield(WORKER_SHUTDOWN), _CC_COMPLETED)
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(
+            SpawnClaudeCodeAgentManager().execute_tool(_HandoffCCWorkflowInstance(), {"goal": "g"}, "tc-drain")
+        )
+    finally:
+        restore()
+
+    assert len(fake.started) == 2, fake.started
+    assert len(fake.started[0]) == 16 and fake.started[0][15] is None, fake.started[0]
+    assert fake.started[1][15] == _DRAINED_SESSION, fake.started[1][15]
+    titles = _cc_titles(events)
+    assert titles.count("Starting Claude Code sandbox") == 1, titles
+    assert titles.count("\u2713 Task Completed") == 1, titles
+    assert "Claude Code Session Cancelled" not in titles, titles
+
+
+async def test_cc_manager_parks_code_session_for_generation_handoff():
+    """A superseded generation parks the running session and hands off."""
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+    from helpers.activity_generation_drain import GENERATION_SUPERSEDED
+    from helpers.generation_handoff import GenerationHandoffRequested
+
+    fake = _SequencedCCWorkflow(_drain_yield(GENERATION_SUPERSEDED))
+    wf = _HandoffCCWorkflowInstance(live_queue="navi-agent-tasks-new")
+    restore = _patch_cc_workflow(fake)
+    events: list = []
+    handoff = None
+    try:
+        async for event in SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-park"):
+            events.append(event)
+    except GenerationHandoffRequested as exc:
+        handoff = exc
+    finally:
+        restore()
+
+    assert handoff is not None, f"expected a parked handoff, got {_cc_titles(events)}"
+    assert handoff.parked is True and handoff.task_queue == "navi-agent-tasks-new", vars(handoff)
+    assert wf.parked == [("tc-park", {"code_session": _DRAINED_SESSION})], wf.parked
+    assert len(fake.started) == 1, fake.started
+    assert _cc_titles(events) == ["Starting Claude Code sandbox"], _cc_titles(events)
+
+
+async def test_cc_manager_finishes_on_superseded_generation_when_parking_unavailable():
+    """Without parking (DAG turn) the run finishes here instead of yielding forever."""
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+    from helpers.activity_generation_drain import GENERATION_SUPERSEDED
+
+    fake = _SequencedCCWorkflow(_drain_yield(GENERATION_SUPERSEDED), _CC_COMPLETED)
+    wf = _HandoffCCWorkflowInstance(live_queue="navi-agent-tasks-new", can_park=False)
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-dag"))
+    finally:
+        restore()
+
+    assert len(fake.started) == 2, fake.started
+    assert fake.started[1][15] == {**_DRAINED_SESSION, "generation_yield": False}, fake.started[1][15]
+    assert _cc_titles(events).count("\u2713 Task Completed") == 1, _cc_titles(events)
+
+
+async def test_cc_manager_parked_reentry_reattaches_without_a_new_chip():
+    """The next generation re-enters the parked call and reattaches to its sandbox."""
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    fake = _SequencedCCWorkflow(_CC_COMPLETED)
+    wf = _HandoffCCWorkflowInstance(resume={"code_session": dict(_DRAINED_SESSION)})
+    wf.compute_token_provider = "gpt"
+    wf.gpt_code_token = "gpt-token"
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-park"))
+    finally:
+        restore()
+
+    assert fake.provider_resolutions == 0, "a parked session keeps the provider it started with"
+    assert len(fake.started) == 1 and fake.started[0][15] == _DRAINED_SESSION, fake.started
+    assert fake.started[0][9] == "claude", fake.started[0][9]
+    titles = _cc_titles(events)
+    assert "Starting Claude Code sandbox" not in titles, titles
+    assert titles.count("\u2713 Task Completed") == 1, titles
+
+
+def _cancelled_before_start():
+    from temporalio.exceptions import ActivityError
+    from temporalio.exceptions import CancelledError as TemporalCancelledError
+
+    error = ActivityError(
+        message="Activity cancelled",
+        scheduled_event_id=1,
+        started_event_id=0,
+        identity="",
+        activity_type="spawn_claude_code_activity",
+        activity_id="2",
+        retry_state=None,
+    )
+    error.__cause__ = TemporalCancelledError("Cancelled")
+    return error
+
+
+def _cancel_chip(events):
+    return next(e for e in events if getattr(e, "title", None) == "Claude Code Session Cancelled")
+
+
+async def test_cc_manager_pause_after_drain_closes_the_detached_sandbox():
+    """Pausing while the run is detached for a deploy closes its sandbox.
+
+    No activity is attached between the drain-yield and the reattach, so no
+    activity cancel can close it: the sandbox kept running (and billing) until
+    the E2B timeout, and the chip ended without its task_id.
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    fake = _SequencedCCWorkflow(_drain_yield(WORKER_SHUTDOWN))
+    wf = _HandoffCCWorkflowInstance()
+    wf.is_paused = True
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-pause"))
+    finally:
+        restore()
+
+    assert len(fake.started) == 1, f"a paused run must not reattach, started={len(fake.started)}"
+    assert fake.closed_sessions == [_DRAINED_SESSION], fake.closed_sessions
+    chip = _cancel_chip(events)
+    assert chip.metadata["task_id"] == "cc-task-1" and chip.metadata["action_type"] == "task_complete", chip.metadata
+    assert "\u2713 Task Completed" not in _cc_titles(events), _cc_titles(events)
+
+
+async def test_cc_manager_cancel_before_reattach_closes_the_detached_sandbox():
+    """A pause that cancels a reattaching activity before it runs still closes the sandbox."""
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    fake = _SequencedCCWorkflow(_cancelled_before_start())
+    wf = _HandoffCCWorkflowInstance(resume={"code_session": dict(_DRAINED_SESSION)})
+    wf.is_paused = True
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-park"))
+    finally:
+        restore()
+
+    assert fake.closed_sessions == [_DRAINED_SESSION], fake.closed_sessions
+    assert _cancel_chip(events).metadata["task_id"] == "cc-task-1", _cancel_chip(events).metadata
+
+
+async def test_cc_manager_leaves_cleanup_to_an_activity_that_held_the_sandbox():
+    """An activity that was attached closes the sandbox itself; the workflow must not close it again."""
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    cancelled = {
+        "status": "cancelled",
+        "task_id": "cc-task-1",
+        "message": "Claude Code agent cancelled by user",
+        "code_provider": "claude",
+    }
+    fake = _SequencedCCWorkflow(cancelled)
+    wf = _HandoffCCWorkflowInstance(resume={"code_session": dict(_DRAINED_SESSION)})
+    wf.is_paused = True
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-park"))
+    finally:
+        restore()
+
+    assert fake.closed_sessions == [], fake.closed_sessions
+    assert _cancel_chip(events).metadata["task_id"] == "cc-task-1", _cancel_chip(events).metadata
+
+
+def _timed_out_on_last_attempt(*heartbeat_details):
+    from temporalio.exceptions import ActivityError
+    from temporalio.exceptions import TimeoutError as TemporalTimeoutError
+    from temporalio.exceptions import TimeoutType
+
+    error = ActivityError(
+        message="Activity task timed out",
+        scheduled_event_id=1,
+        started_event_id=2,
+        identity="",
+        activity_type="spawn_claude_code_activity",
+        activity_id="2",
+        retry_state=None,
+    )
+    error.__cause__ = TemporalTimeoutError(
+        "activity Heartbeat timeout", type=TimeoutType.HEARTBEAT, last_heartbeat_details=heartbeat_details
+    )
+    return error
+
+
+async def test_cc_manager_closes_the_sandbox_when_the_last_attempt_times_out():
+    """Exhausted retries after a dead worker must not leave the sandbox running.
+
+    The last attempt died with its worker, so it never ran its own cleanup,
+    and no attempt will reattach. Its last heartbeat names the sandbox.
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    beat_session = {**_DRAINED_SESSION, "task_id": "cc-task-2", "sandbox_id": "sb-2", "ws_url": "wss://sb-2.e2b.app"}
+    cases = [
+        ("heartbeat names the sandbox", (None,), ("Processing", {"code_session": beat_session}), beat_session),
+        (
+            "no session heartbeat; the scheduled one is still open",
+            ({"code_session": dict(_DRAINED_SESSION)},),
+            ("Verifying",),
+            _DRAINED_SESSION,
+        ),
+        ("never attached", (None,), (), None),
+    ]
+    for label, resume, beat, expected in cases:
+        fake = _SequencedCCWorkflow(_timed_out_on_last_attempt(*beat))
+        wf = _HandoffCCWorkflowInstance(resume=resume[0])
+        restore = _patch_cc_workflow(fake)
+        try:
+            events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-to"))
+        finally:
+            restore()
+        assert fake.closed_sessions == ([expected] if expected else []), (label, fake.closed_sessions)
+        assert "Code session failed" in _cc_titles(events), (label, _cc_titles(events))
 
 
 if __name__ == "__main__":

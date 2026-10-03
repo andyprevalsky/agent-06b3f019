@@ -12,11 +12,12 @@ import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './type
 const log = createLogger('Rose');
 
 /**
- * How long the exclusive Cerebras stream may stay silent before the generic
- * waterfall starts IN PARALLEL as a hedge. Shorter than the 1.2s pre-content
- * stall guard, so a throttled/queued Cerebras stream no longer serializes
- * stall detection + waterfall TTFT (which breached the 5s chat lifecycle
- * ratchet). Non-positive values disable hedging (pure serial fallover).
+ * How long the exclusive Cerebras stream may stay silent before the OpenRouter
+ * fallbacks start IN PARALLEL as a hedge. Cerebras keeps racing them until its
+ * own guard, so a throttled/queued or long-prefill Cerebras stream neither
+ * serializes stall detection + fallback TTFT (which breached the 5s chat
+ * lifecycle ratchet) nor loses a response it was about to send.
+ * Non-positive values disable hedging (pure serial fallover).
  */
 export const DEFAULT_CEREBRAS_CHAT_HEDGE_MS = 800;
 
@@ -70,6 +71,19 @@ export function selectExclusiveCerebrasChatRoute(params: {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+function logBranchFailure(requestId: string, race: string, callerSignal?: AbortSignal) {
+  return (branch: string, error: unknown): void => {
+    if (callerSignal?.aborted) return;
+    log.warn('cerebras_chat.hedge_branch_failed', {
+      request_id: requestId,
+      race,
+      branch,
+      error_name: error instanceof Error ? error.name : 'unknown',
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 200),
+    });
+  };
+}
+
 function withBranchAbort(options: CompletionOptions, branchSignal: AbortSignal): CompletionOptions {
   return {
     ...options,
@@ -80,12 +94,13 @@ function withBranchAbort(options: CompletionOptions, branchSignal: AbortSignal):
 }
 
 /**
- * Race the same-model OpenRouter Cerebras spill against a paid, low-latency
- * Gemini model. This branch is entered only after direct Cerebras has remained
- * silent long enough to arm the outer hedge, so the normal fast path still
- * makes one provider request. The former Gemini 3.5 fallback took 6–10s to
- * first token under burst; this route's dedicated model keeps the same
- * schema/tool contract with a measured sub-1.4s first-token tail.
+ * Race the paid, low-latency fast chat model against the same-model OpenRouter
+ * spill. This branch is entered only after direct Cerebras has failed or stayed
+ * silent, so the normal fast path still makes one provider request. The fast
+ * model leads: off Cerebras the same Qwen model streams at GPU-host speed
+ * (measured 1.6–7.6s to first token). The fast model's guard is sized in
+ * openrouterFastRoute.ts. Structured generator responses use the first
+ * completed answer as the winner.
  */
 export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   poolSpec: PoolSpec;
@@ -93,6 +108,7 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   requestId: string;
   callSite?: string;
   hedgeDelayMs?: number;
+  latchOnComplete?: boolean;
 }): AsyncIterable<RoseStreamChunk> {
   const openrouterKey = process.env.OPENROUTER_API_KEY;
   if (!openrouterKey) {
@@ -103,33 +119,47 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   let winnerName = '';
   const raced = hedgeStreams<RoseStreamChunk>({
     primary: {
-      name: 'openrouter-glm',
-      produce: (signal) =>
-        exclusiveOpenRouterCerebrasCompletion({
-          options: withBranchAbort(params.options, signal),
-          openrouterKey,
-          requestId: params.requestId,
-          callSite: params.callSite,
-          allowProviderFallback: true,
-        }),
-    },
-    hedge: {
       name: 'openrouter-fast-chat',
       produce: (signal) =>
-        exclusiveOpenRouterFastChatCompletion({
-          options: withBranchAbort(params.options, signal),
-          openrouterKey,
-          requestId: params.requestId,
-          callSite: params.callSite,
-        }),
+        requireCompletedContent(
+          exclusiveOpenRouterFastChatCompletion({
+            options: withBranchAbort(params.options, signal),
+            openrouterKey,
+            requestId: params.requestId,
+            callSite: params.callSite,
+          })
+        ),
+    },
+    hedge: {
+      name: 'openrouter-same-model',
+      produce: (signal) =>
+        requireCompletedContent(
+          exclusiveOpenRouterCerebrasCompletion({
+            options: withBranchAbort(params.options, signal),
+            openrouterKey,
+            requestId: params.requestId,
+            callSite: params.callSite,
+            allowProviderFallback: true,
+          })
+        ),
     },
     // The silent-stream path starts both together. A fast direct 429 uses a
-    // short delay so the same-model spill can win without an extra request.
+    // short delay so a prompt fast reply wins without an extra request; a fast
+    // model that is itself capped hands off to the spill without that wait.
     hedgeAfter: () => (params.hedgeDelayMs ? sleep(params.hedgeDelayMs) : Promise.resolve()),
-    isContent: (chunk) => clearsChatStallGuard(chunk.kind),
+    hedgeOnPrimaryFailure: true,
+    // A generator answer is usable only after its final chunk. Router tool
+    // calls continue streaming at their first content chunk.
+    isContent: (chunk) =>
+      params.latchOnComplete ? chunk.kind === 'done' : clearsChatStallGuard(chunk.kind),
     onWinner: (name) => {
       winnerName = name;
     },
+    onBranchFailure: logBranchFailure(
+      params.requestId,
+      'openrouter-fallback',
+      params.options.abort_signal
+    ),
   });
 
   for await (const chunk of raced) yield chunk;
@@ -137,6 +167,19 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
     request_id: params.requestId,
     winner: winnerName,
   });
+}
+
+async function* requireCompletedContent(
+  stream: AsyncIterable<RoseStreamChunk>
+): AsyncIterable<RoseStreamChunk> {
+  let hasContent = false;
+  for await (const chunk of stream) {
+    if (clearsChatStallGuard(chunk.kind)) hasContent = true;
+    if (chunk.kind === 'done' && !hasContent) {
+      throw new Error('OpenRouter fallback completed without content');
+    }
+    yield chunk;
+  }
 }
 
 /**
@@ -213,6 +256,11 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
             });
           }
         },
+        onBranchFailure: logBranchFailure(
+          params.requestId,
+          'cerebras-hedge',
+          params.options.abort_signal
+        ),
       });
       for await (const chunk of hedged) {
         const output = emit(chunk);
@@ -236,7 +284,9 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
         pool: params.pool,
       });
     } catch (error) {
-      if (emittedAny) throw error; // post-content failures surface unchanged
+      // Post-content failures surface unchanged, and a caller that gave up
+      // (the router's deadline) must not start the waterfall it abandoned.
+      if (emittedAny || params.options.abort_signal?.aborted) throw error;
       cerebrasFailure = error;
       log.warn('cerebras_chat.pre_content_failover_to_waterfall', {
         request_id: params.requestId,
@@ -261,6 +311,7 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
       });
     } catch (error) {
       if (!(error instanceof PreContentFallThroughError)) throw error;
+      if (params.options.abort_signal?.aborted) throw error.cause;
       cerebrasFailure = error.cause;
       log.warn('cerebras_chat.pre_content_failover_to_waterfall', {
         request_id: params.requestId,
@@ -270,8 +321,8 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
     }
   }
 
-  // A direct 402/429 first tries the same model via OpenRouter. If that host
-  // remains silent, start the measured fast model too. A fast quota error can
+  // A direct 402/429 first tries the fast chat model via OpenRouter. If it
+  // remains silent, start the same-model spill too. A fast quota error can
   // otherwise bypass the outer hedge and serialize an unbounded OpenRouter
   // wait (55.8s in production) before the chat has shown any answer.
   const openrouterKey = process.env.OPENROUTER_API_KEY;
@@ -290,6 +341,8 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
             requestId: params.requestId,
             callSite: params.callSite,
             hedgeDelayMs: 500,
+            latchOnComplete:
+              params.options.response_format?.json_schema?.name === 'generator_response',
           }),
         emit,
       });

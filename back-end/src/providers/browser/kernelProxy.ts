@@ -4,6 +4,37 @@ import { prisma } from '../database';
 import type { ProxyGeoLocation } from '../geoip';
 
 export type KernelProxyType = 'residential' | 'mobile' | 'isp';
+export type KernelProxySpecificity = 'city' | 'state' | 'country';
+
+/** Preserve the last resolved managed proxy when a paused session resumes. */
+export function managedKernelProxyFromSource(
+  source: string | null
+): { type: KernelProxyType; specificity: KernelProxySpecificity } | undefined {
+  const match = /^kernel_(residential|mobile|isp)_(city|state|country)$/.exec(source ?? '');
+  if (match === null) return undefined;
+  return {
+    type: match[1] as KernelProxyType,
+    specificity: match[2] as KernelProxySpecificity,
+  };
+}
+
+export function kernelRecreateProxySelection(
+  source: string | null,
+  proxyTier: string | null,
+  rotationType?: KernelProxyType
+): {
+  forceManagedProxyType?: KernelProxyType;
+  exactManagedProxy?: { type: KernelProxyType; specificity: KernelProxySpecificity };
+} {
+  if (rotationType !== undefined) return { forceManagedProxyType: rotationType };
+  const recorded = managedKernelProxyFromSource(source);
+  if (recorded !== undefined) return { exactManagedProxy: recorded };
+  // Rows predating kernelProxySource retain only the tier, not the fallback geo.
+  if (source === null && (proxyTier === 'mobile' || proxyTier === 'residential')) {
+    return { forceManagedProxyType: proxyTier };
+  }
+  return {};
+}
 
 /**
  * Kernel's SDK defaults (`timeout=60_000`, `maxRetries=2`) multiply a slow
@@ -215,6 +246,62 @@ export async function forgetKernelProxy(proxyKey: string): Promise<void> {
   await prisma.browserProviderProxy.deleteMany({
     where: { provider: 'kernel', proxyKey },
   });
+}
+
+const STICKY_PROXY_ERRORS = [
+  'proxy not found',
+  'invalid proxy',
+  'proxy unavailable',
+  'proxy is unavailable',
+  'no_peer',
+  'no peer',
+];
+
+export interface KernelProxyLadderEvents {
+  onRefresh?: (candidate: KernelProxyCandidate, error: unknown) => void;
+  onRelax?: (candidate: KernelProxyCandidate, error: unknown) => void;
+}
+
+/**
+ * Create a session on the most specific managed proxy that works, relaxing
+ * city → state → country only when a location is unavailable.
+ *
+ * Geo proxies are shared project-wide, so a cached ID can be deleted by another
+ * actor. `proxy not found` proves the ID is stale, not that the location lacks
+ * inventory: the same candidate is re-resolved once before relaxing.
+ */
+export async function createSessionOnKernelProxyLadder<T>(
+  client: Kernel,
+  candidates: readonly KernelProxyCandidate[],
+  createSession: (proxy: ResolvedKernelProxy) => Promise<T>,
+  events: KernelProxyLadderEvents = {}
+): Promise<T> {
+  for (const [index, candidate] of candidates.entries()) {
+    for (let refreshed = false; ; refreshed = true) {
+      let resolved: ResolvedKernelProxy | undefined;
+      try {
+        resolved = await getOrCreateKernelProxy(client, candidate);
+        return await createSession(resolved);
+      } catch (error) {
+        // Only drop a cache row when the error proves this proxy_id is bad.
+        // A browsers.create transport timeout does not mean the remote proxy is
+        // gone — forgetting it would recreate orphans for the same geo key.
+        const message =
+          error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+        if (resolved !== undefined && STICKY_PROXY_ERRORS.some((f) => message.includes(f))) {
+          await forgetKernelProxy(resolved.proxyKey).catch(() => {});
+        }
+        if (resolved !== undefined && !refreshed && message.includes('proxy not found')) {
+          events.onRefresh?.(candidate, error);
+          continue;
+        }
+        if (!isKernelProxyAvailabilityError(error) || index + 1 >= candidates.length) throw error;
+        events.onRelax?.(candidate, error);
+        break;
+      }
+    }
+  }
+  throw new Error('Kernel proxy ladder needs at least one candidate');
 }
 
 export function isKernelProxyAvailabilityError(error: unknown): boolean {

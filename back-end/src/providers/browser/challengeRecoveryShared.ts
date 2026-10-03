@@ -35,6 +35,11 @@ export function recoveryConfigKeyForSession(
   proxyTier: string | null | undefined
 ): string | undefined {
   const tier = (proxyTier || '').trim().toLowerCase();
+  if ((provider || '').toLowerCase() === 'browser-use') {
+    return tier === '' || tier.startsWith('residential')
+      ? 'browser_use_residential_country'
+      : undefined;
+  }
   if ((provider || '').toLowerCase() === 'steel') {
     if (tier === 'fixed') return 'steel_fixed';
     if (tier === 'managed' || tier === '') return 'steel_managed';

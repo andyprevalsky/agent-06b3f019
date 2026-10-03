@@ -29,11 +29,13 @@ Auto-debug mode:
 
 import argparse
 import asyncio
+import contextvars
 import csv
 import fcntl
 import ipaddress
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -44,13 +46,11 @@ import time
 import unicodedata
 import uuid
 from collections import Counter
-from contextlib import asynccontextmanager
-from contextvars import ContextVar
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from functools import wraps
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -111,7 +111,7 @@ from benchmarks.polar_catalog import (
 )
 from benchmarks.realtime_monitor import SupabaseRealtimeSmokeMonitor
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
-from benchmarks.spawn_contract import primary_live_target, should_disable_saved_browser_auth
+from benchmarks.spawn_contract import should_disable_saved_browser_auth
 from benchmarks.subscription_checkout import complete_test_subscription_checkout
 from benchmarks.timeout_history import (
     InsufficientHistoryError,
@@ -1845,12 +1845,28 @@ _cached_headers: Optional[dict] = None
 _cached_headers_user_id: Optional[str] = None
 _auth_mode: Optional[str] = None  # "jwt" or "api_key"
 _subscription_webhook_stripe_customers: Dict[str, str] = {}
-_task_benchmark_user_id: ContextVar[Optional[str]] = ContextVar("task_benchmark_user_id", default=None)
-_default_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID", "").strip() or USER_ID
+# Per-task run identity. Concurrent tasks share one process, so a process-wide
+# env var lets a finishing sibling restore its stale snapshot over a live task's
+# identity; a ContextVar is copied into each asyncio task instead.
+_task_run_user_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "benchmark_task_run_user_id", default=None
+)
 
 
 def _current_benchmark_user_id() -> str:
-    return _task_benchmark_user_id.get() or os.environ.get("BENCHMARK_RUN_USER_ID", "").strip() or USER_ID
+    return _task_run_user_id.get() or os.environ.get("BENCHMARK_RUN_USER_ID", "").strip() or USER_ID
+
+
+@contextmanager
+def _benchmark_run_user_scope(user_id: Optional[str]) -> Iterator[None]:
+    if not user_id:
+        yield
+        return
+    token = _task_run_user_id.set(user_id)
+    try:
+        yield
+    finally:
+        _task_run_user_id.reset(token)
 
 
 def _new_user_payment_journey_user_id() -> str:
@@ -2298,8 +2314,6 @@ def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
     )
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     goal = auth_test_site.resolve_goal(goal, auth_test_site.active_manifest())
-    if task.name == "google-oauth":
-        goal = goal.replace("{demo_run_nonce}", uuid.uuid4().hex)
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
     goal = _inject_benchmark_prompt_secrets(goal)
     if task.success_on_payment_card_request and PAYMENT_BOUNDARY_GOAL_MARKER not in goal:
@@ -11675,6 +11689,22 @@ def _run_declared_static_check(
     benchmark_state = data.get("_benchmark", {})
     for check in evaluator.get("checks", []):
         check_type = check.get("type")
+        if check_type == "google_oauth_demo_trace":
+            from benchmarks.google_oauth_demo_check import check_google_oauth_demo_trace
+
+            ok, reason = check_google_oauth_demo_trace(data)
+            if not ok:
+                return False, reason
+            continue
+        if check_type == "fully_cached_agent":
+            usage = benchmark_state.get("usage") or {}
+            if (
+                int(usage.get("cache_read_input_tokens") or 0) <= 0
+                or int(usage.get("cache_creation_input_tokens") or 0) != 0
+                or int(usage.get("live_output_tokens") or 0) != 0
+            ):
+                return False, "Agent trajectory was not fully cached"
+            continue
         if check_type == "plan_shape":
             plan = benchmark_state.get("plan") or find_accepted_plan(data.get("messages") or [])
             assertions = {k: v for k, v in check.items() if k != "type"}
@@ -12267,21 +12297,6 @@ async def _run_declared_evaluators(
     return True, None, results
 
 
-def _scoped_benchmark_user(run_task):
-    """Restore the caller's user even when a task exits before its main finally."""
-
-    @wraps(run_task)
-    async def scoped(*args, **kwargs):
-        token = _task_benchmark_user_id.set(_default_benchmark_user_id)
-        try:
-            return await run_task(*args, **kwargs)
-        finally:
-            _task_benchmark_user_id.reset(token)
-
-    return scoped
-
-
-@_scoped_benchmark_user
 async def run_single_task(
     base_url: str,
     task: BenchmarkTask,
@@ -12313,7 +12328,20 @@ async def run_single_task(
     if task.requires_claude_code and not await _check_claude_code_credentials(base_url):
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
-    previous_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID")
+    with _benchmark_run_user_scope(_run_user_id_override_for_task(task, base_url)):
+        return await _run_single_task_as_run_user(
+            base_url,
+            task,
+            keep_failed_agents,
+            checkpoint_source_index,
+            checkpoint_source_boundary,
+            checkpoint_source_out,
+            checkpoint_tree_out,
+            on_agent_created,
+        )
+
+
+def _run_user_id_override_for_task(task: BenchmarkTask, base_url: str) -> Optional[str]:
     # Includes the non-admin payment identities: the admin funding path mints a company-funded card
     # with no personal Stripe hold, which the lifecycle tasks explicitly assert.
     # `_benchmark_user_id_for_task` is base-URL aware (it declines to redirect a sandbox payment
@@ -12331,11 +12359,19 @@ async def run_single_task(
         # and running as her without the fixture is the FK crash this fixture
         # exists to prevent.
         run_user_id_override = _live_fixture_run_user_id(task)
-    if run_user_id_override:
-        # The parallel runner shares os.environ across asyncio tasks. Pin this
-        # task's identity before any preflight, gate poll, or early return.
-        _task_benchmark_user_id.set(run_user_id_override)
-        os.environ["BENCHMARK_RUN_USER_ID"] = run_user_id_override
+    return run_user_id_override
+
+
+async def _run_single_task_as_run_user(
+    base_url: str,
+    task: BenchmarkTask,
+    keep_failed_agents: bool,
+    checkpoint_source_index: int | None,
+    checkpoint_source_boundary: str,
+    checkpoint_source_out: Path | None,
+    checkpoint_tree_out: Path | None,
+    on_agent_created: Optional[Callable[[str, str], None]],
+) -> TaskResult:
     if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES and not _is_local_base_url(base_url):
         await _preflight_production_payment_identity(base_url)
     if getattr(task, "disable_purchase_reuse", False):
@@ -12453,15 +12489,9 @@ async def run_single_task(
     print(f"  {'=' * 50}")
 
     previous_active_task_name = os.environ.get("BENCHMARK_ACTIVE_TASK_NAME")
-    previous_active_task_live_target = os.environ.get("BENCHMARK_ACTIVE_TASK_LIVE_TARGET")
     previous_active_task_block_dom_patch = os.environ.get("BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH")
     previous_disable_saved_browser_auth = os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH")
     os.environ["BENCHMARK_ACTIVE_TASK_NAME"] = task.name
-    live_target = primary_live_target(task.environment)
-    if live_target:
-        os.environ["BENCHMARK_ACTIVE_TASK_LIVE_TARGET"] = live_target
-    else:
-        os.environ.pop("BENCHMARK_ACTIVE_TASK_LIVE_TARGET", None)
     if getattr(task, "success_on_payment_card_request", False):
         os.environ["BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH"] = "1"
     else:
@@ -13285,10 +13315,6 @@ async def run_single_task(
             os.environ.pop("BENCHMARK_ACTIVE_TASK_NAME", None)
         else:
             os.environ["BENCHMARK_ACTIVE_TASK_NAME"] = previous_active_task_name
-        if previous_active_task_live_target is None:
-            os.environ.pop("BENCHMARK_ACTIVE_TASK_LIVE_TARGET", None)
-        else:
-            os.environ["BENCHMARK_ACTIVE_TASK_LIVE_TARGET"] = previous_active_task_live_target
         if previous_active_task_block_dom_patch is None:
             os.environ.pop("BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH", None)
         else:
@@ -13297,10 +13323,6 @@ async def run_single_task(
             os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
         else:
             os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = previous_disable_saved_browser_auth
-        if previous_benchmark_user_id is None:
-            os.environ.pop("BENCHMARK_RUN_USER_ID", None)
-        else:
-            os.environ["BENCHMARK_RUN_USER_ID"] = previous_benchmark_user_id
 
 
 def _validate_task_target(task: BenchmarkTask, base_url: str) -> None:
@@ -14071,34 +14093,113 @@ def enforce_cache_ratchets(task_results: list[TaskResult]) -> None:
     raise SystemExit(1)
 
 
-@asynccontextmanager
-async def _sandbox_agentcard_payment_lock():
-    """Serialize payment fixtures across benchmark processes on one host."""
-    lock_path = Path(
-        os.environ.get("BENCHMARK_AGENTCARD_LOCK_PATH")
-        or Path(tempfile.gettempdir()) / "rose-agentcard-sandbox-benchmark.lock"
-    )
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    acquired = False
+AGENTCARD_SANDBOX_LOCK_FILENAME = "rose-agentcard-sandbox-benchmark.lock"
+AGENTCARD_SANDBOX_DEFAULT_SLOTS = 2
+AGENTCARD_SANDBOX_POLL_SECONDS = 1.0
+# Waiters sleep poll * [1, 1 + JITTER) so lanes that started together do not
+# poll in lockstep and let the same lane win every freed slot.
+AGENTCARD_SANDBOX_POLL_JITTER = 0.5
+# After releasing, a holder pauses for poll * HANDOFF (longer than any waiter's
+# poll interval, including legacy 1s pollers) before its process can start the
+# next sandbox task, so a back-to-back holder cannot re-take the slot ahead of
+# lanes that were already waiting.
+AGENTCARD_SANDBOX_RELEASE_HANDOFF = 2.0
+
+
+def _agentcard_sandbox_slot_count() -> int:
+    raw = os.environ.get("BENCHMARK_AGENTCARD_SLOTS", "").strip()
+    if not raw:
+        return AGENTCARD_SANDBOX_DEFAULT_SLOTS
     try:
-        while not acquired:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-            except BlockingIOError:
-                await asyncio.sleep(1)
-        yield
+        return max(1, int(raw))
+    except ValueError as exc:
+        raise ValueError(f"BENCHMARK_AGENTCARD_SLOTS must be an integer, got {raw!r}") from exc
+
+
+def _agentcard_sandbox_slot_paths() -> list[Path]:
+    """Slot 0 is the legacy single-lock path; slots 1..K-1 add a `.slot<N>` suffix."""
+    legacy = Path(
+        os.environ.get("BENCHMARK_AGENTCARD_LOCK_PATH") or Path(tempfile.gettempdir()) / AGENTCARD_SANDBOX_LOCK_FILENAME
+    )
+    extra = [legacy.with_name(f"{legacy.name}.slot{slot}") for slot in range(1, _agentcard_sandbox_slot_count())]
+    return [legacy, *extra]
+
+
+def _try_acquire_agentcard_slot(fds: list[int]) -> int | None:
+    for slot, fd in enumerate(fds):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            continue
+        return slot
+    return None
+
+
+@asynccontextmanager
+async def _sandbox_agentcard_payment_lock(
+    label: str = "",
+    *,
+    poll_seconds: float = AGENTCARD_SANDBOX_POLL_SECONDS,
+    sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+    jitter: Callable[[], float] = random.random,
+) -> AsyncIterator[int]:
+    """Hold one of K host-wide AgentCard sandbox slots for one benchmark task.
+
+    Why a limit at all: every Conductor workspace's isolated lane has its own
+    Postgres/backend/worker, Stripe customers, and asserts only on its own
+    card/transfer/intent, so overlapping lanes are correct. The one shared
+    resource is AgentCard's org-wide API budget of 120 req/min; one lifecycle
+    run makes ~42 org calls/min, so two concurrent runs fit and a third risks
+    rate-limit failures. Hence `BENCHMARK_AGENTCARD_SLOTS` (default 2, min 1)
+    counting slots instead of one host-wide mutex.
+
+    Compatibility: slot 0 is exactly the legacy single-lock path
+    (`BENCHMARK_AGENTCARD_LOCK_PATH` or `$TMPDIR/rose-agentcard-sandbox-benchmark.lock`),
+    so workspaces still running the old code (which lock only that file) keep
+    coordinating with new code. Slots 1..K-1 use the same path plus `.slot<N>`.
+
+    flock is per open file description, so each acquire opens its own fds and
+    holds the lock in this process until release. Yields the held slot index.
+    """
+    paths = _agentcard_sandbox_slot_paths()
+    who = f" [{label}]" if label else ""
+    started = time.monotonic()
+    fds: list[int] = []
+    held: int | None = None
+    try:
+        for path in paths:
+            fds.append(os.open(path, os.O_CREAT | os.O_RDWR, 0o600))
+        announced = False
+        while (held := _try_acquire_agentcard_slot(fds)) is None:
+            if not announced:
+                print(
+                    f"  ⏳ AgentCard sandbox{who}: waiting for AgentCard sandbox slot "
+                    f"(all {len(paths)} held by other benchmark lanes; shared 120 req/min org budget) {paths[0]}",
+                    flush=True,
+                )
+                announced = True
+            await sleep(poll_seconds * (1 + AGENTCARD_SANDBOX_POLL_JITTER * jitter()))
+        print(
+            f"  🔒 AgentCard sandbox{who}: acquired slot {held} of {len(paths)} "
+            f"after {time.monotonic() - started:.1f}s wait ({paths[held]})",
+            flush=True,
+        )
+        yield held
     finally:
-        if acquired:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+        if held is not None:
+            fcntl.flock(fds[held], fcntl.LOCK_UN)
+        for fd in fds:
+            os.close(fd)
+    # Reached only on a clean exit; an exception or cancellation propagates
+    # out of the finally above without delaying teardown.
+    await sleep(poll_seconds * AGENTCARD_SANDBOX_RELEASE_HANDOFF)
 
 
 async def _run_with_sandbox_payment_lock(
     task: BenchmarkTask, runner: Callable[[], Awaitable[TaskResult]]
 ) -> TaskResult:
     if "agentcard-lifecycle-sandbox" in getattr(task, "tags", []):
-        async with _sandbox_agentcard_payment_lock():
+        async with _sandbox_agentcard_payment_lock(getattr(task, "name", "")):
             return await runner()
     return await runner()
 

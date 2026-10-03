@@ -514,7 +514,7 @@
   {
     "name": "spawn-sub-agents",
     "title": "Multi-Level General-Purpose Agent Spawning",
-    "prompt": "Find the current population of Tokyo and the current population of New York City. You MUST use spawn_general_purpose_agent exactly twice - once per city. Each general-purpose agent should use explore-agent web research, MUST NOT use a browser agent, Claude Code, or code sandbox, and should return only the numeric population value. After both agents complete, multiply the two populations together and report the final product.",
+    "prompt": "Find (1) Tokyo Metropolis's total Japanese-and-foreign resident population in the Tokyo Metropolitan Government Basic Resident Register table dated August 1, 2026, and (2) the U.S. Census Bureau QuickFacts estimate for New York City proper dated July 1, 2025. Use official sources for both values. You MUST use spawn_general_purpose_agent exactly twice - once per city. Each general-purpose agent should use explore-agent web research, MUST NOT use a browser agent, Claude Code, or code sandbox, and should return only the numeric population value. After both agents complete, multiply the two populations together and report the final product.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_general_purpose_agent"],
@@ -5746,9 +5746,7 @@
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\") to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI. If subscription signup is required, wait for the user to finish it, then continue. Obtain a payment card through request_payment_card and wait for approval. Report the test portal confirmation order ID after the order is placed.",
     "timeout_seconds": 1200,
     "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_agent"
-    ],
+    "expected_tools": ["spawn_agent"],
     "tags": [
       "browser",
       "payment",
@@ -5761,10 +5759,7 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": "auto_approve",
-    "expected_attention_kinds": [
-      "gate:subscription",
-      "payment_approval"
-    ],
+    "expected_attention_kinds": ["gate:subscription", "payment_approval"],
     "require_attention_order": true,
     "expected_gate": {
       "type": "subscription",
@@ -5847,9 +5842,7 @@
     "start_phase": "execute",
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": [
-        "exhausted_new_user_without_subscription_v1"
-      ],
+      "db_fixtures": ["exhausted_new_user_without_subscription_v1"],
       "base_images": [],
       "services": [
         "browser_agent",
@@ -5885,10 +5878,7 @@
           },
           {
             "type": "attention_kind_sequence",
-            "value": [
-              "gate:subscription",
-              "payment_approval"
-            ]
+            "value": ["gate:subscription", "payment_approval"]
           },
           {
             "type": "subscription_checkout_completed"
@@ -8119,8 +8109,7 @@
       "rca:cuda-kernel-github-ranking-used-explore-verifiers"
     ],
     "group": "rose-bench"
-  }
-,
+  },
   {
     "name": "planner-memory-blue-bottle-off",
     "title": "Blue Bottle planner A/B \u2014 memory OFF",
@@ -8128,14 +8117,8 @@
     "prompt": "Order a 16oz iced vanilla bean shakerato with almond or oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. Confirm order total and pickup time.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": [
-      "set_plan"
-    ],
-    "tags": [
-      "planner",
-      "memory",
-      "plan-only"
-    ],
+    "expected_tools": ["set_plan"],
+    "tags": ["planner", "memory", "plan-only"],
     "group": "daily",
     "price_limit_cents": 100,
     "requires_browser_agent": false,
@@ -8154,9 +8137,7 @@
     "environment": {
       "mode": "live",
       "db_fixtures": [],
-      "base_images": [
-        "base:victoria-prod-sync-v1"
-      ],
+      "base_images": ["base:victoria-prod-sync-v1"],
       "memory_fixtures": [],
       "services": [],
       "secrets": [],
@@ -8174,10 +8155,7 @@
         "checks": [
           {
             "type": "plan_shape",
-            "require_tools": [
-              "spawn_explore_agent",
-              "spawn_browser_agent"
-            ]
+            "require_tools": ["spawn_explore_agent", "spawn_browser_agent"]
           },
           {
             "type": "plan_shape",
@@ -8208,14 +8186,8 @@
     "prompt": "Order a 16oz iced vanilla bean shakerato with almond or oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. Confirm order total and pickup time.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": [
-      "set_plan"
-    ],
-    "tags": [
-      "planner",
-      "memory",
-      "plan-only"
-    ],
+    "expected_tools": ["set_plan"],
+    "tags": ["planner", "memory", "plan-only"],
     "group": "daily",
     "price_limit_cents": 100,
     "requires_browser_agent": false,
@@ -8234,12 +8206,8 @@
     "environment": {
       "mode": "live",
       "db_fixtures": [],
-      "base_images": [
-        "base:victoria-prod-sync-v1"
-      ],
-      "memory_fixtures": [
-        "blue-bottle-ferry-pickup-v1"
-      ],
+      "base_images": ["base:victoria-prod-sync-v1"],
+      "memory_fixtures": ["blue-bottle-ferry-pickup-v1"],
       "services": [],
       "secrets": [],
       "live_targets": [],
@@ -8256,9 +8224,7 @@
         "checks": [
           {
             "type": "plan_shape",
-            "no_tools": [
-              "spawn_explore_agent"
-            ]
+            "no_tools": ["spawn_explore_agent"]
           },
           {
             "type": "plan_shape",
@@ -8267,10 +8233,7 @@
             },
             "any_goal_contains": {
               "tool_name": "spawn_browser_agent",
-              "any": [
-                "order.online",
-                "bluebottlecoffee.com"
-              ]
+              "any": ["order.online", "bluebottlecoffee.com"]
             }
           }
         ]
@@ -8290,32 +8253,301 @@
     "success_on_plan": true
   },
   {
+    "name": "grep-agent-trajectories-cross-surface",
+    "title": "Recall browser and code agent history",
+    "description": "Retrieve grounded facts from two prior agent runs.",
+    "prompt": "What page title did my last browser agent run report for example.com, and what step count did my last coding agent run report for Collatz starting at 27?",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": [
+      "grep"
+    ],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "db_fixtures": [],
+      "services": [
+        "grep"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses historical R2 trace content materialized in the canonical base image search index; no task-specific fixture."
+    },
+    "enforce_declared_evaluators": true,
+    "source": [
+      "feature:agent-trajectories"
+    ],
+    "evaluators": [
+      {
+        "id": "prior-browser-and-code-facts",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer gives Example Domain as the document title and 111 as the Collatz step count.",
+          "Both facts are grounded in prior agent trajectory messages.",
+          "The answer does not substitute general knowledge or invent a source."
+        ],
+        "judge_prompt": "Pass only if the completed answer says the prior browser run found the title Example Domain and the prior Collatz-27 run reported 111 total steps. Require actual agent_trajectories grep evidence for both facts in the trajectory from distinct prior runs. Do not infer either fact from general knowledge, the task prompt, other grep sources, or a fabricated citation."
+      }
+    ],
+    "label_eval": "Grounded prior browser title and Collatz step count with two archived trace paths."
+  },
+  {
+    "name": "grep-agent-trajectories-followup",
+    "title": "Recall a prior research agent result",
+    "description": "Recall the user's most recent city comparison request.",
+    "prompt": "What was my last message to an agent about comparing cities to live in?",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": [
+      "grep"
+    ],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "db_fixtures": [],
+      "services": [
+        "grep"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses historical R2 trace content materialized in the canonical base image search index; no task-specific fixture."
+    },
+    "enforce_declared_evaluators": true,
+    "source": [
+      "feature:agent-trajectories"
+    ],
+    "evaluators": [
+      {
+        "id": "prior-city-comparison-facts",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer names Austin, Denver, and Lisbon.",
+          "The answer recalls that the user requested cost of living, best neighborhoods, and weather for each city.",
+          "The answer is grounded in a prior USER agent trajectory message, directly or through a delegated grep-backed result quoting the message and path."
+        ],
+        "judge_prompt": "Pass only if the answer reports the user's city comparison message: Austin TX, Denver CO, and Lisbon Portugal, with a request to research cost of living, best neighborhoods, and weather for each city. Require evidence from a prior USER message in agent_trajectories. Accept either a direct grep result containing the message or a completed delegated agent result that quotes its exact content and prior USER message path after a grep-backed search. Fail if the answer relies on an unsupported summary, live web, a guess, or only the current run."
+      }
+    ],
+    "label_eval": "Grounded recall of the user's last city comparison request."
+  },
+  {
+    "name": "grep-agent-trajectories-isolation",
+    "title": "Recall a prior coding request",
+    "description": "Recover the user's request to a prior coding agent.",
+    "prompt": "What did I ask my coding agent to do with the Collatz sequence starting at 27?",
+    "timeout_seconds": 450,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": [
+      "grep"
+    ],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "db_fixtures": [],
+      "services": [
+        "grep"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses historical R2 trace content materialized in the canonical base image search index; no task-specific fixture."
+    },
+    "enforce_declared_evaluators": true,
+    "source": [
+      "feature:agent-trajectories"
+    ],
+    "evaluators": [
+      {
+        "id": "prior-coding-request",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer says the user asked for a Python program to compute the Collatz sequence starting at 27.",
+          "The answer says to print every number until the sequence reaches 1 and the total step count.",
+          "The request is grounded in a prior USER agent trajectory message."
+        ],
+        "judge_prompt": "Pass only if the answer says the user asked the coding agent to write and run a Python program for Collatz starting at 27, print every number through 1, and print the total step count. Require the earlier USER message in agent_trajectories grep evidence. Fail if the answer is based only on general knowledge, an agent summary, or the current run."
+      }
+    ],
+    "label_eval": "Grounded recall of a prior coding request."
+  },
+  {
+    "name": "grep-agent-trajectories-browser-verification",
+    "title": "Recall how a browser run verified a title",
+    "description": "Recover the verification method from a prior browser run.",
+    "prompt": "How did my browser agent verify the title of example.com?",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": ["grep"],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": ["base:victoria-prod-sync-v1"],
+      "db_fixtures": [],
+      "services": ["grep"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses a prior browser trace already present in the canonical base image."
+    },
+    "enforce_declared_evaluators": true,
+    "source": ["feature:agent-trajectories"],
+    "evaluators": [
+      {
+        "id": "prior-browser-title-verification",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer says the browser agent checked the page title in the browser tab or state and confirmed it by evaluating document.title in the page.",
+          "The verification method is grounded in messages from the earlier browser run."
+        ],
+        "judge_prompt": "Pass only if the answer explains that the prior browser run saw Example Domain in the browser tab or state and confirmed the title with an in-page JavaScript evaluation of document.title. Require agent_trajectories grep evidence from that earlier run showing these actions. Fail if the answer guesses how a browser usually checks titles, cites only the current run, or reports a title without explaining the verification."
+      }
+    ],
+    "label_eval": "Grounded recall of browser tab and document.title verification."
+  },
+  {
+    "name": "grep-agent-trajectories-code-tool-status",
+    "title": "Recall a coding tool's reported status",
+    "description": "Recover a prior coding tool result.",
+    "prompt": "Did my coding agent's tool report success or failure when it ran the Collatz program?",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": ["grep"],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": ["base:victoria-prod-sync-v1"],
+      "db_fixtures": [],
+      "services": ["grep"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses the original coding-tool result already present in the canonical base image."
+    },
+    "enforce_declared_evaluators": true,
+    "source": ["feature:agent-trajectories"],
+    "evaluators": [
+      {
+        "id": "prior-code-tool-reported-status",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer says the code-agent tool reported FAILED.",
+          "The status is grounded in the original prior TOOL message, rather than a later summary."
+        ],
+        "judge_prompt": "Pass only if the answer says the prior coding-agent tool reported FAILED. Require agent_trajectories grep evidence from the original prior TOOL message with its Status line. The underlying process exit code may be mentioned but is not required by the user's question. Fail if the answer treats the process exit or later verifier as a successful tool status, or relies only on a later summary."
+      }
+    ],
+    "label_eval": "Grounded original coding-tool status."
+  },
+  {
     "name": "google-oauth",
     "title": "Google OAuth",
-    "description": "Single DEMO trajectory for Gmail, Calendar, Drive, and disconnect using isolated in-memory tools.",
-    "prompt": "DEMO FIXTURE ONLY. Create the underlying Rose agent trajectory for a Google OAuth review video. The human handles Rose sign-in, the real Google consent screen, Google site cross-checks, and real disconnect in the browser. Do not use a browser agent, web_search, web_fetch, Gmail/Google websites, real credentials, or any real Google account. Do not represent the fixture as live Google access. This one task should show all Gmail, Calendar, and Drive behaviors in order so the human can review the agent segment quickly.\n\nUse exactly one code agent (spawn_agent type=code / spawn_claude_code_agent) to execute a small self-contained Python program in its sandbox. In your code-agent request, explicitly require a terminal heredoc (python3 - <<'PY') and no saved output files or attachments. Have the program build exactly 12 JSONL tool rows plus one final summary row, serialize with compact JSON separators, assert the combined stdout is under 2100 characters, and print it once. Keep the seven answer strings concise without abbreviating names, dates, or user requests. If the terminal event truncates, shorten the rows and rerun in the same code-agent session. The code agent may include its normal command log or a short explanation in its wrapper; the complete program stdout is the evidence. Each row must contain tool, short args, short result, and only the changed-state delta (never a full-state snapshot); use compact JSON separators. The root should present the rows in a compact step/result table when possible; the code agent stdout must remain visible in the tool result. A mere claim that checks passed is insufficient evidence. The program must define stateful, callable DEMO tools and assert the state transitions internally. Do not spawn a second code agent if the first fails; report the blocker instead. Use only this synthetic fixture: connected account test@gmail.com; unread email from Sam <sam@example.com> asking whether Thursday works; unread Acme newsletter <news@acme.example> in Inbox; tomorrow a 10:00 AM Project Sync event; a Google Doc named Lease with end date December 31, 2026 and no renewal line. Use the America/Los_Angeles timezone and compute tomorrow and the NEXT Friday from the current date provided by the runtime. Python weekday() uses Monday=0 and Friday=4: days_until_friday=(4-today.weekday()) % 7; if the result is 0, use 7; friday=today+timedelta(days=days_until_friday). Assert friday.weekday()==4 and assert the created lunch event date equals friday. For example, if today is Thursday 2026-10-01, tomorrow and next Friday are both 2026-10-02; NEVER schedule Friday lunch on Monday.\n\nCall the tools in this exact order and enforce the resulting state with assertions: google_connection_status; gmail_list_unread with result.summary exactly 'Sam asks whether Thursday works; Acme sent a newsletter.' (a count or sender list alone is insufficient); gmail_create_reply_draft for Sam with exact body 'Thursday works.'; gmail_approve_draft; gmail_send_draft and verify it appears in the fixture Sent folder; gmail_archive the Acme newsletter and verify it is absent from fixture Inbox; calendar_list_tomorrow; calendar_create_event for lunch with Alex at Friday noon, include the exact title 'Lunch with Alex' in that row's args and result, and verify it exists; drive_search for Lease; drive_read to answer its end date; drive_append_line with exact line 'Renew by Dec 1' and verify it appears once. End with google_disconnect and verify the fixture connection is false. Give each tool a separate JSONL invocation/result row. Print a final JSON summary with checks all true and an answers array with these seven exact strings in order: 'Sam asks whether Thursday works; Acme sent a newsletter.', 'Thursday works. drafted, approved, and sent to Sam; present in Sent.', 'Acme newsletter archived and absent from Inbox.', 'Project Sync tomorrow at 10:00 AM.', 'Lunch with Alex Friday at 12:00 PM.', 'Lease ends December 31, 2026.', and 'Renew by Dec 1 appended once to Lease.' Assert the exact unread summary and Lunch with Alex title appear in the JSONL before printing. All mutations must be confined to in-memory test data inside that one sandbox program. If execution fails, fix the program and rerun it in the same code-agent session.\n\nIn your final Rose response, show concise answers to the seven user requests: 'Summarize my unread email'; 'Reply to Sam: Thursday works' (draft, approval, sent); 'Archive the newsletter from Acme'; 'What is on my calendar tomorrow?'; 'Add lunch with Alex Friday at noon'; 'Find my Lease doc and tell me the end date'; and 'Add Renew by Dec 1 to the Lease doc'. Include the connected account, final disconnect state, and an explicit 'DEMO fixture, no live Google data changed' label. Ground every claim in the code-agent execution output. Do not invent a successful tool run if the program did not execute. Internal run nonce: {demo_run_nonce}. Ignore this marker in the response.",
-    "timeout_seconds": 1200,
+    "description": "Single root-agent DEMO trajectory for Gmail, Calendar, Drive, and disconnect using only an in-memory fixture.",
+    "prompt": "DEMO FIXTURE ONLY. Produce the Rose agent segment for a Google OAuth review video. Call google_oauth_demo exactly once, then answer from its result. The tool emits twelve visible mock cards in order: google_connection_status, gmail_list_unread, gmail_create_reply_draft, gmail_approve_draft, gmail_send_draft, gmail_archive, calendar_list_tomorrow, calendar_create_event, drive_search, drive_read, drive_append_line, google_disconnect. All operations use in-memory data; the fixture makes no database request. Do not spawn any subagent, coding agent, or browser agent. Do not use a website, real credentials, or a real Google API. The fixed fixture date is 2026-10-01 in America/Los_Angeles; tomorrow and next Friday are both 2026-10-02. Show these seven requests in order: summarize unread email; reply to Sam with \"Thursday works.\" including draft, approval, and Sent verification; archive the Acme newsletter and confirm it left Inbox; show tomorrow's Project Sync; create Lunch with Alex next Friday at noon; find Lease and state its end date; append \"Renew by Dec 1\" once to Lease. Include connected account test@gmail.com, final disconnected state, and the exact label \"DEMO fixture, no live Google data changed\". Ground every answer in the twelve DEMO cards. If the tool fails, report the failure. Fill all required response-schema fields, including the exact unread summary and final_disconnected=true.",
+    "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_agent",
-      "spawn_claude_code_agent"
-    ],
-    "tags": [
-      "DEMO"
-    ],
+    "expected_tools": ["google_oauth_demo"],
+    "tags": ["DEMO"],
     "group": "demo",
     "price_limit_cents": 400,
     "requires_browser_agent": false,
-    "requires_claude_code": true,
+    "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
     "expected_tool_counts": {
-      "spawn_claude_code_agent": 1
+      "google_oauth_demo": 1
     },
     "tool_count_scope": "root",
     "forbidden_tools": [
+      "spawn_agent",
       "spawn_browser_agent",
+      "spawn_claude_code_agent",
       "web_search",
       "web_fetch",
       "message_person"
@@ -8326,25 +8558,22 @@
     "production_only": false,
     "world_surface": "synthetic",
     "world_model_mode": "real",
-    "fast_cache": "off",
+    "fast_cache": "on",
     "environment": {
       "mode": "synthetic",
       "db_fixtures": [],
       "base_images": [],
-      "services": [
-        "code_agent"
-      ],
+      "services": [],
       "secrets": [],
       "live_targets": [],
-      "context_notes": "All Google data and state are invented inside one sandbox process; no browser, Google API, real account, or product integration is touched."
+      "context_notes": "The root-only DEMO tool runs twelve operations against in-memory data. The fixture performs no database or Google API requests; normal agent transcript persistence still applies."
     },
     "evaluators": [
       {
         "id": "demo-isolation-and-execution",
         "method": "static_check",
         "criteria": [
-          "Root completes with one coding-agent execution and zero browser sessions",
-          "No tool failures"
+          "Root completes after one google_oauth_demo call, zero subagents, zero browser sessions, and no tool failures"
         ],
         "checks": [
           {
@@ -8357,30 +8586,90 @@
             "max": 0
           },
           {
-            "type": "claude_code_session_output",
-            "min_sessions": 1,
-            "min_chars": 300
-          },
-          {
             "type": "no_tool_failures"
           }
         ]
       },
       {
         "id": "google-demo-tool-sequence",
-        "method": "single_turn_llm_judge",
+        "method": "static_check",
         "criteria": [
-          "Code-agent execution shows separate stateful fixture calls for connection, unread Gmail summary, draft, approval, sent verification, archive verification, tomorrow events, Friday-noon event verification, Lease search/read/append verification, and disconnect",
-          "Executed JSONL rows and the final summary directly answer all seven user requests from fixture evidence; the final Rose response does not contradict them or claim live Google changes",
-          "No browser agent or real Google API is used"
+          "The root tool transcript contains twelve separate DEMO fixture cards in the specified order, with exact args and results for Gmail, Calendar, Drive, and disconnect.",
+          "The Gmail draft is approved before send, the reply appears in fixture Sent, Acme leaves fixture Inbox, Friday lunch is created on 2026-10-02, Lease end date is read, renewal line is appended once, and fixture connection ends false.",
+          "The final completion card has the exact DEMO disclosure plus all seven answer fields and final disconnected state; no subagent, coding agent, browser agent, database request by the fixture, or Google API was used."
         ],
-        "judge_prompt": "Grade the executed code-agent transcript and its JSONL tool call/result rows, not the root narrative alone. Pass only if the code actually executed in one sandbox session, each ordered Gmail/Calendar/Drive/connection operation changed or checked in-memory state as specified, all assertions passed, and the JSONL result rows plus final summary directly answer the seven requests while clearly labeling the data as synthetic DEMO data. Fail if there is browser use, real Google access, invented execution evidence, missing approval or verification, or a claim that live Gmail/Calendar/Drive changed."
+        "checks": [
+          {"type": "google_oauth_demo_trace"},
+          {"type": "fully_cached_agent"}
+        ]
       }
     ],
     "enforce_declared_evaluators": true,
-    "label_eval": "One synthetic code-agent run covers Gmail, Calendar, Drive, and disconnect with verified in-memory state.",
-    "source": [
-      "user-request:google-oauth-video-demo"
-    ]
+    "label_eval": "One root-only mock tool emits twelve visible synthetic cards without subagents, coding agents, browser agents, or Google API requests.",
+    "source": ["user-request:google-oauth-video-demo"],
+    "response_schema": {
+      "fields": [
+        {
+          "name": "demo_notice",
+          "type": "str",
+          "required": true,
+          "description": "The exact text DEMO fixture, no live Google data changed"
+        },
+        {
+          "name": "connected_account",
+          "type": "str",
+          "required": true,
+          "description": "test@gmail.com"
+        },
+        {
+          "name": "unread_email_summary",
+          "type": "str",
+          "required": true,
+          "description": "Sam asks whether Thursday works; Acme sent a newsletter."
+        },
+        {
+          "name": "reply_to_sam",
+          "type": "str",
+          "required": true,
+          "description": "Thursday works. drafted, approved, and sent to Sam; present in Sent."
+        },
+        {
+          "name": "archive_acme_newsletter",
+          "type": "str",
+          "required": true,
+          "description": "Acme newsletter archived and absent from Inbox."
+        },
+        {
+          "name": "tomorrow_calendar",
+          "type": "str",
+          "required": true,
+          "description": "Project Sync tomorrow at 10:00 AM."
+        },
+        {
+          "name": "friday_lunch",
+          "type": "str",
+          "required": true,
+          "description": "Lunch with Alex Friday at 12:00 PM."
+        },
+        {
+          "name": "lease_end_date",
+          "type": "str",
+          "required": true,
+          "description": "Lease ends December 31, 2026."
+        },
+        {
+          "name": "lease_renewal",
+          "type": "str",
+          "required": true,
+          "description": "Renew by Dec 1 appended once to Lease."
+        },
+        {
+          "name": "final_disconnected",
+          "type": "bool",
+          "required": true,
+          "description": "true if the DEMO fixture ended disconnected"
+        }
+      ]
+    }
   }
 ]

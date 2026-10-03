@@ -326,7 +326,9 @@ run_suite "Auto RCA Lifecycle Blackbox" bash scripts/tests/auto-rca-lifecycle.bl
 run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
 run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
+run_suite "Blackbox Backend Teardown" bash scripts/tests/blackbox-backend-teardown.test.sh
 run_suite "Agent Workflow Surface Hash" bash scripts/tests/agent-surface-hash.test.sh
+run_suite "Fly Cutover Clone Recovery" bash scripts/tests/deploy-agent-clone-recovery.test.sh
 run_suite "Mac App Release Drift" bash scripts/tests/mac-app-release-drift.test.sh
 if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)'; then
   run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
@@ -394,10 +396,10 @@ fi
 
 if should_run "agents"; then
   if $AUTO_RCA_MODE; then
-    run_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py && python tests/structural/structural_test_registration.py"
+    run_suite "Agents Structural" bash scripts/tests/agents-structural.test.sh
     run_suite "Agents Coverage and Blackbox" bash -c "cd agents && source venv/bin/activate && AGENTS_COVERAGE_CONCURRENCY=3 bash scripts/run-coverage.sh"
   else
-    bg_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py && python tests/structural/structural_test_registration.py"
+    bg_suite "Agents Structural" bash scripts/tests/agents-structural.test.sh
 
     if [ -n "$DOMAIN" ] && [ "$REPO" = "agents" ]; then
       bg_suite "Agents Blackbox ($DOMAIN)" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py $DOMAIN"
@@ -409,10 +411,10 @@ fi
 
 if should_run "back-end"; then
   if $AUTO_RCA_MODE; then
-    run_suite "Backend Structural" bash -c "cd back-end && npx tsx src/tests/structural/layer-deps.test.ts"
+    run_suite "Backend Structural" bash -c "cd back-end && npm run test:structural"
     run_suite "Backend Coverage and Blackbox" bash -c "cd back-end && npm run test:coverage"
   else
-    bg_suite "Backend Structural" bash -c "cd back-end && npx tsx src/tests/structural/layer-deps.test.ts"
+    bg_suite "Backend Structural" bash -c "cd back-end && npm run test:structural"
 
     if [ -n "$DOMAIN" ] && [ "$REPO" = "back-end" ]; then
       bg_suite "Backend Blackbox ($DOMAIN)" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
@@ -486,6 +488,10 @@ if $SMOKE; then
     # Memory compressor on real completed transcripts (one per benchmark task + the
     # largest completed runs); generic transcript-grounded assertions, reads R2.
     bg_suite "Planner Memory Compressor (real LLM)" bash -c "cd agents && source venv/bin/activate && TRACE_ARCHIVE_ENABLED=0 python benchmarks/run_memory_compressor_bench.py"
+    # Write-lock approval replay: real planner / EXECUTE / browser-use calls at the
+    # checkout review page; the browser agent must click the commit control that
+    # raises the approval prompt (agents/benchmarks/write_lock_approval_scenarios.json).
+    bg_suite "Write-Lock Approval Replay (real LLM)" bash -c "cd agents && source venv/bin/activate && TRACE_ARCHIVE_ENABLED=0 python benchmarks/run_write_lock_approval_scenarios.py"
     bg_suite "Frontend Semantic (Playwright)" bash -c "cd front-end && BACKEND_PORT=$SEMANTIC_BACKEND_PORT FRONTEND_PORT=$SEMANTIC_FRONTEND_PORT bash scripts/run-semantic-tests.sh"
     # Steel cloud-browser load-time gate through a real bot wall (Cloudflare
     # Turnstile + reCAPTCHA on order.toasttab.com). Ratchets median time-to-

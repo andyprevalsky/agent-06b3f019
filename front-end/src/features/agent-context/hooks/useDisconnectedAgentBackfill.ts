@@ -1,6 +1,11 @@
 import { useEffect } from 'react';
 
-import { DISCONNECTED_BACKFILL_POLL_MS, DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS } from '../config';
+import {
+  DISCONNECTED_BACKFILL_FAST_POLL_MS,
+  DISCONNECTED_BACKFILL_FAST_WINDOW_MS,
+  DISCONNECTED_BACKFILL_POLL_MS,
+  DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS,
+} from '../config';
 import { fetchAgentDetail } from '../api';
 import { applyAgentBackfill } from './agentBackfill';
 import type { RealtimeSubscriptionDeps } from './useRealtimeSubscription';
@@ -14,8 +19,10 @@ export function useDisconnectedAgentBackfill(deps: RealtimeSubscriptionDeps): vo
     let inFlight = false;
     let requestController: AbortController | null = null;
     let requestTimeout: number | null = null;
+    let pollTimer: number | null = null;
+    const selectedAt = Date.now();
     const isActive = () => !cancelled && deps.selectedAgentIdRef.current === agentId;
-    const interval = window.setInterval(() => {
+    const poll = () => {
       if (!isActive() || deps.channelRef.current || inFlight) return;
       inFlight = true;
       const controller = new AbortController();
@@ -41,10 +48,22 @@ export function useDisconnectedAgentBackfill(deps: RealtimeSubscriptionDeps): vo
           if (requestController === controller) requestController = null;
           inFlight = false;
         });
-    }, DISCONNECTED_BACKFILL_POLL_MS);
+    };
+    const scheduleNextPoll = () => {
+      const delay =
+        Date.now() - selectedAt < DISCONNECTED_BACKFILL_FAST_WINDOW_MS
+          ? DISCONNECTED_BACKFILL_FAST_POLL_MS
+          : DISCONNECTED_BACKFILL_POLL_MS;
+      pollTimer = window.setTimeout(() => {
+        if (cancelled) return;
+        poll();
+        scheduleNextPoll();
+      }, delay);
+    };
+    scheduleNextPoll();
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      if (pollTimer !== null) window.clearTimeout(pollTimer);
       if (requestTimeout !== null) window.clearTimeout(requestTimeout);
       requestController?.abort();
     };

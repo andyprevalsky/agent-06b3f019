@@ -13,14 +13,12 @@ import { installCaptchaSolveIndicator } from './captchaSolveIndicator';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import { persistBrowserSessionRow } from './sessionPersist';
 import {
-  forgetKernelProxy,
-  getOrCreateKernelProxy,
-  isKernelProxyAvailabilityError,
+  createSessionOnKernelProxyLadder,
   KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
+  kernelRecreateProxySelection,
   resolveKernelProxyMode,
   type KernelProxyType,
-  type ResolvedKernelProxy,
 } from './kernelProxy';
 import {
   BrowserProviderRateLimitError,
@@ -80,12 +78,11 @@ export async function cleanupBenchmarkKernelProfiles(): Promise<void> {
  * credential injection.
  */
 export async function resetKernelSessionTabs(browser: Browser): Promise<number> {
-  const contexts = browser.contexts();
-  const primaryContext = contexts[0];
+  const primaryContext = browser.contexts()[0];
   if (primaryContext === undefined) {
     throw new KernelSessionValidationError('Kernel browser has no context after CDP validation');
   }
-  const pages = contexts.flatMap((context) => context.pages());
+  const pages = browser.contexts().flatMap((context) => context.pages());
   await primaryContext.newPage();
   await Promise.all(pages.map((page) => page.close({ runBeforeUnload: false })));
   return pages.length;
@@ -327,54 +324,32 @@ async function createRemoteSession(
       }
     );
 
-  const createWithManagedProxy = async (
-    candidates: ReturnType<typeof kernelProxyCandidates>,
-    index: number
-  ): ReturnType<typeof createValidatedSession> => {
-    const candidate = candidates[index];
-    if (candidate === undefined) {
-      const proxyType = options.forceManagedProxyType ?? candidates[0]?.type ?? 'residential';
-      throw new Error(`Kernel has no available ${proxyType} proxy for ${proxyLocation.country}`);
-    }
-
-    let resolved: ResolvedKernelProxy | undefined;
-    try {
-      resolved = await getOrCreateKernelProxy(client, candidate);
-      return await createValidatedSession({
-        proxyId: resolved.proxyId,
-        proxyKey: resolved.proxyKey,
-        proxySource: resolved.source,
-        proxyLocation: resolved.location,
-      });
-    } catch (error) {
-      if (!isKernelProxyAvailabilityError(error) || index + 1 >= candidates.length) throw error;
-
-      // Only drop a cache row when the error proves this proxy_id is bad.
-      // A browsers.create transport timeout does not mean the remote proxy is
-      // gone — forgetting it would recreate orphans for the same geo key.
-      const message =
-        error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-      const stickyProxyKey =
-        resolved?.proxyKey !== undefined &&
-        (message.includes('proxy not found') ||
-          message.includes('invalid proxy') ||
-          message.includes('proxy unavailable') ||
-          message.includes('proxy is unavailable') ||
-          message.includes('no_peer') ||
-          message.includes('no peer'))
-          ? resolved.proxyKey
-          : undefined;
-      if (stickyProxyKey !== undefined) {
-        await forgetKernelProxy(stickyProxyKey).catch(() => {});
+  const createWithManagedProxy = (
+    candidates: ReturnType<typeof kernelProxyCandidates>
+  ): ReturnType<typeof createValidatedSession> =>
+    createSessionOnKernelProxyLadder(
+      client,
+      candidates,
+      (resolved) =>
+        createValidatedSession({
+          proxyId: resolved.proxyId,
+          proxyKey: resolved.proxyKey,
+          proxySource: resolved.source,
+          proxyLocation: resolved.location,
+        }),
+      {
+        onRefresh: (candidate, error) =>
+          log.warn('Kernel proxy was deleted; re-resolving the same location', {
+            proxyKey: candidate.proxyKey,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        onRelax: (candidate, error) =>
+          log.warn('Kernel proxy location unavailable; relaxing location specificity', {
+            proxyKey: candidate.proxyKey,
+            error: error instanceof Error ? error.message : String(error),
+          }),
       }
-
-      log.warn('Kernel proxy location unavailable; relaxing location specificity', {
-        proxyKey: candidate.proxyKey,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return createWithManagedProxy(candidates, index + 1);
-    }
-  };
+    );
 
   try {
     let remote;
@@ -392,11 +367,10 @@ async function createRemoteSession(
           `Kernel ${options.exactManagedProxy.type} ${options.exactManagedProxy.specificity} proxy is unavailable for the requested location`
         );
       }
-      remote = await createWithManagedProxy([exact], 0);
+      remote = await createWithManagedProxy([exact]);
     } else if (options.forceManagedProxyType !== undefined) {
       remote = await createWithManagedProxy(
-        kernelProxyCandidates(proxyLocation, options.forceManagedProxyType),
-        0
+        kernelProxyCandidates(proxyLocation, options.forceManagedProxyType)
       );
     } else {
       const proxyMode = resolveKernelProxyMode();
@@ -412,7 +386,7 @@ async function createRemoteSession(
           proxyLocation,
         });
       } else {
-        remote = await createWithManagedProxy(kernelProxyCandidates(proxyLocation), 0);
+        remote = await createWithManagedProxy(kernelProxyCandidates(proxyLocation));
       }
     }
     // Do not mark the profile bound here — persistBrowserSessionRow (or the
@@ -458,6 +432,7 @@ export async function createKernelSessionWithContext(
       wsUrl: remote.wsUrl,
       startUrl: _startUrl || undefined,
       provider: 'kernel',
+      kernelProxySource: remote.proxySource,
       ...providerProfileData(remote.profileId, remote.profileSource, true),
       releaseRemoteSession: releaseKernelRemoteSession,
     });
@@ -542,12 +517,7 @@ export async function closeKernelSession(
   if (releaseError !== null) throw releaseError;
 }
 
-/**
- * Recreate a Kernel browser session on the SAME persistent profile (cookies/login
- * survive), re-navigating to the last URL. Shared by resume (paused → active) and
- * rotate_ip (swap the egress IP mid-run). `forceManagedProxyType` pins the new
- * session to a residential/mobile tier; `proxyTier` records that on the row.
- */
+/** Recreate on the persisted Kernel proxy choice and provider-scoped profile. */
 async function recreateKernelSession(
   taskId: string,
   opts: { forceManagedProxyType?: KernelProxyType; proxyTier?: string } = {}
@@ -577,8 +547,16 @@ async function recreateKernelSession(
     oldSession.agentId,
     proxyLocation,
     {
-      forceManagedProxyType: opts.forceManagedProxyType,
-      boundProfile: recordedProviderProfileBinding(oldSession),
+      ...kernelRecreateProxySelection(
+        oldSession.kernelProxySource,
+        oldSession.proxyTier,
+        opts.forceManagedProxyType
+      ),
+      // Provider profile IDs are scoped to their remote provider. A Browser
+      // Use session returning to Kernel after the rollout switch is disabled
+      // must use its Kernel profile, never the Browser Use profile ID.
+      boundProfile:
+        oldSession.provider === 'kernel' ? recordedProviderProfileBinding(oldSession) : undefined,
     }
   );
   await remote.validationBrowser.close().catch(() => {});
@@ -592,6 +570,7 @@ async function recreateKernelSession(
       status: 'ACTIVE',
       closedAt: null,
       provider: 'kernel',
+      kernelProxySource: remote.proxySource,
       ...providerProfileData(remote.profileId, remote.profileSource, true),
       ...(opts.proxyTier !== undefined ? { proxyTier: opts.proxyTier } : {}),
     },
@@ -611,7 +590,11 @@ async function recreateKernelSession(
   // Evict the superseded Kernel browser so we never leak a paid session. On the
   // resume path the old browser was already deleted at pause time (delete
   // tolerates 404); on the rotate path it is still live and must be reaped.
-  if (previousSessionId !== '' && previousSessionId !== remote.sessionId) {
+  if (
+    oldSession.provider === 'kernel' &&
+    previousSessionId !== '' &&
+    previousSessionId !== remote.sessionId
+  ) {
     await releaseKernelRemoteSession(previousSessionId).catch((error) => {
       log.warn('Failed to evict superseded Kernel session after recreate', {
         previousSessionId,

@@ -23,15 +23,21 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
 PIDS=()
+FIXTURE_PORTS=()
 
-cleanup() {
+stop_fixtures() {
     local pid
     for pid in "${PIDS[@]:-}"; do
-        kill "$pid" 2>/dev/null || true
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
     done
     for pid in "${PIDS[@]:-}"; do
-        wait "$pid" 2>/dev/null || true
+        [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
     done
+    PIDS=()
+}
+
+cleanup() {
+    stop_fixtures
     rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
@@ -197,13 +203,11 @@ echo "PASS: cold isolated seed validates and caps retry delays"
 
 find_free_port() {
     local port
-    # 61000-61999 only. kill-services.test.sh scans 62000-63000 and this gate now
-    # runs concurrently with it, so an inclusive upper bound of 62000 let both
-    # gates hand out the same port. Bind-probe instead of lsof-only so a
-    # concurrent claim between check and use cannot hand out a taken port.
-    for port in $(seq 61000 61999); do
+    # 61000-61999 only. kill-services.test.sh scans 62000-63000 and this gate
+    # runs concurrently with it. Overrides allow a focused TIME_WAIT regression.
+    for port in $(seq "${TEST_PORT_RANGE_START:-61000}" "${TEST_PORT_RANGE_END:-61999}"); do
         if python3 -c 'import socket,sys
-s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s=socket.socket()
 try:
     s.bind(("127.0.0.1", int(sys.argv[1])))
 except OSError:
@@ -215,8 +219,45 @@ finally:
         fi
     done
     echo "FAIL: could not find a free test port" >&2
-    exit 1
+    return 1
 }
+
+# A closed HTTP listener can leave its local port in TIME_WAIT. A bind probe
+# with SO_REUSEADDR may call it free, while this test's outbound socket (which
+# has no reuse option) then fails with EADDRINUSE. Keep the two socket contracts
+# aligned so find_free_port cannot return a port the fixture cannot use.
+time_wait_port="$(python3 - <<'PY'
+import socket
+
+listener = socket.socket()
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(('127.0.0.1', 0))
+listener.listen()
+port = listener.getsockname()[1]
+client = socket.create_connection(('127.0.0.1', port))
+accepted, _ = listener.accept()
+accepted.close()
+client.recv(1)
+client.close()
+listener.close()
+ordinary = socket.socket()
+try:
+    ordinary.bind(('127.0.0.1', port))
+except OSError:
+    pass
+else:
+    raise SystemExit('TIME_WAIT fixture did not block an ordinary bind')
+finally:
+    ordinary.close()
+print(port)
+PY
+)"
+if TEST_PORT_RANGE_START="$time_wait_port" TEST_PORT_RANGE_END="$time_wait_port" \
+    find_free_port >/dev/null 2>&1; then
+    echo "FAIL: TIME_WAIT port was reported free for an outbound socket" >&2
+    exit 1
+fi
+echo "PASS: TIME_WAIT port is unavailable to an outbound socket"
 
 wait_for_port() {
     local port="$1"
@@ -235,6 +276,26 @@ finally:
         sleep 0.1
     done
     echo "FAIL: listener did not start on port $port" >&2
+    exit 1
+}
+
+wait_for_port_free() {
+    local port="$1"
+    local attempt
+    for attempt in $(seq 1 50); do
+        if ! python3 -c 'import socket,sys
+s=socket.socket(); s.settimeout(0.05)
+try:
+    s.connect(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    raise SystemExit(1)
+finally:
+    s.close()' "$port" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "FAIL: listener on port $port survived its fixture's kill" >&2
     exit 1
 }
 
@@ -259,11 +320,12 @@ printf '%s\n' 'ready' > "$wait_for_frontend_test_root/test_payment"
 (
     sleep 0.4
     cd "$wait_for_frontend_test_root"
-    python3 -m http.server "$wait_for_frontend_test_port" --bind 127.0.0.1 \
+    exec python3 -m http.server "$wait_for_frontend_test_port" --bind 127.0.0.1 \
         >"$wait_for_frontend_test_log" 2>&1
 ) &
 frontend_test_pid=$!
 PIDS+=("$frontend_test_pid")
+FIXTURE_PORTS+=("$wait_for_frontend_test_port")
 
 if ! FRONTEND_START_READY_ATTEMPTS=30 RUN_SERVICE_READY_SLEEP_SECONDS=0.1 \
     wait_for_frontend_ready "$frontend_test_pid" "$wait_for_frontend_test_port" "$wait_for_frontend_test_log"; then
@@ -314,9 +376,10 @@ mkdir -p "$foreign_dir"
 foreign_port="$(find_free_port)"
 (
     cd "$foreign_dir"
-    python3 -m http.server "$foreign_port" --bind 127.0.0.1 >/dev/null 2>&1
+    exec python3 -m http.server "$foreign_port" --bind 127.0.0.1 >/dev/null 2>&1
 ) &
 PIDS+=("$!")
+FIXTURE_PORTS+=("$foreign_port")
 wait_for_port "$foreign_port"
 
 if ! port_requires_reassign "$foreign_port"; then
@@ -330,13 +393,16 @@ last_pid="${PIDS[$last_index]}"
 kill "$last_pid" 2>/dev/null || true
 wait "$last_pid" 2>/dev/null || true
 unset "PIDS[$last_index]"
+wait_for_port_free "$foreign_port"
+echo "PASS: killing a listener fixture frees its port"
 
 own_port="$(find_free_port)"
 (
     cd "$ROOT_DIR"
-    python3 -m http.server "$own_port" --bind 127.0.0.1 >/dev/null 2>&1
+    exec python3 -m http.server "$own_port" --bind 127.0.0.1 >/dev/null 2>&1
 ) &
 PIDS+=("$!")
+FIXTURE_PORTS+=("$own_port")
 wait_for_port "$own_port"
 
 if port_requires_reassign "$own_port"; then
@@ -348,6 +414,7 @@ echo "PASS: current-worktree listener does not require reassignment"
 remote_port="$(find_free_port)"
 python3 -m http.server "$remote_port" --bind 127.0.0.1 >/dev/null 2>&1 &
 PIDS+=("$!")
+FIXTURE_PORTS+=("$remote_port")
 wait_for_port "$remote_port"
 
 outbound_port_file="$TMP_ROOT/outbound-port"
@@ -413,5 +480,23 @@ if port_range_can_reassign >/dev/null 2>&1; then
     exit 1
 fi
 echo "PASS: bundled benchmark stacks reject port reassignment across shell boundaries"
+
+# A fixture PID that is only a wrapper subshell orphans its http.server to PID 1
+# on kill, and every deploy then leaks listeners in the shared 61000-61999 range.
+stop_fixtures
+for port in "${FIXTURE_PORTS[@]}"; do
+    if python3 -c 'import socket,sys
+s=socket.socket(); s.settimeout(0.2)
+try:
+    s.connect(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    raise SystemExit(1)
+finally:
+    s.close()' "$port" 2>/dev/null; then
+        echo "FAIL: fixture listener on port $port outlived its tracked PID" >&2
+        exit 1
+    fi
+done
+echo "PASS: fixture listeners stop with their tracked PIDs"
 
 echo "All run.sh port collision tests passed."

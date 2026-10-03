@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MIGRATION_SQL="$BACKEND_DIR/prisma/migrations/20260723000000_add_workflow_iteration_offset/migration.sql"
 UTC_CLEANUP_MIGRATION_SQL="$BACKEND_DIR/prisma/migrations/20260724002500_temporal_cleanup_utc_grace/migration.sql"
+TRAJECTORY_SQL="$BACKEND_DIR/prisma/migrations/20260929120000_agent_trajectory_search/migration.sql"
 
 validate_local_database_url() {
   local variable_name=$1
@@ -29,9 +30,29 @@ command -v psql >/dev/null 2>&1 || {
   exit 2
 }
 
-awk '
-  /^-- Protect the rolling-deploy window/ { emit = 1 }
-  /^-- Prefer explicit logical-iteration checkpoints/ { emit = 0 }
+WORKFLOW_SQL="$(awk '
+  /^-- Protect the rolling-deploy window/ { starts++; if (starts == 1 && ends == 0) emit = 1 }
+  /^-- Prefer explicit logical-iteration checkpoints/ { if (starts == 0) misordered = 1; ends++; emit = 0 }
+  emit && $0 !~ /^[[:space:]]*(--.*)?$/ { statements++ }
   emit { print }
-' "$MIGRATION_SQL" | psql "$DATABASE_URL" -v ON_ERROR_STOP=1
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$UTC_CLEANUP_MIGRATION_SQL"
+  END {
+    if (starts != 1 || ends != 1 || misordered) exit 3
+    if (statements == 0) exit 4
+  }
+' "$MIGRATION_SQL")" || {
+  case $? in
+    4) echo "Refusing local runtime SQL hooks: no workflow SQL between the markers in $MIGRATION_SQL" >&2 ;;
+    *) echo "Refusing local runtime SQL hooks: workflow markers must each appear exactly once, in order, in $MIGRATION_SQL" >&2 ;;
+  esac
+  exit 2
+}
+
+# Concurrent black-box runners share one local database, and DROP/CREATE
+# TRIGGER pairs race each other ("already exists", "tuple concurrently
+# updated"). One transaction behind an advisory lock serializes them.
+{
+  echo "SELECT pg_advisory_xact_lock(hashtext('rose-local-runtime-sql-hooks'));"
+  printf '%s\n' "$WORKFLOW_SQL"
+  cat "$UTC_CLEANUP_MIGRATION_SQL"
+  cat "$TRAJECTORY_SQL"
+} | psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction

@@ -28,6 +28,11 @@ normalize_conductor_workspace_env
 source "$SCRIPT_DIR/local-db-container.sh"
 cd "$BACKEND_DIR"
 
+# This gate starts its own backend and signs its own benchmark-share fixtures.
+# Give both the server and blackbox runner the same local-only signing key when
+# no key was supplied; a production secret is not needed to verify the contract.
+export BENCHMARK_SHARE_SECRET="${BENCHMARK_SHARE_SECRET:-blackbox-local-benchmark-share-secret}"
+
 # Cursor Cloud (and similar) may inject BROWSER_PROVIDER into the process
 # environment. Node dotenv does not override existing vars, so a stale value
 # like "browserbase" wins over back-end/.env ("kernel") and the live
@@ -37,6 +42,17 @@ case "${BROWSER_PROVIDER:-}" in
   *)
     echo "⚠️  BROWSER_PROVIDER='${BROWSER_PROVIDER:-}' is unsupported; forcing kernel for coverage."
     export BROWSER_PROVIDER=kernel
+    ;;
+esac
+
+# Cursor Cloud injects TRACE_ARCHIVE_BACKEND=r2 from prod secrets. Node dotenv
+# does not override it, so agent-trajectories / archive blackboxes write local
+# fixtures in the test process while the backend reads R2 and returns 0 hits.
+case "${TRACE_ARCHIVE_BACKEND:-}" in
+  local|fake-r2) ;;
+  *)
+    echo "⚠️  TRACE_ARCHIVE_BACKEND='${TRACE_ARCHIVE_BACKEND:-}' is not a local blackbox backend; forcing local."
+    export TRACE_ARCHIVE_BACKEND=local
     ;;
 esac
 
@@ -284,13 +300,18 @@ COV_LOG="$BACKEND_DIR/coverage/server.log"
 # archives at R2 for development/prod, but blackbox tests assert local archive
 # artifacts and fake provider boundaries.
 export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
-export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
 export BLACKBOX_TEST_FAKE_TEMPORAL="${BLACKBOX_TEST_FAKE_TEMPORAL:-1}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND=1
 export BLACKBOX_TEST_REPLAY_OUTBOUND=1
+# The benchmark-share blackbox signs a temporary bearer link against the
+# instrumented backend. Give both processes one throwaway key when the shell
+# has no share secret exported.
+if [[ -z "${BENCHMARK_SHARE_SECRET:-}" ]]; then
+  export BENCHMARK_SHARE_SECRET="$(openssl rand -hex 32)"
+fi
 # The instrumented backend starts independently of run-blackbox-tests.sh.
 # OAuth URL cases need the same synthetic local client, never the production one.
 export GOOGLE_CLIENT_ID="${BLACKBOX_GOOGLE_CLIENT_ID:-rose-local-blackbox.apps.googleusercontent.com}"
@@ -369,6 +390,12 @@ fi
 DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
 DB_FOUND=false
 ISOLATED_DB_RESOLVED=false
+STACK_MANIFEST="$ROOT_DIR/.context/services.json"
+
+if [[ -f "$STACK_MANIFEST" ]] && ! jq -e . "$STACK_MANIFEST" >/dev/null 2>&1; then
+  echo "❌ Workspace service manifest is invalid; refusing to guess a coverage database." >&2
+  exit 1
+fi
 
 if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
   if ! node -e '
@@ -389,6 +416,20 @@ if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
   fi
   DB_FOUND=true
   echo "Using isolated system Postgres database victoria_$WORKSPACE_HINT"
+elif [[ -f "$STACK_MANIFEST" ]] &&
+  [[ "$(jq -r '.database.container // empty' "$STACK_MANIFEST")" == "$DB_CONTAINER" ]] &&
+  [[ "$(jq -r '.database.use_system_postgres // false' "$STACK_MANIFEST")" == "false" ]]; then
+  # The worktree manifest declares a Docker database. Verify that exact
+  # container even when Docker's broad info probe stalls under host load;
+  # falling through to shared system Postgres could target another workspace.
+  ACTUAL_PORT=$(docker_quick port "$DB_CONTAINER" 5432 | head -1 | sed 's/.*://') || true
+  if [[ -z "$ACTUAL_PORT" ]] || ! docker_quick exec "$DB_CONTAINER" pg_isready -U postgres -q >/dev/null; then
+    echo "❌ Expected workspace Postgres container $DB_CONTAINER is unavailable; refusing system Postgres fallback." >&2
+    exit 1
+  fi
+  LOCAL_DB_PORT="$ACTUAL_PORT"
+  DB_FOUND=true
+  echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
 elif docker_info_quick; then
   if RESOLVED_CONTAINER="$(resolve_local_db_container "$WORKSPACE_HINT" "$WORKTREE_HINT")"; then
     DB_CONTAINER="$RESOLVED_CONTAINER"
@@ -464,7 +505,7 @@ END $$;
 SQL
   fi
   echo "Syncing Prisma schema to local test database..."
-  npx prisma generate >/dev/null
+  bash "$SCRIPT_DIR/sync-prisma-client.sh"
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
   DATABASE_URL="$LOCAL_PSQL_URL" DIRECT_URL="$LOCAL_PSQL_URL" \
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
@@ -590,9 +631,23 @@ echo "Backend ready at $TEST_BASE_URL"
 # captcha-solve-indicator launches Node Playwright Chromium. Cloud images can
 # have the npm package without the matching browser revision, which fails as
 # "Executable doesn't exist at .../chrome-headless-shell". Install before units.
+# `install` always takes the machine-wide ms-playwright directory lock, which
+# goes stale on a loaded host shared by many worktrees and fails coverage before
+# any test runs. Skip it when every needed revision is already complete.
+playwright_chromium_installed() {
+  local locations location
+  locations="$(npx playwright install --dry-run chromium 2>/dev/null |
+    sed -n 's/^[[:space:]]*Install location:[[:space:]]*//p')" || return 1
+  [ -n "$locations" ] || return 1
+  while IFS= read -r location; do
+    [ -f "$location/INSTALLATION_COMPLETE" ] || return 1
+  done <<< "$locations"
+}
 if command -v npx >/dev/null 2>&1; then
   echo "Ensuring Playwright Chromium is installed for coverage unit tests..."
-  npx playwright install chromium
+  if ! playwright_chromium_installed; then
+    npx playwright install chromium
+  fi
 fi
 
 echo "Running blackbox and unit tests in parallel..."

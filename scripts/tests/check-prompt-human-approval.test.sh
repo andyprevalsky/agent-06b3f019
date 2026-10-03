@@ -16,6 +16,8 @@ new_repo() {
     git init -q -b main
     git config user.email "test@example.com"
     git config user.name "Prompt Guard Test"
+    git config commit.gpgsign false
+    git config tag.gpgsign false
     echo "base" > README.md
     git add .
     git commit -q -m "base"
@@ -198,6 +200,26 @@ PY
 git -C "$tool_description_repo" add agents/providers/rose/browser_use.py
 expect_fail "$tool_description_repo" "tool description text requires approval"
 expect_flag_pass "$tool_description_repo" "approval flag permits a tool description edit"
+
+browser_tool_continuation_repo="$(new_repo browser-tool-continuation)"
+mkdir -p "$browser_tool_continuation_repo/agents/providers/rose"
+cat >"$browser_tool_continuation_repo/agents/providers/rose/browser_use.py" <<'PY'
+BROWSER_USE_TOOLS = {
+    "recover_from_challenge": {
+        "description": (
+            "Recover from a verified challenge. "
+            "Never use for an ordinary load failure."
+        ),
+    },
+}
+PY
+git -C "$browser_tool_continuation_repo" add agents/providers/rose/browser_use.py
+git -C "$browser_tool_continuation_repo" commit -q -m "seed browser tool"
+sed -i.bak 's/ordinary load failure/uncited load failure/' \
+  "$browser_tool_continuation_repo/agents/providers/rose/browser_use.py"
+rm "$browser_tool_continuation_repo/agents/providers/rose/browser_use.py.bak"
+expect_fail "$browser_tool_continuation_repo" "browser tool description continuation requires approval"
+expect_flag_pass "$browser_tool_continuation_repo" "approval flag permits a browser tool continuation edit"
 
 # Regression: 2026-08-04 Blue Bottle — SMS Tools.schemas.ts puts the description
 # string on the line AFTER `description:`, so assignment-line matching misses.

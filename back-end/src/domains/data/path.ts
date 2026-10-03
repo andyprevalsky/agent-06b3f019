@@ -27,6 +27,13 @@ export type ParsedGrepPath =
   | { source: 'messages'; thread: string; messageId?: string }
   | { source: 'network'; contact: string }
   | { source: 'agent_network'; depth?: number; agentId?: string; role?: string; messageId?: string }
+  | {
+      source: 'agent_trajectories';
+      rootAgentId?: string;
+      agentId?: string;
+      role?: string;
+      messageId?: string;
+    }
   | { source: 'transactions'; institution?: string; account?: string; transactionId?: string }
   | { source: 'documents'; documentSource?: string; rest?: string };
 
@@ -48,6 +55,16 @@ export function buildAgentNetworkPath(
   messageId: string
 ): string {
   return `agent_network/depth-${depth}/${agentId}/${role}/${messageId}`;
+}
+
+export function buildAgentTrajectoryPath(
+  rootAgentId: string,
+  agentId: string,
+  role: string,
+  messageId: string
+): string {
+  const agentPart = agentId === rootAgentId ? '' : `/${agentId}`;
+  return `agent_trajectories/${rootAgentId}${agentPart}/${role}/${messageId}`;
 }
 
 /** Account label as printed in results: `<name>` or `<name> ****<mask>`. */
@@ -120,6 +137,21 @@ export function parseGrepPath(value: string): ParsedGrepPath | null {
       return {
         source: 'agent_network',
         ...(depth === undefined ? {} : { depth }),
+        ...(agentId ? { agentId } : {}),
+        ...(role ? { role } : {}),
+        ...(messageId ? { messageId } : {}),
+      };
+    }
+    case 'agent_trajectories': {
+      if (rest.length > 4) return null;
+      const [rootAgentId, second, third, fourth] = rest;
+      const rootMessage = ['SYSTEM', 'USER', 'ASSISTANT', 'TOOL'].includes(second ?? '');
+      const agentId = rootMessage ? rootAgentId : second;
+      const role = rootMessage ? second : third;
+      const messageId = rootMessage ? third : fourth;
+      return {
+        source: 'agent_trajectories',
+        ...(rootAgentId ? { rootAgentId } : {}),
         ...(agentId ? { agentId } : {}),
         ...(role ? { role } : {}),
         ...(messageId ? { messageId } : {}),

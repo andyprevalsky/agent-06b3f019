@@ -27,6 +27,8 @@ import {
 interface LiveViewFrameProps {
   url: string;
   title: string;
+  /** The provider viewer may itself accept input; gate it while the agent owns control. */
+  interactive?: boolean;
   iframeKey?: string;
   className?: string;
   style?: CSSProperties;
@@ -36,6 +38,7 @@ interface LiveViewFrameProps {
 export function LiveViewFrame({
   url,
   title,
+  interactive = true,
   iframeKey,
   className,
   style,
@@ -45,7 +48,14 @@ export function LiveViewFrame({
   const crop = resolveLiveViewChromeCrop(url);
   const needsClipMeasure = crop !== null;
   const streamRef = useRef<HTMLDivElement>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
   const [clipWidth, setClipWidth] = useState(0);
+  useLayoutEffect(() => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    if (interactive) iframe.removeAttribute('inert');
+    else iframe.setAttribute('inert', '');
+  }, [interactive]);
   useLayoutEffect(() => {
     const el = streamRef.current;
     if (!el || !needsClipMeasure) return;
@@ -83,11 +93,16 @@ export function LiveViewFrame({
         }}
       >
         <iframe
+          ref={iframeRef}
           key={iframeKey ?? `${title}:${url}`}
           src={url}
           title={title}
-          className={crop ? 'z-0 border-0' : 'absolute inset-0 z-0 h-full w-full border-0'}
+          className={cn(
+            crop ? 'z-0 border-0' : 'absolute inset-0 z-0 h-full w-full border-0',
+            !interactive && 'pointer-events-none',
+          )}
           style={iframeStyle}
+          tabIndex={interactive ? undefined : -1}
           allow="clipboard-read; clipboard-write"
           sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
         />

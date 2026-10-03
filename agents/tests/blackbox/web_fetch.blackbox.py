@@ -96,6 +96,7 @@ async def test_firecrawl_boundary_request_shape():
             "url": "https://example.com/a",
             "formats": ["markdown", "links"],
             "onlyMainContent": True,
+            "maxAge": 300_000,
         },
     )
 

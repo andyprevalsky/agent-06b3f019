@@ -20,6 +20,8 @@ from typing import Any, AsyncIterator, Dict, Optional
 import httpx
 import structlog
 
+from helpers.http_client import get_streaming_http_client
+
 logger = structlog.get_logger()
 
 
@@ -177,27 +179,28 @@ async def post_anthropic_stream(
         call_site=call_site,
         model=body.get("model"),
     )
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", ANTHROPIC_API_URL, headers=headers, json=body) as response:
-            if response.status_code >= 400:
-                # Read body for error context. It's small for error responses;
-                # caller turns this into a typed RoseError.
-                error_body = (await response.aread()).decode("utf-8", errors="replace")
-                logger.warning(
-                    "rose.transport.anthropic.error",
-                    request_id=request_id,
-                    agent_id=agent_id,
-                    call_site=call_site,
-                    status=response.status_code,
-                    # Validation failures echo request fragments, which can
-                    # expose user content / internal schema. Log only the
-                    # body length; the full body is still attached below for
-                    # the caller's error classifier.
-                    error_body_len=len(error_body),
-                )
-                # Attach body to response for the caller's error classifier.
-                response._rose_error_body = error_body  # type: ignore[attr-defined]
-            yield response
+    async with get_streaming_http_client().stream(
+        "POST", ANTHROPIC_API_URL, headers=headers, json=body, timeout=timeout
+    ) as response:
+        if response.status_code >= 400:
+            # Read body for error context. It's small for error responses;
+            # caller turns this into a typed RoseError.
+            error_body = (await response.aread()).decode("utf-8", errors="replace")
+            logger.warning(
+                "rose.transport.anthropic.error",
+                request_id=request_id,
+                agent_id=agent_id,
+                call_site=call_site,
+                status=response.status_code,
+                # Validation failures echo request fragments, which can
+                # expose user content / internal schema. Log only the
+                # body length; the full body is still attached below for
+                # the caller's error classifier.
+                error_body_len=len(error_body),
+            )
+            # Attach body to response for the caller's error classifier.
+            setattr(response, "_rose_error_body", error_body)
+        yield response
 
 
 @contextlib.asynccontextmanager
@@ -219,25 +222,25 @@ async def post_openai_responses_stream(
         call_site=call_site,
         model=body.get("model"),
     )
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream(
-            "POST",
-            OPENAI_RESPONSES_API_URL,
-            headers=_openai_headers(openai_key),
-            json=body,
-        ) as response:
-            if response.status_code >= 400:
-                error_body = (await response.aread()).decode("utf-8", errors="replace")
-                logger.warning(
-                    "rose.transport.openai.error",
-                    request_id=request_id,
-                    agent_id=agent_id,
-                    call_site=call_site,
-                    status=response.status_code,
-                    error_body_len=len(error_body),
-                )
-                response._rose_error_body = error_body  # type: ignore[attr-defined]
-            yield response
+    async with get_streaming_http_client().stream(
+        "POST",
+        OPENAI_RESPONSES_API_URL,
+        headers=_openai_headers(openai_key),
+        json=body,
+        timeout=timeout,
+    ) as response:
+        if response.status_code >= 400:
+            error_body = (await response.aread()).decode("utf-8", errors="replace")
+            logger.warning(
+                "rose.transport.openai.error",
+                request_id=request_id,
+                agent_id=agent_id,
+                call_site=call_site,
+                status=response.status_code,
+                error_body_len=len(error_body),
+            )
+            setattr(response, "_rose_error_body", error_body)
+        yield response
 
 
 @contextlib.asynccontextmanager
@@ -265,22 +268,23 @@ async def post_openrouter_stream(
         call_site=call_site,
         model=body.get("model"),
     )
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", OPENROUTER_API_URL, headers=headers, json=body) as response:
-            if response.status_code >= 400:
-                error_body = (await response.aread()).decode("utf-8", errors="replace")
-                logger.warning(
-                    "rose.transport.openrouter.error",
-                    request_id=request_id,
-                    agent_id=agent_id,
-                    call_site=call_site,
-                    status=response.status_code,
-                    # See post_anthropic_stream for rationale — log length
-                    # only; raw body stays on the response for the classifier.
-                    error_body_len=len(error_body),
-                )
-                response._rose_error_body = error_body  # type: ignore[attr-defined]
-            yield response
+    async with get_streaming_http_client().stream(
+        "POST", OPENROUTER_API_URL, headers=headers, json=body, timeout=timeout
+    ) as response:
+        if response.status_code >= 400:
+            error_body = (await response.aread()).decode("utf-8", errors="replace")
+            logger.warning(
+                "rose.transport.openrouter.error",
+                request_id=request_id,
+                agent_id=agent_id,
+                call_site=call_site,
+                status=response.status_code,
+                # See post_anthropic_stream for rationale — log length
+                # only; raw body stays on the response for the classifier.
+                error_body_len=len(error_body),
+            )
+            setattr(response, "_rose_error_body", error_body)
+        yield response
 
 
 @contextlib.asynccontextmanager
@@ -302,25 +306,25 @@ async def post_cerebras_stream(
         call_site=call_site,
         model=body.get("model"),
     )
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream(
-            "POST",
-            CEREBRAS_API_URL,
-            headers=_cerebras_headers(cerebras_key),
-            json=body,
-        ) as response:
-            if response.status_code >= 400:
-                error_body = (await response.aread()).decode("utf-8", errors="replace")
-                logger.warning(
-                    "rose.transport.cerebras.error",
-                    request_id=request_id,
-                    agent_id=agent_id,
-                    call_site=call_site,
-                    status=response.status_code,
-                    error_body_len=len(error_body),
-                )
-                response._rose_error_body = error_body  # type: ignore[attr-defined]
-            yield response
+    async with get_streaming_http_client().stream(
+        "POST",
+        CEREBRAS_API_URL,
+        headers=_cerebras_headers(cerebras_key),
+        json=body,
+        timeout=timeout,
+    ) as response:
+        if response.status_code >= 400:
+            error_body = (await response.aread()).decode("utf-8", errors="replace")
+            logger.warning(
+                "rose.transport.cerebras.error",
+                request_id=request_id,
+                agent_id=agent_id,
+                call_site=call_site,
+                status=response.status_code,
+                error_body_len=len(error_body),
+            )
+            setattr(response, "_rose_error_body", error_body)
+        yield response
 
 
 @contextlib.asynccontextmanager
@@ -347,20 +351,21 @@ async def post_codex_stream(
         call_site=call_site,
         model=body.get("model"),
     )
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", CODEX_API_URL, headers=headers, json=body) as response:
-            if response.status_code >= 400:
-                error_body = (await response.aread()).decode("utf-8", errors="replace")
-                logger.warning(
-                    "rose.transport.codex.error",
-                    request_id=request_id,
-                    agent_id=agent_id,
-                    call_site=call_site,
-                    status=response.status_code,
-                    error_body_len=len(error_body),
-                )
-                response._rose_error_body = error_body  # type: ignore[attr-defined]
-            yield response
+    async with get_streaming_http_client().stream(
+        "POST", CODEX_API_URL, headers=headers, json=body, timeout=timeout
+    ) as response:
+        if response.status_code >= 400:
+            error_body = (await response.aread()).decode("utf-8", errors="replace")
+            logger.warning(
+                "rose.transport.codex.error",
+                request_id=request_id,
+                agent_id=agent_id,
+                call_site=call_site,
+                status=response.status_code,
+                error_body_len=len(error_body),
+            )
+            setattr(response, "_rose_error_body", error_body)
+        yield response
 
 
 def get_error_body(response: httpx.Response) -> str:

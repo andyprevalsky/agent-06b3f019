@@ -15,23 +15,32 @@ export interface RotationStep {
  * Deterministic rotate_ip recovery ladder.
  *
  * A Kernel run gets a fresh residential exit, then a mandatory mobile exit,
- * then changes browser/proxy infrastructure to Steel. The fourth and final
- * recovery allocates another fresh Steel exit. Runs that already started on
- * Steel remain there because provider switching is intentionally one-way.
+ * then changes browser/proxy infrastructure to Steel and Browser Use. Browser
+ * Use only has country-level proxy selection; a new session requests a new
+ * residential exit but the provider does not guarantee a distinct IP.
  */
 export function selectRotationStep(
   rotationsUsed: number,
-  currentProvider: BrowserProviderName
+  currentProvider: BrowserProviderName,
+  browserUseAvailable = true
 ): RotationStep {
   if (!Number.isInteger(rotationsUsed) || rotationsUsed < 1 || rotationsUsed > ROTATION_CAP) {
     throw new RangeError(`Rotation position must be between 1 and ${ROTATION_CAP}`);
   }
 
+  if (currentProvider === 'browser-use') {
+    return {
+      provider: browserUseAvailable ? 'browser-use' : 'steel',
+      proxyType: 'residential',
+      recoveryAction: browserUseAvailable ? 'ip_rotated' : 'provider_switched',
+    };
+  }
   if (currentProvider === 'steel') {
     return {
-      provider: 'steel',
+      provider: browserUseAvailable && rotationsUsed >= 3 ? 'browser-use' : 'steel',
       proxyType: 'residential',
-      recoveryAction: 'ip_rotated',
+      recoveryAction:
+        browserUseAvailable && rotationsUsed >= 3 ? 'provider_switched' : 'ip_rotated',
     };
   }
   if (rotationsUsed === 1) {
@@ -49,14 +58,16 @@ export function selectRotationStep(
     };
   }
   return {
-    provider: 'steel',
+    provider: rotationsUsed === 3 || !browserUseAvailable ? 'steel' : 'browser-use',
     proxyType: 'residential',
     recoveryAction: 'provider_switched',
   };
 }
 
 export function rotationStepLabel(step: RotationStep): string {
-  if (step.recoveryAction === 'provider_switched') return 'switch_provider_to_steel';
+  if (step.recoveryAction === 'provider_switched')
+    return `switch_provider_to_${step.provider.replace('-', '_')}`;
+  if (step.provider === 'browser-use') return 'rotate_browser_use_residential_session';
   if (step.provider === 'steel') return 'rotate_steel_residential_ip';
   return step.proxyType === 'mobile' ? 'rotate_kernel_mobile_ip' : 'rotate_kernel_residential_ip';
 }

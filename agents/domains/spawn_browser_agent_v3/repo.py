@@ -19,6 +19,7 @@ from domains.spawn_browser_agent_v3.config import (
     EXTRACT_MAX_CONTENT_LENGTH,
     MIME_TYPE_MAP,
 )
+from helpers.http_client import get_http_client
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
     raise_if_generation_sealed,
@@ -202,23 +203,24 @@ async def save_browser_action_message(
 
         metadata = stamp_tool_workflow_generation(metadata) or metadata
 
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(
-                f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
-                },
-                json={"message": message, "role": "TOOL", "metadata": metadata},
+        client = get_http_client()
+        response = await client.post(
+            f"{config.backend.api_url}/api/agents/{agent_id}/messages",
+            timeout=5.0,
+            headers={
+                "x-api-key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
+            json={"message": message, "role": "TOOL", "metadata": metadata},
+        )
+        raise_if_generation_sealed(response.status_code, "spawn_browser_agent_v3")
+        if not response.is_success:
+            logger.error(
+                "Failed to save browser action message",
+                status_code=response.status_code,
             )
-            raise_if_generation_sealed(response.status_code, "spawn_browser_agent_v3")
-            if not response.is_success:
-                logger.error(
-                    "Failed to save browser action message",
-                    status_code=response.status_code,
-                )
-                return False
+            return False
         return True
     except WorkflowGenerationSealed:
         raise  # a replaced generation must stop, never be swallowed
@@ -243,16 +245,17 @@ async def save_browser_assistant_message(
         if stream_id:
             metadata["streamId"] = stream_id
 
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
-                f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
-                },
-                json={"message": message, "role": "ASSISTANT", "metadata": metadata},
-            )
+        client = get_http_client()
+        await client.post(
+            f"{config.backend.api_url}/api/agents/{agent_id}/messages",
+            timeout=5.0,
+            headers={
+                "x-api-key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
+            json={"message": message, "role": "ASSISTANT", "metadata": metadata},
+        )
     except WorkflowGenerationSealed:
         raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
@@ -305,23 +308,24 @@ async def save_browser_credential_ref_message(
 
             metadata = stamp_tool_workflow_generation(metadata) or metadata
 
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(
-                f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
-                },
-                json={"message": message, "role": role, "metadata": metadata},
+        client = get_http_client()
+        response = await client.post(
+            f"{config.backend.api_url}/api/agents/{agent_id}/messages",
+            timeout=5.0,
+            headers={
+                "x-api-key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
+            json={"message": message, "role": role, "metadata": metadata},
+        )
+        raise_if_generation_sealed(response.status_code, "spawn_browser_agent_v3")
+        if response.is_error:
+            logger.error(
+                "Failed to save credential ref message",
+                status_code=response.status_code,
             )
-            raise_if_generation_sealed(response.status_code, "spawn_browser_agent_v3")
-            if response.is_error:
-                logger.error(
-                    "Failed to save credential ref message",
-                    status_code=response.status_code,
-                )
-                return False
+            return False
         return True
     except WorkflowGenerationSealed:
         raise  # a replaced generation must stop, never be swallowed
@@ -508,10 +512,10 @@ async def init_browser_session(
             response = await client.post(
                 f"{config.backend.api_url}/api/browser-session/init",
                 headers={
-                        "x-api-key": config.backend.api_key or "",
-                        "Content-Type": "application/json",
-                        **workflow_generation_headers(),
-                    },
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 json={
                     "user_id": user_id,
                     "agent_id": agent_id,
@@ -557,10 +561,10 @@ async def resume_browser_session(
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/resume",
             headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
-                },
+                "x-api-key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
             json={"task_id": task_id, "force_fresh_profile": force_fresh_profile},
         )
     if response.status_code in [200, 201]:
@@ -572,11 +576,12 @@ async def resume_browser_session(
 
 async def fetch_browser_captcha_telemetry(config: Any, task_id: str) -> Dict[str, Any]:
     """Read provider-native CAPTCHA solver state for the current browser task."""
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(
-            f"{config.backend.api_url}/api/browser-session/{task_id}/captcha-telemetry",
-            headers={"x-api-key": config.backend.api_key or ""},
-        )
+    client = get_http_client()
+    response = await client.get(
+        f"{config.backend.api_url}/api/browser-session/{task_id}/captcha-telemetry",
+        timeout=10.0,
+        headers={"x-api-key": config.backend.api_key or ""},
+    )
     if response.status_code == 200:
         return response.json()
     raise RuntimeError(f"Failed to read CAPTCHA telemetry: {response.text}")
@@ -621,10 +626,10 @@ async def recover_browser_challenge(
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/recover-challenge",
             headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
-                },
+                "x-api-key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
             json=payload,
         )
     if response.status_code in [200, 201]:
@@ -754,11 +759,7 @@ async def mark_steel_session_auth_failed(
             },
             json={
                 "reason": reason,
-                **(
-                    {"preserve_browser_session_id": preserve_browser_session_id}
-                    if preserve_browser_session_id
-                    else {}
-                ),
+                **({"preserve_browser_session_id": preserve_browser_session_id} if preserve_browser_session_id else {}),
             },
         )
     if response.status_code in (200, 204):
@@ -824,11 +825,12 @@ async def fetch_session_info(config: Any, task_id: str, validate_live: bool = Fa
 
 async def fetch_browser_control_state(config: Any, task_id: str) -> str:
     """Read agent/user ownership without reserving credentials or passkey counters."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(
-            f"{config.backend.api_url}/api/browser-session/task/{task_id}/control",
-            headers={"x-api-key": config.backend.api_key or ""},
-        )
+    client = get_http_client()
+    response = await client.get(
+        f"{config.backend.api_url}/api/browser-session/task/{task_id}/control",
+        timeout=15.0,
+        headers={"x-api-key": config.backend.api_key or ""},
+    )
     if response.status_code == 200:
         return str(response.json().get("state") or "agent")
     raise RuntimeError(f"Failed to fetch browser control state: HTTP {response.status_code}")
@@ -836,16 +838,17 @@ async def fetch_browser_control_state(config: Any, task_id: str) -> str:
 
 async def acknowledge_browser_user_control(config: Any, task_id: str) -> str:
     """Acknowledge ownership at an action boundary before user input is enabled."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.post(
-            f"{config.backend.api_url}/api/browser-session/task/{task_id}/control",
-            headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
-                },
-            json={"mode": "acknowledge"},
-        )
+    client = get_http_client()
+    response = await client.post(
+        f"{config.backend.api_url}/api/browser-session/task/{task_id}/control",
+        timeout=15.0,
+        headers={
+            "x-api-key": config.backend.api_key or "",
+            "Content-Type": "application/json",
+            **workflow_generation_headers(),
+        },
+        json={"mode": "acknowledge"},
+    )
     if response.status_code == 200:
         return str(response.json().get("state") or "agent")
     raise RuntimeError(f"Failed to acknowledge browser control: HTTP {response.status_code}")
@@ -947,10 +950,10 @@ async def take_browser_computer_screenshot(config: Any, session_id: str) -> Dict
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/{session_id}/screenshot",
             headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
-                },
+                "x-api-key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
         )
         response.raise_for_status()
         result = response.json()
@@ -1068,25 +1071,26 @@ Extract the requested information from the page content above."""
 async def fetch_recent_emails(user_id: str, api_url: str, api_key: str, since: str, limit: int = 20) -> List[Dict]:
     """Fetch recent emails for OTP extraction. Returns list of email dicts or empty list."""
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(
-                f"{api_url}/api/integrations/email/messages",
-                params={"since": since, "limit": limit},
-                headers={
-                    "X-API-Key": api_key,
-                    "x-user-id": user_id,
-                },
-            )
+        client = get_http_client()
+        response = await client.get(
+            f"{api_url}/api/integrations/email/messages",
+            timeout=15.0,
+            params={"since": since, "limit": limit},
+            headers={
+                "X-API-Key": api_key,
+                "x-user-id": user_id,
+            },
+        )
 
-            if response.status_code == 404:
-                return []  # Gmail not connected
+        if response.status_code == 404:
+            return []  # Gmail not connected
 
-            if response.status_code != 200:
-                logger.warning("Failed to fetch emails for OTP", status=response.status_code)
-                return []
+        if response.status_code != 200:
+            logger.warning("Failed to fetch emails for OTP", status=response.status_code)
+            return []
 
-            data = response.json()
-            return data.get("emails", [])
+        data = response.json()
+        return data.get("emails", [])
     except WorkflowGenerationSealed:
         raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
@@ -1099,25 +1103,26 @@ async def fetch_recent_sms_messages(
 ) -> List[Dict]:
     """Fetch recent agent-phone SMS messages for OTP extraction."""
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(
-                f"{api_url}/api/agentphone/messages",
-                params={"since": since, "limit": limit},
-                headers={
-                    "X-API-Key": api_key,
-                    "x-user-id": user_id,
-                },
-            )
+        client = get_http_client()
+        response = await client.get(
+            f"{api_url}/api/agentphone/messages",
+            timeout=15.0,
+            params={"since": since, "limit": limit},
+            headers={
+                "X-API-Key": api_key,
+                "x-user-id": user_id,
+            },
+        )
 
-            if response.status_code == 404:
-                return []
+        if response.status_code == 404:
+            return []
 
-            if response.status_code != 200:
-                logger.warning("Failed to fetch SMS messages for OTP", status=response.status_code)
-                return []
+        if response.status_code != 200:
+            logger.warning("Failed to fetch SMS messages for OTP", status=response.status_code)
+            return []
 
-            data = response.json()
-            return data.get("messages", [])
+        data = response.json()
+        return data.get("messages", [])
     except WorkflowGenerationSealed:
         raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
@@ -1132,25 +1137,26 @@ async def fetch_recent_imessages(user_id: str, api_url: str, api_key: str, since
     endpoint so callers can treat both as a single SMS-style source.
     """
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(
-                f"{api_url}/api/imessage/recent-inbound",
-                params={"since": since, "limit": limit, "channel": "IMESSAGE"},
-                headers={
-                    "X-API-Key": api_key,
-                    "x-user-id": user_id,
-                },
-            )
+        client = get_http_client()
+        response = await client.get(
+            f"{api_url}/api/imessage/recent-inbound",
+            timeout=15.0,
+            params={"since": since, "limit": limit, "channel": "IMESSAGE"},
+            headers={
+                "X-API-Key": api_key,
+                "x-user-id": user_id,
+            },
+        )
 
-            if response.status_code == 404:
-                return []
+        if response.status_code == 404:
+            return []
 
-            if response.status_code != 200:
-                logger.warning("Failed to fetch iMessages for OTP", status=response.status_code)
-                return []
+        if response.status_code != 200:
+            logger.warning("Failed to fetch iMessages for OTP", status=response.status_code)
+            return []
 
-            data = response.json()
-            return data.get("messages", [])
+        data = response.json()
+        return data.get("messages", [])
     except WorkflowGenerationSealed:
         raise  # a replaced generation must stop, never be swallowed
     except Exception as e:

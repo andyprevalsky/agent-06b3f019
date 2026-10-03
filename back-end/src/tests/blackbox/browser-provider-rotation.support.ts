@@ -1,5 +1,7 @@
 import { ROTATION_CAP, selectRotationStep } from '../../providers/browser/rotation';
 import { retryWithBackoff } from '../../providers/retry';
+import { chromium } from 'playwright';
+import { browserActivityBudgetMinutes } from '../../providers/steel/sessionLifetime';
 
 interface RotationResponse {
   task_id?: string;
@@ -13,7 +15,7 @@ interface RotationResponse {
   previous_provider?: string;
   recovery_action?: string;
   next_recovery?: string;
-  browser_session_metadata?: { provider?: string; steel_profile_id?: string };
+  browser_session_metadata?: { provider?: string; steel_profile_id?: string; profile_id?: string };
 }
 
 interface CrossProviderLadderOptions {
@@ -24,8 +26,13 @@ interface CrossProviderLadderOptions {
   mobileIp: string;
   post: (path: string, body?: unknown) => Promise<RotationResponse>;
   readDifferentExitIp: (wsUrl: string, previousIp: string) => Promise<string>;
+  readExitIp: (wsUrl: string) => Promise<string>;
   retrieveKernelBrowser: (sessionId: string) => Promise<{ deleted_at?: string | Date | null }>;
-  retrieveSteelBrowser: (sessionId: string) => Promise<{ status?: string }>;
+  retrieveSteelBrowser: (sessionId: string) => Promise<{ status?: string; timeout?: number }>;
+  retrieveBrowserUseBrowser: (sessionId: string) => Promise<{ status?: string }>;
+  browserUseAvailable: boolean;
+  /** Whether Steel can boot a session created with its default options right now. */
+  steelControlSessionBoots?: () => Promise<boolean>;
   /**
    * Every provider session this ladder allocates, appended as it is created.
    *
@@ -104,15 +111,37 @@ export function isSteelCapacityRateLimit(error: unknown): boolean {
  * Deliberately narrow so real defects still fail loudly: assertion failures,
  * wrong provider/tier/counters, leaked sessions, and Steel AUTH/QUOTA rejections
  * (401/402/403 — a credential problem to fix, no connectivity hint) do NOT match.
+ * CDP validation failures are excluded too: our own create options can stop a
+ * Steel browser from booting, so {@link shouldSkipSteelLegs} decides those
+ * against a control session.
  */
 export function isSteelProvisioningOutage(error: unknown): boolean {
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  const isRotateProxy5xx = message.includes('/rotate-proxy') && /\b5\d\d\b/.test(message);
-  const isSteelReplacementFailure = message.includes('failed to create steel replacement');
   const looksLikeConnectivity = STEEL_OUTAGE_CONNECTIVITY_HINTS.some((hint) =>
     message.includes(hint)
   );
-  return isRotateProxy5xx && isSteelReplacementFailure && looksLikeConnectivity;
+  return (
+    isSteelReplacementFailure(message) &&
+    !message.includes('session validation failed') &&
+    looksLikeConnectivity
+  );
+}
+
+function isSteelReplacementFailure(lowerCaseMessage: string): boolean {
+  return (
+    lowerCaseMessage.includes('/rotate-proxy') &&
+    /\b5\d\d\b/.test(lowerCaseMessage) &&
+    lowerCaseMessage.includes('failed to create steel replacement')
+  );
+}
+
+/**
+ * True when every replacement attempt was created by Steel but never accepted
+ * CDP (Steel's `startup_failed`, or a connect timeout before Steel ruled).
+ */
+export function isSteelSessionValidationFailure(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return isSteelReplacementFailure(message) && message.includes('session validation failed');
 }
 
 /**
@@ -127,8 +156,26 @@ export function isSteelSessionRateLimited(error: unknown): boolean {
   return isSteelCapacityRateLimit(error);
 }
 
-function shouldSkipSteelLegs(error: unknown): boolean {
-  return isSteelProvisioningOutage(error) || isSteelSessionRateLimited(error);
+/**
+ * A validation failure is a Steel outage only when Steel cannot boot even a
+ * session with its default options. If that control boots, our replacement
+ * options are what break startup and the ladder must fail.
+ */
+export async function shouldSkipSteelLegs(
+  error: unknown,
+  steelControlSessionBoots?: () => Promise<boolean>
+): Promise<boolean> {
+  if (isSteelProvisioningOutage(error) || isSteelSessionRateLimited(error)) return true;
+  if (!isSteelSessionValidationFailure(error) || steelControlSessionBoots === undefined) {
+    return false;
+  }
+  if (await steelControlSessionBoots()) {
+    console.error(
+      'Steel boots a default control session, so the replacement session options broke startup'
+    );
+    return false;
+  }
+  return true;
 }
 
 export function assertFixedRotationLadder(): void {
@@ -145,15 +192,20 @@ export function assertFixedRotationLadder(): void {
         { provider: 'kernel', proxyType: 'residential', recoveryAction: 'ip_rotated' },
         { provider: 'kernel', proxyType: 'mobile', recoveryAction: 'ip_rotated' },
         { provider: 'steel', proxyType: 'residential', recoveryAction: 'provider_switched' },
-        { provider: 'steel', proxyType: 'residential', recoveryAction: 'ip_rotated' },
+        { provider: 'browser-use', proxyType: 'residential', recoveryAction: 'provider_switched' },
       ]),
     `unexpected rotation ladder: ${JSON.stringify(steps)}`
   );
 }
 
-export async function deleteKernelResource(path: string): Promise<void> {
+/**
+ * Profiles are per-test resources. Managed proxies have no delete helper on
+ * purpose: they are shared by geo name with prod and every concurrent run.
+ */
+export async function deleteKernelProfile(profileId: string): Promise<void> {
   const apiKey = process.env.KERNEL_API_KEY?.trim();
   if (!apiKey) return;
+  const path = `/profiles/${encodeURIComponent(profileId)}`;
   const response = await fetch(`https://api.onkernel.com${path}`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },
@@ -166,7 +218,7 @@ export async function deleteKernelResource(path: string): Promise<void> {
 /** Exercise calls 3-5 after the caller has proven Kernel residential/mobile. */
 export async function runCrossProviderRotationLadder(
   options: CrossProviderLadderOptions
-): Promise<{ finalSessionId: string; firstSteelIp: string; secondSteelIp: string }> {
+): Promise<{ finalSessionId: string; firstSteelIp: string; browserUseIp: string | null }> {
   const {
     baseUrl,
     headers,
@@ -175,8 +227,12 @@ export async function runCrossProviderRotationLadder(
     mobileIp,
     post,
     readDifferentExitIp,
+    readExitIp,
     retrieveKernelBrowser,
     retrieveSteelBrowser,
+    retrieveBrowserUseBrowser,
+    browserUseAvailable,
+    steelControlSessionBoots,
     allocatedSessionIds,
   } = options;
   const recordAllocation = (sessionId: unknown): void => {
@@ -216,7 +272,7 @@ export async function runCrossProviderRotationLadder(
   } catch (error) {
     // Retries exhausted. If Steel's infra is genuinely down or rate-limited
     // (not a rotation defect), skip the Steel legs while Kernel is healthy.
-    if (shouldSkipSteelLegs(error)) {
+    if (await shouldSkipSteelLegs(error, steelControlSessionBoots)) {
       throw new SteelProviderUnavailableError(
         `Kernel→Steel switch (call 3) could not provision a Steel session: ${
           error instanceof Error ? error.message : String(error)
@@ -237,7 +293,8 @@ export async function runCrossProviderRotationLadder(
   assert(
     switched.rotations_used === 3 &&
       switched.rotations_remaining === 1 &&
-      switched.next_recovery === 'rotate_steel_residential_ip',
+      switched.next_recovery ===
+        (browserUseAvailable ? 'switch_provider_to_browser_use' : 'rotate_steel_residential_ip'),
     'call 3 returned the wrong counters or next recovery'
   );
   assert(
@@ -258,81 +315,180 @@ export async function runCrossProviderRotationLadder(
   const evictedKernel = await retrieveKernelBrowser(currentKernelSessionId);
   assert(Boolean(evictedKernel.deleted_at), 'provider switch leaked the superseded Kernel session');
   const firstSteelIp = await readDifferentExitIp(String(switched.ws_url), mobileIp);
+  const assertSteelLifetime = async (sessionId: string): Promise<void> => {
+    const timeout = (await retrieveSteelBrowser(sessionId)).timeout;
+    const activityBudgetMs = browserActivityBudgetMinutes() * 60_000;
+    assert(
+      typeof timeout === 'number' && timeout > activityBudgetMs,
+      `Steel session lifetime ${String(timeout)}ms does not outlive the ${activityBudgetMs}ms browser activity budget; Steel releases it mid-run`
+    );
+  };
+  await assertSteelLifetime(String(switched.session_id));
 
-  let steelRotated: RotationResponse;
-  try {
-    steelRotated = await postWithSteelRetry('/rotate-proxy', {
-      task_id: taskId,
-      current_url: 'https://example.com/steel-rotation-check',
+  const assertSteelReleased = async (sessionId: string): Promise<void> => {
+    const status = await retryWithBackoff(
+      async () => {
+        const current = String((await retrieveSteelBrowser(sessionId)).status);
+        if (current !== 'released') throw new Error(`Steel session remains ${current}`);
+        return current;
+      },
+      {
+        maxRetries: 5,
+        fixedDelays: [200, 400, 600, 800],
+        isRetryable: () => true,
+        component: 'browser-provider superseded Steel release',
+      }
+    );
+    assert(status === 'released', `call 4 leaked the superseded Steel session (${status})`);
+  };
+  const assertRotationExhausted = async (): Promise<void> => {
+    const response = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ task_id: taskId }),
     });
-  } catch (error) {
-    if (shouldSkipSteelLegs(error)) {
-      throw new SteelProviderUnavailableError(
-        `Steel residential IP rotation (call 4) could not provision a Steel session: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-    }
-    throw error;
-  }
-  assert(
-    steelRotated.provider === 'steel' && steelRotated.proxy_tier === 'residential',
-    'call 4 must remain on Steel residential'
-  );
-  assert(
-    steelRotated.previous_provider === 'steel' && steelRotated.recovery_action === 'ip_rotated',
-    'call 4 incorrectly reported another provider switch'
-  );
-  assert(
-    steelRotated.rotations_used === 4 &&
-      steelRotated.rotations_remaining === 0 &&
-      steelRotated.next_recovery === 'rotation_budget_exhausted',
-    'call 4 returned the wrong final rotation state'
-  );
-  recordAllocation(steelRotated.session_id);
-  assert(
-    steelRotated.session_id !== undefined && steelRotated.session_id !== switched.session_id,
-    'call 4 did not allocate another Steel session'
-  );
-  const supersededSteelStatus = await retryWithBackoff(
-    async () => {
-      const status = String((await retrieveSteelBrowser(String(switched.session_id))).status);
-      if (status !== 'released') throw new Error(`Steel session remains ${status}`);
-      return status;
-    },
-    {
-      maxRetries: 5,
-      fixedDelays: [200, 400, 600, 800],
-      isRetryable: () => true,
-      component: 'browser-provider superseded Steel release',
-    }
-  );
-  assert(
-    supersededSteelStatus === 'released',
-    `call 4 leaked the superseded Steel session (status=${supersededSteelStatus})`
-  );
-  const secondSteelIp = await readDifferentExitIp(String(steelRotated.ws_url), firstSteelIp);
+    assert(
+      response.status === 409,
+      `expected 409 after four real recoveries, got ${response.status}`
+    );
+    const body = (await response.json()) as { error?: string; message?: string };
+    assert(
+      body.error === 'proxy_rotation_exhausted' &&
+        String(body.message).includes('PROXY_ROTATION_EXHAUSTED'),
+      'exhaustion response missing the structured error the agent reads'
+    );
+  };
 
-  const exhaustedResponse = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ task_id: taskId }),
+  if (!browserUseAvailable) {
+    let steelRotated: RotationResponse;
+    try {
+      steelRotated = await postWithSteelRetry('/rotate-proxy', {
+        task_id: taskId,
+        current_url: 'https://example.com/steel-rotation-check',
+      });
+    } catch (error) {
+      if (await shouldSkipSteelLegs(error, steelControlSessionBoots)) {
+        throw new SteelProviderUnavailableError(
+          `Steel residential rotation (call 4) could not provision a session: ${String(error)}`
+        );
+      }
+      throw error;
+    }
+    assert(
+      steelRotated.provider === 'steel' && steelRotated.proxy_tier === 'residential',
+      'call 4 must stay on Steel residential while Browser Use is disabled'
+    );
+    assert(
+      steelRotated.previous_provider === 'steel' && steelRotated.recovery_action === 'ip_rotated',
+      'call 4 did not report a Steel IP rotation'
+    );
+    assert(
+      steelRotated.rotations_used === 4 &&
+        steelRotated.rotations_remaining === 0 &&
+        steelRotated.next_recovery === 'rotation_budget_exhausted',
+      'call 4 returned the wrong final rotation state'
+    );
+    assert(
+      steelRotated.browser_session_metadata?.provider === 'steel' &&
+        Boolean(steelRotated.browser_session_metadata.steel_profile_id),
+      'call 4 lost the Steel profile binding'
+    );
+    recordAllocation(steelRotated.session_id);
+    assert(
+      steelRotated.session_id !== undefined && steelRotated.session_id !== switched.session_id,
+      'call 4 did not allocate a new Steel session'
+    );
+    await assertSteelReleased(String(switched.session_id));
+    await readDifferentExitIp(String(steelRotated.ws_url), firstSteelIp);
+    await assertSteelLifetime(String(steelRotated.session_id));
+    await assertRotationExhausted();
+    return { finalSessionId: String(steelRotated.session_id), firstSteelIp, browserUseIp: null };
+  }
+
+  const browserUseRotated = await post('/rotate-proxy', {
+    task_id: taskId,
+    current_url: 'https://example.com/browser-use-rotation-check',
   });
   assert(
-    exhaustedResponse.status === 409,
-    `expected 409 after four real recoveries, got ${exhaustedResponse.status}`
+    browserUseRotated.provider === 'browser-use' && browserUseRotated.proxy_tier === 'residential',
+    'call 4 must switch to Browser Use residential'
   );
-  const exhaustedBody = (await exhaustedResponse.json()) as { error?: string; message?: string };
   assert(
-    exhaustedBody.error === 'proxy_rotation_exhausted' &&
-      String(exhaustedBody.message).includes('PROXY_ROTATION_EXHAUSTED'),
-    'exhaustion response missing the structured error the agent reads'
+    browserUseRotated.previous_provider === 'steel' &&
+      browserUseRotated.recovery_action === 'provider_switched',
+    'call 4 did not report the Steel-to-Browser Use switch'
   );
+  assert(
+    browserUseRotated.browser_session_metadata?.provider === 'browser-use' &&
+      Boolean(browserUseRotated.browser_session_metadata.profile_id),
+    'call 4 omitted the persistent Browser Use profile binding'
+  );
+  assert(
+    browserUseRotated.rotations_used === 4 &&
+      browserUseRotated.rotations_remaining === 0 &&
+      browserUseRotated.next_recovery === 'rotation_budget_exhausted',
+    'call 4 returned the wrong final rotation state'
+  );
+  recordAllocation(browserUseRotated.session_id);
+  assert(
+    browserUseRotated.session_id !== undefined &&
+      browserUseRotated.session_id !== switched.session_id,
+    'call 4 did not allocate a Browser Use session'
+  );
+  await assertSteelReleased(String(switched.session_id));
+  const browserUseIp = await readExitIp(String(browserUseRotated.ws_url));
+  assert(browserUseIp !== '', 'Browser Use session did not expose a working proxy exit');
+  const browserUse = await retrieveBrowserUseBrowser(String(browserUseRotated.session_id));
+  assert(browserUse.status === 'active', 'Browser Use replacement is not active');
+
+  const form = new FormData();
+  form.set(
+    'file',
+    new Blob(['browser-use-upload-proof'], { type: 'text/plain' }),
+    'upload-proof.txt'
+  );
+  const uploadResponse = await fetch(
+    `${baseUrl}/api/browser-session/${browserUseRotated.session_id}/files`,
+    { method: 'POST', headers: { 'x-api-key': headers['x-api-key'] }, body: form }
+  );
+  assert(uploadResponse.ok, `Browser Use session upload failed: HTTP ${uploadResponse.status}`);
+  const upload = (await uploadResponse.json()) as { path?: string; size?: number };
+  assert(upload.path && upload.size === 24, 'Browser Use upload returned no remote file path');
+  const uploadBrowser = await chromium.connectOverCDP(String(browserUseRotated.ws_url));
+  try {
+    const context = uploadBrowser.contexts()[0];
+    assert(context, 'Browser Use upload session has no CDP context');
+    const page = await context.newPage();
+    try {
+      await page.evaluate(
+        'document.documentElement.insertAdjacentHTML(\'beforeend\', \'<input type="file" id="upload">\')'
+      );
+      const cdp = await context.newCDPSession(page);
+      const document = await cdp.send('DOM.getDocument');
+      const input = await cdp.send('DOM.querySelector', {
+        nodeId: document.root.nodeId,
+        selector: '#upload',
+      });
+      assert(input.nodeId, 'Browser Use file input was not found');
+      await cdp.send('DOM.setFileInputFiles', { nodeId: input.nodeId, files: [upload.path] });
+      const selected = await page.evaluate("document.querySelector('#upload').files?.[0]?.name");
+      assert(
+        selected === upload.path.split('/').at(-1),
+        'Browser Use remote path was not usable by file input'
+      );
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } finally {
+    await uploadBrowser.close().catch(() => {});
+  }
+
+  await assertRotationExhausted();
 
   return {
-    finalSessionId: String(steelRotated.session_id),
+    finalSessionId: String(browserUseRotated.session_id),
     firstSteelIp,
-    secondSteelIp,
+    browserUseIp,
   };
 }
 
@@ -347,7 +503,7 @@ export async function runCrossProviderRotationLadder(
  */
 export async function runCrossProviderRotationLadderOrSkipOnSteelOutage(
   options: CrossProviderLadderOptions
-): Promise<{ finalSessionId: string; firstSteelIp: string; secondSteelIp: string } | null> {
+): Promise<{ finalSessionId: string; firstSteelIp: string; browserUseIp: string | null } | null> {
   try {
     return await runCrossProviderRotationLadder(options);
   } catch (error) {
