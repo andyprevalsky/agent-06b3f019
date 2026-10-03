@@ -208,7 +208,8 @@ def validate_browser_agents_terminated_with_recording(
             continue
         action = str(meta.get("action_type") or "")
         tool_name = str(meta.get("toolName") or "")
-        # task_started / task_complete are shared by every spawn tool (e.g. Claude Code).
+        # Other task tools (spawn_claude_code_agent) emit task_started and
+        # task_complete too, but never record a browser.
         browser_related = tool_name == "spawn_browser_agent" or (
             not tool_name
             and action
@@ -284,13 +285,13 @@ def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
             continue
         role = message.get("role")
         content = str(message.get("text") or "")
-        meta = _message_metadata(message)
-        # The root FE transcript nests sub-agent rows inside their collapsed card
-        # (front-end filterMessagesForSubAgent), so their text is not on the page.
+        metadata = _message_metadata(message)
+        # Sub-agent rows render inside the collapsed sub-agent panel, not the
+        # root transcript a fresh share-link visitor sees.
         if (
             role not in ("USER", "ASSISTANT")
-            or meta.get("hidden")
-            or meta.get("subAgentId") is not None
+            or metadata.get("hidden")
+            or metadata.get("subAgentId")
         ):
             continue
         for line in content.splitlines():

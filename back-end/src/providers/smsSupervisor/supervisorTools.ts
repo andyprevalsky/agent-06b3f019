@@ -404,6 +404,19 @@ function validateStartNewAgent(args: StartNewAgentArgs, pendingWrites: PendingOp
       error: 'goal is required and must be a non-empty string',
     };
   }
+  if (
+    args.start_phase !== undefined &&
+    args.start_phase !== null &&
+    args.start_phase !== 'plan' &&
+    args.start_phase !== 'execute'
+  ) {
+    return {
+      tool: 'start_new_agent',
+      success: false,
+      result: '',
+      error: `start_phase must be 'plan' or 'execute', got ${JSON.stringify(args.start_phase)}`,
+    };
+  }
   if (args.budget_dollars !== undefined) {
     if (!Number.isFinite(args.budget_dollars) || args.budget_dollars <= 0) {
       return {

@@ -411,10 +411,10 @@ fi
 
 if should_run "back-end"; then
   if $AUTO_RCA_MODE; then
-    run_suite "Backend Structural" bash -c "cd back-end && npx tsx src/tests/structural/layer-deps.test.ts"
+    run_suite "Backend Structural" bash -c "cd back-end && npm run test:structural"
     run_suite "Backend Coverage and Blackbox" bash -c "cd back-end && npm run test:coverage"
   else
-    bg_suite "Backend Structural" bash -c "cd back-end && npx tsx src/tests/structural/layer-deps.test.ts"
+    bg_suite "Backend Structural" bash -c "cd back-end && npm run test:structural"
 
     if [ -n "$DOMAIN" ] && [ "$REPO" = "back-end" ]; then
       bg_suite "Backend Blackbox ($DOMAIN)" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh $DOMAIN"

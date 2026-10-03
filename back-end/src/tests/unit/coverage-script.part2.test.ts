@@ -18,6 +18,16 @@ for (const [name, harness] of [
 ] as const) {
   assert.match(
     harness,
+    /TRACE_ARCHIVE_BACKEND='\$\{TRACE_ARCHIVE_BACKEND:-\}' is not a local blackbox backend; forcing local/,
+    `${name} harness must force local archives when Cloud injects TRACE_ARCHIVE_BACKEND=r2`
+  );
+  assert.doesNotMatch(
+    harness,
+    /TRACE_ARCHIVE_BACKEND="\$\{TRACE_ARCHIVE_BACKEND:-local\}"/,
+    `${name} harness must not keep an injected R2 backend via \${TRACE_ARCHIVE_BACKEND:-local}`
+  );
+  assert.match(
+    harness,
     /BACKEND_CODEX_TOKEN_SYNC_SKIP/,
     `${name} harness must support preserving pre-seeded Codex credentials`
   );
@@ -36,18 +46,18 @@ for (const [name, harness] of [
     /SEEDED_CODEX_COUNT=.*Integration.*gpt_code/s,
     `${name} harness must preserve a connected isolated gpt_code credential when local auth is incompatible`
   );
-}
 
-// Blackbox suites write and assert local archive artifacts. Cloud VMs inject the prod
-// TRACE_ARCHIVE_BACKEND=r2, which `${TRACE_ARCHIVE_BACKEND:-local}` would hand to the isolated backend.
-for (const [name, harness] of [
-  ['coverage', coverageScript],
-  ['blackbox', blackboxScript],
-] as const) {
+  const prepSql = /<<'SQL'\n([\s\S]*?)\nSQL\n/.exec(harness)?.[1] ?? '';
+  const scrub =
+    /DELETE FROM "Integration"\s+WHERE "userId" = '00000000-0000-0000-0000-000000000000'\s+AND name IN \('gpt_api_key_cooldown', 'anthropic_api_key_cooldown'\);/;
   assert.match(
-    harness,
-    /export TRACE_ARCHIVE_BACKEND="\$\{BLACKBOX_TRACE_ARCHIVE_BACKEND:-local\}"/,
-    `${name} harness must not inherit an injected archive backend`
+    prepSql,
+    scrub,
+    `${name} harness must clear funded-key cooldowns a local stack persisted in the shared test database`
+  );
+  assert.ok(
+    harness.indexOf(prepSql) < harness.indexOf('Syncing Prisma schema to local test database'),
+    `${name} harness must clear funded-key cooldowns before any test starts`
   );
 }
 

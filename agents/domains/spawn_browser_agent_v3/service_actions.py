@@ -14,6 +14,7 @@ import json
 import re
 import socket
 import time as time_module
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from io import BytesIO
@@ -38,7 +39,7 @@ from domains.spawn_browser_agent_v3.service_crypto import (
     has_payment_card_secret_refs,
 )
 from utils.error_utils import extract_error_message
-from utils.purchase_approval import validate_product_url_for_pages
+from utils.purchase_approval import validate_image_url_for_page, validate_product_url_for_pages
 
 if TYPE_CHECKING:
     from browser_tools.dom_service import ActionHistory, DOMService
@@ -491,6 +492,7 @@ _BROWSER_PROVIDER_DOMAIN_SUFFIXES = (
     "onkernel.com",
     "kernel.sh",
     "steel.dev",
+    "browser-use.com",
     "browserbase.com",
     "hyperbrowser.ai",
 )
@@ -860,6 +862,21 @@ def _is_redundant_payment_approval_wait(thinking: Any, params: Any) -> bool:
     return any(marker in haystack for marker in _PAYMENT_APPROVAL_WAIT_MARKERS)
 
 
+async def _receipt_image_url_errors(
+    context: _ActionContext, payment_request: RequestPaymentCardBrowserTool
+) -> List[str]:
+    if not any(item.image_url for item in payment_request.line_items):
+        return []
+    page_image_urls = await context.dom_service.get_page_image_urls()
+    errors: List[str] = []
+    for item_index, item in enumerate(payment_request.line_items):
+        try:
+            validate_image_url_for_page(item.image_url, page_image_urls, context.current_url)
+        except ValueError as error:
+            errors.append(f"line_items[{item_index}].image_url {item.image_url}: {error}")
+    return errors
+
+
 async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[str, Any]:
     if has_payment_card_secret_refs(context.secret_refs):
         return {
@@ -887,6 +904,12 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
                 "for a rating that is not shown."
             )
         return {"success": False, "error": f"request_payment_card receipt is incomplete: {error}.{hint}"}
+    image_errors = await _receipt_image_url_errors(context, payment_request)
+    if image_errors:
+        return {
+            "success": False,
+            "error": f"request_payment_card receipt is incomplete: {'; '.join(image_errors)}.",
+        }
     return {
         "status": "awaiting_payment_card_approval",
         "payment_request": context.params,
@@ -1686,7 +1709,15 @@ async def execute_action(
         if index is not None:
             element = dom_service.selector_map.get(index)
             if not element:
-                return {"success": False, "error": f"Element with index {index} not found"}
+                # Payment inputs inside open shadow roots can be visible in the
+                # browser state without a selector-map entry. Let the approved
+                # card-ref path locate the field semantically across roots and
+                # frames instead of rejecting its stale index up front.
+                payment_ref = params.get("text") if action_name == "input_text" else None
+                if payment_ref in PAYMENT_CARD_SECRET_REFS and has_payment_card_secret_refs(secret_refs):
+                    index = None
+                else:
+                    return {"success": False, "error": f"Element with index {index} not found"}
 
         context = _ActionContext(
             dom_service=dom_service,
@@ -3072,6 +3103,70 @@ def _evaluate_element_text_write_lock(
     return None
 
 
+_ARM_CLICK_RECEIPT_JS = """
+({ token, x, y }) => {
+    const hit = document.elementFromPoint(x, y);
+    // Click events inside a child document do not bubble into this document.
+    if (hit?.tagName === 'IFRAME') return false;
+    const target = hit?.closest('button, [role="button"], a, input, select, textarea') || hit;
+    if (!target) return false;
+    const receipts = window.__roseBrowserClickReceipts ||= {};
+    const receipt = { seen: false, listener: null };
+    receipt.listener = (event) => {
+        if (event.target === target || target.contains(event.target)) {
+            receipt.seen = true;
+        }
+    };
+    receipts[token] = receipt;
+    document.addEventListener('click', receipt.listener, true);
+    return true;
+}
+"""
+
+_READ_CLICK_RECEIPT_JS = """
+(token) => {
+    const receipts = window.__roseBrowserClickReceipts;
+    const receipt = receipts?.[token];
+    if (!receipt) return null; // A navigation may have replaced the document.
+    document.removeEventListener('click', receipt.listener, true);
+    delete receipts[token];
+    return receipt.seen;
+}
+"""
+
+
+async def _arm_click_receipt(session: Any, coords: Dict[str, int]) -> Optional[tuple[Any, str]]:
+    """Observe DOM delivery on the authoritative browser-use page, not the input transport."""
+    get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
+    if not callable(get_page):
+        return None
+    try:
+        page = await _maybe_await(get_page())
+        if page is None:
+            return None
+        token = uuid.uuid4().hex
+        armed = await page.evaluate(
+            _ARM_CLICK_RECEIPT_JS, {"token": token, "x": int(coords["x"]), "y": int(coords["y"])}
+        )
+        return (page, token) if armed is True else None
+    except Exception as error:
+        logger.debug("Unable to arm browser click receipt", error=str(error))
+        return None
+
+
+async def _read_click_receipt(receipt: Optional[tuple[Any, str]]) -> Optional[bool]:
+    if receipt is None:
+        return None
+    page, token = receipt
+    try:
+        delivered = await page.evaluate(_READ_CLICK_RECEIPT_JS, token)
+        return delivered if isinstance(delivered, bool) else None
+    except Exception as error:
+        # A navigation can destroy the old document immediately after a valid click.
+        logger.debug("Browser click receipt unavailable after navigation", error=str(error))
+        return None
+
+
 async def _execute_click(
     *,
     session: Any,
@@ -3120,7 +3215,24 @@ async def _execute_click(
         asyncio.create_task(session.highlight_interaction_element(element))
 
         if humanizer and element_coords:
+            receipt = await _arm_click_receipt(session, element_coords)
             await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
+            if await _read_click_receipt(receipt) is False:
+                logger.warning(
+                    "Humanized click did not reach target DOM control; retrying through browser session",
+                    index=index,
+                    coordinates=element_coords,
+                    url=current_url[:120],
+                )
+                retry_receipt = await _arm_click_receipt(session, element_coords)
+                event = session.event_bus.dispatch(ClickElementEvent(node=element))
+                await event
+                await event.event_result(raise_if_any=True, raise_if_none=False)
+                if await _read_click_receipt(retry_receipt) is False:
+                    return {
+                        "success": False,
+                        "error": "Click did not reach the target control; refresh browser state and try again",
+                    }
         else:
             if humanizer:
                 logger.error(
@@ -4019,8 +4131,13 @@ async def _execute_screenshot(
 
     saved_path = None
     if config:
+        upload_name = (
+            f"screenshot-{uuid.uuid4().hex}.png"
+            if screenshot_result.get("provider") == "browser-use"
+            else "screenshot.png"
+        )
         upload_result = await upload_file_to_session(
-            config, session_id, "screenshot.png", screenshot_bytes, "image/png"
+            config, session_id, upload_name, screenshot_bytes, "image/png"
         )
         if upload_result:
             saved_path = upload_result.get("path", "/tmp/screenshot.png")

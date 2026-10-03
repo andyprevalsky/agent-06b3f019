@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import os
@@ -40,7 +41,10 @@ def _history_paths(history_file: Optional[str] = None) -> List[str]:
     configured = history_file or os.environ.get("SPAN_HISTORY_FILE")
     if configured:
         return [configured]
-    segments = sorted(glob(os.path.join(HISTORY_DIR, "span_durations.*.jsonl")))
+    segments = sorted(
+        glob(os.path.join(HISTORY_DIR, "span_durations.*.jsonl")),
+        key=lambda path: re.sub(r"(\.\d{8})\.jsonl$", r"\1.01.jsonl", path),
+    )
     return [HISTORY_FILE, *segments]
 
 
@@ -59,14 +63,19 @@ def _writer_key() -> str:
     return re.sub(r"[^a-z0-9]+", "-", branch.lower()).strip("-")[:64]
 
 
-def _append_history_path(history_file: Optional[str] = None) -> str:
+def _append_history_path(history_file: Optional[str] = None, required_bytes: int = 0) -> str:
     configured = history_file or os.environ.get("SPAN_HISTORY_FILE")
     if configured:
         return configured
-    try:
-        if not os.path.exists(HISTORY_FILE) or os.path.getsize(HISTORY_FILE) < MAX_HISTORY_FILE_BYTES:
-            return HISTORY_FILE
-    except OSError:
+
+    def has_room(candidate: str) -> bool:
+        try:
+            size = os.path.getsize(candidate)
+        except OSError:
+            return True
+        return size == 0 or (size < MAX_HISTORY_FILE_BYTES and size + required_bytes <= MAX_HISTORY_FILE_BYTES)
+
+    if not glob(os.path.join(HISTORY_DIR, "span_durations.*.jsonl")) and has_room(HISTORY_FILE):
         return HISTORY_FILE
 
     # Segments are union-merged, so two branches appending to one shared name each
@@ -75,13 +84,15 @@ def _append_history_path(history_file: Optional[str] = None) -> str:
     prefix = f"span_durations.{datetime.now(timezone.utc).strftime('%Y%m%d')}"
     if writer:
         prefix = f"{prefix}.{writer}"
+    latest_part = 1
     for part in range(1, 100):
         suffix = "" if part == 1 else f".{part:02d}"
+        if os.path.exists(os.path.join(HISTORY_DIR, f"{prefix}{suffix}.jsonl")):
+            latest_part = part
+    for part in range(latest_part, 100):
+        suffix = "" if part == 1 else f".{part:02d}"
         candidate = os.path.join(HISTORY_DIR, f"{prefix}{suffix}.jsonl")
-        try:
-            if not os.path.exists(candidate) or os.path.getsize(candidate) < MAX_HISTORY_FILE_BYTES:
-                return candidate
-        except OSError:
+        if has_room(candidate):
             return candidate
     # More than 99 full 90 MiB segments in one day is not credible, but retaining
     # a deterministic final target keeps benchmark recording best-effort.
@@ -92,7 +103,7 @@ def _clean_record(record: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in record.items() if v not in (None, "")}
 
 
-def record_span_observations(
+def _record_span_observations_unlocked(
     observations: Iterable[Dict[str, Any]],
     *,
     history_file: Optional[str] = None,
@@ -105,20 +116,60 @@ def record_span_observations(
     OSError is swallowed after any successfully written rows.
     """
     path = _append_history_path(history_file)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if parent := os.path.dirname(path):
+        os.makedirs(parent, exist_ok=True)
     written = 0
+    configured = history_file or os.environ.get("SPAN_HISTORY_FILE")
     try:
-        with open(path, "a") as f:
-            for observation in observations:
-                span_key = observation.get("span_key")
-                duration_ms = observation.get("duration_ms")
-                if not span_key or not isinstance(duration_ms, (int, float)) or duration_ms < 0:
-                    continue
-                f.write(json.dumps(_clean_record(dict(observation)), sort_keys=True) + "\n")
-                written += 1
+        current_size = os.path.getsize(path)
+    except OSError:
+        current_size = 0
+    output = None
+    try:
+        for observation in observations:
+            span_key = observation.get("span_key")
+            duration_ms = observation.get("duration_ms")
+            if not span_key or not isinstance(duration_ms, (int, float)) or duration_ms < 0:
+                continue
+            line = json.dumps(_clean_record(dict(observation)), sort_keys=True) + "\n"
+            line_bytes = len(line.encode("utf-8"))
+            if not configured and current_size and current_size + line_bytes > MAX_HISTORY_FILE_BYTES:
+                if output is not None:
+                    output.close()
+                    output = None
+                path = _append_history_path(required_bytes=line_bytes)
+                try:
+                    current_size = os.path.getsize(path)
+                except OSError:
+                    current_size = 0
+            if output is None:
+                output = open(path, "a")
+            output.write(line)
+            current_size += line_bytes
+            written += 1
     except OSError:
         return written
+    finally:
+        if output is not None:
+            output.close()
     return written
+
+
+def record_span_observations(
+    observations: Iterable[Dict[str, Any]],
+    *,
+    history_file: Optional[str] = None,
+) -> int:
+    """Append observations under one file lock so concurrent batches cannot overfill a segment."""
+    lock_path = history_file or os.environ.get("SPAN_HISTORY_FILE") or HISTORY_FILE
+    try:
+        if parent := os.path.dirname(lock_path):
+            os.makedirs(parent, exist_ok=True)
+        with open(lock_path, "a") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            return _record_span_observations_unlocked(observations, history_file=history_file)
+    except OSError:
+        return 0
 
 
 def load_records(
@@ -159,8 +210,21 @@ def load_records(
     return records
 
 
+def _in_recorded_order(records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Order rows by when they were recorded, not by where they sit on disk.
+
+    Segments are union-merged across branches and can hold overflow rows, so
+    file order is not time order. Rows without a timestamp sort first.
+    """
+    return sorted(records, key=lambda record: str(record.get("timestamp") or ""))
+
+
 def summarize_records(records: Sequence[Dict[str, Any]], *, window: int = RECENT_WINDOW) -> Optional[Dict[str, Any]]:
-    durations = [float(r["duration_ms"]) for r in records if isinstance(r.get("duration_ms"), (int, float))]
+    durations = [
+        float(r["duration_ms"])
+        for r in _in_recorded_order(records)
+        if isinstance(r.get("duration_ms"), (int, float))
+    ]
     if not durations:
         return None
     recent = durations[-window:]

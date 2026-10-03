@@ -179,6 +179,28 @@ async function main(): Promise<void> {
     );
     assert.equal(throttledCalls, 2);
 
+    // The sandbox also returns HTTP 200 with a structured rate-limit error. A close_card response
+    // in this shape previously escaped as a successful tool call, then treasury-rails failed even
+    // though the provider would accept the close on the next window.
+    let structuredThrottleCalls = 0;
+    const structuredThrottleRuntime = new AgentCardOrgRuntime(async () => {
+      structuredThrottleCalls += 1;
+      if (structuredThrottleCalls === 1) {
+        return {
+          structuredContent: {
+            status: 'error',
+            message: 'close_card failed: API key rate limit exceeded, please try again later',
+          },
+        };
+      }
+      return { structuredContent: { status: 'CLOSED' } };
+    });
+    assert.deepEqual(
+      await structuredThrottleRuntime.callTool('close_card', { card_id: 'card_1' }),
+      { structuredContent: { status: 'CLOSED' } }
+    );
+    assert.equal(structuredThrottleCalls, 2, 'a structured MCP throttle must be retried');
+
     // A throttle that never clears stays bounded and surfaces as a typed 429 rather than an opaque
     // transport error, so callers can distinguish provider backpressure from a Rose defect.
     let exhaustedCalls = 0;
@@ -271,56 +293,59 @@ async function main(): Promise<void> {
     );
     assert.equal(stuckUnavailableCalls, 3, 'transient-unavailable retries must stay bounded');
 
-    // The org throttle also arrives as an HTTP 200 tools/call result (observed verbatim on a
-    // 150-read burst). Returned as a value, it reached the wallet parser as "no structured wallet"
-    // and failed both concurrent benchmark payment seeders without ever entering the throttle retry.
-    const structuredThrottle = {
+    // AgentCard also reports its upstream API-key throttle as an HTTP-200 tool error (no
+    // retryAfter). On a read that is the same backpressure as a transport 429 and must ride the
+    // same bounded retry instead of being handed to the caller as a successful result.
+    const apiKeyThrottle = {
+      isError: true,
       content: [
         {
           type: 'text',
-          text: 'get_company_wallet failed: API key rate limit exceeded, please try again later',
+          text: 'get_cardholder_kyc_status failed: API key rate limit exceeded, please try again later',
         },
       ],
-      structuredContent: {
-        message: 'get_company_wallet failed: API key rate limit exceeded, please try again later',
-        status: 'error',
-      },
     };
-    let structuredThrottledCalls = 0;
-    const throttledThenOkRuntime = new AgentCardOrgRuntime(async () => {
-      structuredThrottledCalls += 1;
-      if (structuredThrottledCalls === 1) return structuredThrottle;
-      return {
-        structuredContent: {
-          wallet: { livemode: false, balance_cents: 100, committed_cents: 0, available_cents: 100 },
-        },
-      };
+    let toolThrottledCalls = 0;
+    const toolThrottledRuntime = new AgentCardOrgRuntime(async () => {
+      toolThrottledCalls += 1;
+      return toolThrottledCalls === 1
+        ? apiKeyThrottle
+        : { structuredContent: { kyc_status: 'verified' } };
     });
-    assert.deepEqual(await throttledThenOkRuntime.callTool('get_company_wallet', {}), {
-      structuredContent: {
-        wallet: { livemode: false, balance_cents: 100, committed_cents: 0, available_cents: 100 },
-      },
-    });
-    assert.equal(
-      structuredThrottledCalls,
-      2,
-      'a structured MCP throttle must be retried, not returned'
+    assert.deepEqual(
+      await toolThrottledRuntime.callTool('get_cardholder_kyc_status', { cardholder_id: 'ch-1' }),
+      { structuredContent: { kyc_status: 'verified' } }
     );
+    assert.equal(toolThrottledCalls, 2, 'a tool-level throttle on a read must be retried');
 
-    let stuckStructuredThrottledCalls = 0;
-    const stuckStructuredThrottledRuntime = new AgentCardOrgRuntime(async () => {
-      stuckStructuredThrottledCalls += 1;
-      return structuredThrottle;
+    let stuckToolThrottleCalls = 0;
+    const stuckToolThrottleRuntime = new AgentCardOrgRuntime(async () => {
+      stuckToolThrottleCalls += 1;
+      return apiKeyThrottle;
     });
     await assert.rejects(
-      () => stuckStructuredThrottledRuntime.callTool('get_company_wallet', {}),
+      () =>
+        stuckToolThrottleRuntime.callTool('get_cardholder_kyc_status', { cardholder_id: 'ch-1' }),
       (error: unknown) =>
         error instanceof AgentCardOrgRuntimeError &&
         error.status === 429 &&
         error.code === 'agentcard_org_mcp_rate_limited' &&
         /API key rate limit exceeded/.test(error.message)
     );
-    assert.equal(stuckStructuredThrottledCalls, 3, 'structured throttle retries must stay bounded');
+    assert.equal(stuckToolThrottleCalls, 3, 'tool-level throttle retries must stay bounded');
+
+    // A tool-level throttle can arrive after a multi-step mutation already changed provider state,
+    // so a mutation's result is handed back untouched for its caller to interpret.
+    let mutationThrottleCalls = 0;
+    const mutationThrottleRuntime = new AgentCardOrgRuntime(async () => {
+      mutationThrottleCalls += 1;
+      return apiKeyThrottle;
+    });
+    assert.deepEqual(
+      await mutationThrottleRuntime.callTool('recover_funds', { cardholder_id: 'ch-1' }),
+      apiKeyThrottle
+    );
+    assert.equal(mutationThrottleCalls, 1, 'a throttled mutation must never be replayed');
 
     // AbortSignal.timeout on tools/call throws "The operation was aborted due to timeout" before
     // any HTTP/RPC body exists. Under coverage concurrency that mid-poll stall used to escape as a

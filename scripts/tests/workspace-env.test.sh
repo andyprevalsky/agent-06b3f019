@@ -525,4 +525,8 @@ run_venv_preflight "$asdf_root/asdf-python" || { echo "FAIL: run.sh venv preflig
 expect_eq "$(sort -u "$asdf_root/base-calls")" "$asdf_root/asdf-python/bin/python3" \
   "a working asdf lookup selects its python"
 
+# cloud-init.sh's injected-secret -> .env sync has no /deploy gate of its own;
+# this already-gated environment suite runs it so a regression fails Step 4s.
+bash "$ROOT_DIR/scripts/tests/cloud-init-env.test.sh"
+
 echo "All workspace env tests passed."

@@ -15,6 +15,7 @@ interface StatusOverlayProps {
   onResume: () => void;
   buttonLabel?: string;
   loadingLabel?: string;
+  compact?: boolean;
 }
 
 export function StatusOverlay({
@@ -22,9 +23,17 @@ export function StatusOverlay({
   onResume,
   buttonLabel = 'Take Control',
   loadingLabel = 'Loading...',
+  compact = false,
 }: StatusOverlayProps) {
   return (
-    <div className="absolute inset-0 backdrop-blur-md flex items-center justify-center">
+    <div
+      className={cn(
+        'absolute flex items-center justify-center',
+        compact
+          ? 'bottom-3 left-1/2 -translate-x-1/2'
+          : 'inset-0 backdrop-blur-md',
+      )}
+    >
       <button
         onClick={onResume}
         disabled={isResuming}

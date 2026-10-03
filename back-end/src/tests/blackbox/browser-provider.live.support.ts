@@ -1,12 +1,13 @@
 #!/usr/bin/env tsx
 
-/** Live Kernel/Steel provider parity + rotate_ip ladder (split for max-lines). */
+/** Live Kernel/Steel/Browser Use provider parity + rotate_ip ladder (split for max-lines). */
 
 import { randomUUID } from 'node:crypto';
 import Kernel from '@onkernel/sdk';
 import jwt from 'jsonwebtoken';
 import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
+import { browserUseEnabled } from '../../providers/browser/config';
 import { retryWithBackoff } from '../../providers/retry';
 import {
   releaseSteelRemoteSession,
@@ -56,9 +57,11 @@ export async function runLiveProviderParity(): Promise<void> {
   const apiKey = process.env.BACKEND_API_KEY?.trim();
   const kernelApiKey = process.env.KERNEL_API_KEY?.trim();
   const steelApiKey = process.env.STEEL_API_KEY?.trim();
-  if (!apiKey || !kernelApiKey || !steelApiKey) {
+  const browserUseApiKey = process.env.BROWSER_USE_API_KEY?.trim() ?? '';
+  const browserUseAvailable = browserUseEnabled();
+  if (!apiKey || !kernelApiKey || !steelApiKey || (browserUseAvailable && !browserUseApiKey)) {
     throw new Error(
-      'BACKEND_API_KEY, KERNEL_API_KEY, and STEEL_API_KEY are required for live provider parity'
+      'BACKEND_API_KEY, KERNEL_API_KEY, STEEL_API_KEY, and (when enabled) BROWSER_USE_API_KEY are required for live provider parity'
     );
   }
 
@@ -320,7 +323,10 @@ export async function runLiveProviderParity(): Promise<void> {
     liveSessionId = String(mobileRotated.session_id);
     const mobileRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
     const mobileProxyId = mobileRemote.proxy_id;
-    assert(Boolean(mobileProxyId), 'mobile rotation did not retain its managed proxy ID');
+    assert(
+      mobileProxyId !== undefined && mobileProxyId !== proxyId,
+      'mobile rotation did not select a distinct managed proxy tier'
+    );
     const mobileMetadata = mobileRotated.browser_session_metadata ?? {};
     const mobileIp = await readDifferentExitIp(
       String(mobileRotated.ws_url),
@@ -504,9 +510,18 @@ export async function runLiveProviderParity(): Promise<void> {
       mobileIp,
       post,
       readDifferentExitIp,
+      readExitIp,
       retrieveKernelBrowser: (sessionId) =>
         kernel.browsers.retrieve(sessionId, { include_deleted: true }),
       retrieveSteelBrowser: (sessionId) => steel.sessions.retrieve(sessionId),
+      retrieveBrowserUseBrowser: async (sessionId) => {
+        const response = await fetch(`https://api.browser-use.com/api/v4/browsers/${sessionId}`, {
+          headers: { 'X-Browser-Use-API-Key': browserUseApiKey },
+        });
+        assert(response.ok, `Browser Use session retrieve failed: HTTP ${response.status}`);
+        return response.json() as Promise<{ status: string }>;
+      },
+      browserUseAvailable,
       steelControlSessionBoots: steelDefaultSessionBoots,
       allocatedSessionIds,
     });
@@ -514,7 +529,10 @@ export async function runLiveProviderParity(): Promise<void> {
     liveSessionId = crossProvider.finalSessionId;
 
     console.log(
-      `[rotate_ip repro] complete ladder: kernel baseline=${ipBefore} residential=${ipAfter} mobile=${mobileIp}; steel=${crossProvider.firstSteelIp}/${crossProvider.secondSteelIp}`
+      `[rotate_ip repro] complete ladder: kernel baseline=${ipBefore} residential=${ipAfter} mobile=${mobileIp}; steel=${crossProvider.firstSteelIp}` +
+        (crossProvider.browserUseIp === null
+          ? '; Browser Use disabled, final provider=Steel'
+          : `; browser-use=${crossProvider.browserUseIp}`)
     );
 
     await post('/close', { session_id: liveSessionId, pause: false });
@@ -533,6 +551,16 @@ export async function runLiveProviderParity(): Promise<void> {
       await post('/close', { session_id: sessionId, pause: false }).catch(() => {});
     }
     if (profileId) await deleteKernelProfile(profileId).catch(() => {});
+    const browserUseProfiles = await prisma.browserProviderProfile.findMany({
+      where: { provider: 'browser-use', context: { userId } },
+      select: { profileId: true },
+    });
+    for (const profile of browserUseProfiles) {
+      await fetch(`https://api.browser-use.com/api/v4/profiles/${profile.profileId}`, {
+        method: 'DELETE',
+        headers: { 'X-Browser-Use-API-Key': browserUseApiKey },
+      }).catch(() => {});
+    }
     await prisma.browserSession.deleteMany({ where: { agentId } });
     await prisma.browserContext.deleteMany({ where: { userId } });
     await prisma.agent.deleteMany({ where: { id: agentId } });

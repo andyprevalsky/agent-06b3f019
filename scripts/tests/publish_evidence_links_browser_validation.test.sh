@@ -20,10 +20,12 @@ assert spec.loader is not None
 spec.loader.exec_module(mod)
 
 # Avoid network probes in unit checks: stub URL/pointer reachability.
-mod._probe_recording_view_url = lambda url, timeout=20.0: url.startswith("https://ok/")
-mod._probe_recording_file_pointer = (
+setattr(mod, "_probe_recording_view_url", lambda url, timeout=20.0: url.startswith("https://ok/"))
+setattr(
+    mod,
+    "_probe_recording_file_pointer",
     lambda agent_id, pointer, timeout=30.0: isinstance(pointer, dict)
-    and pointer.get("id") == "fp-ok"
+    and pointer.get("id") == "fp-ok",
 )
 
 
@@ -73,43 +75,23 @@ assert list_snippets == {
     "assistant": ["Inspect the run before retrying"],
 }, list_snippets
 
-# The root FE transcript nests a sub-agent's stream inside its collapsed card,
-# so those rows are not page text (prod agent 96de1863-fd9d-40cd-9978-348643222007).
-sub_agent_snippets = mod.visible_transcript_snippets(
+# Sub-agent stream rows (browser-use reasoning) render inside the collapsed
+# sub-agent panel, not the root transcript the share link opens.
+nested_snippets = mod.visible_transcript_snippets(
     [
-        {"role": "USER", "text": "Use a browser agent to complete checkout"},
-        {"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [{"id": "c1"}]}},
+        {"role": "USER", "text": "Buy the three named products at checkout"},
         {
             "role": "ASSISTANT",
-            "text": "Let's start by reading the current state of the browser",
-            "metadata": {"streamId": "s1", "subAgentId": "browser-task-1"},
+            "text": "I'm on the checkout page and the cart is ready",
+            "metadata": '{"subAgentId": "6d61c149-db71-5ee1-9f87-5d9dc6f1a1d3"}',
         },
-        {
-            "role": "ASSISTANT",
-            "text": "Checkout finished on the root transcript",
-            "metadata": '{"subAgentId": null}',
-        },
+        {"role": "ASSISTANT", "text": "Order tp_57735378 is confirmed"},
     ]
 )
-assert sub_agent_snippets == {
-    "user": ["Use a browser agent to complete checkout"],
-    "assistant": ["Checkout finished on the root transcript"],
-}, sub_agent_snippets
-
-only_sub_agent_snippets = mod.visible_transcript_snippets(
-    [
-        {"role": "USER", "text": "Use a browser agent to complete checkout"},
-        {
-            "role": "ASSISTANT",
-            "text": "We are on the test checkout page for payment",
-            "metadata": '{"subAgentId": "browser-task-1"}',
-        },
-    ]
-)
-assert only_sub_agent_snippets == {
-    "user": ["Use a browser agent to complete checkout"],
-    "assistant": [],
-}, only_sub_agent_snippets
+assert nested_snippets == {
+    "user": ["Buy the three named products at checkout"],
+    "assistant": ["Order tp_57735378 is confirmed"],
+}, nested_snippets
 
 # No browser tasks → pass
 assert mod.validate_browser_agents_terminated_with_recording(agent, []) == []
@@ -187,29 +169,8 @@ failures = mod.validate_browser_agents_terminated_with_recording(
 )
 assert failures == [], failures
 
-# Dead view URL → fail recording
-mod._probe_recording_view_url = lambda url, timeout=20.0: False
-failures = mod.validate_browser_agents_terminated_with_recording(
-    agent,
-    [
-        msg(
-            task_id="t3",
-            toolName="spawn_browser_agent",
-            action_type="task_complete",
-            toolStatus="ERROR",
-        ),
-        msg(
-            task_id="t3",
-            toolName="spawn_browser_agent",
-            action_type="recording",
-            toolStatus="FINISHED",
-            recording_view_url="https://dead/replay.mp4",
-        ),
-    ],
-)
-assert any("no correctly attached recording" in f for f in failures), failures
-
-# Other tools share the generic task lifecycle actions; a Claude Code task is not a browser
+# A Claude Code task shares task_started/task_complete action types but never
+# records a browser, so it must not be held to the browser recording rule.
 failures = mod.validate_browser_agents_terminated_with_recording(
     agent,
     [
@@ -234,6 +195,35 @@ failures = mod.validate_browser_agents_terminated_with_recording(
     ],
 )
 assert failures == [], failures
+
+# A legacy browser row without toolName still counts as a browser task.
+failures = mod.validate_browser_agents_terminated_with_recording(
+    agent,
+    [msg(task_id="t4", action_type="session_started", toolStatus="IN_PROGRESS")],
+)
+assert any("has not terminated" in f for f in failures), failures
+
+# Dead view URL → fail recording
+setattr(mod, "_probe_recording_view_url", lambda url, timeout=20.0: False)
+failures = mod.validate_browser_agents_terminated_with_recording(
+    agent,
+    [
+        msg(
+            task_id="t3",
+            toolName="spawn_browser_agent",
+            action_type="task_complete",
+            toolStatus="ERROR",
+        ),
+        msg(
+            task_id="t3",
+            toolName="spawn_browser_agent",
+            action_type="recording",
+            toolStatus="FINISHED",
+            recording_view_url="https://dead/replay.mp4",
+        ),
+    ],
+)
+assert any("no correctly attached recording" in f for f in failures), failures
 
 # A lifecycle row without a tool name still counts as browser progress
 failures = mod.validate_browser_agents_terminated_with_recording(

@@ -78,12 +78,16 @@ deterministic repro would require exclusive use of that cardholder.
 
 ## Solution
 
-On timeout, `_wait_for_expected_payment_lifecycle` now appends the last
-snapshot of every ledger it waited on: purchase, wallet funding, AgentCard card,
-and AgentCard transfer. A stuck provider release now reads as
-`agentCard(status='CLOSED', balanceCents=0); orgTransfer(status='consumed', …, releasedCents=0)`
-instead of a bare `HELD` mismatch. This is pinned by the benchmark blackbox case
-`abandonment_timeout_names_provider_rows`, which failed before the change.
+On timeout, `_wait_for_expected_payment_lifecycle` now appends the last state
+of the provider rows it waited on (`_payment_lifecycle_settlement_state`): wallet
+funding status, the AgentCard card's status and balance, and the card's org
+transfer id, card id, status, transferred and released cents. A stuck provider
+release now reads as
+`agentCard={"status": "CLOSED", "balanceCents": 0}, orgTransfer={…, "status": "consumed", …, "releasedCents": 0}`
+instead of a bare `HELD` mismatch. PR #1401 landed the same diagnostic on main
+independently; the merge kept main's function and added the card row. This is
+pinned by the benchmark blackbox case
+`abandonment_timeout_names_unreleased_agentcard_transfer`.
 
 The 420s reconciliation deadline and the task's expected lifecycle are
 unchanged.

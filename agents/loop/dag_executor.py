@@ -1068,7 +1068,11 @@ async def _execute_single_task(
             # Store a reusable context snapshot for same-machine activity pickup.
             # call_llm_activity removes the entry after a successful call, so a
             # locally rejected contract attempt must restore it before retrying.
-            pending_context = (list(context), system_prompt_text, None)
+            # Tag it with this node's replay-stable tool_call_id: a slot left on a
+            # worker by an earlier node, or by this workflow before it migrated
+            # off that worker, must never be adopted as this call's conversation.
+            pending_context_token = f"dag:{tool_call_id}"
+            pending_context = (list(context), system_prompt_text, None, user_id, pending_context_token)
             _pending_llm_context[agent_id] = pending_context
 
             # Keep the exact execute-phase tool schema so every param-populator
@@ -1113,6 +1117,9 @@ async def _execute_single_task(
                 False,
                 True,
                 f"agent:{agent_id}:task:{task.index}:call:dag_param_populator",
+                # Appended last: older replayed histories fall back to the defaults.
+                False,
+                pending_context_token,
             ]
 
             async def track_param_usage(param_usage: Dict[str, Any]) -> None:

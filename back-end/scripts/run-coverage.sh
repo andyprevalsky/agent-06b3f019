@@ -29,6 +29,11 @@ source "$SCRIPT_DIR/local-db-container.sh"
 source "$SCRIPT_DIR/coverage-failure-evidence.sh"
 cd "$BACKEND_DIR"
 
+# This gate starts its own backend and signs its own benchmark-share fixtures.
+# Give both the server and blackbox runner the same local-only signing key when
+# no key was supplied; a production secret is not needed to verify the contract.
+export BENCHMARK_SHARE_SECRET="${BENCHMARK_SHARE_SECRET:-blackbox-local-benchmark-share-secret}"
+
 # Cursor Cloud (and similar) may inject BROWSER_PROVIDER into the process
 # environment. Node dotenv does not override existing vars, so a stale value
 # like "browserbase" wins over back-end/.env ("kernel") and the live
@@ -38,6 +43,17 @@ case "${BROWSER_PROVIDER:-}" in
   *)
     echo "⚠️  BROWSER_PROVIDER='${BROWSER_PROVIDER:-}' is unsupported; forcing kernel for coverage."
     export BROWSER_PROVIDER=kernel
+    ;;
+esac
+
+# Cursor Cloud injects TRACE_ARCHIVE_BACKEND=r2 from prod secrets. Node dotenv
+# does not override it, so agent-trajectories / archive blackboxes write local
+# fixtures in the test process while the backend reads R2 and returns 0 hits.
+case "${TRACE_ARCHIVE_BACKEND:-}" in
+  local|fake-r2) ;;
+  *)
+    echo "⚠️  TRACE_ARCHIVE_BACKEND='${TRACE_ARCHIVE_BACKEND:-}' is not a local blackbox backend; forcing local."
+    export TRACE_ARCHIVE_BACKEND=local
     ;;
 esac
 
@@ -283,10 +299,8 @@ COV_LOG="$BACKEND_DIR/coverage/server.log"
 
 # Keep local blackbox coverage deterministic. back-end/.env points trace
 # archives at R2 for development/prod, but blackbox tests assert local archive
-# artifacts and fake provider boundaries. Cloud VMs also inject
-# TRACE_ARCHIVE_BACKEND=r2 into the environment, so it must not be inherited.
+# artifacts and fake provider boundaries.
 export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
-export TRACE_ARCHIVE_BACKEND="${BLACKBOX_TRACE_ARCHIVE_BACKEND:-local}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
@@ -487,6 +501,14 @@ BEGIN
       FROM "AgentAttentionRequest" attention
       WHERE attention.id = request.id
     );
+  END IF;
+  -- On system Postgres this database is shared with the local stack, whose
+  -- real provider quota failures persist process-global funded-key cooldowns.
+  -- Tests that exercise the funded routes assume no backoff is active.
+  IF to_regclass('"Integration"') IS NOT NULL THEN
+    DELETE FROM "Integration"
+    WHERE "userId" = '00000000-0000-0000-0000-000000000000'
+      AND name IN ('gpt_api_key_cooldown', 'anthropic_api_key_cooldown');
   END IF;
 END $$;
 SQL

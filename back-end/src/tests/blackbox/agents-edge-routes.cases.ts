@@ -63,19 +63,35 @@ test('POST / — with response_schema parameter', async () => {
   const session = await createAnonymousSession('response-schema');
   const schema = {
     fields: [
-      { name: 'result', type: 'str', required: true, description: 'The result string' },
+      {
+        name: 'result',
+        type: 'str',
+        required: true,
+        minLength: 3,
+        maxLength: 80,
+        description: 'The result string',
+      },
       { name: 'confidence', type: 'float', required: false, description: 'Confidence score' },
+      { name: 'optional_count', type: 'int', required: false, description: 'Omittable count' },
+      { name: 'nullable_summary', type: 'str', required: true, nullable: true },
       {
         name: 'rows',
         type: 'list[object]',
         required: true,
+        minItems: 2,
+        maxItems: 2,
         description: 'Rows with label and count',
         properties: [
-          { name: 'label', type: 'str' },
-          { name: 'count', type: 'int' },
+          { name: 'label', type: 'str', minLength: 2, maxLength: 40 },
+          { name: 'count', type: 'int', required: false },
           { name: 'asset', type: 'file_pointer' },
           { name: 'remote_asset', type: 'session_file_pointer' },
-          { name: 'remote_frames', type: 'list[session_file_pointer]' },
+          {
+            name: 'remote_frames',
+            type: 'list[session_file_pointer]',
+            maxItems: 3,
+            nullable: true,
+          },
         ],
       },
       {
@@ -101,8 +117,45 @@ test('POST / — with response_schema parameter', async () => {
   assertStatus(detail.status, 200, detail.data);
   const detailBody = assertSchema(GetAgentResponse, detail.data, 'response_schema detail');
   assert(detailBody.agent.response_schema !== null, 'response_schema should be persisted');
+  const storedFields = (detailBody.agent.response_schema as { fields: Record<string, unknown>[] })
+    .fields;
+  assert(
+    storedFields[0].minLength === 3 &&
+      storedFields[0].maxLength === 80 &&
+      storedFields[2].required === false &&
+      storedFields[3].nullable === true &&
+      storedFields[4].minItems === 2 &&
+      storedFields[4].maxItems === 2 &&
+      (storedFields[4].properties as Record<string, unknown>[])[0].minLength === 2 &&
+      (storedFields[4].properties as Record<string, unknown>[])[1].required === false &&
+      (storedFields[4].properties as Record<string, unknown>[])[4].nullable === true,
+    'response_schema bounds, optional flags, and legacy nullable flags should round-trip through the API'
+  );
 
   await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+test('POST / — rejects invalid output schema bounds', async () => {
+  const session = await createAnonymousSession('response-schema-bounds');
+  const invalidFields = [
+    { name: 'items', type: 'list[str]', required: true, minItems: 3, maxItems: 2 },
+    { name: 'title', type: 'str', required: true, minItems: 1 },
+    { name: 'items', type: 'list[str]', required: true, maxLength: 10 },
+    { name: 'items', type: 'list[str]', required: true, minItems: -1 },
+    {
+      name: 'rows',
+      type: 'list[object]',
+      required: true,
+      properties: [{ name: 'label', type: 'str', minLength: 8, maxLength: 2 }],
+    },
+  ];
+  for (const field of invalidFields) {
+    const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
+      goal: 'Invalid response schema bounds',
+      response_schema: { fields: [field] },
+    });
+    assertStatus(res.status, 400, res.data);
+  }
 });
 
 // ========================= POST / — with max_iterations ====================

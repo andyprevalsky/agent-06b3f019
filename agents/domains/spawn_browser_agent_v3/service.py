@@ -17,6 +17,7 @@ import structlog
 
 from browser_tools.schemas import AVAILABLE_ACTIONS
 from domains.spawn_browser_agent_v3.config import (
+    BROWSER_USE_COST_CENTS_PER_MS,
     BROWSER_USE_PRICING_POOL,
     KERNEL_COST_CENTS_PER_MS,
     STEEL_COST_CENTS_PER_MS,
@@ -464,7 +465,7 @@ async def build_browser_verifier_context(
             preserved_number += 1
             section_title = f"### Preserved page evidence {preserved_number}"
             section_description = (
-                "This snapshot was extracted directly from the browser after a successful evaluate; "
+                "This snapshot was extracted directly from the browser during the run; "
                 "it is browser ground truth, not an agent claim. Prefer it over later pages when those "
                 "pages no longer show the load-bearing facts."
             )
@@ -897,6 +898,7 @@ def build_usage_items(
     usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
     *,
     fast_mode_cache_enabled: bool = False,
+    provider: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Build standardized usage items for cost tracking.
 
@@ -913,9 +915,15 @@ def build_usage_items(
     rows) previously still billed wall-clock cents under the live-LLM check
     alone (verify19 ~4.5¢ Kernel on child d24898d1).
     """
-    browser_provider = os.getenv("BROWSER_PROVIDER", "kernel").strip().lower()
-    service_provider = "Kernel Browser" if browser_provider == "kernel" else "Steel.dev Browser"
-    cost_per_ms = KERNEL_COST_CENTS_PER_MS if browser_provider == "kernel" else STEEL_COST_CENTS_PER_MS
+    browser_provider = (provider or os.getenv("BROWSER_PROVIDER", "kernel")).strip().lower()
+    if browser_provider == "kernel":
+        service_provider, cost_per_ms = "Kernel Browser", KERNEL_COST_CENTS_PER_MS
+    elif browser_provider == "steel":
+        service_provider, cost_per_ms = "Steel.dev Browser", STEEL_COST_CENTS_PER_MS
+    elif browser_provider == "browser-use":
+        service_provider, cost_per_ms = "Browser Use Browser", BROWSER_USE_COST_CENTS_PER_MS
+    else:
+        raise ValueError(f"Unsupported browser provider for usage: {browser_provider}")
     llm_items = build_browser_llm_usage_items(
         total_input_tokens,
         total_output_tokens,
