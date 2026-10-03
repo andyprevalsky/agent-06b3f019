@@ -13479,9 +13479,6 @@ def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
 async def test_execute_click_preserves_submit_target_after_rerender():
     from browser_tools.dom_service import ActionHistory
     from domains.spawn_browser_agent_v3.service_actions import _execute_click
-    from domains.spawn_browser_agent_v3.visible_result_completion import (
-        should_force_visible_result_completion,
-    )
 
     element = SimpleNamespace(
         tag_name="button",
@@ -13519,16 +13516,9 @@ async def test_execute_click_preserves_submit_target_after_rerender():
     assert history.get_entries()[0]["element_description"] == (
         '<button "Submit (Protected by Invisible"'
     )
-    assert should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning='Risk Score: 0.07; Bot detected - form blocked.',
-        action_entries=history.get_entries(),
-    )
-    assert not should_force_visible_result_completion(
-        action_name="scroll",
-        last_reasoning='Risk Score: 0.07; Bot detected - form blocked.',
-        action_entries=[{**history.get_entries()[0], "element_description": '<button "Checkbox">'}],
-    )
+    # The forced visible-result completion rewrite that used to consume this
+    # description was removed with the other benchmark-specific outcome
+    # rewrites; the description itself is the contract under test here.
 
 async def test_execute_click_with_element_humanizer():
     from domains.spawn_browser_agent_v3.service_actions import _execute_click
