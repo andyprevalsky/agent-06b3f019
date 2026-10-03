@@ -40,6 +40,17 @@ case "${BROWSER_PROVIDER:-}" in
     ;;
 esac
 
+# Cursor Cloud injects TRACE_ARCHIVE_BACKEND=r2 from prod secrets. Node dotenv
+# does not override it, so agent-trajectories / archive blackboxes write local
+# fixtures in the test process while the backend reads R2 and returns 0 hits.
+case "${TRACE_ARCHIVE_BACKEND:-}" in
+  local|fake-r2) ;;
+  *)
+    echo "⚠️  TRACE_ARCHIVE_BACKEND='${TRACE_ARCHIVE_BACKEND:-}' is not a local blackbox backend; forcing local."
+    export TRACE_ARCHIVE_BACKEND=local
+    ;;
+esac
+
 # Read the effective value of KEY from back-end/.env using dotenv last-in-wins
 # semantics (quoted values keep '#'; unquoted values drop inline comments).
 dotenv_effective_value() {
@@ -284,7 +295,6 @@ COV_LOG="$BACKEND_DIR/coverage/server.log"
 # archives at R2 for development/prod, but blackbox tests assert local archive
 # artifacts and fake provider boundaries.
 export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
-export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"

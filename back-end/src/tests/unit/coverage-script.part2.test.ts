@@ -18,6 +18,16 @@ for (const [name, harness] of [
 ] as const) {
   assert.match(
     harness,
+    /TRACE_ARCHIVE_BACKEND='\$\{TRACE_ARCHIVE_BACKEND:-\}' is not a local blackbox backend; forcing local/,
+    `${name} harness must force local archives when Cloud injects TRACE_ARCHIVE_BACKEND=r2`
+  );
+  assert.doesNotMatch(
+    harness,
+    /TRACE_ARCHIVE_BACKEND="\$\{TRACE_ARCHIVE_BACKEND:-local\}"/,
+    `${name} harness must not keep an injected R2 backend via \${TRACE_ARCHIVE_BACKEND:-local}`
+  );
+  assert.match(
+    harness,
     /BACKEND_CODEX_TOKEN_SYNC_SKIP/,
     `${name} harness must support preserving pre-seeded Codex credentials`
   );
