@@ -326,8 +326,9 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
     # Count tracks the -k filter above. I-03/I-04 token+fetch-ref cases,
     # controller-token/private-repo auth, bounded dependency-refresh ownership,
-    # and isolated-backend queue alignment keep this at 18 focused cases.
-    assert "18 passed" in result.stdout
+    # isolated-backend queue alignment, and the SIGPIPE-safe target-mode parse
+    # keep this at 19 focused cases.
+    assert "19 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
