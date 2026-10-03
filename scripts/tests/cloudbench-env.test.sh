@@ -2035,26 +2035,17 @@ require_text "$HELPER_SRC" \
   'raise SystemExit(3)' \
   "TCP listener probe must use exit 3 for unexpected probe failures"
 (
-  # Behavioral: free port → exit 1; occupied → 0; bad arg → 2.
-  free_port=19731
-  while cloudbench_tcp_listener_present "$free_port"; do
-    free_port=$((free_port + 1))
-  done
-  rc=0
-  cloudbench_tcp_listener_present "$free_port" || rc=$?
-  [ "$rc" -eq 1 ] || fail "free port probe must exit 1 (got $rc)"
+  # Behavioral: occupied → 0; free port → 1; bad arg → 2.
   rc=0
   cloudbench_tcp_listener_present not-a-port || rc=$?
   [ "$rc" -eq 2 ] || fail "bad port arg must exit 2 (got $rc)"
-  # Keep the listener alive until the parent finishes probing it. A short
-  # sleep races with slow probes when coverage suites share the host.
-  listener_ready="$TMP_ROOT/tcp-listener-ready"
-  python3 - "$free_port" "$listener_ready" <<'PY' &
-import socket, sys, threading, time
-port = int(sys.argv[1])
+  # Let the OS assign a port and retain the listener until the probe completes.
+  listener_port_file="$TMP_ROOT/tcp-listener-port"
+  python3 - "$listener_port_file" <<'PY' &
+import pathlib, socket, sys, threading, time
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", port))
+s.bind(("127.0.0.1", 0))
 s.listen(1)
 
 # Each probe opens a connection. Consume it so readiness does not fill the
@@ -2068,22 +2059,25 @@ def accept_connections():
         connection.close()
 
 threading.Thread(target=accept_connections, daemon=True).start()
-open(sys.argv[2], "w").close()
+pathlib.Path(sys.argv[1]).write_text(str(s.getsockname()[1]))
 while True:
     time.sleep(1)
-s.close()
 PY
   listener_pid=$!
-  trap 'kill "$listener_pid" 2>/dev/null || true' RETURN
+  trap 'kill "$listener_pid" 2>/dev/null || true' EXIT
   for _ in $(seq 1 100); do
-    [ -f "$listener_ready" ] && break
+    [ -s "$listener_port_file" ] && break
     sleep 0.05
   done
-  [ -f "$listener_ready" ] || fail "occupied port listener did not become ready"
+  [ -s "$listener_port_file" ] || fail "occupied port listener did not become ready"
+  free_port="$(cat "$listener_port_file")"
   cloudbench_tcp_listener_present "$free_port" \
     || fail "occupied port probe must exit 0"
   kill "$listener_pid" 2>/dev/null || true
   wait "$listener_pid" 2>/dev/null || true
+  rc=0
+  cloudbench_tcp_listener_present "$free_port" || rc=$?
+  [ "$rc" -eq 1 ] || fail "free port probe must exit 1 (got $rc)"
 
   # `if probe; then` must not swallow exit 1: a free preferred port is allocatable.
   selected="$(cloudbench_select_central_hub_port "$free_port" "/tmp/no-such-hub-root")"

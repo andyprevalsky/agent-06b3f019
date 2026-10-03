@@ -79,12 +79,11 @@ export async function cleanupBenchmarkKernelProfiles(): Promise<void> {
  * credential injection.
  */
 export async function resetKernelSessionTabs(browser: Browser): Promise<number> {
-  const contexts = browser.contexts();
-  const primaryContext = contexts[0];
+  const primaryContext = browser.contexts()[0];
   if (primaryContext === undefined) {
     throw new KernelSessionValidationError('Kernel browser has no context after CDP validation');
   }
-  const pages = contexts.flatMap((context) => context.pages());
+  const pages = browser.contexts().flatMap((context) => context.pages());
   await primaryContext.newPage();
   await Promise.all(pages.map((page) => page.close({ runBeforeUnload: false })));
   return pages.length;
@@ -494,12 +493,7 @@ export async function closeKernelSession(
   if (releaseError !== null) throw releaseError;
 }
 
-/**
- * Recreate a Kernel browser session on the SAME persistent profile (cookies/login
- * survive), re-navigating to the last URL. Shared by resume (paused → active) and
- * rotate_ip (swap the egress IP mid-run). `forceManagedProxyType` pins the new
- * session to a residential/mobile tier; `proxyTier` records that on the row.
- */
+/** Recreate on the persisted Kernel proxy choice and provider-scoped profile. */
 async function recreateKernelSession(
   taskId: string,
   opts: { forceManagedProxyType?: KernelProxyType; proxyTier?: string } = {}
@@ -534,7 +528,11 @@ async function recreateKernelSession(
         oldSession.proxyTier,
         opts.forceManagedProxyType
       ),
-      boundProfile: recordedProviderProfileBinding(oldSession),
+      // Provider profile IDs are scoped to their remote provider. A Browser
+      // Use session returning to Kernel after the rollout switch is disabled
+      // must use its Kernel profile, never the Browser Use profile ID.
+      boundProfile:
+        oldSession.provider === 'kernel' ? recordedProviderProfileBinding(oldSession) : undefined,
     }
   );
   await remote.validationBrowser.close().catch(() => {});
@@ -568,7 +566,11 @@ async function recreateKernelSession(
   // Evict the superseded Kernel browser so we never leak a paid session. On the
   // resume path the old browser was already deleted at pause time (delete
   // tolerates 404); on the rotate path it is still live and must be reaped.
-  if (previousSessionId !== '' && previousSessionId !== remote.sessionId) {
+  if (
+    oldSession.provider === 'kernel' &&
+    previousSessionId !== '' &&
+    previousSessionId !== remote.sessionId
+  ) {
     await releaseKernelRemoteSession(previousSessionId).catch((error) => {
       log.warn('Failed to evict superseded Kernel session after recreate', {
         previousSessionId,

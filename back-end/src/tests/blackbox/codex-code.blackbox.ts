@@ -39,6 +39,7 @@ import {
   testDetectCreditExhaustion_observedOpenAiWording,
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
+import { waitForCodexOutput } from './codex-ws-output.support';
 import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
 import { waitForCodexOutput } from './codex-smoke-output.support';
 config();

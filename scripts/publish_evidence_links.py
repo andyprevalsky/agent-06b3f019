@@ -343,7 +343,7 @@ def validate_browser_agents_terminated_with_recording(
         explicit_browser = tool_name == "spawn_browser_agent" or meta.get("agentType") == "browser" or action in {
             "browser", "recording", "network_recording",
         }
-        browser_related = explicit_browser or action in {
+        browser_related = explicit_browser or (not tool_name and action in {
             "browser",
             "session_init",
             "session_started",
@@ -351,7 +351,7 @@ def validate_browser_agents_terminated_with_recording(
             "recording",
             "network_recording",
             "task_complete",
-        }
+        })
         if not browser_related and not code_related:
             continue
         state = tasks.setdefault(

@@ -52,6 +52,206 @@ def test_generated_agent_title_normalization():
     assert _normalize_generated_agent_title("x" * 100) == "x" * 80
 
 
+def test_generated_response_schema_preserves_constraints():
+    from helpers.llm import _GeneratedResponseSchema, _schema_from_generated_model
+
+    generated = _GeneratedResponseSchema.model_validate({
+        "reasoning": "Two entries and an optional note.",
+        "fields": [
+            {
+                "name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
+                "properties": [
+                    {"name": "label", "type": "str", "minLength": 3, "maxLength": 30},
+                    {"name": "note", "type": "str", "required": False},
+                ],
+            },
+        ],
+    })
+    field = _schema_from_generated_model(generated)["fields"][0]
+    assert field["minItems"] == field["maxItems"] == 2
+    assert field["properties"][0]["minLength"] == 3
+    assert field["properties"][0]["maxLength"] == 30
+    assert field["properties"][1]["required"] is False
+
+
+def test_optional_output_keys_can_be_omitted_but_present_values_are_typed():
+    from pydantic import ValidationError
+    from helpers.llm import (
+        _GeneratedResponseSchema, _schema_from_generated_model,
+        _build_verifier_json_schema, _build_verifier_response_model,
+        _structured_response_satisfies_schema,
+    )
+    from providers.rose.schema import build_openai_response_format
+    from utils.prompts import build_verifier_prompt
+
+    generated = _GeneratedResponseSchema.model_validate({
+        "reasoning": "A count and optional extra details.",
+        "fields": [
+            {"name": "total", "type": "int", "required": True},
+            {"name": "estimate", "type": "int", "required": False},
+            {"name": "rows", "type": "list[object]", "required": False,
+             "properties": [
+                 {"name": "name", "type": "str", "required": True},
+                 {"name": "rank", "type": "int", "required": False},
+             ]},
+        ],
+    })
+    schema = _schema_from_generated_model(generated)
+    assert schema["fields"][1]["required"] is False
+    assert schema["fields"][2]["properties"][1]["required"] is False
+    json_envelope = _build_verifier_json_schema(schema)["json_schema"]
+    output = json_envelope["schema"]["properties"]["output"]
+    assert output["required"] == ["total"]
+    assert output["properties"]["estimate"]["type"] == "integer"
+    assert output["properties"]["rows"]["items"]["required"] == ["name"]
+    assert json_envelope["strict"] is False
+    prompt = build_verifier_prompt(schema)
+    assert "including 1 required field(s)" in prompt
+    assert "estimate (int, optional)" in prompt
+
+    model = _build_verifier_response_model(schema)
+    assert build_openai_response_format(model)["json_schema"]["strict"] is False
+    valid = {"output": {"total": 2}, "reasoning": "Grounded", "score": 1}
+    assert model.model_validate(valid).model_dump(exclude_unset=True)["output"] == {"total": 2}
+    assert _structured_response_satisfies_schema({"total": 2}, schema)
+    assert _structured_response_satisfies_schema({"total": 2, "rows": [{"name": "A"}]}, schema)
+    for invalid in (
+        {"total": 2, "estimate": None},
+        {"total": 2, "estimate": "two"},
+        {"total": 2, "rows": [{"name": "A", "rank": None}]},
+    ):
+        assert not _structured_response_satisfies_schema(invalid, schema)
+    for invalid in (
+        {**valid, "output": {"total": 2, "estimate": None}},
+        {**valid, "output": {"total": 2, "rows": [{"name": "A", "rank": None}]}},
+    ):
+        try:
+            model.model_validate(invalid)
+            raise AssertionError("optional field present as null should be invalid")
+        except ValidationError:
+            pass
+    try:
+        _GeneratedResponseSchema.model_validate({
+            "reasoning": "No required output", "fields": [{"name": "estimate", "type": "int", "required": False}],
+        })
+        raise AssertionError("generated schema must retain one required signal")
+    except ValidationError:
+        pass
+
+
+def test_verifier_enforces_size_bounds_and_nullable_nested_fields():
+    from pydantic import ValidationError
+    from helpers.llm import _build_verifier_json_schema, _build_verifier_response_model
+
+    schema = {"fields": [
+        {
+            "name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
+            "properties": [
+                {"name": "label", "type": "str", "minLength": 3, "maxLength": 8},
+                {"name": "note", "type": "str", "nullable": True},
+            ],
+        },
+        {"name": "summary", "type": "str", "nullable": True},
+    ]}
+    output = _build_verifier_json_schema(schema)["json_schema"]["schema"]["properties"]["output"]
+    items = output["properties"]["items"]
+    assert (items["minItems"], items["maxItems"]) == (2, 2)
+    assert items["items"]["properties"]["label"]["minLength"] == 3
+    assert items["items"]["properties"]["label"]["maxLength"] == 8
+    assert "null" in items["items"]["properties"]["note"]["type"]
+    assert "null" in output["properties"]["summary"]["type"]
+
+    model = _build_verifier_response_model(schema)
+    valid = {"output": {"items": [
+        {"label": "Desk", "note": None},
+        {"label": "Lamp", "note": "Used"},
+    ], "summary": None}, "reasoning": "Grounded", "score": 1}
+    model.model_validate(valid)
+    for missing_or_unmarked_null in (
+        {**valid, "output": {"items": valid["output"]["items"]}},
+        {**valid, "output": {**valid["output"], "items": None}},
+    ):
+        try:
+            model.model_validate(missing_or_unmarked_null)
+            raise AssertionError("expected ValidationError for missing field or unmarked null")
+        except ValidationError:
+            pass
+    for invalid in (
+        {**valid, "output": {**valid["output"], "items": valid["output"]["items"][:1]}},
+        {**valid, "output": {**valid["output"], "items": valid["output"]["items"] * 2}},
+        {**valid, "output": {**valid["output"], "items": [
+            {"label": "No", "note": None}, valid["output"]["items"][1],
+        ]}},
+    ):
+        try:
+            model.model_validate(invalid)
+            raise AssertionError("expected ValidationError")
+        except ValidationError:
+            pass
+
+
+def test_structured_output_schema_respects_constraints():
+    from helpers.llm import _structured_response_satisfies_schema
+
+    schema = {"fields": [
+        {"name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
+         "properties": [{"name": "title", "type": "str", "minLength": 3}]},
+        {"name": "note", "type": "str", "nullable": True},
+    ]}
+    assert _structured_response_satisfies_schema({
+        "items": [{"title": "Desk"}, {"title": "Lamp"}], "note": None,
+    }, schema)
+    assert not _structured_response_satisfies_schema({"items": [{"title": "Desk"}], "note": None}, schema)
+    assert not _structured_response_satisfies_schema({
+        "items": [{"title": "No"}, {"title": "Lamp"}], "note": None,
+    }, schema)
+    assert not _structured_response_satisfies_schema({
+        "items": [{"title": "Desk"}, {"title": "Lamp"}],
+    }, schema)
+    zero_schema = {"fields": [
+        {"name": "items", "type": "list[str]", "maxItems": 0},
+        {"name": "summary", "type": "str", "maxLength": 0},
+    ]}
+    assert _structured_response_satisfies_schema({"items": [], "summary": ""}, zero_schema)
+    # Optional fields may be omitted or present-and-empty, but a present value
+    # must still have the declared shape.
+    optional_pointer = {"fields": [
+        {"name": "total", "type": "int"},
+        {"name": "report", "type": "file_pointer", "required": False},
+        {"name": "tags", "type": "list[str]", "required": False},
+    ]}
+    assert _structured_response_satisfies_schema({"total": 1}, optional_pointer)
+    assert _structured_response_satisfies_schema({"total": 1, "tags": []}, optional_pointer)
+    assert _structured_response_satisfies_schema({"total": 1, "report": {"path": "/out/r.md"}}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": "/out/r.md"}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": {"note": "x"}}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": ""}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": {}}, optional_pointer)
+    optional_pointer_list = {"fields": [
+        {"name": "total", "type": "int"},
+        {"name": "reports", "type": "list[file_pointer]", "required": False},
+    ]}
+    assert _structured_response_satisfies_schema({"total": 1}, optional_pointer_list)
+    assert not _structured_response_satisfies_schema({"total": 1, "reports": []}, optional_pointer_list)
+
+
+async def test_live_schema_generation_chooses_file_for_large_goal():
+    """Opt-in live proof through the production schema generator for a captured goal."""
+    goal_path = os.environ["SCHEMA_GEN_LIVE_GOAL_FILE"]
+    from helpers.llm import _generate_response_schema_with_rose
+
+    goal = Path(goal_path).read_text(encoding="utf-8").strip()
+    schema, title, usage = await _generate_response_schema_with_rose(
+        goal, agent_id="schema-gen-live-proof", include_title=True,
+    )
+    proof_path = os.getenv("SCHEMA_GEN_LIVE_PROOF_FILE")
+    if proof_path:
+        Path(proof_path).write_text(json.dumps({"schema": schema, "title": title, "usage": usage}, indent=2))
+    assert any(field["type"] in ("file_pointer", "list[file_pointer]") for field in schema["fields"]), schema
+    assert not any(field["type"] == "list[object]" for field in schema["fields"]), schema
+    assert all("properties" not in field for field in schema["fields"] if field["type"] == "file_pointer"), schema
+
+
 def test_prepare_schema_for_openai_nested_and_array():
     """Schema preparation handles nested models, arrays, and union types recursively."""
     from typing import List, Optional, Union
@@ -453,6 +653,7 @@ def test_convert_context_to_messages_includes_structured_values_not_schema():
                 "toolCallId": "browser-1",
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "output_schema": output_schema,
                 "structured_response": {"selected_url": "https://amazon.com/item"},
@@ -4336,6 +4537,7 @@ async def test_check_progress_browser_success_uses_fast_cache_write_only():
             "metadata": {
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "fcaptcha_risk_score_display": "0.16",
@@ -4633,6 +4835,8 @@ def test_rejected_completed_child_handoff_is_scoped_to_source_child():
                 "toolCallId": tool_call_id,
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "structured_response": {"answer": answer},
             },
         }
@@ -4698,6 +4902,14 @@ def test_rejected_completed_child_handoff_is_scoped_to_source_child():
         "browser-older",
     )
 
+    for legacy_success in (False, None):
+        old_result = completed_child("browser-unverified", "looks complete")
+        if legacy_success is None:
+            old_result["metadata"].pop("success")
+        else:
+            old_result["metadata"]["success"] = legacy_success
+        assert _completed_child_task_structured_handoff([old_result], schema) is None
+
 
 async def test_check_progress_accepts_completed_browser_task_structured_response():
     """Parent execute verifier accepts a finished browser child structured response without an LLM call."""
@@ -4720,6 +4932,8 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
             "metadata": {
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": structured_response,
             },
@@ -5220,6 +5434,190 @@ async def test_call_llm_activity_force_backend_ignores_and_preserves_shared_cont
         assert _pending_llm_context[agent_id_key] is stale_pending
     finally:
         _pending_llm_context.pop(agent_id_key, None)
+
+
+async def test_call_llm_activity_ignores_pending_context_left_by_an_evicted_workflow():
+    """An LLM activity must build the conversation of ITS turn, never a stale same-agent slot.
+
+    REGRESSION (2026-10-02, test-mass-agent-run-0 GP e268b1db): under host load the GP
+    workflow's task timed out on worker W and resumed on worker Y. W kept the
+    `_pending_llm_context[agent_id]` slot its workflow had written for an earlier turn
+    (that activity had run on another worker, so nothing consumed it). The turn-4 LLM
+    activity later landed on W, read that slot, and sent the model a conversation missing
+    the newest explore spawns -- so the July GP replay saw too few prior explores and
+    replayed a 4th one past the 3-per-GP cap.
+
+    Drives the real writer (run_agent, workflow scope) and the real reader
+    (call_llm_activity) across a simulated worker migration.
+    """
+    from helpers import llm as llm_mod
+    from loop import run_agent as run_mod
+    from providers.fast_cache.rose_cache import _prior_explore_spawn_tool_call_ids
+
+    agent_id = "agent-evicted-pending-ctx"
+    worker_w_slots = llm_mod._pending_llm_context  # the process the turn-4 activity lands on
+    worker_y_slots: dict = {}
+    worker_w_slots.pop(agent_id, None)
+    scheduled: list[list] = []
+    turn4_canonical_context: list = []
+
+    async def mock_execute_activity(fn, args=None, **_kwargs):
+        if fn is not llm_mod.call_llm_activity:
+            return {}
+        scheduled.append(list(args or []))
+        turn = len(scheduled)
+        if turn == 3:
+            # W stalls with this turn's activity in flight; the workflow task times out and
+            # the workflow resumes on Y. W keeps the slot it just wrote for turn 3, frozen:
+            # the evicted workflow instance on W never mutates its context again (this test
+            # keeps running the same coroutine as "Y", so detach W's copy explicitly).
+            stale = worker_w_slots[agent_id]
+            worker_w_slots[agent_id] = (list(stale[0]), *stale[1:])
+            run_mod._pending_llm_context = worker_y_slots
+        if turn == 4:
+            turn4_canonical_context.extend(worker_y_slots[agent_id][0])
+        return {
+            "response": "",
+            "tool_calls": [{"tool": "spawn_agent", "type": "explore", "goal": f"Explore angle {turn}"}],
+            "usage": {},
+            "detected_tools_ordered": [("spawn_agent", f"tc-explore-{turn}", float(turn))],
+        }
+
+    async def execute_tool(_tool_name, _tool_args, tool_call_id):
+        return {"message": f"EXPLORE-RESULT-{tool_call_id}"}
+
+    async def prompt():
+        return "System prompt"
+
+    try:
+        with (
+            patch.object(run_mod, "_pending_llm_context", worker_w_slots),
+            patch.object(run_mod.workflow, "execute_activity", new=AsyncMock(side_effect=mock_execute_activity)),
+            patch.object(run_mod.asyncio, "sleep", new=AsyncMock()),
+        ):
+            await run_mod.run_agent(
+                agent_id=agent_id,
+                user_id="user-evicted",
+                system_prompt=prompt,
+                verifier_prompt_generator=prompt,
+                model="rose-labs/rose-1-ultra",
+                tools=["spawn_agent", "attempt_completion"],
+                initial_context=[{"role": "USER", "text": "Analyze one creator", "timestamp": "2026-10-02T00:00:00Z"}],
+                is_inside_temporal_activity=False,
+                post_message=AsyncMock(),
+                execute_tool=execute_tool,
+                max_iterations=4,
+                skip_verification=True,
+                skip_status_updates=True,
+            )
+
+        assert len(scheduled) == 4, f"expected four LLM turns, got {len(scheduled)}"
+        assert agent_id in worker_w_slots, "worker W must still hold the slot written before eviction"
+        assert "EXPLORE-RESULT-tc-explore-3" in json.dumps(turn4_canonical_context)
+
+        sent: list = []
+
+        async def capture_llm(**kwargs):
+            sent.append(kwargs["messages"])
+            return (
+                SimpleNamespace(response="", tool_calls=[]),
+                {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                [],
+            )
+
+        with (
+            patch("helpers.llm.call_llm_structured_streaming", new=AsyncMock(side_effect=capture_llm)),
+            patch(
+                "helpers.fetch_config._fetch_agent_data_impl",
+                new=AsyncMock(return_value={"agent": {"id": agent_id}, "messages": turn4_canonical_context}),
+            ),
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm.activity.in_activity", return_value=False),
+        ):
+            # Turn 4's activity, with the exact args the workflow scheduled, runs on W.
+            await llm_mod.call_llm_activity(*scheduled[3])
+
+        assert len(sent) == 1
+        sent_text = json.dumps(sent[0])
+        assert "EXPLORE-RESULT-tc-explore-3" in sent_text, (
+            "turn-4 LLM call was built from worker W's stale turn-3 slot: the newest tool result "
+            "is missing from the conversation sent to the model"
+        )
+        prior_explores = _prior_explore_spawn_tool_call_ids({"messages": sent[0]})
+        assert prior_explores == {"tc-explore-1", "tc-explore-2", "tc-explore-3"}, (
+            f"July GP explore cap would count {sorted(prior_explores)} prior explores, not all three"
+        )
+    finally:
+        worker_w_slots.pop(agent_id, None)
+        worker_y_slots.pop(agent_id, None)
+
+
+async def test_call_llm_activity_consumes_only_its_own_tagged_pending_slot():
+    """Same-worker handoff still skips the backend; a foreign tagged slot is neither used nor popped."""
+    from helpers.llm import _pending_llm_context, call_llm_activity
+
+    agent_id = "agent-tagged-pending-slot"
+    own_context = [{"role": "USER", "text": "OWN-TURN-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}]
+    foreign_slot = (
+        [{"role": "USER", "text": "FOREIGN-TURN-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}],
+        "System prompt",
+        None,
+        "user-tagged",
+        "stream-other:7",
+    )
+    sent: list = []
+    backend = AsyncMock(
+        return_value={
+            "agent": {"id": agent_id},
+            "messages": [{"role": "USER", "text": "BACKEND-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}],
+        }
+    )
+
+    async def capture_llm(**kwargs):
+        sent.append(json.dumps(kwargs["messages"]))
+        return (
+            SimpleNamespace(response="", tool_calls=[]),
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            [],
+        )
+
+    async def call(token):
+        await call_llm_activity(
+            agent_id,
+            "rose-labs/rose-1-ultra",
+            [],
+            0,
+            agent_id,
+            system_prompt="System prompt",
+            pending_context_token=token,
+        )
+
+    try:
+        with (
+            patch("helpers.llm.call_llm_structured_streaming", new=AsyncMock(side_effect=capture_llm)),
+            patch("helpers.fetch_config._fetch_agent_data_impl", new=backend),
+            patch("helpers.llm.asyncio.sleep", new=AsyncMock()),
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm.activity.in_activity", return_value=False),
+        ):
+            _pending_llm_context[agent_id] = (own_context, "System prompt", None, "user-tagged", "stream-a:3")
+            await call("stream-a:3")
+            assert "OWN-TURN-CONTEXT" in sent[-1]
+            assert backend.await_count == 0, "a matching same-worker slot must not refetch from the backend"
+            assert agent_id not in _pending_llm_context, "the call must consume its own slot"
+
+            _pending_llm_context[agent_id] = foreign_slot
+            await call("stream-a:4")
+            assert "BACKEND-CONTEXT" in sent[-1] and "FOREIGN-TURN-CONTEXT" not in sent[-1]
+            assert backend.await_count == 1
+
+            # A token-less caller (DAG param populator) never adopts a tagged run_agent slot.
+            _pending_llm_context[agent_id] = foreign_slot
+            await call(None)
+            assert "FOREIGN-TURN-CONTEXT" not in sent[-1]
+            assert backend.await_count == 2
+    finally:
+        _pending_llm_context.pop(agent_id, None)
 
 
 async def test_call_planner_llm_activity_failure_raises():
@@ -6043,6 +6441,7 @@ def test_build_verifier_context_messages_prunes_superseded_browser_protocol_fail
                 "toolName": "spawn_browser_agent",
                 "toolCallId": "tc-browser-1",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "fcaptcha_risk_score_display": "0.16",
@@ -6091,6 +6490,7 @@ async def test_build_llm_messages_prunes_superseded_browser_protocol_failure():
                 "toolName": "spawn_browser_agent",
                 "toolCallId": "tc-browser-1",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "fcaptcha_risk_score_display": "0.16",
@@ -8430,6 +8830,12 @@ async def run_all_tests():
     r.record("extract_nested_agent_json_blob_braces_embedded", test_extract_nested_agent_json_blob_braces_embedded)
     r.record("build_verifier_json_schema", test_build_verifier_json_schema)
     r.record("generated_agent_title_normalization", test_generated_agent_title_normalization)
+    r.record("generated_response_schema_preserves_constraints", test_generated_response_schema_preserves_constraints)
+    r.record("optional_output_keys_can_be_omitted_but_present_values_are_typed", test_optional_output_keys_can_be_omitted_but_present_values_are_typed)
+    r.record("verifier_enforces_size_bounds_and_nullable_nested_fields", test_verifier_enforces_size_bounds_and_nullable_nested_fields)
+    r.record("structured_output_schema_respects_constraints", test_structured_output_schema_respects_constraints)
+    if os.getenv("SCHEMA_GEN_LIVE_GOAL_FILE"):
+        await r.record_async("live_schema_generation_chooses_file", test_live_schema_generation_chooses_file_for_large_goal)
     r.record("verifier_score_schema_no_numeric_bounds", test_verifier_score_schema_has_no_numeric_bounds)
     r.record("build_verifier_json_schema_with_response_schema", test_build_verifier_json_schema_with_response_schema)
     r.record("build_verifier_json_schema_all_types", test_build_verifier_json_schema_all_types)
@@ -8694,6 +9100,14 @@ async def run_all_tests():
     await r.record_async(
         "call_llm_activity_force_backend",
         test_call_llm_activity_force_backend_ignores_and_preserves_shared_context,
+    )
+    await r.record_async(
+        "call_llm_activity_ignores_evicted_workflow_pending_ctx",
+        test_call_llm_activity_ignores_pending_context_left_by_an_evicted_workflow,
+    )
+    await r.record_async(
+        "call_llm_activity_consumes_only_own_tagged_pending_slot",
+        test_call_llm_activity_consumes_only_its_own_tagged_pending_slot,
     )
     await r.record_async("call_planner_llm_activity_failure", test_call_planner_llm_activity_failure_raises)
     await r.record_async("verifier_schema_file_pointer", test_build_verifier_json_schema_file_pointer_type)

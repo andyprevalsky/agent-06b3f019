@@ -2803,7 +2803,7 @@ def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
 
 @pytest.mark.parametrize("cancelled_party", ["waiter", "owner", "owner_and_waiter"])
 def test_position_fallback_cancellation_preserves_singleflight_ownership(monkeypatch, cancelled_party):
-    """Waiter cancellation stays local; live followers retry a cancelled HTTP owner."""
+    """Caller cancellation stays local; the shared HTTP task resolves live followers."""
     import httpx
 
     import providers.fast_cache.client as cache_client
@@ -2872,9 +2872,9 @@ def test_position_fallback_cancellation_preserves_singleflight_ownership(monkeyp
                     assert results == [expected_result, expected_result]
                     assert len(requests) == 1
                 else:
-                    assert shared.cancelled(), "owner cancellation left a pending shared result"
-                    assert len(cancelled_http) == 1
-                    assert cache_client._position_inflight.get(("cancel-goal", "explore_agent", 7)) is not shared
+                    assert not shared.cancelled(), "caller cancellation poisoned the shared HTTP task"
+                    assert not cancelled_http
+                    assert cache_client._position_inflight.get(("cancel-goal", "explore_agent", 7)) is shared
                     release.set()
                     if cancelled_party == "owner_and_waiter":
                         with pytest.raises(asyncio.CancelledError):
@@ -2883,10 +2883,10 @@ def test_position_fallback_cancellation_preserves_singleflight_ownership(monkeyp
                         assert await lookup() == expected_result
                     else:
                         assert await asyncio.wait_for(waiter, 10) == expected_result
-                    assert len(requests) == 2
+                    assert len(requests) == 1
 
                 assert await lookup() == expected_result
-                assert len(requests) == (1 if cancelled_party == "waiter" else 2)
+                assert len(requests) == 1
                 assert not cache_client._position_inflight
             finally:
                 release.set()
@@ -2894,6 +2894,7 @@ def test_position_fallback_cancellation_preserves_singleflight_ownership(monkeyp
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(*cache_client._position_inflight.values(), return_exceptions=True)
                 cache_client.clear_position_memo()
 
     asyncio.run(body())

@@ -114,6 +114,23 @@ describe('AgentSettingsDialog', () => {
     expect(screen.getAllByText('$0.25').length).toBeGreaterThan(0);
   });
 
+  it('copies the labeled agent ID from the debug row', async () => {
+    mockSession(ANDY_USER_ID);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const u = userEvent.setup();
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      writable: true,
+      configurable: true,
+    });
+    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
+    await u.click(document.querySelector('button')!);
+
+    expect(screen.getByText('Agent ID')).toBeInTheDocument();
+    await u.click(screen.getByRole('button', { name: 'Copy agent ID' }));
+    expect(writeText).toHaveBeenCalledWith('agent-id: <agent-xyz>');
+  });
+
   it('renders response schema fields when provided', async () => {
     const u = userEvent.setup();
     renderWithProviders(
@@ -121,8 +138,23 @@ describe('AgentSettingsDialog', () => {
         agent={makeAgent({
           response_schema: {
             fields: [
-              { name: 'title', type: 'str', required: true, description: 'Article title' },
+              {
+                name: 'title',
+                type: 'str',
+                required: true,
+                minLength: 4,
+                maxLength: 80,
+                description: 'Article title',
+              },
               { name: 'count', type: 'int', required: false, description: 'Count thing' },
+              {
+                name: 'rows',
+                type: 'list[object]',
+                required: true,
+                minItems: 2,
+                maxItems: 2,
+                properties: [{ name: 'note', type: 'str', required: false }],
+              },
             ],
           },
         })}
@@ -134,9 +166,13 @@ describe('AgentSettingsDialog', () => {
     });
     expect(screen.getByText('title')).toBeInTheDocument();
     expect(screen.getByText('string')).toBeInTheDocument();
-    expect(screen.getByText('required')).toBeInTheDocument();
+    expect(screen.getAllByText('required')).toHaveLength(2);
     expect(screen.getByText('count')).toBeInTheDocument();
     expect(screen.getByText('integer')).toBeInTheDocument();
+    expect(screen.getByText('at least 4 characters · at most 80 characters')).toBeInTheDocument();
+    expect(screen.getByText('exactly 2 items')).toBeInTheDocument();
+    expect(screen.getByText('note: string · optional')).toBeInTheDocument();
+    expect(screen.getAllByText('optional')).toHaveLength(1);
   });
 
   it('shows "Schema generating..." when no response schema', async () => {
@@ -193,7 +229,7 @@ describe('AgentSettingsDialog', () => {
         (r) => r.method === 'PATCH' && r.url.includes('/api/agents/'),
       );
       expect(req).toBeDefined();
-      expect((req!.body as never).price_limit_cents).toBe(999);
+      expect((req!.body as Record<string, unknown>).price_limit_cents).toBe(999);
     });
     await waitFor(() => expect(onUpdate).toHaveBeenCalled());
   });

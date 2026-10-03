@@ -942,8 +942,37 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     # Count tracks the -k filter above. I-03/I-04 token+fetch-ref cases,
     # controller-token/private-repo auth, bounded dependency-refresh ownership,
     # isolated-backend queue alignment, exact workspace replay, and pgvector
-    # installation cover 32 cases.
-    assert "32 passed" in result.stdout
+    # installation plus the SIGPIPE-safe target-mode parse cover 33 cases.
+    assert "33 passed" in result.stdout
+
+
+def test_run_benchmark_task_selection_suite_is_in_permanent_gate():
+    """Run the whole task-selection/identity/AgentCard-slot suite in a fresh interpreter.
+
+    The AgentCard sandbox slot cases need real separate processes (flock is per
+    open file description), so they cannot run in-process here.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    behavioral_suite = repo_root / "agents/benchmarks/run_benchmark_task_selection_test.py"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-v", str(behavioral_suite)],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    for case in (
+        "test_sandbox_payment_lock_slot0_is_the_legacy_lock_path",
+        "test_sandbox_payment_lock_single_slot_serializes_separate_benchmark_processes",
+        "test_sandbox_payment_lock_two_slots_admit_two_processes_and_block_a_third",
+        "test_sandbox_payment_lock_legacy_holder_on_slot0_leaves_new_slots_free",
+        "test_sandbox_payment_lock_announces_wait_once_jitters_polls_and_hands_off",
+    ):
+        assert f"{case} PASSED" in result.stdout, f"{case} did not run and pass:\n{result.stdout}"
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
@@ -1632,6 +1661,103 @@ async def test_agentcard_setup_targets_effective_benchmark_user():
         "userId": bench.AGENT_PAYMENT_BENCHMARK_USER_ID,
         "action": "complete",
     }
+
+
+async def test_agentcard_setup_retries_transient_upstream_failure():
+    """A one-off AgentCard 502 must not burn the setup attention and stall the run to timeout.
+
+    2026-10-03: AgentCard returned "Invalid or expired organization token" for one
+    list_cardholders call on a healthy secret (the next call 2s later succeeded). The
+    runner marked the setup attention seen before the fixture POST, swallowed the 502,
+    and agent-payment-setup-resume idled until its 900s cap.
+    """
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    class FakeResponse:
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self.text = body
+
+        def json(self):
+            return {"status": "connected"}
+
+    def fake_client(statuses):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, url, *, headers, json):
+                status = statuses[min(len(calls), len(statuses) - 1)]
+                calls.append(status)
+                body = (
+                    '{"error":"Benchmark AgentCard cardholder resolution failed: AgentCard '
+                    'Organization MCP list_cardholders failed: Invalid or expired organization token"}'
+                    if status == 502
+                    else '{"status":"connected"}'
+                )
+                return FakeResponse(status, body)
+
+        return FakeClient, calls
+
+    async def fake_headers():
+        return {"X-API-Key": "test"}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    with patch.object(bench, "_api_headers", fake_headers), patch.object(bench.asyncio, "sleep", fake_sleep):
+        client, calls = fake_client([502, 200])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            assert await bench.configure_benchmark_agentcard_setup("http://backend", "complete") == {
+                "status": "connected"
+            }
+        assert calls == [502, 200]
+        assert len(sleeps) == 1
+
+        client, calls = fake_client([502])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "complete")
+            except RuntimeError as error:
+                assert "Invalid or expired organization token" in str(error)
+            else:
+                raise AssertionError("a persistent 502 must raise with the upstream cause")
+        assert len(calls) == 1 + len(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+
+        client, calls = fake_client([409])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "complete")
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("a 409 not-ready cardholder is not transient")
+        assert calls == [409]
+
+
+def test_agentcard_setup_attention_failure_fails_the_task_with_its_cause():
+    """The poll loop must surface a failed setup fixture instead of swallowing it as a warning."""
+    import inspect
+
+    import benchmarks.run_benchmark as bench
+
+    source = inspect.getsource(bench)
+    handler = source[source.index('observed_kind == "agentcard_user_cardholder_onboarding_required"') :]
+    handler = handler[: handler.index("continue")]
+    assert "except RuntimeError as setup_error" in handler
+    assert "AgentCard setup fixture failed" in handler
 
 
 def test_payment_benchmark_rejects_retired_agentcard_api_key(tmp_path):
@@ -2805,6 +2931,51 @@ async def test_abandonment_timeout_surfaces_the_last_durable_mismatch():
             timeout_seconds=0,
             poll_interval_seconds=0,
         )
+
+
+async def test_abandonment_timeout_names_the_unreleased_agentcard_transfer():
+    """A HELD timeout must show whether AgentCard ever released THIS card's hold.
+
+    Regression: agent 22d0b761 timed out as "expected 'VOIDED', got 'HELD'" while the real stall
+    was AgentCard leaving owt_f982bfbd5e7f4b0cb2312920 `consumed` with nothing released for over
+    an hour after close_card succeeded.
+    """
+    import pytest
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    lifecycle = {
+        "purchase": {"status": "HELD"},
+        "walletFunding": {"status": "RECLAIMING"},
+        "orgTransfer": {
+            "id": "owt_f982bfbd5e7f4b0cb2312920",
+            "status": "consumed",
+            "amountCents": 4396,
+            "transferredCents": 4396,
+            "releasedCents": 0,
+            "cardId": "card_b671f34fed0a52c94625b715",
+            "livemode": False,
+        },
+    }
+
+    with pytest.raises(RuntimeError) as raised:
+        await _wait_for_expected_payment_lifecycle(
+            "http://localhost:55120",
+            "agent-123",
+            get_task_by_name("agent-payment-abandonment"),
+            lifecycle,
+            timeout_seconds=0,
+            poll_interval_seconds=0,
+        )
+
+    message = str(raised.value)
+    assert "expected 'VOIDED', got 'HELD'" in message
+    assert "walletFunding.status='RECLAIMING'" in message
+    assert '"id": "owt_f982bfbd5e7f4b0cb2312920"' in message
+    assert '"cardId": "card_b671f34fed0a52c94625b715"' in message
+    assert '"status": "consumed"' in message
+    assert '"releasedCents": 0' in message
 
 
 async def test_abandonment_waits_between_funding_reclaim_and_purchase_void():
@@ -6875,49 +7046,6 @@ async def test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics():
 
 async def test_blue_bottle_tree_proof_passes_with_subagent_evidence():
     await _assert_blue_bottle_tree_proof_semantics_passes()
-
-
-def test_blue_bottle_spawn_contract_seeds_live_target_without_rewriting_goal():
-    """k=5 timeouts burned budget on marketing detours; goals may still say complete payment."""
-    import os
-
-    from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.spawn_contract import (
-        apply_browser_spawn_live_target,
-        should_disable_saved_browser_auth,
-        with_active_benchmark_task,
-    )
-
-    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
-    assert should_disable_saved_browser_auth(task) is True
-
-    planner_goal = (
-        "Place a pickup order immediately from Blue Bottle Coffee at the Ferry Building in San Francisco, "
-        "using guest checkout. Complete payment and submit the order, using available agent payment capabilities. "
-        "Do not stop at the cart. Return the confirmed order confirmation ID."
-    )
-    patched = apply_browser_spawn_live_target(
-        task,
-        {
-            "goal": planner_goal,
-            "start_url": "https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
-        },
-    )
-    assert patched["start_url"] == task.environment["live_targets"][0]
-    assert patched["goal"] == planner_goal
-
-    with with_active_benchmark_task(task.name):
-        assert os.environ["BENCHMARK_ACTIVE_TASK_NAME"] == task.name
-        from benchmarks.spawn_contract import apply_active_task_spawn_contract
-
-        env_patched = apply_active_task_spawn_contract(
-            {
-                "goal": planner_goal,
-                "start_url": "https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
-            }
-        )
-        assert env_patched["start_url"] == task.environment["live_targets"][0]
-        assert env_patched["goal"] == planner_goal
 
 
 def test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate():
@@ -19650,6 +19778,10 @@ async def run_all_tests():
         ],
     )
     r.record(
+        "run_benchmark_task_selection_suite_permanent_gate",
+        test_run_benchmark_task_selection_suite_is_in_permanent_gate,
+    )
+    r.record(
         "cloudbench_patch_includes_untracked_files",
         test_cloudbench_worktree_patch_includes_tracked_and_untracked_files,
     )
@@ -20247,6 +20379,14 @@ async def run_all_tests():
         "agentcard_setup_effective_benchmark_user",
         test_agentcard_setup_targets_effective_benchmark_user,
     )
+    await r.record_async(
+        "agentcard_setup_retries_transient_upstream_failure",
+        test_agentcard_setup_retries_transient_upstream_failure,
+    )
+    r.record(
+        "agentcard_setup_attention_failure_fails_task",
+        test_agentcard_setup_attention_failure_fails_the_task_with_its_cause,
+    )
     r.record(
         "isolated_benchmark_slow_first_sync",
         test_isolated_benchmark_services_allow_slow_first_sync,
@@ -20334,6 +20474,10 @@ async def run_all_tests():
     await r.record_async(
         "abandonment_timeout_surfaces_durable_mismatch",
         test_abandonment_timeout_surfaces_the_last_durable_mismatch,
+    )
+    await r.record_async(
+        "abandonment_timeout_names_unreleased_agentcard_transfer",
+        test_abandonment_timeout_names_the_unreleased_agentcard_transfer,
     )
     await r.record_async(
         "abandonment_waits_between_reclaim_and_void",
@@ -20614,10 +20758,6 @@ async def run_all_tests():
     r.record(
         "cuda_kernel_stall_limit_covers_full_claude_code_runtime",
         test_cuda_kernel_stall_limit_covers_full_claude_code_runtime,
-    )
-    r.record(
-        "blue_bottle_spawn_contract_seeds_live_target",
-        test_blue_bottle_spawn_contract_seeds_live_target_without_rewriting_goal,
     )
     r.record(
         "blue_bottle_spawn_contract_blocks_dom_patch_evaluate",

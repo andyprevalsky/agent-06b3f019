@@ -28,6 +28,7 @@ import {
 import { canonicalAuthRealm } from '../../providers/authRealm';
 import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
+import { storedBrowserProvider } from '../../providers/browser/types';
 import { validateBrowserKeySymbols } from './service.browser-input';
 import { validateSessionFilePath } from './service.file-path';
 import { findRequiredSteelProfileForStart } from './service.profile-binding';
@@ -294,7 +295,7 @@ export async function resizeBrowserViewport(
     throw new SessionNotFoundError();
   }
 
-  const provider = session.provider === 'kernel' ? 'kernel' : 'steel';
+  const provider = storedBrowserProvider(session.provider);
   return resizeSessionViewport(session.sessionId, viewport, provider);
 }
 

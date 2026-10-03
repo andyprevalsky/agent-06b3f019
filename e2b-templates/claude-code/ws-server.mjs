@@ -534,6 +534,14 @@ async function runClaudeCli() {
       ...process.env,
       HOME: home,
       NO_COLOR: "1",
+      // The CLI's streaming idle watchdog is off unless this is set. Without
+      // it a silently dropped /v1/messages stream hangs the session forever
+      // (the SDK request timeout only covers the initial fetch, not the
+      // body). Enabled, the CLI aborts after CLAUDE_STREAM_IDLE_TIMEOUT_MS
+      // (its 90s default) and retries non-streaming. Forced on for every
+      // session (E2B overlay and the local fallback both spawn here). See
+      // docs/rca/cases/2026-10-02-claude-code-cli-launched-without-stream-idle-watchdog.md
+      CLAUDE_ENABLE_STREAM_WATCHDOG: "1",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });

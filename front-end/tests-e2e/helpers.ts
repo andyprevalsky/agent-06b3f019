@@ -81,6 +81,39 @@ export async function resolveTestUserId(): Promise<string> {
   return resolvedLocalUserId;
 }
 
+/**
+ * Wraps a page probe for `expect.poll` and records how long the page took to
+ * answer. expect.poll charges a probe that never returns against its timeout,
+ * so a renderer frozen by host overload reads exactly like a wrong value
+ * (RCA 2026-10-02-semantic-renderer-stall-consumed-chip-poll-budget).
+ * `describe()` says which of the two a failure was.
+ */
+export function trackPageProbe<T>(probe: () => Promise<T>): {
+  probe: () => Promise<T>;
+  describe: () => string;
+} {
+  let pendingSince: number | null = null;
+  let probes = 0;
+  let slowestMs = 0;
+  return {
+    probe: async () => {
+      const startedAt = Date.now();
+      pendingSince = startedAt;
+      probes += 1;
+      try {
+        return await probe();
+      } finally {
+        slowestMs = Math.max(slowestMs, Date.now() - startedAt);
+        pendingSince = null;
+      }
+    },
+    describe: () =>
+      pendingSince !== null
+        ? `RENDERER UNRESPONSIVE: page probe #${probes} still pending after ${Date.now() - pendingSince}ms — value never observed (host stall, not an assertion result)`
+        : `page answered ${probes} probe(s); slowest ${slowestMs}ms`,
+  };
+}
+
 export interface Recorder {
   console: { type: string; text: string }[];
   pageErrors: string[];

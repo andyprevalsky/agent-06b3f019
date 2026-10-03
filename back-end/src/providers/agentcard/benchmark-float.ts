@@ -1,4 +1,9 @@
-import { callOrgTool as defaultCallOrgTool, type AgentCardOrgToolCaller } from './org-runtime';
+import {
+  AgentCardOrgRuntimeError,
+  callOrgTool as defaultCallOrgTool,
+  orgRetryDeadlineAtMs,
+  type AgentCardOrgToolCaller,
+} from './org-runtime';
 import { getOrgCardholderVerificationStatus } from './org-onboarding';
 import { readAgentCardOrgWallet } from './org-wallet-monitor';
 import { retryWithBackoff } from '../retry';
@@ -110,7 +115,11 @@ export async function resolveBenchmarkCardholderId(
   preferredIds: string[] = preferredBenchmarkCardholderIds(),
   callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
 ): Promise<string> {
-  const cardholders = extractCardholders(await callOrgTool('list_cardholders', {}));
+  // Resolution loops over candidates, so every read shares one rate-limit budget.
+  const deadlineAtMs = orgRetryDeadlineAtMs();
+  const callWithinBudget: AgentCardOrgToolCaller = (toolName, args) =>
+    callOrgTool(toolName, args, deadlineAtMs);
+  const cardholders = extractCardholders(await callWithinBudget('list_cardholders', {}));
   if (cardholders.length === 0) {
     throw new Error(
       'AgentCard sandbox org has no cardholders. Create one in sandbox mode at ' +
@@ -132,10 +141,18 @@ export async function resolveBenchmarkCardholderId(
 
   for (const id of ordered) {
     // A cardholder whose status cannot be read is treated as not-ready rather than failing the
-    // whole resolution: another candidate may still be verified.
-    const status = await getOrgCardholderVerificationStatus(id, { callOrgTool }).catch(
-      () => undefined
-    );
+    // whole resolution: another candidate may still be verified. An exhausted org-wide throttle
+    // says nothing about this cardholder, and reading the next one would only add load to it.
+    const status = await getOrgCardholderVerificationStatus(id, {
+      callOrgTool: callWithinBudget,
+    }).catch((error: unknown) => {
+      if (
+        error instanceof AgentCardOrgRuntimeError &&
+        error.code === 'agentcard_org_mcp_rate_limited'
+      )
+        throw error;
+      return undefined;
+    });
     if (status !== undefined && KYC_READY_STATUSES.has(status.toLowerCase())) return id;
   }
   // Nothing verifiable: fall back to the highest-preference candidate so the caller's more

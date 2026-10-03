@@ -58,7 +58,7 @@ export function reusableSteelRecordedProfileId(oldSession: {
   // so they can all supply it.
   providerProfileSource: string | null;
 }): string | null {
-  const wasSteel = oldSession.provider !== 'kernel';
+  const wasSteel = oldSession.provider === 'steel';
   return wasSteel &&
     oldSession.providerProfileSource !== INVALIDATED_STEEL_PROFILE_SOURCE &&
     typeof oldSession.providerProfileId === 'string' &&
@@ -178,7 +178,11 @@ export async function recreateSession(
   if (oldSession === null) throw new Error(`Browser task not found: ${taskId}`);
 
   const previousProvider: BrowserProviderName =
-    oldSession.provider === 'kernel' ? 'kernel' : 'steel';
+    oldSession.provider === 'kernel'
+      ? 'kernel'
+      : oldSession.provider === 'browser-use'
+        ? 'browser-use'
+        : 'steel';
   const savedUrl = hasValue(oldSession.currentUrl)
     ? oldSession.currentUrl
     : hasValue(oldSession.startUrl)

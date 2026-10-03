@@ -253,11 +253,7 @@ expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$boot_only_env' agent-id
   bash -c 'exec -a cursor-agent-store-fuse sleep 60' &
   store_pid=$!
   printf 'pid=%s\n' "$store_pid" >"$fake_store/ready"
-  if [ -r /proc/self/cmdline ]; then
-    expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "bc-live" "a running store daemon's id is the agent id"
-  else
-    expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "" "a host without procfs does not trust the store id"
-  fi
+  expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "bc-live" "a running store daemon's id is the agent id"
   kill "$store_pid" 2>/dev/null || true
   wait "$store_pid" 2>/dev/null || true
   store_pid=''
@@ -489,5 +485,9 @@ for venv_provisioner in scripts/cloud-build.sh scripts/run.sh scripts/prepare-de
   fi
 done
 echo "PASS: every agents venv provisioner checks requirements.txt satisfaction"
+
+# cloud-init.sh's injected-secret -> .env sync has no /deploy gate of its own;
+# this already-gated environment suite runs it so a regression fails Step 4s.
+bash "$ROOT_DIR/scripts/tests/cloud-init-env.test.sh"
 
 echo "All workspace env tests passed."

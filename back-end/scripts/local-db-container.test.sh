@@ -79,4 +79,16 @@ system_db_fallback_is_safe || {
   exit 1
 }
 
+RUNNING_DB_LIST=$'victoria-db-seedmem-513046\nvictoria-db-seedsrc-513046'
+system_db_fallback_is_safe || {
+  echo "Expected cold-seed measurement containers not to block the system Postgres fallback" >&2
+  exit 1
+}
+
+RUNNING_DB_LIST=$'victoria-db-seedmem-513046\nvictoria-db-boston'
+if system_db_fallback_is_safe; then
+  echo "Expected a workspace DB alongside seed measurement containers to reject the fallback" >&2
+  exit 1
+fi
+
 echo "Local DB container resolution tests passed"

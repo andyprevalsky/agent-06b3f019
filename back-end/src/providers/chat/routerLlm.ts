@@ -11,7 +11,7 @@ import {
   type CompletionOptions,
 } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
-import { agentFastMode, cacheGet, cacheSet } from '../fastCacheStore';
+import { agentFastMode, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
 import { contentKey } from '../fastCacheNormalizeKeys';
 import { ROUTER_SYSTEM_PROMPT } from './chatPrompts';
@@ -29,7 +29,8 @@ import {
   getWebSearchStreamTitleFromPartialRouterJson,
   type ClosedRouterAction,
 } from './routerJsonStream';
-import { delayedCacheStreamHedge, type CacheLookupResult } from './delayedCacheStreamHedge';
+import { delayedCacheStreamHedge } from './delayedCacheStreamHedge';
+import { isOpeningRouterTurn, readRouterFastCache } from './routerFastCache';
 import { isOaiDemoGoal } from '../fastCacheNormalizeOaiDemo';
 import type { ChatProviderRoute } from './phaseModels';
 import type { ChatCompletionParams } from './completionOptions';
@@ -48,7 +49,6 @@ import {
 } from './chatMultimodal';
 import {
   finalizeRouterDecisionFromStream,
-  isValidRouterCacheJson,
   requireRouterDecision,
   type RouterDecision,
 } from './routerDecision';
@@ -250,6 +250,7 @@ export async function callRouterLlm(params: {
   const providerFastMode = fastMode.providerFastMode !== false;
   let fcKey: string | null = null;
   let fcCacheWon = false;
+  const driftGoal = fastModeRead && isOpeningRouterTurn(openaiMessages) ? fastMode.goal : null;
   if ((fastModeRead || fastModeWrite) && fastMode.goal) {
     fcKey = contentKey(fastMode.goal, 'chat_router', {
       model: params.model,
@@ -331,23 +332,7 @@ export async function callRouterLlm(params: {
         if (fcKey && fastModeRead && !skipFastCache) {
           const cacheKey = fcKey;
           stream = delayedCacheStreamHedge({
-            readCache: async (): Promise<CacheLookupResult<string>> => {
-              const hit = await cacheGet(cacheKey);
-              const json = hit.hit ? (hit.value as { json?: unknown } | null)?.json : undefined;
-              if (typeof json === 'string' && json.length > 0) {
-                if (!isValidRouterCacheJson(json)) {
-                  log.warn('fast_cache.chat_router_invalid', {
-                    agentId: params.agentId,
-                    key: cacheKey,
-                  });
-                  return { hit: false };
-                }
-                log.info('fast_cache.chat_router_hit', { agentId: params.agentId, key: cacheKey });
-                return { hit: true, value: json };
-              }
-              log.info('fast_cache.chat_router_miss', { agentId: params.agentId, key: cacheKey });
-              return { hit: false };
-            },
+            readCache: () => readRouterFastCache({ agentId: params.agentId, cacheKey, driftGoal }),
             createLive: (abortSignal) => createLiveStream(abortSignal),
             createCached: syntheticChatStream,
             isLiveCommitChunk: (chunk) => {

@@ -31,7 +31,7 @@ export const ROUTER_JSON_SCHEMA = {
       // instead of allowing the runtime's compatibility fallback to mask one.
       enum: ['plan', 'execute'],
       description:
-        'Execution mode: "plan" for 3+ tool calls, "execute" for 1-2 tool calls. Required for start_superintelligence; ignored for other actions (pick either enum value).',
+        'Agent start phase, chosen per Mode Selection. Required for start_superintelligence; ignored for other actions (pick either enum value).',
     },
   },
   required: ['reasoning', 'action', 'query', 'goal', 'mode'],

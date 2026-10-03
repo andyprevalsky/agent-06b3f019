@@ -788,9 +788,18 @@ found` / `rsync: command not found`.
   `TEMPORAL_TASK_QUEUE` is injected pointing at a shared queue — always `export
 TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
   local worker never consumes other runs' workflows (mirrors `run.sh`'s
-  per-workspace queue). `BROWSER_PROVIDER` must be `kernel` or `steel`. When
-  something is misconfigured despite a correct `.env`, check for an injected env
-  var of the same name first.
+  per-workspace queue). `BROWSER_PROVIDER` must be `kernel`, `steel`, or
+  `browser-use` (which requires `BROWSER_USE_API_KEY` and
+  `BROWSER_AGENT_BROWSER_USE_ENABLED=true` on the backend). The rollout flag
+  defaults off and prevents new Browser Use sessions, challenge recovery, and
+  proxy hopping into Browser Use; set it false to route new work to Kernel even
+  if Browser Use was configured as the default provider.
+  Browser Use Cloud has not passed the live WebAuthn assertion test
+  (`browser-passkey-provider`); keep the flag off for passkey-dependent work
+  until that provider passes. Its CAPTCHA solver also left a live reCAPTCHA
+  image grid unresolved; hand unresolved challenges to the live-view user.
+  When something is misconfigured despite a correct `.env`, check for an
+  injected env var of the same name first.
 - **Local backend tests on Fly hosts:** launch the test child with
   `env -u FLY_APP_NAME` before TypeScript imports. Any defined value, including an
   empty string, selects production mode and suppresses the local LLM dumps that

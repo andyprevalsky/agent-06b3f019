@@ -394,11 +394,11 @@ cloudbench_validate_browser_provider_contract() {
   agents_provider="$(cloudbench_env_value "$agents_env" BROWSER_PROVIDER)"
   backend_provider="$(cloudbench_env_value "$backend_env" BROWSER_PROVIDER)"
 
-  case "$prod_backend" in kernel|steel) ;; *)
+  case "$prod_backend" in kernel|steel|browser-use) ;; *)
     echo "FATAL: production backend BROWSER_PROVIDER is invalid: ${prod_backend:-<unset>}" >&2
     return 1
   esac
-  case "$prod_worker" in kernel|steel) ;; *)
+  case "$prod_worker" in kernel|steel|browser-use) ;; *)
     echo "FATAL: production worker BROWSER_PROVIDER is invalid: ${prod_worker:-<unset>}" >&2
     return 1
   esac

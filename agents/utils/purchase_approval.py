@@ -3,7 +3,7 @@
 import re
 from collections.abc import Iterable
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 _PLACEHOLDER_RE = re.compile(
     r"\b(?:n\s*/?\s*a|none|not\s+available|unavailable|unknown)\b",
@@ -117,6 +117,41 @@ def validate_product_url_for_pages(value: Any, trusted_page_urls: Iterable[Any])
             "product_url host must match a page the browser actually visited"
         )
     return text
+
+
+def _image_asset_key(value: Any, page_url: Any) -> str:
+    """Scheme-insensitive identity of an image asset, or '' when not an http(s) URL."""
+    try:
+        parsed = urlparse(urljoin(str(page_url or ""), str(value or "").strip()))
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        return ""
+    port_suffix = f":{port}" if port else ""
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{hostname}{port_suffix}{parsed.path}{query}"
+
+
+def validate_image_url_for_page(value: Any, page_image_urls: Iterable[Any], page_url: Any = "") -> Any:
+    """Require a receipt image to be an asset the current page actually renders.
+
+    The approval shows this image as the item being paid for, and the browser
+    model transcribes it character by character, so near-miss URLs (one digit
+    of a size segment drifted) are rejected rather than repaired. Scheme is
+    ignored because pages reference the same asset over http and https.
+    """
+    if value is None or not str(value).strip():
+        return value
+    rendered = {_image_asset_key(url, page_url) for url in (page_image_urls or [])}
+    rendered.discard("")
+    # A page that renders no images leaves nothing to compare against.
+    if not rendered:
+        return value
+    if _image_asset_key(value, page_url) not in rendered:
+        raise ValueError("image_url must be copied exactly from an image rendered on the current page, or omitted")
+    return value
 
 
 def validate_product_rating(value: Any) -> str:

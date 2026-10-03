@@ -1,4 +1,5 @@
 import asyncio
+import fcntl
 import multiprocessing
 import os
 import tempfile
@@ -10,47 +11,181 @@ import pytest
 import benchmarks.local as local_runner
 import benchmarks.run_benchmark as rb
 
+# Holders run fast polls/handoffs so the multi-process cases stay well under 10s.
+_FAST_POLL_SECONDS = 0.05
+
 
 def _hold_sandbox_payment_lock(ready, release):
     async def hold():
-        async with rb._sandbox_agentcard_payment_lock():
-            ready.send(True)
+        async with rb._sandbox_agentcard_payment_lock(poll_seconds=_FAST_POLL_SECONDS) as slot:
+            ready.send(slot)
             await asyncio.to_thread(release.recv)
 
     asyncio.run(hold())
 
 
-def test_sandbox_payment_lock_serializes_separate_benchmark_processes(monkeypatch):
+class _SlotHolder:
+    """A separate benchmark process holding one AgentCard sandbox slot.
+
+    flock is per open file description, so cross-lane exclusion is only proven
+    by holders in separate processes.
+    """
+
+    def __init__(self, context):
+        self._ready_rx, ready_tx = context.Pipe(duplex=False)
+        release_rx, self._release_tx = context.Pipe(duplex=False)
+        self._process = context.Process(target=_hold_sandbox_payment_lock, args=(ready_tx, release_rx))
+        self._released = False
+
+    def start(self) -> "_SlotHolder":
+        self._process.start()
+        return self
+
+    def slot(self) -> int:
+        assert self._ready_rx.poll(15), "benchmark process did not acquire an AgentCard sandbox slot"
+        return self._ready_rx.recv()
+
+    def release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._release_tx.send(True)
+
+    def join(self) -> None:
+        self._process.join(timeout=10)
+        assert self._process.exitcode == 0
+
+    def cleanup(self) -> None:
+        if self._process.is_alive():
+            self.release()
+            self._process.terminate()
+            self._process.join(timeout=5)
+
+
+async def _assert_waits_until_released(holder: _SlotHolder, *, expected_slot: int) -> None:
+    async def acquire():
+        async with rb._sandbox_agentcard_payment_lock(poll_seconds=_FAST_POLL_SECONDS) as slot:
+            return slot
+
+    waiter = asyncio.create_task(acquire())
+    await asyncio.sleep(0.3)
+    assert not waiter.done(), "benchmark lane entered while every AgentCard sandbox slot was held"
+    holder.release()
+    assert await asyncio.wait_for(waiter, timeout=10) == expected_slot
+
+
+@pytest.fixture
+def agentcard_lock_dir(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
-        monkeypatch.setenv("BENCHMARK_AGENTCARD_LOCK_PATH", str(Path(directory) / "payment.lock"))
-        context = multiprocessing.get_context("spawn")
-        ready_rx, ready_tx = context.Pipe(duplex=False)
-        release_rx, release_tx = context.Pipe(duplex=False)
-        holder = context.Process(target=_hold_sandbox_payment_lock, args=(ready_tx, release_rx))
-        holder.start()
-        try:
-            assert ready_rx.poll(15), "first benchmark did not acquire the payment lock"
-            assert ready_rx.recv() is True
+        lock_path = Path(directory) / "payment.lock"
+        monkeypatch.setenv("BENCHMARK_AGENTCARD_LOCK_PATH", str(lock_path))
+        yield lock_path
 
-            async def verify_wait():
-                async def acquire():
-                    async with rb._sandbox_agentcard_payment_lock():
-                        return True
 
-                waiter = asyncio.create_task(acquire())
-                await asyncio.sleep(0.2)
-                assert not waiter.done(), "second benchmark entered while the first held the lock"
-                release_tx.send(True)
-                assert await asyncio.wait_for(waiter, timeout=10)
+def test_sandbox_payment_lock_slot0_is_the_legacy_lock_path(monkeypatch):
+    monkeypatch.delenv("BENCHMARK_AGENTCARD_LOCK_PATH", raising=False)
+    monkeypatch.delenv("BENCHMARK_AGENTCARD_SLOTS", raising=False)
+    legacy = Path(tempfile.gettempdir()) / "rose-agentcard-sandbox-benchmark.lock"
 
-            asyncio.run(verify_wait())
-            holder.join(timeout=10)
-            assert holder.exitcode == 0
-        finally:
-            if holder.is_alive():
-                release_tx.send(True)
-                holder.terminate()
-                holder.join(timeout=5)
+    assert rb._agentcard_sandbox_slot_paths() == [legacy, legacy.with_name(f"{legacy.name}.slot1")]
+
+    monkeypatch.setenv("BENCHMARK_AGENTCARD_LOCK_PATH", "/custom/payment.lock")
+    monkeypatch.setenv("BENCHMARK_AGENTCARD_SLOTS", "3")
+    assert rb._agentcard_sandbox_slot_paths() == [
+        Path("/custom/payment.lock"),
+        Path("/custom/payment.lock.slot1"),
+        Path("/custom/payment.lock.slot2"),
+    ]
+
+    monkeypatch.setenv("BENCHMARK_AGENTCARD_SLOTS", "0")
+    assert rb._agentcard_sandbox_slot_paths() == [Path("/custom/payment.lock")]
+
+    monkeypatch.setenv("BENCHMARK_AGENTCARD_SLOTS", "two")
+    with pytest.raises(ValueError, match="BENCHMARK_AGENTCARD_SLOTS"):
+        rb._agentcard_sandbox_slot_paths()
+
+
+def test_sandbox_payment_lock_single_slot_serializes_separate_benchmark_processes(monkeypatch, agentcard_lock_dir):
+    monkeypatch.setenv("BENCHMARK_AGENTCARD_SLOTS", "1")
+    holder = _SlotHolder(multiprocessing.get_context("spawn")).start()
+    try:
+        assert holder.slot() == 0
+        asyncio.run(_assert_waits_until_released(holder, expected_slot=0))
+        holder.join()
+    finally:
+        holder.cleanup()
+
+
+def test_sandbox_payment_lock_two_slots_admit_two_processes_and_block_a_third(monkeypatch, agentcard_lock_dir):
+    monkeypatch.setenv("BENCHMARK_AGENTCARD_SLOTS", "2")
+    context = multiprocessing.get_context("spawn")
+    first = _SlotHolder(context).start()
+    second = _SlotHolder(context).start()
+    try:
+        first_slot, second_slot = first.slot(), second.slot()
+        assert {first_slot, second_slot} == {0, 1}, "two lanes must hold the two slots concurrently"
+        asyncio.run(_assert_waits_until_released(first, expected_slot=first_slot))
+        first.join()
+        second.release()
+        second.join()
+    finally:
+        first.cleanup()
+        second.cleanup()
+
+
+def test_sandbox_payment_lock_legacy_holder_on_slot0_leaves_new_slots_free(monkeypatch, agentcard_lock_dir):
+    """Old-code lanes flock only the legacy path; new code must count them as slot 0."""
+    monkeypatch.setenv("BENCHMARK_AGENTCARD_SLOTS", "2")
+    legacy_fd = os.open(agentcard_lock_dir, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(legacy_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    entered = False
+
+    async def fail_if_polled(seconds: float) -> None:
+        # Only the post-release handoff may sleep; polling means slot 1 was missed.
+        assert entered, "slot 1 was free but the new lock polled instead of taking it"
+
+    async def acquire():
+        nonlocal entered
+        async with rb._sandbox_agentcard_payment_lock(sleep=fail_if_polled) as slot:
+            entered = True
+            return slot
+
+    try:
+        assert asyncio.run(acquire()) == 1
+    finally:
+        os.close(legacy_fd)
+
+
+def test_sandbox_payment_lock_announces_wait_once_jitters_polls_and_hands_off(monkeypatch, capsys, agentcard_lock_dir):
+    monkeypatch.setenv("BENCHMARK_AGENTCARD_SLOTS", "1")
+    legacy_fd = os.open(agentcard_lock_dir, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(legacy_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    jitters = iter([0.0, 1.0, 0.5])
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            fcntl.flock(legacy_fd, fcntl.LOCK_UN)
+        assert len(sleeps) <= 4, f"lock kept polling after slot 0 was released: {sleeps}"
+
+    async def acquire():
+        async with rb._sandbox_agentcard_payment_lock(
+            "agentcard-task", poll_seconds=2.0, sleep=record_sleep, jitter=lambda: next(jitters)
+        ) as slot:
+            return slot
+
+    try:
+        assert asyncio.run(acquire()) == 0
+    finally:
+        os.close(legacy_fd)
+
+    # Three jittered polls in [poll, 1.5 * poll), then a post-release handoff
+    # longer than any waiter's poll so a back-to-back holder cannot re-take it.
+    assert sleeps == [2.0, 3.0, 2.5, 4.0]
+    out = capsys.readouterr().out
+    assert out.count("waiting for AgentCard sandbox slot") == 1
+    assert "[agentcard-task]" in out
+    assert "acquired slot 0 of 1" in out
 
 
 def _args(*, task=None, suite=None, exclude_task=None):

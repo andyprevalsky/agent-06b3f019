@@ -161,6 +161,11 @@ class _FakeWFModule:
     def info(self):
         return type("I", (), {"workflow_id": "wf-123"})()
 
+    def now(self):
+        from datetime import datetime, timezone
+
+        return getattr(self, "_now", None) or datetime(2026, 10, 3, tzinfo=timezone.utc)
+
     def uuid4(self):
         return "tool-call-uuid"
 
@@ -886,6 +891,124 @@ async def test_direct_attention_sms_source_sends_agentcard_setup_notify():
     assert payload["setup_url"] == "https://rose.test/setup"
 
 
+async def test_direct_approval_does_not_send_reminder():
+    """After the initial write_lock SMS, later waits must not send another SMS."""
+    from datetime import datetime, timedelta, timezone
+
+    from domains.request_user_approval.service import request_user_approval_direct
+
+    wf = _WFInstance()
+    notify_payloads = []
+
+    class _WaitFake(_FakeWFModule):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._now = datetime(2026, 10, 3, tzinfo=timezone.utc)
+            self._waits = 0
+
+        def now(self):
+            return self._now
+
+        async def wait_condition(self, predicate, timeout=None):
+            self._waits += 1
+            if self._waits == 1:
+                self._now = self._now + timedelta(minutes=16)
+                raise TimeoutError("slice elapsed")
+            wf._signal_responses["req-remind"] = "Approved"
+            return
+
+    fake = _WaitFake(
+        activity_results={
+            "create_approval_request_activity": "req-remind",
+            "notify_sms_event_activity": lambda: notify_payloads.append("sent") or None,
+        }
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        result = await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Approve the purchase?",
+        )
+    finally:
+        restore()
+
+    notify_calls = [c for c in fake.activity_calls if c["name"] == "notify_sms_event_activity"]
+    assert len(notify_calls) == 1
+    assert notify_calls[0]["args"][3].get("reminder") is not True
+    assert result["response"] == "Approved"
+    assert fake._waits == 2
+
+
+async def test_direct_approval_resume_does_not_notify_again():
+    """A cutover that already notified must not SMS again."""
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from domains.request_user_approval.service import request_user_approval_direct
+
+    wf = _WFInstance()
+    wf._pending_approval_resume = {
+        "request_id": "req-reminded",
+        "question": "Approve the purchase?",
+    }
+    wf._signal_responses["req-reminded"] = "Approved later"
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-must-not-create",
+            "notify_sms_event_activity": None,
+        }
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        result = await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Approve the purchase?",
+        )
+    finally:
+        restore()
+
+    create_calls = [c for c in fake.activity_calls if c["name"] == "create_approval_request_activity"]
+    notify_calls = [c for c in fake.activity_calls if c["name"] == "notify_sms_event_activity"]
+    assert create_calls == []
+    assert notify_calls == []
+    assert result["attention_request_id"] == "req-reminded"
+    assert result["response"] == "Approved later"
+    assert not isinstance(result, GenerationHandoffRequested)
+
+
+async def test_direct_approval_resume_request_does_not_notify_again():
+    """Parked resume_request that already notified must not SMS again."""
+    from domains.request_user_approval.service import request_user_approval_direct
+
+    wf = _WFInstance()
+    wf._signal_responses["req-parked"] = "Approved"
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-must-not-create",
+            "notify_sms_event_activity": None,
+        }
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        result = await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Approve the purchase?",
+            resume_request={
+                "attention_request_id": "req-parked",
+                "tool_call_id": "tool-parked",
+            },
+        )
+    finally:
+        restore()
+
+    create_calls = [c for c in fake.activity_calls if c["name"] == "create_approval_request_activity"]
+    notify_calls = [c for c in fake.activity_calls if c["name"] == "notify_sms_event_activity"]
+    assert create_calls == []
+    assert notify_calls == []
+    assert result["attention_request_id"] == "req-parked"
+    assert result["response"] == "Approved"
+
+
 async def test_direct_subagent_attention_sms_sends_notify():
     """Sub-agent setup handoffs (login/card) must also SMS — same class as approval."""
     from domains.request_user_approval.service import request_user_attention_direct
@@ -1105,6 +1228,18 @@ async def run_all_tests():
     await r.record_async(
         "direct_cancel_preserves_unanswered_resume_only",
         test_direct_cancel_preserves_unanswered_resume_only,
+    )
+    await r.record_async(
+        "direct_no_reminder",
+        test_direct_approval_does_not_send_reminder,
+    )
+    await r.record_async(
+        "direct_resume_no_notify",
+        test_direct_approval_resume_does_not_notify_again,
+    )
+    await r.record_async(
+        "direct_resume_request_no_notify",
+        test_direct_approval_resume_request_does_not_notify_again,
     )
     teardown_mock()
     return r.all_passed

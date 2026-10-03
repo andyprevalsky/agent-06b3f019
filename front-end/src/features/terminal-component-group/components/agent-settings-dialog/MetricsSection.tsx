@@ -2,10 +2,17 @@
  * Metrics block: message count, combined token counts, cost, optional inline
  * price-limit row, context-usage progress bar, and a debug agent-id row gated
  * on DEV mode or the admin user.
+ *
+ * STATE MACHINE (agent ID copy):
+ * [IDLE] --copy succeeds--> [COPIED] --different agent--> [IDLE]
+ * [IDLE] --copy fails----> [ERROR]  --next attempt----> [COPIED or ERROR]
  */
 
+import { useState } from 'react';
+import { Check, Copy } from 'lucide-react';
 import { Label } from '@/components/ui/label';
 import { Progress } from '@/components/ui/progress';
+import { copyToClipboard } from '@/lib/clipboard';
 import { useAuth, useAppData, type AgentDetail } from '../../hooks';
 import { ADMIN_USER_IDS, IS_DEV_MODE } from '../../config';
 import { getModelContextWindow, formatCentsAsDollars } from './helpers';
@@ -18,6 +25,8 @@ interface MetricsSectionProps {
 }
 
 export default function MetricsSection({ agent, priceLimitEdit }: MetricsSectionProps) {
+  const [copiedAgentId, setCopiedAgentId] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState(false);
   const { models } = useAppData();
   const { user: authUser } = useAuth();
 
@@ -31,6 +40,18 @@ export default function MetricsSection({ agent, priceLimitEdit }: MetricsSection
   const treeCostDisplay = formatCentsAsDollars(agent.tree_cost_cents || 0);
 
   const showDebug = IS_DEV_MODE || (authUser?.id != null && ADMIN_USER_IDS.includes(authUser.id));
+  const isCopied = copiedAgentId === agent.agent_id;
+
+  async function copyAgentId() {
+    try {
+      await copyToClipboard(`agent-id: <${agent.agent_id}>`);
+      setCopiedAgentId(agent.agent_id);
+      setCopyError(false);
+    } catch {
+      setCopiedAgentId(null);
+      setCopyError(true);
+    }
+  }
 
   return (
     <div className="space-y-3">
@@ -69,10 +90,22 @@ export default function MetricsSection({ agent, priceLimitEdit }: MetricsSection
 
         {showDebug && (
           <div className="space-y-2 pt-3 border-t border-dashed">
-            <div className="flex justify-between text-xs">
+            <div className="flex justify-between items-center gap-2 text-xs">
               <span className="text-muted-foreground">Agent ID</span>
-              <span className="font-mono text-[10px]">{agent.agent_id}</span>
+              <div className="flex min-w-0 items-center gap-1">
+                <span className="font-mono text-[10px] break-all">{agent.agent_id}</span>
+                <button
+                  type="button"
+                  onClick={() => void copyAgentId()}
+                  aria-label="Copy agent ID"
+                  title={isCopied ? 'Copied agent ID' : 'Copy agent ID'}
+                  className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                >
+                  {isCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                </button>
+              </div>
             </div>
+            {copyError && <p className="text-xs text-destructive">Could not copy agent ID.</p>}
           </div>
         )}
       </div>
