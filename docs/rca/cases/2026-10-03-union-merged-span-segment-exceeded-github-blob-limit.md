@@ -24,7 +24,7 @@ status: fixed
 ## Problem
 
 During `/deploy` run `20261002-213707-2123940`, this branch merged `main` again
-(merge `701869867`). Pushing it failed: GitHub rejected
+(local merge `701869867`, never pushed). Pushing it failed: GitHub rejected
 `span_durations.20261002.jsonl` at 133.55 MiB. `span_durations.20261001.02.jsonl`
 was 97 MiB, close behind.
 
