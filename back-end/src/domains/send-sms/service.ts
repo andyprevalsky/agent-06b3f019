@@ -4,6 +4,7 @@ import {
   claimToolSideEffect,
   markToolSideEffectFailed,
   markToolSideEffectSucceeded,
+  reclaimFailedToolSideEffect,
   type ToolSideEffectJson,
 } from '../../providers/toolSideEffects';
 import {
@@ -26,6 +27,7 @@ import { getWhatsAppReachable } from '../../providers/whatsappReachability';
 
 const log = createLogger('SendSMS');
 const COMPLETION_SMS_OPERATION_TYPE = 'lifecycle-sms.completion';
+const WRITE_LOCK_SMS_OPERATION_TYPE = 'lifecycle-sms.write_lock';
 
 // ── Surge direct send ────────────────────────────────────────────────
 
@@ -254,6 +256,83 @@ async function dispatchCompletionOnce(
   return { success: true, skipped: delivery.skipped };
 }
 
+/**
+ * Cap write_lock SMS at the initial notification plus one extra reminder
+ * per attention request. Temporal retries of the same kind reuse the claim.
+ */
+async function dispatchWriteLockOnce(
+  data: NotifyInput,
+  payload: Record<string, unknown>,
+  channels: SupervisorChannel[]
+): Promise<void> {
+  const attentionRequestId = (payload.attention_request_id as string | undefined) ?? '';
+  const isReminder = payload.reminder === true;
+  const kind = isReminder ? 'reminder' : 'initial';
+  const operationKey =
+    attentionRequestId === ''
+      ? ''
+      : `${WRITE_LOCK_SMS_OPERATION_TYPE}:${attentionRequestId}:${kind}`;
+
+  if (operationKey !== '') {
+    let claim = await claimToolSideEffect({
+      operationKey,
+      operationType: WRITE_LOCK_SMS_OPERATION_TYPE,
+      request: {
+        user_id: data.user_id,
+        agent_id: data.agent_id,
+        attention_request_id: attentionRequestId,
+        kind,
+      },
+    });
+    if (claim.status === 'existing' && claim.record.status === 'FAILED') {
+      claim = await reclaimFailedToolSideEffect(operationKey);
+    }
+    if (claim.status === 'existing') {
+      log.info('Write-lock SMS already claimed, skipping duplicate', {
+        agentId: data.agent_id,
+        attentionRequestId,
+        kind,
+        status: claim.record.status,
+      });
+      return;
+    }
+    try {
+      await notifyWriteLock(
+        data.user_id,
+        { id: data.agent_id },
+        (payload.question as string | undefined) ?? '',
+        attentionRequestId,
+        (payload.workflow_id as string | undefined) ?? '',
+        payload.metadata,
+        channels,
+        isReminder
+      );
+      await markToolSideEffectSucceeded({
+        operationKey,
+        externalId: `${attentionRequestId}:${kind}`,
+      });
+    } catch (error) {
+      await markToolSideEffectFailed({
+        operationKey,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+    return;
+  }
+
+  await notifyWriteLock(
+    data.user_id,
+    { id: data.agent_id },
+    (payload.question as string | undefined) ?? '',
+    attentionRequestId,
+    (payload.workflow_id as string | undefined) ?? '',
+    payload.metadata,
+    channels,
+    isReminder
+  );
+}
+
 /* c8 ignore start -- dispatchByEventType delegates to smsSupervisor outboundEvents (excluded from coverage) */
 /** Route to the correct outbound event handler based on event_type. */
 async function dispatchByEventType(
@@ -289,15 +368,7 @@ async function dispatchByEventType(
       break;
 
     case 'write_lock':
-      await notifyWriteLock(
-        data.user_id,
-        { id: data.agent_id },
-        (payload.question as string | undefined) ?? '',
-        (payload.attention_request_id as string | undefined) ?? '',
-        (payload.workflow_id as string | undefined) ?? '',
-        payload.metadata,
-        channels
-      );
+      await dispatchWriteLockOnce(data, payload, channels);
       break;
 
     case 'agentcard_setup': {
