@@ -30,7 +30,9 @@ import {
   markGuestCart,
   placeOrder,
   removeFromCart,
+  type CartTotals,
 } from './serviceShop';
+import type { AuthTestSite } from './types';
 import {
   cartToken,
   formField,
@@ -53,6 +55,11 @@ shopRouter.use(SHOP_PATHS, (req: Request, res: Response, next: NextFunction) => 
   }
   next();
 });
+
+/** The cart priced for this shopper: the member price once signed in. */
+function totalsFor(req: Request, site: AuthTestSite): CartTotals {
+  return cartTotals(site, cartLines(site, cartToken(req)), sessionOf(req).session !== null);
+}
 
 const ORDER_ERRORS = {
   empty_cart: 'Your cart is empty.',
@@ -87,14 +94,14 @@ shopRouter.get('/:siteId/cart', (req: Request, res: Response) => {
   const site = siteOf(req);
   sendPage(
     res,
-    renderCartPage(site, cartTotals(cartLines(site, cartToken(req))), sessionOf(req).session)
+    renderCartPage(site, totalsFor(req, site), sessionOf(req).session)
   );
 });
 
 shopRouter.get('/:siteId/checkout', (req: Request, res: Response) => {
   const site = siteOf(req);
   const token = cartToken(req);
-  const totals = cartTotals(cartLines(site, token));
+  const totals = totalsFor(req, site);
   if (totals.lines.length === 0) {
     res.redirect(303, siteUrl(site, '/cart'));
     return;
@@ -121,7 +128,7 @@ shopRouter.post(
     const site = siteOf(req);
     const token = cartToken(req);
     const { session } = sessionOf(req);
-    const totals = cartTotals(cartLines(site, token));
+    const totals = totalsFor(req, site);
     const result = await placeOrder(site, {
       cartToken: token,
       session,
@@ -169,5 +176,5 @@ shopRouter.get('/:siteId/orders/:orderNumber', (req: Request, res: Response) => 
     res.redirect(303, siteUrl(site));
     return;
   }
-  sendPage(res, renderOrderPage(site, order, cartTotals(order.lines)));
+  sendPage(res, renderOrderPage(site, order, cartTotals(site, order.lines, order.email !== null)));
 });

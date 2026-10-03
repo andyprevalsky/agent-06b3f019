@@ -282,6 +282,66 @@ async function cartWithToteInto(base: string, manifest: Manifest, cart: string):
   await postForm(base, pagePath(manifest, '/cart/add'), { item: 'canvas-tote' }, cart);
 }
 
+const TOTE_MEMBER_TOTAL_CENTS = 1960;
+
+test('member_discount_purchase: a member pays less than a guest for the same cart', async () => {
+  const userId = await createUser();
+  try {
+    const minted = await createMintedIdentity(userId);
+    await withLocalSite(async ({ base, sentMail }) => {
+      await withSettler(async (charges) => {
+        const manifest = await seed(base, userId, 'member_discount_purchase');
+        const shop = await (await getPage(base, pagePath(manifest, '/'))).text();
+        assert(shop.includes('Members pay $13.50 (10% off'), 'the member price must be shown');
+        const cart = await cartWithTote(base, manifest);
+        const gate = await (await getPage(base, pagePath(manifest, '/checkout'), cart)).text();
+        assert(
+          gate.includes('Continue as guest') && gate.includes('Members pay 10% less'),
+          'the gate offers guest checkout and states the member price'
+        );
+        const guestCart = await (await getPage(base, pagePath(manifest, '/cart'), cart)).text();
+        assert(guestCart.includes('$21.23'), 'a guest sees the full total');
+
+        const verified = await signUpAndVerify(
+          base,
+          manifest,
+          sentMail,
+          minted.email,
+          { next: 'checkout' },
+          cart
+        );
+        const cookies = `${cart}; ${sessionCookie(verified)}`;
+        const checkout = await (
+          await getPage(base, pagePath(manifest, '/checkout'), cookies)
+        ).text();
+        assert(
+          checkout.includes(`data-total-cents="${TOTE_MEMBER_TOTAL_CENTS}"`) &&
+            checkout.includes('data-unit-price-cents="1350"'),
+          'a member checks out at the member price'
+        );
+        const placed = await postForm(base, pagePath(manifest, '/checkout'), CARD, cookies);
+        const receipt = await (
+          await getPage(base, placed.headers.get('location') ?? '', cookies)
+        ).text();
+        assert(receipt.includes('$19.60'), 'the receipt keeps the member total');
+        const report = await fetchReport(base, manifest.siteId);
+        assert(
+          report.orders.length === 1 &&
+            report.orders[0]?.email === minted.email &&
+            report.orders[0]?.totalCents === TOTE_MEMBER_TOTAL_CENTS,
+          `one member-priced order expected: ${JSON.stringify(report.orders)}`
+        );
+        assert(
+          charges.length === 1 && charges[0]?.amountCents === TOTE_MEMBER_TOTAL_CENTS,
+          `charges ${JSON.stringify(charges)}`
+        );
+      });
+    });
+  } finally {
+    await cleanup(userId);
+  }
+});
+
 test('guest_purchase: a guest cart checks out with no account', async () => {
   const userId = await createUser();
   try {

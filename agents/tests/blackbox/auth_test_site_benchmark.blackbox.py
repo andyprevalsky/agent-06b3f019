@@ -39,6 +39,7 @@ TASK_SCENARIOS = {
     "browser-auth-assistance-user-signs-in": "user_signs_in",
     "browser-auth-assistance-declined": "saved_logins_fail",
     "browser-auth-guest-purchase": "guest_purchase",
+    "browser-auth-member-discount-purchase": "member_discount_purchase",
     "browser-auth-signup-purchase": "signup_purchase",
     "browser-auth-signup-purchase-no-subscription": "signup_purchase",
     "browser-auth-signup-fails-purchase-assistance": "signup_fails_purchase",

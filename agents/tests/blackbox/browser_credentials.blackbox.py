@@ -912,10 +912,51 @@ async def test_passkey_cdp_session_change_rearms_webauthn() -> None:
     enable_before = sum(1 for method, _ in state.calls if method == "WebAuthn.enable")
 
     session_holder["id"] = "session-target-a-recycled"
-    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
-    # Re-arm issues WebAuthn.enable; one_internal retry may enable once more
-    # after disable — both count as correct recovery of the new CDP session.
+    # Nothing new is seeded: the authenticator survives the session change and
+    # only the new session's WebAuthn environment is enabled.
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 0
     assert sum(1 for method, _ in state.calls if method == "WebAuthn.enable") >= enable_before + 1
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+
+async def test_passkey_cdp_session_change_keeps_a_healthy_authenticator() -> None:
+    """A new CDP session arrives with every action. Rebuilding the authenticator
+    on each one removed it on the very click that started a passkey ceremony:
+    the site got no assertion and the agent fell back to the password."""
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    session = _fake_webauthn_session(send, target_id="target-a")
+    session_holder = {"id": "session-1"}
+
+    async def get_or_create_cdp_session(tid, focus=False):
+        async def scoped_send(method, params=None, _tid=tid):
+            return await send(method, params or {}, _tid)
+
+        return SimpleNamespace(send=scoped_send, session_id=session_holder["id"])
+
+    session.get_or_create_cdp_session = get_or_create_cdp_session
+    dom = DOMService(cdp_url="")
+    dom._session = session
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    authenticators_before = dict(state.authenticators)
+    calls_before = len(state.calls)
+
+    session_holder["id"] = "session-2"
+    await dom.ensure_browser_overlays_suppressed()
+
+    after = [method for method, _ in state.calls[calls_before:]]
+    assert "WebAuthn.enable" in after, "the new session must be enabled"
+    rebuilt = [m for m in after if m in ("WebAuthn.removeVirtualAuthenticator", "WebAuthn.addVirtualAuthenticator")]
+    assert rebuilt == [], f"a healthy authenticator was torn down on a session change: {rebuilt}"
+    assert state.authenticators == authenticators_before
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+    # An authenticator Chrome no longer knows is still rebuilt.
+    state.reset_environment("target-a")
+    session_holder["id"] = "session-3"
+    await dom.ensure_browser_overlays_suppressed()
     assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
 
 
@@ -1255,6 +1296,10 @@ async def run_all_tests():
     await runner.record_async(
         "passkey_cdp_session_change_rearms_webauthn",
         test_passkey_cdp_session_change_rearms_webauthn,
+    )
+    await runner.record_async(
+        "passkey_cdp_session_change_keeps_a_healthy_authenticator",
+        test_passkey_cdp_session_change_keeps_a_healthy_authenticator,
     )
     await runner.record_async(
         "passkey_rebuild_reloads_amazon_signin_page",

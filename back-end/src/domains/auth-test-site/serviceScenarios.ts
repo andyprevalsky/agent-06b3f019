@@ -84,6 +84,7 @@ const BASE_BEHAVIOR: SiteBehavior = {
   signUp: 'off',
   guest: 'off',
   shop: false,
+  memberDiscountPercent: 0,
   expireSessionAtOrder: false,
 };
 
@@ -356,6 +357,9 @@ const PLANNERS: Record<AuthTestSiteScenario, (ctx: PlanContext) => ScenarioPlan>
   signup: () => openSitePlan({ signUp: 'open' }),
   signup_already_registered: (ctx) => mintedAccountPlan(ctx, { signUp: 'open' }),
   guest_purchase: () => openSitePlan({ ...SHOP, signUp: 'open', guest: 'checkout' }),
+  // Guests can buy, but only an account gets the lower price.
+  member_discount_purchase: () =>
+    openSitePlan({ ...SHOP, signUp: 'open', guest: 'checkout', memberDiscountPercent: 10 }),
   signup_purchase: () => openSitePlan({ ...SHOP, signUp: 'open' }),
   signup_fails_purchase: () => openSitePlan({ ...SHOP, signUp: 'error' }),
   session_expires_at_checkout: (ctx) =>

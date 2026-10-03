@@ -43,6 +43,7 @@ export const AUTH_TEST_SITE_SCENARIOS = [
   'signup',
   'signup_already_registered',
   'guest_purchase',
+  'member_discount_purchase',
   'signup_purchase',
   'signup_fails_purchase',
   'session_expires_at_checkout',
@@ -120,6 +121,8 @@ export interface SiteBehavior {
   /** browse: guests see the shop only; checkout: guests can also buy. */
   guest: 'off' | 'browse' | 'checkout';
   shop: boolean;
+  /** Percent off every item for signed-in members; 0 = members and guests pay the same. */
+  memberDiscountPercent: number;
   /** The first order submit ends the session and asks the member to sign in again. */
   expireSessionAtOrder: boolean;
 }

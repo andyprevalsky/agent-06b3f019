@@ -69,6 +69,8 @@ export const SHOP_CATALOG: readonly ShopItem[] = [
 
 export interface PricedLine {
   item: ShopItem;
+  /** What this shopper pays per unit (the member price when signed in to a discount shop). */
+  unitPriceCents: number;
   quantity: number;
   lineTotalCents: number;
 }
@@ -132,12 +134,23 @@ export function removeFromCart(site: AuthTestSite, cartToken: string | null, ite
   site.carts[cartToken] = site.carts[cartToken].filter((line) => line.id !== itemId);
 }
 
-export function cartTotals(lines: CartLine[]): CartTotals {
+export function memberPriceCents(site: AuthTestSite, item: ShopItem): number {
+  return Math.round((item.priceCents * (100 - site.behavior.memberDiscountPercent)) / 100);
+}
+
+/** Members pay the member price; a guest (member = false) pays the list price. */
+export function cartTotals(site: AuthTestSite, lines: CartLine[], member: boolean): CartTotals {
   const priced: PricedLine[] = [];
   for (const line of lines) {
     const item = findItem(line.id);
     if (item === undefined) continue;
-    priced.push({ item, quantity: line.quantity, lineTotalCents: item.priceCents * line.quantity });
+    const unitPriceCents = member ? memberPriceCents(site, item) : item.priceCents;
+    priced.push({
+      item,
+      unitPriceCents,
+      quantity: line.quantity,
+      lineTotalCents: unitPriceCents * line.quantity,
+    });
   }
   const subtotalCents = priced.reduce((sum, line) => sum + line.lineTotalCents, 0);
   const taxCents = Math.round(subtotalCents * SHOP_TAX_RATE);
@@ -193,7 +206,7 @@ export async function placeOrder(
   input: { cartToken: string | null; session: SiteSession | null; card: CardInput }
 ): Promise<PlaceOrderResult> {
   const lines = cartLines(site, input.cartToken);
-  const totals = cartTotals(lines);
+  const totals = cartTotals(site, lines, input.session !== null);
   if (totals.lines.length === 0) return { ok: false, reason: 'empty_cart' };
   const buyer = input.session?.email ?? null;
   if (input.session === null && !isGuestCart(site, input.cartToken)) {

@@ -3,7 +3,7 @@
 import { AUTH_TEST_SITE_NAME, SHOP_CURRENCY } from './config';
 import { publicSiteUrl, siteUrl } from './service';
 import { banner, escapeHtml, layout } from './servicePages';
-import { SHOP_CATALOG, type CartTotals, type ShopItem } from './serviceShop';
+import { SHOP_CATALOG, memberPriceCents, type CartTotals, type ShopItem } from './serviceShop';
 import type { AuthTestSite, SiteOrder, SiteSession } from './types';
 
 export function money(cents: number): string {
@@ -18,13 +18,18 @@ function accountBar(site: AuthTestSite, session: SiteSession | null, cartCount: 
   return `<p>${who} · <a href="${siteUrl(site, '/cart')}">Cart (${cartCount})</a></p>`;
 }
 
+function memberPrice(site: AuthTestSite, item: ShopItem): string {
+  if (site.behavior.memberDiscountPercent === 0) return '';
+  return ` · Members pay ${money(memberPriceCents(site, item))} (${site.behavior.memberDiscountPercent}% off with a free account)`;
+}
+
 function productCard(site: AuthTestSite, item: ShopItem): string {
   return `<div class="product" data-product-id="${item.id}">
       <a href="${item.imageUrl}"><img src="${item.imageUrl}" alt="${escapeHtml(item.name)}"></a>
       <p class="image-url">Image URL: ${item.imageUrl}</p>
       <h2><a href="${siteUrl(site, `/products/${item.id}`)}">${escapeHtml(item.name)}</a></h2>
       <p>${escapeHtml(item.description)}</p>
-      <p><strong>${money(item.priceCents)}</strong> · ${item.rating} stars (${item.reviewCount} reviews)</p>
+      <p><strong>${money(item.priceCents)}</strong>${memberPrice(site, item)} · ${item.rating} stars (${item.reviewCount} reviews)</p>
       <form method="post" action="${siteUrl(site, '/cart/add')}">
         <input type="hidden" name="item" value="${item.id}">
         <button type="submit">Add to cart</button>
@@ -67,9 +72,9 @@ function summaryTable(site: AuthTestSite, totals: CartTotals, removable: boolean
       const remove = removable
         ? `<td><form method="post" action="${siteUrl(site, '/cart/remove')}"><input type="hidden" name="item" value="${line.item.id}"><button type="submit">Remove</button></form></td>`
         : '';
-      return `<tr class="line-item" data-name="${escapeHtml(line.item.name)}" data-product-url="${publicSiteUrl(site, `/products/${line.item.id}`)}" data-image-url="${line.item.imageUrl}" data-unit-price-cents="${line.item.priceCents}" data-quantity="${line.quantity}" data-line-total-cents="${line.lineTotalCents}" data-rating="${line.item.rating}" data-review-count="${line.item.reviewCount}">
+      return `<tr class="line-item" data-name="${escapeHtml(line.item.name)}" data-product-url="${publicSiteUrl(site, `/products/${line.item.id}`)}" data-image-url="${line.item.imageUrl}" data-unit-price-cents="${line.unitPriceCents}" data-quantity="${line.quantity}" data-line-total-cents="${line.lineTotalCents}" data-rating="${line.item.rating}" data-review-count="${line.item.reviewCount}">
         <td><a href="${publicSiteUrl(site, `/products/${line.item.id}`)}">${escapeHtml(line.item.name)}</a><br><a href="${line.item.imageUrl}"><img src="${line.item.imageUrl}" alt="${escapeHtml(line.item.name)}" width="80"></a><br>Image URL: ${line.item.imageUrl}<br>${line.item.rating} stars (${line.item.reviewCount} reviews)</td>
-        <td>${line.quantity} × ${money(line.item.priceCents)}</td>
+        <td>${line.quantity} × ${money(line.unitPriceCents)}</td>
         <td>${money(line.lineTotalCents)}</td>${remove}
       </tr>`;
     })
@@ -115,6 +120,10 @@ export function renderCheckoutGatePage(site: AuthTestSite, notice?: string): str
     site.behavior.guest === 'checkout'
       ? `<form method="post" action="${siteUrl(site, '/checkout/guest')}"><button type="submit">Continue as guest</button></form>`
       : '';
+  const memberOffer =
+    site.behavior.memberDiscountPercent === 0
+      ? ''
+      : `<p>Members pay ${site.behavior.memberDiscountPercent}% less. Guests pay the full price.</p>`;
   return layout(
     site,
     'Check out',
@@ -122,6 +131,7 @@ export function renderCheckoutGatePage(site: AuthTestSite, notice?: string): str
     ${banner('notice', notice)}
     <p>${site.behavior.guest === 'checkout' ? 'Sign in, create an account, or check out as a guest.' : `You need a ${AUTH_TEST_SITE_NAME} account to check out.`}</p>
     <p><a href="${siteUrl(site, '/login')}&next=checkout">Sign in</a></p>
+    ${memberOffer}
     ${signUp}
     ${guest}`
   );

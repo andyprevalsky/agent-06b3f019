@@ -4538,6 +4538,165 @@
     "source": ["user-request:auth-critical-path-e2e"]
   },
   {
+    "name": "browser-auth-member-discount-purchase",
+    "title": "Hosted Purchase: Account Chosen For The Member Price",
+    "description": "The shop lets guests buy, but members pay 10% less; the browser agent creates an account with the minted identity instead of checking out as a guest, and pays the member price.",
+    "prompt": "Buy me a Canvas Tote from {auth_test_site_url}",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth", "payment", "agentcard-lifecycle-sandbox"],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kind": "payment_approval",
+    "expected_approval_count": 1,
+    "expected_payment_receipt": {
+      "merchant": "Rose Shop",
+      "currency": "USD",
+      "subtotalCents": 1350,
+      "totalCents": 1960,
+      "lineItems": [
+        {
+          "name": "Canvas Tote",
+          "imageUrl": "https://placehold.co/320x220/png?text=Canvas+Tote",
+          "unitPriceCents": 1350,
+          "quantity": 1,
+          "lineTotalCents": 1350
+        }
+      ],
+      "fees": [
+        {
+          "label": "Tax",
+          "amountCents": 111
+        },
+        {
+          "label": "Shipping",
+          "amountCents": 499
+        }
+      ]
+    },
+    "expected_payment_lifecycle": {
+      "integrity": {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "cardCount": 1
+      },
+      "purchase": {
+        "status": "CLEARED",
+        "merchant": "Rose Shop",
+        "totalCents": 1960
+      },
+      "walletFunding": {
+        "status": "CONSUMED",
+        "amountCents": 1960
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 1960,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 1960
+      },
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "orgTransfer": {
+        "status": "consumed",
+        "amountCents": 1960,
+        "transferredCents": 1960,
+        "releasedCents": 0,
+        "livemode": false
+      }
+    },
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": ["agent_payment_lifecycle_v1"],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests",
+        "minted_identity",
+        "primitive_email"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET",
+        "PRIMITIVE_API_KEY"
+      ],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "member_discount_purchase"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free test site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. The site records every sign-in, sign-up and order event; auth_test_site_outcome grades those records. Checkout charges the typed card through the sandbox AgentCard settlement; the harness auto-approves the one payment request. The cart total for one Canvas Tote is $21.23 (15.00 + 1.24 tax + 4.99 shipping). At checkout the shop offers sign in, create an account, or continue as a guest, and states that members pay 10% less. No credentials are saved, so only the minted identity is offered. The harness runs this task as the default admin benchmark user 1f85ff25-6e29-4c1b-8739-f917bd101a30 with BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1, so the purchase takes the charged Stripe-hold path; back-end/scripts/setup-benchmark-payment.ts seeds that user's Stripe test customer, subscription and org-managed AgentCard."
+    },
+    "evaluators": [
+      {
+        "id": "member-discount-purchase-runtime",
+        "method": "static_check",
+        "criteria": ["No tool call fails", "The root agent completes"],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "expected_payment_receipt"
+          },
+          {
+            "type": "expected_payment_lifecycle"
+          }
+        ]
+      },
+      {
+        "id": "member-discount-purchase-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site has one new verified account under the minted email",
+          "Exactly one order was placed, by that account, at the member price",
+          "The final answer reports the order number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "signup",
+            "accounts_created": 1,
+            "orders": {
+              "count": 1,
+              "placed_by": "signed_in_account"
+            },
+            "deliverable_contains_order_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
     "name": "browser-auth-signup-purchase",
     "title": "Hosted Purchase: New Account Then Purchase",
     "description": "The shop requires an account to check out and none exists; the browser agent signs up with the minted identity, verifies the emailed code, and completes exactly one clean purchase.",

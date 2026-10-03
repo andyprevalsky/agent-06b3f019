@@ -1000,7 +1000,14 @@ class DOMService:
         # Kernel can hand us a fresh CDP session for the same target id while our
         # cache still thinks WebAuthn is armed. WebAuthn.enable is per-session
         # ("environment has not been enabled for this session" — agent
-        # c1ebd389), so a session_id change must re-issue enable + rebuild.
+        # c1ebd389), so a session_id change must re-issue enable.
+        #
+        # It must NOT throw the authenticator away. The authenticator belongs to
+        # the target, not the session, and a new session arrives with every
+        # action: forgetting it here removed and rebuilt a healthy authenticator
+        # on the very click that started a passkey ceremony, and the site got no
+        # assertion. The sync below health-checks the kept id through the new
+        # session and rebuilds only if Chrome no longer knows it.
         session_changed = (
             session_id is not None
             and armed_session_id is not None
@@ -1013,11 +1020,7 @@ class DOMService:
                 f"re-arming WebAuthn target={target_id[:12]} "
                 f"was={str(armed_session_id)[:12]} now={str(session_id)[:12]}"
             )
-            self._passkey_authenticator_by_target.pop(target_id, None)
-            self._passkey_seeded_by_target.pop(target_id, None)
-            self._passkey_seeded_at_by_target.pop(target_id, None)
             self._armed_targets.discard(target_id)
-            self._passkey_pending_auth_reload_targets.add(target_id)
 
         # 1. WebAuthn: suppress the native passkey/credential popup on a new
         # target. Do NOT reissue WebAuthn.enable on an already-healthy target:

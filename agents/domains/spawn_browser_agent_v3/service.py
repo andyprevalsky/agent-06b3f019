@@ -66,7 +66,7 @@ def select_auth_assistance_current_url(current_url: str, visited_urls: List[str]
     return current_url
 
 
-# Guest/anonymous CTAs that make step 7 observable. Once seen in-page, the
+# Guest/anonymous CTAs that make step 6 observable. Once seen in-page, the
 # auth-assistance hard gate requires a guest attempt before step 8.
 GUEST_PAGE_COMPLETION_OPTION_RE = re.compile(
     r"(?:"
@@ -130,7 +130,7 @@ class AuthRuntimeState:
     minted_ids: set[str] = field(default_factory=set)
     minted_attempted: bool = False
     # Guest is only a hard-gate blocker after a guest CTA has been observed on
-    # the page. Defaulting unavailable=True previously skipped step 7 entirely.
+    # the page. Defaulting unavailable=True previously skipped step 6 entirely.
     guest_unavailable: bool = False
     guest_option_seen: bool = False
     guest_attempted: bool = False
@@ -202,7 +202,7 @@ class AuthRuntimeState:
             self.guest_option_seen = True
 
     def observe_clicked_element_text(self, text: Optional[str]) -> None:
-        """Record a guest/anonymous CTA click as exhausting step 7."""
+        """Record a guest/anonymous CTA click as exhausting step 6."""
         if clicked_text_indicates_guest_completion_option(text):
             self.guest_option_seen = True
             self.guest_attempted = True
