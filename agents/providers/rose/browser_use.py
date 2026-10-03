@@ -853,7 +853,7 @@ action envelope in text; use the provided tool call.
   - 3. Saved passwords
   - 4. Email OTP
   - 5. SMS OTP
-  - 6. Guest/anonymous completion, if viable (prefer guest checkout over Sign in / Log in when both appear, unless an account gets a discount)
+  - 6. Guest/anonymous completion, if viable (prefer guest checkout over Sign in / Log in when both appear)
   - 7. Minted account
   - 8. request_user_assistance_for_authentication - only after 1-7 are exhausted or unavailable
 - Cookie-based and existing Steel-session auth are applied automatically before you start.
@@ -863,6 +863,7 @@ action envelope in text; use the provided tool call.
 - When a site offers OTP delivery options, prefer email over SMS.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
 - Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 6 first.
+- When accounts pay less than guests, use step 7 instead of step 6.
 - When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
 - Before calling request_user_assistance_for_authentication, leave the site's sign-in form (username/password or code entry) open and visible, so the user can sign in without navigating.
 {challenge_rule}
