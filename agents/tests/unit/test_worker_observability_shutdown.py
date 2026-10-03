@@ -147,7 +147,7 @@ def test_worker_entrypoint_joins_inflight_metrics_rpc_before_exit(outcome, phase
                 assert process.returncode == 0, "Worker startup/shutdown failed before process-exit assertion"
                 assert b"WORKER_ENTRYPOINT_RETURNED" in output
                 assert observations.get("worker_drained") is True
-                assert rpc_finished.wait(1)
+                assert rpc_finished.wait(10)
                 if outcome != "deadline":
                     assert observations["entrypoint_returned_before_first_response"] is False, (
                         "Worker entry point returned while its native metrics RPC was unfinished"

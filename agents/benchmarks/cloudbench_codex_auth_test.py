@@ -205,7 +205,7 @@ def test_explicit_codex_handoff_waits_for_atomic_complete_upload(handoff):
     import time
 
     module, owner, body = handoff
-    module.WAIT_SECONDS = 2
+    module.WAIT_SECONDS = 10
     module.admit(owner, "a" * 64)
     module.stage(owner)
     target = module.directory(owner)
@@ -219,7 +219,7 @@ def test_explicit_codex_handoff_waits_for_atomic_complete_upload(handoff):
         assert not (target / "auth.json").exists()
         pending.write_bytes(body)
         module.publish(owner)
-        assert waiting.result(timeout=2) == target / "auth.json"
+        assert waiting.result(timeout=10) == target / "auth.json"
     assert not pending.exists()
     assert module.check_ready(owner).read_bytes() == body
     module.retire(owner, "a" * 64)
@@ -637,7 +637,7 @@ def test_explicit_codex_shell_launch_precedes_upload_and_requires_cleanup():
                 },
                 capture_output=True,
                 text=True,
-                timeout=3,
+                timeout=10,
             )
             assert (result.returncode == 0) == (not explicit)
             assert (Path(d) / "guest-shutdown.confirmed").exists() == (not explicit)
@@ -732,10 +732,10 @@ def _cloud_controller_source():
 @pytest.mark.parametrize("probe_timeout,delay,expected", [(None, 0, 10), ("8", 5.2, 8), ("999", 0, 270)])
 def test_explicit_codex_stage_uses_owned_probe_budget(tmp_path, probe_timeout, delay, expected):
     """Exercise the actual timeout owner, including a valid connection beyond five seconds."""
+    import re
     import shlex
     import signal
     import sys
-    import re
 
     cloud = _cloud_controller_source()
     stage = re.search(r"(?ms)^stage_explicit_codex_auth\(\).*?^}\n", cloud).group()

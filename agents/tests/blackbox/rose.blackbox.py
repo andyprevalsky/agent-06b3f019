@@ -5169,13 +5169,13 @@ async def test_cerebras_cooldown_rpc_is_bounded_and_cancellation_isolated():
                 # The mocked request has no IO timeout of its own. A whole-RPC
                 # budget must release all ten callers, even with shielded lookup.
                 results = await asyncio.wait_for(
-                    asyncio.gather(*(cb._cerebras_on_cooldown(scope, "offline-fake") for _ in range(10))), timeout=0.3
+                    asyncio.gather(*(cb._cerebras_on_cooldown(scope, "offline-fake") for _ in range(10))), timeout=10
                 )
                 assert results == [False] * 10
                 assert seen == ["GET", "GET"]
                 await asyncio.sleep(0)
                 assert not cb._cooldown_reads
-                await asyncio.wait_for(cb._mark_cerebras_cooldown(scope, "offline-fake", 30), timeout=0.3)
+                await asyncio.wait_for(cb._mark_cerebras_cooldown(scope, "offline-fake", 30), timeout=10)
                 assert await cb._cerebras_on_cooldown(scope, "offline-fake") is True
                 assert seen == ["GET", "GET", "POST"]
         finally:
@@ -5278,8 +5278,8 @@ async def _assert_cerebras_successful_quota_headers_do_not_wait_for_shared_mark(
                 next_content = asyncio.create_task(first_content(source))
                 finish_stream = None
                 try:
-                    await asyncio.wait_for(mark_entered.wait(), timeout=0.3)
-                    chunk = await asyncio.wait_for(asyncio.shield(next_content), timeout=0.1)
+                    await asyncio.wait_for(mark_entered.wait(), timeout=10)
+                    chunk = await asyncio.wait_for(asyncio.shield(next_content), timeout=10)
                     assert chunk.data["text"] == "ready"
                     scope, key = cb._cooldown_scope("offline-provider-key", get_pool("rose-1-flash").cerebras_model)
                     assert await cb._cerebras_on_cooldown(scope, key) is True
@@ -5298,7 +5298,7 @@ async def _assert_cerebras_successful_quota_headers_do_not_wait_for_shared_mark(
                             assert finish_stream.cancelled(), "stream cancellation was swallowed"
                         else:
                             mark_release.set()
-                            await asyncio.wait_for(finish_stream, timeout=0.3)
+                            await asyncio.wait_for(finish_stream, timeout=10)
                     assert mark_finished.is_set(), "stream exit abandoned the shared mark"
                     assert mark_tasks and all(task.done() for task in mark_tasks)
                     assert all(task.cancelled() == (finish != "complete") for task in mark_tasks)
@@ -5551,14 +5551,14 @@ async def test_client_foundry_stream_exit_closes_http_owner():
                     await source.aclose()
                 else:
                     consumer = asyncio.create_task(_drain(source))
-                    await asyncio.wait_for(waiting.wait(), timeout=1.0)
+                    await asyncio.wait_for(waiting.wait(), timeout=10)
                     if finish == "cancel":
                         consumer.cancel()
                         await asyncio.gather(consumer, return_exceptions=True)
                         assert consumer.cancelled(), "consumer cancellation was swallowed"
                     else:
                         release.set()
-                        await asyncio.wait_for(consumer, timeout=1.0)
+                        await asyncio.wait_for(consumer, timeout=10)
                 assert closed.is_set(), f"{finish} returned before closing Foundry response"
                 assert all(response.is_closed for response in responses)
                 assert all(client.is_closed for client in clients), f"{finish} abandoned Foundry HTTP client"

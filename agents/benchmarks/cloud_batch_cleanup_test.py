@@ -109,7 +109,7 @@ async def test_large_archive_tree_does_not_overload_snapshot_reads():
     logs = {}
     with patch.object(bench, "get_agent_tree", AsyncMock(return_value=infos)), patch.object(bench, "get_agent", fetch):
         await bench._refresh_browser_archive_snapshot(
-            "http://localhost:1", ROOT, {}, logs, expected_agent_ids=set(ids), timeout_seconds=0.2
+            "http://localhost:1", ROOT, {}, logs, expected_agent_ids=set(ids), timeout_seconds=10
         )
     assert completed == set(ids)
     assert set(logs["tree"]) == set(ids)
@@ -590,7 +590,7 @@ def test_exact_provider_cleanup_identifies_client_without_accepting_forbidden():
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join(timeout=10)
         assert not thread.is_alive()
 
 
@@ -920,7 +920,7 @@ async def test_deferred_cleanup_uses_exact_database_owner():
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join(timeout=10)
     assert requests == [('pause', aid, owner) for aid, owner in owners.items()] + [('delete', aid, owner) for aid, owner in owners.items()]
 
 
@@ -961,7 +961,7 @@ async def test_cleanup_identity_isolated_and_reset_after_cancellation():
     ):
         observer = asyncio.create_task(sibling())
         try:
-            async with asyncio.timeout(2):
+            async with asyncio.timeout(10):
                 with pytest.raises(asyncio.CancelledError):
                     await bench._finalize_owned_cloud_batch("http://localhost:1", [result(ROOT)], {})
                 await observer

@@ -187,7 +187,7 @@ def local_driver(folder, argv):
         event(folder, "before_stack_stop", world=str(stack.context_dir), owner_state=owner["state"])
         if owned.poll() is None:
             assert exact_signal(ident, "TERM") == 0
-        owned.wait(timeout=2)
+        owned.wait(timeout=10)
         stack_owner = json.loads((stack.context_dir / "local-stack-owner.json").read_text())
         receipt = stack.context_dir / "local-stack-cleanup.status"
         receipt.write_text(
@@ -265,7 +265,7 @@ async def benchmark(folder, argv):
         return []
 
     async def create(url, task):
-        async with httpx.AsyncClient(trust_env=False, timeout=1) as client:
+        async with httpx.AsyncClient(trust_env=False, timeout=10) as client:
             response = await client.get(url + "/fixture/state")
         event(
             folder,
@@ -321,7 +321,7 @@ def clean_fixture(folder, direct):
     for ident in identities:
         if live(ident):
             exact_signal(ident, "TERM")
-    until = time.monotonic() + 1
+    until = time.monotonic() + 10
     while any(live(i) for i in identities) and time.monotonic() < until:
         for process in direct:
             process.poll()
@@ -330,8 +330,8 @@ def clean_fixture(folder, direct):
         if live(ident):
             exact_signal(ident, "KILL")
     for process in direct:
-        process.wait(timeout=2)
-    until = time.monotonic() + 2
+        process.wait(timeout=10)
+    until = time.monotonic() + 10
     while any(live(i) for i in identities) and time.monotonic() < until:
         time.sleep(0.02)
     alive = [i for i in identities if live(i)]

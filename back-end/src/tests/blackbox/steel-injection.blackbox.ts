@@ -409,8 +409,8 @@ test('browser-state injection is serial and bounded after CDP connects', async (
       firstCallStarted,
       new Promise<never>((_, reject) =>
         setTimeout(
-          () => reject(new Error('browser-state fixture was not reached within 5s')),
-          5_000
+          () => reject(new Error('browser-state fixture was not reached within 15s')),
+          15_000
         )
       ),
     ]);
@@ -418,8 +418,12 @@ test('browser-state injection is serial and bounded after CDP connects', async (
       injectionSettled,
       new Promise<{ rejected: false; message: string }>((resolve) =>
         setTimeout(
-          () => resolve({ rejected: false, message: 'browser-state injection exceeded 500ms' }),
-          500
+          () =>
+            resolve({
+              rejected: false,
+              message: 'browser-state injection exceeded the 10s test guard',
+            }),
+          10_000
         )
       ),
     ]);
@@ -517,8 +521,8 @@ test('JIT credential injection bounds a CDP endpoint that accepts transport but 
       new Promise<{ rejected: false; message: string }>((resolve) =>
         setTimeout(
           () =>
-            resolve({ rejected: false, message: 'CDP acquisition exceeded the 500ms test budget' }),
-          500
+            resolve({ rejected: false, message: 'CDP acquisition exceeded the 10s test guard' }),
+          10_000
         )
       ),
     ]);

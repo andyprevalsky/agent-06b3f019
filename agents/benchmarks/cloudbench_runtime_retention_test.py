@@ -748,18 +748,18 @@ trap stop_on_exit EXIT
     timed_out = False
     try:
         try:
-            stdout, stderr = process.communicate(timeout=2)
+            stdout, stderr = process.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             timed_out = True
             os.killpg(process.pid, signal.SIGTERM)
-            stdout, stderr = process.communicate(timeout=2)
+            stdout, stderr = process.communicate(timeout=10)
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
         process.communicate()
         server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join(timeout=10)
     assert not timed_out, "unconfirmed boot timeout entered ordinary runtime collection"
     assert process.returncode == (125 if fleet else 70), (process.returncode, stdout, stderr)
     assert retained.is_file(), "existing bounded EXIT retirement did not run"

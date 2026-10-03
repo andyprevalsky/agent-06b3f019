@@ -173,7 +173,7 @@ async function main() {
         sessionId,
       ],
       {
-        env: { ...process.env, BROWSER_STATE_INJECTION_TIMEOUT_MS: '15000' },
+        env: { ...process.env, BROWSER_STATE_INJECTION_TIMEOUT_MS: '60000' },
         stdio: ['ignore', 'pipe', 'pipe'],
       }
     );

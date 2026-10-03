@@ -298,7 +298,7 @@ def test_hub_upload_rejection_retains_safe_response_identity_without_retry():
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=1)
+        thread.join(timeout=10)
         assert not thread.is_alive()
 
 
@@ -371,7 +371,7 @@ def test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry():
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=1)
+        thread.join(timeout=10)
         assert not thread.is_alive()
 
 
@@ -613,7 +613,7 @@ def _run_owned_benchmark_commands(commands, cwd, timeout=60):
             try:
                 rows = subprocess.run(
                     ["ps", "-axo", "pid=,ppid=,pgid=,stat="],
-                    capture_output=True, text=True, check=True, timeout=2.4,
+                    capture_output=True, text=True, check=True, timeout=5,
                 ).stdout
                 break
             except subprocess.TimeoutExpired:
@@ -656,7 +656,7 @@ def _run_owned_benchmark_commands(commands, cwd, timeout=60):
                     if live[child.pid]:
                         with contextlib.suppress(ProcessLookupError):
                             os.killpg(child.pid, sig)
-                cleanup_deadline = time.monotonic() + 3
+                cleanup_deadline = time.monotonic() + 10
                 while any(snapshot()[1].values()) and time.monotonic() < cleanup_deadline:
                     time.sleep(0.05)
                 if not any(snapshot()[1].values()):
@@ -664,7 +664,7 @@ def _run_owned_benchmark_commands(commands, cwd, timeout=60):
             remaining = snapshot()[1]
             assert not any(remaining.values()), "owned benchmark group members survived cleanup"
             for child, _ in children:
-                child.wait(timeout=3)
+                child.wait(timeout=10)
         failures = []
         for child, output in children:
             if child.returncode:
@@ -2219,7 +2219,7 @@ async def test_paused_browser_before_session_allocation_archives_with_exact_zero
             logs,
             expected_agent_ids={root},
             ownership_before=zero,
-            timeout_seconds=0.1,
+            timeout_seconds=10,
         )
     assert logs["browser_zero_allocation_receipt"] == {
         "root_agent_id": root,
@@ -19304,7 +19304,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             peak = max(peak, active)
             if active == 2:
                 started.set()
-        assert release.wait(2), "judge did not observe two bounded native lanes"
+        assert release.wait(10), "judge did not observe two bounded native lanes"
         with admission_lock:
             active -= 1
     main_thread = threading.get_ident()
@@ -19323,7 +19323,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         raise AssertionError("must be rejected before becoming a false pass")
 
     async def judge_success():
-        assert await asyncio.to_thread(started.wait, 2), "native checks never started"
+        assert await asyncio.to_thread(started.wait, 10), "native checks never started"
         release.set()
 
     async def judge_failure():
@@ -19424,7 +19424,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             BlackboxResult(), [("owned_one", owned_native), ("owned_two", owned_native), ("forbidden", forbidden_next_native)], [("waiting", waiting_judge)],
         ))
         try:
-            assert await asyncio.to_thread(started.wait, 2)
+            assert await asyncio.to_thread(started.wait, 10)
             owner.cancel()
             await asyncio.sleep(0)
             owner.cancel()
@@ -19433,7 +19433,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         finally:
             release.set()
         try:
-            await asyncio.wait_for(owner, 2)
+            await asyncio.wait_for(owner, 10)
         except asyncio.CancelledError:
             pass
         else:
@@ -19465,7 +19465,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             "import pathlib,subprocess,sys,time\n"
             f"subprocess.Popen([sys.executable,'-c',{descendant_code!r}])\n"
             f"ready=pathlib.Path({str(descendant)!r})\n"
-            "deadline=time.monotonic()+2\n"
+            "deadline=time.monotonic()+10\n"
             "while not ready.exists() and time.monotonic()<deadline:time.sleep(.01)\n"
             "assert ready.exists()\n"
         )
@@ -19476,7 +19476,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             owner = json.loads(descendant.read_text())
             observed = subprocess.run(
                 ["ps", "-p", str(owner["pid"]), "-o", "stat="],
-                capture_output=True, text=True, timeout=2,
+                capture_output=True, text=True, timeout=10,
             )
             assert observed.returncode in (0, 1), "native control process observation failed"
             if observed.returncode == 1 and not observed.stdout.strip():
@@ -19489,7 +19489,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             except (OSError, ValueError, IndexError):
                 gone = subprocess.run(
                     ["ps", "-p", str(owner["pid"]), "-o", "stat="],
-                    capture_output=True, text=True, timeout=2,
+                    capture_output=True, text=True, timeout=10,
                 )
                 assert (gone.returncode == 1 and not gone.stdout.strip()) or (
                     gone.returncode == 0 and gone.stdout.strip().startswith("Z")
@@ -19515,7 +19515,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             observer.write_text(
                 f"#!{sys.executable}\nimport os,pathlib,sys,time\n"
                 f"once=pathlib.Path({str(observed_once)!r})\n"
-                "if not once.exists():\n once.touch();time.sleep(2.6)\n"
+                "if not once.exists():\n once.touch();time.sleep(5.2)\n"
                 f" pathlib.Path({str(uncancelled_observation)!r}).touch()\n"
                 f"os.execv({real_ps!r},[{real_ps!r},*sys.argv[1:]])\n"
             )
@@ -19534,7 +19534,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             if descendant_live():
                 owner = json.loads(descendant.read_text())
                 identity.main(["process-identity.py", "--expect", owner["birth"], "--signal", "KILL", str(owner["pid"])])
-            cleanup_deadline = time.monotonic() + 3
+            cleanup_deadline = time.monotonic() + 10
             while descendant_live() and time.monotonic() < cleanup_deadline:
                 await asyncio.sleep(0.02)
             assert not descendant_live(), "native control descendant survived exact cleanup"

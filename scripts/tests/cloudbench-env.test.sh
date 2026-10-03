@@ -271,7 +271,7 @@ try:
     observed = observed_identity()
     if observed is not unknown and observed != expected:
         raise SystemExit(0)
-    probe = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True, timeout=2)
+    probe = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True, timeout=5)
     observed = observed_identity()
     if observed is not unknown and observed != expected:
         raise SystemExit(0)
@@ -301,13 +301,13 @@ child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.re
 try:
     birth = identity(child.pid)
     def verdict():
-        return subprocess.run(["bash", "-c", command, "terminal-test", str(root), str(child.pid), birth], timeout=3).returncode
+        return subprocess.run(["bash", "-c", command, "terminal-test", str(root), str(child.pid), birth], timeout=10).returncode
     assert verdict() != 0, "terminal predicate accepted a live exact child"
     child.stdin.write(b"x")
     child.stdin.close()
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + 10
     while True:
-        state = subprocess.check_output(["ps", "-p", str(child.pid), "-o", "stat="], text=True, timeout=1).strip()
+        state = subprocess.check_output(["ps", "-p", str(child.pid), "-o", "stat="], text=True, timeout=5).strip()
         if state.startswith("Z"):
             break
         assert time.monotonic() < deadline, "owned child never reached native zombie state"
@@ -318,7 +318,7 @@ try:
 finally:
     if child.poll() is None:
         child.kill()
-    child.wait(timeout=2)
+    child.wait(timeout=10)
 assert verdict() == 0, "terminal predicate rejected its reaped child"
 PY_TREE_TERMINAL
   fail "native descendant terminal-state assertion contract failed"

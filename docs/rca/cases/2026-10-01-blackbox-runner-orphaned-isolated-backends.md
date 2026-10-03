@@ -69,3 +69,26 @@ under `.context/acceptance/proof111-main-integration/`.
 ## Reusable lesson
 
 `$!` for `npx …` / `npm exec …` / `tsx …` is a launcher, not the service. Signalling it alone orphans the real process, which keeps its port and memory. Stop the whole process tree (TERM, bounded wait, KILL), and check for leftovers by run ID or port instead of trusting the launcher's exit.
+
+## Timing-policy follow-up — 2026-10-03
+
+The final backend gate on source `685d26cc` passed all 179 blackbox domains and
+237 of 238 unit files. The remaining process-tree unit had already proved both
+launcher and TERM-resistant descendants stopped, then failed solely because its
+observed 618 ms escalation was below the 900 ms lower timing bound. The original
+aggregate remains a failed run; it is not evidence of surviving descendants.
+
+At the user's direction, that elapsed range is now a warning. Native identity,
+process state, harness return code and zero surviving descendants remain hard
+requirements. Fixture observation guards are more generous; the one-second
+synthetic cancellation stimulus and production teardown implementation are
+unchanged. The existing unit passed on Linux in 7.432 seconds with V8 collection,
+and its exact wrapper, child and process group were verified retired. Scoped
+formatting, lint and typechecking passed. Original and updated private evidence
+is retained under `.context/acceptance/proof116-backend-timing-policy/`.
+
+The canonical failed run deleted its raw V8 directory during EXIT cleanup, so
+these retained functional results cannot reconstruct a fresh coverage report.
+A final-source canonical coverage run and its existing normal-exit/SIGTERM
+posthook remain required before merge; the fleet acceptance proof remains a
+separate incomplete gate.

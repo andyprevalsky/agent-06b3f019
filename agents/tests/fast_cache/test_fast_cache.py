@@ -2847,11 +2847,11 @@ def test_position_fallback_cancellation_preserves_singleflight_ownership(monkeyp
             try:
                 owner = asyncio.create_task(lookup())
                 tasks.append(owner)
-                await asyncio.wait_for(started.wait(), 1.0)
+                await asyncio.wait_for(started.wait(), 10)
                 shared = cache_client._position_inflight[("cancel-goal", "explore_agent", 7)]
                 waiter = asyncio.create_task(lookup(waiter=True))
                 tasks.append(waiter)
-                await asyncio.wait_for(joined.wait(), 1.0)
+                await asyncio.wait_for(joined.wait(), 10)
                 target = waiter if cancelled_party == "waiter" else owner
                 target.cancel()
                 if cancelled_party == "owner_and_waiter":
@@ -2866,9 +2866,9 @@ def test_position_fallback_cancellation_preserves_singleflight_ownership(monkeyp
                     joined.clear()
                     later = asyncio.create_task(lookup(waiter=True))
                     tasks.append(later)
-                    await asyncio.wait_for(joined.wait(), 1.0)
+                    await asyncio.wait_for(joined.wait(), 10)
                     release.set()
-                    results = await asyncio.wait_for(asyncio.gather(owner, later), 1.0)
+                    results = await asyncio.wait_for(asyncio.gather(owner, later), 10)
                     assert results == [expected_result, expected_result]
                     assert len(requests) == 1
                 else:
@@ -2882,7 +2882,7 @@ def test_position_fallback_cancellation_preserves_singleflight_ownership(monkeyp
                         assert len(requests) == 1
                         assert await lookup() == expected_result
                     else:
-                        assert await asyncio.wait_for(waiter, 1.0) == expected_result
+                        assert await asyncio.wait_for(waiter, 10) == expected_result
                     assert len(requests) == 2
 
                 assert await lookup() == expected_result
@@ -2943,12 +2943,12 @@ def test_position_fallback_failure_is_owned_and_propagated(monkeypatch, with_fol
 
                 try:
                     tasks.append(asyncio.create_task(lookup()))
-                    await asyncio.wait_for(started.wait(), 1.0)
+                    await asyncio.wait_for(started.wait(), 10)
                     if with_follower:
                         tasks.append(asyncio.create_task(lookup(follower=True)))
-                        await asyncio.wait_for(joined.wait(), 1.0)
+                        await asyncio.wait_for(joined.wait(), 10)
                     release.set()
-                    results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 1.0)
+                    results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 10)
                     assert all(isinstance(result, httpx.ReadTimeout) for result in results)
                     assert all(result is results[0] for result in results)
                     assert len(requests) == 3

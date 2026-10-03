@@ -58,7 +58,7 @@ def retire_fixture_hub(base):
             raise AssertionError(
                 f"Exact Hub {name} failed or identity is unverified: {pid}"
             )
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             try:
                 os.kill(pid, 0)
@@ -196,7 +196,7 @@ printf 'PASS: %s cleanup with %s observation\n' "$3" "$observation"
                     self.assertTrue(
                         (base / "call.ready").exists(), "Hub startup failed"
                     )
-                    deadline = time.monotonic() + 2
+                    deadline = time.monotonic() + 10
                     while (
                         not (base / "call.result").exists() and process.poll() is None
                     ):
@@ -226,10 +226,10 @@ printf 'PASS: %s cleanup with %s observation\n' "$3" "$observation"
                         cleanup_errors.append(str(error))
                     if process.poll() is None:
                         try:
-                            process.wait(timeout=3)
+                            process.wait(timeout=10)
                         except subprocess.TimeoutExpired:
                             os.killpg(process.pid, signal.SIGKILL)
-                            process.wait(timeout=3)
+                            process.wait(timeout=10)
                     self.assertFalse(cleanup_errors, "; ".join(cleanup_errors))
                     (base / "retain").unlink()
 

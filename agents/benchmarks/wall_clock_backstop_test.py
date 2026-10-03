@@ -235,7 +235,7 @@ def test_backstop_covers_real_task_preparation_and_checkpoint(monkeypatch, tmp_p
     )
 
     async def run():
-        guard = asyncio.timeout(1)
+        guard = asyncio.timeout(10)
         try:
             async with guard:
                 await runner.run_single_task("http://127.0.0.1:39999", task, **kwargs)

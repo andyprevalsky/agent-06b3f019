@@ -13,7 +13,7 @@ async function waitFor(file: string) {
     const backstop = setTimeout(() => {
       watcher.close();
       reject(new Error(`missing fixture signal: ${file}`));
-    }, 5000);
+    }, 15000);
     function check() {
       if (!fs.existsSync(path.join(directory, file))) return;
       clearTimeout(backstop);

@@ -30,7 +30,7 @@ export function registerSeedCopyTests(test: Test, assert: Assert): void {
               SEED_COPY_TEST_MODE: mode,
             },
             encoding: 'utf8',
-            timeout: 10_000,
+            timeout: 60_000,
           }
         );
         assert(!result.error, `COPY driver failed: ${result.error}`);
@@ -139,7 +139,7 @@ export function registerSeedCopyTests(test: Test, assert: Assert): void {
         '--command',
         'SELECT "databases"::text FROM "IndexedDBOrigin";',
       ],
-      { input: csv, encoding: 'utf8', timeout: 10_000 }
+      { input: csv, encoding: 'utf8', timeout: 30_000 }
     );
     assert(result.status === 0, `target COPY protocol failed: ${result.error || result.stderr}`);
     const lines = result.stdout.trim().split('\n');

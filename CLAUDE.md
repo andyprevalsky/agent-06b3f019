@@ -247,6 +247,16 @@ independent copies with at most N active; never repeat a task by passing duplica
 names to one fleet. Named slices are `daily`, `pre-deploy`, `rose-bench`,
 `polar-bench`, and `incomplete`.
 
+Treat inner elapsed-time measurements as diagnostics, not independent success
+criteria. Keep terminal outcomes, exact resource retirement and the end-to-end
+deadline hard; use generous fixture host guards. Tiny synthetic deadlines that
+exercise cancellation are test inputs, not acceptable production timing budgets.
+For terminal-result/cleanup campaigns, use
+`scripts/verify_successful_llm_queries.py --diagnostics-only` to retain reported
+errors as warnings. Require meaningful real LLM calls (normally more than three; chat may need fewer), a terminal SUCCESS or
+FAILURE (including an execution-window FAILURE), and exact owned-resource cleanup
+within the 1800-second allocation deadline; do not force extra model calls.
+
 **Cloud runner quick start:** From a configured clone, run
 `scripts/run-bench list`, then `scripts/run-bench <task> --wait` for one real
 isolated benchmark. For an infrastructure streak, use
@@ -962,9 +972,9 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
    require positive parent/group/state evidence before cleanup. Teardown
    fixtures must include the runner's early EXIT-trap setup, and distinguish
    an executing child from an unreaped terminal child while joining their owners.
-   Match timing assertions to the measured operation: a router-stream deadline
-   does not bound later database or Temporal completion. Correlate the actual
-   stream measurement and retain a separate end-to-end completion bound.
+   Correlate timing diagnostics to the measured operation: a router-stream clock
+   does not include later database or Temporal completion. Warn on inner elapsed
+   observations; retain outcome, ownership and end-to-end completion checks.
 
 2. **TDD loop** - Don't return until tests pass:
 

@@ -977,7 +977,7 @@ async def test_direct_cancel_preserves_unanswered_resume_only():
             request_user_approval_direct(wf, question, close_on_cancel=True)
         )
         try:
-            await asyncio.wait_for(wf.persisted.wait(), timeout=1)
+            await asyncio.wait_for(wf.persisted.wait(), timeout=10)
             task.cancel()
             try:
                 await task

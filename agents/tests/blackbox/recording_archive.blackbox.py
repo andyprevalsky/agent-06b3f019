@@ -190,7 +190,7 @@ def test_recording_archive_worker_exit_has_no_serial_publication_tail():
                 process.wait(timeout=10)
             server.shutdown()
             server.server_close()
-            thread.join(timeout=2)
+            thread.join(timeout=10)
 
 
 async def test_recording_batch_failure_retains_sources_and_retryable_envelopes():
@@ -384,7 +384,7 @@ archive_files(root_agent_id='offline-root', artifacts=(
 
         try:
             if not entered.wait(10):
-                assert process.poll() is None, process.communicate(timeout=1)
+                assert process.poll() is None, process.communicate(timeout=10)
                 raise AssertionError("fixture child did not enter batch HTTP request")
             with patch.dict(os.environ, env), patch.object(archive, "_backend_http_client", return_value=Client()):
                 assert archive._pending_archive_futures("offline-root") == set(), "owner must be another process"
@@ -394,7 +394,7 @@ archive_files(root_agent_id='offline-root', artifacts=(
                 process.kill()
                 process.wait(timeout=5)
                 release.set()
-                assert archive.flush_archive_writes("offline-root", timeout_s=2)
+                assert archive.flush_archive_writes("offline-root", timeout_s=10)
                 assert len(singles) == len(batch) == 3
                 assert {item["path"]: item["ciphertextB64"] for item in singles} == {
                     item["path"]: item["ciphertextB64"] for item in batch
@@ -406,7 +406,7 @@ archive_files(root_agent_id='offline-root', artifacts=(
             release.set()
             server.shutdown()
             server.server_close()
-            thread.join(timeout=2)
+            thread.join(timeout=10)
 
 
 def test_failed_recording_batch_still_publishes_later_files():
@@ -457,7 +457,7 @@ def test_failed_recording_batch_still_publishes_later_files():
         ):
             assert not archive.archive_files(root_agent_id="offline-root", artifacts=iter(entries))
             assert [len(batch) for batch in batches] == [2, 2, 1]
-            assert archive.flush_archive_writes("offline-root", timeout_s=2)
+            assert archive.flush_archive_writes("offline-root", timeout_s=10)
             assert accepted == {path for path, _, _, _ in entries}
             assert all(source.exists() for _, source, _, _ in entries)
 

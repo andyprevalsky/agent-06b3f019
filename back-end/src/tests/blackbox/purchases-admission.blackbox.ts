@@ -35,7 +35,7 @@ async function bounded<T>(promise: Promise<T>, label: string): Promise<T> {
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Fixture did not reach ${label}`)), 5000);
+        timer = setTimeout(() => reject(new Error(`Fixture did not reach ${label}`)), 15000);
       }),
     ]);
   } finally {
@@ -116,7 +116,7 @@ async function sealWins<T>(agentId: string, admit: () => Promise<T>): Promise<vo
       ready.resolve(pid.pid);
       await release.promise;
     },
-    { timeout: 10000 }
+    { timeout: 30000 }
   );
   const blocker = await ready.promise;
   let finished = false;
@@ -132,7 +132,7 @@ async function sealWins<T>(agentId: string, admit: () => Promise<T>): Promise<vo
   );
   let waiting = false;
   try {
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + 15000;
     waiting = await retryWithBackoff(
       async () => {
         const [row] = await prisma.$queryRaw<Array<{ waiting: boolean }>>`
@@ -143,9 +143,9 @@ async function sealWins<T>(agentId: string, admit: () => Promise<T>): Promise<vo
         return row.waiting;
       },
       {
-        maxRetries: 500,
+        maxRetries: 1500,
         getBackoffDelayMs: () => 10,
-        fixedDelays: Array.from({ length: 499 }, () => 10),
+        fixedDelays: Array.from({ length: 1499 }, () => 10),
         isRetryable: () => false,
         shouldRetryResult: (observed) => !observed && !finished && Date.now() < deadline,
         component: 'PurchaseAdmissionFixture',
@@ -260,7 +260,7 @@ async function admittedMintRemainsVisibleWithoutHoldingSealLock() {
           await lockAgentWorkflowGeneration(tx, f.agentId);
           await tx.agent.update({ where: { id: f.agentId }, data: { deletedAt: new Date() } });
         },
-        { timeout: 2000 }
+        { timeout: 15000 }
       );
       assert.equal(
         (await prisma.purchaseSpend.findUniqueOrThrow({ where: { id: pending.id } })).status,
@@ -399,7 +399,7 @@ async function staleLegacyResumeCannotStealOwnership() {
       ready.resolve(row.pid);
       await release.promise;
     },
-    { timeout: 10000 }
+    { timeout: 30000 }
   );
   const blocker = await bounded(ready.promise, 'second agent generation lock');
   let finished = false;
@@ -419,7 +419,7 @@ async function staleLegacyResumeCannotStealOwnership() {
       }
     );
   try {
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + 15000;
     const waiting = await retryWithBackoff(
       async () => {
         const [row] = await prisma.$queryRaw<Array<{ waiting: boolean }>>`
@@ -428,8 +428,8 @@ async function staleLegacyResumeCannotStealOwnership() {
         return row.waiting;
       },
       {
-        maxRetries: 500,
-        fixedDelays: Array.from({ length: 499 }, () => 10),
+        maxRetries: 1500,
+        fixedDelays: Array.from({ length: 1499 }, () => 10),
         isRetryable: () => false,
         shouldRetryResult: (observed) => !observed && !finished && Date.now() < deadline,
         component: 'PurchaseResumeOwnershipFixture',

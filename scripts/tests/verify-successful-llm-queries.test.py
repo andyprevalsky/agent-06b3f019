@@ -1,6 +1,8 @@
 """Offline evidence contracts for the capability proof's three-query gate."""
 
 import importlib.util
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -110,46 +112,67 @@ def rose_fixture():
 
 class QueryEvidenceTest(unittest.TestCase):
     def test_recovered_owned_browser_state_timeout_still_rejects_infra(self):
-        for case in ('owned', 'child', 'foreign', 'wrong_root', 'after', 'before',
-                     'challenge', 'provider_retry', 'ordinary_failure'):
+        for case in (
+            "owned",
+            "child",
+            "foreign",
+            "wrong_root",
+            "after",
+            "before",
+            "challenge",
+            "provider_retry",
+            "ordinary_failure",
+        ):
             with self.subTest(case=case):
                 payload = fixture()
-                task = payload['tasks'][0]
-                task['benchmark_status'] = 'FAILED'
-                logs = task['logs']
+                task = payload["tasks"][0]
+                task["benchmark_status"] = "FAILED"
+                logs = task["logs"]
                 event = {
-                    'event': 'Transient browser session init failure; retrying with a fresh proxy',
-                    'agent_id': ROOT_AGENT, 'span_id': 'browser-init',
-                    'timestamp': '2026-09-29T00:00:30Z', 'status_code': 500,
-                    'attempt': 1,
-                    'detail': json.dumps({'error': 'Browser state injection timed out after 18000ms'}),
+                    "event": "Transient browser session init failure; retrying with a fresh proxy",
+                    "agent_id": ROOT_AGENT,
+                    "span_id": "browser-init",
+                    "timestamp": "2026-09-29T00:00:30Z",
+                    "status_code": 500,
+                    "attempt": 1,
+                    "detail": json.dumps(
+                        {"error": "Browser state injection timed out after 18000ms"}
+                    ),
                 }
-                if case in ('child', 'foreign'):
-                    event['agent_id'] = SECOND_AGENT
-                    if case == 'child':
-                        logs['tree'][SECOND_AGENT] = {'parent_agent_id': ROOT_AGENT}
-                elif case == 'wrong_root':
-                    event['root_agent_id'] = SECOND_AGENT
-                elif case in ('after', 'before'):
-                    event['timestamp'] = ('2026-09-29T00:00:46Z' if case == 'after'
-                                          else '2026-09-28T23:59:59Z')
-                elif case == 'challenge':
-                    event['event'] = 'browser_challenge_recovery'
-                elif case == 'provider_retry':
-                    event['detail'] = json.dumps({'error': 'Provider temporarily unavailable'})
-                elif case == 'ordinary_failure':
-                    event['event'] = 'task_complete'
-                logs['worker_logs'].extend([event, json.dumps(event)])
+                if case in ("child", "foreign"):
+                    event["agent_id"] = SECOND_AGENT
+                    if case == "child":
+                        logs["tree"][SECOND_AGENT] = {"parent_agent_id": ROOT_AGENT}
+                elif case == "wrong_root":
+                    event["root_agent_id"] = SECOND_AGENT
+                elif case in ("after", "before"):
+                    event["timestamp"] = (
+                        "2026-09-29T00:00:46Z"
+                        if case == "after"
+                        else "2026-09-28T23:59:59Z"
+                    )
+                elif case == "challenge":
+                    event["event"] = "browser_challenge_recovery"
+                elif case == "provider_retry":
+                    event["detail"] = json.dumps(
+                        {"error": "Provider temporarily unavailable"}
+                    )
+                elif case == "ordinary_failure":
+                    event["event"] = "task_complete"
+                logs["worker_logs"].extend([event, json.dumps(event)])
                 original = json.dumps(payload, sort_keys=True)
                 result = module.verify(payload)
-                reject = case in ('owned', 'child')
-                self.assertEqual(result['status'], 'failed' if reject else 'passed')
-                self.assertEqual(result['successful_llm_queries'], 3)
-                self.assertEqual(len(result['infra_errors']), int(reject))
+                reject = case in ("owned", "child")
+                self.assertEqual(result["status"], "failed" if reject else "passed")
+                self.assertEqual(result["successful_llm_queries"], 3)
+                self.assertEqual(len(result["infra_errors"]), int(reject))
                 if reject:
-                    self.assertEqual(result['infra_errors'][0]['error_type'], 'BrowserStateInjectionTimeout')
-                    self.assertEqual(len(result['infra_errors'][0]['event_sha256']), 64)
-                    self.assertNotIn('detail', result['infra_errors'][0])
+                    self.assertEqual(
+                        result["infra_errors"][0]["error_type"],
+                        "BrowserStateInjectionTimeout",
+                    )
+                    self.assertEqual(len(result["infra_errors"][0]["event_sha256"]), 64)
+                    self.assertNotIn("detail", result["infra_errors"][0])
                 self.assertEqual(json.dumps(payload, sort_keys=True), original)
 
     def test_three_completed_foundry_queries_use_the_same_live_evidence_contract(self):
@@ -502,6 +525,65 @@ class QueryEvidenceTest(unittest.TestCase):
         task["logs"]["post"]["worker_logs"] = []
         with self.assertRaises(AssertionError):
             module.verify(payload)
+
+
+class DiagnosticModeTests(unittest.TestCase):
+    def test_diagnostic_exit_preserves_failed_report_and_real_call_count(self):
+        payload = rose_fixture()
+        payload["tasks"][0]["logs"]["worker_logs"].append(
+            {
+                "event": "rose.complete.failed",
+                "agent_id": ROOT_AGENT,
+                "request_id": "request-failed",
+                "span_id": "failed-span",
+                "timestamp": "2026-09-29T00:00:35Z",
+            }
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            task = root / "example-task"
+            task.mkdir()
+            (task / "cloudbench-run.json").write_text(json.dumps(payload))
+            report = root / "diagnostic.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = module.main(
+                    [
+                        str(root),
+                        str(report),
+                        "--expected-count",
+                        "1",
+                        "--minimum",
+                        "4",
+                        "--diagnostics-only",
+                    ]
+                )
+            result = json.loads(report.read_text())
+            self.assertEqual(code, 0)
+            self.assertEqual(result["status"], "failed")
+            self.assertTrue(result["diagnostics_only"])
+            self.assertEqual(result["tasks"][0]["live_llm_requests"], 3)
+            self.assertEqual(len(result["tasks"][0]["failed_queries"]), 1)
+
+    def test_copied_starts_do_not_inflate_calls_and_cache_only_is_zero(self):
+        payload = rose_fixture()
+        events = payload["tasks"][0]["logs"]["worker_logs"]
+        events.extend(list(events))
+        self.assertEqual(module.verify(payload)["live_llm_requests"], 3)
+        payload["tasks"][0]["logs"]["worker_logs"] = [
+            event for event in events if event["event"] == "llm.cache"
+        ]
+        self.assertEqual(module.verify(payload)["live_llm_requests"], 0)
+
+    def test_queued_starts_are_distinct_from_observed_provider_activity(self):
+        payload = rose_fixture()
+        payload["tasks"][0]["logs"]["worker_logs"] = [
+            event
+            for event in payload["tasks"][0]["logs"]["worker_logs"]
+            if event["event"] == "rose.complete.start"
+        ]
+        result = module.verify(payload)
+        self.assertEqual(result["live_llm_requests"], 3)
+        self.assertEqual(result["provider_observed_llm_requests"], 0)
 
 
 if __name__ == "__main__":
