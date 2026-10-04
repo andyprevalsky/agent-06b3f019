@@ -19,7 +19,7 @@ OpenRouter today, so a single transport path is sufficient.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional
 
 import httpx
 import structlog
@@ -35,6 +35,7 @@ from providers.rose.pools import PoolSpec
 from providers.rose.streaming import parse_openai_sse
 from providers.rose.transforms import is_anthropic_model, transform_messages_for_openai
 from providers.rose.transport import post_openrouter_stream
+from providers.rose.truncation import model_key
 from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger()
@@ -208,6 +209,7 @@ async def waterfall_complete(
     exclude_anthropic_family: bool = False,
     cache_namespace: Optional[str] = None,
     skip_cache_write: bool = False,
+    skip_models: FrozenSet[str] = frozenset(),
 ) -> AsyncIterator[StreamChunk]:
     """Walk the pool's waterfall until one model streams a clean response.
 
@@ -217,6 +219,20 @@ async def waterfall_complete(
     step_errors: List[RoseStepError] = []
 
     for idx, model in enumerate(pool_spec.waterfall):
+        if model_key(model) in skip_models:
+            # Its reply was cut off at the output limit even with a larger one (truncation.py).
+            logger.warning(
+                "rose.waterfall.step_skipped",
+                request_id=request_id,
+                agent_id=agent_id,
+                call_site=call_site,
+                pool=pool_spec.name,
+                step=idx + 1,
+                total=len(pool_spec.waterfall),
+                model=model,
+                reason="reply_cut_off_at_output_limit",
+            )
+            continue
         if exclude_anthropic_family and is_anthropic_model(model):
             logger.warning(
                 "rose.waterfall.step_skipped",

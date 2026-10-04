@@ -26,7 +26,7 @@ import contextlib
 import os
 import time
 import uuid
-from typing import Any, AsyncIterator, Dict, List, Optional, Type, cast
+from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional, Type, cast
 
 import structlog
 from pydantic import BaseModel
@@ -77,6 +77,7 @@ from providers.rose.types import (
     RoseResponse,
     StreamChunk,
 )
+from providers.rose.truncation import model_key, recover_truncated
 from providers.rose.waterfall import waterfall_complete
 
 logger = structlog.get_logger()
@@ -816,7 +817,20 @@ class RoseClient:
                 logger.info("llm.cache.stored", call_site=call_site, key=key)
             yield chunk
 
-    async def _complete_impl(
+    async def _complete_impl(self, **kwargs: Any) -> AsyncIterator[StreamChunk]:
+        """One completion under the shared cut-off policy (`providers/rose/truncation.py`).
+
+        `recover_truncation=True` is passed by consumers that handle `restart`
+        chunks; everyone else gets exactly one attempt, as before.
+        """
+        if not kwargs.pop("recover_truncation", False):
+            async for chunk in self._complete_once(**kwargs):
+                yield chunk
+            return
+        async for chunk in recover_truncated(self._complete_once, kwargs):
+            yield chunk
+
+    async def _complete_once(
         self,
         *,
         pool: PoolName,
@@ -846,6 +860,7 @@ class RoseClient:
         dump_extra: Optional[Dict[str, Any]] = None,
         cache_namespace: Optional[str] = None,
         _exclude_anthropic_family: bool = False,
+        _skip_models: FrozenSet[str] = frozenset(),
     ) -> AsyncIterator[StreamChunk]:
         """Run a full Rose completion, yielding normalized StreamChunks.
 
@@ -1736,7 +1751,7 @@ class RoseClient:
                     )
 
             cerebras_key = _cerebras_api_key() if pool_spec.cerebras_model else ""
-            if cerebras_key:
+            if cerebras_key and model_key(pool_spec.cerebras_model) not in _skip_models:
                 active_route = "cerebras"
                 cerebras_yielded_any = False
                 try:
@@ -1821,6 +1836,7 @@ class RoseClient:
                     exclude_anthropic_family=_exclude_anthropic_family,
                     cache_namespace=cache_namespace,
                     skip_cache_write=skip_cache_write,
+                    skip_models=_skip_models,
                 )
             ):
                 chunk = _with_timing_if_done(chunk)
@@ -2073,8 +2089,12 @@ class RoseClient:
             dump_context=dump_context,
             dump_extra=dump_extra,
             cache_namespace=cache_namespace,
+            recover_truncation=True,
         ):
-            if chunk.kind == "content" and structured_output is not None:
+            if chunk.kind == "restart":
+                result = RoseResponse()
+                structured_output = StructuredOutputAccumulator() if response_model is not None else None
+            elif chunk.kind == "content" and structured_output is not None:
                 structured_output.add_chunk(chunk)
             else:
                 _fold(result, chunk)

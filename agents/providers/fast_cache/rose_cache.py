@@ -259,7 +259,11 @@ async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
 
 
 def _accumulate(acc: Dict[str, Any], chunk: "StreamChunk") -> None:
-    if chunk.kind == "metadata":
+    if chunk.kind == "restart":
+        # The attempt so far was abandoned (providers/rose/truncation.py); only the next one is stored.
+        acc.clear()
+        acc.update(_empty_response())
+    elif chunk.kind == "metadata":
         acc["actual_model"] = chunk.data.get("actual_model", acc["actual_model"])
         acc["pool_name"] = chunk.data.get("pool_name", acc["pool_name"])
         acc["request_id"] = chunk.data.get("request_id", acc["request_id"])
