@@ -324,6 +324,13 @@ def aggregate(
                 raise ValueError(
                     f"{name}: task world_model_mode does not match the canonical execution task matrix"
                 )
+            task = dict(task)
+            directory = fleet_dir / name
+            task["lifecycle_stage"] = (
+                "released" if (directory / "bench-e2e.finished-epoch").is_file()
+                else "teardown" if (directory / "benchmark-child.finished").is_file()
+                else "evaluated"
+            )
             tasks.append(task)
     passed = sum(bool(task.get("passed")) for task in tasks)
     costs = sum(float(task.get("cost_cents") or 0) for task in tasks)

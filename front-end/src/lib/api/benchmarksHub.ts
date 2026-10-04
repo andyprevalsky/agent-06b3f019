@@ -78,6 +78,8 @@ export interface HubRunTask {
   fast_mode: boolean;
   tree_agent_count: number | null;
   failure_reason: string | null;
+  lifecycle_stage?: string;
+  startup_label?: string;
 }
 
 export interface HubRun {

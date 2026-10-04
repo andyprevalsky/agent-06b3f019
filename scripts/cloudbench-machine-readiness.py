@@ -215,6 +215,7 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
                 f"instance_id={instance_id}\n"
                 f"private_ip={private_ip}\n"
                 f"clone_cmd_overridable={int(clone_cmd_overridable)}\n"
+                f"clone_cmd_inert={int(clone_cmd_overridable and init.get('cmd') == ['sleep', 'infinity'])}\n"
                 f"storage_ready={int(storage_ready)}\n"
                 f"storage_failed={int(storage_failed)}\n"
             )

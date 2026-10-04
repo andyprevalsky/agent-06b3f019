@@ -199,7 +199,7 @@ def main() -> int:
             super().__init__(*handler_args, directory=str(root), **handler_kwargs)
 
         def do_POST(self) -> None:
-            if self.path not in {"/release", "/shutdown"}:
+            if self.path not in {"/release", "/shutdown", "/outcome-published"}:
                 self.send_error(404)
                 return
             if not token:
@@ -209,6 +209,44 @@ def main() -> int:
             expected = f"Bearer {token}"
             if not hmac.compare_digest(supplied, expected):
                 self.send_error(403)
+                return
+            if self.path == "/outcome-published":
+                machine = os.environ.get("FLY_MACHINE_ID", "")
+                if (not run_token or not machine
+                    or self.headers.get("X-Cloudbench-Run-Token") != run_token
+                    or self.headers.get("X-Cloudbench-Machine-Id") != machine):
+                    self.send_error(409, "outcome identity does not match this guest")
+                    return
+                context = root / "repo/.context/cloudbench"
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 4096:
+                        raise ValueError
+                    value = json.loads(self.rfile.read(length))
+                    pending = json.loads(read_runtime_metadata(
+                        context / f"cloudbench-outcome-{run_token}.pending.json", 4096))
+                    canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+                    if (canonical != json.dumps(pending, sort_keys=True, separators=(",", ":")).encode()
+                        or type(value.get("version")) is not int or value.get("version") != 1
+                        or value.get("run_token") != run_token or value.get("machine_id") != machine
+                        or value.get("status") not in {"passed", "failed"}):
+                        raise ValueError
+                    signature = hashlib.sha256(canonical).hexdigest()
+                    descriptor, temporary = tempfile.mkstemp(dir=context, prefix=".outcome-ack.")
+                    try:
+                        with os.fdopen(descriptor, "w") as output:
+                            output.write(signature + "\n")
+                            output.flush()
+                            os.fsync(output.fileno())
+                        os.chmod(temporary, 0o644)
+                        os.replace(temporary, context / f"cloudbench-outcome-{run_token}.ack")
+                    finally:
+                        Path(temporary).unlink(missing_ok=True)
+                except (OSError, ValueError, AttributeError):
+                    self.send_error(409, "outcome does not match the evaluated packet")
+                    return
+                self.send_response(204)
+                self.end_headers()
                 return
             length = int(self.headers.get("Content-Length", "0") or 0)
             if length:

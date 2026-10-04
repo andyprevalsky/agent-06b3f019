@@ -142,7 +142,9 @@ is best effort after resource release and does not block the next slice.
 Publishers must retire before final cleanup. Report whole-slice and individual
 benchmark E2E times, with task durations where available. The 20-minute target
 is a warning and speedup reviews are waived. Preserve 7,200/300/1,800-second
-normal execution, temporary execution and E2E budgets. A runtime change that
+normal execution, temporary execution and E2E budgets. The current follow-up
+50-task command is explicitly authorized to use 600 seconds temporarily; this
+does not change normal defaults or the 1,800-second allocation cutoff. A runtime change that
 invalidates earlier runs starts a fresh streak; test/doc-only changes can carry
 results when their exercised inputs are verified unchanged.
 
@@ -161,9 +163,15 @@ bash scripts/run-predeploy-local
 
 This gate selects the bounded predeploy set and invokes `scripts/run-bench --local`, which owns the stack, execution and cleanup. General cloud selections use `scripts/run-bench <slice-or-task...>`. The lower-level `run_benchmark.py --port N` remains available for an explicitly reused running backend; it is not the normal deploy launcher. Production-only payment verification uses `scripts/run-bench agent-payment-production-abandonment` and the CLI's existing production routing.
 
-Every `/deploy` also runs four compact offline benchmark controls in Step 4s:
+Every `/deploy` also runs compact offline benchmark controls in Step 4s:
 canonical CLI dispatch, completed LIVE-query evidence, exact composite-root
-cleanup, and quiesced resource retirement. The CLI control covers a single
+cleanup, quiesced resource retirement, and evaluated result publication before
+teardown. The live-result control exercises the actual fleet projection/Hub
+transport, exact-owner publication acknowledgment, task runner's agent/phone
+cleanup boundaries, and serialized worker
+admission after unknown inventory observations, without model calls. Frontend
+blackbox coverage pins live pass/fail polling and stops detail polling once the
+run is terminal. The CLI control covers a single
 50-task dispatch with the requested five-minute execution setting and existing
 production-only routing. `run-deploy-structural-gates.test.py` prevents those
 controls from disappearing from the automatic registry. They are also registered
@@ -174,3 +182,10 @@ in `scripts/test.sh`; no live 50-task campaign is added to deploy by default.
 - **Backend API endpoint:** Add `back-end/src/tests/blackbox/<domain>.blackbox.ts`
 - **Agent tool:** Add `agents/tests/blackbox/<tool-name>/test_<tool-name>.py`
 - **Frontend component:** Add `front-end/src/tests/blackbox/<domain>.blackbox.tsx`
+
+The compact live-result deploy control also owns native inert worker admission,
+cancellation between stages and clone retries, exact prelaunch retirement,
+launched-worker capture failures, and the decoded-size Hub transport boundary.
+Frontend coverage follows every phase through release; backend Hub round-trip
+coverage preserves those fields. The original full forensic bundle is unchanged;
+Hub transport omits duplicated diagnostic logs while keeping complete transcripts.

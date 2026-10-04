@@ -215,6 +215,11 @@ slice; skipped tasks do not prove execution. Missing, malformed, `SKIPPED`,
 `INFRA_ERROR`, `ERROR`, or `CANCELLED` task results
 abort the command so the streak can restart only after RCA and a fix.
 
+The compact benchmark live-result deploy control also verifies that PASS/FAIL
+is projected to the Hub while guest teardown is pending. Keep result visibility
+separate from exact resource-release evidence; follow `/benchmark` for the
+publication lifecycle and compact permanent regression command.
+
 The command contract is exercised end to end with fake provider children inside
 the existing always-run `Descend Command` deploy gate: selection, both `-k`
 spellings, concurrency bounds, per-copy identities, child-failure propagation,
@@ -927,3 +932,9 @@ Done requires all of:
 - the full lifecycle ledger and actual benchmark duration were reported.
 
 Only then propose or enable the cron.
+
+For fleet publication/cleanup regressions, follow the canonical benchmark CLI
+and `scripts/tests/benchmark-live-results.test.py`, not a private replacement
+harness. Distinguish an evaluated verdict from resource release: the parent stays
+live through teardown. Follow CLAUDE.md for any explicitly authorized temporary
+execution setting; keep normal defaults and exact ownership cleanup unchanged.

@@ -560,6 +560,18 @@ def test_private_fleet_source_behavior_is_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_evaluated_fleet_outcomes_publish_before_teardown():
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, str(repo_root / "scripts/tests/benchmark-live-results.test.py")],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_fly_native_completion_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
@@ -19725,6 +19737,7 @@ async def run_all_tests():
         "hub_upload_gzip_preserves_live_and_final_bundles_across_retry",
         test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry,
     )
+    r.record("evaluated_fleet_outcomes_publish_before_teardown", test_evaluated_fleet_outcomes_publish_before_teardown)
     r.record(
         "cloudbench_rejects_stale_wrong_task",
         test_cloudbench_result_rejects_stale_passing_artifact_from_another_task,

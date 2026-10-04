@@ -4,6 +4,8 @@ import gzip
 import json
 import socket
 import threading
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from benchmarks.hub_upload import (
@@ -22,12 +24,17 @@ from benchmarks.hub_upload import (
 )
 
 
-def _serve(record: list):
+def _serve(record: list, *, decoded_limit: int | None = None):
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length)
             decoded = gzip.decompress(raw) if self.headers.get("Content-Encoding") == "gzip" else raw
+            if decoded_limit is not None and len(decoded) > decoded_limit:
+                self.send_response(413)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             record.append(
                 {
                     "path": self.path,
@@ -50,6 +57,52 @@ def _serve(record: list):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def test_hub_transport_keeps_complete_transcripts_without_diagnostic_blobs(monkeypatch):
+    """The same decoded-size boundary accepts full FE transcripts, not raw logs."""
+    import pytest
+
+    record = []
+    server, url = _serve(record, decoded_limit=4096)
+    task = {
+        "name": "fixture-fanout",
+        "agent_id": "root",
+        "passed": False,
+        "tree_agent_count": 2,
+        "lifecycle_stage": "released",
+        "logs": {
+            "messages": [{"role": "USER", "message": "fixture goal"}],
+            "tree": {
+                "child": {"parent_agent_id": "root", "status": "COMPLETED", "messages": [{"message": "child result"}]}
+            },
+            "worker_logs": ["x" * 8192],
+            "backend_logs": ["diagnostic"],
+            "realtime_logs": [{"event": "diagnostic"}],
+        },
+    }
+    bundle = {"run_id": "fixture-terminal", "tasks": [task]}
+    original = json.dumps(bundle, sort_keys=True)
+    try:
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", url)
+        monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+        request = urllib.request.Request(
+            url + "/api/benchmarks/runs",
+            data=gzip.compress(original.encode()),
+            headers={"Content-Encoding": "gzip", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=30)
+        assert exc.value.code == 413
+        exc.value.close()
+        assert upload_run_bundle(bundle, required=True)
+        stored = record[0]["body"]["tasks"][0]
+        assert stored["logs"] == {"messages": task["logs"]["messages"], "tree": task["logs"]["tree"]}
+        assert stored["passed"] is False and stored["lifecycle_stage"] == "released"
+        assert json.dumps(bundle, sort_keys=True) == original
+    finally:
+        server.shutdown()
 
 
 def test_upload_timeout_scales_with_payload_size():
@@ -152,7 +205,9 @@ def test_large_bundle_uploads_with_gzip(monkeypatch):
     try:
         monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", url)
         monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "test-key")
-        assert upload_run_bundle({"run_id": "large-run", "tasks": [], "padding": "x" * (8 * 1024 * 1024)}, required=True)
+        assert upload_run_bundle(
+            {"run_id": "large-run", "tasks": [], "padding": "x" * (8 * 1024 * 1024)}, required=True
+        )
         assert len(record) == 1
         assert record[0]["content_encoding"] == "gzip"
         assert record[0]["body"]["padding"] == "x" * (8 * 1024 * 1024)
@@ -367,3 +422,21 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_live_response_preserves_phase_and_startup_label():
+    from benchmarks.hub_upload import live_response_matches
+
+    task = {
+        "name": "fixture",
+        "status": "starting",
+        "passed": None,
+        "agent_id": None,
+        "lifecycle_stage": "starting",
+        "startup_label": "Loading services",
+    }
+    bundle = {"run_id": "fixture-parent", "tasks": [task]}
+    stored = {**bundle, "live": True}
+    assert live_response_matches(bundle, stored)
+    for key in ("lifecycle_stage", "startup_label"):
+        assert not live_response_matches(bundle, {**stored, "tasks": [{k: v for k, v in task.items() if k != key}]})

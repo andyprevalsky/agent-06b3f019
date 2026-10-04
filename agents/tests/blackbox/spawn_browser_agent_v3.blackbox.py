@@ -22238,7 +22238,7 @@ async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
         return _TerminalBoundaryHandle(
             first
             if len(ids) == 1
-            else {"task_id": ids[-1], "success": True, "message": "done"}
+            else {"status": "completed", "task_id": ids[-1], "success": True, "message": "done"}
         )
 
     async def approve(*_args, **_kwargs):

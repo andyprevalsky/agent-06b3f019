@@ -25,6 +25,16 @@ Behavior:
 
 Keep the ordinary 7,200-second backstops. For an explicitly requested five-minute validation, set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300` and pass `--timeout 300`; the environment setting bounds task execution and the flag bounds the controller path. Preserve terminal task grading, meaningful real execution, exact resource cleanup and the separately monitored E2E deadline. Recovered errors and inner latency measurements remain diagnostics for an infrastructure-only campaign; an ordinary task failure can satisfy that campaign without satisfying the deploy smoke gate.
 
+For the current explicitly authorized 50-task follow-up only, the user added five minutes: use `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=600` with `--timeout 600`. This is a command-scoped execution setting; keep normal defaults and the independent 1,800-second allocation cutoff. Run latency proofs without concurrent paid smoke suites.
+
+The entrypoint owns evaluation publication and the live Hub publisher. Task PASS/FAIL
+is emitted before agent/phone cleanup; the fleet publishes changed outcomes on
+its next aggregation poll instead of waiting for guest teardown. Exact-owner
+acknowledgment follows a matching live Hub response before normal cleanup;
+a sixty-second publication wait is warning-only and never prevents resource
+release. The frontend polls every five seconds. A terminal run still requires actual resource cleanup
+and final publication; early results are not a cleanup receipt.
+
 The entrypoint owns local service startup and teardown, per-run ports, per-run
 Postgres container/volume naming through `CONDUCTOR_WORKSPACE_NAME`, frontend
 and public tunnel URLs, Temporal task queue naming, non-load benchmark
@@ -176,3 +186,9 @@ This task has no live browser-auth fixture. The stack must export
 4. Never rename an existing task `name` (history primary key).
 5. Never edit prompt / criteria / timeout / pass threshold to make a flaky run
    green — fix the agent or harness boundary instead.
+
+The publisher starts before allocation and forwards starting/ready/running,
+evaluated, teardown and released phases. Keep the parent live until resource
+release, then publish its final transcripts. Hub transport excludes only
+worker/backend/realtime diagnostic logs; complete messages/tree, task metrics
+and evidence references remain, and the original local bundle stays unchanged.

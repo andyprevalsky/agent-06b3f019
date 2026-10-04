@@ -470,6 +470,37 @@ Benchmark request identity is scoped per task; exact resource cleanup temporaril
 overrides it with the persisted root owner. Preserve that precedence and restore
 both scopes on cancellation. The existing cleanup and benchmark identity tests
 cover concurrent siblings, preflight failures and callback/result contracts.
+Benchmark task PASS/FAIL is emitted as soon as evaluation completes, before
+normal agent/phone teardown. The owned fleet aggregator publishes changes,
+verifies the matching live Hub response, then acknowledges the exact guest
+outcome packet. The guest waits up to sixty seconds before cleanup; unavailable
+publication is a warning and cancellation still releases resources. The frontend
+polls every five seconds; the existing upload transport bound still applies. Early result visibility does not prove
+recording availability or resource release. The compact automatic deploy control
+is `python3 scripts/tests/benchmark-live-results.test.py`; it covers publication,
+agent/phone cleanup ordering, and pending worker admission with real serialized
+capacity controls. Unknown provider inventory admits no worker and retries on
+the existing autoscaler poll. Completed tasks stop future worker allocation;
+late inert clones preserve exact prelaunch evidence and are reaped. Launched
+workers still require runtime evidence. A redundant native update of an inert
+clone can consume an organization slot; use the verified inert creation CMD and
+clear BOOT in the explicit wrapper. The compact deploy gate owns these controls.
+The live publisher starts before allocation, carries startup and release phases,
+and keeps the Hub live through teardown. Final publication occurs after resource
+release. Hub transport keeps complete messages/tree and task/evidence metadata;
+diagnostic worker/backend/realtime logs stay in the original local archive.
+Never solve the decoded HTTP payload limit by raising it or truncating transcripts.
+The dispatch timeline treats evaluated outcomes as finished execution, not active
+work. Guest outcome ACKs must match canonical packet bytes and an integer version;
+Python's numeric equality is insufficient. An auxiliary final Hub upload warning
+preserves the canonical outcome and teardown exit code; durable evidence still
+needs independent confirmation before fleet acceptance. The same compact deploy
+control covers these boundaries, and the frontend renderer covers terminal display.
+For the next explicitly authorized follow-up 50-task run only, add five minutes:
+use `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=600` and `--timeout 600` (temporary).
+The normal 7,200-second backstop and independent 1,800-second allocation cutoff
+remain unchanged. Do not run paid smoke gates concurrently with a latency proof.
+
 The live-query verifier retains strict diagnostic findings for owned terminal
 `rose.complete.failed` and browser-state injection failures. Use its existing
 `--diagnostics-only` mode for this campaign: a recovered error remains visible

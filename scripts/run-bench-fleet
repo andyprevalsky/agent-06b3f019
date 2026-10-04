@@ -2227,9 +2227,43 @@ cloudbench_retain_runtime_evidence() {  # durable independent artifact retention
     cloudbench_fsync_directory "$FLEET_REGISTRY_DIR"
 }
 
+cloudbench_preserve_unlaunched_worker() {  # <bench-output> <worker-id>
+    # An inert clone has no worker runtime before its wrapper launch. Preserve
+    # the original staging evidence without requiring its not-yet-staged helper.
+    python3 - "$1" "$2" <<'PY'
+import hashlib, json, os, sys
+from pathlib import Path
+out, machine = Path(sys.argv[1]), sys.argv[2]
+base = out / 'worker-runtime-evidence' / machine
+try:
+    owner_path, stage = base / 'owner.json', out / f'worker-{machine}.stage.log'
+    assert owner_path.is_file() and not owner_path.is_symlink()
+    owner = json.loads(owner_path.read_text())
+    assert owner['version'] == 1 and owner['machine_id'] == machine
+    assert stage.is_file() and not stage.is_symlink() and stage.stat().st_size <= 2 * 1024 * 1024
+    original = stage.read_bytes()
+    assert b'launch worker wrapper' not in original
+    assert not (out / f'worker-{machine}.ready').exists()
+    assert not (out / f'worker-{machine}.launch-attempted').exists()
+    ready = out / 'worker-ready.ids'
+    assert not ready.exists() or machine not in ready.read_text().splitlines()
+    receipt = dict(owner, worker_started=False, stage_sha256=hashlib.sha256(original).hexdigest())
+    path = base / 'not-launched.json'
+    temporary = path.with_suffix('.tmp')
+    with temporary.open('w') as stream:
+        json.dump(receipt, stream, sort_keys=True)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
+except (AssertionError, OSError, ValueError, KeyError):
+    raise SystemExit(1)
+PY
+}
+
 cloudbench_capture_worker_runtime_evidence() {  # <bench-output> <worker-id>
     local out="$1" wid="$2" base token command capture_rc=0
     base="$out/worker-runtime-evidence/$wid"
+    cloudbench_preserve_unlaunched_worker "$out" "$wid" && return 0
     token="$(python3 - "$base/owner.json" "$wid" <<'PY'
 import json, re, sys
 from pathlib import Path
@@ -7848,7 +7882,7 @@ PY
 }
 
 fleet_recovery_confirm_pool_claims() {  # <exact recovered owner registry>
-    local registry="$1" meta="$1/meta" plan kind bench clone_name id volume_id out port
+    local registry="$1" meta="$1/meta" plan kind bench clone_name id volume_id out port guest_run_token receipt_token
     local claim state digest host pid pid_start owner run_id exact_ids
     exact_ids="$(exact_owner_pool_claim_ids "$meta")" || return 1
     [ -n "$exact_ids" ] || return 0
@@ -7889,7 +7923,7 @@ run = Path(meta['runs_root']) / meta['run_id']
 assert run.is_dir() and not run.is_symlink() and run.resolve() == run
 tasks = json.loads((run / '_batch/benches.json').read_text())
 outputs = {}
-for task in tasks:
+for ordinal, task in enumerate(tasks):
     name = task['name']
     assert isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9._-]+', name)
     assert name not in ('.', '..')
@@ -7902,7 +7936,7 @@ for task in tasks:
     assert len(parts) == 2
     if parts[0] == 'pool':
         assert parts[1] not in outputs
-        outputs[parts[1]] = out
+        outputs[parts[1]] = (out, f'{owner}-{ordinal}')
 claimed = {}
 audited = set()
 assert (audit / 'pool').is_dir() and not (audit / 'pool').is_symlink()
@@ -7925,17 +7959,22 @@ for record in (audit / 'pool').iterdir():
     claimed[record.name] = outputs[record.name]
 assert audited == set(outputs)
 with plan.open('w') as stream:
-    for machine_id, out in sorted(claimed.items()):
-        stream.write(f'{machine_id}\t{out}\n')
+    for machine_id, (out, guest_token) in sorted(claimed.items()):
+        stream.write(f'{machine_id}\t{out}\t{guest_token}\n')
 PY
     then
         rm -f "$plan"
         return 1
     fi
-    while IFS=$'\t' read -r id out; do
+    while IFS=$'\t' read -r id out guest_run_token; do
+        # The child writes its owner/catalog-ordinal token after authenticated
+        # shutdown; controller recovery writes the batch ID. Both identities
+        # are derived from this exact claim and catalog, never a free token.
         if [ -f "$out/guest-shutdown.confirmed" ] \
             && [ ! -L "$out/guest-shutdown.confirmed" ] \
-            && [ "$(cat "$out/guest-shutdown.confirmed")" = "$run_id" ]; then
+            && receipt_token="$(cat "$out/guest-shutdown.confirmed")" \
+            && { [ "$receipt_token" = "$run_id" ] \
+                 || [ "$receipt_token" = "$guest_run_token" ]; }; then
             :
         else
             volume_id="$(registry_meta_value "$FLEET_AUDIT_ROOT/$owner/pool/$id" volume_id)"
@@ -8785,6 +8824,15 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
     diagnostic_log="${ledger%.ids}.log"
     attempt=1
     while :; do
+        # Stop only fresh worker allocations once its task has finished. Any
+        # already issued attempt above was reconciled before returning here;
+        # unresolved names retain ownership and still require exact recovery.
+        if [ "${ledger##*/}" = "worker-clones.ids" ] \
+            && { [ -e "${ledger%/*}/benchmark-child.finished" ] \
+                || [ -e "${ledger%/*}/autoscaler.runtime-completed" ]; }; then
+            [ ! -s "$names_ledger" ] || return 1
+            return 75
+        fi
         if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
             private_fleet_source_admission || return 1
         fi
@@ -10537,19 +10585,12 @@ cleanup() {
         fleet_registry_remove_if_empty "$FLEET_REGISTRY_DIR" \
             || { ec=1; teardown_failed=1; }
     fi
-    # Teardown audit publication and registry retirement also consume the
-    # snapshotted migration helper. Keep the bundle until those final consumers
-    # finish; deleting it after child reaping alone strands migrated ownership.
-    if ! cleanup_owned_script_snapshot; then
-        ec=1
-        teardown_failed=1
-    fi
     cloudbench_controller_lock_release "$LOCK_DIR"
     # Report each bench's end-to-end duration only after its provider claim has
     # been released or its exact clone teardown has finished. Pool members get
     # an earlier, per-machine finish receipt in the claim-release loop below;
     # this fallback covers fresh clones and recovery paths.
-    if [ "$teardown_failed" = "0" ]; then
+    if [ "$teardown_failed" = "0" ] && [ "$KEEP_CLONES" != "1" ]; then
         for out in "${CHILD_OUT[@]}"; do
             if [ -s "$out/bench-e2e.started-epoch" ] \
                 && [ ! -s "$out/bench-e2e.finished-epoch" ]; then
@@ -10612,6 +10653,22 @@ PY
             ec=1
         fi
     fi
+    # Keep the parent live while releasing resources. Only this post-release
+    # projection closes dashboard polling and publishes the final transcripts.
+    if ! finalize_terminal_projection "$ec"; then
+        ec=1
+    elif [ "${SELF_MANAGED_HUB_RUN:-0}" = "1" ]; then
+        local hub_final_action=--upload-live
+        if [ "$teardown_failed" = "0" ] && [ "$KEEP_CLONES" != "1" ] \
+            && [ ! -e "$FLEET_REGISTRY_DIR" ] && [ ! -L "$FLEET_REGISTRY_DIR" ]; then
+            hub_final_action=--upload-final
+        fi
+        python3 "$HUB_UPLOAD_HELPER" "$hub_final_action" "$FLEET_DIR/_batch/run.json" \
+            --run-id "$BENCHMARK_HUB_PARENT_RUN_ID" --source direct-cloud-fleet \
+            || echo "⚠️ final Hub publication failed; canonical outcome and cleanup status are preserved" >&2
+    fi
+    # Teardown and final publication both need the snapshotted helpers.
+    cleanup_owned_script_snapshot || ec=1
     exit "$ec"
 }
 trap cleanup EXIT
@@ -11416,7 +11473,7 @@ reserve_worker_machine_slot() {  # <unique-reservation-token>
     local reserved_machines reserved_shared projected_machines projected_shared
     app_machine_ceiling="${CLOUDBENCH_APP_MACHINE_CEILING:-56}"
     case "$app_machine_ceiling" in ''|*[!0-9]*|0) return 1 ;; esac
-    current_machines="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c '
+    if ! current_machines="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c '
 import json, sys
 try:
     machines = json.load(sys.stdin)
@@ -11425,8 +11482,16 @@ try:
     print(len(machines))
 except Exception:
     print("")
-' 2>/dev/null)"
-    case "$current_machines" in ''|*[!0-9]*) return 1 ;; esac
+' 2>/dev/null)"; then
+        echo "⚠️ worker capacity inventory unavailable; admission pending" >&2
+        return 75
+    fi
+    case "$current_machines" in
+        ''|*[!0-9]*)
+            echo "⚠️ worker capacity inventory invalid; admission pending" >&2
+            return 75
+            ;;
+    esac
     result="$(capacity_reserve_slots "$token" 1 0 "$app_machine_ceiling" \
         2147483647 "$current_machines" 0 autoscaler-worker)"
     status=$?
@@ -11924,6 +11989,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
     : >> "$cleanup_log" 2>/dev/null || true
     if [ "$rc" = "0" ] \
         && [ -e "$cleanup_out/worker-runtime-evidence/$cleanup_wid/owner.json" ] \
+        && ! cloudbench_preserve_unlaunched_worker "$cleanup_out" "$cleanup_wid" \
         && ! cloudbench_capture_worker_runtime_evidence "$cleanup_out" "$cleanup_wid"; then
         echo "❌ worker $cleanup_wid runtime evidence was not preserved; retaining exact ownership" >&2
         rc=1
@@ -12051,6 +12117,8 @@ reconcile_worker_failure_outcomes() {  # <bench> <bench-output-dir>
 provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <primary_ip> <sim01> <out> <run-token>
     local bench="$1" ws="$2" primary_id="$3" pip="$4" sim="$5" out="$6"
     local runtime_run_token="$7"
+    [ ! -e "$out/benchmark-child.finished" ] \
+        && [ ! -e "$out/autoscaler.runtime-completed" ] || return 0
     local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file stage_log failure_reason
     local primary_volume_size worker_snapshot
     primary_volume_size="$(machine_volume_size_gb "$primary_id")" || primary_volume_size=""
@@ -12065,13 +12133,29 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         return 1
     fi
     worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
-    if ! reserve_worker_machine_slot "$worker_capacity_token"; then
+    local worker_capacity_status=0
+    reserve_worker_machine_slot "$worker_capacity_token" || worker_capacity_status=$?
+    if [ "$worker_capacity_status" -eq 75 ]; then
+        return 75
+    fi
+    if [ "$worker_capacity_status" -ne 0 ]; then
         printf '%s\n' "Machine-count capacity unavailable for worker clone" > "$out/autoscaler.failed"
         echo "  ❌ [$bench] mandatory autoscaler: Machine-count capacity unavailable" >&2
         return 1
     fi
-    if ! wid="$(clone_machine_target "$out/worker-clones.ids" "$primary_id" \
-        "$FLEET_WORKER_VM_SIZE" "$FLEET_WORKER_VM_MEMORY" "$worker_snapshot")"; then
+    if [ -e "$out/benchmark-child.finished" ] || [ -e "$out/autoscaler.runtime-completed" ]; then
+        capacity_release_reservation "$worker_capacity_token"
+        return $?
+    fi
+    local worker_clone_status=0
+    wid="$(clone_machine_target "$out/worker-clones.ids" "$primary_id" \
+        "$FLEET_WORKER_VM_SIZE" "$FLEET_WORKER_VM_MEMORY" "$worker_snapshot")" \
+        || worker_clone_status=$?
+    if [ "$worker_clone_status" -eq 75 ]; then
+        capacity_release_reservation "$worker_capacity_token"
+        return $?
+    fi
+    if [ "$worker_clone_status" -ne 0 ]; then
         # Keep the reservation until controller teardown: an ambiguous clone
         # failure can still become provider-visible after the lookup deadline.
         printf '%s\n' "could not allocate worker clone" > "$out/autoscaler.failed"
@@ -12082,6 +12166,21 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         printf '%s\n' "could not release worker capacity reservation" > "$out/autoscaler.failed"
         echo "  ❌ [$bench] mandatory autoscaler: worker capacity handoff was not durable" >&2
         return 1
+    fi
+    # Preserve the exact prelaunch owner before cancellation can reap a late
+    # allocation. Final evidence coverage includes destroyed worker clones.
+    if ! cloudbench_record_worker_evidence_owner "$out" "$wid" "$primary_id" \
+        "$runtime_run_token" "$ws"; then
+        printf '%s\n' "could not preserve worker runtime evidence ownership before launch" \
+            > "$out/autoscaler.failed"
+        return 1
+    fi
+    printf '%s\n' "allocated inert worker clone; wrapper not launched" \
+        > "$out/worker-$wid.stage.log" || return 1
+    if [ -e "$out/benchmark-child.finished" ] || [ -e "$out/autoscaler.runtime-completed" ]; then
+        : > "$out/worker-$wid.cancelled" || return 1
+        cleanup_failed_worker "$out" "$wid"
+        return $?
     fi
     echo "  ➕ [$bench] worker $wid created"
     ready_file="/data/cloudbench-worker-$wid.ready"
@@ -12124,19 +12223,13 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
         return 1
     fi
-    if ! cloudbench_record_worker_evidence_owner "$out" "$wid" "$primary_id" \
-        "$runtime_run_token" "$ws"; then
-        printf '%s\n' "could not preserve worker runtime evidence ownership before launch" \
-            > "$out/autoscaler.failed"
-        return 1
-    fi
     # Allocation is ownership, not capacity. Keep it in worker-clones.ids for
     # teardown, but count it as operational only after the worker health endpoint
     # proves that Temporal worker.run() reached its queue-polling boundary.
     : > "$out/worker-$wid.pending"
     rm -f "$out/worker-$wid.cancelled"
     stage_log="$out/worker-$wid.stage.log"
-    : > "$stage_log" 2>/dev/null || true
+    : >> "$stage_log" 2>/dev/null || true
     local wrapper worker_env; wrapper="$(mktemp)"; worker_env="$(mktemp)"
     chmod 600 "$worker_env" 2>/dev/null || true
     printf 'CLOUDBENCH_GITHUB_TOKEN_B64=%q\n' "$worker_github_token_b64" > "$worker_env"
@@ -12156,6 +12249,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         echo "export CLOUDBENCH_WORKER_MACHINE_ID=$(printf '%q' "$wid")"
         echo "export WORKSPACE_NAME=$(printf '%q' "$ws")"
         echo "export PRIMARY_HOST=$(printf '%q' "$pip")"
+        echo "export CLOUDBENCH_BOOT=0"
         echo "export BACKEND_PORT=$(printf '%q' "$BOX_BACKEND_PORT")"
         echo "export WMH_PORT=$(printf '%q' "$BOX_WMH_PORT")"
         echo "export HEALTH_PORT=$(printf '%q' "$FLEET_WORKER_HEALTH_PORT")"
@@ -12173,11 +12267,15 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
       # whose dynamic scope has already ended.
       trap - EXIT HUP INT TERM
       worker_provision_cancelled() {
+          if [ -e "$out/benchmark-child.finished" ] || [ -e "$out/autoscaler.runtime-completed" ]; then
+              : > "$out/worker-$wid.cancelled" || return 1
+          fi
           [ -e "$out/worker-$wid.cancelled" ]
       }
       finish_cancelled_worker_provision() {
           rm -f "$wrapper" "$worker_env" "$out/worker-$wid.pending" 2>/dev/null || true
-          exit 0
+          cleanup_failed_worker "$out" "$wid"
+          exit $?
       }
       publish_worker_failure() {
           local reason="$1" failure_tmp="$out/worker-$wid.failed.tmp.$$"
@@ -12206,6 +12304,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
       run_worker_stage_cmd() {
           local label="$1" rc
           shift
+          worker_provision_cancelled && finish_cancelled_worker_provision
           log_worker_stage "attempt ${attempt:-?}/$stage_attempts: $label"
           if "$@" >> "$stage_log" 2>&1; then
               log_worker_stage "attempt ${attempt:-?}/$stage_attempts: $label succeeded"
@@ -12217,7 +12316,6 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           return "$rc"
       }
       launched=0
-      worker_neutralized=0
       for attempt in $(seq 1 "$stage_attempts"); do
         worker_provision_cancelled && finish_cancelled_worker_provision
         if ! machine_storage_ready "$wid"; then
@@ -12230,17 +12328,14 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
             sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
             continue
         fi
-        # Creation already overrides the copied primary command with an inert
-        # sleep. Clear the inherited boot flag before staging the worker too.
-        if [ "$worker_neutralized" != "1" ]; then
-            if ! run_worker_stage_cmd "neutralize cloned boot command" \
-                fly_with_timeout 30 machine update "$wid" -a "$APP" \
-                --env CLOUDBENCH_BOOT=0 --command "sleep infinity" \
-                --skip-health-checks --skip-start --yes; then
-                sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
-                continue
-            fi
-            worker_neutralized=1
+        # Creation already overrides CMD with inert sleep and rejects source
+        # exec/entrypoint overrides. An identical native update consumes a
+        # replacement slot and fails at the org limit. Clear BOOT in the
+        # explicit wrapper instead, before any worker code runs.
+        if [ "$(inventory_machine_field "$wid" clone_cmd_inert)" != "1" ]; then
+            log_worker_stage "waiting for native inert clone command"
+            sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+            continue
         fi
         run_worker_stage_cmd "start neutralized worker" \
             fly_with_timeout 20 machine start "$wid" -a "$APP" || true
@@ -12270,6 +12365,8 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
                       continue
                   fi
               fi
+              worker_provision_cancelled && finish_cancelled_worker_provision
+              : > "$out/worker-$wid.launch-attempted" || exit 1
               if run_worker_stage_cmd "launch worker wrapper" \
                   fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
                   -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\""; then
@@ -12394,6 +12491,13 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
             fi
             tracked_workers="$(_pool_ids "$out")"
             ready_workers="$(_ready_pool_ids "$out")"
+            if [ -e "$out/benchmark-child.finished" ] \
+                || [ -e "$out/autoscaler.runtime-completed" ]; then
+                # A finished task cannot use future capacity. Existing owned
+                # transitions still drain and retire; an unallocated demand
+                # observation cannot reject the terminal task or delay release.
+                desired_workers="$ready_workers"
+            fi
             if [ "$ready_workers" -ge "$desired_workers" ] \
                 && [ "$tracked_workers" = "$ready_workers" ] \
                 && ! find "$out" -maxdepth 1 -name 'worker-*.pending' \
@@ -12679,7 +12783,15 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
             scale_down_since=""
             local n=$((want - cur))
             echo "  ⤴️  [$bench] scale up +$n (desired=$desired, pool=$cur)"
-            for _ in $(seq 1 "$n"); do provision_worker "$bench" "$ws" "$cid" "$pip" "$sim" "$out" "$runtime_run_token"; done
+            for _ in $(seq 1 "$n"); do
+                local provision_status=0
+                provision_worker "$bench" "$ws" "$cid" "$pip" "$sim" "$out" "$runtime_run_token" \
+                    || provision_status=$?
+                # Unknown inventory admits nothing. Observe again on the normal
+                # poll, with child/owner lifecycle checked at the next loop head.
+                [ "$provision_status" -ne 75 ] || break
+                [ "$provision_status" -eq 0 ] || return "$provision_status"
+            done
         elif [ "$want" -lt "$cur" ]; then
             autoscaler_monotonic_seconds scale_down_now
             if [ "$scale_down_target" != "$want" ] \
@@ -12869,6 +12981,142 @@ if [ -s "$POOL_IDS_FILE" ]; then
     }
     echo "🧊 worker clone source: ${WORKER_POOL_SNAPSHOT_SIZE_GB} GB pool snapshot $WORKER_POOL_SNAPSHOT_ID"
 fi
+# ── ONE aggregated batch dashboard (served; never auto-opens a browser) ─────
+# Merge every bench's live report-card.json into a single card (N per_task rows,
+# summed cost + tokens) and serve it on DASH_BASE. Each row's agent_url already
+# points at its own bench's /open-agent (localhost:<bench-port>), so clicking
+# "open" from the batch view routes to the right isolated machine's viewer.
+UNIFIED_DIR="$FLEET_DIR/_batch"
+mkdir -p "$UNIFIED_DIR"
+printf '%s' "${CODE_SUMMARY:-}" > "$UNIFIED_DIR/code.txt"   # shown in the dashboard header
+cp -f "$ROOT_DIR/agents/benchmarks/dashboard.html" "$UNIFIED_DIR/dashboard.html" 2>/dev/null || true
+# NOTE: never kill whatever holds DASH_BASE — that is the ONE persistent central
+# hub, shared across every run + carrying the user's open tab. It picks up this
+# new run dir on its next scan. We (re)start it below ONLY if it isn't already up.
+# benches.json was frozen with the complete requested task list at fire time.
+# Live and terminal projections consume that same manifest, including when
+# provisioning exits before every child has an output directory.
+# Revalidate/restart the identity-owned hub BEFORE the aggregator captures
+# DASH_BASE. If the early hub disappeared and a foreign workspace took its
+# port, every generated agent URL must use the newly selected port.
+start_central_hub || exit 1
+require_central_hub_visibility || exit 1
+HUB_URL="http://localhost:$DASH_BASE/"
+RUN_URL="http://localhost:$DASH_BASE/run/$RUN_ID/dashboard.html"
+(
+    while :; do
+        env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" \
+            ROOT_DIR="$ROOT_DIR" SELF_MANAGED_HUB_RUN="$SELF_MANAGED_HUB_RUN" \
+            python3 - "$UNIFIED_DIR/report-card.json" <<'PY' || echo "⚠️ live benchmark publication failed" >&2
+import json, os, sys
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+out = sys.argv[1]; fleet = os.environ["FLEET_DIR"]; dash_base = os.environ.get("DASH_BASE", "8765")
+# Startup-phase tracker (stdlib-only) → per-row step timeline while queued.
+sys.path.insert(0, os.path.join(os.environ["ROOT_DIR"], "agents"))
+try:
+    from benchmarks.fleet_startup_phase import startup_state
+except Exception:
+    startup_state = None
+benches = json.load(open(os.path.join(os.environ["UNIFIED_DIR"], "benches.json")))
+per_task = []
+ci = {"agents_llm_usd": 0.0, "wmh_grounding_usd": 0.0, "infra_usd": 0.0, "total_usd": 0.0}
+mi = {"tokens_in": 0, "tokens_out": 0}
+modes, elapsed = set(), 0.0
+for b in benches:
+    name = b["name"]; default_mode = "simulate" if b.get("mode") == "SIM" else "real"
+    card = None
+    try: card = json.load(open(os.path.join(fleet, name, "cloudbench-live", "report-card.json")))
+    except Exception: card = None
+    row = None
+    if card:
+        rows = card.get("per_task") or []
+        row = next((r for r in rows if r.get("name") == name), rows[0] if rows else None)
+    if row is None:   # seed a queued placeholder so ALL N benches always show
+        row = {"name": name, "status": "queued", "duration_s": None, "cost_usd": None,
+               "agent_url": None, "tokens_in": 0, "tokens_out": 0,
+               "world_model_mode": default_mode, "infra_usd": None}
+    row.setdefault("world_model_mode", default_mode)
+    directory = Path(fleet) / name
+    if (directory / "bench-e2e.finished-epoch").exists():
+        row["lifecycle_stage"] = "released"
+    elif (directory / "guest-shutdown.confirmed").exists() or (directory / "benchmark-child.finished").exists():
+        row["lifecycle_stage"] = "teardown"
+    elif row.get("status") in ("passed", "failed", "error"):
+        row["lifecycle_stage"] = "evaluated"
+    elif row.get("status") == "running":
+        row["lifecycle_stage"] = "running"
+    elif (directory / "barrier.ready.observed").exists():
+        row["lifecycle_stage"] = "ready"
+    elif (directory / "bench-e2e.started-epoch").exists():
+        row["lifecycle_stage"] = "starting"
+    else:
+        row["lifecycle_stage"] = "queued"
+    # Route "open" through the DURABLE batch resolver (DASH_BASE) — never the
+    # per-bench port that dies with the run. The resolver serves from local run
+    # data, so the link can't go dead.
+    url = row.get("agent_url")
+    if url:
+        try:
+            aid = (parse_qs(urlparse(url).query).get("agent-id") or [""])[0]
+        except Exception:
+            aid = ""
+        if aid:
+            row["agent_url"] = f"http://localhost:{dash_base}/open-agent?agent-id={aid}"
+    # While queued (before the on-box run_benchmark emits a card), surface the
+    # concrete startup step + expected/elapsed so the dashboard shows progress.
+    if row.get("status") == "queued" and startup_state is not None:
+        try:
+            row["startup"] = startup_state(
+                Path(fleet) / name / "fleet-child.log",
+                Path(fleet) / name / ".startup-state.json",
+            )
+        except Exception:
+            pass
+    per_task.append(row)
+    if card:
+        cost = card.get("cost") or {}
+        for k in ci:
+            v = cost.get(k)
+            if isinstance(v, (int, float)): ci[k] += v
+        md = card.get("metadata") or {}
+        mi["tokens_in"] += int(md.get("tokens_in") or 0); mi["tokens_out"] += int(md.get("tokens_out") or 0)
+        elapsed = max(elapsed, float(card.get("elapsed_s") or 0))
+    if row.get("world_model_mode"): modes.add(row["world_model_mode"])
+st = lambda s: sum(1 for t in per_task if t.get("status") == s)
+passed, failed = st("passed"), st("failed") + st("error")
+running = sum(1 for t in per_task if t.get("status") == "running")
+queued = sum(1 for t in per_task if t.get("status") == "queued")
+try:
+    code_summary = open(os.path.join(os.environ["UNIFIED_DIR"], "code.txt")).read().strip()
+except Exception:
+    code_summary = ""
+card = {
+    "run_id": "batch",
+    "code": code_summary,
+    "elapsed_s": elapsed,
+    "world_model_mode": (list(modes)[0] if len(modes) == 1 else "mixed") if modes else "real",
+    "tasks": {"total": len(benches), "running": running, "completed": passed + failed, "queued": queued},
+    "results": {"passed": passed, "failed": failed, "transient": st("transient"),
+                "success_rate": round(passed / max(1, passed + failed), 3)},
+    "cost": {**{k: round(v, 4) for k, v in ci.items()}, "fast_cache_hit_rate": None},
+    "metadata": mi,
+    "infra": None,
+    "per_task": per_task,
+}
+with open(out, "w") as f: json.dump(card, f); f.write("\n")
+if os.environ.get("SELF_MANAGED_HUB_RUN") == "1":
+    from benchmarks.hub_upload import publish_live_report_card
+    from benchmarks.outcome_publication import acknowledge_published
+    parent = os.environ["BENCHMARK_HUB_PARENT_RUN_ID"]
+    if publish_live_report_card(card, run_id=parent,
+                               state_path=Path(out).with_name("hub-live-publication.json")):
+        acknowledge_published(card, run_id=parent, fleet_dir=Path(fleet))
+PY
+        sleep 1
+    done
+) & UNIFIED_AGG_PID=$!
+
 # ── Phase 1: provision every bench's isolated machine CONCURRENTLY ───────────
 if [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ] \
     && [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" != "1" ]; then
@@ -13155,118 +13403,7 @@ fi
 echo ""
 echo "⏳ ${#CHILD_PIDS[@]} isolated bench machine(s) running."
 
-# ── ONE aggregated batch dashboard (served; never auto-opens a browser) ─────
-# Merge every bench's live report-card.json into a single card (N per_task rows,
-# summed cost + tokens) and serve it on DASH_BASE. Each row's agent_url already
-# points at its own bench's /open-agent (localhost:<bench-port>), so clicking
-# "open" from the batch view routes to the right isolated machine's viewer.
-UNIFIED_DIR="$FLEET_DIR/_batch"
-mkdir -p "$UNIFIED_DIR"
-printf '%s' "${CODE_SUMMARY:-}" > "$UNIFIED_DIR/code.txt"   # shown in the dashboard header
-cp -f "$ROOT_DIR/agents/benchmarks/dashboard.html" "$UNIFIED_DIR/dashboard.html" 2>/dev/null || true
-# NOTE: never kill whatever holds DASH_BASE — that is the ONE persistent central
-# hub, shared across every run + carrying the user's open tab. It picks up this
-# new run dir on its next scan. We (re)start it below ONLY if it isn't already up.
-# benches.json was frozen with the complete requested task list at fire time.
-# Live and terminal projections consume that same manifest, including when
-# provisioning exits before every child has an output directory.
-# Revalidate/restart the identity-owned hub BEFORE the aggregator captures
-# DASH_BASE. If the early hub disappeared and a foreign workspace took its
-# port, every generated agent URL must use the newly selected port.
-start_central_hub || exit 1
-require_central_hub_visibility || exit 1
-HUB_URL="http://localhost:$DASH_BASE/"
-RUN_URL="http://localhost:$DASH_BASE/run/$RUN_ID/dashboard.html"
-(
-    while :; do
-        env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" \
-            python3 - "$UNIFIED_DIR/report-card.json" <<'PY' 2>/dev/null || true
-import json, os, sys
-from pathlib import Path
-from urllib.parse import parse_qs, urlparse
-out = sys.argv[1]; fleet = os.environ["FLEET_DIR"]; dash_base = os.environ.get("DASH_BASE", "8765")
-# Startup-phase tracker (stdlib-only) → per-row step timeline while queued.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(fleet)), "agents"))
-try:
-    from benchmarks.fleet_startup_phase import startup_state
-except Exception:
-    startup_state = None
-benches = json.load(open(os.path.join(os.environ["UNIFIED_DIR"], "benches.json")))
-per_task = []
-ci = {"agents_llm_usd": 0.0, "wmh_grounding_usd": 0.0, "infra_usd": 0.0, "total_usd": 0.0}
-mi = {"tokens_in": 0, "tokens_out": 0}
-modes, elapsed = set(), 0.0
-for b in benches:
-    name = b["name"]; default_mode = "simulate" if b.get("mode") == "SIM" else "real"
-    card = None
-    try: card = json.load(open(os.path.join(fleet, name, "cloudbench-live", "report-card.json")))
-    except Exception: card = None
-    row = None
-    if card:
-        rows = card.get("per_task") or []
-        row = next((r for r in rows if r.get("name") == name), rows[0] if rows else None)
-    if row is None:   # seed a queued placeholder so ALL N benches always show
-        row = {"name": name, "status": "queued", "duration_s": None, "cost_usd": None,
-               "agent_url": None, "tokens_in": 0, "tokens_out": 0,
-               "world_model_mode": default_mode, "infra_usd": None}
-    row.setdefault("world_model_mode", default_mode)
-    # Route "open" through the DURABLE batch resolver (DASH_BASE) — never the
-    # per-bench port that dies with the run. The resolver serves from local run
-    # data, so the link can't go dead.
-    url = row.get("agent_url")
-    if url:
-        try:
-            aid = (parse_qs(urlparse(url).query).get("agent-id") or [""])[0]
-        except Exception:
-            aid = ""
-        if aid:
-            row["agent_url"] = f"http://localhost:{dash_base}/open-agent?agent-id={aid}"
-    # While queued (before the on-box run_benchmark emits a card), surface the
-    # concrete startup step + expected/elapsed so the dashboard shows progress.
-    if row.get("status") == "queued" and startup_state is not None:
-        try:
-            row["startup"] = startup_state(
-                Path(fleet) / name / "fleet-child.log",
-                Path(fleet) / name / ".startup-state.json",
-            )
-        except Exception:
-            pass
-    per_task.append(row)
-    if card:
-        cost = card.get("cost") or {}
-        for k in ci:
-            v = cost.get(k)
-            if isinstance(v, (int, float)): ci[k] += v
-        md = card.get("metadata") or {}
-        mi["tokens_in"] += int(md.get("tokens_in") or 0); mi["tokens_out"] += int(md.get("tokens_out") or 0)
-        elapsed = max(elapsed, float(card.get("elapsed_s") or 0))
-    if row.get("world_model_mode"): modes.add(row["world_model_mode"])
-st = lambda s: sum(1 for t in per_task if t.get("status") == s)
-passed, failed = st("passed"), st("failed") + st("error")
-running = sum(1 for t in per_task if t.get("status") == "running")
-queued = sum(1 for t in per_task if t.get("status") == "queued")
-try:
-    code_summary = open(os.path.join(os.environ["UNIFIED_DIR"], "code.txt")).read().strip()
-except Exception:
-    code_summary = ""
-card = {
-    "run_id": "batch",
-    "code": code_summary,
-    "elapsed_s": elapsed,
-    "world_model_mode": (list(modes)[0] if len(modes) == 1 else "mixed") if modes else "real",
-    "tasks": {"total": len(benches), "running": running, "completed": passed + failed, "queued": queued},
-    "results": {"passed": passed, "failed": failed, "transient": st("transient"),
-                "success_rate": round(passed / max(1, passed + failed), 3)},
-    "cost": {**{k: round(v, 4) for k, v in ci.items()}, "fast_cache_hit_rate": None},
-    "metadata": mi,
-    "infra": None,
-    "per_task": per_task,
-}
-with open(out, "w") as f: json.dump(card, f); f.write("\n")
-PY
-        sleep 1
-    done
-) & UNIFIED_AGG_PID=$!
+
 echo "   this run: $RUN_URL"
 echo "   per-bench viewers: $(for j in "${!CHILD_PORT[@]}"; do printf '%s→:%s ' "${CHILD_BENCH[$j]}" "${CHILD_PORT[$j]}"; done)"
 echo ""
@@ -13332,6 +13469,7 @@ release_start_barrier() {
                 fi
             fi
             if [ "${is_ready[$j]}" = "1" ]; then
+                : > "$out/barrier.ready.observed" || true
                 ready=$((ready + 1)); live=$((live + 1))
             elif ! kill -0 "$p" 2>/dev/null; then
                 # exited before signalling ready → infra failure; exclude it.
@@ -13439,9 +13577,6 @@ for j in "${!AUTOSCALER_PIDS[@]}"; do
     elif ! ready_workers_operational "${CHILD_OUT[$j]}"; then
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler worker became unhealthy before final acceptance" >&2
         AUTOSCALER_FAILURE=1
-    elif [ "$ready_workers" -lt "$desired_workers" ]; then
-        echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler worker capacity below desired: $ready_workers/$desired_workers workers queue-ready" >&2
-        AUTOSCALER_FAILURE=1
     elif [ "$tracked_workers" != "$ready_workers" ] \
         || find "${CHILD_OUT[$j]}" -maxdepth 1 -name 'worker-*.pending' -print -quit 2>/dev/null | grep -q .; then
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler worker capacity incomplete: $ready_workers/$tracked_workers workers queue-ready" >&2
@@ -13462,6 +13597,10 @@ for j in "${!AUTOSCALER_PIDS[@]}"; do
             > "${CHILD_OUT[$j]}/autoscaler.acceptance-failed" 2>/dev/null || true
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler did not confirm terminal completion" >&2
         AUTOSCALER_FAILURE=1
+    fi
+    if [ "$ready_workers" -lt "${desired_workers:-0}" ] \
+        && [ -e "${CHILD_OUT[$j]}/autoscaler.completed-after-child" ]; then
+        echo "⚠️ [${CHILD_BENCH[$j]}] task finished before future worker demand was needed: $ready_workers/$desired_workers queue-ready" >&2
     fi
 done
 # Normal completion has already reaped every child. Clear the ownership list so
@@ -13500,7 +13639,7 @@ if ! finalize_terminal_projection 0; then
     exit 1
 fi
 if [ "$SELF_MANAGED_HUB_RUN" = "1" ]; then
-    python3 "$HUB_UPLOAD_HELPER" --upload-final "$UNIFIED_DIR/run.json" \
+    python3 "$HUB_UPLOAD_HELPER" --upload-live "$UNIFIED_DIR/run.json" \
         --run-id "$BENCHMARK_HUB_PARENT_RUN_ID" --source direct-cloud-fleet
 fi
 

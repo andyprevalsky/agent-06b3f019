@@ -67,6 +67,7 @@ class TaskCard:
     duration_s: Optional[float] = None
     cost_usd: Optional[float] = None
     agent_url: Optional[str] = None
+    outcome_sha256: Optional[str] = None
     llm_call_count: Optional[int] = None
     tree_agent_count: Optional[int] = None
     tokens_in: Optional[int] = None
@@ -201,9 +202,7 @@ def build_report_card(state: RunState) -> dict:
     else:
         agents_llm_usd = round(sum(t.cost_usd or 0.0 for t in per_task), 4)
 
-    wmh_grounding_usd = (
-        round(state.wmh_grounding_usd, 4) if state.wmh_grounding_usd is not None else None
-    )
+    wmh_grounding_usd = round(state.wmh_grounding_usd, 4) if state.wmh_grounding_usd is not None else None
     # Infra (vCPU/machine) cost: prefer the run-level value; else sum per-bench.
     infra_usd = (
         round(state.infra_usd, 4)
@@ -224,14 +223,10 @@ def build_report_card(state: RunState) -> dict:
         "fast_cache_hit_rate": state.fast_cache_hit_rate,
     }
     agent_tokens_in = (
-        int(state.tokens_in)
-        if state.tokens_in is not None
-        else sum(int(t.tokens_in or 0) for t in per_task)
+        int(state.tokens_in) if state.tokens_in is not None else sum(int(t.tokens_in or 0) for t in per_task)
     )
     agent_tokens_out = (
-        int(state.tokens_out)
-        if state.tokens_out is not None
-        else sum(int(t.tokens_out or 0) for t in per_task)
+        int(state.tokens_out) if state.tokens_out is not None else sum(int(t.tokens_out or 0) for t in per_task)
     )
     wmh_tokens_in = int(state.wmh_tokens_in or 0)
     wmh_tokens_out = int(state.wmh_tokens_out or 0)
@@ -281,6 +276,7 @@ def build_report_card(state: RunState) -> dict:
                 "duration_s": round(t.duration_s, 1) if t.duration_s is not None else None,
                 "cost_usd": round(t.cost_usd, 4) if t.cost_usd is not None else None,
                 "agent_url": t.agent_url,
+                "outcome_sha256": t.outcome_sha256,
                 "tokens_in": int(t.tokens_in or 0),
                 "tokens_out": int(t.tokens_out or 0),
                 "world_model_mode": t.world_model_mode or state.world_model_mode,

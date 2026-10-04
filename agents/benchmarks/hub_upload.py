@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 # Script-mode (`python agents/benchmarks/hub_upload.py`) puts this file's
 # directory on sys.path, not `agents/`. Cloudbench copies run that way.
@@ -227,6 +227,11 @@ def prepare_run_bundle_for_upload(bundle: dict, *, live: bool = False, required:
             continue
         task = dict(task)
         logs = dict(task.get("logs") or {})
+        # The Hub renders messages/tree. Diagnostic process/event logs remain
+        # in the unchanged local bundle and forensic archive; sending those
+        # duplicated blobs with every task can exceed the decoded HTTP limit.
+        for diagnostic in ("worker_logs", "backend_logs", "realtime_logs"):
+            logs.pop(diagnostic, None)
         raw_tree = logs.get("tree")
         tree = canonicalize_agent_tree(raw_tree)
         if raw_tree and not tree:
@@ -259,6 +264,7 @@ def _post_run_bundle(
     live: bool,
     required: bool,
     label: str,
+    verify_live_response: bool = False,
 ) -> bool:
     headers = _auth_headers(required=required)
     if headers is None:
@@ -284,6 +290,9 @@ def _post_run_bundle(
         try:
             with opener.open(request, timeout=effective_timeout) as response:
                 ok = 200 <= response.status < 300
+                if ok and verify_live_response:
+                    stored = json.loads(response.read(1024 * 1024)).get("run") or {}
+                    ok = live_response_matches(body, stored)
                 if ok:
                     print(f"📤 uploaded run bundle to {label}: {body.get('run_id')}")
                 return ok
@@ -341,6 +350,7 @@ def upload_run_bundle(
     timeout: float = 30.0,
     live: bool = False,
     required: bool = False,
+    verify_live_response: bool = False,
 ) -> bool:
     """POST the bundle to the hub. Returns True on success, False otherwise."""
     base = _hub_url(required=required)
@@ -353,7 +363,122 @@ def upload_run_bundle(
         live=live,
         required=required,
         label="hub",
+        verify_live_response=verify_live_response,
     )
+
+
+def live_response_matches(bundle: dict, stored: dict) -> bool:
+    """A terminal-to-live fenced no-op cannot acknowledge a new outcome."""
+
+    def identity(task):
+        passed = task.get("passed")
+        status = "passed" if passed is True else "failed" if passed is False else task.get("status")
+        return (
+            task.get("name"),
+            status,
+            passed,
+            task.get("agent_id"),
+            task.get("lifecycle_stage"),
+            task.get("startup_label"),
+        )
+
+    return (
+        stored.get("live") is True
+        and stored.get("run_id") == bundle.get("run_id")
+        and [identity(t) for t in stored.get("tasks") or []] == [identity(t) for t in bundle["tasks"]]
+    )
+
+
+def live_bundle_from_report_card(card: dict, *, run_id: str, source: str) -> dict:
+    """Project metadata from the same evaluated rows the fleet dashboard renders."""
+    tasks = []
+    for row in card.get("per_task") or []:
+        status = row.get("status") or "running"
+        agent_ids = parse_qs(urlparse(row.get("agent_url") or "").query).get("agent-id") or []
+        cost = row.get("cost_usd")
+        tasks.append(
+            {
+                "name": row["name"],
+                "status": status,
+                "passed": True if status == "passed" else False if status in ("failed", "error") else None,
+                "agent_id": agent_ids[0] if agent_ids else None,
+                "outcome_sha256": row.get("outcome_sha256"),
+                "lifecycle_stage": row.get("lifecycle_stage"),
+                "startup_label": (row.get("startup") or {}).get("label"),
+                "duration_seconds": row.get("duration_s"),
+                "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
+                "world_model_mode": row.get("world_model_mode"),
+                "fast_mode": bool(row.get("fast_mode")),
+                "llm_call_count": row.get("llm_call_count"),
+                "tree_agent_count": row.get("tree_agent_count"),
+                "tokens_in": row.get("tokens_in"),
+                "tokens_out": row.get("tokens_out"),
+            }
+        )
+    return {
+        "run_id": run_id,
+        "timestamp": card.get("timestamp") or "",
+        "source": source,
+        "suite": "cloud-fleet",
+        "tasks": tasks,
+        "code": card.get("code"),
+        "elapsed_s": card.get("elapsed_s"),
+        "cost": card.get("cost"),
+        "metadata": card.get("metadata"),
+    }
+
+
+def publish_live_report_card(card: dict, *, run_id: str, state_path: Path) -> bool:
+    """Publish outcome changes immediately; coalesce ongoing cost/token refreshes."""
+    bundle = live_bundle_from_report_card(card, run_id=run_id, source="direct-cloud-fleet")
+    signature = [
+        (
+            task["name"],
+            task["status"],
+            task["agent_id"],
+            task["outcome_sha256"],
+            task["lifecycle_stage"],
+            task["startup_label"],
+        )
+        for task in bundle["tasks"]
+    ]
+    now = time.time()
+    try:
+        previous = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        previous = {}
+    if not isinstance(previous, dict):
+        previous = {}
+    epoch = previous.get("epoch", 0)
+    if not isinstance(epoch, (int, float)):
+        epoch = 0
+    if previous.get("signature") == [list(row) for row in signature] and now - epoch < 15:
+        return True
+    began = time.monotonic()
+    verified = upload_run_bundle(bundle, live=True, verify_live_response=True)
+    # Only metadata: source-bound transport timing, without bodies, headers,
+    # credentials, request IDs, or free-form provider errors.
+    event = {
+        "epoch": now,
+        "elapsed_seconds": round(time.monotonic() - began, 3),
+        "verified": verified,
+        "task_counts": {
+            status: sum(t["status"] == status for t in bundle["tasks"])
+            for status in {t["status"] for t in bundle["tasks"]}
+        },
+    }
+    try:
+        with state_path.with_suffix(".events.jsonl").open("a") as stream:
+            os.chmod(stream.name, 0o600)
+            stream.write(json.dumps(event) + "\n")
+    except OSError:
+        pass
+    if verified:
+        temporary = state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"signature": signature, "epoch": now}))
+        temporary.replace(state_path)
+        return True
+    return False
 
 
 def mirror_run_bundle_to_durable_hub(
@@ -450,6 +575,7 @@ def _main() -> int:
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--require-visible", metavar="BUNDLE_JSON")
     action.add_argument("--upload-final", metavar="BUNDLE_JSON")
+    action.add_argument("--upload-live", metavar="BUNDLE_JSON")
     action.add_argument("--verify-visible", metavar="RUN_ID")
     parser.add_argument("--run-id")
     parser.add_argument("--source", default="direct-benchmark")
@@ -457,7 +583,7 @@ def _main() -> int:
     if args.verify_visible:
         verify_run_visible(args.verify_visible)
         return 0
-    path = Path(args.require_visible or args.upload_final)
+    path = Path(args.require_visible or args.upload_final or args.upload_live)
     bundle = json.loads(path.read_text())
     if args.run_id:
         bundle["run_id"] = args.run_id
@@ -465,7 +591,7 @@ def _main() -> int:
     if args.require_visible:
         require_run_visible(bundle)
     else:
-        upload_run_bundle(bundle, required=True)
+        upload_run_bundle(bundle, live=bool(args.upload_live), required=True)
     return 0
 
 
