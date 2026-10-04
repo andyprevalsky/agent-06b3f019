@@ -15,17 +15,17 @@ bash scripts/test.sh --list                        # list available repos/domain
 
 ## Test Suites
 
-| Suite                            | Command                                                                  | Server Required   | Filtering    |
-| -------------------------------- | ------------------------------------------------------------------------ | ----------------- | ------------ |
-| Offline-only                     | `bash scripts/test.sh --no-smoke`                                        | No                | repo, domain |
-| All (offline + smoke + semantic) | `bash scripts/test.sh --port=N`                                          | Yes               | —            |
-| Agents blackbox                  | `cd agents && python scripts/run_blackbox_tests.py [domain]`             | No                | domain       |
-| Backend structural               | `cd back-end && npx tsx src/tests/structural/layer-deps.test.ts`         | No                | —            |
-| Backend blackbox                 | `cd back-end && bash scripts/run-blackbox-tests.sh [domain]`             | No (self-manages) | domain       |
-| Frontend blackbox                | `cd front-end && bash scripts/run-blackbox-tests.sh [domain]`            | No                | domain       |
-| Smoke benchmarks                 | `cd agents && python benchmarks/run_benchmark.py --suite smoke --port=N` | Yes               | —            |
-| Backend ESLint                   | `cd back-end && npm run lint`                                            | No                | —            |
-| Frontend ESLint                  | `cd front-end && npm run lint`                                           | No                | —            |
+| Suite                            | Command                                                          | Server Required   | Filtering    |
+| -------------------------------- | ---------------------------------------------------------------- | ----------------- | ------------ |
+| Offline-only                     | `bash scripts/test.sh --no-smoke`                                | No                | repo, domain |
+| All (offline + smoke + semantic) | `bash scripts/test.sh --port=N`                                  | Yes               | —            |
+| Agents blackbox                  | `cd agents && python scripts/run_blackbox_tests.py [domain]`     | No                | domain       |
+| Backend structural               | `cd back-end && npx tsx src/tests/structural/layer-deps.test.ts` | No                | —            |
+| Backend blackbox                 | `cd back-end && bash scripts/run-blackbox-tests.sh [domain]`     | No (self-manages) | domain       |
+| Frontend blackbox                | `cd front-end && bash scripts/run-blackbox-tests.sh [domain]`    | No                | domain       |
+| Predeploy benchmarks             | `bash scripts/run-predeploy-local`                               | No (self-manages) | selector     |
+| Backend ESLint                   | `cd back-end && npm run lint`                                    | No                | —            |
+| Frontend ESLint                  | `cd front-end && npm run lint`                                   | No                | —            |
 
 ## Suite Details
 
@@ -156,10 +156,18 @@ check; they do not supply fleet acceptance credit.
 End-to-end tests that spawn real agents against a running backend. Requires all services (back-end + agents + research) to be running.
 
 ```bash
-cd agents && python benchmarks/run_benchmark.py --suite smoke --port 3001 --ci --parallel
+bash scripts/run-predeploy-local
 ```
 
-The `--port` flag is required for local runs — there is no implicit port default. Use `--prod` to run against production instead.
+This gate selects the bounded predeploy set and invokes `scripts/run-bench --local`, which owns the stack, execution and cleanup. General cloud selections use `scripts/run-bench <slice-or-task...>`. The lower-level `run_benchmark.py --port N` remains available for an explicitly reused running backend; it is not the normal deploy launcher. Production-only payment verification uses `scripts/run-bench agent-payment-production-abandonment` and the CLI's existing production routing.
+
+Every `/deploy` also runs four compact offline benchmark controls in Step 4s:
+canonical CLI dispatch, completed LIVE-query evidence, exact composite-root
+cleanup, and quiesced resource retirement. The CLI control covers a single
+50-task dispatch with the requested five-minute execution setting and existing
+production-only routing. `run-deploy-structural-gates.test.py` prevents those
+controls from disappearing from the automatic registry. They are also registered
+in `scripts/test.sh`; no live 50-task campaign is added to deploy by default.
 
 ## Adding New Tests
 

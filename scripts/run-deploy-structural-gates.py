@@ -51,6 +51,19 @@ GATES = (
         "benchmark-sms-transport-mock",
         ("bash", "scripts/tests/benchmark-sms-transport-mock.test.sh"),
     ),
+    Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
+    Gate(
+        "benchmark-successful-llm-evidence",
+        ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
+    ),
+    Gate(
+        "cloudbench-composite-root-cleanup",
+        ("python3", "scripts/tests/cloudbench-exact-session-multi-root.test.py"),
+    ),
+    Gate(
+        "cloudbench-quiesced-forensic-retirement",
+        ("python3", "scripts/tests/cloudbench-forensic-quiesced.test.py"),
+    ),
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
     Gate(
