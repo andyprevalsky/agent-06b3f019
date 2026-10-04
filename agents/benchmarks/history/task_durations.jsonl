@@ -4849,3 +4849,14 @@
 {"task": "browser-auth-signup-fails-purchase-assistance", "duration_seconds": 439.5, "cost_cents": 0.0, "timestamp": "2026-10-04T18:30:18.728469+00:00", "agent_id": "b52c7c26-e569-4f4a-bb01-6ddbe9ce4bc5"}
 {"task": "browser-auth-code-never-arrives", "duration_seconds": 580.8, "cost_cents": 2.0, "timestamp": "2026-10-04T20:53:48.997119+00:00", "agent_id": "97d658db-0964-4b3c-a72c-82649fba4ef4"}
 {"task": "browser-auth-saved-password-retry", "duration_seconds": 115.5, "cost_cents": 10.0, "timestamp": "2026-10-04T20:53:48.997119+00:00", "agent_id": "47297454-f94a-41e5-b777-1dd4e584015f"}
+{"task": "browser-auth-code-never-arrives", "duration_seconds": 394.1, "cost_cents": 2.0, "timestamp": "2026-10-04T21:36:57.481571+00:00", "agent_id": "aece5dc6-3ff7-42de-ac7b-cd7a9f6448a1"}
+{"task": "browser-auth-all-options-fail-assistance", "duration_seconds": 423.9, "cost_cents": 2.0, "timestamp": "2026-10-04T21:36:57.481571+00:00", "agent_id": "1cee45eb-994e-4a47-9d47-f032f362beec"}
+{"task": "browser-auth-signup-fails-purchase-assistance", "duration_seconds": 222.0, "cost_cents": 2.0, "timestamp": "2026-10-04T21:36:57.481571+00:00", "agent_id": "ffef46ee-7d7f-4aef-b0c9-85a88cb1c351"}
+{"task": "browser-auth-signup-purchase-no-subscription", "duration_seconds": 209.0, "cost_cents": 8.0, "timestamp": "2026-10-04T21:36:57.481571+00:00", "agent_id": "8f97e308-7ece-4612-a4c4-cb4143c201cf"}
+{"task": "browser-auth-code-never-arrives", "duration_seconds": 231.9, "cost_cents": 2.0, "timestamp": "2026-10-04T21:37:11.141457+00:00", "agent_id": "ef8def1f-7ff5-4fc2-82b6-37cacdcd3028"}
+{"task": "browser-auth-all-options-fail-assistance", "duration_seconds": 423.8, "cost_cents": 2.0, "timestamp": "2026-10-04T21:37:11.141457+00:00", "agent_id": "efcf015b-113f-478e-b569-08c769626a3c"}
+{"task": "browser-auth-signup-fails-purchase-assistance", "duration_seconds": 286.4, "cost_cents": 2.0, "timestamp": "2026-10-04T21:37:11.141457+00:00", "agent_id": "2b1275d6-75af-4193-9e32-20155379766b"}
+{"task": "browser-auth-signup-purchase-no-subscription", "duration_seconds": 197.0, "cost_cents": 7.0, "timestamp": "2026-10-04T21:37:11.141457+00:00", "agent_id": "65ff9714-1186-430e-b6ea-5dd6d4807a15"}
+{"task": "browser-auth-code-never-arrives", "duration_seconds": 263.0, "cost_cents": 27.0, "timestamp": "2026-10-04T21:37:31.702760+00:00", "agent_id": "946bbaff-49c0-43f5-bbf4-bd932ea7e7b3"}
+{"task": "browser-auth-signup-fails-purchase-assistance", "duration_seconds": 261.7, "cost_cents": 2.0, "timestamp": "2026-10-04T21:37:31.702760+00:00", "agent_id": "88f8b321-05c5-4d98-83eb-62cf952ddd0a"}
+{"task": "browser-auth-signup-purchase-no-subscription", "duration_seconds": 195.2, "cost_cents": 7.0, "timestamp": "2026-10-04T21:37:31.702760+00:00", "agent_id": "3b502ac5-3cc1-4436-ac65-d2f32703bb81"}
