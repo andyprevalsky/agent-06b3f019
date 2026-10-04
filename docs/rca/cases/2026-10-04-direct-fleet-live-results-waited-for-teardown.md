@@ -110,3 +110,21 @@ failed on the frozen pre-correction source and passed unchanged after guarding
 the release fallback on clone retention and publishing the readiness marker
 from the shared accepted-ready branch. Existing real per-pool release receipts
 remain preserved. These controls join the same compact deploy gate.
+
+The full review-history audit recovered an earlier substantive review omitted
+by timestamp filtering. Its three non-security findings extend this same case:
+the dispatch timeline counted passed/failed tasks as executing; Python numeric
+equality accepted a boolean or float packet version whose canonical ACK digest
+differed; and an auxiliary final upload failure replaced successful cleanup's
+exit code. Actual renderer and HTTP/cleanup controls failed before correction
+(one renderer failure and two owning failures in 2.08 seconds), then passed
+unchanged (renderer green and two owning passes in 1.12 seconds). The compact
+deploy control remained nineteen passing cases, without provider calls.
+
+The fixes distinguish active execution from completed startup and all-terminal
+execution, compare canonical packet bytes with an exact integer version, and
+warn on auxiliary publication failure without replacing the owned result.
+Durable production evidence remains required for acceptance. Archive searches
+were `outcome-published canonical version boolean` and `benchmark executing
+terminal status final upload warning`; the optional-artifact-sink case is a
+relative. No original archive, evaluator, model, prompt or task was modified.

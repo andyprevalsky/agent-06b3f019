@@ -106,6 +106,8 @@ def test_outcome_publication_http_ownership_and_terminal_fence(tmp_path, monkeyp
             assert request(packet, **changes) in (403, 409)
             assert not ack.exists()
         assert request(dict(packet, status="failed")) == 409 and not ack.exists()
+        for version in (True, 1.0):
+            assert request(dict(packet, version=version)) == 409 and not ack.exists()
         pending.write_text(json.dumps(dict(packet, agent_id="foreign-agent")))
         assert request(packet) == 409 and not ack.exists()
         pending.write_text(json.dumps(packet))

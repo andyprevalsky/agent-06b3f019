@@ -49,7 +49,14 @@ function toDetail(run: typeof base) {
       fast_cache_hit_rate: 0,
     },
     metadata: {},
-    dispatch: null,
+    dispatch: {
+      status: 'running',
+      created_at: base.timestamp,
+      claimed_at: base.timestamp,
+      claimed_by: 'fixture-poller',
+      updated_at: base.timestamp,
+      error: null,
+    },
   };
 }
 afterEach(() => {
@@ -132,6 +139,7 @@ it('shows evaluated pass/fail while teardown is pending, then stops terminal det
   expect(
     within(screen.getByTestId('run-view-task-chat-mode')).getByText('running'),
   ).toBeInTheDocument();
+  expect(screen.getByText('benchmark executing — table updates live')).toBeInTheDocument();
   lifecycle_stage = 'evaluated';
   status = 'passed';
   await act(async () => {
@@ -142,6 +150,7 @@ it('shows evaluated pass/fail while teardown is pending, then stops terminal det
   ).toBeInTheDocument();
   expect(screen.getByText('● live')).toBeInTheDocument();
   expect(screen.getByText('Evaluated')).toBeInTheDocument();
+  expect(screen.queryByText('benchmark executing — table updates live')).not.toBeInTheDocument();
   lifecycle_stage = 'teardown';
   status = 'failed';
   await act(async () => {

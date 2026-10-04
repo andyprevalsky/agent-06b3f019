@@ -10665,7 +10665,7 @@ PY
         fi
         python3 "$HUB_UPLOAD_HELPER" "$hub_final_action" "$FLEET_DIR/_batch/run.json" \
             --run-id "$BENCHMARK_HUB_PARENT_RUN_ID" --source direct-cloud-fleet \
-            || ec=1
+            || echo "⚠️ final Hub publication failed; canonical outcome and cleanup status are preserved" >&2
     fi
     # Teardown and final publication both need the snapshotted helpers.
     cleanup_owned_script_snapshot || ec=1

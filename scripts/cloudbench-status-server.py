@@ -225,11 +225,13 @@ def main() -> int:
                     value = json.loads(self.rfile.read(length))
                     pending = json.loads(read_runtime_metadata(
                         context / f"cloudbench-outcome-{run_token}.pending.json", 4096))
-                    if (value != pending or value.get("version") != 1
+                    canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+                    if (canonical != json.dumps(pending, sort_keys=True, separators=(",", ":")).encode()
+                        or type(value.get("version")) is not int or value.get("version") != 1
                         or value.get("run_token") != run_token or value.get("machine_id") != machine
                         or value.get("status") not in {"passed", "failed"}):
                         raise ValueError
-                    signature = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                    signature = hashlib.sha256(canonical).hexdigest()
                     descriptor, temporary = tempfile.mkstemp(dir=context, prefix=".outcome-ack.")
                     try:
                         with os.fdopen(descriptor, "w") as output:

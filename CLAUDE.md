@@ -490,6 +490,12 @@ and keeps the Hub live through teardown. Final publication occurs after resource
 release. Hub transport keeps complete messages/tree and task/evidence metadata;
 diagnostic worker/backend/realtime logs stay in the original local archive.
 Never solve the decoded HTTP payload limit by raising it or truncating transcripts.
+The dispatch timeline treats evaluated outcomes as finished execution, not active
+work. Guest outcome ACKs must match canonical packet bytes and an integer version;
+Python's numeric equality is insufficient. An auxiliary final Hub upload warning
+preserves the canonical outcome and teardown exit code; durable evidence still
+needs independent confirmation before fleet acceptance. The same compact deploy
+control covers these boundaries, and the frontend renderer covers terminal display.
 For the next explicitly authorized follow-up 50-task run only, add five minutes:
 use `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=600` and `--timeout 600` (temporary).
 The normal 7,200-second backstop and independent 1,800-second allocation cutoff

@@ -85,7 +85,17 @@ function usd(n: number | null): string {
  * The fleet dashboard's startup bar, hub edition: concrete dispatch progress
  * while a run spins up, so "queued" is never an opaque wait.
  */
-function DispatchTimeline({ dispatch, running }: { dispatch: HubRunDispatch; running: boolean }) {
+function DispatchTimeline({
+  dispatch,
+  running,
+  started,
+  finished,
+}: {
+  dispatch: HubRunDispatch;
+  running: boolean;
+  started: boolean;
+  finished: boolean;
+}) {
   const now = Date.now();
   const createdMs = new Date(dispatch.created_at).getTime();
   const claimedMs = dispatch.claimed_at === null ? null : new Date(dispatch.claimed_at).getTime();
@@ -108,15 +118,19 @@ function DispatchTimeline({ dispatch, running }: { dispatch: HubRunDispatch; run
       detail:
         claimedMs === null
           ? 'expected ~2–4 min'
-          : running
+          : started || finished
             ? 'done'
             : `${fmtElapsed((now - claimedMs) / 1000)} elapsed · expected ~2–4 min`,
-      state: claimedMs === null ? 'pending' : running ? 'done' : 'active',
+      state: started || finished ? 'done' : claimedMs === null ? 'pending' : 'active',
     },
     {
       label: 'Running',
-      detail: running ? 'benchmark executing — table updates live' : 'expected after stack boot',
-      state: running ? 'active' : 'pending',
+      detail: finished
+        ? 'execution finished — results available'
+        : running
+          ? 'benchmark executing — table updates live'
+          : 'expected after stack boot',
+      state: finished ? 'done' : running ? 'active' : 'pending',
     },
   ];
   return (
@@ -268,7 +282,14 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
           {detail.live && detail.dispatch !== null && (
             <DispatchTimeline
               dispatch={detail.dispatch}
-              running={detail.tasks.some((t) => ['running', 'passed', 'failed'].includes(t.status))}
+              running={detail.tasks.some((t) => ['running', 'evaluating'].includes(t.status))}
+              started={detail.tasks.some((t) =>
+                ['running', 'evaluating', 'passed', 'failed'].includes(t.status),
+              )}
+              finished={
+                detail.tasks.length > 0 &&
+                detail.tasks.every((t) => ['passed', 'failed', 'error'].includes(t.status))
+              }
             />
           )}
           <div className="flex flex-wrap gap-2 pb-3" data-testid="run-tiles">

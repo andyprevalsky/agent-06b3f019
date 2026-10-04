@@ -7664,12 +7664,16 @@ exit 99
 def test_fleet_lifecycle_receipt_requires_final_registry_retirement(tmp_path: Path) -> None:
     """A sealed provider audit is insufficient if recovery authority remains."""
     upload_probe = tmp_path / "upload-probe.py"
-    upload_probe.write_text("import pathlib,sys\npathlib.Path(sys.argv[2]).write_text(sys.argv[1])\n")
+    upload_probe.write_text(
+        "import pathlib,sys,os\n"
+        "pathlib.Path(sys.argv[2]).write_text(sys.argv[1])\n"
+        "raise SystemExit(1 if os.environ.get('UPLOAD_WARNING') == '1' else 0)\n"
+    )
     fleet_source = FLEET_SCRIPT.read_text()
     cleanup = "\n".join(_extract_fleet_function(fleet_source, signature) for signature in (
         "cloudbench_fsync_directory() {", "cloudbench_collect_remaining_runtime_evidence() {", "cleanup() {",
     ))
-    for removal in ("removed", "failed", "retained"):
+    for removal in ("removed", "failed", "retained", "upload-warning"):
         fleet = tmp_path / removal
         (fleet / "_batch").mkdir(parents=True)
         (fleet / "registry").mkdir()
@@ -7685,6 +7689,7 @@ BENCHMARK_HUB_PARENT_RUN_ID=fixture-parent
 HUB_UPLOAD_HELPER={shlex.quote(str(upload_probe))}
 FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 RUN_ID={removal}
+export UPLOAD_WARNING={1 if removal == "upload-warning" else 0}
 FLEET_REGISTRY_DIR="$FLEET_DIR/registry"
 FLEET_REGISTRY_PUBLISHED=1
 FLEET_EXECUTION_COMPLETED=1
@@ -7712,7 +7717,7 @@ for helper in release_cleanup_disk_reserve cloudbench_terminate_tree_and_wait \\
 done
 fleet_registry_remove_if_empty() {{
     case {removal} in
-        removed) rmdir "$FLEET_REGISTRY_DIR" ;;
+        removed|upload-warning) rmdir "$FLEET_REGISTRY_DIR" ;;
         failed) return 1 ;;
         retained) return 0 ;;
     esac
@@ -7724,10 +7729,10 @@ exit 0
         result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
         assert not evidence_latch.exists(), "real no-child evidence collection did not release its latch"
         assert (fleet / "_batch/run.json").read_text() == (
-            "--upload-final" if removal == "removed" else "--upload-live"
+            "--upload-final" if removal in ("removed", "upload-warning") else "--upload-live"
         ), "unreleased resources falsely stopped frontend polling"
         receipt = json.loads((fleet / "_batch/lifecycle.json").read_text())
-        assert receipt["status"] == ("verified" if removal == "removed" else "failed"), result.stderr
+        assert receipt["status"] == ("verified" if removal in ("removed", "upload-warning") else "failed"), result.stderr
         assert receipt["fleet_owner_token"] == "a" * 32
         assert receipt["run_id"] == removal
         if removal == "failed":
