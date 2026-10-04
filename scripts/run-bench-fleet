@@ -10590,7 +10590,7 @@ cleanup() {
     # been released or its exact clone teardown has finished. Pool members get
     # an earlier, per-machine finish receipt in the claim-release loop below;
     # this fallback covers fresh clones and recovery paths.
-    if [ "$teardown_failed" = "0" ]; then
+    if [ "$teardown_failed" = "0" ] && [ "$KEEP_CLONES" != "1" ]; then
         for out in "${CHILD_OUT[@]}"; do
             if [ -s "$out/bench-e2e.started-epoch" ] \
                 && [ ! -s "$out/bench-e2e.finished-epoch" ]; then
@@ -13457,7 +13457,6 @@ release_start_barrier() {
                         if curl --noproxy '*' -fsS --max-time 1 -o /dev/null \
                             "$ready_marker_url" 2>/dev/null; then
                             is_ready[$j]=1
-                            : > "$out/barrier.ready.observed" || true
                         fi
                         ;;
                 esac
@@ -13470,6 +13469,7 @@ release_start_barrier() {
                 fi
             fi
             if [ "${is_ready[$j]}" = "1" ]; then
+                : > "$out/barrier.ready.observed" || true
                 ready=$((ready + 1)); live=$((live + 1))
             elif ! kill -0 "$p" 2>/dev/null; then
                 # exited before signalling ready → infra failure; exclude it.

@@ -30,7 +30,7 @@ if __name__ == "__main__":
                 "benchmarks/outcome_publication_test.py",
                 "benchmarks/hub_upload_test.py",
                 "-k",
-                "fleet_publishes_evaluation_before_teardown or evaluated_outcome_is_visible_before_agent_and_phone_teardown or autoscaler_runtime_handoff_capacity or worker_cleanup_and_terminal_allocation_ownership or outcome_publication_http or outcome_wait_preserves or hub_transport_keeps_complete_transcripts_without_diagnostic_blobs or live_response_preserves_phase_and_startup_label or machine_readiness_publishes_keyed_inventory_index or test_clone_retries_transient_volume_not_found or fleet_lifecycle_receipt_requires_final_registry_retirement or exact_pool_claim_confirmation_requires_guest_receipt",
+                "fleet_publishes_evaluation_before_teardown or evaluated_outcome_is_visible_before_agent_and_phone_teardown or autoscaler_runtime_handoff_capacity or worker_cleanup_and_terminal_allocation_ownership or outcome_publication_http or outcome_wait_preserves or hub_transport_keeps_complete_transcripts_without_diagnostic_blobs or live_response_preserves_phase_and_startup_label or machine_readiness_publishes_keyed_inventory_index or test_clone_retries_transient_volume_not_found or fleet_lifecycle_receipt_requires_final_registry_retirement or exact_pool_claim_confirmation_requires_guest_receipt or fleet_retained_resources_do_not_claim_release or data_plane_barrier_release_at_full_fleet_width",
             ],
             cwd=AGENTS,
             env=env,

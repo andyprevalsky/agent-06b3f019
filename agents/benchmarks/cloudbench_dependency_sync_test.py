@@ -18319,6 +18319,33 @@ def test_refresh_wmh_publishes_the_rebuilt_volume_as_the_proven_fleet_snapshot()
     assert "WMH model snapshot published for fleet clones" in refresh
 
 
+def test_fleet_retained_resources_do_not_claim_release(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    start = fleet.index("    # Report each bench's end-to-end duration")
+    end = fleet.index("    # Task failure and infrastructure failure", start)
+    fallback = fleet[start:end]
+    for keep, failed, already_released in ((0, 0, False), (1, 0, False), (1, 0, True), (0, 1, False)):
+        out = tmp_path / f"{keep}-{failed}-{already_released}"
+        out.mkdir()
+        (out / "bench-e2e.started-epoch").write_text("1\n")
+        marker = out / "bench-e2e.finished-epoch"
+        if already_released:
+            marker.write_text("2\n")
+        script = f"""set -eu
+KEEP_CLONES={keep}
+teardown_failed={failed}
+ec=0
+CHILD_OUT=({shlex.quote(str(out))})
+{fallback}
+"""
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert marker.exists() == (already_released or (not keep and not failed)), \
+            "retained resources falsely reported release"
+        if already_released:
+            assert marker.read_text() == "2\n", "actual per-pool release receipt was overwritten"
+
+
 def test_start_barrier_tolerates_infra_failures() -> None:
     """RCA (2026-07-15): at fleet width some isolated stacks sporadically fail
     on-box startup (resource/timing races under N concurrent full stacks). The
@@ -18699,9 +18726,11 @@ release_start_barrier
         )
         assert success.returncode == 0, success.stderr
         assert all((root / f"cloudbench-start-{barrier}.release").exists() for root in roots)
+        assert all((root / "barrier.ready.observed").exists() for root in roots)
 
         for root in roots:
             (root / f"cloudbench-start-{barrier}.release").unlink()
+            (root / "barrier.ready.observed").unlink()
         # The second half isolates release failure (not readiness discovery):
         # retain the compatibility READY signal after taking its server down so
         # the controller must attempt, and fail, the release POST.
@@ -18718,6 +18747,8 @@ release_start_barrier
             timeout=subprocess_timeout_seconds,
         )
         assert failed.returncode == 1
+        assert (roots[-1] / "barrier.ready.observed").exists(), \
+            "accepted log readiness never reached the phase publisher"
         assert "could not release synchronized start barrier" in failed.stderr
     finally:
         for server in servers:

@@ -102,3 +102,11 @@ successful teardown, disabled clone retention, and exact owner-registry absence.
 The Hub acknowledgment validates phase and startup labels as well as verdicts;
 an older backend cannot acknowledge fields it omitted. The compact deploy gate
 covers both boundaries without provider calls.
+
+Formal review found two additional phase edges. The final fallback wrote a
+release timestamp even when fresh clones were intentionally retained, and the
+accepted READY log fallback omitted its phase marker. Both owning controls
+failed on the frozen pre-correction source and passed unchanged after guarding
+the release fallback on clone retention and publishing the readiness marker
+from the shared accepted-ready branch. Existing real per-pool release receipts
+remain preserved. These controls join the same compact deploy gate.
