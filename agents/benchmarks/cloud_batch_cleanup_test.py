@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import functools
+import inspect
 import json
 import os
 import tempfile
@@ -26,6 +27,98 @@ def async_case(function):
 
     run.async_case = function
     return run
+
+
+@async_case
+async def test_evaluated_outcome_is_visible_before_agent_and_phone_teardown():
+    for passed in (True, False):
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            await _assert_evaluated_before_teardown(monkeypatch, passed)
+
+
+async def _assert_evaluated_before_teardown(monkeypatch, passed):
+    """Exercise the real task runner through evaluation and both cleanup boundaries."""
+    events = []
+    task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+    task.tags = []
+    task.min_steps = {}
+    task.min_tool_counts = {}
+    task.min_agent_count = None
+    task.phone_persona = {"system_prompt": "fixture"}
+    task.enforce_declared_evaluators = False
+
+    class Callee:
+        phone_number = "fixture-phone"
+        assistant_id = "fixture-assistant"
+
+        def __init__(self, *_args):
+            pass
+
+        async def setup(self):
+            pass
+
+        async def cleanup(self):
+            events.append("phone-cleanup")
+
+    async def empty(*_args, **_kwargs):
+        return []
+
+    async def poll(*_args):
+        return {"agent": {"status": "COMPLETED"}, "messages": []}, 0, 0, None
+
+    async def delete(*_args):
+        events.append("agent-cleanup")
+
+    for name in (
+        "_apply_live_fixtures",
+        "_apply_memory_fixtures",
+        "_restore_live_fixture_scenarios_async",
+        "subscribe_supabase_realtime_agent",
+        "get_agent_tree",
+        "post_world_model_update_events",
+        "archive_agent_start",
+    ):
+        monkeypatch.setattr(bench, name, empty)
+    monkeypatch.setattr(bench, "PhoneCalleeSession", Callee)
+    monkeypatch.setattr(bench, "create_agent", AsyncMock(return_value=ROOT))
+    monkeypatch.setattr(bench, "_poll_agent", poll)
+    monkeypatch.setattr(bench, "_get_settled_tool_usage", AsyncMock(return_value={}))
+    monkeypatch.setattr(bench, "_fetch_tree_stats", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        bench,
+        "get_llm_usage_details",
+        AsyncMock(
+            return_value=(
+                {},
+                {
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_hit_pct": 0,
+                },
+            )
+        ),
+    )
+    monkeypatch.setattr(bench, "evaluate_task", lambda *_args: (passed, None if passed else "task failed"))
+    monkeypatch.setattr(bench, "_evaluate_phone_call_task", AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr(bench, "ensure_payment_lifecycle_cleanup", AsyncMock(return_value=None))
+    monkeypatch.setattr(bench, "collect_logs", AsyncMock(return_value={"messages": []}))
+    monkeypatch.setattr(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("fixture", None)))
+    monkeypatch.setattr(bench, "_should_delete_agent_after_run", lambda *_args: True)
+    monkeypatch.setattr(bench, "delete_agent", delete)
+
+    async def evaluated(result):
+        assert result.agent_id == ROOT and result.passed is passed
+        await asyncio.sleep(0)
+        events.append("evaluated")
+
+    kwargs = (
+        {"on_task_evaluated": evaluated}
+        if "on_task_evaluated" in inspect.signature(bench.run_single_task).parameters
+        else {}
+    )
+    result = await bench.run_single_task("http://localhost:39999", task, **kwargs)
+    assert result.passed is passed
+    assert events == ["evaluated", "agent-cleanup", "phone-cleanup"]
 
 
 def browser_rows(task="browser-one", *, attached=True):

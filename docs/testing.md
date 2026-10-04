@@ -161,9 +161,15 @@ bash scripts/run-predeploy-local
 
 This gate selects the bounded predeploy set and invokes `scripts/run-bench --local`, which owns the stack, execution and cleanup. General cloud selections use `scripts/run-bench <slice-or-task...>`. The lower-level `run_benchmark.py --port N` remains available for an explicitly reused running backend; it is not the normal deploy launcher. Production-only payment verification uses `scripts/run-bench agent-payment-production-abandonment` and the CLI's existing production routing.
 
-Every `/deploy` also runs four compact offline benchmark controls in Step 4s:
+Every `/deploy` also runs compact offline benchmark controls in Step 4s:
 canonical CLI dispatch, completed LIVE-query evidence, exact composite-root
-cleanup, and quiesced resource retirement. The CLI control covers a single
+cleanup, quiesced resource retirement, and evaluated result publication before
+teardown. The live-result control exercises the actual fleet projection/Hub
+transport, exact-owner publication acknowledgment, task runner's agent/phone
+cleanup boundaries, and serialized worker
+admission after unknown inventory observations, without model calls. Frontend
+blackbox coverage pins live pass/fail polling and stops detail polling once the
+run is terminal. The CLI control covers a single
 50-task dispatch with the requested five-minute execution setting and existing
 production-only routing. `run-deploy-structural-gates.test.py` prevents those
 controls from disappearing from the automatic registry. They are also registered

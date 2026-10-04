@@ -488,6 +488,7 @@ their assertions or test counts:
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `bash scripts/tests/descend-command.test.sh`,
+`python3 scripts/tests/benchmark-live-results.test.py`,
 `python3 scripts/tests/verify-successful-llm-queries.test.py`,
 `python3 scripts/tests/cloudbench-exact-session-multi-root.test.py`,
 `python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
@@ -515,7 +516,7 @@ cannot be silently dropped from the deploy path. `run-deploy-structural-gates.te
 asserts this list and the `GATES` registry match exactly in both directions, so
 adding a gate without documenting it here fails the build.
 
-The four compact benchmark gates above run on every deploy, including deploys
+The compact benchmark gates above run on every deploy, including deploys
 without cloud-runner changes. They exercise the canonical CLI dispatch (including
 one 50-task dispatch and production-only routing), completed LIVE-query evidence,
 exact composite-root cleanup, and quiesced resource retirement offline. Larger

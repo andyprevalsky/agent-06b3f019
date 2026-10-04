@@ -24396,3 +24396,170 @@ fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
         assert (registry / "runtime-evidence-unconfirmed").exists()
         assert not (run / "_forensic/retirement-verified.json").exists()
     assert 'fleet_recovery_confirm_forensic_retirement "$registry"' in fleet
+
+
+def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
+    """Real aggregation publishes evaluated outcomes while guest cleanup is pending."""
+    from unittest.mock import patch
+
+    from benchmarks.hub_upload import require_run_visible
+
+    received = []
+
+    class Hub(BaseHTTPRequestHandler):
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            if self.headers.get("Content-Encoding") == "gzip":
+                raw = gzip.decompress(raw)
+            bundle = json.loads(raw)
+            received.append((self.path, bundle))
+            response = json.dumps({"run": {"run_id": bundle["run_id"], "live": True, "tasks": bundle.get("tasks", [])}}).encode()
+            self.send_response(201)
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def do_GET(self):
+            response = json.dumps({"run": {"run_id": "live-parent"}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, *_args):
+            pass
+
+    batch = tmp_path / "_batch"
+    batch.mkdir()
+    manifest = [{"name": "alpha", "mode": "REAL"}, {"name": "beta", "mode": "REAL"}]
+    (batch / "benches.json").write_text(json.dumps(manifest))
+    for name, status in [("alpha", "running"), ("beta", "passed")]:
+        live = tmp_path / name / "cloudbench-live"
+        live.mkdir(parents=True)
+        (live / "report-card.json").write_text(
+            json.dumps(
+                {
+                    "per_task": [
+                        {
+                            "name": name,
+                            "status": status,
+                            "duration_s": 12,
+                            "agent_url": f"https://www.roselabs.ai/?agent-id={name}&view=bench",
+                        }
+                    ]
+                }
+            )
+        )
+    source = FLEET_SCRIPT.read_text().split("# ── ONE aggregated batch dashboard", 1)[1]
+    aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    env = dict(
+        os.environ,
+        FLEET_DIR=str(tmp_path),
+        UNIFIED_DIR=str(batch),
+        ROOT_DIR=str(ROOT),
+        DASH_BASE="8765",
+        SELF_MANAGED_HUB_RUN="1",
+        BENCHMARK_HUB_PARENT_RUN_ID="live-parent",
+        BENCHMARK_HUB_API_KEY="fixture-key",
+        BENCHMARK_HUB_UPLOAD_URL=f"http://127.0.0.1:{server.server_port}",
+        PYTHONPATH=str(ROOT / "agents"),
+    )
+    try:
+        with patch.dict(os.environ, env):
+            require_run_visible(
+                {"run_id": "live-parent", "tasks": [{"name": row["name"], "status": "starting"} for row in manifest]}
+            )
+        received.clear()
+
+        def project():
+            command = subprocess.run(
+                [sys.executable, "-c", aggregate, str(batch / "report-card.json")],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert command.returncode == 0, command.stderr
+            assert not any(tmp_path.glob("*/guest-shutdown.confirmed"))
+
+        project()
+        assert received, "Hub never received evaluated outcomes before teardown"
+        path, bundle = received[-1]
+        assert path == "/api/benchmarks/runs?live=1"
+        assert bundle["run_id"] == "live-parent"
+        assert [(t["name"], t["status"], t["passed"]) for t in bundle["tasks"]] == [
+            ("alpha", "running", None),
+            ("beta", "passed", True),
+        ]
+        assert bundle["tasks"][1]["agent_id"] == "beta"
+        count = len(received)
+        project()
+        assert len(received) == count, "unchanged task outcomes must not spam Hub"
+        live = tmp_path / "alpha" / "cloudbench-live" / "report-card.json"
+        card = json.loads(live.read_text())
+        card["per_task"][0]["status"] = "failed"
+        live.write_text(json.dumps(card))
+        project()
+        assert len(received) == count + 1, "a failure must publish immediately, before teardown"
+        assert [(t["status"], t["passed"]) for t in received[-1][1]["tasks"]] == [("failed", False), ("passed", True)]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("inventory,provider_rc,expected", [
+    (None, 1, 75), ("malformed", 0, 75), (87, 1, 75), (88, 0, 1), (87, 0, 0),
+])
+def test_autoscaler_runtime_handoff_capacity_observation_pending(
+    tmp_path: Path, inventory, provider_rc, expected,
+) -> None:
+    """Unknown observations allocate nothing; real serialized ceiling remains hard."""
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(_extract_fleet_function(fleet, name + "() {") for name in (
+        "capacity_reserve_slots", "reserve_worker_machine_slot", "provision_worker",
+    ))
+    payload = tmp_path / "inventory.json"
+    payload.write_text(json.dumps([{"id": str(i)} for i in range(inventory)])
+                       if isinstance(inventory, int) else "{" if inventory else "")
+    script = f'''set -uo pipefail
+CASE={shlex.quote(str(tmp_path))}
+APP=fixture-app
+RUN_ID=fixture-run
+FLEET_OWNER_TOKEN={'a' * 32}
+FLEET_OWNER_HOST="$(hostname)"
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+FLEET_OWNERSHIP_ROOT="$CASE/ownership"
+CAPACITY_RESERVATION_ROOT="$CASE/capacity"
+CLOUDBENCH_APP_MACHINE_CEILING=88
+WARM_SOURCE_SIZE_GB=20
+SNAP_ID=fixture-snapshot
+FLY() {{ cat "$CASE/inventory.json"; return {provider_rc}; }}
+machine_volume_size_gb() {{ printf 20; }}
+clone_machine_target() {{ touch "$CASE/clone-called"; return 97; }}
+{functions}
+status=0
+reserve_worker_machine_slot "$FLEET_OWNER_TOKEN-first" || status=$?
+test "$status" = {expected} || exit 11
+if [ "$status" = 0 ]; then
+  # A second observer sees the same inventory; the actual locked reservation
+  # must account for the first pending allocation and reject over-admission.
+  status=0
+  reserve_worker_machine_slot "$FLEET_OWNER_TOKEN-second" || status=$?
+  test "$status" = 1 || exit 12
+  test "$(find "$CASE/capacity/reservations" -type f | wc -l | tr -d ' ')" = 1 || exit 13
+else
+  test ! -d "$CASE/capacity/reservations" || test -z "$(ls -A "$CASE/capacity/reservations")" || exit 14
+  status=0
+  provision_worker fixture-task workspace primary ::1 0 "$CASE" fixture-token || status=$?
+  test "$status" = {expected} || exit 15
+  test ! -e "$CASE/clone-called" || exit 16
+  if [ "$status" = 75 ]; then test ! -e "$CASE/autoscaler.failed" || exit 17; fi
+fi
+'''
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr

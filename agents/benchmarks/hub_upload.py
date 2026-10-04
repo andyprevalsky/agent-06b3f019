@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 # Script-mode (`python agents/benchmarks/hub_upload.py`) puts this file's
 # directory on sys.path, not `agents/`. Cloudbench copies run that way.
@@ -259,6 +259,7 @@ def _post_run_bundle(
     live: bool,
     required: bool,
     label: str,
+    verify_live_response: bool = False,
 ) -> bool:
     headers = _auth_headers(required=required)
     if headers is None:
@@ -284,6 +285,9 @@ def _post_run_bundle(
         try:
             with opener.open(request, timeout=effective_timeout) as response:
                 ok = 200 <= response.status < 300
+                if ok and verify_live_response:
+                    stored = json.loads(response.read(1024 * 1024)).get("run") or {}
+                    ok = live_response_matches(body, stored)
                 if ok:
                     print(f"📤 uploaded run bundle to {label}: {body.get('run_id')}")
                 return ok
@@ -341,6 +345,7 @@ def upload_run_bundle(
     timeout: float = 30.0,
     live: bool = False,
     required: bool = False,
+    verify_live_response: bool = False,
 ) -> bool:
     """POST the bundle to the hub. Returns True on success, False otherwise."""
     base = _hub_url(required=required)
@@ -353,7 +358,84 @@ def upload_run_bundle(
         live=live,
         required=required,
         label="hub",
+        verify_live_response=verify_live_response,
     )
+
+
+def live_response_matches(bundle: dict, stored: dict) -> bool:
+    """A terminal-to-live fenced no-op cannot acknowledge a new outcome."""
+
+    def identity(task):
+        passed = task.get("passed")
+        status = "passed" if passed is True else "failed" if passed is False else task.get("status")
+        return (task.get("name"), status, passed, task.get("agent_id"))
+
+    return (
+        stored.get("live") is True
+        and stored.get("run_id") == bundle.get("run_id")
+        and [identity(t) for t in stored.get("tasks") or []] == [identity(t) for t in bundle["tasks"]]
+    )
+
+
+def live_bundle_from_report_card(card: dict, *, run_id: str, source: str) -> dict:
+    """Project metadata from the same evaluated rows the fleet dashboard renders."""
+    tasks = []
+    for row in card.get("per_task") or []:
+        status = row.get("status") or "running"
+        agent_ids = parse_qs(urlparse(row.get("agent_url") or "").query).get("agent-id") or []
+        cost = row.get("cost_usd")
+        tasks.append(
+            {
+                "name": row["name"],
+                "status": status,
+                "passed": True if status == "passed" else False if status in ("failed", "error") else None,
+                "agent_id": agent_ids[0] if agent_ids else None,
+                "outcome_sha256": row.get("outcome_sha256"),
+                "duration_seconds": row.get("duration_s"),
+                "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
+                "world_model_mode": row.get("world_model_mode"),
+                "fast_mode": bool(row.get("fast_mode")),
+                "llm_call_count": row.get("llm_call_count"),
+                "tree_agent_count": row.get("tree_agent_count"),
+                "tokens_in": row.get("tokens_in"),
+                "tokens_out": row.get("tokens_out"),
+            }
+        )
+    return {
+        "run_id": run_id,
+        "timestamp": card.get("timestamp") or "",
+        "source": source,
+        "suite": "cloud-fleet",
+        "tasks": tasks,
+        "code": card.get("code"),
+        "elapsed_s": card.get("elapsed_s"),
+        "cost": card.get("cost"),
+        "metadata": card.get("metadata"),
+    }
+
+
+def publish_live_report_card(card: dict, *, run_id: str, state_path: Path) -> bool:
+    """Publish outcome changes immediately; coalesce ongoing cost/token refreshes."""
+    bundle = live_bundle_from_report_card(card, run_id=run_id, source="direct-cloud-fleet")
+    signature = [(task["name"], task["status"], task["agent_id"], task["outcome_sha256"]) for task in bundle["tasks"]]
+    now = time.time()
+    try:
+        previous = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        previous = {}
+    if not isinstance(previous, dict):
+        previous = {}
+    epoch = previous.get("epoch", 0)
+    if not isinstance(epoch, (int, float)):
+        epoch = 0
+    if previous.get("signature") == [list(row) for row in signature] and now - epoch < 15:
+        return True
+    if upload_run_bundle(bundle, live=True, verify_live_response=True):
+        temporary = state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"signature": signature, "epoch": now}))
+        temporary.replace(state_path)
+        return True
+    return False
 
 
 def mirror_run_bundle_to_durable_hub(

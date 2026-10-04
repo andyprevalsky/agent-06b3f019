@@ -25,6 +25,14 @@ Behavior:
 
 Keep the ordinary 7,200-second backstops. For an explicitly requested five-minute validation, set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300` and pass `--timeout 300`; the environment setting bounds task execution and the flag bounds the controller path. Preserve terminal task grading, meaningful real execution, exact resource cleanup and the separately monitored E2E deadline. Recovered errors and inner latency measurements remain diagnostics for an infrastructure-only campaign; an ordinary task failure can satisfy that campaign without satisfying the deploy smoke gate.
 
+The entrypoint owns evaluation publication and the live Hub publisher. Task PASS/FAIL
+is emitted before agent/phone cleanup; the fleet publishes changed outcomes on
+its next aggregation poll instead of waiting for guest teardown. Exact-owner
+acknowledgment follows a matching live Hub response before normal cleanup;
+a sixty-second publication wait is warning-only and never prevents resource
+release. The frontend polls every five seconds. A terminal run still requires actual resource cleanup
+and final publication; early results are not a cleanup receipt.
+
 The entrypoint owns local service startup and teardown, per-run ports, per-run
 Postgres container/volume naming through `CONDUCTOR_WORKSPACE_NAME`, frontend
 and public tunnel URLs, Temporal task queue naming, non-load benchmark

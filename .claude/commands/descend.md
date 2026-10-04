@@ -215,6 +215,11 @@ slice; skipped tasks do not prove execution. Missing, malformed, `SKIPPED`,
 `INFRA_ERROR`, `ERROR`, or `CANCELLED` task results
 abort the command so the streak can restart only after RCA and a fix.
 
+The compact benchmark live-result deploy control also verifies that PASS/FAIL
+is projected to the Hub while guest teardown is pending. Keep result visibility
+separate from exact resource-release evidence; follow `/benchmark` for the
+publication lifecycle and compact permanent regression command.
+
 The command contract is exercised end to end with fake provider children inside
 the existing always-run `Descend Command` deploy gate: selection, both `-k`
 spellings, concurrency bounds, per-copy identities, child-failure propagation,

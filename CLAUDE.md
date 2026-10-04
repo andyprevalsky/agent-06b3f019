@@ -470,6 +470,18 @@ Benchmark request identity is scoped per task; exact resource cleanup temporaril
 overrides it with the persisted root owner. Preserve that precedence and restore
 both scopes on cancellation. The existing cleanup and benchmark identity tests
 cover concurrent siblings, preflight failures and callback/result contracts.
+Benchmark task PASS/FAIL is emitted as soon as evaluation completes, before
+normal agent/phone teardown. The owned fleet aggregator publishes changes,
+verifies the matching live Hub response, then acknowledges the exact guest
+outcome packet. The guest waits up to sixty seconds before cleanup; unavailable
+publication is a warning and cancellation still releases resources. The frontend
+polls every five seconds; the existing upload transport bound still applies. Early result visibility does not prove
+recording availability or resource release. The compact automatic deploy control
+is `python3 scripts/tests/benchmark-live-results.test.py`; it covers publication,
+agent/phone cleanup ordering, and pending worker admission with real serialized
+capacity controls. Unknown provider inventory admits no worker and retries on
+the existing autoscaler poll; genuine capacity denial remains a failure.
+
 The live-query verifier retains strict diagnostic findings for owned terminal
 `rose.complete.failed` and browser-state injection failures. Use its existing
 `--diagnostics-only` mode for this campaign: a recovered error remains visible

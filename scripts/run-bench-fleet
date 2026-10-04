@@ -11416,7 +11416,7 @@ reserve_worker_machine_slot() {  # <unique-reservation-token>
     local reserved_machines reserved_shared projected_machines projected_shared
     app_machine_ceiling="${CLOUDBENCH_APP_MACHINE_CEILING:-56}"
     case "$app_machine_ceiling" in ''|*[!0-9]*|0) return 1 ;; esac
-    current_machines="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c '
+    if ! current_machines="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c '
 import json, sys
 try:
     machines = json.load(sys.stdin)
@@ -11425,8 +11425,16 @@ try:
     print(len(machines))
 except Exception:
     print("")
-' 2>/dev/null)"
-    case "$current_machines" in ''|*[!0-9]*) return 1 ;; esac
+' 2>/dev/null)"; then
+        echo "⚠️ worker capacity inventory unavailable; admission pending" >&2
+        return 75
+    fi
+    case "$current_machines" in
+        ''|*[!0-9]*)
+            echo "⚠️ worker capacity inventory invalid; admission pending" >&2
+            return 75
+            ;;
+    esac
     result="$(capacity_reserve_slots "$token" 1 0 "$app_machine_ceiling" \
         2147483647 "$current_machines" 0 autoscaler-worker)"
     status=$?
@@ -12065,7 +12073,12 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         return 1
     fi
     worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
-    if ! reserve_worker_machine_slot "$worker_capacity_token"; then
+    local worker_capacity_status=0
+    reserve_worker_machine_slot "$worker_capacity_token" || worker_capacity_status=$?
+    if [ "$worker_capacity_status" -eq 75 ]; then
+        return 75
+    fi
+    if [ "$worker_capacity_status" -ne 0 ]; then
         printf '%s\n' "Machine-count capacity unavailable for worker clone" > "$out/autoscaler.failed"
         echo "  ❌ [$bench] mandatory autoscaler: Machine-count capacity unavailable" >&2
         return 1
@@ -12679,7 +12692,15 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
             scale_down_since=""
             local n=$((want - cur))
             echo "  ⤴️  [$bench] scale up +$n (desired=$desired, pool=$cur)"
-            for _ in $(seq 1 "$n"); do provision_worker "$bench" "$ws" "$cid" "$pip" "$sim" "$out" "$runtime_run_token"; done
+            for _ in $(seq 1 "$n"); do
+                local provision_status=0
+                provision_worker "$bench" "$ws" "$cid" "$pip" "$sim" "$out" "$runtime_run_token" \
+                    || provision_status=$?
+                # Unknown inventory admits nothing. Observe again on the normal
+                # poll, with child/owner lifecycle checked at the next loop head.
+                [ "$provision_status" -ne 75 ] || break
+                [ "$provision_status" -eq 0 ] || return "$provision_status"
+            done
         elif [ "$want" -lt "$cur" ]; then
             autoscaler_monotonic_seconds scale_down_now
             if [ "$scale_down_target" != "$want" ] \
@@ -13180,13 +13201,14 @@ RUN_URL="http://localhost:$DASH_BASE/run/$RUN_ID/dashboard.html"
 (
     while :; do
         env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" \
-            python3 - "$UNIFIED_DIR/report-card.json" <<'PY' 2>/dev/null || true
+            ROOT_DIR="$ROOT_DIR" SELF_MANAGED_HUB_RUN="$SELF_MANAGED_HUB_RUN" \
+            python3 - "$UNIFIED_DIR/report-card.json" <<'PY' || echo "⚠️ live benchmark publication failed" >&2
 import json, os, sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 out = sys.argv[1]; fleet = os.environ["FLEET_DIR"]; dash_base = os.environ.get("DASH_BASE", "8765")
 # Startup-phase tracker (stdlib-only) → per-row step timeline while queued.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(fleet)), "agents"))
+sys.path.insert(0, os.path.join(os.environ["ROOT_DIR"], "agents"))
 try:
     from benchmarks.fleet_startup_phase import startup_state
 except Exception:
@@ -13263,6 +13285,13 @@ card = {
     "per_task": per_task,
 }
 with open(out, "w") as f: json.dump(card, f); f.write("\n")
+if os.environ.get("SELF_MANAGED_HUB_RUN") == "1":
+    from benchmarks.hub_upload import publish_live_report_card
+    from benchmarks.outcome_publication import acknowledge_published
+    parent = os.environ["BENCHMARK_HUB_PARENT_RUN_ID"]
+    if publish_live_report_card(card, run_id=parent,
+                               state_path=Path(out).with_name("hub-live-publication.json")):
+        acknowledge_published(card, run_id=parent, fleet_dir=Path(fleet))
 PY
         sleep 1
     done

@@ -52,6 +52,7 @@ GATES = (
         ("bash", "scripts/tests/benchmark-sms-transport-mock.test.sh"),
     ),
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
+    Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),

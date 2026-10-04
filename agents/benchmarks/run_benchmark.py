@@ -32,6 +32,7 @@ import asyncio
 import contextvars
 import csv
 import fcntl
+import inspect
 import ipaddress
 import json
 import os
@@ -12809,6 +12810,7 @@ async def run_single_task(
     checkpoint_source_out: Path | None = None,
     checkpoint_tree_out: Path | None = None,
     on_agent_created: Optional[Callable[[str, str], None]] = None,
+    on_task_evaluated: Optional[Callable[[TaskResult], None | Awaitable[None]]] = None,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     _validate_task_target(task, base_url)
@@ -12841,6 +12843,7 @@ async def run_single_task(
             checkpoint_source_out,
             checkpoint_tree_out,
             on_agent_created,
+            on_task_evaluated,
         )
 
 
@@ -12874,6 +12877,7 @@ async def _run_single_task_as_run_user(
     checkpoint_source_out: Path | None,
     checkpoint_tree_out: Path | None,
     on_agent_created: Optional[Callable[[str, str], None]],
+    on_task_evaluated: Optional[Callable[[TaskResult], None | Awaitable[None]]] = None,
 ) -> TaskResult:
     if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES and not _is_local_base_url(base_url):
         await _preflight_production_payment_identity(base_url)
@@ -13634,6 +13638,16 @@ async def _run_single_task_as_run_user(
             world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
         )
 
+        # Evaluation is complete. Publish its outcome before releasing agent
+        # resources or entering the phone/fixture cleanup in finally.
+        if on_task_evaluated is not None:
+            try:
+                publication = on_task_evaluated(result)
+                if inspect.isawaitable(publication):
+                    await publication
+            except Exception as exc:
+                print(f"    ⚠ evaluated outcome publication failed: {type(exc).__name__}")
+
         icon = "✅" if passed else "❌"
         print(f"\n    {icon} {task.name}: {'PASS' if passed else 'FAIL'}")
         if failure_reason:
@@ -13777,16 +13791,7 @@ async def _run_single_task_as_run_user(
                 benchmark_status="ERROR",
                 failure_reason=str(e),
             )
-            await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
-            try:
-                if not keep_failed_agents and cloud_batch_cleanup.contract() is None:
-                    await delete_agent(base_url, agent_id)
-                    print(f"    🗑  Deleted orphaned agent {agent_id[:12]}")
-                else:
-                    print(f"    🧪 Keeping failed agent {agent_id[:12]} for diagnostics")
-            except Exception:
-                print(f"    ⚠ Failed to delete orphaned agent {agent_id[:12]}")
-        return TaskResult(
+        result = TaskResult(
             name=task.name,
             passed=False,
             agent_id=agent_id,
@@ -13806,6 +13811,25 @@ async def _run_single_task_as_run_user(
             world_model_fidelity=world_model_fidelity,
             world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
         )
+        if on_task_evaluated is not None:
+            try:
+                publication = on_task_evaluated(result)
+                if inspect.isawaitable(publication):
+                    await publication
+            except Exception as exc:
+                print(f"    ⚠ evaluated outcome publication failed: {type(exc).__name__}")
+        if agent_id:
+            await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
+            try:
+                if not keep_failed_agents and cloud_batch_cleanup.contract() is None:
+                    await delete_agent(base_url, agent_id)
+                    print(f"    🗑  Deleted orphaned agent {agent_id[:12]}")
+                else:
+                    print(f"    🧪 Keeping failed agent {agent_id[:12]} for diagnostics")
+            except Exception:
+                print(f"    ⚠ Failed to delete orphaned agent {agent_id[:12]}")
+        return result
+
     finally:
         realtime_tree_error = None
         if realtime_tree_task:
@@ -15055,6 +15079,8 @@ async def main_async(args):
     # name -> FIFO of live agent ids so k-repeats of the same task name each keep
     # their own deep link instead of overwriting one shared slot.
     _live_task_agent_ids: dict[str, list[str]] = {}
+    _evaluated_task_results: dict[asyncio.Task, TaskResult] = {}
+    _outcome_signatures: dict[str, str] = {}
 
     def _remember_live_agent(task_name: str, agent_id: str) -> None:
         if task_name and agent_id:
@@ -15069,7 +15095,8 @@ async def main_async(args):
         task_world_model_modes = {t.name: t.world_model_mode for t in tasks if t.world_model_mode}
         per_task: list[TaskCard] = []
         finished_agent_ids: set[str] = set()
-        for r in run.task_results:
+        evaluated_results = list(_evaluated_task_results.values())
+        for r in [*run.task_results, *evaluated_results]:
             status = "skipped" if r.status == "SKIPPED" else ("passed" if r.passed else "failed")
             if r.agent_id:
                 finished_agent_ids.add(r.agent_id)
@@ -15080,6 +15107,7 @@ async def main_async(args):
                     duration_s=r.duration_seconds,
                     cost_usd=(r.cost_cents / 100.0) if r.cost_cents is not None else None,
                     agent_url=durable_agent_frontend_url(r.agent_id) if r.agent_id else None,
+                    outcome_sha256=_outcome_signatures.get(r.agent_id),
                     llm_call_count=r.llm_call_count,
                     tree_agent_count=r.tree_agent_count,
                     tokens_in=r.tokens_in,
@@ -15092,11 +15120,12 @@ async def main_async(args):
         # Emit one running card per still-pending occurrence (Counter), not one
         # per distinct name — otherwise `bench A A A` with one finished looks
         # like all three completed.
+        evaluated_counts = Counter(r.name for r in evaluated_results)
         for name, running_count in running_name_counts.items():
             live_ids = [
                 agent_id for agent_id in _live_task_agent_ids.get(name, []) if agent_id not in finished_agent_ids
             ]
-            for index in range(running_count):
+            for index in range(max(0, running_count - evaluated_counts[name])):
                 live_agent_id = live_ids[index] if index < len(live_ids) else None
                 per_task.append(
                     TaskCard(
@@ -15146,6 +15175,29 @@ async def main_async(args):
     # task name each keep a distinct "running" slot.
     _report_running: Counter[str] = Counter()
 
+    async def _run_reported_task(task: BenchmarkTask, **kwargs) -> TaskResult:
+        # The owning task preserves repeated names and retains the evaluated
+        # row until the coordinator replaces it with the final cleanup result.
+        token = asyncio.current_task()
+        assert token is not None
+
+        async def evaluated(result: TaskResult) -> None:
+            from benchmarks.outcome_publication import prepare, wait_for_publication
+
+            contract = cloud_batch_cleanup.contract()
+            pending = None
+            try:
+                pending = prepare(result, contract[0].parent, contract[1]) if contract else None
+            except (OSError, ValueError) as exc:
+                print(f"  ⚠ outcome acknowledgment preparation unavailable: {type(exc).__name__}")
+            if pending:
+                _outcome_signatures[result.agent_id] = pending[1]
+            _evaluated_task_results[token] = result
+            _emit_report(dict(_report_running), force=True)
+            await wait_for_publication(pending)
+
+        return await run_single_task(base_url, task, on_task_evaluated=evaluated, **kwargs)
+
     async def _report_ticker() -> None:
         try:
             while True:
@@ -15167,8 +15219,7 @@ async def main_async(args):
                 tasks[0].price_limit_cents = args.checkpoint_source_price_limit_cents
             result = await _run_with_sandbox_payment_lock(
                 tasks[0],
-                lambda: run_single_task(
-                    base_url,
+                lambda: _run_reported_task(
                     tasks[0],
                     keep_failed_agents=True,
                     checkpoint_source_index=args.checkpoint_source_index,
@@ -15179,6 +15230,7 @@ async def main_async(args):
                 ),
             )
             run.task_results.append(result)
+            _evaluated_task_results.pop(asyncio.current_task(), None)
         elif args.parallel:
             max_concurrency = args.max_concurrency
             if max_concurrency is None and args.prod:
@@ -15205,10 +15257,9 @@ async def main_async(args):
             async def run_parallel_task(task: BenchmarkTask) -> TaskResult:
                 return await _run_with_sandbox_payment_lock(
                     task,
-                    lambda: run_single_task(
-                        base_url,
+                    lambda: _run_reported_task(
                         task,
-                        args.keep_failed_agents,
+                        keep_failed_agents=args.keep_failed_agents,
                         on_agent_created=_remember_live_agent,
                     ),
                 )
@@ -15222,14 +15273,14 @@ async def main_async(args):
                     _report_running[task.name] += 1
                     result = await _run_with_sandbox_payment_lock(
                         task,
-                        lambda: run_single_task(
-                            base_url,
+                        lambda: _run_reported_task(
                             task,
-                            args.keep_failed_agents,
+                            keep_failed_agents=args.keep_failed_agents,
                             on_agent_created=_remember_live_agent,
                         ),
                     )
                     run.task_results.append(result)
+                    _evaluated_task_results.pop(asyncio.current_task(), None)
                     _report_running[task.name] -= 1
                     if _report_running[task.name] <= 0:
                         del _report_running[task.name]
@@ -15270,6 +15321,7 @@ async def main_async(args):
                             )
                         else:
                             run.task_results.append(result)
+                        _evaluated_task_results.pop(task_future, None)
                     _emit_report(Counter(pending_results[future].name for future in pending))
             except asyncio.CancelledError:
                 for task_future in pending:
@@ -15301,20 +15353,21 @@ async def main_async(args):
                 _report_running[task.name] += 1
                 result = await _run_with_sandbox_payment_lock(
                     task,
-                    lambda: run_single_task(
-                        base_url,
+                    lambda: _run_reported_task(
                         task,
-                        args.keep_failed_agents,
+                        keep_failed_agents=args.keep_failed_agents,
                         on_agent_created=_remember_live_agent,
                     ),
                 )
                 run.task_results.append(result)
+                _evaluated_task_results.pop(asyncio.current_task(), None)
                 _report_running[task.name] -= 1
                 if _report_running[task.name] <= 0:
                     del _report_running[task.name]
                 _emit_report({})
     finally:
         _report_ticker_task.cancel()
+        _evaluated_task_results.clear()
         _emit_report({}, force=True)
         fly_total = await stop_fly_log_collector()
         print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
