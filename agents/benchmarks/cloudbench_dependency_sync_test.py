@@ -12472,6 +12472,18 @@ fleet_recovery_confirm_pool_claims "$1"
     receipt.write_text("wrong-run\n")
     assert confirm().returncode != 0
     assert "cleanup_state=unconfirmed" in (claims / machine).read_text()
+    for rejected in (f"{owner}-1", f"{'6f' * 16}-0"):
+        receipt.write_text(rejected + "\n")
+        assert confirm().returncode != 0
+        assert "cleanup_state=unconfirmed" in (claims / machine).read_text()
+    # The child launcher writes its exact catalog-ordinal token after HTTP 204.
+    receipt.write_text(f"{owner}-0\n")
+    result = confirm()
+    assert result.returncode == 0, result.stderr
+    assert "cleanup_state=owned" in (claims / machine).read_text()
+    (claims / machine).write_text(
+        (claims / machine).read_text().replace("cleanup_state=owned", "cleanup_state=unconfirmed")
+    )
     receipt.write_text(run_id + "\n")
     result = confirm()
     assert result.returncode == 0, result.stderr

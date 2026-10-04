@@ -7882,7 +7882,7 @@ PY
 }
 
 fleet_recovery_confirm_pool_claims() {  # <exact recovered owner registry>
-    local registry="$1" meta="$1/meta" plan kind bench clone_name id volume_id out port
+    local registry="$1" meta="$1/meta" plan kind bench clone_name id volume_id out port guest_run_token receipt_token
     local claim state digest host pid pid_start owner run_id exact_ids
     exact_ids="$(exact_owner_pool_claim_ids "$meta")" || return 1
     [ -n "$exact_ids" ] || return 0
@@ -7923,7 +7923,7 @@ run = Path(meta['runs_root']) / meta['run_id']
 assert run.is_dir() and not run.is_symlink() and run.resolve() == run
 tasks = json.loads((run / '_batch/benches.json').read_text())
 outputs = {}
-for task in tasks:
+for ordinal, task in enumerate(tasks):
     name = task['name']
     assert isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9._-]+', name)
     assert name not in ('.', '..')
@@ -7936,7 +7936,7 @@ for task in tasks:
     assert len(parts) == 2
     if parts[0] == 'pool':
         assert parts[1] not in outputs
-        outputs[parts[1]] = out
+        outputs[parts[1]] = (out, f'{owner}-{ordinal}')
 claimed = {}
 audited = set()
 assert (audit / 'pool').is_dir() and not (audit / 'pool').is_symlink()
@@ -7959,17 +7959,22 @@ for record in (audit / 'pool').iterdir():
     claimed[record.name] = outputs[record.name]
 assert audited == set(outputs)
 with plan.open('w') as stream:
-    for machine_id, out in sorted(claimed.items()):
-        stream.write(f'{machine_id}\t{out}\n')
+    for machine_id, (out, guest_token) in sorted(claimed.items()):
+        stream.write(f'{machine_id}\t{out}\t{guest_token}\n')
 PY
     then
         rm -f "$plan"
         return 1
     fi
-    while IFS=$'\t' read -r id out; do
+    while IFS=$'\t' read -r id out guest_run_token; do
+        # The child writes its owner/catalog-ordinal token after authenticated
+        # shutdown; controller recovery writes the batch ID. Both identities
+        # are derived from this exact claim and catalog, never a free token.
         if [ -f "$out/guest-shutdown.confirmed" ] \
             && [ ! -L "$out/guest-shutdown.confirmed" ] \
-            && [ "$(cat "$out/guest-shutdown.confirmed")" = "$run_id" ]; then
+            && receipt_token="$(cat "$out/guest-shutdown.confirmed")" \
+            && { [ "$receipt_token" = "$run_id" ] \
+                 || [ "$receipt_token" = "$guest_run_token" ]; }; then
             :
         else
             volume_id="$(registry_meta_value "$FLEET_AUDIT_ROOT/$owner/pool/$id" volume_id)"
