@@ -51,6 +51,14 @@ class StructuralGateDocumentationTests(unittest.TestCase):
     def test_clone_recovery_is_registered(self) -> None:
         self.assertIn("bash scripts/tests/deploy-agent-clone-recovery.test.sh", _registry_commands())
 
+    def test_compact_benchmark_gates_are_always_registered(self) -> None:
+        self.assertTrue({
+            "bash scripts/tests/descend-command.test.sh",
+            "python3 scripts/tests/verify-successful-llm-queries.test.py",
+            "python3 scripts/tests/cloudbench-exact-session-multi-root.test.py",
+            "python3 scripts/tests/cloudbench-forensic-quiesced.test.py",
+        }.issubset(_registry_commands()))
+
     def test_deploy_md_lists_every_registered_gate(self) -> None:
         deploy_md = DEPLOY_MD.read_text()
         missing = sorted(c for c in _registry_commands() if f"`{c}`" not in deploy_md)

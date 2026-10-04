@@ -4,31 +4,31 @@ Spawns real agents against prod or localhost, polls for completion, evaluates pa
 
 ## Eval Suite (the ONE catalog)
 
-`tasks.json` is the single canonical benchmark catalog (see CLAUDE.md "Eval Suite"). Each entry carries the additive eval contract — `status` (`ready` | `incomplete`), `runner` (`agent`), `bench` (`pipeline-e2e` harness plumbing | `rose-bench` harness-independent capability), `description`, `environment`, `evaluators[]`, `source` — validated by `long_horizon.py:validate_catalog()`. Idea kernels live in `long_horizon_ideas.json`.
+`tasks.json` contains the ordinary suites, and the sibling `polar_tasks.json` contains Polar tasks. The shared catalog loader combines both for selection (see CLAUDE.md "Eval Suite"). Each entry carries the additive eval contract — `status` (`ready` | `incomplete`), `runner` (`agent`), `bench` (`pipeline-e2e` harness plumbing | `rose-bench` harness-independent capability), `description`, `environment`, `evaluators[]`, `source` — validated by `long_horizon.py:validate_catalog()`. Idea kernels live in `long_horizon_ideas.json`.
 
 **How evaluators pass/fail** (Layer 1 harness contract → Layer 2 `evaluators[]`,
 tree-aware semantic evidence, Blue Bottle worked example): see the `/benchmark`
 skill at `.claude/commands/benchmark.md` → **Evaluators**.
 
 ```bash
-# THE full-suite entrypoint: every ready benchmark eval
-python benchmarks/run_eval_suite.py --port 3001
+# From the repository root: every ready benchmark eval on an isolated local stack
+scripts/run-bench eval
 
 # Print the holding set (ready vs incomplete)
-python benchmarks/run_eval_suite.py --list
+scripts/run-bench eval --list
 
 # Run a named subset
-python benchmarks/run_eval_suite.py --only test-mass-agent-run-0,browser-agent
+scripts/run-bench eval --only test-mass-agent-run-0,browser-agent
 
 # Run one bench axis
-python benchmarks/run_eval_suite.py --bench rose-bench --port 3001
+scripts/run-bench eval --bench rose-bench
 ```
 
 Every task runs on a **base-image fixture**: undeclared environments inherit `base:victoria-prod-sync-v1` (workspace prod-sync DB, `scripts/setup-db.sh`) at load time — registry + pg_dump freezer in `fixtures.py`. Every completed run — pass or fail — is recorded: full record in `runs/*.json`, one line per attempt in `history/task_attempts.jsonl` (`record_attempt`), full LLM trajectories in `.llm-dumps/<agent_id>/` (always-on locally).
 
 ### Live data fixtures (`environment.live_fixtures`)
 
-`db_fixtures` are *frozen* task deltas on a base image (reproducible). The single **`live` fixture** is the opposite: an explicit prod-synced overlay for credentials that must be current at runtime. It includes compute tokens, browser context/provider profiles, cookies and origin storage, passwords, passkeys, `CookieBundle` rows, and `SteelSessionAuth` rows. A frozen expired token is worthless, so tasks that need current credentials declare the overlay explicitly.
+`db_fixtures` are _frozen_ task deltas on a base image (reproducible). The single **`live` fixture** is the opposite: an explicit prod-synced overlay for credentials that must be current at runtime. It includes compute tokens, browser context/provider profiles, cookies and origin storage, passwords, passkeys, `CookieBundle` rows, and `SteelSessionAuth` rows. A frozen expired token is worthless, so tasks that need current credentials declare the overlay explicitly.
 
 Declare it only on tasks that exercise current credentials:
 
@@ -67,26 +67,26 @@ task contract.
 ```bash
 cd agents
 
-# List all benchmark tasks
-python benchmarks/run_benchmark.py --list
+# List all benchmark tasks through the supported entrypoint
+../scripts/run-bench list
 
-# Run a single task against prod
-python benchmarks/run_benchmark.py --task chat-mode
+# Run one isolated cloud task
+../scripts/run-bench chat-mode --wait
 
-# Run all smoke tasks against prod
-python benchmarks/run_benchmark.py --suite smoke
+# Run the daily suite as one fully parallel isolated cloud fleet
+../scripts/run-bench daily
 
-# Run all tasks against localhost
-python benchmarks/run_benchmark.py --suite all --url http://localhost:3001
+# Run the selected deploy benchmarks through the isolated local stack
+../scripts/run-predeploy-local
 
-# Run without retry on failure
-python benchmarks/run_benchmark.py --suite smoke --no-retry
+# Run an isolated local task
+../scripts/run-bench --local chat-mode
 
 # Run a benchmark until root message index 42, export a source, and create a paused checkpoint
-../scripts/run-bench chat-mode --checkpoint 42 --checkpoint-no-start
+../scripts/run-bench --local chat-mode --checkpoint 42 --checkpoint-no-start
 
 # Resume that paused checkpoint later
-../scripts/run-bench chat-mode \
+../scripts/run-bench --local chat-mode \
   --checkpoint-start-agent-id <agent-id> \
   --checkpoint-manifest .context/benchmarks/<run-id>/checkpoints/chat-mode.json
 
@@ -103,7 +103,7 @@ confirms ownership before any child allocates services and waits for canonical
 agent and stack cleanup before accepting its result. Separate local databases
 do not isolate externally shared AgentCard cardholders.
 
-`scripts/run-bench <task> --checkpoint <turn_n>` uses the normal local benchmark
+`scripts/run-bench --local <task> --checkpoint <turn_n>` uses the normal local benchmark
 orchestrator: it starts an isolated stack, runs the selected benchmark with its
 usual fixtures/attachments until the root transcript contains that message index,
 pauses the source agent, exports root/tree checkpoint JSON, clones that exported
@@ -119,29 +119,29 @@ resume command. To reuse a pre-existing export instead of generating one, pass
 
 The curated tag vocabulary (each task carries zero or more):
 
-| Tag | Description |
-|-----|-------------|
-| `antibot` | Bot-challenge / biometric-defeat browser tasks |
-| `attachments` | Tasks with file attachments or document handling |
-| `auth` | Tasks needing authenticated sessions (cookie, minted, or anon accounts) |
-| `browser` | Browser agent tasks |
-| `cache` | Fast-mode cache record/replay tasks |
-| `chat` | Chat mode only |
-| `code-agent` | Claude Code sandbox tasks |
-| `grep` | User-data grep/search tasks |
-| `load-test` | Mass-agent / scale load tests |
-| `outreach` | Personalized outreach at scale |
-| `payment` | Payment and checkout flows |
-| `phone` | Phone-call tasks |
-| `plaid` | Plaid-connected finance tasks |
-| `polar-bench` | Odysseys + BU Bench V1 (polar-evals); opt-in suite, never daily |
-| `research` | Deep-research tasks |
-| `smoke` | Deploy-gate smoke suite |
-| `social` | Social-account tasks |
-| `sub-agent-fan-out` | Multi-agent for-each fan-out tasks |
-| `transactions` | Transaction analysis tasks |
-| `voice` | Voice tasks |
-| `wait-for` | wait_for scheduling tasks |
+| Tag                 | Description                                                             |
+| ------------------- | ----------------------------------------------------------------------- |
+| `antibot`           | Bot-challenge / biometric-defeat browser tasks                          |
+| `attachments`       | Tasks with file attachments or document handling                        |
+| `auth`              | Tasks needing authenticated sessions (cookie, minted, or anon accounts) |
+| `browser`           | Browser agent tasks                                                     |
+| `cache`             | Fast-mode cache record/replay tasks                                     |
+| `chat`              | Chat mode only                                                          |
+| `code-agent`        | Claude Code sandbox tasks                                               |
+| `grep`              | User-data grep/search tasks                                             |
+| `load-test`         | Mass-agent / scale load tests                                           |
+| `outreach`          | Personalized outreach at scale                                          |
+| `payment`           | Payment and checkout flows                                              |
+| `phone`             | Phone-call tasks                                                        |
+| `plaid`             | Plaid-connected finance tasks                                           |
+| `polar-bench`       | Odysseys + BU Bench V1 (polar-evals); opt-in suite, never daily         |
+| `research`          | Deep-research tasks                                                     |
+| `smoke`             | Deploy-gate smoke suite                                                 |
+| `social`            | Social-account tasks                                                    |
+| `sub-agent-fan-out` | Multi-agent for-each fan-out tasks                                      |
+| `transactions`      | Transaction analysis tasks                                              |
+| `voice`             | Voice tasks                                                             |
+| `wait-for`          | wait_for scheduling tasks                                               |
 
 Special suite selectors (not tags): `all` (every ready first-party agent task;
 excludes `polar-bench`), `auth` (cookie-auth task by default, anon tasks with
@@ -150,19 +150,19 @@ axis). Run Polar Odysseys + BU Bench V1 with `--suite polar-bench`.
 
 ## Tasks
 
-| # | Name | Timeout | Cost Limit | Approval | Attachment |
-|---|------|---------|------------|----------|------------|
-| 1 | chat-mode | 120s | 25c | — | — |
-| 2 | spawn-sub-agents | 300s | 100c | — | — |
-| 3 | parallel-tool-calls | 180s | 50c | — | — |
-| 4 | message-person | 180s | 50c | auto_approve | — |
-| 5 | browser-agent | 600s | 200c | ignore | — |
-| 6 | claude-code-agent | 300s | 100c | — | — |
-| 7 | image-handling | 300s | 100c | — | rs.jpeg |
-| 8 | files-in-sub-agents | 600s | 300c | — | rs.jpeg |
-| 9 | agent-for-each | 600s | 500c | — | entities-12.csv |
-| 10 | build-boxing-payment | 900s | 1000c | prompt_user | waivers PDFs |
-| 11 | job-applications | 900s | 1000c | prompt_user | 2x resume PDFs |
+| #   | Name                 | Timeout | Cost Limit | Approval     | Attachment      |
+| --- | -------------------- | ------- | ---------- | ------------ | --------------- |
+| 1   | chat-mode            | 120s    | 25c        | —            | —               |
+| 2   | spawn-sub-agents     | 300s    | 100c       | —            | —               |
+| 3   | parallel-tool-calls  | 180s    | 50c        | —            | —               |
+| 4   | message-person       | 180s    | 50c        | auto_approve | —               |
+| 5   | browser-agent        | 600s    | 200c       | ignore       | —               |
+| 6   | claude-code-agent    | 300s    | 100c       | —            | —               |
+| 7   | image-handling       | 300s    | 100c       | —            | rs.jpeg         |
+| 8   | files-in-sub-agents  | 600s    | 300c       | —            | rs.jpeg         |
+| 9   | agent-for-each       | 600s    | 500c       | —            | entities-12.csv |
+| 10  | build-boxing-payment | 900s    | 1000c      | prompt_user  | waivers PDFs    |
+| 11  | job-applications     | 900s    | 1000c      | prompt_user  | 2x resume PDFs  |
 
 ## How It Works
 
@@ -195,16 +195,16 @@ axis). Run Polar Odysseys + BU Bench V1 with `--suite polar-bench`.
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BENCHMARK_BASE_URL` | `https://navi-j9a9.onrender.com` | API base URL |
-| `BACKEND_API_KEY` | **(required)** | API key for authentication |
-| `CLICKHOUSE_ENDPOINT` | — | ClickHouse Cloud endpoint for retained Fly.io worker logs (`agents/.env`) |
-| `CLICKHOUSE_USER` | — | ClickHouse user for retained Fly.io worker logs (`agents/.env`) |
-| `CLICKHOUSE_PASSWORD` | — | ClickHouse password for retained Fly.io worker logs (`agents/.env`) |
-| `FLY_API_TOKEN` | — | Fly.io deploy token for worker log streaming (`agents/.env`) |
-| `RENDER_API_KEY` | — | Render API key for backend log fetching (`back-end/.env`) |
-| `SUPABASE_ACCESS_TOKEN` | — | Supabase management token for edge function logs (`agents/.env`) |
+| Variable                | Default                          | Description                                                               |
+| ----------------------- | -------------------------------- | ------------------------------------------------------------------------- |
+| `BENCHMARK_BASE_URL`    | `https://navi-j9a9.onrender.com` | API base URL                                                              |
+| `BACKEND_API_KEY`       | **(required)**                   | API key for authentication                                                |
+| `CLICKHOUSE_ENDPOINT`   | —                                | ClickHouse Cloud endpoint for retained Fly.io worker logs (`agents/.env`) |
+| `CLICKHOUSE_USER`       | —                                | ClickHouse user for retained Fly.io worker logs (`agents/.env`)           |
+| `CLICKHOUSE_PASSWORD`   | —                                | ClickHouse password for retained Fly.io worker logs (`agents/.env`)       |
+| `FLY_API_TOKEN`         | —                                | Fly.io deploy token for worker log streaming (`agents/.env`)              |
+| `RENDER_API_KEY`        | —                                | Render API key for backend log fetching (`back-end/.env`)                 |
+| `SUPABASE_ACCESS_TOKEN` | —                                | Supabase management token for edge function logs (`agents/.env`)          |
 
 ## API Endpoint
 
@@ -216,13 +216,13 @@ Each benchmark run collects production logs from retained ClickHouse rows and li
 
 ### Log Sources
 
-| Source | Key in JSON | What it captures | Filtered by |
-|--------|-------------|------------------|-------------|
-| **Render** (backend) | `backend_logs` | HTTP requests to/from the API (agent create, status updates, messages) | `agent_id` in URL/body |
-| **ClickHouse** (retained Fly.io worker) | `worker_logs` | Agent execution logs retained for 7 days | `agent_id` in structlog context or raw JSON |
-| **Fly.io** (live worker stream) | `worker_logs` | Live agent execution logs during benchmark runs | `agent_id` in structlog context |
-| **Supabase** (research) | `research_logs` | Rose API gateway logs (completions calls, API key validation) | Time window (no agent_id in edge function logs) |
-| **Messages** | `messages` | Full agent conversation transcript (USER/ASSISTANT/TOOL messages) | Always available |
+| Source                                  | Key in JSON     | What it captures                                                       | Filtered by                                     |
+| --------------------------------------- | --------------- | ---------------------------------------------------------------------- | ----------------------------------------------- |
+| **Render** (backend)                    | `backend_logs`  | HTTP requests to/from the API (agent create, status updates, messages) | `agent_id` in URL/body                          |
+| **ClickHouse** (retained Fly.io worker) | `worker_logs`   | Agent execution logs retained for 7 days                               | `agent_id` in structlog context or raw JSON     |
+| **Fly.io** (live worker stream)         | `worker_logs`   | Live agent execution logs during benchmark runs                        | `agent_id` in structlog context                 |
+| **Supabase** (research)                 | `research_logs` | Rose API gateway logs (completions calls, API key validation)          | Time window (no agent_id in edge function logs) |
+| **Messages**                            | `messages`      | Full agent conversation transcript (USER/ASSISTANT/TOOL messages)      | Always available                                |
 
 ### How to Read Logs from a Run
 

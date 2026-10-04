@@ -223,6 +223,17 @@ INFRA reset. This must remain an offline `$0` extension of the existing
 always-run `Descend Command` deploy gate; never add a separate live benchmark
 stage or cloud wait to `/deploy`.
 
+The sequential proof wrapper caps width at 32. That is separate from `/deploy`'s
+20-task selection cap. For an explicitly requested wider parallel slice, resolve
+the concrete names and invoke `scripts/run-bench <task-1> ... <task-N>` once,
+without campaign flags. Retain one batch, verify observed execution concurrency,
+and report provider latency and resource release. Do not split that request into
+smaller slices and label it a wide run. Check current provider capacity, controller
+CPU and disk before allocation; never reclaim another workspace's resources.
+An explicitly infrastructure-only validation accepts terminal task failures under
+the user's contract in `CLAUDE.md`; it does not change this command's default
+task-success goal or the stricter predeploy smoke qualification.
+
 ## Persistent state
 
 Create .context/descend/<run-id>/state.json and update it after every state

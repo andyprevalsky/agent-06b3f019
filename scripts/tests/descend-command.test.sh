@@ -17,10 +17,17 @@ fail() {
 require_text() {
   local text="$1"
   local description="$2"
-  grep -Fq -- "$text" "$DESCEND_COMMAND" || fail "$description"
+  [[ "$DESCEND_NORMALIZED" == *"$text"* ]] || fail "$description"
 }
 
 [ -f "$DESCEND_COMMAND" ] || fail "/descend command is missing"
+DESCEND_NORMALIZED="$(python3 - "$DESCEND_COMMAND" <<'PY'
+import re
+import sys
+from pathlib import Path
+print(re.sub(r"\s+", " ", Path(sys.argv[1]).read_text()))
+PY
+)"
 [ -f "$DESCEND_STEP_LOGGER" ] || fail "/descend step logger is missing"
 [ -f "$DESCEND_STEP_HISTORY" ] || fail "/descend tracked step history is missing"
 grep -Fq 'agents/benchmarks/history/descend_steps.jsonl merge=union' "$GIT_ATTRIBUTES" || \
@@ -197,6 +204,95 @@ for capture in captures:
         "campaign child inherited a parent Hub run that the campaign never registered"
     )
     assert "<demo-fleet-alpha><--timeout><7><--foreground>" in text
+PY
+
+python3 - "$ROOT_DIR" "$tmp/wide-names" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+from cloudbench_catalog import load_unified_catalog
+
+names = [task["name"] for task in load_unified_catalog(root / "agents/benchmarks/tasks.json")
+         if task.get("status", "ready") == "ready" and not task.get("production_only")][:50]
+assert len(names) == len(set(names)) == 50
+Path(sys.argv[2]).write_text("\n".join(names) + "\n")
+PY
+cat >"$tmp/wide-fleet" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - "$RUN_BENCH_WIDE_CAPTURE" "$@" <<'PY'
+import json
+import os
+import sys
+with open(sys.argv[1], "a") as stream:
+    stream.write(json.dumps({"args": sys.argv[2:], "backstop": os.environ.get("BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS")}) + "\n")
+PY
+SH
+wide_names=()
+while IFS= read -r name; do wide_names+=("$name"); done <"$tmp/wide-names"
+RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
+RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  "$RUN_BENCH" "${wide_names[@]}" --timeout 300 --autoscale-max 2 --strict-barrier --foreground
+python3 - "$tmp/wide-names" "$tmp/wide-capture" <<'PY'
+import json
+import sys
+from pathlib import Path
+names = Path(sys.argv[1]).read_text().splitlines()
+calls = [json.loads(line) for line in Path(sys.argv[2]).read_text().splitlines()]
+assert len(calls) == 1, "a wide slice must remain one fleet, not smaller campaigns"
+assert calls[0]["args"] == names + ["--timeout", "300", "--autoscale-max", "2", "--strict-barrier", "--foreground"]
+assert calls[0]["backstop"] == "300"
+PY
+
+python3 - "$ROOT_DIR" "$tmp" <<'PY'
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+source, temporary = map(Path, sys.argv[1:])
+root = temporary / "production-routing"
+(root / "scripts").mkdir(parents=True)
+(root / "agents/benchmarks").mkdir(parents=True)
+(root / "agents/venv/bin").mkdir(parents=True)
+for name in ("run-bench", "cloudbench_catalog.py", "cloudbench-production-only-tasks.py"):
+    shutil.copyfile(source / "scripts" / name, root / "scripts" / name)
+(root / "agents/benchmarks/tasks.json").write_text(json.dumps([
+    {"name": "production-route", "status": "ready", "production_only": True}
+]))
+(root / "agents/benchmarks/polar_tasks.json").write_text(json.dumps([
+    {"name": "polar-routing-control", "status": "ready", "bench": "polar-bench"}
+]))
+interpreter = root / "agents/venv/bin/python"
+interpreter.write_text("""#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+if args[1].endswith(('cloudbench_catalog.py', 'cloudbench-production-only-tasks.py')):
+    os.execv(os.environ['ROUTING_REAL_PYTHON'], [os.environ['ROUTING_REAL_PYTHON'], *args])
+assert args[1] == 'benchmarks/run_benchmark.py', args
+with open(os.environ['ROUTING_CAPTURE'], 'a') as stream:
+    stream.write(json.dumps(args) + '\\n')
+""")
+interpreter.chmod(0o755)
+fleet = root / "scripts/forbidden-fleet"
+fleet.write_text('#!/usr/bin/env bash\nexit 98\n')
+capture = root / "production-argv.jsonl"
+completed = subprocess.run(
+    ["bash", str(root / "scripts/run-bench"), "production-route"],
+    env={**os.environ, "ROUTING_REAL_PYTHON": sys.executable,
+         "ROUTING_CAPTURE": str(capture), "RUN_BENCH_FLEET_BIN_UNDER_TEST": str(fleet)},
+    capture_output=True, text=True, timeout=15,
+)
+assert completed.returncode == 0, completed.stdout + completed.stderr
+assert [json.loads(line) for line in capture.read_text().splitlines()] == [
+    ["-u", "benchmarks/run_benchmark.py", "--task", "production-route", "--prod", "--ci", "--bootstrap"]
+], "production deploy must use the canonical CLI without allocating a fleet"
 PY
 
 set +e

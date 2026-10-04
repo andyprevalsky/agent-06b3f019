@@ -487,6 +487,10 @@ their assertions or test counts:
 `bash scripts/tests/deploy-agent-clone-recovery.test.sh`,
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
+`bash scripts/tests/descend-command.test.sh`,
+`python3 scripts/tests/verify-successful-llm-queries.test.py`,
+`python3 scripts/tests/cloudbench-exact-session-multi-root.test.py`,
+`python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
 `python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
@@ -510,6 +514,13 @@ suites assert that their own command still appears here, which is how a gate
 cannot be silently dropped from the deploy path. `run-deploy-structural-gates.test.py`
 asserts this list and the `GATES` registry match exactly in both directions, so
 adding a gate without documenting it here fails the build.
+
+The four compact benchmark gates above run on every deploy, including deploys
+without cloud-runner changes. They exercise the canonical CLI dispatch (including
+one 50-task dispatch and production-only routing), completed LIVE-query evidence,
+exact composite-root cleanup, and quiesced resource retirement offline. Larger
+paid fleet campaigns remain explicit human-requested validation; they are not
+added to this automatic gate.
 
 ```bash
 bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \
@@ -614,10 +625,7 @@ bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
 bash scripts/tests/cloudbench-status-service-shutdown.test.sh
 bash scripts/tests/fleet-infra-canary.test.sh
 bash scripts/tests/fleet-infra-stability-proof.test.sh
-python3 scripts/tests/verify-successful-llm-queries.test.py
-python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
 python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py
-python3 scripts/tests/cloudbench-forensic-quiesced.test.py
 bash scripts/tests/cloudbench-multi-workstream.test.sh
 bash scripts/tests/cloudbench-github-token.test.sh
 bash scripts/tests/seed-dump-toolchain.test.sh
@@ -713,6 +721,7 @@ cd back-end && bash ../scripts/run-deploy-stage seed-memory-ratchet -- \
 The checked-in budget is the maximum of the last five stable runs plus exactly
 20% headroom, rounded up. If this gate fails, reduce the seed's peak and re-run
 all five measurements. Never raise the budget or a machine size to make it pass.
+
 ## Step 5: Spin up local services
 
 **Step 5.0 (MANDATORY pre-flight garbage collection):** before spinning up anything, kill any stale run.sh trees + orphaned backend/worker/supabase processes from prior aborted runs in this worktree. This guarantees a clean local blackbox/semantic stack; cloud smoke uses separate task-scoped queues.
@@ -1381,7 +1390,7 @@ bash scripts/run-deploy-stage --finish
    git commit -m "$(cat <<'EOF'
    <concise description of changes>
 
-   ## Test Report
+## Test Report
 
    | Step | Status | Summary |
    |------|--------|---------|
@@ -2317,12 +2326,8 @@ gate because the two checks are isolated:
 
 ```bash
 python3 scripts/record_factory_event.py deploy production-start agentcard
-cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
-python benchmarks/run_benchmark.py \
-  --task agent-payment-production-abandonment \
-  --prod \
-  --ci \
-  --bootstrap
+cd "$(git rev-parse --show-toplevel)" && source agents/venv/bin/activate
+scripts/run-bench agent-payment-production-abandonment
 python3 scripts/record_factory_event.py deploy production-finish agentcard
 ```
 

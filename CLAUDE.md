@@ -247,6 +247,21 @@ independent copies with at most N active; never repeat a task by passing duplica
 names to one fleet. Named slices are `daily`, `pre-deploy`, `rose-bench`,
 `polar-bench`, and `incomplete`.
 
+The sequential `stability-proof` wrapper caps width at 32; `/deploy` selects at
+most 20 tasks. Neither cap defines the width of an explicitly requested ordinary
+fleet: resolve its concrete names and pass them together to `scripts/run-bench`
+without `-k` or `--concurrency`. Check current provider capacity and controller
+CPU/disk, then retain one batch and measure actual execution and LLM concurrency.
+Do not substitute smaller slices for a requested wide slice. Larger live stress
+runs remain explicitly requested validations, not automatic deploy stages.
+
+After explicitly destroying a released pool, preserve its ownership history and
+remove only the exact, natively verified retired IDs from the active git-common
+`cloudbench-pools/<workspace>.ids` index. Historical IDs must not remain an active
+pool: the worker-snapshot preflight correctly rejects an indexed Machine missing
+from provider inventory. Never prune on an observation timeout or touch another
+workspace's pool. An empty active index uses the existing verified warm snapshot.
+
 Treat inner elapsed-time measurements as diagnostics, not independent success
 criteria. Keep terminal outcomes, exact resource retirement and the end-to-end
 deadline hard; use generous fixture host guards. Tiny synthetic deadlines that
@@ -667,8 +682,10 @@ Pooled boot admission checks the requested CPU kind, count, memory and native
 stopped state exactly; shared CPUs cannot satisfy a dedicated request. Dynamic
 pool reuse retains admitted 8 GB shapes for either CPU kind and prefers an exact
 shape before resizing. The fleet-wide default remains shared to fit larger
-daily fleets' reservation budget. The dedicated profile is under live PR #1299
-verification; passing resource tests alone is not a benchmark outcome.
+daily fleets' reservation budget. PR #1299's dedicated profile passed its
+ten-slice infrastructure campaign and was merged and deployed. That width-ten
+result does not certify larger widths; passing resource tests alone is not a
+benchmark outcome.
 If a stopped member cannot reserve the requested CPU on its current host,
 stop before starting tasks and inspect its exact resize log. Preserve the member
 and its evidence while replacing that exact unclaimed slot from an existing
@@ -873,7 +890,7 @@ When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 - Never rename an existing task `name`
 - Before benches run, the selector **always prints** `TOTAL SELECTED: N / 20` (and screams when the cap binds)
 
-**The single full-suite entrypoint:** `cd agents && python benchmarks/run_eval_suite.py --port N`. It runs every `status: "ready"` benchmark entry through `run_benchmark.py` and lists `status: "incomplete"` entries (missing fixtures/judges) as skipped. `--list` prints the holding set split by `rose-bench` vs. `pipeline-e2e`; `--bench rose-bench` or `--bench pipeline-e2e` runs one axis. Run this after every agent-harness change to evaluate whether progress is being made.
+**The single full-suite entrypoint:** `scripts/run-bench eval` owns an isolated local stack and invokes `agents/benchmarks/run_eval_suite.py`. It runs every `status: "ready"` benchmark entry through `run_benchmark.py` and lists `status: "incomplete"` entries (missing fixtures/judges) as skipped. `scripts/run-bench eval --list` prints the holding set split by `rose-bench` vs. `pipeline-e2e`; `--bench rose-bench` or `--bench pipeline-e2e` runs one axis. The lower-level `run_eval_suite.py --port N` is for an explicitly reused running backend. Run the suite after every agent-harness change to evaluate whether progress is being made.
 
 **The FE query box reads this same catalog** via `GET /api/benchmarks/test-prompts` (adapter in `back-end/src/domains/benchmarks/service.ts`); the dev test-prompts picker cannot drift from the suite.
 
