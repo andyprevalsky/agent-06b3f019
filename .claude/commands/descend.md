@@ -932,3 +932,9 @@ Done requires all of:
 - the full lifecycle ledger and actual benchmark duration were reported.
 
 Only then propose or enable the cron.
+
+For fleet publication/cleanup regressions, follow the canonical benchmark CLI
+and `scripts/tests/benchmark-live-results.test.py`, not a private replacement
+harness. Distinguish an evaluated verdict from resource release: the parent stays
+live through teardown. Follow CLAUDE.md for any explicitly authorized temporary
+execution setting; keep normal defaults and exact ownership cleanup unchanged.

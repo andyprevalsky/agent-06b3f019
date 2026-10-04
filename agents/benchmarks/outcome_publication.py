@@ -75,6 +75,9 @@ def acknowledge_published(card: dict, *, run_id: str, fleet_dir: Path) -> None:
         if name in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
             return
         out = fleet_dir / name
+        began = time.monotonic()
+        attempt_status = None
+        attempted = False
         try:
             owner = json.loads((out / "runtime-evidence.owner.json").read_text())
             port = int((out / "status-proxy.port").read_text())
@@ -100,7 +103,9 @@ def acknowledge_published(card: dict, *, run_id: str, fleet_dir: Path) -> None:
                 },
             )
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            attempted = True
             with opener.open(request, timeout=5) as response:
+                attempt_status = response.status
                 if response.status == 204:
                     metadata = out / "hub-outcome-published.meta.json"
                     staged = metadata.with_suffix(".tmp")
@@ -109,10 +114,29 @@ def acknowledge_published(card: dict, *, run_id: str, fleet_dir: Path) -> None:
                     temporary = receipt.with_suffix(".tmp")
                     temporary.write_text(signature + "\n")
                     temporary.replace(receipt)
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                attempt_status = exc.code
             # Retry on the existing aggregator cadence. Never turn an ACK
             # observation into a failure of the benchmark or resource release.
             return
+        finally:
+            if attempted:
+                try:
+                    with (out / "hub-outcome-delivery.events.jsonl").open("a") as stream:
+                        os.chmod(stream.name, 0o600)
+                        stream.write(
+                            json.dumps(
+                                {
+                                    "epoch": time.time(),
+                                    "status": attempt_status,
+                                    "elapsed_seconds": round(time.monotonic() - began, 3),
+                                }
+                            )
+                            + "\n"
+                        )
+                except OSError:
+                    pass
 
     # One slow guest cannot serially delay publication of the other outcomes.
     # This is metadata delivery over existing owned proxies, never model work.

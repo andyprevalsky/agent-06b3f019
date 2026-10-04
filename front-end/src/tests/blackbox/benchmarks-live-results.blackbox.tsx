@@ -72,6 +72,7 @@ it('shows evaluated pass/fail while teardown is pending, then stops terminal det
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
   let status = 'starting';
   let live = true;
+  let lifecycle_stage = 'starting';
   let detailReads = 0;
   const base = RUNS.runs[0];
   const delegate = fetchSpy.getMockImplementation()!;
@@ -82,6 +83,8 @@ it('shows evaluated pass/fail while teardown is pending, then stops terminal det
       {
         ...base.tasks[0],
         status,
+        lifecycle_stage,
+        startup_label: 'Loading services',
         passed: status === 'passed' ? true : status === 'failed' ? false : null,
       },
     ],
@@ -112,20 +115,34 @@ it('shows evaluated pass/fail while teardown is pending, then stops terminal det
     'aria-label',
     '0 passed, 0 failed, 1 queued',
   );
+  fireEvent.click(screen.getByTestId('run-row-run-abc'));
+  await waitFor(() => expect(screen.getByTestId('run-view-task-chat-mode')).toBeInTheDocument());
+  expect(screen.getByText('Loading services')).toBeInTheDocument();
+  lifecycle_stage = 'ready';
+  status = 'ready';
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000);
+  });
+  expect(screen.getByText('Ready')).toBeInTheDocument();
+  lifecycle_stage = 'running';
+  status = 'running';
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000);
+  });
+  expect(
+    within(screen.getByTestId('run-view-task-chat-mode')).getByText('running'),
+  ).toBeInTheDocument();
+  lifecycle_stage = 'evaluated';
   status = 'passed';
   await act(async () => {
     await vi.advanceTimersByTimeAsync(5000);
   });
-  expect(screen.getByTestId('run-status-bar')).toHaveAttribute(
-    'aria-label',
-    '1 passed, 0 failed, 0 queued',
-  );
-  fireEvent.click(screen.getByTestId('run-row-run-abc'));
-  await waitFor(() => expect(screen.getByTestId('run-view-task-chat-mode')).toBeInTheDocument());
   expect(
     within(screen.getByTestId('run-view-task-chat-mode')).getByText('pass'),
   ).toBeInTheDocument();
   expect(screen.getByText('● live')).toBeInTheDocument();
+  expect(screen.getByText('Evaluated')).toBeInTheDocument();
+  lifecycle_stage = 'teardown';
   status = 'failed';
   await act(async () => {
     await vi.advanceTimersByTimeAsync(5000);
@@ -134,11 +151,14 @@ it('shows evaluated pass/fail while teardown is pending, then stops terminal det
     within(screen.getByTestId('run-view-task-chat-mode')).getByText('failed'),
   ).toBeInTheDocument();
   expect(screen.getByText('● live')).toBeInTheDocument();
+  expect(screen.getByText('Releasing resources')).toBeInTheDocument();
+  lifecycle_stage = 'released';
   live = false;
   await act(async () => {
     await vi.advanceTimersByTimeAsync(5000);
   });
   expect(screen.queryByText('● live')).not.toBeInTheDocument();
+  expect(screen.getByText('Resources released')).toBeInTheDocument();
   const terminalReads = detailReads;
   await act(async () => {
     await vi.advanceTimersByTimeAsync(15000);

@@ -51,7 +51,7 @@ function verdictBadge(detail: HubRunDetail) {
 
 function statusBadge(status: string) {
   const s = status.toLowerCase();
-  if (s === 'running' || s === 'queued')
+  if (['running', 'queued', 'starting', 'ready', 'evaluating'].includes(s))
     return (
       <Badge className="bg-orange-100 text-orange-700 dark:bg-orange-950 dark:text-orange-300">
         {s}
@@ -268,7 +268,7 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
           {detail.live && detail.dispatch !== null && (
             <DispatchTimeline
               dispatch={detail.dispatch}
-              running={detail.tasks.some((t) => t.status !== 'queued') || detail.elapsed_s !== null}
+              running={detail.tasks.some((t) => ['running', 'passed', 'failed'].includes(t.status))}
             />
           )}
           <div className="flex flex-wrap gap-2 pb-3" data-testid="run-tiles">
@@ -360,7 +360,22 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
                         </div>
                       )}
                     </td>
-                    <td className="px-3 py-2">{statusBadge(task.status)}</td>
+                    <td className="px-3 py-2">
+                      {statusBadge(task.status)}
+                      <div className="text-[11px] text-muted-foreground">
+                        {task.lifecycle_stage === 'teardown'
+                          ? 'Releasing resources'
+                          : task.lifecycle_stage === 'released'
+                            ? 'Resources released'
+                            : task.lifecycle_stage === 'evaluated'
+                              ? 'Evaluated'
+                              : task.lifecycle_stage === 'ready'
+                                ? 'Ready'
+                                : task.lifecycle_stage === 'starting'
+                                  ? (task.startup_label ?? 'Starting')
+                                  : null}
+                      </div>
+                    </td>
                     <td className="px-3 py-2 text-muted-foreground">
                       {task.duration_seconds !== null
                         ? `${Math.round(task.duration_seconds)}s`

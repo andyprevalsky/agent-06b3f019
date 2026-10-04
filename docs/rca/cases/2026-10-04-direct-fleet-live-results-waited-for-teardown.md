@@ -83,3 +83,22 @@ tests cemented in deploy and prohibited adding massive verification.
 
 Publish evaluation outcomes through the owned live path; do not make useful
 result visibility depend on resource teardown completing.
+
+## Follow-up evidence
+
+The next actual fleet exposed a separate startup publisher-order gap and late
+post-evaluation acknowledgment warnings. Start the publisher before allocation,
+forward phase changes through Hub summaries, keep polling through teardown, and
+finalize only after release. Compact renderer/API controls cover the phases.
+The exact post-evaluation delay cause remains open; metadata-only upload/ACK
+latency receipts will distinguish it in the next actual run. Startup ordering
+alone is not claimed to explain those late warnings. The final HTTP 413 boundary
+is archived separately; no synthetic check grants live fleet credit.
+
+Independent integration review also caught a final-publication edge: a failed
+cleanup must retain the live flag. The unchanged owning cleanup control failed
+on the pre-correction source and passed after final publication was fenced on
+successful teardown, disabled clone retention, and exact owner-registry absence.
+The Hub acknowledgment validates phase and startup labels as well as verdicts;
+an older backend cannot acknowledge fields it omitted. The compact deploy gate
+covers both boundaries without provider calls.

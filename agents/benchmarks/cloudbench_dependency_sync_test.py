@@ -3263,6 +3263,8 @@ def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Pa
     for mode in (
         "storage-not-ready",
         "storage-failed",
+        "non-inert-clone",
+        "child-finished-during-inventory",
         "upload-failure",
         "upload-and-reap-failure",
         "upload-and-status-failure",
@@ -3310,6 +3312,11 @@ capacity_release_reservation() {{ return 0; }}
 controller_github_token_b64() {{ printf token; }}
 machine_storage_ready() {{ [ "$MODE" != storage-not-ready ] && [ "$MODE" != storage-failed ]; }}
 machine_storage_failed() {{ [ "$MODE" = storage-failed ]; }}
+inventory_machine_field() {{
+  [ "$MODE" != non-inert-clone ] || return 1
+  [ "$MODE" != child-finished-during-inventory ] || : > "$OUT/benchmark-child.finished"
+  printf 1
+}}
 worker_operational() {{ [ "$MODE" != readiness-failure ]; }}
 fly_with_timeout() {{
   shift
@@ -3414,16 +3421,20 @@ fi
             assert fly_calls == []
             assert "storage failed before staging" in stage_log
             continue
-        neutralize = next(i for i, call in enumerate(fly_calls) if "machine update abc123" in call)
+        if mode == "non-inert-clone":
+            assert fly_calls == [], "unproven clone started or staged"
+            assert "waiting for native inert clone command" in stage_log
+            continue
+        if mode == "child-finished-during-inventory":
+            assert fly_calls == [], "terminal child caused a new start or upload"
+            continue
+        assert not any("machine update abc123" in call for call in fly_calls)
         first_start = next(i for i, call in enumerate(fly_calls) if "machine start abc123" in call)
         clear_stage = next(i for i, call in enumerate(fly_calls) if "rm -f /data/cloudbench-worker.sh" in call)
         first_upload = next(
             i for i, call in enumerate(fly_calls) if "ssh sftp put" in call and "cloudbench-worker.sh" in call
         )
-        assert neutralize < first_start < clear_stage < first_upload
-        assert "--env CLOUDBENCH_BOOT=0 --command sleep infinity" in fly_calls[neutralize]
-        assert "--skip-start" in fly_calls[neutralize]
-        assert "neutralize cloned boot command" in stage_log
+        assert first_start < clear_stage < first_upload
         assert "start neutralized worker" in stage_log
         assert "clear stale worker stage files" in stage_log
         launch_calls = [call for call in fly_calls if "setsid bash /tmp/rbw.sh" in call]
@@ -4322,7 +4333,7 @@ def test_machine_readiness_publishes_keyed_inventory_index(tmp_path: Path) -> No
                     "name": "cloudbench-one",
                     "state": "created",
                     "private_ip": "fdaa::1",
-                    "config": {"mounts": [{"volume": "volume-1"}]},
+                    "config": {"mounts": [{"volume": "volume-1"}], "init": {"cmd": ["sleep", "infinity"]}},
                 },
                 {
                     "id": "machine-2",
@@ -4357,6 +4368,7 @@ def test_machine_readiness_publishes_keyed_inventory_index(tmp_path: Path) -> No
         "instance_id=",
         "private_ip=fdaa::1",
         "clone_cmd_overridable=1",
+        "clone_cmd_inert=1",
         "storage_ready=0",
         "storage_failed=1",
     ]
@@ -4365,6 +4377,7 @@ def test_machine_readiness_publishes_keyed_inventory_index(tmp_path: Path) -> No
         "instance_id=",
         "private_ip=fdaa::2",
         "clone_cmd_overridable=1",
+        "clone_cmd_inert=0",
         "storage_ready=1",
         "storage_failed=0",
     ]
@@ -4395,6 +4408,16 @@ def test_machine_readiness_publishes_keyed_inventory_index(tmp_path: Path) -> No
         replay = subprocess.run(first.args, text=True, capture_output=True, check=False)
         assert replay.returncode == 0, replay.stderr
     assert len(list(index.glob(".generation-*"))) <= 2
+
+    # An inherited exec or entrypoint overrides CMD and cannot be started as inert.
+    rows = json.loads(machines.read_text())
+    for override in ("exec", "entrypoint"):
+        rows[1]["config"]["init"] = {"cmd": ["sleep", "infinity"], override: ["fixture"]}
+        machines.write_text(json.dumps(rows))
+        checked = subprocess.run(first.args, text=True, capture_output=True, check=False)
+        assert checked.returncode == 0, checked.stderr
+        fields = (index / "current/machines/machine-2").read_text().splitlines()
+        assert "clone_cmd_overridable=0" in fields and "clone_cmd_inert=0" in fields
 
 
 def test_machine_inventory_publication_cleans_temp_link_on_replace_failure(
@@ -4661,11 +4684,11 @@ def test_boot_update_always_submits_a_bounded_post_config_start() -> None:
     storage_wait = worker_provision[storage_gate:storage_gate_end]
     assert 'machine_storage_failed "$wid"' in storage_wait
     assert "continue" in storage_wait
-    neutralize = worker_provision.index('machine update "$wid"', storage_gate_end)
-    first_start = worker_provision.index('machine start "$wid"', neutralize)
-    assert storage_gate < storage_gate_end < neutralize < first_start
-    assert "--env CLOUDBENCH_BOOT=0" in worker_provision[neutralize:first_start]
-    assert "--skip-start" in worker_provision[neutralize:first_start]
+    inert_guard = worker_provision.index('inventory_machine_field "$wid" clone_cmd_inert', storage_gate_end)
+    first_start = worker_provision.index('machine start "$wid"', inert_guard)
+    assert storage_gate < storage_gate_end < inert_guard < first_start
+    assert 'echo "export CLOUDBENCH_BOOT=0"' in worker_provision
+    assert 'machine update "$wid"' not in worker_provision
 
 
 def test_boot_launch_delivers_the_advertised_local_workspace_patch() -> None:
@@ -7640,6 +7663,8 @@ exit 99
 
 def test_fleet_lifecycle_receipt_requires_final_registry_retirement(tmp_path: Path) -> None:
     """A sealed provider audit is insufficient if recovery authority remains."""
+    upload_probe = tmp_path / "upload-probe.py"
+    upload_probe.write_text("import pathlib,sys\npathlib.Path(sys.argv[2]).write_text(sys.argv[1])\n")
     fleet_source = FLEET_SCRIPT.read_text()
     cleanup = "\n".join(_extract_fleet_function(fleet_source, signature) for signature in (
         "cloudbench_fsync_directory() {", "cloudbench_collect_remaining_runtime_evidence() {", "cleanup() {",
@@ -7655,6 +7680,9 @@ def test_fleet_lifecycle_receipt_requires_final_registry_retirement(tmp_path: Pa
         script = f"""set -uo pipefail
 FLEET_DIR={shlex.quote(str(fleet))}
 ROOT_DIR={shlex.quote(str(ROOT))}
+SELF_MANAGED_HUB_RUN=1
+BENCHMARK_HUB_PARENT_RUN_ID=fixture-parent
+HUB_UPLOAD_HELPER={shlex.quote(str(upload_probe))}
 FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 RUN_ID={removal}
 FLEET_REGISTRY_DIR="$FLEET_DIR/registry"
@@ -7695,6 +7723,9 @@ exit 0
 """
         result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
         assert not evidence_latch.exists(), "real no-child evidence collection did not release its latch"
+        assert (fleet / "_batch/run.json").read_text() == (
+            "--upload-final" if removal == "removed" else "--upload-live"
+        ), "unreleased resources falsely stopped frontend polling"
         receipt = json.loads((fleet / "_batch/lifecycle.json").read_text())
         assert receipt["status"] == ("verified" if removal == "removed" else "failed"), result.stderr
         assert receipt["fleet_owner_token"] == "a" * 32
@@ -8336,8 +8367,10 @@ def test_cloud_fleet_provenance_is_staged_stamped_aggregated_and_validated() -> 
     assert '--expected-execution-task-matrix-file "$EXECUTION_TASK_MATRIX_FILE"' in fleet
     assert "digest-task-matrix \\" in fleet
     aggregate_acceptance = fleet.index("if ! finalize_terminal_projection 0; then")
-    final_upload = fleet.index('python3 "$HUB_UPLOAD_HELPER" --upload-final', aggregate_acceptance)
+    final_upload = fleet.index('python3 "$HUB_UPLOAD_HELPER" --upload-live', aggregate_acceptance)
     assert aggregate_acceptance < final_upload
+    cleanup = _extract_fleet_function(fleet, "cleanup() {")
+    assert cleanup.index('"$out/bench-e2e.finished-epoch"') < cleanup.index('hub_final_action=--upload-final')
 
     assert "CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT=" in cloud
     assert '--file-local "/cloudbench-execution-provenance.py=' in cloud
@@ -8530,6 +8563,7 @@ def _worker_cleanup_bundle(source: str) -> str:
                     "worker_is_tracked() {",
                     "worker_ledger_lock_acquire() {",
                     "worker_ledger_lock_release() {",
+                    "cloudbench_preserve_unlaunched_worker() {",
                     "cleanup_failed_worker() {",
                 )
             ),
@@ -8709,6 +8743,7 @@ def test_clone_retries_transient_volume_not_found(tmp_path: Path) -> None:
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
     cloner = _clone_machine_bundle(fleet)
+    name_resolver = _extract_fleet_function(fleet, "registry_resolve_name() {")
     ledger = tmp_path / "owned-clones.ids"
     attempt_file = tmp_path / "attempts"
     machines_file = tmp_path / "machines"
@@ -8744,11 +8779,13 @@ CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
 {timeout_fn}
 fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
 fleet_registry_record_name() {{ return 0; }}
+fleet_registry_release_name() {{ return 0; }}
 fleet_registry_record_id() {{ return 0; }}
 machine_storage_ready() {{ return 0; }}
 machine_storage_failed() {{ return 1; }}
 {_clone_index_adapter_fixture()}
 {resolver}
+{name_resolver}
 {cloner}
 clone_machine_target "$LEDGER"
 """
@@ -8773,6 +8810,40 @@ clone_machine_target "$LEDGER"
     assert "retrying" in result.stderr
     # The resolved id is recorded once in the ownership ledger.
     assert ledger.read_text().split() == ["clone-2"]
+
+    # The same first rejected create finishes a worker task. Reconcile that
+    # attempt, then cancel rather than issuing a fresh provider create.
+    worker_ledger = tmp_path / "worker-clones.ids"
+    attempt_file.unlink()
+    machines_file.write_text("")
+    worker_script = script.replace(
+        'if [ "$n" -lt 2 ]; then echo',
+        'if [ "$n" -lt 2 ]; then : > "${LEDGER%/*}/benchmark-child.finished"; echo',
+    )
+    worker_result = subprocess.run(
+        ["bash", "-c", worker_script],
+        env={"PATH": os.environ["PATH"], "ATTEMPT_FILE": str(attempt_file),
+             "MACHINES_FILE": str(machines_file), "LEDGER": str(worker_ledger)},
+        text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert worker_result.returncode == 75, worker_result.stderr
+    assert attempt_file.read_text().strip() == "1", "terminal worker issued a fresh clone retry"
+    assert not worker_ledger.exists() or not worker_ledger.read_text().strip()
+
+    # A malformed native inventory is ambiguous; stop new creates but retain
+    # its unresolved name and fail rather than falsely releasing ownership.
+    attempt_file.unlink()
+    machines_file.write_text("malformed\n")
+    (tmp_path / "benchmark-child.finished").unlink()
+    ambiguous = subprocess.run(
+        ["bash", "-c", worker_script],
+        env={"PATH": os.environ["PATH"], "ATTEMPT_FILE": str(attempt_file),
+             "MACHINES_FILE": str(machines_file), "LEDGER": str(worker_ledger)},
+        text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert ambiguous.returncode == 1, ambiguous.stderr
+    assert attempt_file.read_text().strip() == "1"
+    assert worker_ledger.with_suffix(".names").read_text().strip(), "ambiguous name ownership lost"
 
 
 def test_clone_gives_up_after_max_attempts(tmp_path: Path) -> None:
@@ -23756,7 +23827,7 @@ bench_autoscaler fixture-task {q(expected_machine)} fixture-workspace 0 {q(str(o
             release.touch(exist_ok=True)
             assert child.wait(timeout=5) == child_exit
             assert (out / "benchmark-child.finished").read_text().strip() == str(child_exit)
-            expected_success = variant in {"terminal", "pending_ready"}
+            expected_success = variant in {"terminal", "pending_ready", "pending_removed"}
             assert (scaler_rc == 0) is expected_success, (variant, (tmp_path / "autoscaler.log").read_text())
             if expected_success:
                 assert not failed.exists()
@@ -23767,8 +23838,6 @@ bench_autoscaler fixture-task {q(expected_machine)} fixture-workspace 0 {q(str(o
                 assert not (out / "autoscaler.completed-after-child").exists()
                 if variant == "prior_failure":
                     assert failed.read_text() == "prior-failure"
-                elif variant == "pending_removed":
-                    assert "worker capacity below desired: 0/1" in failed.read_text()
                 elif variant not in {"pending_failed", "pending_stuck", "missing_child"}:
                     assert (tmp_path / "metrics-polls").read_text().splitlines().count("missing") == 6
         finally:
@@ -24452,6 +24521,7 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         )
     source = FLEET_SCRIPT.read_text().split("# ── ONE aggregated batch dashboard", 1)[1]
     aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+    assert FLEET_SCRIPT.read_text().index('# ── ONE aggregated batch dashboard') < FLEET_SCRIPT.read_text().index('# ── Phase 1: provision'), 'live publisher begins after allocation'
     server = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -24495,6 +24565,8 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
             ("beta", "passed", True),
         ]
         assert bundle["tasks"][1]["agent_id"] == "beta"
+        assert [task["lifecycle_stage"] for task in bundle["tasks"]] == ["running", "evaluated"]
+
         count = len(received)
         project()
         assert len(received) == count, "unchanged task outcomes must not spam Hub"
@@ -24505,6 +24577,16 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         project()
         assert len(received) == count + 1, "a failure must publish immediately, before teardown"
         assert [(t["status"], t["passed"]) for t in received[-1][1]["tasks"]] == [("failed", False), ("passed", True)]
+        (tmp_path / "alpha" / "guest-shutdown.confirmed").touch()
+        command = subprocess.run([sys.executable, '-c', aggregate, str(batch / 'report-card.json')], env=env, capture_output=True, text=True, timeout=30)
+        assert command.returncode == 0
+        assert received[-1][1]['tasks'][0]['status'] == 'failed'
+        assert received[-1][1]['tasks'][0]['lifecycle_stage'] == 'teardown'
+        (tmp_path / "alpha" / "bench-e2e.finished-epoch").write_text('1')
+        command = subprocess.run([sys.executable, '-c', aggregate, str(batch / 'report-card.json')], env=env, capture_output=True, text=True, timeout=30)
+        assert command.returncode == 0
+        assert received[-1][1]['tasks'][0]['lifecycle_stage'] == 'released'
+
     finally:
         server.shutdown()
         server.server_close()

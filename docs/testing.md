@@ -142,7 +142,9 @@ is best effort after resource release and does not block the next slice.
 Publishers must retire before final cleanup. Report whole-slice and individual
 benchmark E2E times, with task durations where available. The 20-minute target
 is a warning and speedup reviews are waived. Preserve 7,200/300/1,800-second
-normal execution, temporary execution and E2E budgets. A runtime change that
+normal execution, temporary execution and E2E budgets. The current follow-up
+50-task command is explicitly authorized to use 600 seconds temporarily; this
+does not change normal defaults or the 1,800-second allocation cutoff. A runtime change that
 invalidates earlier runs starts a fresh streak; test/doc-only changes can carry
 results when their exercised inputs are verified unchanged.
 
@@ -180,3 +182,10 @@ in `scripts/test.sh`; no live 50-task campaign is added to deploy by default.
 - **Backend API endpoint:** Add `back-end/src/tests/blackbox/<domain>.blackbox.ts`
 - **Agent tool:** Add `agents/tests/blackbox/<tool-name>/test_<tool-name>.py`
 - **Frontend component:** Add `front-end/src/tests/blackbox/<domain>.blackbox.tsx`
+
+The compact live-result deploy control also owns native inert worker admission,
+cancellation between stages and clone retries, exact prelaunch retirement,
+launched-worker capture failures, and the decoded-size Hub transport boundary.
+Frontend coverage follows every phase through release; backend Hub round-trip
+coverage preserves those fields. The original full forensic bundle is unchanged;
+Hub transport omits duplicated diagnostic logs while keeping complete transcripts.

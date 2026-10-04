@@ -205,9 +205,9 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                 elif mode == "pending_until_child":
                     assert [row[1] for row in calls] == [1, 2, 3], "persistent-unknown-retried-in-same-pass"
                     assert tracked == ready == [], "persistent-unknown-admitted-worker"
-                    assert scaler_rc != 0, "unmet-demand-terminal-semantics-weakened"
-                    assert "worker capacity below desired: 0/2" in (out / "autoscaler.failed").read_text()
-                    assert not (out / "autoscaler.completed-after-child").exists()
+                    assert scaler_rc == 0, "unallocated-postterminal-demand-blocked-release"
+                    assert not (out / "autoscaler.failed").exists()
+                    assert (out / "autoscaler.completed-after-child").read_text().strip() == "1"
                 else:
                     assert scaler_rc == 17, "true-provision-return-code-lost"
                     assert len(calls) == 1, "provision-retried-after-hard-failure"
