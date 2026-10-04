@@ -1,6 +1,6 @@
 ---
 description: "Run benchmark tasks through the isolated cloud fleet by default; use --local explicitly for local benchmarks and evals."
-argument-hint: "list | eval [--bench rose-bench|pipeline-e2e] [--agent-only] [--only a,b] | <task-name...> [--full] [--rerun-failed latest]"
+argument-hint: "list | eval [--bench rose-bench|pipeline-e2e] [--agent-only] [--only a,b] | <slice-or-task...> [-k K --concurrency N] | --local <task...|--full|--rerun-failed latest>"
 ---
 
 # Benchmark Runner
@@ -39,8 +39,8 @@ services are already running and the user wants to reuse `.context/services.json
 
 # Evaluators (how a bench passes)
 
-Catalog: `agents/benchmarks/tasks.json` (one task = one entry).  
-Runner: `agents/benchmarks/run_benchmark.py`.  
+Catalog: `agents/benchmarks/tasks.json` (one task = one entry).
+Runner: `agents/benchmarks/run_benchmark.py`.
 Evidence builders: `agents/benchmarks/semantic_evaluator_evidence.py`.
 
 A task can fail in **two layers**. Both must pass when

@@ -318,8 +318,8 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
 **Execution model for Steps 1–4a (run in this order):**
 
 1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them, then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
-   1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
-   1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them, then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
+1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
+1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them, then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
 2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 3. **Parallel Group 3** (all read-only after the mutators; start every applicable
    lane in one assistant message with separate Bash tool calls, using the worker
@@ -1338,7 +1338,7 @@ bash scripts/run-deploy-stage --finish
 
 # ║ Includes four concurrent chat paths × five full-lifecycle samples, ║
 
-# ║ with every sample below the six-second ratchet. ║
+# ║ with every sample below the six-second ratchet.  ║
 
 # ║ 6c. Claude Code E2B sandbox smoke: PASS on every /deploy; never ║
 
@@ -1362,7 +1362,7 @@ bash scripts/run-deploy-stage --finish
 
 # ║ - "The code changes don't touch agent/Temporal code" (check the ║
 
-# ║ Step 6 table — back-end/ changes ALSO require ║
+# ║ Step 6 table — back-end/ changes ALSO require              ║
 
 # ║ smoke, not just agents/) ║
 
@@ -1390,7 +1390,7 @@ bash scripts/run-deploy-stage --finish
    git commit -m "$(cat <<'EOF'
    <concise description of changes>
 
-   ## Test Report
+## Test Report
 
    | Step | Status | Summary |
    |------|--------|---------|
