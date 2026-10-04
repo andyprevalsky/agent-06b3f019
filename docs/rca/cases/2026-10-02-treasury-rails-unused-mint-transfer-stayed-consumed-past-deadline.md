@@ -118,9 +118,66 @@ a dedicated mint-capable sandbox cardholder for this gate, which needs an
 operator to provision. The gate was rerun on the same HEAD without code
 changes.
 
+### 2026-10-04: a missed reclaim is judged a day after the mint
+
+Read-only provider checks at 14:38–14:41Z:
+
+- Transfer `owt_ef9b047212c177aaca719afe` was still `consumed` with $0.00
+  released, 20.6 hours after its card closed unused.
+- Card `card_d9109871658de3d93171a63b` (the 2026-10-03 03:47Z failure) was in
+  neither list. The `consumed` page reached back only 33 hours, but the
+  `reclaimed` page reached back 41 hours, so it had not been reclaimed after
+  35 hours.
+- Of the 53 $13.00 treasury mints still visible, 52 were `reclaimed`.
+
+A missed reclaim is rare, and both observed ones lasted far beyond any test
+wait. The operator directed that the test assume recovery can take about a
+day, without the test itself waiting that long.
+
+- When the in-run wait ends with the card's transfer still `consumed`,
+  `pending` or `funded`, the test records the card in
+  `~/.cache/rose-labs/treasury-rails-pending-mints.jsonl` and passes. A short
+  reclaim, a `failed` transfer or a missing transfer still fails the run.
+- Each later run on that machine, after its pre-mint sweep, re-reads the open
+  entries from the five `list_transfers` status pages, one read each however
+  many entries are open. A transfer still unreleased 24 hours after its mint
+  fails that run with the provider row. A full reclaim resolves it.
+- Every verdict except "still waiting" is appended to the ledger, so a lost
+  mint fails one run, not every run after it. An entry that has aged out of
+  the reclaimed page is reported `UNVERIFIED` and dropped instead.
+- The 240-second in-run wait is unchanged.
+
+The ledger lives outside the worktree, so a later run from any worktree on
+the same machine checks it, including after a merged worktree is deleted.
+Runs on other machines do not see it.
+
+Verification:
+
+- `src/tests/unit/unused-mint-settle.test.ts` and
+  `src/tests/blackbox/treasury-rails-pending-mints.blackbox.ts` cover the
+  verdicts and the ledger, including the two observed stalls.
+- A live run seeded with both stalled cards failed before minting on
+  `card_d910…` (35.2 hours, "could be consumed") and kept `card_3fe0…`
+  (20.9 hours) waiting. The next run did not report `card_d910…` again and
+  passed.
+- A run with the wait forced to 5 seconds recorded `card_6e3e9d0879a2c5ea5d22ac62`
+  and passed. The next run's sweep recovered its $13.00, and a check about
+  5 minutes after its mint found it `reclaimed` in full.
+- That next run also stalled on its own card, `card_01c6aabfe93b113e8c84f4b6`:
+  it stayed `consumed` through 24 attempts while the sweeps returned $13.00
+  and $37.21. The old test would have failed. The new one recorded it.
+
+This stays open. If stalls keep outlasting a day, the deferred check fails a
+day later instead of in the run. The org MCP exposes `create_cardholder`, and
+sandbox KYC and payment-method setup are documented as instant, so a
+dedicated cardholder may not need an operator after all. That is untested.
+Adding one changes the shared org, and callers that pick `cardholders[0]`
+(newest first), including this test, would start using it.
+
 ## Human feedback
 
-None recorded.
+2026-10-04: assume recovery can take about a day, and update the test for
+that without making it take forever.
 
 ## Reusable lesson
 
