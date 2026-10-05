@@ -311,13 +311,15 @@ def test_get_max_iterations_reads_positive_env(monkeypatch):
     assert get_max_iterations() == 250
 
 
-def test_browser_activity_timeout_outlasts_its_step_budget(monkeypatch):
-    """A timeout shorter than the step budget cuts the single activity attempt off mid-task."""
+def test_browser_activity_timeout_grows_only_for_an_explicit_step_override(monkeypatch):
+    """The 250-step default keeps the 30-minute window a browser session can outlive."""
     monkeypatch.delenv("BROWSER_MAX_ITERATIONS", raising=False)
-    assert browser_start_to_close_timeout_minutes(fast_mode=False, goal="Buy socks") == 102
-    assert ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES == 102
+    assert get_max_iterations() == 250
+    assert browser_start_to_close_timeout_minutes(fast_mode=False, goal="Buy socks") == 30
     monkeypatch.setenv("BROWSER_MAX_ITERATIONS", "60")
     assert browser_start_to_close_timeout_minutes(fast_mode=False, goal="Buy socks") == 30
+    monkeypatch.setenv("BROWSER_MAX_ITERATIONS", "250")
+    assert browser_start_to_close_timeout_minutes(fast_mode=False, goal="Buy socks") == 102
     monkeypatch.setenv("BROWSER_MAX_ITERATIONS", "500")
     assert browser_start_to_close_timeout_minutes(fast_mode=False, goal="Buy socks") == 190
 

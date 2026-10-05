@@ -14,7 +14,7 @@ import { join, resolve } from 'node:path';
 import { sameSessionAvailability } from '../../domains/browser-session/service.task-info';
 import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/sessionRecovery';
 import {
-  BROWSER_ACTIVITY_BASE_TIMEOUT_MINUTES,
+  BROWSER_ACTIVITY_START_TO_CLOSE_MINUTES,
   BROWSER_DEFAULT_MAX_ITERATIONS,
   BROWSER_SESSION_MIN_REMAINING_MS,
   BROWSER_STEPS_COVERED_BY_BASE_TIMEOUT,
@@ -49,19 +49,19 @@ function pythonIntConstant(source: string, name: string): number {
 test('backend budget constants match the Python browser activity config', () => {
   const source = readFileSync(pythonConfigPath, 'utf8');
   assert.strictEqual(
-    BROWSER_ACTIVITY_BASE_TIMEOUT_MINUTES,
-    pythonIntConstant(source, '_BASE_TIMEOUT_MINUTES')
-  );
-  assert.strictEqual(
-    BROWSER_STEPS_COVERED_BY_BASE_TIMEOUT,
-    pythonIntConstant(source, '_STEPS_COVERED_BY_BASE_TIMEOUT')
+    BROWSER_ACTIVITY_START_TO_CLOSE_MINUTES,
+    pythonIntConstant(source, 'ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES')
   );
   assert.strictEqual(
     BROWSER_DEFAULT_MAX_ITERATIONS,
     pythonIntConstant(source, 'DEFAULT_MAX_ITERATIONS')
   );
+  assert.strictEqual(
+    BROWSER_STEPS_COVERED_BY_BASE_TIMEOUT,
+    pythonIntConstant(source, 'STEPS_COVERED_BY_BASE_TIMEOUT')
+  );
   assert.ok(
-    source.includes('return max(_BASE_TIMEOUT_MINUTES, int(steps * 0.35) + 15)'),
+    source.includes('return max(ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES, int(steps * 0.35) + 15)'),
     'Python step-scaled browser budget changed; update browserActivityBudgetMinutes to match'
   );
   assert.strictEqual(
@@ -96,17 +96,17 @@ test('a resumed task reuses a live session only while it outlives another step',
 });
 
 test('step-scaled budgets mirror the Python formula', () => {
-  assert.strictEqual(browserActivityBudgetMinutes({}), 102);
+  assert.strictEqual(browserActivityBudgetMinutes({}), 30);
   assert.strictEqual(browserActivityBudgetMinutes({ BROWSER_MAX_ITERATIONS: '60' }), 30);
-  assert.strictEqual(browserActivityBudgetMinutes({ BROWSER_MAX_ITERATIONS: '0' }), 102);
-  assert.strictEqual(browserActivityBudgetMinutes({ BROWSER_MAX_ITERATIONS: 'nope' }), 102);
+  assert.strictEqual(browserActivityBudgetMinutes({ BROWSER_MAX_ITERATIONS: '0' }), 30);
+  assert.strictEqual(browserActivityBudgetMinutes({ BROWSER_MAX_ITERATIONS: 'nope' }), 30);
   assert.strictEqual(browserActivityBudgetMinutes({ BROWSER_MAX_ITERATIONS: '100' }), 50);
   assert.strictEqual(browserActivityBudgetMinutes({ BROWSER_MAX_ITERATIONS: ' 120 ' }), 57);
 });
 
 test('Steel session outlives the browser activity budget within the plan cap', () => {
-  for (const steps of ['60', '80', '100']) {
-    const env = { BROWSER_MAX_ITERATIONS: steps };
+  for (const steps of [undefined, '60', '80', '100']) {
+    const env = steps === undefined ? {} : { BROWSER_MAX_ITERATIONS: steps };
     const budgetMs = browserActivityBudgetMinutes(env) * 60_000;
     const timeoutMs = steelSessionTimeoutMs(env);
     assert.ok(
@@ -115,16 +115,12 @@ test('Steel session outlives the browser activity budget within the plan cap', (
     );
     assert.ok(timeoutMs <= STEEL_PLAN_MAX_SESSION_MS, `steps=${String(steps)}: exceeds plan cap`);
   }
-  // A budget past the plan cap cannot be outlived: the session gets the cap and
-  // the step loop replaces it before BROWSER_SESSION_MIN_REMAINING_MS is left.
-  assert.ok(browserActivityBudgetMinutes({}) * 60_000 > STEEL_PLAN_MAX_SESSION_MS);
-  assert.strictEqual(steelSessionTimeoutMs({}), STEEL_PLAN_MAX_SESSION_MS);
 });
 
 test('challenge-recovery Steel sessions use the derived lifetime', () => {
   const options = buildSteelRecoveryBrowserOptions({ proxy: true });
   assert.strictEqual(options.timeout, steelSessionTimeoutMs());
-  assert.ok(options.timeout > BROWSER_ACTIVITY_BASE_TIMEOUT_MINUTES * 60_000);
+  assert.ok(options.timeout > BROWSER_ACTIVITY_START_TO_CLOSE_MINUTES * 60_000);
 });
 
 test('every Steel session create site derives its lifetime, never a literal', () => {
