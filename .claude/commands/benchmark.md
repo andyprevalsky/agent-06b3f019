@@ -23,9 +23,16 @@ Behavior:
 
 `/deploy` uses `scripts/run-predeploy-local` → `scripts/run-bench --local` by default, with the history-qualified selector and its hard cap of 20; its explicit cloud alternative uses the same fleet scripts. Production payment verification uses `scripts/run-bench agent-payment-production-abandonment`. Keep compact runner regressions in the existing deploy gates; a large live stress run requires an explicit user request and does not become an automatic deploy stage.
 
+Ordinary cloud runs automatically reuse verified completed dependency snapshots,
+including from fresh checkouts. Use `scripts/run-bench --help` and CLAUDE.md's
+"Cloud startup reuse" guidance; do not rebuild dependencies for source-only changes.
+
 Keep the ordinary 7,200-second backstops. For an explicitly requested five-minute validation, set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300` and pass `--timeout 300`; the environment setting bounds task execution and the flag bounds the controller path. Preserve terminal task grading, meaningful real execution, exact resource cleanup and the separately monitored E2E deadline. Recovered errors and inner latency measurements remain diagnostics for an infrastructure-only campaign; an ordinary task failure can satisfy that campaign without satisfying the deploy smoke gate.
 
-For the current explicitly authorized 50-task follow-up only, the user added five minutes: use `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=600` with `--timeout 600`. This is a command-scoped execution setting; keep normal defaults and the independent 1,800-second allocation cutoff. Run latency proofs without concurrent paid smoke suites.
+For an explicitly requested twenty-minute task window, use
+`BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=1200` with `--timeout 1200`. This is a
+command-scoped execution setting; keep normal defaults. Run latency proofs
+without concurrent paid smoke suites.
 
 The entrypoint owns evaluation publication and the live Hub publisher. Task PASS/FAIL
 is emitted before agent/phone cleanup; the fleet publishes changed outcomes on

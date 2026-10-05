@@ -933,6 +933,33 @@ WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
 if [ "$MACHINE_NAME" != cloudbench-warm ]; then
     WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.$MACHINE_NAME.fp"
 fi
+HYDRATED_WARM_DEPS_STATE=""
+warm_deps_recorded_state() {
+    # A sibling checkout can replace the shared legacy slot after discovery.
+    # Keep this fleet's verified receipt through selection and preflight.
+    if [ -n "${HYDRATED_WARM_DEPS_STATE:-}" ]; then
+        printf '%s\n' "$HYDRATED_WARM_DEPS_STATE"
+    else
+        cat "$WARM_DEPS_STATE_FILE"
+    fi
+}
+hydrate_warm_deps_state() {
+    local node_fp py_fp shared_state temporary
+    node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" || return 0
+    py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || return 0
+    if shared_state="$(printf '{"machines":%s,"snapshots":%s}' "$warm_json" "$SNAPSHOTS_JSON" \
+        | cloudbench_warm_deps_state_from_inventory "$APP" "$WARM_ID" "$VOL_ID" "$node_fp" "$py_fp")"; then
+        HYDRATED_WARM_DEPS_STATE="$shared_state"
+        temporary="$WARM_DEPS_STATE_FILE.tmp.$$"
+        if printf '%s\n' "$shared_state" > "$temporary" && mv "$temporary" "$WARM_DEPS_STATE_FILE"; then
+            echo "🧾 restored proven donor dependency snapshot for this checkout"
+        else
+            rm -f "$temporary"
+            echo "⚠️  could not cache donor dependency proof locally; using this fleet's verified receipt" >&2
+        fi
+    fi
+    return 0
+}
 # ── Capture an explicit immutable fleet source ─────────────────────────────
 PRIVATE_SOURCE_FILE=""
 PRIVATE_SOURCE_SHA256="none"
@@ -10998,7 +11025,8 @@ else
         echo "❌ could not read volume snapshots for $VOL_ID after 6 attempts (provider read failure, not a missing snapshot)" >&2
         exit 1
     fi
-    RECORDED_SNAP_ID="$(awk 'NF >= 4 {print $4; exit}' "$WARM_DEPS_STATE_FILE" 2>/dev/null || true)"
+    hydrate_warm_deps_state
+    RECORDED_SNAP_ID="$(warm_deps_recorded_state 2>/dev/null | awk 'NF >= 4 {print $4; exit}' || true)"
     # The newest snapshot is not necessarily proven: an interrupted refresh can
     # leave a newer complete snapshot without ever publishing its dependency
     # proof. Prefer the exact recorded snapshot while it still exists and is
@@ -11104,7 +11132,7 @@ warm_deps_preflight() {
         return 0
     fi
     local state="$WARM_DEPS_STATE_FILE"
-    local node_fp py_fp snap_epoch s_node s_py s_epoch _rest new_snap
+    local node_fp py_fp snap_epoch s_node s_py s_epoch _rest new_snap recorded_state
     node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR" 2>/dev/null || true)"
     py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}" 2>/dev/null || true)"
     CURRENT_NODE_FP="$node_fp"
@@ -11113,12 +11141,25 @@ warm_deps_preflight() {
         echo "⚠️  could not fingerprint dep manifests — skipping warm-deps preflight" >&2
         return 0
     fi
-    if [ -f "$state" ]; then
-        read -r s_node s_py s_epoch _rest < "$state" || true
+    recorded_state="$(warm_deps_recorded_state 2>/dev/null || true)"
+    if [ -n "$recorded_state" ]; then
+        read -r s_node s_py s_epoch _rest <<< "$recorded_state" || true
         snap_epoch="$(snapshot_created_epoch "$SNAP_ID")"
         if [ "$s_node" = "$node_fp" ] && [ "$s_py" = "$py_fp" ] && \
            [ "$_rest" = "$SNAP_ID" ] && \
            [ "${snap_epoch:-0}" -ge $(( ${s_epoch:-0} - 60 )) ]; then
+            # Migrate a verified legacy controller receipt without another
+            # install/snapshot. This writes metadata only, including if another
+            # controller has since started the donor for maintenance.
+            if [ "${warm_json:-[]}" != "[]" ] && [ -n "${SNAPSHOTS_JSON:-}" ] && \
+                ! printf '{"machines":%s,"snapshots":%s}' \
+                "$warm_json" "$SNAPSHOTS_JSON" | cloudbench_warm_deps_state_from_inventory \
+                "$APP" "$WARM_ID" "$VOL_ID" "$node_fp" "$py_fp" >/dev/null; then
+                if ! cloudbench_publish_warm_deps_state "$APP" "$WARM_ID" "$VOL_ID" \
+                    "$s_node" "$s_py" "$s_epoch" "$SNAP_ID"; then
+                    echo "⚠️  shared dependency proof publication failed; using this checkout's verified snapshot" >&2
+                fi
+            fi
             echo "✅ warm snapshot dep trees match the current ref (fast bring-up)"
             return 0
         fi

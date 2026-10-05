@@ -892,6 +892,32 @@ TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
 
 ## Eval Suite
 
+**Cloud startup reuse:** use `scripts/run-bench <task...> --wait` normally. The
+CLI reuses completed dependency snapshots across fresh checkouts and synchronizes
+the requested code after boot. Dependency hashes, the donor Machine/volume, and
+the exact completed snapshot are checked before reuse. A changed dependency set
+refreshes once centrally; it is not installed independently on every task box.
+Cache metadata publication failures warn and retain the existing verified local
+receipt rather than reject an otherwise usable run. Use `scripts/run-bench
+--help` for current flags. `--timeout 1200` is a per-run twenty-minute task
+execution override; the normal timeout remains unchanged.
+
+To skip fresh volume restoration on repeated runs, prepare an explicitly sized
+workspace pool with `scripts/run-bench --provision-pool N --wait`. Ordinary runs
+automatically claim and return its stopped Machines. Retained volumes incur
+storage cost; do not automatically retain every fresh task clone. A dependency
+snapshot does not update system packages in the container image: after changing
+the native image prerequisites, refresh the shared image once through the
+documented `scripts/run-bench-cloud --setup` maintenance path. A missing
+`vector.control` during cloud seed restore indicates an outdated PostgreSQL
+image, not a task or model failure.
+
+The compact cache regressions are in
+`agents/benchmarks/cloudbench_dependency_sync_test.py` and run through the
+benchmark blackbox domain and `/deploy` Step 4cb. They cover fresh-checkout reuse,
+donor/volume/dependency binding, incomplete snapshots, legacy receipt migration,
+and metadata-only publication without making publication a benchmark gate.
+
 **`agents/benchmarks/tasks.json` is the ONE canonical benchmark catalog.** Benchmark tasks and migrated long-horizon evals live here; ordinary blackbox/vitest tests do not. Each entry carries the additive eval contract: `status`, `runner` (`agent`), `bench` (`pipeline-e2e` for Rose harness plumbing vs. `rose-bench` for harness-independent capability), `description`, `environment` (mode/db_fixtures/base_images/services/secrets/live_targets/context_notes), `evaluators[]` (`static_check` | `single_turn_llm_judge` | `agentic_llm_judge`), and `source` (provenance pointers). Validated by `agents/benchmarks/long_horizon.py:validate_catalog()`. Idea kernels that haven't become evals yet live in `agents/benchmarks/long_horizon_ideas.json`.
 
 **Pre-Deploy bench selection (auto-attach):** `/deploy` does **not** run the full daily suite. `agents/benchmarks/select_predeploy_benches.py` builds a bounded set every deploy:
