@@ -3336,6 +3336,8 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
         # Hosted Rose Shop purchases: the same sandbox settlement behind a sign-in gate.
         "browser-auth-guest-purchase",
         "browser-auth-member-discount-purchase",
+        "browser-auth-member-discount-signup-fails-purchase",
+        "browser-auth-paid-membership-purchase",
         "browser-auth-signup-purchase",
         "browser-auth-signup-purchase-no-subscription",
         "browser-auth-session-expires-at-checkout",

@@ -35,6 +35,7 @@ import type {
   SiteAccount,
   SiteBehavior,
 } from './types';
+import { BASE_BEHAVIOR, GUEST_SHOP, MEMBER_PRICE_SHOP, SHOP } from './serviceScenarioBehaviors';
 
 export interface PlanContext {
   siteId: string;
@@ -73,20 +74,6 @@ export const NEEDS_MINTED_IDENTITY: readonly AuthTestSiteScenario[] = [
   'signup_already_registered',
   'password_email_2fa',
 ];
-
-const BASE_BEHAVIOR: SiteBehavior = {
-  identifierFirst: false,
-  passwordSignIn: true,
-  emailSignIn: 'code',
-  smsSignIn: 'off',
-  passkey: 'off',
-  secondFactor: 'none',
-  signUp: 'off',
-  guest: 'off',
-  shop: false,
-  memberDiscountPercent: 0,
-  expireSessionAtOrder: false,
-};
 
 export function randomMemberNumber(): string {
   const value = (randomBytes(4).readUInt32BE(0) % 90_000_000) + 10_000_000;
@@ -328,9 +315,6 @@ function namedAccountPlan(ctx: PlanContext): ScenarioPlan {
 const openSitePlan = (behavior: Partial<SiteBehavior>): ScenarioPlan =>
   plan({ behavior: { ...BASE_BEHAVIOR, ...behavior }, minted: 'offered' });
 
-const SHOP: Partial<SiteBehavior> = { shop: true };
-const GUEST_SHOP: Partial<SiteBehavior> = { ...SHOP, signUp: 'open', guest: 'checkout' };
-
 const PLANNERS: Record<AuthTestSiteScenario, (ctx: PlanContext) => ScenarioPlan> = {
   password_retry: passwordRetryPlan,
   saved_logins_fail: (ctx) => savedLoginsFailPlan(ctx),
@@ -358,7 +342,10 @@ const PLANNERS: Record<AuthTestSiteScenario, (ctx: PlanContext) => ScenarioPlan>
   signup_already_registered: (ctx) => mintedAccountPlan(ctx, { signUp: 'open' }),
   guest_purchase: () => openSitePlan(GUEST_SHOP),
   // Guests can buy, but only an account gets the lower price.
-  member_discount_purchase: () => openSitePlan({ ...GUEST_SHOP, memberDiscountPercent: 10 }),
+  member_discount_purchase: () => openSitePlan(MEMBER_PRICE_SHOP),
+  member_discount_signup_fails_purchase: () =>
+    openSitePlan({ ...MEMBER_PRICE_SHOP, signUp: 'error' }),
+  paid_membership_purchase: () => openSitePlan({ ...MEMBER_PRICE_SHOP, membershipFeeCents: 999 }),
   signup_purchase: () => openSitePlan({ ...SHOP, signUp: 'open' }),
   signup_fails_purchase: () => openSitePlan({ ...SHOP, signUp: 'error' }),
   session_expires_at_checkout: (ctx) =>

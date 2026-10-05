@@ -40,6 +40,8 @@ TASK_SCENARIOS = {
     "browser-auth-assistance-declined": "saved_logins_fail",
     "browser-auth-guest-purchase": "guest_purchase",
     "browser-auth-member-discount-purchase": "member_discount_purchase",
+    "browser-auth-member-discount-signup-fails-purchase": "member_discount_signup_fails_purchase",
+    "browser-auth-paid-membership-purchase": "paid_membership_purchase",
     "browser-auth-signup-purchase": "signup_purchase",
     "browser-auth-signup-purchase-no-subscription": "signup_purchase",
     "browser-auth-signup-fails-purchase-assistance": "signup_fails_purchase",
@@ -184,6 +186,8 @@ def test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts() ->
     for name in (
         "browser-auth-guest-purchase",
         "browser-auth-member-discount-purchase",
+        "browser-auth-member-discount-signup-fails-purchase",
+        "browser-auth-paid-membership-purchase",
         "browser-auth-signup-purchase",
         "browser-auth-session-expires-at-checkout",
     ):

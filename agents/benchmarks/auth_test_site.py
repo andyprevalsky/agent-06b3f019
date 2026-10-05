@@ -63,6 +63,8 @@ SCENARIO_LADDERS: dict[str, tuple[int, bool, int, int]] = {
     "signup_already_registered": (0, True, 0, 0),
     "guest_purchase": (0, True, 0, 0),
     "member_discount_purchase": (0, True, 0, 0),
+    "member_discount_signup_fails_purchase": (0, True, 0, 0),
+    "paid_membership_purchase": (0, True, 0, 0),
     "signup_purchase": (0, True, 0, 0),
     "signup_fails_purchase": (0, True, 0, 0),
     "session_expires_at_checkout": (1, False, 0, 0),

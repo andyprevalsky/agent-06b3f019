@@ -44,6 +44,8 @@ export const AUTH_TEST_SITE_SCENARIOS = [
   'signup_already_registered',
   'guest_purchase',
   'member_discount_purchase',
+  'member_discount_signup_fails_purchase',
+  'paid_membership_purchase',
   'signup_purchase',
   'signup_fails_purchase',
   'session_expires_at_checkout',
@@ -123,6 +125,8 @@ export interface SiteBehavior {
   shop: boolean;
   /** Percent off every item for signed-in members; 0 = members and guests pay the same. */
   memberDiscountPercent: number;
+  /** Monthly price of the membership that earns the discount; 0 = membership is free. */
+  membershipFeeCents: number;
   /** The first order submit ends the session and asks the member to sign in again. */
   expireSessionAtOrder: boolean;
 }

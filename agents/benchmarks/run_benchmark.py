@@ -317,6 +317,8 @@ AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
 ROSE_SHOP_PAYMENT_TASK_NAMES = {
     "browser-auth-guest-purchase",
     "browser-auth-member-discount-purchase",
+    "browser-auth-member-discount-signup-fails-purchase",
+    "browser-auth-paid-membership-purchase",
     "browser-auth-signup-purchase",
     "browser-auth-session-expires-at-checkout",
 }

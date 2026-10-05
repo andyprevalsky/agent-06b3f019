@@ -342,6 +342,62 @@ test('member_discount_purchase: a member pays less than a guest for the same car
   }
 });
 
+test('member price shops state the membership terms, and a refused sign-up still leaves guest checkout', async () => {
+  const userId = await createUser();
+  try {
+    await createMintedIdentity(userId);
+    await withLocalSite(async ({ base }) => {
+      await withSettler(async (charges) => {
+        const paid = await seed(base, userId, 'paid_membership_purchase');
+        const paidShop = await (await getPage(base, pagePath(paid, '/'))).text();
+        assert(
+          paidShop.includes('Members pay $13.50 (10% off with a $9.99/month membership)'),
+          'a paid membership must be priced on the product'
+        );
+
+        const manifest = await seed(base, userId, 'member_discount_signup_fails_purchase');
+        const cart = await cartWithTote(base, manifest);
+        const gate = await (await getPage(base, pagePath(manifest, '/checkout'), cart)).text();
+        assert(
+          gate.includes('Members pay 10% less with a free account') &&
+            gate.includes('Continue as guest'),
+          'the gate states free membership and still offers guest checkout'
+        );
+        const refused = await postForm(
+          base,
+          pagePath(manifest, '/signup'),
+          { name: 'Rose Cedar', email: 'rose.cedar@mail.example', password: 'correct-horse-7' },
+          cart
+        );
+        assert(
+          !(refused.headers.get('location') ?? '').includes('/signup/verify'),
+          'sign-up must be refused on this site'
+        );
+        await postForm(base, pagePath(manifest, '/checkout/guest'), {}, cart);
+        const placed = await postForm(base, pagePath(manifest, '/checkout'), CARD, cart);
+        assert(
+          (placed.headers.get('location') ?? '').includes('/orders/ORD-'),
+          'guest order placed'
+        );
+        const report = await fetchReport(base, manifest.siteId);
+        assert(
+          report.orders.length === 1 &&
+            report.orders[0]?.email === null &&
+            report.orders[0]?.totalCents === TOTE_TOTAL_CENTS,
+          `one full-price guest order expected: ${JSON.stringify(report.orders)}`
+        );
+        assert(report.accounts.length === 0, 'no account may exist after a refused sign-up');
+        assert(
+          charges.length === 1 && charges[0]?.amountCents === TOTE_TOTAL_CENTS,
+          `charges ${JSON.stringify(charges)}`
+        );
+      });
+    });
+  } finally {
+    await cleanup(userId);
+  }
+});
+
 test('guest_purchase: a guest cart checks out with no account', async () => {
   const userId = await createUser();
   try {

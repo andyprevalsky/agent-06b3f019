@@ -18,9 +18,14 @@ function accountBar(site: AuthTestSite, session: SiteSession | null, cartCount: 
   return `<p>${who} · <a href="${siteUrl(site, '/cart')}">Cart (${cartCount})</a></p>`;
 }
 
+function membershipTerms(site: AuthTestSite): string {
+  const fee = site.behavior.membershipFeeCents;
+  return fee === 0 ? 'a free account' : `a ${money(fee)}/month membership`;
+}
+
 function memberPrice(site: AuthTestSite, item: ShopItem): string {
   if (site.behavior.memberDiscountPercent === 0) return '';
-  return ` · Members pay ${money(memberPriceCents(site, item))} (${site.behavior.memberDiscountPercent}% off with a free account)`;
+  return ` · Members pay ${money(memberPriceCents(site, item))} (${site.behavior.memberDiscountPercent}% off with ${membershipTerms(site)})`;
 }
 
 function productCard(site: AuthTestSite, item: ShopItem): string {
@@ -123,7 +128,7 @@ export function renderCheckoutGatePage(site: AuthTestSite, notice?: string): str
   const memberOffer =
     site.behavior.memberDiscountPercent === 0
       ? ''
-      : `<p>Members pay ${site.behavior.memberDiscountPercent}% less. Guests pay the full price.</p>`;
+      : `<p>Members pay ${site.behavior.memberDiscountPercent}% less with ${membershipTerms(site)}. Guests pay the full price.</p>`;
   return layout(
     site,
     'Check out',

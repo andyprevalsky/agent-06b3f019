@@ -337,7 +337,7 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "  - 4. Email OTP" in prompt
     assert "  - 5. SMS OTP" in prompt
     assert "  - 6. Guest/anonymous completion, if viable" in prompt
-    assert "- If members pay less than guests, sign up with the minted account instead of checking out as a guest.\n" in prompt
+    assert "- If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.\n" in prompt
     assert "  - 7. Minted account\n" in prompt
     assert "  - 8. request_user_assistance_for_authentication" in prompt
     assert "OTP codes from email or SMS are automatically injected" in prompt
