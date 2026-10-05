@@ -898,7 +898,11 @@ the requested code after boot. Dependency hashes, the donor Machine/volume, and
 the exact completed snapshot are checked before reuse. A changed dependency set
 refreshes once centrally; it is not installed independently on every task box.
 Cache metadata publication failures warn and retain the existing verified local
-receipt rather than reject an otherwise usable run. Use `scripts/run-bench
+receipt rather than reject an otherwise usable run. Publication refreshes the
+selected Fly session through `flyctl auth token --json --quiet`; do not copy its
+short-lived output into env files. A raw env token returning HTTP 403 while the
+same selected session works through `flyctl` indicates stale session discharges,
+not a reason to rotate keys or rebuild the image. Use `scripts/run-bench
 --help` for current flags. `--timeout 1200` is a per-run twenty-minute task
 execution override; the normal timeout remains unchanged.
 
