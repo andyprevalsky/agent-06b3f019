@@ -150,3 +150,45 @@ assertion message or treating an isolated pass as proof of the original cause.
 ## Reusable lesson
 
 Retain the failing child command's logs and lifecycle receipts before assigning a cause from its wrapper assertion.
+
+
+## October 5 captured completion-boundary recurrence
+
+The clean eight-lane canonical gate on `7695d9b` retained 39 passing suites and
+two failed enclosing suites. Their preserved success fixtures both returned
+zero, with passed summaries, one accepted slice, and verified cleanup. Neither
+produced `fixture consumed completion byte: 0`: the injected read armed its
+one-shot flag before its five-second read consumed a byte. A timed-out first
+attempt disabled all later injection. This is a newly confirmed fixture cause,
+not evidence that production lost completion bytes or teardown failed.
+
+The same descend run also retained duplicate-frame and SKIPPED-task controls
+that genuinely exceeded their eight-second outer completion guard. The fixture
+now records a sixty-second host guard, including its final join; duplicate-frame,
+SKIPPED-credit, terminal-state, and exact cleanup assertions remain intact.
+The injection now arms only after actual byte consumption. One compact Bash
+control forces timeout/no-byte followed by byte consumption; it must retain the
+second injected interruption and marker. This unchanged control rejects the
+original injector before the repair and passes afterward. It runs inside the
+existing registered suite, without provider calls or new verification stages.
+
+The original September intermittent cause remains open. One current rejected
+fixture had `unverified-root-exited` containment, which is preserved as unknown
+rather than promoted to a cleanup pass. The separately handled missing canary
+helper warning does not establish either failed assertion's cause. Runtime
+inputs and completed 100/50-task fleet proofs are unchanged. Originals and
+independent review are private under
+`.context/deploy-runs/pr1410-finalize-20261005/`.
+
+
+A subsequent direct diagnostic suite retained one cancellation/body-probe
+failure after 412.315 seconds overall. The slice had published exit 143, but
+its canonical receipt remained pending and recovery had not run before fixture
+containment. Later native inspection found all four recorded owners absent and
+the recorded group empty; this does not create a canonical cleanup receipt.
+The precise cancellation delay remains open. Both unchanged enclosing deploy
+suites independently passed all 27 current cleanup controls in 87.574 and
+112.148 seconds. The successful scopes compose with the 39 unchanged aggregate
+passes; the original aggregate exit-one and direct diagnostic failure remain
+archived rather than rewritten. Independent recurrence seal:
+`24f28787b1ac597a399c4be254dbd4cc3cd973104ad778cfaa10e00334cf8b74`.

@@ -523,6 +523,14 @@ exact composite-root cleanup, and quiesced resource retirement offline. Larger
 paid fleet campaigns remain explicit human-requested validation; they are not
 added to this automatic gate.
 
+The structural runner admits eight suites concurrently by default and runs the
+complete registry. Use `--max-workers N` to choose a host-appropriate limit;
+this changes test scheduling only, not benchmark fleet width or task deadlines.
+Activate `agents/venv` and keep its `bin` before Homebrew in `PATH`, since the
+registered Python children inherit that interpreter selection.
+Fixture process-start and cleanup observations allow sixty seconds of host
+breathing room while retaining terminal-state and exact-owner assertions.
+
 ```bash
 bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \
   python3 scripts/run-deploy-structural-gates.py

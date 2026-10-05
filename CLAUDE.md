@@ -1004,6 +1004,24 @@ curl -sS -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT"
 
 Typical signatures to look for: `peer closed connection` during streaming, `[NO END]` on an LLM call (crashed/cutoff mid-stream), `Failed to fetch pricing` retries (underlying-model 404s burning 30s each), P2024 Prisma pool timeouts (5s × 3 retry on `db.findFirst`), 429 from Anthropic on the `claude_token` path (rate-limit fallback to waterfall), `thinking.adaptive.effort: Extra inputs` (effort must go in `output_config`, not `thinking`), 0% cache hit on claudeAuth (check `cache.prefix_fingerprint` hashes match across calls — differing hashes = different prefix = no cache reuse).
 
+## Deploy command regression scheduling
+
+`python3 scripts/run-deploy-structural-gates.py` runs the complete deploy
+command registry with eight concurrent suites by default. Use `--max-workers N`
+for a different host limit; this never changes benchmark fleet width. Fixture
+startup/cleanup observations allow sixty seconds, and assert actual terminal
+state, exact resource release, and real failures. Simulated review deadlines
+use a controlled clock so host load cannot change the scenario.
+Activate `agents/venv` before invoking the runner, and keep its `bin` before
+Homebrew in `PATH`; otherwise child `python3` commands select a different
+interpreter without the declared agent dependencies.
+For the sandbox gate, inspect the retained test-run `summary.json` and
+`claude-code.log` for the real smoke result; the outer command prints an aggregate.
+A silent startup recurrence can use temporary `NODE_DEBUG=esm`, with all output
+redirected to private `.context` artifacts. Keep those diagnostics out of git.
+Semantic readiness checks session state and visible behavior; never add a
+network-idle prerequisite to the realtime app's authenticated test helper.
+
 ## Factory Workflow Review
 
 Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md`) to generate and open the source-backed `/deploy`, `/RCA`, and checked-in `/descend` lifecycle, wall-clock, sequencing, and trend report; validate it with `python3 scripts/factory_review.py --self-test`.

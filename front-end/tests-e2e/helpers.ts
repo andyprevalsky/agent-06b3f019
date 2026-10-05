@@ -169,7 +169,6 @@ export async function expectInjectedSessionRecognized(page: Page): Promise<void>
     window.localStorage.setItem('rose-session', session);
   }, INJECTED_SESSION);
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await page.waitForLoadState('networkidle').catch(() => {});
   const sessionState = await page.evaluate(() => {
     const raw = window.localStorage.getItem('rose-session');
     if (!raw) return { hasSession: false, isAnonymous: null };
