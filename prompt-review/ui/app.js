@@ -24,6 +24,7 @@ const els = {
     openclaw: { body: $("col-openclaw"), sub: $("col-openclaw-sub"), weak: $("col-openclaw-weak") },
     hermes:   { body: $("col-hermes"),   sub: $("col-hermes-sub"),   weak: $("col-hermes-weak") },
     codex:    { body: $("col-codex"),    sub: $("col-codex-sub"),    weak: $("col-codex-weak") },
+    prime:    { body: $("col-prime"),    sub: $("col-prime-sub"),    weak: $("col-prime-weak") },
   },
 };
 
@@ -675,7 +676,7 @@ function renderCurrent() {
   // CLAUDE / OPENCLAW / HERMES — hide entirely when there is no entry
   // (explicit "no equivalent" or no auto-match candidate). User can still see
   // them by toggling the show-empty switch in the topbar.
-  for (const key of ["claude", "openclaw", "hermes", "codex"]) {
+  for (const key of ["claude", "openclaw", "hermes", "codex", "prime"]) {
     const r = row[key];
     if (!r || !r.entry) {
       if (!showEmptyCols) {
