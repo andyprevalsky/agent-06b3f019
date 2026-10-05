@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# run-cloudbench-controller-gate — run the /deploy Step 4cb cloud-benchmark
+# controller suites on a throwaway Linux machine in the benchmark Fly app.
+#
+# Three of those suites read /proc and use native Linux process semantics; on
+# macOS they fail identically on main and on every branch, which stalled a
+# deploy on 2026-10-05 for hours. The fleet's warm image already has the deps
+# baked in, so one machine from it, the pushed HEAD fetched inside, is the
+# gate's natural home. The machine is created with --rm and destroyed when the
+# command exits, on timeout, or when this script is interrupted.
+#
+#   HEAD (pushed) ──► fly machine run <warm image> --rm --file-local gate.sh
+#                        │ clone HEAD, link /app deps, run each suite
+#                        ▼
+#                     logs: GATE_STEP <name> exit=N … GATE_RESULT exit=N
+#                        │
+#   this script polls ◄──┘ and exits with GATE_RESULT's code
+#
+# Usage:
+#   bash scripts/run-cloudbench-controller-gate            # the Step 4cb suites
+#   bash scripts/run-cloudbench-controller-gate -- bash scripts/tests/cloudbench-env.test.sh
+#   CLOUDBENCH_GATE_REF=<sha> bash scripts/run-cloudbench-controller-gate
+# Env: CLOUDBENCH_GATE_TIMEOUT_S (default 2400), WARM_IMAGE_REF (default: newest
+# cloudbench-warm image on the fleet), CLOUDBENCH_GATE_VM_SIZE / _VM_MEMORY.
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$ROOT_DIR"
+
+APP="${CLOUDBENCH_APP:-navi-whisper-lux-bench}"
+REGION="${CLOUDBENCH_REGION:-iad}"
+VM_SIZE="${CLOUDBENCH_GATE_VM_SIZE:-shared-cpu-4x}"
+VM_MEMORY="${CLOUDBENCH_GATE_VM_MEMORY:-8192}"
+TIMEOUT_S="${CLOUDBENCH_GATE_TIMEOUT_S:-2400}"
+REPO_URL="${CLOUDBENCH_GATE_REPO_URL:-https://github.com/Rose-Ai-Labs/rose.git}"
+
+# shellcheck disable=SC2016  # the pytest -k expression is quoted for the remote shell
+DEFAULT_SUITES=(
+  "bash scripts/tests/cloudbench-env.test.sh"
+  "bash scripts/tests/cloudbench-acceptance-autoscale.test.sh"
+  "bash scripts/tests/cloudbench-status-service-shutdown.test.sh"
+  "bash scripts/tests/fleet-infra-canary.test.sh"
+  "bash scripts/tests/fleet-infra-stability-proof.test.sh"
+  "python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py"
+  "bash scripts/tests/cloudbench-multi-workstream.test.sh"
+  "bash scripts/tests/cloudbench-github-token.test.sh"
+  "bash scripts/tests/seed-dump-toolchain.test.sh"
+  "agents/venv/bin/python -m pytest -q agents/benchmarks/wall_clock_backstop_test.py"
+)
+
+SUITES=()
+if [ "${1:-}" = "--" ]; then
+  shift
+  SUITES=("$*")
+elif [ "$#" -gt 0 ]; then
+  echo "usage: $0 [-- <command to run in the repo on the machine>]" >&2
+  exit 2
+else
+  SUITES=("${DEFAULT_SUITES[@]}")
+fi
+
+if [ -z "${FLY_API_TOKEN:-}" ]; then
+  FLY_API_TOKEN="$(grep -E '^FLY_API_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
+fi
+[ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ FLY_API_TOKEN is not set and not in agents/.env" >&2; exit 1; }
+export FLY_API_TOKEN
+
+GATE_REF="${CLOUDBENCH_GATE_REF:-$(git rev-parse HEAD)}"
+if ! git ls-remote --exit-code origin "refs/heads/$(git branch --show-current)" >/dev/null 2>&1 \
+  || [ -z "$(git branch -r --contains "$GATE_REF" 2>/dev/null)" ]; then
+  echo "❌ $GATE_REF is not on any remote branch; push it first (the machine fetches from GitHub)." >&2
+  exit 1
+fi
+
+GITHUB_TOKEN_VALUE="${GITHUB_TOKEN:-}"
+if [ -z "$GITHUB_TOKEN_VALUE" ]; then
+  GITHUB_TOKEN_VALUE="$(env -u GITHUB_TOKEN -u GH_TOKEN gh auth token --hostname github.com 2>/dev/null || true)"
+fi
+if [ -z "$GITHUB_TOKEN_VALUE" ]; then
+  GITHUB_TOKEN_VALUE="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
+fi
+[ -n "$GITHUB_TOKEN_VALUE" ] || { echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)" >&2; exit 1; }
+
+IMAGE_REF="${WARM_IMAGE_REF:-}"
+if [ -z "$IMAGE_REF" ]; then
+  IMAGE_REF="$(flyctl machines list -a "$APP" --json 2>/dev/null | python3 -c '
+import json, sys, re
+images = {m["config"]["image"] for m in json.load(sys.stdin) if "cloudbench-warm" in m["config"].get("image", "")}
+# Tags are cloudbench-warm[-local]-YYYYMMDD-HHMMSS; the newest date wins.
+def stamp(image):
+    m = re.search(r"cloudbench-warm(?:-local)?-(\d{8}-\d{4,6})", image)
+    return m.group(1) if m else ""
+print(max(images, key=stamp) if images else "")
+')"
+fi
+[ -n "$IMAGE_REF" ] || { echo "❌ No cloudbench-warm image found on $APP; set WARM_IMAGE_REF" >&2; exit 1; }
+
+STAMP="$(date -u +%Y%m%d-%H%M%S)"
+MACHINE_NAME="cloudbench-gate-${GATE_REF:0:8}-${STAMP}"
+GATE_SCRIPT="$(mktemp -t cloudbench-gate.XXXXXX)"
+MACHINE_ID=""
+cleanup() {
+  rm -f "$GATE_SCRIPT"
+  if [ -n "$MACHINE_ID" ]; then
+    flyctl machine destroy "$MACHINE_ID" -a "$APP" --force >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+{
+  echo '#!/usr/bin/env bash'
+  echo 'set -uo pipefail'
+  echo 'echo "GATE_START $(date -u +%FT%TZ) $(uname -srm)"'
+  echo 'token="$(printf "%s" "$GATE_GITHUB_TOKEN_B64" | base64 -d)"'
+  echo 'mkdir -p /tmp/gate && cd /tmp/gate'
+  echo 'git init -q repo && cd repo'
+  echo 'git -c http.extraheader="AUTHORIZATION: basic $(printf "x-access-token:%s" "$token" | base64 -w0)" fetch -q --depth 1 "$GATE_REPO_URL" "$GATE_REF" || { echo "GATE_RESULT exit=90 fetch_failed"; exit 90; }'
+  echo 'git checkout -q FETCH_HEAD'
+  echo '# Dependencies are baked into the warm image; the suites only need the paths.'
+  echo 'ln -s /app/node_modules node_modules; ln -s /app/back-end/node_modules back-end/node_modules'
+  echo 'ln -s /app/agents/venv agents/venv; [ -d /app/front-end/node_modules ] && ln -s /app/front-end/node_modules front-end/node_modules'
+  echo 'chown -R rose:rose /tmp/gate 2>/dev/null || true'
+  echo 'export PATH="/tmp/gate/repo/agents/venv/bin:$PATH" HOME=/home/rose'
+  echo 'overall=0'
+  echo 'n=0'
+  for suite in "${SUITES[@]}"; do
+    printf 'n=$((n+1)); echo "GATE_STEP_START %s"\n' "$suite"
+    printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "cd /tmp/gate/repo && $suite"
+    printf 'echo "GATE_STEP %s exit=$rc"; [ $rc -eq 0 ] || { overall=1; echo "GATE_FAIL_TAIL_START $n"; tail -n 60 "/tmp/gate/step-$n.log"; echo "GATE_FAIL_TAIL_END $n"; }\n' "$suite"
+  done
+  echo 'echo "GATE_RESULT exit=$overall"'
+  echo 'exit $overall'
+} > "$GATE_SCRIPT"
+
+echo "🖥️  Gate machine: $MACHINE_NAME  image: ${IMAGE_REF##*/}  ref: $GATE_REF"
+RUN_LOG="$(mktemp -t cloudbench-gate-run.XXXXXX)"
+# flyctl's own start wait is shorter than a cold 2 GB image pull and then exits
+# non-zero even though the machine comes up; the machine id in its output is
+# what matters, and the loop below is the real wait.
+set +e
+flyctl machine run "$IMAGE_REF" \
+  -a "$APP" --region "$REGION" --name "$MACHINE_NAME" \
+  --vm-size "$VM_SIZE" --vm-memory "$VM_MEMORY" \
+  --restart no --rm --detach \
+  --entrypoint "/bin/bash" \
+  --file-local "/tmp/gate.sh=$GATE_SCRIPT" \
+  -e "GATE_GITHUB_TOKEN_B64=$(printf '%s' "$GITHUB_TOKEN_VALUE" | base64 | tr -d '\n')" \
+  -e "GATE_REF=$GATE_REF" -e "GATE_REPO_URL=$REPO_URL" \
+  "/tmp/gate.sh" 2>&1 | tee "$RUN_LOG"
+set -e
+MACHINE_ID="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}')"
+rm -f "$RUN_LOG"
+[ -n "$MACHINE_ID" ] || { echo "❌ Could not read the gate machine id" >&2; exit 1; }
+echo "✅ machine $MACHINE_ID started; waiting up to ${TIMEOUT_S}s"
+
+deadline=$((SECONDS + TIMEOUT_S))
+result=""
+seen=0
+MACHINE_LOG="${CLOUDBENCH_GATE_LOG:-$ROOT_DIR/.context/cloudbench-gate-$MACHINE_ID.log}"
+mkdir -p "$(dirname "$MACHINE_LOG")"
+: > "$MACHINE_LOG"
+echo "📄 full machine log: $MACHINE_LOG"
+while [ $SECONDS -lt $deadline ]; do
+  sleep 20
+  # Fly returns about the last 100 lines per call; merge every poll into one file.
+  flyctl logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
+  sort -u -o "$MACHINE_LOG" "$MACHINE_LOG"
+  logs="$(cat "$MACHINE_LOG")"
+  steps="$(printf '%s\n' "$logs" | grep -oE 'GATE_(START|STEP|STEP_START|RESULT)[^"]*' | sed 's/\\n$//' || true)"
+  count="$(printf '%s\n' "$steps" | grep -c . || true)"
+  if [ "$count" -gt "$seen" ]; then
+    printf '%s\n' "$steps" | tail -n +"$((seen + 1))" | sed 's/^/   /'
+    seen="$count"
+  fi
+  result="$(printf '%s\n' "$steps" | grep -oE 'GATE_RESULT exit=[0-9]+' | tail -1 || true)"
+  [ -n "$result" ] && break
+  state="$(flyctl machines list -a "$APP" --json 2>/dev/null | MID="$MACHINE_ID" python3 -c '
+import json, os, sys
+machines = json.load(sys.stdin)
+print(next((m.get("state", "") for m in machines if m.get("id") == os.environ["MID"]), "destroyed"))
+' 2>/dev/null || true)"
+  # An empty state is a transient status-API miss, not an ended machine.
+  if [ "$state" = "destroyed" ] || [ "$state" = "stopped" ]; then
+    # The command exited before its result line reached the log stream; read once more.
+    sleep 10
+    flyctl logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
+    sort -u -o "$MACHINE_LOG" "$MACHINE_LOG"
+    logs="$(cat "$MACHINE_LOG")"
+    result="$(printf '%s\n' "$logs" | grep -oE 'GATE_RESULT exit=[0-9]+' | tail -1 || true)"
+    [ -n "$result" ] || { echo "❌ gate machine ended ($state) without a GATE_RESULT line" >&2; exit 1; }
+    break
+  fi
+done
+[ -n "$result" ] || { echo "❌ gate timed out after ${TIMEOUT_S}s; destroying $MACHINE_ID" >&2; exit 1; }
+code="${result##*=}"
+if [ "$code" = "0" ]; then
+  echo "✅ cloud-bench controller gate passed on Linux ($MACHINE_ID)"
+else
+  echo "❌ cloud-bench controller gate failed on Linux ($MACHINE_ID): $result" >&2
+  echo "   failed suites' output (last 60 lines each) is in $MACHINE_LOG between GATE_FAIL_TAIL_START/END markers" >&2
+fi
+exit "$code"
