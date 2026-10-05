@@ -4846,14 +4846,6 @@
               "placed_by": "guest"
             },
             "accounts_created": 0,
-            "forbid": [
-              {
-                "kind": "password"
-              },
-              {
-                "kind": "code_request"
-              }
-            ],
             "deliverable_contains_order_number": true
           }
         ]
