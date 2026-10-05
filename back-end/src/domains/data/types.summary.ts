@@ -41,5 +41,9 @@ export interface SummaryResult {
         to: string | null;
       };
     };
+    /** Google Calendar, searched as the `calendar` source. */
+    calendar?: { accounts: string[]; total_events: number };
+    /** Google Drive, searched as the `drive` source. */
+    drive?: { accounts: string[]; total_files: number };
   };
 }
