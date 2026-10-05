@@ -38,9 +38,19 @@ codex/            → Cloned OpenAI Codex CLI (READ-ONLY reference, gitignored,
                     Re-clone with
                     `git clone --depth 1 https://github.com/openai/codex.git`
                     if missing locally.
+prime-agent/      → Cloned Prime Intellect prime-agent (READ-ONLY reference,
+                    gitignored, MIT). Recursive-language-model harness: one
+                    persistent Python REPL tool, every other tool/subagent a
+                    Python call, plus self-edited memories/skills. System
+                    prompt layers live under
+                    `crates/pa-core/src/prompts/layers/`, skills under
+                    `skills/`, the kernel under `prime-agent-runtime/src/rlm/`.
+                    Re-clone with
+                    `git clone --depth 1 https://github.com/PrimeIntellect-ai/prime-agent.git`
+                    if missing locally.
 ```
 
-> **Reference repos policy:** `openclaw/`, `hermes-agent/`, and `codex/` are gitignored
+> **Reference repos policy:** `openclaw/`, `hermes-agent/`, `codex/`, and `prime-agent/` are gitignored
 > (sit alongside `claude-code-src/` but are NOT committed). Treat as
 > read-only research material — do not edit them. If they're missing on a
 > fresh clone, run `bash scripts/sync-reference-repos.sh` to restore.
@@ -49,7 +59,7 @@ codex/            → Cloned OpenAI Codex CLI (READ-ONLY reference, gitignored,
 
 `prompt-review/` ships a small local web app for reviewing every prompt in
 this repo against reference codebases side by side. Columns:
-**current → ~1 month ago → Claude Code → OpenClaw → Hermes → Codex**. Notes are
+**current → ~1 month ago → Claude Code → OpenClaw → Hermes → Codex → Prime Agent**. Notes are
 saved per prompt; checkpoint state persists across reloads.
 
 ```bash
@@ -59,7 +69,7 @@ PROMPT_REVIEW_PORT=9000 bash prompt-review/run.sh   # custom port
 
 - Catalog: `prompt-review/catalog.json` (edit to add/remove prompts).
   Each OUR entry has a `matches` field with hand-picked semantic pairings
-  for each reference repo (`claude`, `openclaw`, `hermes`, `codex`); a value of
+  for each reference repo (`claude`, `openclaw`, `hermes`, `codex`, `prime`); a value of
   `null` means "no equivalent in that repo" and the column shows
   "no equivalent" instead of a low-quality keyword match. Edit
   `prompt-review/render/apply_explicit_mappings.py` to refine pairings.

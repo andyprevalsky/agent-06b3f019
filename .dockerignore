@@ -48,6 +48,8 @@ agents/navi-worker-log.txt
 claude-code-src
 openclaw
 hermes-agent
+codex
+prime-agent
 
 # Media / decks
 pitch-deck

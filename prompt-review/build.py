@@ -879,6 +879,7 @@ def main() -> int:
         "openclaw": ROOT,
         "hermes-agent": ROOT,
         "codex": ROOT,
+        "prime-agent": ROOT,
     }
 
     EXTRACTS_DIR.mkdir(exist_ok=True)
@@ -887,7 +888,7 @@ def main() -> int:
     # Pre-extract reference repos so we can score against them.
     print(f"[build] extracting reference prompts...", file=sys.stderr)
     extracted: dict[str, list[dict]] = {}
-    for repo_name in ("claude-code-src", "openclaw", "hermes-agent", "codex"):
+    for repo_name in ("claude-code-src", "openclaw", "hermes-agent", "codex", "prime-agent"):
         items = []
         for entry in catalog[repo_name]:
             if entry.get("category") not in RUNTIME_VISIBLE_CATEGORIES:
@@ -903,7 +904,7 @@ def main() -> int:
     rows = []
     # Index reference catalog entries by id for O(1) explicit lookups.
     by_id: dict[str, dict[str, dict]] = {}
-    for repo_name in ("claude-code-src", "openclaw", "hermes-agent", "codex"):
+    for repo_name in ("claude-code-src", "openclaw", "hermes-agent", "codex", "prime-agent"):
         by_id[repo_name] = {
             e["id"]: e
             for e in catalog[repo_name]
@@ -923,6 +924,7 @@ def main() -> int:
         "openclaw": "openclaw",
         "hermes": "hermes-agent",
         "codex": "codex",
+        "prime": "prime-agent",
     }
 
     def resolve_match(ours_entry: dict, ui_key: str) -> tuple[dict | None, float, str]:
@@ -962,6 +964,7 @@ def main() -> int:
         match_open,    score_open,    src_open    = resolve_match(entry, "openclaw")
         match_hermes,  score_hermes,  src_hermes  = resolve_match(entry, "hermes")
         match_codex,   score_codex,   src_codex   = resolve_match(entry, "codex")
+        match_prime,   score_prime,   src_prime   = resolve_match(entry, "prime")
 
         rows.append({
             "id": entry["id"],
@@ -998,6 +1001,12 @@ def main() -> int:
                 "score": round(score_codex, 3),
                 "weak": (src_codex == "auto" and score_codex < WEAK_THRESHOLD),
                 "match_source": src_codex,
+            },
+            "prime": {
+                "entry": hydrate(match_prime, "prime-agent"),
+                "score": round(score_prime, 3),
+                "weak": (src_prime == "auto" and score_prime < WEAK_THRESHOLD),
+                "match_source": src_prime,
             },
         })
 
