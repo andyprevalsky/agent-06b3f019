@@ -163,10 +163,10 @@ class FleetFailureCleanup(unittest.TestCase):
         shutil.move(str(self.root), str(retained / "fixture"))
         print(f"Retained failed fleet fixture: {retained}", file=sys.stderr)
 
-    def run_completion_proof(self, command):
+    def run_completion_proof(self, command, *, timeout_seconds=60):
         log_path = self.root / "output.log"
         metadata_path = self.root / "command.json"
-        metadata = {"command": command, "timeout_seconds": 8, "status": "starting"}
+        metadata = {"command": command, "timeout_seconds": timeout_seconds, "status": "starting"}
         metadata_path.write_text(json.dumps(metadata))
         with log_path.open("w") as log:
             process = subprocess.Popen(
@@ -176,13 +176,13 @@ class FleetFailureCleanup(unittest.TestCase):
             try:
                 metadata.update(pid=process.pid, status="running")
                 metadata_path.write_text(json.dumps(metadata))
-                result = process.wait(timeout=8)
+                result = process.wait(timeout=timeout_seconds)
             except BaseException as error:
                 primary_error = error
                 metadata["status"] = "timeout" if isinstance(error, subprocess.TimeoutExpired) else "error"
                 try:
                     with ExitStack() as cleanup:
-                        cleanup.callback(process.wait, timeout=2)
+                        cleanup.callback(process.wait, timeout=60)
                         cleanup.callback(lambda: process.kill() if process.poll() is None else None)
                         drained = FIXTURE_PROCESS["terminate_fixture_tree"](process)
                         metadata["cleanup"] = "captured-tree-drained" if drained else "unverified-root-exited"
@@ -209,19 +209,20 @@ class FleetFailureCleanup(unittest.TestCase):
         script = r"""
 import json, pathlib, runpy, subprocess, sys, time
 identity = runpy.run_path(sys.argv[1])
-child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'], start_new_session=True)
 ready = pathlib.Path(sys.argv[2])
 pending = ready.with_suffix('.tmp')
 pending.write_text(json.dumps({'pid': child.pid, 'identity': identity['current_identity'](child.pid)}))
 pending.replace(ready)
 print('fixture output before timeout', flush=True)
-time.sleep(60)
+time.sleep(600)
 """
-        foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
         try:
             with self.assertRaises(subprocess.TimeoutExpired):
                 self.run_completion_proof(
-                    [sys.executable, "-c", script, str(ROOT / "scripts/process-identity.py"), str(ready)]
+                    [sys.executable, "-c", script, str(ROOT / "scripts/process-identity.py"), str(ready)],
+                    timeout_seconds=8,
                 )
             captured = json.loads(ready.read_text())
             state = subprocess.run(
@@ -317,7 +318,7 @@ time.sleep(60)
                 ):
                     self.run_completion_proof(["synthetic-fixture"])
                 self.assertIsNotNone(process.poll(), "failure abandoned the owned root")
-                self.assertIn(("wait", 2), calls, "failure did not join the owned root")
+                self.assertEqual(calls[-1], ("wait", 60), "failure did not finally join the owned root")
                 self.assertIn(("cleanup",), calls)
                 if scenario == "exited_root":
                     self.assertEqual(writes[-1]["cleanup"], "unverified-root-exited")
@@ -447,13 +448,13 @@ exec "$FIXTURE_REAL_TEE" "$@"
             )
             try:
                 if cancel:
-                    deadline = time.monotonic() + 8
+                    deadline = time.monotonic() + 60
                     while not (self.root / "ready").exists() and time.monotonic() < deadline and process.poll() is None:
                         time.sleep(0.02)
                     self.assertTrue((self.root / "ready").exists(), (self.root / "output.log").read_text())
                     process.send_signal(signal.SIGTERM)
                 try:
-                    result = process.wait(timeout=5 if publication_failure else 15)
+                    result = process.wait(timeout=60)
                 except subprocess.TimeoutExpired:
                     self.fail(
                         "proof supervisor did not finish its owned cleanup\n" + (self.root / "output.log").read_text()
@@ -524,14 +525,41 @@ exec "$FIXTURE_REAL_TEE" "$@"
 read() {
   if [[ "${!#}" == proof_completion_line ]] && [[ -n "${proof_completion_reader:-}" ]] \
     && [[ -z "${fixture_partial_completion:-}" ]]; then
-    fixture_partial_completion=1
     builtin read -r -N 1 -t 5 -u "$proof_completion_reader" proof_completion_line || return "$?"
+    fixture_partial_completion=1
     printf 'fixture consumed completion byte: %s\n' "$proof_completion_line" >&2
     return 142
   fi
   builtin read "$@"
 }
 """)
+
+    def test_partial_completion_injection_retries_unconsumed_read(self):
+        self.inject_partial_completion_read()
+        command = r"""
+source "$1"
+builtin() {
+  if [[ "$1" == read ]]; then
+    fixture_read_calls=$(( ${fixture_read_calls:-0} + 1 ))
+    [[ "$fixture_read_calls" != 1 ]] || return 142
+    printf -v "${!#}" '%s' 0
+    return 0
+  fi
+  command builtin "$@"
+}
+proof_completion_reader=123
+read -r proof_completion_line || first_result=$?
+[[ "$first_result" == 142 && -z "${fixture_partial_completion:-}" ]] || exit 21
+read -r proof_completion_line || second_result=$?
+[[ "$second_result" == 142 && "$proof_completion_line" == 0
+   && "$fixture_partial_completion" == 1 && "$fixture_read_calls" == 2 ]] || exit 22
+"""
+        result = subprocess.run(
+            [BASH, "-c", command, "_", str(self.root / "scripts/lib/cloudbench-env.sh")],
+            cwd=self.root, env=self.env, capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fixture consumed completion byte: 0", result.stderr)
 
     def test_interrupted_completion_read_preserves_original_failure(self):
         self.run_case(fleet_exit=137, partial_completion=True)

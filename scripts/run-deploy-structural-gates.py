@@ -18,6 +18,7 @@ from typing import BinaryIO, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 SIGNAL_GRACE_SECONDS = 1.0
+DEFAULT_MAX_WORKERS = 8
 
 
 @dataclass(frozen=True)
@@ -273,7 +274,7 @@ def main() -> int:
             print(gate.name)
         return 0
     if args.max_workers is None:
-        return run_gates(GATES, max_workers=len(GATES))
+        return run_gates(GATES, max_workers=DEFAULT_MAX_WORKERS)
     return run_gates(GATES, max_workers=args.max_workers)
 
 

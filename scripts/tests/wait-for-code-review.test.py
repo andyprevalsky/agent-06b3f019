@@ -7,6 +7,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -464,6 +465,7 @@ class ReviewWaitTest(unittest.TestCase):
     def test_budget_exhausted_inside_gh_reports_the_review_timeout(self) -> None:
         head = "3" * 40
         calls: list[float | None] = []
+        clock = [0.0]
 
         def fake_gh_payload(_pr, _repo=None, *, timeout=None):
             calls.append(timeout)
@@ -478,13 +480,15 @@ class ReviewWaitTest(unittest.TestCase):
                         }
                     ],
                 }
-            MODULE.time.sleep(float(timeout or 0) + 0.01)
+            clock[0] += float(timeout or 0) + 0.01
             raise MODULE.ReviewWaitError(f"gh timed out after {timeout}s: gh api ...")
 
         original = MODULE.gh_payload
         MODULE.gh_payload = fake_gh_payload
         try:
-            with self.assertRaisesRegex(TimeoutError, r"last state: PENDING\)$"):
+            with patch.object(MODULE.time, "monotonic", side_effect=lambda: clock[0]), self.assertRaisesRegex(
+                TimeoutError, r"last state: PENDING\)$"
+            ):
                 MODULE.wait_for_review(
                     pr="1348",
                     expected_head=head,

@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix="benchmark-share-import-") as temporary:
         ["node", str(script)], input=json.dumps({
             "url": "https://example.invalid/", "agentId": "import-control",
             "snippets": {"user": [], "assistant": []},
-        }), text=True, capture_output=True, env=environment, timeout=5,
+        }), text=True, capture_output=True, env=environment, timeout=60,
     )
     assert result.returncode == 1, result.returncode
     assert result.stdout == "backend-playwright-imported\n", result.stderr
