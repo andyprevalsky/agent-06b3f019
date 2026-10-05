@@ -15248,12 +15248,16 @@ def test_pinned_warm_deps_preflight_keeps_verified_snapshot_without_unlisted_inv
 
 def test_dependency_proof_publication_uses_only_machine_metadata(tmp_path: Path) -> None:
     requests = []
+    response_status = [204]
 
     class MetadataHandler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append((self.path, body, self.headers.get("Authorization")))
-            self.send_response(204 if len(requests) == 1 else 503)
+            authorized = self.headers.get("Authorization") in {
+                "Bearer fixture-token", "FlyV1 fm2_refreshed_fixture",
+            }
+            self.send_response(response_status[0] if authorized else 403)
             self.end_headers()
 
         def log_message(self, *_args) -> None:
@@ -15269,12 +15273,54 @@ def test_dependency_proof_publication_uses_only_machine_metadata(tmp_path: Path)
                "FLY_API_HOSTNAME": f"http://127.0.0.1:{server.server_port}"}
         command = ["bash", "-c", f'source {shlex.quote(str(ENV_HELPER_SCRIPT))}; cloudbench_publish_warm_deps_state bench-app warm-machine vol_warm {node} {python} 1000 snap-current']
         for expected in (0, 1):
+            response_status[0] = 204 if expected == 0 else 503
             result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=10)
             assert result.returncode == expected, result.stdout + result.stderr
             assert "fixture-token" not in result.stdout + result.stderr
         assert requests == [(f"/v1/apps/bench-app/machines/warm-machine/metadata/{key}",
                              {"value": f"{node} {python} 1000 snap-current vol_warm warm-machine bench-app"},
                              "Bearer fixture-token")] * 2
+        broker_dir = tmp_path / "bin"
+        broker_dir.mkdir()
+        broker = broker_dir / "flyctl"
+        broker.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, sys\n"
+            "pathlib.Path(os.environ['BROKER_RECEIPT']).write_text(json.dumps({\n"
+            "    'argv': sys.argv[1:], 'selected': os.environ.get('FLY_API_TOKEN'),\n"
+            "    'access_override': os.environ.get('FLY_ACCESS_TOKEN')}))\n"
+            "mode = os.environ.get('BROKER_MODE', 'ok')\n"
+            "if mode == 'fail':\n"
+            "    print(os.environ['FLY_API_TOKEN'], file=sys.stderr)\n"
+            "    raise SystemExit(1)\n"
+            "token = 'FlyV1 fm2_refreshed_fixture'\n"
+            "if mode == 'empty': token = ''\n"
+            "if mode == 'bad-header': token += '\\ninvalid-header'\n"
+            "print('invalid-json' if mode == 'malformed' else json.dumps({'token': token}))\n"
+        )
+        broker.chmod(0o755)
+        receipt = tmp_path / "broker.json"
+        selected_session = "fm1r_selected_fixture,fm2_discharge_one_fixture,fm2_discharge_two_fixture"
+        refresh_env = {**env, "PATH": f"{broker_dir}:{env['PATH']}",
+                       "FLY_API_TOKEN": selected_session,
+                       "FLY_ACCESS_TOKEN": "different-fixture-session",
+                       "BROKER_RECEIPT": str(receipt)}
+        response_status[0] = 204
+        refreshed = subprocess.run(command, env=refresh_env, text=True, capture_output=True, timeout=10)
+        assert refreshed.returncode == 0, refreshed.stdout + refreshed.stderr
+        assert refreshed.stdout + refreshed.stderr == ""
+        assert json.loads(receipt.read_text()) == {
+            "argv": ["auth", "token", "--json", "--quiet"],
+            "selected": selected_session, "access_override": None,
+        }
+        assert requests[-1] == (requests[0][0], requests[0][1], "FlyV1 fm2_refreshed_fixture")
+        request_count = len(requests)
+        for mode in ("fail", "malformed", "empty", "bad-header"):
+            rejected = subprocess.run(command, env={**refresh_env, "BROKER_MODE": mode},
+                                      text=True, capture_output=True, timeout=10)
+            assert rejected.returncode == 1
+            assert rejected.stdout + rejected.stderr == ""
+            assert len(requests) == request_count
         probe = tmp_path / "transport"
         probe.mkdir()
         (probe / "sitecustomize.py").write_text(
