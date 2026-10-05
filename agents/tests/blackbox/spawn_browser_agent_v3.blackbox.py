@@ -19536,7 +19536,7 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
 
     assert result["status"] == "completed" and result["success"] is False, result
     assert result["user_declined_auth"] is True and result["task_id"] == "task-1", result
-    assert result["message"] == "User declined to sign in to shop.example. No other sign-in option is left.", result
+    assert result["message"] == "User declined to sign in to shop.example.", result
     assert close_mock.await_count == 1 and close_mock.await_args.args[1] == "session-1"
     assert close_mock.await_args.kwargs == {"pause": False}
     fetch_mock.assert_not_awaited()
@@ -21512,7 +21512,7 @@ async def test_manager_ends_the_browser_task_when_the_user_declines_auth_assista
             "step_count": 3,
         }
     )
-    declined_message = "User declined to sign in to example.com. No other sign-in option is left."
+    declined_message = "User declined to sign in to example.com."
     second = _FakeActivityHandle(
         {
             "status": "completed",
