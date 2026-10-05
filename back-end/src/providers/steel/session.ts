@@ -26,6 +26,11 @@ import {
 import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
 import { steelSessionTimeoutMs } from './sessionLifetime';
 import {
+  newOwnedSteelSessionId,
+  registerInFlightSteelSession,
+  unregisterInFlightSteelSession,
+} from './sessionIdentity';
+import {
   buildSteelProxySettings,
   isInvalidSteelProxyConfiguration,
   isKnownRejectedProxyCity,
@@ -213,6 +218,7 @@ export async function createSessionWithContext(
         options?.requiredSteelProfileId ?? null
       );
       const session = (await steel.sessions.create({
+        sessionId: newOwnedSteelSessionId(),
         profileId: profile.profileId, // Use existing profile if available
         persistProfile: profile.persistProfile,
         userAgent:
@@ -234,6 +240,7 @@ export async function createSessionWithContext(
           height: 891, // 800 + 91 for browser chrome → 800 viewport
         },
       })) as SteelSessionResult;
+      registerInFlightSteelSession(session.id);
 
       if (
         options?.requiredSteelProfileId !== undefined &&
@@ -470,6 +477,7 @@ export async function releaseSteelRemoteSession(sessionId: string): Promise<void
   // Treating their synthetic IDs as remote turns a successful local close into
   // a permanent retry obligation.
   if (sessionId.startsWith('local-')) return;
+  unregisterInFlightSteelSession(sessionId);
   await retryWithBackoff(
     async () => {
       try {

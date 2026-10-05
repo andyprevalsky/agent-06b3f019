@@ -22,6 +22,7 @@ import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconcile
 import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
 import { runTerminalAgentBrowserReleaseReconcileWithLease } from './providers/agentCleanup';
 import { runTraceArchiveFinalizationRetries } from './providers/traceArchiveFinalizationRetry';
+import { runSteelSessionReaperWithLease } from './providers/steel/sessionReaper';
 
 function scheduleTraceArchiveFinalizationRetries(isProduction: boolean): void {
   const cronLog = createLogger('Cron');
@@ -364,11 +365,52 @@ function scheduleProactiveSmsOutreach(isProduction: boolean): void {
  * Registers all background cron jobs. Contract-test backends should not run
  * unrelated background jobs, so each job self-gates on its DISABLE_* env flag.
  */
+function scheduleSteelSessionReaper(): void {
+  const cronLog = createLogger('Cron');
+  // Every environment reaps only the sessions it created (sessionIdentity.ts), so
+  // local stacks run this too; without a key there is nothing to list.
+  if (
+    (process.env.STEEL_API_KEY ?? '').trim() === '' ||
+    process.env.DISABLE_STEEL_SESSION_REAPER === '1'
+  ) {
+    cronLog.info('Steel session reaper disabled', {
+      reason:
+        process.env.DISABLE_STEEL_SESSION_REAPER === '1'
+          ? 'DISABLE_STEEL_SESSION_REAPER'
+          : 'no STEEL_API_KEY',
+    });
+    return;
+  }
+  let running = false;
+  const run = () => {
+    if (running) return;
+    running = true;
+    runSteelSessionReaperWithLease()
+      .then((summary) => {
+        if (summary !== null && (summary.released > 0 || summary.failed > 0)) {
+          cronLog.warn('Steel session reaper summary', { ...summary });
+        }
+      })
+      .catch((error) => {
+        cronLog.error('Steel session reaper failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = false;
+      });
+  };
+  run();
+  cron.schedule('*/5 * * * *', run);
+  cronLog.info('Steel session reaper scheduled (every 5 minutes)');
+}
+
 export function registerCronJobs(isProduction: boolean): void {
   scheduleTraceArchiveFinalizationRetries(isProduction);
   scheduleTemporalWorkflowCleanup(isProduction);
   scheduleWorkflowLivenessReconcile(isProduction);
   scheduleTerminalBrowserReleaseReconcile(isProduction);
+  scheduleSteelSessionReaper();
   scheduleGmailSync();
   scheduleGoogleDataPurge();
   schedulePlaidSync();

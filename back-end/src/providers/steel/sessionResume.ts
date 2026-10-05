@@ -27,6 +27,7 @@ import {
   validateBrowserConnection,
 } from './sessionConnection';
 import { steelSessionTimeoutMs } from './sessionLifetime';
+import { newOwnedSteelSessionId, registerInFlightSteelSession } from './sessionIdentity';
 import { steelCdpConnectionUrl } from './urls';
 
 function hasValue(value: string | null | undefined): value is string {
@@ -230,6 +231,7 @@ export async function recreateSession(
         boundProfile
       );
       const session = await dependencies.createSession({
+        sessionId: newOwnedSteelSessionId(),
         profileId: profile.profileId,
         persistProfile: profile.persistProfile,
         userAgent:
@@ -244,6 +246,7 @@ export async function recreateSession(
         dimensions: { width: 1288, height: 891 },
       });
       createdSessionId = session.id;
+      registerInFlightSteelSession(session.id);
 
       if (profile.profileId !== undefined && session.profileId !== profile.profileId) {
         throw new Error(
