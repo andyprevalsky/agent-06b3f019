@@ -18,8 +18,11 @@ STEEL_API_KEY = os.environ.get("STEEL_API_KEY", "")
 # whatever budget the pre-approval half left behind. 50 was not enough to reach
 # checkout and then enter a card (prod agent
 # 7f354640-ffab-4098-b7ae-041ddf246c6f died at "Max iterations reached: 50"
-# mid card entry after resuming at step 32).
-DEFAULT_MAX_ITERATIONS = 60
+# mid card entry after resuming at step 32). 60 was still short of a sign-in
+# ladder where every option fails: the agent spent its budget on the refused
+# options and never reached "ask the user". 250 matches the sub-agent budget of
+# the reference harnesses (Hermes delegate 250, Claude Code fork 200).
+DEFAULT_MAX_ITERATIONS = 250
 
 
 def get_max_iterations() -> int:
@@ -34,7 +37,20 @@ def get_max_iterations() -> int:
 
 MAX_ITERATIONS = get_max_iterations()
 MAX_CONSECUTIVE_API_FAILURES = 5
-ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES = 30
+# The activity must outlast its step budget, or Temporal times it out mid-task and
+# retries it from the start. 60 steps or fewer fit in 30 minutes; above that the
+# ceiling follows the budget (100 steps ≈ 30 minutes upstream, plus a buffer).
+_BASE_TIMEOUT_MINUTES = 30
+_STEPS_COVERED_BY_BASE_TIMEOUT = 60
+
+
+def _timeout_minutes_for_steps(steps: int) -> int:
+    if steps <= _STEPS_COVERED_BY_BASE_TIMEOUT:
+        return _BASE_TIMEOUT_MINUTES
+    return max(_BASE_TIMEOUT_MINUTES, int(steps * 0.35) + 15)
+
+
+ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES = _timeout_minutes_for_steps(DEFAULT_MAX_ITERATIONS)
 # test-mass-agent-run-0 Fast Mode only. Live Fast Mode checkouts (Blue Bottle)
 # keep the 30m budget. Soft-complete + cache hits on the demo finish in
 # seconds; 3m is a hard ceiling so Huberman YouTube hangs cannot burn 30m.
@@ -47,21 +63,14 @@ def browser_start_to_close_timeout_minutes(
     goal: str = "",
     workflow_instance=None,
 ) -> int:
-    """3m Fast Mode ceiling is demo-only; every other FM browser keeps 30m.
-
-    Polar / high BROWSER_MAX_ITERATIONS runs scale the ceiling with the step
-    budget (~30m per 100 steps, matching Odysseys Opus wall-clock at 100 steps).
-    """
+    """3m Fast Mode ceiling is demo-only; every other browser run gets the
+    ceiling that fits its step budget (`_timeout_minutes_for_steps`)."""
     demo = is_oai_demo_goal(goal)
     if workflow_instance is not None:
         demo = demo or is_oai_demo_mass_agent_task(workflow_instance)
     if fast_mode and demo:
         return ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
-    steps = get_max_iterations()
-    if steps > DEFAULT_MAX_ITERATIONS:
-        # 100 steps ≈ 30 minutes upstream; keep a small buffer above that ratio.
-        return max(ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES, int(steps * 0.35) + 15)
-    return ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
+    return _timeout_minutes_for_steps(get_max_iterations())
 
 
 def skip_browser_network_recording(*, fast_mode: bool, goal: str = "") -> bool:
