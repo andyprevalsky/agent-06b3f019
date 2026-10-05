@@ -312,7 +312,7 @@ def test_get_max_iterations_reads_positive_env(monkeypatch):
 
 
 def test_browser_activity_timeout_outlasts_its_step_budget(monkeypatch):
-    """A timeout shorter than the step budget gets the activity retried from the start mid-task."""
+    """A timeout shorter than the step budget cuts the single activity attempt off mid-task."""
     monkeypatch.delenv("BROWSER_MAX_ITERATIONS", raising=False)
     assert browser_start_to_close_timeout_minutes(fast_mode=False, goal="Buy socks") == 102
     assert ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES == 102

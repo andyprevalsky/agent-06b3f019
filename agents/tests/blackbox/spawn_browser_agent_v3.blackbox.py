@@ -224,17 +224,19 @@ def test_verifier_activity_timeout_allows_llm_call():
 
     assert VERIFIER_ULTRA_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
-def test_stateful_browser_activity_has_one_thirty_minute_attempt():
-    """Stateful browser writes get a full window but no from-scratch Temporal retry."""
+def test_stateful_browser_activity_has_one_attempt_sized_to_its_step_budget():
+    """Stateful browser writes get a window that fits the step budget but no from-scratch Temporal retry."""
     import inspect
 
     from domains.spawn_browser_agent_v3.config import (
         ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
+        DEFAULT_MAX_ITERATIONS,
         MAX_ACTIVITY_ATTEMPTS,
     )
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
 
-    assert ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES == 30
+    assert DEFAULT_MAX_ITERATIONS == 250
+    assert ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES == 102
     assert MAX_ACTIVITY_ATTEMPTS == 1
 
     execute_source = inspect.getsource(SpawnBrowserAgentManagerV3.execute_tool)
@@ -24046,8 +24048,8 @@ async def run_all_tests():
     r.record("browser_progress_title", test_browser_progress_title_describes_active_agent)
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record(
-        "stateful_browser_activity_one_thirty_minute_attempt",
-        test_stateful_browser_activity_has_one_thirty_minute_attempt,
+        "stateful_browser_activity_one_attempt_sized_to_step_budget",
+        test_stateful_browser_activity_has_one_attempt_sized_to_its_step_budget,
     )
     r.record(
         "browser_spawn_goal_uses_tool_call_goal_verbatim",

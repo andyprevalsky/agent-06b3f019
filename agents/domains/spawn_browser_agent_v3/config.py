@@ -37,8 +37,8 @@ def get_max_iterations() -> int:
 
 MAX_ITERATIONS = get_max_iterations()
 MAX_CONSECUTIVE_API_FAILURES = 5
-# The activity must outlast its step budget, or Temporal times it out mid-task and
-# retries it from the start. 60 steps or fewer fit in 30 minutes; above that the
+# The activity gets one attempt, so it must outlast its step budget or the task is
+# cut off mid-way. 60 steps or fewer fit in 30 minutes; above that the
 # ceiling follows the budget (100 steps ≈ 30 minutes upstream, plus a buffer).
 _BASE_TIMEOUT_MINUTES = 30
 _STEPS_COVERED_BY_BASE_TIMEOUT = 60
