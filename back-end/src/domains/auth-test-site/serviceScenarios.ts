@@ -325,11 +325,11 @@ function namedAccountPlan(ctx: PlanContext): ScenarioPlan {
   });
 }
 
-function openSitePlan(behavior: Partial<SiteBehavior>): ScenarioPlan {
-  return plan({ behavior: { ...BASE_BEHAVIOR, ...behavior }, minted: 'offered' });
-}
+const openSitePlan = (behavior: Partial<SiteBehavior>): ScenarioPlan =>
+  plan({ behavior: { ...BASE_BEHAVIOR, ...behavior }, minted: 'offered' });
 
 const SHOP: Partial<SiteBehavior> = { shop: true };
+const GUEST_SHOP: Partial<SiteBehavior> = { ...SHOP, signUp: 'open', guest: 'checkout' };
 
 const PLANNERS: Record<AuthTestSiteScenario, (ctx: PlanContext) => ScenarioPlan> = {
   password_retry: passwordRetryPlan,
@@ -356,10 +356,9 @@ const PLANNERS: Record<AuthTestSiteScenario, (ctx: PlanContext) => ScenarioPlan>
   email_otp: emailOtpPlan,
   signup: () => openSitePlan({ signUp: 'open' }),
   signup_already_registered: (ctx) => mintedAccountPlan(ctx, { signUp: 'open' }),
-  guest_purchase: () => openSitePlan({ ...SHOP, signUp: 'open', guest: 'checkout' }),
+  guest_purchase: () => openSitePlan(GUEST_SHOP),
   // Guests can buy, but only an account gets the lower price.
-  member_discount_purchase: () =>
-    openSitePlan({ ...SHOP, signUp: 'open', guest: 'checkout', memberDiscountPercent: 10 }),
+  member_discount_purchase: () => openSitePlan({ ...GUEST_SHOP, memberDiscountPercent: 10 }),
   signup_purchase: () => openSitePlan({ ...SHOP, signUp: 'open' }),
   signup_fails_purchase: () => openSitePlan({ ...SHOP, signUp: 'error' }),
   session_expires_at_checkout: (ctx) =>
@@ -369,6 +368,5 @@ const PLANNERS: Record<AuthTestSiteScenario, (ctx: PlanContext) => ScenarioPlan>
   named_account: namedAccountPlan,
 };
 
-export function planScenario(scenario: AuthTestSiteScenario, ctx: PlanContext): ScenarioPlan {
-  return PLANNERS[scenario](ctx);
-}
+export const planScenario = (scenario: AuthTestSiteScenario, ctx: PlanContext): ScenarioPlan =>
+  PLANNERS[scenario](ctx);

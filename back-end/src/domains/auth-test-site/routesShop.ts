@@ -92,10 +92,7 @@ shopRouter.post('/:siteId/cart/remove', (req: Request, res: Response) => {
 
 shopRouter.get('/:siteId/cart', (req: Request, res: Response) => {
   const site = siteOf(req);
-  sendPage(
-    res,
-    renderCartPage(site, totalsFor(req, site), sessionOf(req).session)
-  );
+  sendPage(res, renderCartPage(site, totalsFor(req, site), sessionOf(req).session));
 });
 
 shopRouter.get('/:siteId/checkout', (req: Request, res: Response) => {
