@@ -30,7 +30,8 @@ This keeps them unit-testable in plain `pytest` and avoids circular deps when
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator, Dict, Optional, Protocol
+from contextvars import ContextVar
+from typing import Any, AsyncIterator, Callable, Dict, Optional, Protocol
 
 import structlog
 
@@ -46,6 +47,26 @@ from providers.rose.errors import (
 from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger()
+
+# Parsers buffer tool arguments until a complete tool_call can be emitted.
+# Report genuine fragments privately to the request guard without introducing
+# partial tools, changing normalized output or counting them as completed calls.
+_stream_progress: ContextVar[Optional[Callable[[str, int], None]]] = ContextVar(
+    "rose_stream_progress", default=None,
+)
+
+
+def _note_stream_attempt() -> None:
+    callback = _stream_progress.get()
+    if callback is not None:
+        callback("attempt", 0)
+
+
+def _note_tool_argument(fragment: Any) -> None:
+    if isinstance(fragment, str) and fragment:
+        callback = _stream_progress.get()
+        if callback is not None:
+            callback("tool_arguments", len(fragment))
 
 
 def _responses_error_to_exception(error_payload: Any, request_id: str):
@@ -274,6 +295,9 @@ async def parse_anthropic_sse(
                     fragment = delta.get("partial_json") or ""
                     if fragment:
                         current_tool_args.append(fragment)
+                        if (current_block_kind == "tool_use"
+                                and event.get("index", current_block_index) == current_block_index):
+                            _note_tool_argument(fragment)
                 continue
 
             if event_type == "content_block_stop":
@@ -479,6 +503,7 @@ async def parse_openai_sse(
                     slot["name"] = fn["name"]
                 if fn.get("arguments"):
                     slot["arguments"] += fn["arguments"]
+                    _note_tool_argument(fn["arguments"])
 
             if choice.get("finish_reason"):
                 finish_reason = choice["finish_reason"]
@@ -600,6 +625,7 @@ async def parse_responses_sse(
                     item_type = item.get("type")
                     item_phase = item.get("phase")
                     output_items[item_id] = {
+                        "type": item_type,
                         "item_id": item_id,
                         "output_index": event.get("output_index") if isinstance(event.get("output_index"), int) else 0,
                         "content_index": 0,
@@ -607,6 +633,13 @@ async def parse_responses_sse(
                         if isinstance(item_phase, str) and item_phase
                         else ("reasoning" if item_type == "reasoning" else "final_answer"),
                     }
+                continue
+
+            if event_type == "response.function_call_arguments.delta":
+                item_id = event.get("item_id")
+                item = output_items.get(item_id) if isinstance(item_id, str) else None
+                if item is not None and item.get("type") == "function_call":
+                    _note_tool_argument(event.get("delta"))
                 continue
 
             delta = event.get("delta") or event.get("text")
@@ -640,6 +673,9 @@ async def parse_responses_sse(
                 if not isinstance(item, dict):
                     continue
                 item_id = item.get("id")
+                if isinstance(item_id, str) and item_id in output_items:
+                    # A finished item cannot produce additional arguments.
+                    output_items[item_id]["type"] = "completed"
                 if isinstance(item_id, str) and item_id and item_id not in output_items:
                     item_type = item.get("type")
                     item_phase = item.get("phase")

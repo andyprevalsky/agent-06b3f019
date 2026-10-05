@@ -891,8 +891,8 @@ async def test_direct_attention_sms_source_sends_agentcard_setup_notify():
     assert payload["setup_url"] == "https://rose.test/setup"
 
 
-async def test_direct_approval_sends_one_reminder_then_stops():
-    """After the initial write_lock SMS, exactly one extra reminder may fire."""
+async def test_direct_approval_does_not_send_reminder():
+    """After the initial write_lock SMS, later waits must not send another SMS."""
     from datetime import datetime, timedelta, timezone
 
     from domains.request_user_approval.service import request_user_approval_direct
@@ -913,10 +913,7 @@ async def test_direct_approval_sends_one_reminder_then_stops():
             self._waits += 1
             if self._waits == 1:
                 self._now = self._now + timedelta(minutes=16)
-                raise TimeoutError("reminder window elapsed")
-            if self._waits == 2:
-                self._now = self._now + timedelta(minutes=16)
-                raise TimeoutError("must not send a second reminder")
+                raise TimeoutError("slice elapsed")
             wf._signal_responses["req-remind"] = "Approved"
             return
 
@@ -936,15 +933,14 @@ async def test_direct_approval_sends_one_reminder_then_stops():
         restore()
 
     notify_calls = [c for c in fake.activity_calls if c["name"] == "notify_sms_event_activity"]
-    assert len(notify_calls) == 2
-    assert notify_calls[0]["args"][3].get("reminder") is False
-    assert notify_calls[1]["args"][3].get("reminder") is True
+    assert len(notify_calls) == 1
+    assert notify_calls[0]["args"][3].get("reminder") is not True
     assert result["response"] == "Approved"
-    assert fake._waits == 3
+    assert fake._waits == 2
 
 
-async def test_direct_approval_resume_after_reminder_does_not_notify_again():
-    """A cutover that already sent the extra reminder must not SMS again."""
+async def test_direct_approval_resume_does_not_notify_again():
+    """A cutover that already notified must not SMS again."""
     from helpers.generation_handoff import GenerationHandoffRequested
     from domains.request_user_approval.service import request_user_approval_direct
 
@@ -952,7 +948,6 @@ async def test_direct_approval_resume_after_reminder_does_not_notify_again():
     wf._pending_approval_resume = {
         "request_id": "req-reminded",
         "question": "Approve the purchase?",
-        "reminder_sent": True,
     }
     wf._signal_responses["req-reminded"] = "Approved later"
 
@@ -980,8 +975,8 @@ async def test_direct_approval_resume_after_reminder_does_not_notify_again():
     assert not isinstance(result, GenerationHandoffRequested)
 
 
-async def test_direct_approval_resume_request_after_reminder_does_not_notify_again():
-    """Parked resume_request that already sent the extra reminder must not SMS."""
+async def test_direct_approval_resume_request_does_not_notify_again():
+    """Parked resume_request that already notified must not SMS again."""
     from domains.request_user_approval.service import request_user_approval_direct
 
     wf = _WFInstance()
@@ -1001,7 +996,6 @@ async def test_direct_approval_resume_request_after_reminder_does_not_notify_aga
             resume_request={
                 "attention_request_id": "req-parked",
                 "tool_call_id": "tool-parked",
-                "reminder_sent": "true",
             },
         )
     finally:
@@ -1046,6 +1040,139 @@ async def test_direct_subagent_attention_sms_sends_notify():
     assert "notify" in activity_calls
     notify_call = next(c for c in fake.activity_calls if c["name"] == "notify_sms_event_activity")
     assert notify_call["args"][1] == "agentcard_setup"
+
+
+async def test_direct_cancel_preserves_unanswered_resume_only():
+    """Canceled unanswered chips retain their row; consumed decisions never rearm."""
+    from copy import deepcopy
+
+    from domains.request_user_approval.config import REJECTION_SENTINEL
+    from domains.request_user_approval.service import (
+        request_user_approval_direct,
+        stash_pending_approvals_from_context,
+    )
+    from tools.base import MessageStatus
+
+    class PersistedWF(_WFInstance):
+        def __init__(self, blocked_status):
+            super().__init__()
+            self.blocked_status = blocked_status
+            self.persisted = asyncio.Event()
+            self.blocked_once = False
+
+        async def _handle_tool_event(self, event, tool_call_id, tool_name):
+            await super()._handle_tool_event(deepcopy(event), tool_call_id, tool_name)
+            self.context.append(
+                {
+                    "role": "TOOL",
+                    "text": event.message,
+                    "metadata": {
+                        **(event.metadata or {}),
+                        "toolStatus": event.status.name,
+                    },
+                }
+            )
+            if event.status == self.blocked_status and not self.blocked_once:
+                self.blocked_once = True
+                self.persisted.set()
+                await asyncio.Event().wait()
+
+    for decision in (None, "Approved", REJECTION_SENTINEL):
+        request_id = "req-cancel-resume"
+        question = "Approve the existing request?"
+        wf = PersistedWF(
+            MessageStatus.IN_PROGRESS if decision is None else MessageStatus.FINISHED
+        )
+        if decision is not None:
+            wf._pending_approval_resume = {
+                "request_id": request_id,
+                "question": question,
+            }
+            wf._signal_responses[request_id] = decision
+        fake = _FakeWFModule(
+            activity_results={
+                "create_approval_request_activity": request_id,
+                "notify_sms_event_activity": None,
+            }
+        )
+        restore = _patch_service_workflow(fake)
+        task = asyncio.create_task(
+            request_user_approval_direct(wf, question, close_on_cancel=True)
+        )
+        try:
+            await asyncio.wait_for(wf.persisted.wait(), timeout=10)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("The original caller must remain canceled")
+            stash_pending_approvals_from_context(wf)
+            assert request_id not in wf._signal_responses
+            assert not any(
+                c["name"] == "resolve_attention_request_activity"
+                for c in fake.activity_calls
+            )
+            if decision is None:
+                assert getattr(wf, "_pending_approval_resume", None) == {
+                    "request_id": request_id,
+                    "question": question,
+                }, "Canceled unanswered approval lost its original attention request"
+                closed = wf.handled_events[-1][0]
+                assert closed.title == "Approval interrupted"
+                assert closed.metadata["excludeFromModel"] is True
+                wf._signal_responses[request_id] = "Approved"
+                resumed = await request_user_approval_direct(
+                    wf, question, close_on_cancel=True
+                )
+                assert resumed["attention_request_id"] == request_id
+                assert resumed["response"] == "Approved"
+                assert wf._pending_approval_resume is None
+                assert (
+                    sum(
+                        c["name"] == "create_approval_request_activity"
+                        for c in fake.activity_calls
+                    )
+                    == 1
+                )
+                assert (
+                    sum(
+                        c["name"] == "notify_sms_event_activity"
+                        for c in fake.activity_calls
+                    )
+                    == 1
+                )
+            else:
+                assert wf._pending_approval_resume is None, (
+                    "Consumed decisions must never be re-stashed"
+                )
+                terminal_events = [
+                    e
+                    for e, _, _ in wf.handled_events
+                    if e.status == MessageStatus.FINISHED
+                ]
+                assert len(terminal_events) == 2
+                assert terminal_events[0] == terminal_events[1]
+                expected_title = (
+                    "✗ User rejected action"
+                    if decision == REJECTION_SENTINEL
+                    else "✓ User approval received"
+                )
+                assert terminal_events[-1].title == expected_title
+                assert not any(
+                    c["name"] == "create_approval_request_activity"
+                    for c in fake.activity_calls
+                )
+                assert not any(
+                    c["name"] == "notify_sms_event_activity"
+                    for c in fake.activity_calls
+                )
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            restore()
 
 
 async def run_all_tests():
@@ -1099,16 +1226,20 @@ async def run_all_tests():
         test_direct_subagent_attention_sms_sends_notify,
     )
     await r.record_async(
-        "direct_one_reminder",
-        test_direct_approval_sends_one_reminder_then_stops,
+        "direct_cancel_preserves_unanswered_resume_only",
+        test_direct_cancel_preserves_unanswered_resume_only,
     )
     await r.record_async(
-        "direct_resume_after_reminder",
-        test_direct_approval_resume_after_reminder_does_not_notify_again,
+        "direct_no_reminder",
+        test_direct_approval_does_not_send_reminder,
     )
     await r.record_async(
-        "direct_resume_request_after_reminder",
-        test_direct_approval_resume_request_after_reminder_does_not_notify_again,
+        "direct_resume_no_notify",
+        test_direct_approval_resume_does_not_notify_again,
+    )
+    await r.record_async(
+        "direct_resume_request_no_notify",
+        test_direct_approval_resume_request_does_not_notify_again,
     )
     teardown_mock()
     return r.all_passed

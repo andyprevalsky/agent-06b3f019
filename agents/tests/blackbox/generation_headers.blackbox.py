@@ -51,7 +51,7 @@ def _test_symbol_is_resolvable() -> List[str]:
     for module_name in TOOL_WRITER_MODULES:
         try:
             module = importlib.import_module(module_name)
-        except Exception as exc:  # noqa: BLE001 - report, do not mask
+        except Exception as exc:
             failures.append(f"{module_name}: import failed: {type(exc).__name__}: {exc}")
             continue
         if not hasattr(module, "workflow_generation_headers"):
@@ -62,10 +62,134 @@ def _test_symbol_is_resolvable() -> List[str]:
     return failures
 
 
+def _post_has_generation_headers(node: ast.Call, tree: ast.AST, *, tracing_headers_safe: bool = False) -> bool:
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    current: ast.AST = node
+    while current in parents:
+        current = parents[current]
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # A canonical module import does not authorize a shadowed local.
+            if any(
+                isinstance(child, ast.Name)
+                and isinstance(child.ctx, ast.Store)
+                and child.id == "tracing_headers"
+                or isinstance(child, ast.arg)
+                and child.arg == "tracing_headers"
+                or isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler))
+                and child.name == "tracing_headers"
+                or isinstance(child, ast.alias)
+                and (child.asname or child.name) == "tracing_headers"
+                for child in ast.walk(current)
+            ):
+                tracing_headers_safe = False
+
+    def direct_header(value: ast.AST) -> bool:
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "workflow_generation_headers"
+            and not value.args
+            and not value.keywords
+        )
+
+    def includes_header(value: ast.AST) -> bool:
+        if direct_header(value):
+            return True
+        if not isinstance(value, ast.Dict):
+            return False
+        # Only helper spreads and known different headers preserve attribution.
+        # Unknown earlier spreads can add a differently cased duplicate key;
+        # unknown later spreads can replace the generation outright.
+        found_header = False
+        for key, item in zip(value.keys, value.values):
+            if key is None:
+                if (
+                    tracing_headers_safe
+                    and isinstance(item, ast.Call)
+                    and isinstance(item.func, ast.Name)
+                    and item.func.id == "tracing_headers"
+                    and not item.args
+                    and not item.keywords
+                ):
+                    continue
+                if not direct_header(item):
+                    return False
+                found_header = True
+                continue
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                return False
+            if key.value.lower() == "x-agent-workflow-generation":
+                return False
+        return found_header
+
+    header = next((kw.value for kw in node.keywords if kw.arg == "headers"), None)
+    if header is None:
+        return False
+    if includes_header(header):
+        return True
+    if not isinstance(header, ast.Name):
+        return False
+
+    # Recording retries preserve one header dictionary. Resolve its preceding
+    # assignment in an enclosing sequential block, without accepting conditional
+    # sibling assignments or a later overwrite that drops the generation.
+    def mentions_alias(statement: ast.AST) -> bool:
+        return any(isinstance(child, ast.Name) and child.id == header.id for child in ast.walk(statement))
+
+    current: ast.AST = node
+    while current in parents:
+        parent = parents[current]
+        if isinstance(parent, ast.ExceptHandler) and parent.name == header.id:
+            return False
+        # Enclosing tests/bindings and sibling handlers/finally clauses can
+        # replace or mutate the alias before this call or the next iteration.
+        for _field, value in ast.iter_fields(parent):
+            if value is current or isinstance(value, list) and current in value:
+                continue
+            children = value if isinstance(value, list) else [value]
+            if any(isinstance(child, ast.AST) and mentions_alias(child) for child in children):
+                return False
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(parent, field, None)
+            if not isinstance(block, list) or current not in block:
+                continue
+            for statement in reversed(block[: block.index(current)]):
+                if (
+                    isinstance(statement, ast.Assign)
+                    and len(statement.targets) == 1
+                    and isinstance(statement.targets[0], ast.Name)
+                    and statement.targets[0].id == header.id
+                ):
+                    return includes_header(statement.value)
+                if (
+                    isinstance(statement, ast.AnnAssign)
+                    and isinstance(statement.target, ast.Name)
+                    and statement.target.id == header.id
+                ):
+                    return statement.value is not None and includes_header(statement.value)
+                # Unknown uses may mutate or rebind the dictionary, including
+                # conditional assignments, alias escapes and method calls.
+                if mentions_alias(statement):
+                    return False
+            if isinstance(parent, (ast.For, ast.AsyncFor, ast.While)):
+                if any(mentions_alias(statement) for statement in block[block.index(current) + 1 :]):
+                    return False
+        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return False
+        if isinstance(parent, (ast.For, ast.AsyncFor)) and mentions_alias(parent.target):
+            return False
+        current = parent
+    return False
+
+
 def _test_message_posts_send_the_header() -> List[str]:
     """Every POST to /messages in a writer must spread the generation headers."""
+    from helpers.tracing import tracing_headers
+
     failures: List[str] = []
-    for path in WRITER_PATHS:
+    for path, module_name in zip(WRITER_PATHS, TOOL_WRITER_MODULES):
+        module = importlib.import_module(module_name)
+        tracing_safe = getattr(module, "tracing_headers", None) is tracing_headers
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
         for node in ast.walk(tree):
@@ -77,12 +201,141 @@ def _test_message_posts_send_the_header() -> List[str]:
             rendered = ast.get_source_segment(source, node) or ""
             if "/messages" not in rendered:
                 continue
-            if "workflow_generation_headers()" not in rendered:
+            if not _post_has_generation_headers(node, tree, tracing_headers_safe=tracing_safe):
                 failures.append(
                     f"{path.name}:{node.lineno}: POST to /messages does not send "
                     f"workflow_generation_headers() — its writes will be attributed to "
                     f"generation 1 and fenced after any deploy replacement"
                 )
+    return failures
+
+
+def _test_tracing_headers_are_disjoint() -> List[str]:
+    from helpers.tracing import tracing_headers
+    from structlog.contextvars import bound_contextvars
+
+    with bound_contextvars(span_id="span", request_id="request", agent_id="agent"):
+        keys = {key.lower() for key in tracing_headers()}
+    if keys != {"x-parent-span-id", "x-request-id", "x-agent-id"}:
+        return ["canonical tracing headers changed; recheck generation-header preservation"]
+    return []
+
+
+def _test_header_alias_resolution() -> List[str]:
+    snippets = (
+        ("headers = {**workflow_generation_headers()}\nclient.post('/messages', headers=headers)", True),
+        ("headers = {**workflow_generation_headers()}\nheaders = {}\nclient.post('/messages', headers=headers)", False),
+        (
+            "if enabled:\n    headers = {**workflow_generation_headers()}\nclient.post('/messages', headers=headers)",
+            False,
+        ),
+        ("client.post('/messages', headers={**workflow_generation_headers()})", True),
+        (
+            "client.post('/messages', headers={**tracing_headers(), **workflow_generation_headers()})",
+            True,
+        ),
+        (
+            "client.post('/messages', headers={**workflow_generation_headers(), **tracing_headers()})",
+            True,
+        ),
+        ("client.post('/messages', headers={**tracing_headers()})", False),
+        ("client.post('/messages', headers={**tracing_headers(extra), **workflow_generation_headers()})", False),
+        ("client.post('/messages', headers={**tracing_headers(extra=True), **workflow_generation_headers()})", False),
+        (
+            "def send(tracing_headers):\n    client.post('/messages', headers={**tracing_headers(), **workflow_generation_headers()})",
+            False,
+        ),
+        (
+            "def send():\n    tracing_headers = other\n    client.post('/messages', headers={**tracing_headers(), **workflow_generation_headers()})",
+            False,
+        ),
+        (
+            "client.post('/messages', headers={**tracing_headers(), **workflow_generation_headers(), 'x-agent-workflow-generation': 'stale'})",
+            False,
+        ),
+        ("client.post('/messages', headers={})", False),
+        (
+            "headers = {**workflow_generation_headers()}\nif enabled:\n    headers = {}\nclient.post('/messages', headers=headers)",
+            False,
+        ),
+        (
+            "headers = {**workflow_generation_headers()}\nheaders: dict = {}\nclient.post('/messages', headers=headers)",
+            False,
+        ),
+        (
+            "headers = {**workflow_generation_headers()}\ndef send(headers):\n    client.post('/messages', headers=headers)",
+            False,
+        ),
+        (
+            "headers = {**workflow_generation_headers()}\nheaders.clear()\nclient.post('/messages', headers=headers)",
+            False,
+        ),
+        (
+            "headers = {**workflow_generation_headers()}\nmutate(headers)\nclient.post('/messages', headers=headers)",
+            False,
+        ),
+        (
+            "headers = {**workflow_generation_headers()}\nfor item in items:\n    client.post('/messages', headers=headers)\n    headers.clear()",
+            False,
+        ),
+        (
+            "headers = {**workflow_generation_headers()}\nwith resource as headers:\n    client.post('/messages', headers=headers)",
+            False,
+        ),
+        (
+            "headers = {**workflow_generation_headers()}\nif (headers := {'other': 'value'}):\n    client.post('/messages', headers=headers)",
+            False,
+        ),
+        (
+            "headers = {**workflow_generation_headers()}\ntry:\n    work()\nexcept Exception as headers:\n    client.post('/messages', headers=headers)",
+            False,
+        ),
+        (
+            "headers = {**workflow_generation_headers()}\nfor item in items:\n    try:\n        client.post('/messages', headers=headers)\n    finally:\n        headers.clear()",
+            False,
+        ),
+        (
+            "headers = {'Other': workflow_generation_headers().get('X-Agent-Workflow-Generation', '')}\nclient.post('/messages', headers=headers)",
+            False,
+        ),
+        (
+            "headers = {**workflow_generation_headers(), 'X-Agent-Workflow-Generation': 'stale'}\nclient.post('/messages', headers=headers)",
+            False,
+        ),
+        (
+            "headers = {**workflow_generation_headers(), **unknown}\nclient.post('/messages', headers=headers)",
+            False,
+        ),
+        (
+            "headers = {**unknown, **workflow_generation_headers()}\nclient.post('/messages', headers=headers)",
+            False,
+        ),
+        (
+            "headers = {'x-api-key': key, **workflow_generation_headers()}\nclient.post('/messages', headers=headers)",
+            True,
+        ),
+        ("headers = workflow_generation_headers()\nclient.post('/messages', headers=headers)", True),
+        (
+            "client.post('/messages', headers={**workflow_generation_headers(), 'x-agent-workflow-generation': 'stale'})",
+            False,
+        ),
+        (
+            "headers = {**workflow_generation_headers(), key: 'stale'}\nclient.post('/messages', headers=headers)",
+            False,
+        ),
+    )
+    failures = []
+    for index, (source, expected) in enumerate(snippets):
+        tree = ast.parse(source)
+        post = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "post"
+        )
+        if _post_has_generation_headers(post, tree, tracing_headers_safe=True) != expected:
+            failures.append(f"header alias fixture {index} incorrectly classified")
+        if expected and "tracing_headers()" in source and _post_has_generation_headers(post, tree):
+            failures.append(f"header alias fixture {index} trusted a noncanonical tracing helper")
     return failures
 
 
@@ -116,11 +369,7 @@ def _test_abort_survives_blanket_handlers() -> List[str]:
             body = ast.get_source_segment(source, node) or ""
             if "raise_if_generation_sealed" not in body:
                 continue
-            names = [
-                h.type.id
-                for h in node.handlers
-                if isinstance(h.type, ast.Name)
-            ]
+            names = [h.type.id for h in node.handlers if isinstance(h.type, ast.Name)]
             if "Exception" in names and "WorkflowGenerationSealed" not in names:
                 failures.append(
                     f"{path.name}:{node.lineno}: a try/except Exception wraps "
@@ -170,6 +419,8 @@ async def run_all_tests() -> Dict[str, Any]:
     for name, case in (
         ("generation header symbol is resolvable in every TOOL writer", _test_symbol_is_resolvable),
         ("every /messages POST sends the generation header", _test_message_posts_send_the_header),
+        ("canonical tracing headers cannot overwrite generation", _test_tracing_headers_are_disjoint),
+        ("header aliases preserve generation and reject overwrites", _test_header_alias_resolution),
         ("every /messages POST aborts on a sealed generation", _test_message_posts_abort_on_409),
         ("the sealed-generation abort is never swallowed", _test_abort_survives_blanket_handlers),
         ("gather(return_exceptions) never downgrades the abort", _test_gather_reraises_sealed),

@@ -8,6 +8,7 @@
  */
 
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
+import { START_PHASE_DESCRIPTION } from './schema';
 
 export const TOOL_SCHEMAS = [
   {
@@ -86,8 +87,13 @@ export const TOOL_SCHEMAS = [
           type: 'number' as const,
           description: 'Budget in dollars (default: $1.00)',
         },
+        start_phase: {
+          type: 'string' as const,
+          enum: ['plan', 'execute'],
+          description: START_PHASE_DESCRIPTION,
+        },
       },
-      required: ['goal'],
+      required: ['goal', 'start_phase'],
     },
   },
   {

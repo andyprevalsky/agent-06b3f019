@@ -63,6 +63,7 @@ REQUIRED_SECTIONS = (
 
 # Step 4 of docs/root-cause-analysis.md.
 CLASSIFICATIONS = {
+    "undetermined",
     "our-bug",
     "third-party-failure",
     "input-error",
@@ -305,6 +306,10 @@ def validate() -> list[str]:
         status = meta.get("status")
         if isinstance(status, str) and status not in STATUSES:
             errors.append(f"{rel}: `status` {status!r} not in {sorted(STATUSES)}")
+        if classification == "undetermined" and status != "open":
+            errors.append(
+                f"{rel}: `classification` 'undetermined' requires `status` 'open'"
+            )
         if classification == "unresolved" and status != "open":
             errors.append(f"{rel}: `unresolved` classification requires `status: open`")
 

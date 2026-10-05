@@ -52,7 +52,11 @@ const CODEX_OAUTH_REVOCATION_PATTERN =
 export function detectCodexCreditExhaustion(output: string, events: unknown[]): string | null {
   const haystacks: string[] = [output];
   for (const event of events) {
-    const typed = event as { message?: unknown; reason?: unknown; error?: unknown };
+    const typed = event as {
+      message?: unknown;
+      reason?: unknown;
+      error?: unknown;
+    };
     // `error` arrives as a bare string on some providers and as
     // `{ message }` on others; only reading the string form let a nested
     // out-of-funds message slip past the detector and hard-fail the deploy.
@@ -127,7 +131,10 @@ export function testDetectCreditExhaustion_positive(): void {
   // Exhaustion surfaced only in structured events (message/reason fields).
   assert(
     detectCodexCreditExhaustion('normal output', [
-      { type: 'error', message: 'Quota exceeded. Check your plan and billing details.' },
+      {
+        type: 'error',
+        message: 'Quota exceeded. Check your plan and billing details.',
+      },
     ]) !== null,
     'quota-exceeded event message must be detected'
   );
@@ -295,4 +302,39 @@ export function testCreateUnavailableSkip_cooldownOnly(): void {
     ) !== null,
     'existing create-time funding wording still skips without a cooldown flag'
   );
+}
+
+export interface TestResult {
+  name: string;
+  passed: boolean;
+  skipped?: boolean;
+  skipReason?: string;
+  error?: string;
+  duration: number;
+}
+
+export async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
+  const start = Date.now();
+  try {
+    await fn();
+    return { name, passed: true, duration: Date.now() - start };
+  } catch (error) {
+    if (error instanceof CredentialExhaustionSkip) {
+      // Not a failure: the third-party account is out of credits/quota. Report
+      // as a loud SKIP so the deploy gate is not blocked by external funding.
+      return {
+        name,
+        passed: true,
+        skipped: true,
+        skipReason: error.message,
+        duration: Date.now() - start,
+      };
+    }
+    return {
+      name,
+      passed: false,
+      error: error instanceof Error ? error.message : String(error),
+      duration: Date.now() - start,
+    };
+  }
 }

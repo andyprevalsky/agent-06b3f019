@@ -20,6 +20,7 @@ tags:
   - fixtures
   - whatsapp-history-recall
 sources:
+  - PR #1299
   - fleet run 20260820_211517_whatsapp-history-recall
   - agent 76b73506-a102-4ebc-a623-c69f5c279206
   - memory:poisoned-canonical-whatsapp-v2-seed-r2-cc104a3f
@@ -88,3 +89,20 @@ A cache key's *revision name* is a content promise, not a size promise. When two
 valid archive encodings of different row sets share the same byte-size band,
 gate restore and publish on the reviewed row invariants — never on file size
 alone.
+
+## Schema-only refresh during PR #1299
+
+After merging main's reviewed PlannerMemory migration, cloud preflight correctly
+refused the missing `105b336b6195266377feff58cbf93abc818e0bc4-pg15-...` key.
+The prior `68c247627227166f0dd7a91003a68efd227aac5a-pg15-...` canonical fixture
+was restored into an isolated PostgreSQL 15 container and the checked-in SQL
+migration was applied. Fingerprints preserved every row in all 68 existing
+tables (excluding only the newly added Agent.memoryEnabled column); the sole
+new table was empty and the new column had its reviewed default.
+
+Prisma reported no schema difference. The canonical validator verified all
+3,825 WhatsApp messages and the connected integration before and after a PG15
+dump/restore round trip. The newly keyed artifact was published only after
+confirming absence, then downloaded and compared byte-for-byte. The isolated
+container and anonymous volume were removed. Evidence is retained under
+`.context/acceptance/canonical-pg15/`; no cold-sync or coverage rows were used.

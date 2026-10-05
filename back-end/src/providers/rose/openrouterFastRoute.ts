@@ -48,6 +48,9 @@ export const DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS = CHAT_TIMEOUT_MS;
 export const OPENROUTER_CHAT_LATENCY_PROVIDER = {
   sort: 'latency',
   preferred_min_throughput: { p50: 80 },
+  // Friendli repeatedly started streaming but missed the 15s router completion
+  // bound on the exact production follow-up, despite the throughput preference.
+  ignore: ['friendli'],
   allow_fallbacks: true,
   require_parameters: true,
 } as const;

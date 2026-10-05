@@ -50,6 +50,7 @@ _CONFIG_SCALAR_KEYS = {
     "region",
     "run_timeout_seconds",
     "child_run_timeout_seconds",
+    "benchmark_wall_clock_backstop_seconds",
     "synchronized_start",
     "first_run_stack_wait_seconds",
     "per_box_barrier_wait_seconds",
@@ -84,6 +85,7 @@ _CONFIG_SCALAR_KEYS = {
     "guest_pg_major",
     "seed_cache_identity",
     "volume_snapshot_id",
+    "base_source_manifest_sha256",
     "node_dependency_fingerprint",
     "python_dependency_fingerprint",
     "per_child_max_concurrency",
@@ -431,13 +433,15 @@ def build_provenance(
     snapshot_errors = validate_snapshot_manifest(snapshot_manifest)
     if snapshot_errors:
         raise ProvenanceError("; ".join(snapshot_errors))
+    if not isinstance(snapshot_manifest, dict):
+        raise ProvenanceError("controller snapshot manifest must be an object")
     document: dict[str, object] = {
         "schema_version": EXECUTION_SCHEMA_VERSION,
         "base_sha": base_sha,
         "workspace_patch_sha256": workspace_patch_sha256,
         "controller_snapshot": {
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
-            "sha256": snapshot_manifest["sha256"],  # type: ignore[index]
+            "sha256": snapshot_manifest["sha256"],
         },
         "config": config,
     }

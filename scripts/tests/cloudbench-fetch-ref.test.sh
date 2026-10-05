@@ -79,12 +79,23 @@ output="$(
   fail "requested ref was not checked out"
 grep -Fq '[cloudbench] compacting persistent Git object store' <<<"$output" || \
   fail "oversized persistent object store did not trigger compaction"
+for stage in git-maintenance git-fetch git-checkout git-reset; do
+  grep -Eq "\\[cloudbench\\] $stage [0-9]+s" <<<"$output" || \
+    fail "fresh-code timing omitted $stage"
+done
 assert_lock_released "$lock_path"
 
+# The exact-SHA idempotent fast path intentionally skips maintenance because no
+# fetch needs scratch space. Advance the remote so this check exercises a real
+# fetch preflight rather than asking an already-current checkout to fail.
+printf 'three\n' >> "$TMP_ROOT/source/payload.txt"
+git -C "$TMP_ROOT/source" commit -qam three
+git -C "$TMP_ROOT/source" push -q origin HEAD:main
+next_target="$(git -C "$TMP_ROOT/source" rev-parse HEAD)"
 failure_output="$TMP_ROOT/insufficient-space.log"
 if CLOUDBENCH_GIT_COMPACT_AT_KB=999999999999 \
    CLOUDBENCH_GIT_MIN_FREE_KB=999999999999 \
-   bash "$FETCH_SCRIPT" "$TMP_ROOT/checkout" "$target" >"$failure_output" 2>&1; then
+   bash "$FETCH_SCRIPT" "$TMP_ROOT/checkout" "$next_target" >"$failure_output" 2>&1; then
   fail "fetch must fail closed when compaction cannot recover required space"
 fi
 grep -Fq '[cloudbench] FATAL: insufficient volume space for git fetch' "$failure_output" || \

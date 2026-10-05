@@ -73,3 +73,17 @@ None recorded.
 ## Reusable lesson
 
 Check database readiness through the same network path the next client will use, and retain failure output from every hard gate.
+
+
+## October 5 host-probe-success recurrence
+
+A fresh deployment on `7695d9b` again produced four of five successful cold
+seeds. This time the retained localhost SELECT1 probe succeeded before Prisma
+reported P1001 after another 69.302 seconds. Both target URLs matched the owned
+database; subsequent fidelity-verified peaks were 154, 158, 168, and 169 MB.
+The original target server state was not retained, so Docker transport failure
+versus delayed host execution remains unclassified. The prior missing-probe
+cause is not established for this occurrence, and the four samples remain a
+failed gate. Original output and independent review are private under
+`.context/deploy-runs/pr1410-finalize-20261005/`. A fresh five-run validation is
+required; a passing retry does not retroactively resolve the original cause.

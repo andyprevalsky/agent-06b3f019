@@ -39,6 +39,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -102,11 +103,132 @@ def durable_fe_url(agent_id: str, run_id: str, token: str) -> str:
     return f"{DURABLE_ORIGIN}/?{query}#{fragment}"
 
 
-def upload_run_json(run_json: Path) -> str:
+def evidence_bundle_for_agent(bundle: dict, agent_id: str) -> dict:
+    """Expose one real root from a composite bench without changing its result.
+
+    Composite benches retain their aggregate result under a comma-joined
+    ``agent_id`` and keep each root's captured transcript in a named stage.
+    The Hub cannot resolve either UUID from that aggregate task. Publish a
+    separate, deterministic evidence run containing the original stage logs;
+    never rewrite the aggregate benchmark run or invent transcript messages.
+    """
+    tasks = bundle.get("tasks") or []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        logs = task.get("logs") or {}
+        if task.get("agent_id") == agent_id or (
+            isinstance(logs, dict)
+            and isinstance(logs.get("tree"), dict)
+            and agent_id in logs["tree"]
+        ):
+            return bundle
+
+    matches = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        joined = task.get("agent_id")
+        if not isinstance(joined, str) or agent_id not in joined.split(","):
+            continue
+        logs = task.get("logs") or {}
+        if not isinstance(logs, dict):
+            continue
+        for stage_name, stage_logs in logs.items():
+            if not isinstance(stage_logs, dict):
+                continue
+            tree = stage_logs.get("tree")
+            messages = stage_logs.get("messages")
+            if isinstance(tree, dict) and agent_id in tree and isinstance(messages, list) and messages:
+                matches.append((task, stage_name, stage_logs))
+    if len(matches) != 1:
+        raise SystemExit(
+            f"expected exactly one captured stage transcript for {agent_id}; found {len(matches)}"
+        )
+    task, stage_name, stage_logs = matches[0]
+    run_id = bundle.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise SystemExit("run bundle is missing run_id")
+    projected_task = dict(task)
+    projected_task.update(
+        agent_id=agent_id,
+        name=f"{task.get('name', 'composite')} [{stage_name} evidence]",
+        logs=stage_logs,
+        message_count=len(stage_logs["messages"]),
+        tree_agent_count=len(stage_logs["tree"]),
+        evidence_projection_of=task.get("name"),
+    )
+    return {
+        **bundle,
+        "run_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"rose-benchmark-evidence:{run_id}:{agent_id}")),
+        "source": "durable-evidence-projection",
+        "source_run_id": run_id,
+        "tasks": [projected_task],
+    }
+
+
+def verified_zero_session_tasks(bundle: dict, agent_id: str) -> set[str]:
+    """Bind pre-session cancellation to exact owned DB and cleanup receipts."""
+    projected = evidence_bundle_for_agent(bundle, agent_id)
+    matches = [
+        task for task in projected.get("tasks", [])
+        if task.get("agent_id") == agent_id
+        or agent_id in ((task.get("logs") or {}).get("tree") or {})
+    ]
+    if len(matches) != 1:
+        return set()
+    logs = matches[0].get("logs") or {}
+    receipt = logs.get("browser_zero_allocation_receipt")
+    if receipt is None:
+        return set()
+    cleanup = logs.get("cloud_cleanup_evidence") or {}
+    provider = logs.get("cloud_provider_cleanup") or {}
+    ids = receipt.get("task_ids") if isinstance(receipt, dict) else None
+    tree = receipt.get("tree_agent_ids") if isinstance(receipt, dict) else None
+    task_map = receipt.get("task_ids_by_agent") if isinstance(receipt, dict) else None
+    owner = receipt.get("root_agent_id") if isinstance(receipt, dict) else None
+    valid = (
+        isinstance(ids, list) and bool(ids)
+        and all(isinstance(value, str) and value for value in ids)
+        and len(ids) == len(set(ids))
+        and isinstance(tree, list) and all(isinstance(value, str) for value in tree)
+        and agent_id in tree
+        and isinstance(task_map, dict)
+        and set(task_map).issubset(set(tree))
+        and all(isinstance(values, list) and all(isinstance(value, str) and value for value in values)
+                for values in task_map.values())
+        and sorted(value for values in task_map.values() for value in values) == sorted(ids)
+        and isinstance(owner, str) and owner in tree
+        and receipt.get("before_browser_sessions") == []
+        and receipt.get("archive_browser_sessions") == []
+        and cleanup.get("errors") == []
+        and cleanup.get("provider_receipts") == []
+        and provider.get("tree_sealed") is True
+        and provider.get("root_deleted") is True
+        and provider.get("provider_receipts") == []
+    )
+    for phase in ("before", "after", "final"):
+        snapshot = cleanup.get(phase) if isinstance(cleanup, dict) else None
+        valid = valid and (
+            isinstance(snapshot, dict)
+            and snapshot.get("root_exists") is True
+            and isinstance(snapshot.get("tree_agent_ids"), list)
+            and all(isinstance(value, str) for value in snapshot["tree_agent_ids"])
+            and sorted(snapshot["tree_agent_ids"]) == sorted(tree)
+            and snapshot.get("browser_sessions") == []
+        )
+    if not valid:
+        raise SystemExit("invalid exact zero-browser-allocation ownership receipt")
+    return set(task_map.get(agent_id, []))
+
+
+def upload_run_json(run_json: Path, agent_id: str) -> str:
     sys.path.insert(0, str(REPO_ROOT / "agents"))
     from benchmarks.hub_upload import upload_run_bundle
 
-    bundle = json.loads(run_json.read_text(encoding="utf-8"))
+    bundle = evidence_bundle_for_agent(
+        json.loads(run_json.read_text(encoding="utf-8")), agent_id
+    )
     os.environ.setdefault("BENCHMARK_HUB_UPLOAD_URL", DEFAULT_HUB)
     if not (os.getenv("BENCHMARK_HUB_API_KEY") or os.getenv("BACKEND_API_KEY")):
         raise SystemExit(
@@ -186,7 +308,7 @@ def _probe_recording_file_pointer(
 
 
 def validate_browser_agents_terminated_with_recording(
-    agent_id: str, messages: list
+    agent_id: str, messages: list, *, zero_session_task_ids: set[str] | None = None,
 ) -> list[str]:
     """Return failure reasons when any browser task is still live or missing recording.
 
@@ -195,8 +317,17 @@ def validate_browser_agents_terminated_with_recording(
       * ``action_type=task_complete`` (terminated for FE panels)
       * a FINISHED recording message with a reachable ``recording_view_url`` or a
         fetchable ``recording_file_pointer``
+    An exact owned zero-session receipt permits a task cancelled before its
+    session was allocated; an allocated browser still requires a recording.
     Agents with no browser tasks pass.
+    Code agents share lifecycle action names with browsers. Explicit code
+    identity exempts those tasks unless the same task also has browser evidence;
+    lifecycle events with unknown identity retain the fail-closed checks.
     """
+    sys.path.insert(0, str(REPO_ROOT / "agents"))
+    from benchmarks.browser_zero_allocation import cancelled_before_session_task_ids
+
+    verified_zero = (zero_session_task_ids or set()) & cancelled_before_session_task_ids(messages)
     tasks: dict[str, dict[str, bool]] = {}
     recording_candidates: dict[str, list[dict]] = {}
     for message in messages:
@@ -208,7 +339,11 @@ def validate_browser_agents_terminated_with_recording(
             continue
         action = str(meta.get("action_type") or "")
         tool_name = str(meta.get("toolName") or "")
-        browser_related = tool_name == "spawn_browser_agent" or action in {
+        code_related = tool_name == "spawn_claude_code_agent" or meta.get("agentType") == "code"
+        explicit_browser = tool_name == "spawn_browser_agent" or meta.get("agentType") == "browser" or action in {
+            "browser", "recording", "network_recording",
+        }
+        browser_related = explicit_browser or (not tool_name and action in {
             "browser",
             "session_init",
             "session_started",
@@ -216,13 +351,18 @@ def validate_browser_agents_terminated_with_recording(
             "recording",
             "network_recording",
             "task_complete",
-        }
-        if not browser_related:
+        })
+        if not browser_related and not code_related:
             continue
         state = tasks.setdefault(
-            task_id, {"seen": False, "complete": False, "recording_ok": False}
+            task_id, {
+                "seen": False, "complete": False, "recording_ok": False,
+                "code": False, "browser": False,
+            }
         )
-        if action in {
+        state["code"] = state["code"] or code_related
+        state["browser"] = state["browser"] or explicit_browser
+        if explicit_browser or action in {
             "browser",
             "session_init",
             "session_started",
@@ -239,7 +379,7 @@ def validate_browser_agents_terminated_with_recording(
 
     failures: list[str] = []
     for task_id, state in sorted(tasks.items()):
-        if not state["seen"]:
+        if not state["seen"] or (state["code"] and not state["browser"]):
             continue
         if not state["complete"]:
             failures.append(
@@ -261,7 +401,7 @@ def validate_browser_agents_terminated_with_recording(
             ):
                 recording_ok = True
                 break
-        if not recording_ok:
+        if not recording_ok and task_id not in verified_zero:
             failures.append(
                 f"browser task {task_id} has no correctly attached recording "
                 "(need reachable recording_view_url or fetchable recording_file_pointer)"
@@ -273,35 +413,62 @@ def validate_browser_agents_terminated_with_recording(
 
 def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
     """Extract short, rendered phrases from each visible transcript role."""
+    markdown = None
     snippets: dict[str, list[str]] = {"user": [], "assistant": []}
     for message in messages:
         if not isinstance(message, dict):
             continue
         role = message.get("role")
         content = str(message.get("text") or "")
-        meta = _message_metadata(message)
-        # Mirrors the FE root filter (filterMessagesForSubAgent): sub-agent rows
-        # render inside their collapsed card, except explore-agent rows.
-        nested = meta.get("subAgentId") is not None and meta.get("agentType") != "explore"
-        if role not in ("USER", "ASSISTANT") or meta.get("hidden") or nested:
+        metadata = _message_metadata(message)
+        if role not in ("USER", "ASSISTANT") or metadata.get("hidden"):
             continue
-        for line in content.splitlines():
-            # React renders Markdown markers as formatting, so match the text
-            # the signed-out visitor sees instead of the raw Markdown source.
-            visible_line = re.sub(
-                r"^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)", "", line
+        # Match MessageList's root scope: nested browser reasoning is rendered
+        # inside its browser panel, not in the root transcript being checked.
+        # Explore progress and Claude Code lifecycle anchors remain root-visible.
+        if (
+            metadata.get("subAgentId") is not None
+            and metadata.get("agentType") != "explore"
+            and not (
+                metadata.get("toolName") == "spawn_claude_code_agent"
+                and metadata.get("action_type")
+                in {"claude_code_started", "task_complete", "session_cancelled"}
             )
-            visible_line = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", visible_line)
-            visible_line = re.sub(r"`([^`]+)`", r"\1", visible_line)
-            visible_line = re.sub(
-                r"\*\*([^*]+)\*\*|__([^_]+)__", lambda m: m[1] or m[2], visible_line
+        ):
+            continue
+        if role == "USER" or message.get("file_pointer"):
+            # UserBubble and AssistantAttachmentBubble render literal text.
+            lines = content.splitlines()
+        else:
+            # Use the existing agents dependency rather than approximating
+            # CommonMark: adjacent emphasis delimiters may remain literal text.
+            if markdown is None:
+                from markdown_it import MarkdownIt
+
+                markdown = MarkdownIt("commonmark", {"html": False}).enable(
+                    ["strikethrough", "table"]
+                )
+            # Match the FE's normalizeMarkdownText before parsing. Keep block
+            # and line boundaries; image alt/link destinations are not innerText.
+            content = re.sub(
+                r"\\([nt*_`#\[\]()])",
+                lambda match: {"n": "\n", "t": "\t"}.get(match[1], match[1]),
+                content,
             )
-            visible_line = re.sub(
-                r"(?<!\w)\*([^*]+)\*(?!\w)|(?<!\w)_([^_]+)_(?!\w)",
-                lambda m: m[1] or m[2],
-                visible_line,
-            )
-            visible_line = re.sub(r"~~([^~]+)~~", r"\1", visible_line).strip()
+            lines: list[str] = []
+            for token in markdown.parse(content):
+                if token.type == "inline":
+                    rendered = "".join(
+                        child.content
+                        if child.type in {"text", "code_inline"}
+                        else "\n" if child.type in {"softbreak", "hardbreak"} else ""
+                        for child in token.children or []
+                    )
+                    lines.extend(rendered.splitlines())
+                elif token.type in {"fence", "code_block"}:
+                    lines.extend(token.content.splitlines())
+        for line in lines:
+            visible_line = line.strip()
             if len(visible_line) >= 12:
                 snippets[str(role).lower()].append(visible_line[:60])
                 break
@@ -309,7 +476,8 @@ def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
 
 
 def verify_agent_reachable(
-    agent_id: str, token: str, *, timeout: float = 60.0
+    agent_id: str, token: str, *, timeout: float = 60.0,
+    zero_session_task_ids: set[str] | None = None,
 ) -> tuple[str, int]:
     """Probe archive-backed agent detail; return (status_label, message_count).
 
@@ -321,8 +489,17 @@ def verify_agent_reachable(
         url, headers={"Authorization": f"BenchmarkShare {token}"}, method="GET"
     )
     try:
-        with _opener().open(request, timeout=timeout) as response:
-            payload = json.loads(response.read() or b"{}")
+        for attempt in range(2):
+            try:
+                with _opener().open(request, timeout=timeout) as response:
+                    payload = json.loads(response.read() or b"{}")
+                break
+            except TimeoutError:
+                # This read-only request can safely start a fresh connection.
+                # Preserve the per-attempt timeout and the caller's outer bound;
+                # HTTP/auth, malformed JSON, and evidence failures never retry.
+                if attempt:
+                    raise
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise SystemExit(f"agent API HTTP {exc.code}: {body[:300]}") from exc
@@ -335,7 +512,7 @@ def verify_agent_reachable(
             f"agent {agent_id} returned no messages — Hub archive not readable yet"
         )
     browser_failures = validate_browser_agents_terminated_with_recording(
-        agent_id, messages
+        agent_id, messages, zero_session_task_ids=zero_session_task_ids,
     )
     if browser_failures:
         raise SystemExit(
@@ -448,14 +625,17 @@ def main() -> int:
     args = parse_args()
     agent_id = _normalize_agent_id(args.agent_id)
     run_id = args.run_id or ""
+    zero_session_task_ids: set[str] = set()
     if args.run_json:
         run_path = args.run_json.resolve()
+        bundle = json.loads(run_path.read_text(encoding="utf-8"))
+        zero_session_task_ids = verified_zero_session_tasks(bundle, agent_id)
         if args.skip_hub_upload:
-            run_id = str(json.loads(run_path.read_text(encoding="utf-8")).get("run_id") or "")
+            run_id = str(evidence_bundle_for_agent(bundle, agent_id).get("run_id") or "")
         else:
-            run_id = upload_run_json(run_path)
+            run_id = upload_run_json(run_path, agent_id)
             dual_write_claude_code_sessions(run_path, agent_id)
-    if not re.fullmatch(_AGENT_ID_RE, run_id):
+    if not _AGENT_ID_RE.fullmatch(run_id):
         raise SystemExit("a UUID run_id from --run-json or --run-id is required for a share link")
     token = benchmark_share_token(run_id)
     dump = (args.dump or latest_dump_for_agent(agent_id)).resolve()
@@ -463,7 +643,9 @@ def main() -> int:
     if args.skip_fe_verify:
         fe_status, message_count = "skipped", 0
     else:
-        fe_status, message_count = verify_agent_reachable(agent_id, token)
+        fe_status, message_count = verify_agent_reachable(
+            agent_id, token, zero_session_task_ids=zero_session_task_ids,
+        )
     manifest = write_manifest(
         agent_id=agent_id,
         run_id=run_id,

@@ -280,6 +280,7 @@ if $DB_FOUND; then
     fi
     echo "Skipping local DB schema sync; existing backend caller prepared the test database."
   else
+    node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
     if command -v psql >/dev/null 2>&1; then
       psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 DO $$
@@ -293,11 +294,18 @@ BEGIN
       WHERE attention.id = request.id
     );
   END IF;
+  -- On system Postgres this database is shared with the local stack, whose
+  -- real provider quota failures persist process-global funded-key cooldowns.
+  -- Tests that exercise the funded routes assume no backoff is active.
+  IF to_regclass('"Integration"') IS NOT NULL THEN
+    DELETE FROM "Integration"
+    WHERE "userId" = '00000000-0000-0000-0000-000000000000'
+      AND name IN ('gpt_api_key_cooldown', 'anthropic_api_key_cooldown');
+  END IF;
 END $$;
 SQL
     fi
     echo "Syncing Prisma schema to local test database..."
-    bash "$SCRIPT_DIR/sync-prisma-client.sh"
     npx prisma db push --skip-generate --accept-data-loss >/dev/null
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
     # Credential seeding and smoke execution are separate controls. A caller may
@@ -386,14 +394,26 @@ PORT="${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-$START_PORT}}"
 PORT_LOCK_DIR=""
 BACKEND_PID=""
 
-source "$ROOT_DIR/scripts/lib/process-tree.sh"
+# npm/tsx can leave the server below a launcher process. Snapshot and drain
+# the owned descendants before terminating that launcher, then join its PID.
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 cleanup() {
-  stop_process_tree "$BACKEND_PID"
-  BACKEND_PID=""
+  local result=$? cleaned=1
+  trap - EXIT INT TERM
+  if [[ -n "$BACKEND_PID" ]]; then
+    if cloudbench_terminate_tree_and_wait 5 "$BACKEND_PID"; then
+      wait "$BACKEND_PID" 2>/dev/null || true
+    else
+      echo "❌ Could not verify isolated backend process-tree cleanup" >&2
+      result=1
+      cleaned=0
+    fi
+  fi
 
-  if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
+  if [[ "$cleaned" == 1 && -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
     rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
   fi
+  exit "$result"
 }
 # Bash resumes the script after a signal trap returns, so INT/TERM must exit
 # (and let the EXIT trap clean up) rather than release the lock and keep going.
@@ -468,10 +488,21 @@ echo "Artifacts: $ARTIFACT_DIR"
 
 # Launch node directly: `npx tsx` interposes npx → sh → tsx → node, and killing
 # $! (npx) orphans the server, which keeps holding its port after the run.
+# Defer cancellation only across the background-child ownership handoff.
+BACKEND_PENDING_SIGNAL=0
+trap 'BACKEND_PENDING_SIGNAL=130' INT
+trap 'BACKEND_PENDING_SIGNAL=143' TERM
+
 PORT="$PORT" \
 DISABLE_GMAIL_SYNC=1 \
 node --import tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ "$BACKEND_PENDING_SIGNAL" != 0 ]]; then
+  exit "$BACKEND_PENDING_SIGNAL"
+fi
+
 
 READY=0
 for _ in $(seq 1 120); do

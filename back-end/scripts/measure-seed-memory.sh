@@ -77,6 +77,9 @@ cleanup() {
     fi
 }
 cleanup_all() {
+    # A failed pipeline expansion can inherit EXIT; only the creating shell owns
+    # these databases. $$ and BASH_SUBSHELL can still name the parent in that trap.
+    /bin/sh -c '[ "$PPID" = "$1" ]' cleanup-owner "$$" || return 0
     cleanup
     if $USE_SYSTEM_PG; then
         PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$SRC_DB" >/dev/null 2>&1 || true
@@ -149,7 +152,7 @@ if $USE_SYSTEM_PG; then
     PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$SRC_DB" >/dev/null 2>&1 || true
     PGPASSWORD=postgres createdb -h localhost -p 5432 -U postgres "$SRC_DB" || {
         echo "❌ could not create system source database $SRC_DB" | tee -a "$SUMMARY"; exit 1; }
-    echo "   restoring source into ${SRC_DB}…" | tee -a "$SUMMARY"
+    printf '   restoring source into %s…\n' "$SRC_DB" | tee -a "$SUMMARY"
     PGPASSWORD=postgres pg_restore -h localhost -p 5432 -U postgres -d "$SRC_DB" \
         --no-owner --no-acl "$DUMP" >/dev/null 2>&1 || true
     SRC_ROWS="$(psql_db "$SRC_DB" -tAc \
@@ -405,11 +408,13 @@ for i in $(seq 1 "$RUNS"); do
     fi
     if [ "$(uname -s)" = "Darwin" ]; then
         SEED_PEAK_RSS_REPORT="$report" \
+            NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
             "$TIME_BIN" -l npx tsx scripts/seed-local.ts > "$log" 2>&1
         rc=$?
         os_peak_bytes="$(grep -oE '[0-9]+ +maximum resident set size' "$log" | grep -oE '^[0-9]+' | tail -1)"
     else
         SEED_PEAK_RSS_REPORT="$report" \
+            NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
             "$TIME_BIN" -v npx tsx scripts/seed-local.ts > "$log" 2>&1
         rc=$?
         os_peak_kb="$(grep -oE 'Maximum resident set size \(kbytes\):[[:space:]]*[0-9]+' "$log" | grep -oE '[0-9]+$' | tail -1)"

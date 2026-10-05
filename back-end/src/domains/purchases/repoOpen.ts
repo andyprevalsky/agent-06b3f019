@@ -1,5 +1,6 @@
 import { PurchaseSpendStatus, type Prisma } from '@prisma/client';
 import { runTransactionWithRetry } from '../../providers/database';
+import { lockPurchaseAgentAdmission } from './repoAgentAdmission';
 import { canonicalStoredPurchaseFingerprint } from './fingerprint';
 
 const PURCHASE_OPEN_LOCK_SEED = 4_951_887;
@@ -31,6 +32,9 @@ export async function createPendingPurchaseWithLock(data: {
   const agentId =
     data.agentId !== undefined && data.agentId.trim() !== '' ? data.agentId.trim() : undefined;
   return runTransactionWithRetry(async (transaction) => {
+    // Deletion seals this same generation. Either the purchase is visible to
+    // cleanup before the seal commits, or this admission is rejected.
+    await lockPurchaseAgentAdmission(transaction, { userId: data.userId, agentId });
     const lockKey = `${data.userId}:${data.canonicalFingerprint}`;
     await transaction.$queryRaw`
       WITH acquired AS MATERIALIZED (

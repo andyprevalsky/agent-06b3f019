@@ -19,6 +19,10 @@ import {
   paymentMethodIdForBenchmarkCard,
 } from './catalog';
 import {
+  prepareBenchmarkAgentCardResidual,
+  type BenchmarkResidualDependencies,
+} from './benchmarkResidual';
+import {
   getPhoneBenchmarkPaymentAuditPathOverride,
   isAgentCardOrgOAuthConfigured,
   TEST_PAYMENT_PUBLIC_BASE_URL,
@@ -44,7 +48,7 @@ export { findAgentOwnerId } from './repo';
 const PHONE_BENCHMARK_DEFAULT_AMOUNT_CENTS = 3420;
 const PHONE_BENCHMARK_DEFAULT_ITEM = 'Dozen red roses with delivery';
 
-interface TestPaymentDependencies {
+interface TestPaymentDependencies extends BenchmarkResidualDependencies {
   settleAgentCardSandboxPayment?: (
     input: AgentCardSandboxSettlementInput
   ) => Promise<AgentCardSandboxSettlementResult>;
@@ -59,9 +63,12 @@ export async function configureBenchmarkAgentCardSetup(
     action?: unknown;
   },
   dependencies: TestPaymentDependencies = {}
-): Promise<{ status: 'connect_required' | 'connected' }> {
+): Promise<{ status: 'connect_required' | 'connected' | 'residual_ready' }> {
   const userId = typeof input.userId === 'string' ? input.userId.trim() : '';
   if (userId === '') throw new TestPaymentError('userId is required');
+  if (input.action === 'prepare-residual') {
+    return prepareBenchmarkAgentCardResidual(dependencies);
+  }
   if (input.action === 'reset') {
     await testPaymentRepo.resetBenchmarkAgentCardSetup(userId);
     return { status: 'connect_required' };
@@ -110,7 +117,7 @@ export async function configureBenchmarkAgentCardSetup(
     await testPaymentRepo.completeBenchmarkAgentCardSetup(userId, cardholderId);
     return { status: 'connected' };
   }
-  throw new TestPaymentError('action must be reset or complete');
+  throw new TestPaymentError('action must be reset, complete, or prepare-residual');
 }
 
 export async function resolvePublicBaseUrl(): Promise<string | null> {

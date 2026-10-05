@@ -68,7 +68,7 @@
 #   --vm-size <size>   machine size at --setup (default shared-cpu-4x)
 #   --vm-memory <mb>   machine memory at --setup (default 8192)
 #   --volume-size <gb> volume size at --setup (default 20)
-#   --timeout <secs>   hard ceiling for ordinary tasks (default 3600); catalog
+#   --timeout <secs>   controller ceiling for ordinary tasks (default 7200); catalog
 #                      step-budget-only Polar uses a semantic-inactivity watchdog
 #                      capped by this value (default inactivity 1800)
 #
@@ -86,8 +86,10 @@ export PYTHONDONTWRITEBYTECODE=1
 APP="navi-whisper-lux-bench"
 PROD_APP="navi-whisper-lux"   # NEVER touch this.
 REGION="${CLOUDBENCH_REGION:-iad}"
-MACHINE_NAME="cloudbench-warm"
-VOLUME_NAME="cloudbench_data"     # Fly volume names must be [a-z0-9_].
+MACHINE_NAME="${CLOUDBENCH_WARM_MACHINE_NAME:-cloudbench-warm}"
+VOLUME_NAME="${CLOUDBENCH_WARM_VOLUME_NAME:-cloudbench_data}"     # Fly volume names must be [a-z0-9_].
+case "$MACHINE_NAME" in ''|*[!a-z0-9-]*) echo "Invalid warm machine name" >&2; exit 2 ;; esac
+case "$VOLUME_NAME" in ''|*[!a-z0-9_]*) echo "Invalid warm volume name" >&2; exit 2 ;; esac
 ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
@@ -106,16 +108,21 @@ CLOUDBENCH_RUNTIME_SCRIPT_ROOT="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}
     && CLOUDBENCH_RUNTIME_LIB_ROOT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/lib" \
     || CLOUDBENCH_RUNTIME_LIB_ROOT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT"
 CLOUDBENCH_GUEST_BOOT_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-boot.sh"
+CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-boot-payload.py"
+CLOUDBENCH_GUEST_CODEX_AUTH_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-codex-auth.py"
 CLOUDBENCH_GUEST_RUN_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-run.sh"
 CLOUDBENCH_GUEST_FETCH_REF_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-fetch-ref.sh"
 CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-sync-deps.sh"
 CLOUDBENCH_GUEST_SYNC_PRISMA_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-sync-prisma-client.sh"
+CLOUDBENCH_GUEST_NGROK_INSTALL_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-install-ngrok.sh"
 CLOUDBENCH_GUEST_CURRENT_RUN_ARTIFACT_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-current-run-artifact.py"
 CLOUDBENCH_GUEST_PREPARE_PATCH_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-prepare-patch.sh"
 CLOUDBENCH_GUEST_STATUS_SERVER="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-status-server.py"
 CLOUDBENCH_GUEST_BENCHMARK_TARGET_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-benchmark-target.py"
 CLOUDBENCH_GUEST_CATALOG_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench_catalog.py"
 CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench_execution_provenance.py"
+CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-exact-session-cleanup.py"
+CLOUDBENCH_GUEST_RECOVERY_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-guest-recovery.py"
 CLOUDBENCH_GUEST_ENV_HELPER="$CLOUDBENCH_RUNTIME_LIB_ROOT/cloudbench-env.sh"
 CLOUDBENCH_GUEST_SEED_BUDGET_LIB="$CLOUDBENCH_RUNTIME_LIB_ROOT/cloudbench-seed-budget.sh"
 MACHINE_READINESS_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-machine-readiness.py"
@@ -126,6 +133,10 @@ STATE_FILE="$ROOT_DIR/.context/cloudbench-machine.json"
 POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
+WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+if [ "$MACHINE_NAME" != cloudbench-warm ]; then
+    WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.$MACHINE_NAME.fp"
+fi
 APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"
 # Cross-workspace app-environment lock primitive (acquire/release/assert). Its
 # wait budget must outlast a peer's warm-dep refresh so concurrent fleets queue
@@ -165,7 +176,17 @@ VM_MEMORY="8192"
 WARM_PARKED_VM_SIZE="${CLOUDBENCH_WARM_PARKED_VM_SIZE:-shared-cpu-1x}"
 WARM_PARKED_VM_MEMORY="${CLOUDBENCH_WARM_PARKED_VM_MEMORY:-2048}"
 VOLUME_SIZE="20"
-RUN_TIMEOUT="3600"      # 60 min per-run ceiling (warm: no WMH build; serve-only).
+RUN_TIMEOUT="7200"      # 120 min controller backstop; benchmark work has its own ceiling.
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS-7200}"
+case "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in
+    ''|*[!0-9]*|0) echo "❌ BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
+[ "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" -gt 0 ] || exit 2
+CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS="${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS}"
+case "$CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS" in
+    ''|*[!0-9]*|0) echo "❌ CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
+[ "$CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS" -gt 0 ] || exit 2
 DASHBOARD="1"           # proxy + open the live dashboard (auto-off under CI).
 # Per-workspace default so concurrent workspaces get non-colliding dashboards
 # (CONDUCTOR_PORT=3001 → 8765, the historical default).
@@ -316,7 +337,10 @@ fi
 # Persistent pool volumes can still have a previous detached driver unwinding
 # while the next run starts. Scope every terminal marker to this controller so
 # stale output can never complete or populate the new run.
-RUN_LOG_TOKEN="$$-$(date +%s)-$RANDOM"
+RUN_LOG_TOKEN="${CLOUDBENCH_FLEET_RUN_TOKEN:-$$-$(date +%s)-$RANDOM}"
+case "$RUN_LOG_TOKEN" in
+    ''|*[!a-zA-Z0-9._-]*) echo "❌ invalid cloud benchmark run token" >&2; exit 2 ;;
+esac
 DONE_MARKER="::CLOUDBENCH-DONE:: token=$RUN_LOG_TOKEN"
 REPORT_BEGIN="::CLOUDBENCH-REPORT-CARD-BEGIN:: token=$RUN_LOG_TOKEN"
 REPORT_END="::CLOUDBENCH-REPORT-CARD-END:: token=$RUN_LOG_TOKEN"
@@ -1688,6 +1712,41 @@ echo \"::CLOUDBENCH-REF::\$REMOTE_REF\"" "$GIT_SYNC_TO" 2>&1 | grep -av '^Connec
     return 0
 }
 
+# Apply exactly the fleet's workspace after fetching its reachable base. Keep
+# staging outside the checkout, validate bytes on BOTH sides, and clean only this
+# maintenance invocation's files. The caller holds the shared warm-source lease.
+warm_source_apply_patch() {  # <machine-id> <patch-file> <pinned-sha256>
+    local mid="$1" patch="$2" digest="$3"
+    local remote_dir="${REMOTE_REPO%/*}/cloudbench-warm-patch.$$"
+    [ -s "$patch" ] && [ -n "$digest" ] \
+        && [ "$(cloudbench_env_sha256 "$patch")" = "$digest" ] || {
+        echo "❌ warm workspace patch checksum mismatch" >&2
+        return 1
+    }
+    _sftp_put_warm_patch() {
+        ssh_exec "$mid" "mkdir -p '$remote_dir'; rm -f '$remote_dir/workspace.diff' '$remote_dir/prepare.sh'" >/dev/null &&
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 \
+            "$patch" "$remote_dir/workspace.diff" &&
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0700 \
+            "$CLOUDBENCH_GUEST_PREPARE_PATCH_SCRIPT" "$remote_dir/prepare.sh"
+    }
+    if ! cloudbench_retry_command \
+        "${CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS:-5}" \
+        "${CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS:-3}" _sftp_put_warm_patch; then
+        ssh_exec "$mid" "rm -f '$remote_dir/workspace.diff' '$remote_dir/prepare.sh'; rmdir '$remote_dir'" >/dev/null || true
+        echo "❌ failed to upload the pinned warm workspace patch" >&2
+        return 1
+    fi
+    ssh_exec "$mid" "set -e
+trap 'rm -f \"$remote_dir/workspace.diff\" \"$remote_dir/prepare.sh\"; rmdir \"$remote_dir\"' EXIT
+actual=\$(sha256sum '$remote_dir/workspace.diff' | cut -d ' ' -f1)
+[ \"\$actual\" = '$digest' ] || { echo 'FATAL: warm workspace patch checksum mismatch' >&2; exit 1; }
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='$REMOTE_REPO'
+bash '$remote_dir/prepare.sh' '$REMOTE_REPO' '$remote_dir/workspace.diff'
+git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' apply --check '$remote_dir/workspace.diff'
+git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' apply '$remote_dir/workspace.diff'" "${CLOUDBENCH_REFRESH_DEPS_SSH_TIMEOUT:-300}"
+}
+
 # SSH-exec a shell snippet on the machine, streaming output.
 # $1 = machine id, $2 = remote shell command, $3 = optional timeout seconds
 # (default CLOUDBENCH_SSH_EXEC_TIMEOUT or 1800). Always bound via _with_timeout:
@@ -2270,6 +2329,44 @@ if [ "$MODE" = "refresh-deps" ]; then
         echo "❌ invalid benchmark ref: $BENCH_REF is not a local commit" >&2
         exit 1
     fi
+    REFRESH_PATCH_FILE=""
+    REFRESH_PATCH_SHA256=""
+    REFRESH_OWNED_PATCH=""
+    cleanup_refresh_deps() {
+        if [ -n "${maintenance_mid:-}" ]; then
+            park_warm_source "${mid:-$maintenance_mid}" || true
+        fi
+        release_app_environment_lock
+        [ -z "$REFRESH_OWNED_PATCH" ] || rm -f "$REFRESH_OWNED_PATCH"
+    }
+    trap cleanup_refresh_deps EXIT
+    trap 'cleanup_refresh_deps; exit 130' INT
+    trap 'cleanup_refresh_deps; exit 143' TERM
+    if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ]; then
+        if [ -n "${CLOUDBENCH_LOCAL_PATCH_SOURCE:-}" ]; then
+            REFRESH_PATCH_FILE="$CLOUDBENCH_LOCAL_PATCH_SOURCE"
+            REFRESH_PATCH_SHA256="${CLOUDBENCH_LOCAL_PATCH_SHA256:-}"
+            [ -s "$REFRESH_PATCH_FILE" ] && [ -n "$REFRESH_PATCH_SHA256" ] \
+                && [ "$(cloudbench_env_sha256 "$REFRESH_PATCH_FILE")" = "$REFRESH_PATCH_SHA256" ] || {
+                echo "❌ shared warm workspace patch is missing or its pinned checksum mismatches" >&2
+                exit 1
+            }
+        else
+            # Direct maintenance also supports committed, unpublished changes:
+            # compare the workspace with the fetchable base, never just HEAD.
+            REFRESH_OWNED_PATCH="$(mktemp)"
+            refresh_patch_rc=0
+            cloudbench_prepare_workspace_patch "$ROOT_DIR" "$EXPECTED_REF" \
+                "$REFRESH_OWNED_PATCH" "$ROOT_DIR/scripts/create-worktree-patch.sh" || refresh_patch_rc=$?
+            if [ "$refresh_patch_rc" -eq 0 ]; then
+                REFRESH_PATCH_FILE="$REFRESH_OWNED_PATCH"
+                REFRESH_PATCH_SHA256="$(cloudbench_env_sha256 "$REFRESH_PATCH_FILE")"
+            elif [ "$refresh_patch_rc" -ne "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
+                echo "❌ could not freeze the warm workspace patch" >&2
+                exit 1
+            fi
+        fi
+    fi
     EXPECTED_NODE_FP="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")"
     EXPECTED_PY_FP="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
     [ -n "$EXPECTED_NODE_FP" ] && [ -n "$EXPECTED_PY_FP" ] || {
@@ -2278,13 +2375,6 @@ if [ "$MODE" = "refresh-deps" ]; then
     }
     echo "═══ run-bench-cloud --refresh-deps (ref $BENCH_REF) ═══"
     ensure_app
-    cleanup_refresh_deps() {
-        park_warm_source "${mid:-${maintenance_mid:-}}" || true
-        release_app_environment_lock
-    }
-    trap cleanup_refresh_deps EXIT
-    trap 'cleanup_refresh_deps; exit 130' INT
-    trap 'cleanup_refresh_deps; exit 143' TERM
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
     acquire_app_environment_lock || exit 1
 
@@ -2316,6 +2406,10 @@ if [ "$MODE" = "refresh-deps" ]; then
     if [ "$sync_rc" -ne 0 ]; then
         echo "❌ exact remote checkout failed" >&2
         exit 1
+    fi
+
+    if [ -n "$REFRESH_PATCH_FILE" ]; then
+        warm_source_apply_patch "$mid" "$REFRESH_PATCH_FILE" "$REFRESH_PATCH_SHA256" || exit 1
     fi
 
     echo "📦 rebuilding/syncing warm dependency trees for the exact checked-out ref ..."
@@ -2374,9 +2468,9 @@ for m in json.load(sys.stdin) or []:
     # freshness without mounting anything. Shared across sibling workspaces
     # via the git-common dir (same pattern as pool claims).
     printf '%s %s %s %s\n' "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP" \
-        > "$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+        > "$WARM_DEPS_STATE_FILE"
     echo "✅ warm volume deps refreshed; fresh snapshot: $NEW_SNAP"
-    echo "   state: $GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+    echo "   state: $WARM_DEPS_STATE_FILE"
     exit 0
 fi
 
@@ -2482,7 +2576,7 @@ ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
     # volume only after the model reported ready and the source is proven quiescent; otherwise
     # successful maintenance silently leaves every benchmark on the previous WMH corpus.
     read -r RECORDED_NODE_FP RECORDED_PY_FP _ _ \
-        < "$GIT_COMMON_DIR/cloudbench-warm-deps.fp" 2>/dev/null || true
+        < "$WARM_DEPS_STATE_FILE" 2>/dev/null || true
     if [ -z "${RECORDED_NODE_FP:-}" ] || [ -z "${RECORDED_PY_FP:-}" ]; then
         echo "❌ cannot publish WMH snapshot without the existing dependency proof" >&2
         exit 1
@@ -2502,7 +2596,7 @@ for m in json.load(sys.stdin) or []:
     create_volume_snapshot_exact "$VOL_ID" || exit 1
     NEW_SNAP="$CREATED_SNAPSHOT_ID"
     printf '%s %s %s %s\n' "$RECORDED_NODE_FP" "$RECORDED_PY_FP" "$SNAP_START_EPOCH" \
-        "$NEW_SNAP" > "$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+        "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE"
     echo "✅ WMH model snapshot published for fleet clones: $NEW_SNAP"
 
     # EXIT trap parks the already-stopped source machine.
@@ -3011,7 +3105,7 @@ boot_update_with_capacity_recovery() {
             return 0
         fi
         if grep -Eiq \
-            'reached (its|the) machine limit|machine limit[^[:alnum:]]+reached|cpu_overcommit_exceeded|shared[ -]cpu.*(limit|overcommit)' \
+            'reached (its|the) machine limit|machine limit[^[:alnum:]]+reached|cpu_overcommit_exceeded|shared[ -]cpu.*(limit|overcommit)|insufficient CPUs available to fulfill request on the current host' \
             "$update_log" 2>/dev/null; then
             if [ "$SECONDS" -ge "$capacity_deadline" ]; then
                 echo "❌ boot update replacement capacity did not return within ${capacity_wait}s" >&2
@@ -3051,7 +3145,7 @@ confirm_guest_shutdown() {
     # deadline and flip a clean PASS into exit 125 + KEEP_CLONES. Skip the
     # browser-cleanup handshake and record the same confirmation marker fleet
     # teardown expects.
-    if cloudbench_skip_held_driver_teardown_race; then
+    if [ -z "${CODEX_AUTH_SHA256:-}" ] && cloudbench_skip_held_driver_teardown_race; then
         marker_tmp="$OUT_DIR/guest-shutdown.confirmed.tmp.$$"
         printf '%s\n' "${RUN_LOG_TOKEN:-probe-or-demo}" > "$marker_tmp" \
             && mv "$marker_tmp" "$OUT_DIR/guest-shutdown.confirmed"
@@ -3106,11 +3200,318 @@ confirm_guest_shutdown() {
     echo "❌ guest cleanup was not acknowledged; machine ownership must be retained (HTTP ${status_code:-transport-error})" >&2
     return 1
 }
+cloudbench_prepare_runtime_evidence() {  # before boot config/start; no guest work admitted on failure
+    [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] || return 0
+    cloudbench_skip_held_driver_teardown_race && return 0
+    # Fleet supplies its shared credential; a standalone boot run owns a fresh
+    # credential for the same authenticated status endpoint before guest config.
+    if [ -z "${CLOUDBENCH_BARRIER_TOKEN:-}" ]; then
+        CLOUDBENCH_BARRIER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" || return 1
+    fi
+    export CLOUDBENCH_BARRIER_TOKEN
+    python3 - "$OUT_DIR" "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" "${CLOUDBENCH_FLEET_RUN_TOKEN:+fleet}" <<'PY'
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+os.umask(0o077)
+output_dir, run_token, machine, fleet = sys.argv[1:]
+assert re.fullmatch(r"[A-Za-z0-9._-]+", run_token) and machine
+assert not Path(output_dir).is_symlink()
+root = Path(output_dir).resolve(strict=True)
+intent = root / "runtime-evidence.pending"
+# The fleet owns deletion. Keep this independent of a truthful guest cleanup
+# acknowledgement: failed collection must retain the original volume.
+owner = intent.with_name("runtime-evidence.owner.json")
+capture = root / "remote-logs/runtime-evidence"
+if not fleet:
+    # Serialize only local admission. The pending owner fences the namespace
+    # after this short-lived lock exits, including an interrupted admission.
+    lock = os.open(root / ".runtime-evidence-admission.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    assert stat.S_ISREG(os.fstat(lock).st_mode)
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+assert not intent.exists() and not intent.is_symlink(), "previous runtime evidence is still pending"
+
+def read(path, ceiling=1048576):
+    assert path.resolve(strict=True) == path
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        assert stat.S_ISREG(info.st_mode) and info.st_size <= ceiling
+        data = stream.read(info.st_size + 1)
+        assert len(data) == info.st_size
+        return data
+
+def sync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+if owner.exists() or owner.is_symlink():
+    assert not fleet, "fleet runtime evidence ownership cannot be reused"
+    previous = json.loads(read(owner))
+    token = previous["run_token"]
+    assert previous["version"] == 1 and re.fullmatch(r"[0-9a-f]+", previous["machine_id"])
+    assert re.fullmatch(r"[A-Za-z0-9._-]+", token) and token not in (".", "..", run_token)
+    manifest = json.loads(read(capture / "manifest.json"))
+    assert all(manifest[key] == previous[key] for key in ("version", "machine_id", "run_token"))
+    services = json.loads(read(capture / "services.json"))
+    count = services["env"]["worker_processes"]
+    assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
+    cleanup_name = f"cloudbench-stack-cleanup-{token}.status"
+    expected = {"services.json", "run.json", "stack.log", cleanup_name, "logs/backend.log",
+                "logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
+    assert set(manifest["files"]) == expected
+    entries = list(capture.rglob("*"))
+    assert all(not path.is_symlink() for path in entries)
+    assert {str(path.relative_to(capture)) for path in entries} == expected | {"manifest.json", "logs"}
+    cleanup = dict(line.split("=", 1) for line in read(capture / cleanup_name).decode().splitlines())
+    assert cleanup["state"] == "clean" and cleanup["token"] == token
+    total = 0
+    for name, metadata in manifest["files"].items():
+        assert set(metadata) == {"bytes", "sha256"}
+        assert type(metadata["bytes"]) is int and metadata["bytes"] >= 0
+        total += metadata["bytes"]
+        assert total <= 512 * 1024 * 1024
+        path = capture / name
+        assert path.resolve(strict=True) == path
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+            before = os.fstat(stream.fileno())
+            assert stat.S_ISREG(before.st_mode) and before.st_size == metadata["bytes"]
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(65536), b""):
+                digest.update(chunk)
+            after = path.stat()
+            assert (before.st_ino, before.st_size, before.st_mtime_ns) == (after.st_ino, after.st_size, after.st_mtime_ns)
+            assert digest.hexdigest() == metadata["sha256"]
+    history = root / "runtime-evidence-history"
+    assert not history.is_symlink()
+    history.mkdir(exist_ok=True)
+    archive = history / token
+    archive.mkdir()
+    owner.rename(archive / owner.name)
+    capture.rename(archive / "runtime-evidence")
+    for directory in (archive, history, capture.parent, root):
+        sync_directory(directory)
+else:
+    assert not capture.exists() and not capture.is_symlink(), "runtime evidence has no matching owner"
+row = {"version": 1, "run_token": run_token, "machine_id": machine}
+for path in (owner, intent):
+    with path.open("x") as output:
+        json.dump(row, output, sort_keys=True)
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+sync_directory(root)
+PY
+}
+
+cloudbench_collect_runtime_evidence() {  # <destination> <port> <run-token> <machine> <deadline>
+    python3 - "$@" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+destination, port, run_token, machine, deadline = sys.argv[1:]
+os.umask(0o077)
+assert port.isascii() and port.isdigit() and 1 <= int(port) <= 65535
+assert deadline.isascii() and deadline.isdigit() and int(deadline) > 0
+assert re.fullmatch(r"[A-Za-z0-9._-]+", run_token) and machine
+maximum = 512 * 1024 * 1024
+parent = Path(destination)
+intent = parent.parent / "runtime-evidence.pending"
+owner = intent.with_name("runtime-evidence.owner.json")
+for path in (owner, intent):
+    assert not path.is_symlink() and path.is_file()
+    assert json.loads(path.read_text()) == {"version": 1, "run_token": run_token, "machine_id": machine}
+class RuntimeEvidenceDeadline(RuntimeError):
+    """The whole capture budget expired, not one retryable socket read."""
+
+def timed_out(_signum, _frame):
+    raise RuntimeEvidenceDeadline("terminal runtime evidence deadline expired")
+signal.signal(signal.SIGALRM, timed_out)
+signal.alarm(int(deadline))
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+headers = {"Authorization": "Bearer " + os.environ["CLOUDBENCH_BARRIER_TOKEN"],
+           "X-Cloudbench-Run-Token": run_token, "X-Cloudbench-Machine-Id": machine}
+url = f"http://127.0.0.1:{port}/runtime-evidence"
+shutdown_url = f"http://127.0.0.1:{port}/shutdown-health"
+driver_url = f"http://127.0.0.1:{port}/driver-health"
+ack_url = f"http://127.0.0.1:{port}/cloudbench-driver-clean-{run_token}.ack"
+def request(suffix=""):
+    return opener.open(urllib.request.Request(url + suffix, headers=headers), timeout=6)
+def manifest():
+    with request() as response:
+        data = response.read(1048577)
+        assert len(data) <= 1048576 and response.status == 200
+        return json.loads(data)
+def exited_without_ack():
+    # /shutdown-health is 409 until the controller sends POST /shutdown, even
+    # when a failed driver's boot supervisor has already sealed state=exited.
+    # Read both exact guest facts before deciding the runtime can never seal.
+    try:
+        with opener.open(urllib.request.Request(driver_url, headers=headers), timeout=6):
+            return False
+    except urllib.error.HTTPError as error:
+        if error.code != 410:
+            return False
+    try:
+        with opener.open(urllib.request.Request(ack_url, headers=headers), timeout=6) as response:
+            return response.read(256).strip() != run_token.encode()
+    except urllib.error.HTTPError as error:
+        return error.code == 404
+unacked_exits = 0
+shutdown_complete = False
+# DONE precedes the guest EXIT trap. Retry only seal observation and transient
+# transport reads before the first manifest, within the unchanged whole-capture
+# alarm. Once sealed, transfers and the final manifest comparison fail closed.
+while True:
+    try:
+        try:
+            expected = manifest()
+            break
+        except urllib.error.HTTPError as error:
+            if error.code != 409:
+                raise
+            if shutdown_complete:
+                # This 409 was observed after the exact terminal ACK, unlike
+                # the earlier read that may have raced the guest's seal.
+                raise RuntimeError("guest shutdown without sealed runtime evidence") from error
+        try:
+            with opener.open(urllib.request.Request(shutdown_url, headers=headers), timeout=6) as response:
+                if response.status == 204:
+                    shutdown_complete = True
+                    continue
+                assert response.status == 202
+        except urllib.error.HTTPError as shutdown_error:
+            if shutdown_error.code == 500:
+                raise RuntimeError("driver exited without cleanup acknowledgement") from shutdown_error
+            if shutdown_error.code not in (409, 503):
+                raise
+        unacked_exits = unacked_exits + 1 if exited_without_ack() else 0
+        if unacked_exits >= 2:
+            raise RuntimeError("driver exited without cleanup acknowledgement")
+    except urllib.error.HTTPError:
+        # HTTPError is a URLError subclass; authentication and protocol failures
+        # are not transient transport reads.
+        raise
+    except (urllib.error.URLError, TimeoutError, ConnectionError):
+        pass
+    time.sleep(0.5)
+assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
+files = expected["files"]
+required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
+assert isinstance(files, dict) and required <= files.keys() and len(files) <= 1030
+total = 0
+for name, metadata in files.items():
+    assert name in required or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
+    assert set(metadata) == {"bytes", "sha256"}
+    assert type(metadata["bytes"]) is int and metadata["bytes"] >= 0
+    assert re.fullmatch(r"[0-9a-f]{64}", metadata["sha256"])
+    total += metadata["bytes"]
+assert total <= maximum
+final = parent / "runtime-evidence"
+assert not final.exists() and not final.is_symlink()
+pending = Path(tempfile.mkdtemp(prefix=".runtime-evidence-", dir=parent))
+for name, metadata in files.items():
+    target = pending / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    remaining = metadata["bytes"]
+    with request("?" + urllib.parse.urlencode({"file": name})) as response, target.open("xb") as output:
+        assert response.status == 200 and response.headers.get("Content-Length") == str(remaining)
+        while remaining:
+            chunk = response.read(min(65536, remaining))
+            assert chunk, "runtime evidence response ended early"
+            output.write(chunk)
+            digest.update(chunk)
+            remaining -= len(chunk)
+        assert not response.read(1), "runtime evidence response exceeded manifest"
+        output.flush()
+        os.fsync(output.fileno())
+    assert digest.hexdigest() == metadata["sha256"], "runtime evidence hash mismatch"
+services = json.loads((pending / "services.json").read_text())
+count = services["env"]["worker_processes"]
+assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
+assert set(files) == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
+assert manifest() == expected, "runtime evidence changed across collection"
+with (pending / "manifest.json").open("x") as output:
+    json.dump(expected, output, sort_keys=True)
+    output.write("\n")
+    output.flush()
+    os.fsync(output.fileno())
+# Persist child directory entries before acknowledging the published capture.
+# File fsync alone does not make their names durable across controller failure.
+for directory in (pending / "logs", pending):
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+pending.rename(final)
+descriptor = os.open(parent, os.O_RDONLY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+signal.alarm(0)
+PY
+}
+
 stop_on_exit() {
     local ec=$?
+    local retirement_deadline=$((SECONDS + ${CLOUDBENCH_CHILD_TERM_SECONDS:-30} - 2))
+    local remaining shutdown_confirmed=0
     release_boot_config_update_slot
-    if ! confirm_guest_shutdown; then
+    if [ -n "${GUEST_SHUTDOWN_RESULT:-}" ]; then
+        if [ "$GUEST_SHUTDOWN_RESULT" = "0" ]; then shutdown_confirmed=1; else ec=125; fi
+    elif confirm_guest_shutdown; then
+        shutdown_confirmed=1
+    else
         ec=125
+    fi
+    # TERM and early exits bypass the normal post-loop collector. The same
+    # exact-owner data-plane transfer must finish before stop_proxy retires its
+    # only transport. Keep the original exit status and pending marker: result
+    # validation, not a signal handler, decides whether a run is accepted.
+    if [ "$shutdown_confirmed" = "1" ] \
+        && [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] \
+        && ! cloudbench_skip_held_driver_teardown_race \
+        && { [ -e "$OUT_DIR/runtime-evidence.pending" ] || [ -L "$OUT_DIR/runtime-evidence.pending" ]; }; then
+        mkdir -p "$OUT_DIR/remote-logs"
+        if [ ! -f "$OUT_DIR/remote-logs/cloudbench-driver.log" ]; then
+            if [ -f "${SSH_LOG:-}" ]; then
+                cp "$SSH_LOG" "$OUT_DIR/remote-logs/cloudbench-driver.log" || ec=70
+            else
+                ec=70
+            fi
+        fi
+        if [ ! -d "$OUT_DIR/remote-logs/runtime-evidence" ]; then
+            remaining=$((retirement_deadline - SECONDS))
+            if [ "$remaining" -le 0 ] \
+                || ! cloudbench_collect_runtime_evidence "$OUT_DIR/remote-logs" \
+                    "$LOCAL_STATUS_PORT" "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" "$remaining"; then
+                echo "❌ terminal runtime evidence remains incomplete; retaining exact owner" >&2
+                ec=70
+            fi
+        fi
     fi
     if declare -F cleanup_staged_local_files >/dev/null 2>&1; then
         cleanup_staged_local_files
@@ -3128,8 +3529,13 @@ stop_on_exit() {
     # In fleet mode the machine is a per-bench clone owned by run-bench-fleet,
     # which destroys it after collecting results — never stop it here.
     if [ "$STOP_DONE" != "1" ] && [ -z "$FLEET_MACHINE_ID" ]; then
-        STOP_DONE="1"
-        stop_machine "$mid"
+        if [ -e "$OUT_DIR/runtime-evidence.pending" ] || [ -L "$OUT_DIR/runtime-evidence.pending" ]; then
+            echo "❌ standalone runtime evidence remains pending; retaining original machine" >&2
+            ec=70
+        else
+            STOP_DONE="1"
+            stop_machine "$mid"
+        fi
     fi
     if [ "${LOCK_ACQUIRED:-0}" = "1" ]; then
         cloudbench_controller_lock_release "$LOCK_DIR"
@@ -3156,6 +3562,54 @@ cleanup_staged_local_files() {
         [ -n "$p" ] && rm -f "$p" 2>/dev/null || true
     done
 }
+# Explicit auth stays out of machine config.files and durable run artifacts.
+CODEX_AUTH_SOURCE=""
+CODEX_AUTH_SHA256=""
+if [ -n "${CODEX_AUTH_PATH:-}" ]; then
+    CODEX_AUTH_SOURCE="$(mktemp /tmp/rose-cloudbench-codex-auth.XXXXXXXX)" || exit 1
+    STAGED_LOCAL_FILES+=("$CODEX_AUTH_SOURCE")
+    rm -f "$CODEX_AUTH_SOURCE"
+    CODEX_AUTH_SHA256="$(python3 "$CLOUDBENCH_GUEST_CODEX_AUTH_SCRIPT" prepare \
+        --source "$CODEX_AUTH_PATH" --output "$CODEX_AUTH_SOURCE")" || exit 1
+fi
+
+stage_explicit_codex_auth() {  # <controller-staged guest helper>
+    [ -n "$CODEX_AUTH_SOURCE" ] || return 0
+    local helper="$1" deadline=$((SECONDS + 270)) remaining command staged=0 stage_log stage_reply stage_status
+    local probe_timeout="${CLOUDBENCH_SSH_PROBE_TIMEOUT_SECONDS:-10}"
+    case "$probe_timeout" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$probe_timeout" -gt 0 ] || return 1
+    case "$RUN_LOG_TOKEN" in ''|*[!a-zA-Z0-9._-]*) return 1 ;; esac
+    [[ "$mid" =~ ^[0-9a-f]{14,16}$ ]] || return 1
+    stage_log="$OUT_DIR/cloudbench-codex-stage.log"
+    : > "$stage_log"
+    stage_reply="$OUT_DIR/cloudbench-codex-stage-reply.log"
+    command="test \"\$(head -n 1 /data/bench.log)\" = RUNSTAMP-$RUN_LOG_TOKEN && export CLOUDBENCH_RUN_TOKEN=$RUN_LOG_TOKEN && python3 $helper stage --run-token $RUN_LOG_TOKEN --machine-id $mid --sha256 $CODEX_AUTH_SHA256"
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        remaining=$((deadline - SECONDS))
+        [ "$remaining" -le "$probe_timeout" ] || remaining="$probe_timeout"
+        if _with_timeout "$remaining" flyctl ssh console -a "$APP" --machine "$mid" \
+            -C "bash -lc $(printf '%q' "$command")" > "$stage_reply" 2>&1; then
+            cat "$stage_reply" >> "$stage_log"
+            stage_status="$(tail -n 1 "$stage_reply")"
+            [ "$stage_status" != already-ready ] || return 0
+            [ "$stage_status" = stage-ready ] || return 1
+            staged=1
+            break
+        fi
+        sleep 1
+    done
+    [ "$staged" = 1 ] || return 1
+    remaining=$((deadline - SECONDS)); [ "$remaining" -gt 0 ] || return 1
+    _with_timeout "$remaining" flyctl ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 \
+        "$CODEX_AUTH_SOURCE" "/tmp/rose-cloudbench-codex/$RUN_LOG_TOKEN-$mid/auth.pending" \
+        >> "$stage_log" 2>&1 || return 1
+    remaining=$((deadline - SECONDS)); [ "$remaining" -gt 0 ] || return 1
+    command="test \"\$(head -n 1 /data/bench.log)\" = RUNSTAMP-$RUN_LOG_TOKEN && export CLOUDBENCH_RUN_TOKEN=$RUN_LOG_TOKEN && python3 $helper publish --run-token $RUN_LOG_TOKEN --machine-id $mid --sha256 $CODEX_AUTH_SHA256"
+    _with_timeout "$remaining" flyctl ssh console -a "$APP" --machine "$mid" \
+        -C "bash -lc $(printf '%q' "$command")" >> "$stage_log" 2>&1
+}
+
 LOCAL_PATCH_FILE=""
 LOCAL_PATCH_SHA256=""
 if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ]; then
@@ -3247,6 +3701,9 @@ LIVE_BACKEND_PORT=""
 LIVE_BACKEND_URL=""
 CLOUDBENCH_API_KEY="$( { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env" 2>/dev/null | head -1; } | sed -E 's/^BACKEND_API_KEY=//; s/^"//; s/"$//' )"
 
+# Persist capture authority before boot configuration can launch guest writers.
+# A crash anywhere after admission leaves exact evidence ownership recoverable.
+cloudbench_prepare_runtime_evidence || { echo "❌ could not persist runtime evidence ownership" >&2; exit 70; }
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
     rm -f "$POST_CONFIG_START_MARKER"
@@ -3254,16 +3711,23 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
+        --env CODEX_AUTH_PATH=
+        --env CLOUDBENCH_CODEX_AUTH_HELPER=/cloudbench-codex-auth.py
+        --env "CLOUDBENCH_CODEX_AUTH_SHA256=$CODEX_AUTH_SHA256"
+        --env "CLOUDBENCH_CODEX_AUTH_MACHINE_ID=$mid"
         --env CLOUDBENCH_RUN_SCRIPT=/cloudbench-run.sh
         --env CLOUDBENCH_FETCH_REF_SCRIPT=/cloudbench-fetch-ref.sh
         --env CLOUDBENCH_SYNC_DEPS_SCRIPT=/cloudbench-sync-deps.sh
         --env CLOUDBENCH_SYNC_PRISMA_SCRIPT=/cloudbench-sync-prisma-client.sh
+        --env CLOUDBENCH_NGROK_INSTALL_SCRIPT=/cloudbench-install-ngrok.sh
         --env CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT=/cloudbench-current-run-artifact.py
         --env CLOUDBENCH_PREPARE_PATCH_SCRIPT=/cloudbench-prepare-patch.sh
         --env CLOUDBENCH_STATUS_SERVER_SCRIPT=/cloudbench-status-server.py
         --env CLOUDBENCH_BENCHMARK_TARGET_SCRIPT=/cloudbench-benchmark-target.py
         --env CLOUDBENCH_CATALOG_SCRIPT=/cloudbench_catalog.py
         --env CLOUDBENCH_ENV_HELPER=/cloudbench-env.sh
+        --env CLOUDBENCH_EXACT_SESSION_CLEANUP_SCRIPT=/cloudbench-exact-session-cleanup.py
+        --env CLOUDBENCH_GUEST_RECOVERY_SCRIPT=/cloudbench-guest-recovery.py
         --env "LOCAL_PATCH_B64="
         --env "CLOUDBENCH_RUN_TOKEN=$RUN_LOG_TOKEN"
         --env "REF=$BENCH_REF"
@@ -3282,18 +3746,34 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "CONDUCTOR_WORKSPACE_NAME=$RUN_WORKSPACE_NAME"
         --env "BENCHMARK_HUB_PARENT_RUN_ID=${BENCHMARK_HUB_PARENT_RUN_ID:-}"
         --env "BENCHMARK_FAST_MODE_CACHE=${BENCHMARK_FAST_MODE_CACHE:-}"
+        --env "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS"
         --env "BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=${BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY:-}"
         --env "ROSE_EXCLUDE_ANTHROPIC_FAMILY=${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}"
         --env "BENCHMARK_PEAK_FLY_MACHINES=$OBSERVED_PEAK_FLY_MACHINES"
         --env "BENCHMARK_VM_USD_PER_HOUR=$VM_USD_PER_HOUR"
         --env "CLOUDBENCH_INFRA_PROBE=${CLOUDBENCH_INFRA_PROBE:-0}"
     )
+    _pool_shape_args=()
+    if [ -n "${CLOUDBENCH_POOL_BOOT_VM_SIZE:-}" ] \
+        || [ -n "${CLOUDBENCH_POOL_BOOT_VM_MEMORY:-}" ]; then
+        if ! [[ "${CLOUDBENCH_POOL_BOOT_VM_SIZE:-}" =~ ^(shared-cpu|performance)-[1-9][0-9]*x$ ]]; then
+            echo "❌ invalid claimed-pool VM size" >&2
+            exit 70
+        fi
+        case "${CLOUDBENCH_POOL_BOOT_VM_MEMORY:-}" in
+            ''|*[!0-9]*|0) echo "❌ invalid claimed-pool VM memory" >&2; exit 70 ;;
+        esac
+        _pool_shape_args=(--vm-size "$CLOUDBENCH_POOL_BOOT_VM_SIZE"
+                          --vm-memory "$CLOUDBENCH_POOL_BOOT_VM_MEMORY")
+    fi
     _boot_file_args=(
         --file-local "/cloudbench-boot.sh=$CLOUDBENCH_GUEST_BOOT_SCRIPT"
         --file-local "/cloudbench-run.sh=$CLOUDBENCH_GUEST_RUN_SCRIPT"
+        --file-local "/cloudbench-codex-auth.py=$CLOUDBENCH_GUEST_CODEX_AUTH_SCRIPT"
         --file-local "/cloudbench-fetch-ref.sh=$CLOUDBENCH_GUEST_FETCH_REF_SCRIPT"
         --file-local "/cloudbench-sync-deps.sh=$CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT"
         --file-local "/cloudbench-sync-prisma-client.sh=$CLOUDBENCH_GUEST_SYNC_PRISMA_SCRIPT"
+        --file-local "/cloudbench-install-ngrok.sh=$CLOUDBENCH_GUEST_NGROK_INSTALL_SCRIPT"
         --file-local "/cloudbench-current-run-artifact.py=$CLOUDBENCH_GUEST_CURRENT_RUN_ARTIFACT_SCRIPT"
         --file-local "/cloudbench-prepare-patch.sh=$CLOUDBENCH_GUEST_PREPARE_PATCH_SCRIPT"
         --file-local "/cloudbench-status-server.py=$CLOUDBENCH_GUEST_STATUS_SERVER"
@@ -3301,6 +3781,8 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --file-local "/cloudbench_catalog.py=$CLOUDBENCH_GUEST_CATALOG_SCRIPT"
         --file-local "/cloudbench-env.sh=$CLOUDBENCH_GUEST_ENV_HELPER"
         --file-local "/cloudbench-seed-budget.sh=$CLOUDBENCH_GUEST_SEED_BUDGET_LIB"
+        --file-local "/cloudbench-exact-session-cleanup.py=$CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT"
+        --file-local "/cloudbench-guest-recovery.py=$CLOUDBENCH_GUEST_RECOVERY_SCRIPT"
     )
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
         _envargs+=(
@@ -3374,6 +3856,29 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     # Report-card / RCA agent links must outlive the ephemeral dashboard mirror.
     # Always-on prod viewer rehydrates archived runs via findAgentAcrossRuns.
     [ "$DASHBOARD" = "1" ] && _envargs+=( --env "BENCHMARK_REPORT_FRONTEND_URL=https://roselabs.ai" )
+    # The patch is only part of the request: uncompressed current bootstrap
+    # helpers plus a compressed patch exceeded the provider body ceiling. Pack
+    # every non-entrypoint file losslessly; preserve the original guest paths,
+    # patch digests, and execution provenance after checksum-verified unpacking.
+    _boot_payload_args=()
+    _boot_entrypoint_args=()
+    for _boot_pair in "${_boot_file_args[@]}"; do
+        [ "$_boot_pair" = "--file-local" ] && continue
+        case "${_boot_pair%%=*}" in
+            /cloudbench-boot.sh|/cloudbench-status-server.py)
+                _boot_entrypoint_args+=(--file-local "$_boot_pair") ;;
+            *) _boot_payload_args+=(--file-local "$_boot_pair") ;;
+        esac
+    done
+    _boot_payload_file="$OUT_DIR/cloudbench-boot-payload.json.gz"
+    _boot_payload_sha256="$(python3 "$CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT" pack \
+        "$_boot_payload_file" "${_boot_payload_args[@]}")" || exit 1
+    _boot_file_args=("${_boot_entrypoint_args[@]}"
+        --file-local "/cloudbench-boot-payload.py=$CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT"
+        --file-local "/cloudbench-boot-payload.json.gz=$_boot_payload_file")
+    _envargs+=(
+        --env CLOUDBENCH_BOOT_PAYLOAD_FILE=/cloudbench-boot-payload.json.gz
+        --env "CLOUDBENCH_BOOT_PAYLOAD_SHA256=$_boot_payload_sha256")
     boot_config_payload_guard() {  # <--file-local pairs...>
     # flyctl base64-encodes each --file-local payload into the machine-config
     # update body (4 bytes per 3 bytes of file). Fly rejects an oversized body
@@ -3435,12 +3940,40 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     # boot-config barrier still releases all guest starts together afterward.
     acquire_boot_config_update_slot || exit 1
     if boot_update_with_capacity_recovery "$_update_log" \
-          flyctl machine update "$mid" -a "$APP" "${_envargs[@]}" \
+          flyctl machine update "$mid" -a "$APP" "${_pool_shape_args[@]}" "${_envargs[@]}" \
           "${_boot_file_args[@]}" \
           --command "bash /cloudbench-boot.sh" --skip-health-checks --skip-start --yes; then
         _upd=1
     fi
     release_boot_config_update_slot
+    if [ "$_upd" = 1 ] && [ "${#_pool_shape_args[@]}" -gt 0 ]; then
+        _expected_kind="${CLOUDBENCH_POOL_BOOT_VM_SIZE%%-*}"
+        _expected_cpus="${CLOUDBENCH_POOL_BOOT_VM_SIZE##*-}"
+        _expected_cpus="${_expected_cpus%x}"
+        _shape_verified=0
+        for _shape_attempt in 1 2 3 4 5; do
+            _actual_shape="$(FLY machines list -a "$APP" --json 2>/dev/null \
+                | CLOUDBENCH_SHAPE_MACHINE="$mid" python3 -c '
+import json, os, sys
+try:
+    machine = next(m for m in json.load(sys.stdin)
+                   if m.get("id") == os.environ["CLOUDBENCH_SHAPE_MACHINE"])
+    guest = machine["config"]["guest"]
+    print(machine["state"], guest["cpu_kind"], guest["cpus"], guest["memory_mb"])
+except Exception:
+    print("")
+' 2>/dev/null)" || _actual_shape=""
+            if [ "$_actual_shape" = "stopped $_expected_kind $_expected_cpus $CLOUDBENCH_POOL_BOOT_VM_MEMORY" ]; then
+                _shape_verified=1
+                break
+            fi
+            sleep 2
+        done
+        if [ "$_shape_verified" != 1 ]; then
+            echo "❌ claimed-pool VM resize was not provider-verified before start" >&2
+            _upd=0
+        fi
+    fi
     [ "$_upd" = 1 ] || {
         echo "❌ boot-launch: could not set machine env/command after retries." >&2
         echo "─── final Fly update error ───" >&2
@@ -3491,6 +4024,10 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
     mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
     rm -f "$_start_log"
+    stage_explicit_codex_auth /cloudbench-codex-auth.py || {
+        echo "❌ explicit Codex auth staging failed before benchmark setup" >&2
+        exit 1
+    }
     echo "✅ boot-launch: $mid post-config start accepted — booting into the driver (polling over the data plane)."
 else
 # ── 1. Start the warm machine + wait until it is start+ssh-ready ────────────
@@ -3572,6 +4109,8 @@ for helper_path in \
     "$CLOUDBENCH_GUEST_STATUS_SERVER" \
     "$CLOUDBENCH_GUEST_BENCHMARK_TARGET_SCRIPT" \
     "$CLOUDBENCH_GUEST_CATALOG_SCRIPT" \
+    "$CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT" \
+    "$CLOUDBENCH_GUEST_RECOVERY_SCRIPT" \
     "$CLOUDBENCH_GUEST_ENV_HELPER" \
     "$CLOUDBENCH_GUEST_SEED_BUDGET_LIB"; do
     [ -s "$helper_path" ] || { echo "❌ Missing controller-owned guest helper: $helper_path" >&2; exit 1; }
@@ -3609,6 +4148,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
     echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
     echo "export CLOUDBENCH_SYNC_PRISMA_SCRIPT=/data/cloudbench-sync-prisma-client.sh"
+    echo "export CLOUDBENCH_NGROK_INSTALL_SCRIPT=/data/cloudbench-install-ngrok.sh"
     echo "export CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT=/data/cloudbench-current-run-artifact.py"
     echo "export CLOUDBENCH_PREPARE_PATCH_SCRIPT=/data/cloudbench-prepare-patch.sh"
     echo "export CLOUDBENCH_SEED_BUDGET_LIB=/data/cloudbench-seed-budget.sh"
@@ -3616,6 +4156,8 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_BENCHMARK_TARGET_SCRIPT=/data/cloudbench-benchmark-target.py"
     echo "export CLOUDBENCH_CATALOG_SCRIPT=/data/cloudbench_catalog.py"
     echo "export CLOUDBENCH_ENV_HELPER=/data/cloudbench-env.sh"
+    echo "export CLOUDBENCH_EXACT_SESSION_CLEANUP_SCRIPT=/data/cloudbench-exact-session-cleanup.py"
+    echo "export CLOUDBENCH_GUEST_RECOVERY_SCRIPT=/data/cloudbench-guest-recovery.py"
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
         echo "export CLOUDBENCH_EXECUTION_PROVENANCE_SCRIPT=/data/cloudbench-execution-provenance.py"
         echo "export CLOUDBENCH_EXECUTION_PROVENANCE_FILE=/data/cloudbench-execution-provenance.json"
@@ -3625,6 +4167,10 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
         echo "export CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=0"
     fi
     echo "export CLOUDBENCH_RUN_TOKEN=$(printf '%q' "$RUN_LOG_TOKEN")"
+    echo "unset CODEX_AUTH_PATH"
+    echo "export CLOUDBENCH_CODEX_AUTH_HELPER=/data/cloudbench-codex-auth.py"
+    echo "export CLOUDBENCH_CODEX_AUTH_SHA256=$(printf '%q' "$CODEX_AUTH_SHA256")"
+    echo "export CLOUDBENCH_CODEX_AUTH_MACHINE_ID=$(printf '%q' "$mid")"
     echo "export CLOUDBENCH_START_BARRIER=$(printf '%q' "${CLOUDBENCH_START_BARRIER:-}")"
     echo "export CLOUDBENCH_BARRIER_TOKEN=$(printf '%q' "${CLOUDBENCH_BARRIER_TOKEN:-}")"
     echo "export CLOUDBENCH_START_BARRIER_WAIT_SECONDS=$(printf '%q' "${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}")"
@@ -3636,6 +4182,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export BENCH_DASHPORT=$(printf '%q' "$REMOTE_DASH_PORT")"
     echo "export CONDUCTOR_WORKSPACE_NAME=$(printf '%q' "$RUN_WORKSPACE_NAME")"
     echo "export BENCHMARK_FAST_MODE_CACHE=$(printf '%q' "${BENCHMARK_FAST_MODE_CACHE:-}")"
+    echo "export BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=$(printf '%q' "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS")"
     echo "export BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=$(printf '%q' "${BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY:-}")"
     echo "export ROSE_EXCLUDE_ANTHROPIC_FAMILY=$(printf '%q' "${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}")"
     echo "export BENCHMARK_PEAK_FLY_MACHINES=$(printf '%q' "$OBSERVED_PEAK_FLY_MACHINES")"
@@ -3702,7 +4249,7 @@ STAGED_LOCAL_FILES+=("$stage_err")
 STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
 for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     : > "$stage_err"
-    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
+    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-codex-auth.py /data/cloudbench-install-ngrok.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-exact-session-cleanup.py /data/cloudbench-guest-recovery.py /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
     provenance_stage_ok=1
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
         FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
@@ -3713,14 +4260,18 @@ for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     fi
     if [ "$provenance_stage_ok" = "1" ] \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_RUN_SCRIPT" /data/cloudbench-run.sh >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_CODEX_AUTH_SCRIPT" /data/cloudbench-codex-auth.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_FETCH_REF_SCRIPT" /data/cloudbench-fetch-ref.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT" /data/cloudbench-sync-deps.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_SYNC_PRISMA_SCRIPT" /data/cloudbench-sync-prisma-client.sh >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_NGROK_INSTALL_SCRIPT" /data/cloudbench-install-ngrok.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_CURRENT_RUN_ARTIFACT_SCRIPT" /data/cloudbench-current-run-artifact.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_PREPARE_PATCH_SCRIPT" /data/cloudbench-prepare-patch.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_STATUS_SERVER" /data/cloudbench-status-server.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_BENCHMARK_TARGET_SCRIPT" /data/cloudbench-benchmark-target.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_CATALOG_SCRIPT" /data/cloudbench_catalog.py >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT" /data/cloudbench-exact-session-cleanup.py >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_RECOVERY_SCRIPT" /data/cloudbench-guest-recovery.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_ENV_HELPER" /data/cloudbench-env.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_SEED_BUDGET_LIB" /data/cloudbench-seed-budget.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$WRAPPER_LOCAL" "$REMOTE_TMP_SCRIPT" >>"$stage_err" 2>&1; then
@@ -3776,51 +4327,23 @@ for _la in $(seq 1 "$launch_attempts"); do
     fi
 done
 if [ "$_ok" = 1 ]; then echo "✅ On-box driver launched + confirmed running."; else echo "   ⚠️ driver-running check inconclusive after $launch_attempts attempts; polling anyway (the poll loop will detect a dead driver)."; fi
+stage_explicit_codex_auth /data/cloudbench-codex-auth.py || {
+    echo "❌ explicit Codex auth staging failed before benchmark launch" >&2
+    exit 1
+}
+
 fi  # end launch: boot-launch vs legacy ssh path
 
 # Bring up the DATA-PLANE status proxy: one flyctl proxy (WireGuard tunnel) whose
 # ongoing traffic never touches the Machines API. The poll loop reads bench.log
 # over http://127.0.0.1:$LOCAL_STATUS_PORT through it, so 30 boxes polling every
 # few seconds no longer saturate Fly's control-plane rate limit.
+status_proxy_lifecycle_response_accepted() {
+    cloudbench_status_proxy_lifecycle_response_accepted "$1"
+}
+
 start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> <label> [timeout]
-    local local_port="$1" remote_port="$2" host="$3" log_file="$4"
-    local pid_var="$5" label="$6" timeout="${7:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}"
-    local started_at pid attempt=0
-    started_at="$(date +%s)"
-    : > "$log_file"
-    while [ $(( $(date +%s) - started_at )) -lt "$timeout" ]; do
-        attempt=$((attempt + 1))
-        printf '[%s] %s proxy attempt %s: localhost:%s -> %s:%s\n' \
-            "$(date -u +%H:%M:%S)" "$label" "$attempt" "$local_port" "$host" "$remote_port" \
-            >> "$log_file"
-        flyctl proxy "$local_port:$remote_port" "$host" -a "$APP" --bind-addr 127.0.0.1 -q \
-            >> "$log_file" 2>&1 &
-        pid=$!
-        # flyctl resolves the remote host lazily on the first client connection.
-        # Trigger lazy DNS, but classify a local bind collision before waiting.
-        sleep 0.5
-        curl --noproxy '*' -sS --max-time 2 -o /dev/null \
-            "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true
-        if grep -Eiq 'listen tcp .*bind: address already in use|address already in use' "$log_file"; then
-            wait "$pid" 2>/dev/null || true
-            printf -v "$pid_var" '%s' ""
-            return 98
-        fi
-        # Require a short post-probe survival window for asynchronous lazy-DNS failures.
-        sleep "${CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS:-3}"
-        if kill -0 "$pid" 2>/dev/null; then
-            printf -v "$pid_var" '%s' "$pid"
-            return 0
-        fi
-        wait "$pid" 2>/dev/null || true
-        sleep 2
-    done
-    printf -v "$pid_var" '%s' ""
-    echo "❌ $label data-plane proxy did not stay alive within ${timeout}s" >&2
-    tail -20 "$log_file" 2>/dev/null | sed 's/^/   /' >&2 || true
-    # Ordinary remote readiness failures retain the bounded same-host retry
-    # behavior above; only local ownership collisions ask the caller to rotate.
-    return 1
+    cloudbench_start_data_plane_proxy "$@"
 }
 
 publish_status_proxy_port() {
@@ -4158,11 +4681,14 @@ read_bench_log() {
     local offset="${1:-}" limit="${2:-${CLOUDBENCH_LOG_CHUNK_BYTES:-262144}}"
     local anchor="${3:-}" generation="${4:-}"
     local headers="${BENCH_LOG_HEADERS_FILE:-/dev/null}"
+    BENCH_LOG_READ_EXIT=1
+    BENCH_LOG_REQUEST_OFFSET="${offset:-0}"
     [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null || return 1
     if [ -z "$offset" ]; then
         offset="$(wc -c < "$SSH_LOG" | tr -d ' ')"
     fi
     [[ "$offset" =~ ^[0-9]+$ ]] || return 2
+    BENCH_LOG_REQUEST_OFFSET="$offset"
     [[ "$limit" =~ ^[1-9][0-9]*$ ]] || return 2
     [ "$limit" -le 262144 ] || return 2
     if [ -z "$anchor" ]; then
@@ -4178,11 +4704,14 @@ read_bench_log() {
         generation="$(cat "$BENCH_LOG_GENERATION_FILE" 2>/dev/null || true)"
     fi
     [ -z "$generation" ] || [[ "$generation" =~ ^[0-9a-f]{32}$ ]] || return 2
+    local curl_exit=0
     curl --noproxy '*' -sS --max-time 6 -D "$headers" \
         -H "X-Cloudbench-Log-Anchor: $anchor" \
         -H "X-Cloudbench-Log-Generation: $generation" \
         "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log?offset=$offset&limit=$limit" \
-        2>/dev/null
+        2>/dev/null || curl_exit=$?
+    BENCH_LOG_READ_EXIT="$curl_exit"
+    return "$curl_exit"
 }
 cloudbench_response_header() {  # <name> <header-file>
     awk -F ':' -v wanted="$1" '
@@ -4203,7 +4732,7 @@ cloudbench_store_log_generation() {  # <generation>
     printf '%s\n' "$generation" > "$temporary" \
         && mv -f "$temporary" "$BENCH_LOG_GENERATION_FILE"
 }
-refresh_bench_log() {  # [maximum bounded chunks]
+refresh_bench_log_checked() {  # [maximum bounded chunks]
     local max_chunks="${1:-1}" limit="${CLOUDBENCH_LOG_CHUNK_BYTES:-262144}"
     local chunks=0 offset status body_size range server_size server_generation server_continuity known_generation
     local range_start range_end range_total expected_size next_offset
@@ -4227,7 +4756,6 @@ refresh_bench_log() {  # [maximum bounded chunks]
         if ! read_bench_log "$offset" "$limit" > "$BENCH_LOG_CHUNK_FILE"; then
             # curl can leave a response prefix after a timeout/reset. Keep it in
             # scratch; the last validated cumulative log remains byte-identical.
-            : > "$BENCH_LOG_CHUNK_FILE"
             return 1
         fi
         status="$(cloudbench_response_status "$BENCH_LOG_HEADERS_FILE")"
@@ -4308,6 +4836,61 @@ refresh_bench_log() {  # [maximum bounded chunks]
     done
     return 0
 }
+record_bench_log_read_failure() {
+    # Keep only bounded response metadata, never an unvalidated body or headers
+    # that could contain credentials. This diagnostic cannot acknowledge a run.
+    [ -n "${OUT_DIR:-}" ] || return 0
+    python3 - "$OUT_DIR/remote-logs/bench-log-read-failures.json" \
+        "$BENCH_LOG_HEADERS_FILE" "$BENCH_LOG_CHUNK_FILE" \
+        "${BENCH_LOG_READ_EXIT:-1}" "${BENCH_LOG_REQUEST_OFFSET:-0}" <<'PY'
+import datetime
+import json
+import pathlib
+import sys
+
+destination, headers_path, chunk_path, curl_exit, offset = sys.argv[1:]
+headers = {}
+status = ""
+for line in pathlib.Path(headers_path).read_text(errors="replace").splitlines():
+    if line.startswith("HTTP/"):
+        parts = line.split()
+        status = parts[1] if len(parts) > 1 else ""
+        headers = {}
+    elif ":" in line:
+        name, value = line.split(":", 1)
+        if name.lower() in {"content-range", "x-cloudbench-log-generation", "x-cloudbench-log-continuity"}:
+            headers[name.lower()] = value.strip()[:256]
+path = pathlib.Path(destination)
+try:
+    prior = json.loads(path.read_text())
+except (OSError, ValueError):
+    prior = []
+if not isinstance(prior, list):
+    prior = []
+record = {
+    "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "request_offset": int(offset),
+    "curl_exit": int(curl_exit),
+    "http_status": status,
+    "received_bytes": pathlib.Path(chunk_path).stat().st_size,
+    "content_range": headers.get("content-range", ""),
+    "generation": headers.get("x-cloudbench-log-generation", ""),
+    "continuity": headers.get("x-cloudbench-log-continuity", ""),
+}
+path.parent.mkdir(parents=True, exist_ok=True)
+temporary = path.with_suffix(".tmp")
+temporary.write_text(json.dumps([*prior[-19:], record], indent=2) + "\n")
+temporary.replace(path)
+PY
+}
+refresh_bench_log() {  # [maximum bounded chunks]
+    local refresh_exit=0
+    refresh_bench_log_checked "${1:-1}" || refresh_exit=$?
+    if [ "$refresh_exit" -ne 0 ]; then
+        record_bench_log_read_failure || true
+    fi
+    return "$refresh_exit"
+}
 refresh_bench_log_to_eof() {
     local max_chunks="${CLOUDBENCH_TERMINAL_LOG_MAX_CHUNKS:-128}"
     case "$max_chunks" in ''|*[!0-9]*|0) max_chunks=128 ;; esac
@@ -4328,10 +4911,7 @@ status_proxy_transport_healthy() {
     # explicit pre-launch lifecycle state while boot checkout is still running.
     health_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
         "http://127.0.0.1:$LOCAL_STATUS_PORT/driver-health" 2>/dev/null || true)"
-    case "$health_code" in
-        204|410|425) return 0 ;;
-        *) return 1 ;;
-    esac
+    status_proxy_lifecycle_response_accepted "$health_code"
 }
 ensure_status_proxy() {
     if ! status_proxy_transport_healthy; then
@@ -4439,7 +5019,7 @@ DRIVER_DIED="0"
 # The detached on-box driver occasionally dies at launch (an early kill/crash
 # before its first STEP — seen at fleet width when the Fly API is rate-limited).
 # It then never writes the DONE marker, so a poll loop that only watches for DONE
-# or the hard timeout would spin the FULL RUN_TIMEOUT (up to 60 min) while the
+# or the hard timeout would spin the FULL RUN_TIMEOUT while the
 # fleet's synchronized-start barrier waits on this box — one flaky launch stalling
 # the whole batch for an hour. When the log stops growing, verify the driver
 # process is still alive; if it's gone with no DONE marker, stop promptly and
@@ -4672,8 +5252,39 @@ done
 # Preserve the complete remote driver and service logs before the EXIT trap
 # stops/destroys the machine. Console progress intentionally shows only a tail;
 # these artifacts are the authoritative failure evidence.
+# Cancellation produces its run record during shutdown. Spend the existing
+# cleanup window before extracting artifacts, then drain the sealed log once.
+# Keep TIMED_OUT set: a recovered cancellation record is still infrastructure
+# failure. The EXIT trap reuses this result instead of granting another window.
+if [ "$TIMED_OUT" = "1" ] && [ -n "${FLEET_MACHINE_ID:-}" ]; then
+    GUEST_SHUTDOWN_RESULT=1
+    if confirm_guest_shutdown; then
+        GUEST_SHUTDOWN_RESULT=0
+        if cloudbench_collect_terminal_log; then
+            FINISHED=1
+            BENCH_EXIT="$CURRENT_TERMINAL_EXIT"
+        fi
+    fi
+fi
 mkdir -p "$OUT_DIR/remote-logs"
 cp -f "$SSH_LOG" "$OUT_DIR/remote-logs/cloudbench-driver.log" 2>/dev/null || true
+if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_teardown_race; then
+    if [ "$TIMED_OUT" = "1" ] && [ "${GUEST_SHUTDOWN_RESULT:-1}" != "0" ]; then
+        echo "❌ timed-out guest shutdown unconfirmed; retaining runtime evidence owner -- infrastructure failure" >&2
+        exit 70
+    fi
+    # The driver waits for run.sh's stopped/clean receipt before ACK; the boot
+    # supervisor then seals exited. Read raw logs only across that boundary,
+    # through the existing data plane, before the EXIT trap destroys the guest.
+    # Agent-filtered run JSON rows are capped and cannot replace these files.
+    if ! cloudbench_collect_runtime_evidence "$OUT_DIR/remote-logs" "$LOCAL_STATUS_PORT" \
+        "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" \
+        "${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS:-7200}}"
+    then
+        echo "❌ complete terminal runtime evidence could not be verified -- infrastructure failure" >&2
+        exit 70
+    fi
+fi
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ]; then
     for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log; do
         local_log_name="$(printf '%s' "$remote_log_name" | tr '/' '-')"
@@ -4698,11 +5309,20 @@ if [ "$NEEDS_IMESSAGE_RELAY" = "1" ] && [ -f "$IMESSAGE_RELAY_LOG" ]; then
 fi
 
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
-    # Boot-launch's authoritative log already carries both artifacts between
-    # run-scoped markers. Never re-enter Machines-API SSH after DONE: seven
-    # sequential 3x60s reads left a passed box/controller hanging for minutes.
+    # The sealed runtime capture is already collected with exact ownership,
+    # byte counts and hashes. Driver log transport can truncate a multi-MiB
+    # JSON string, so terminal run records must come from that complete file.
+    # Keep the marker path only for the existing held-driver teardown fixture.
+    # Never re-enter Machines-API SSH after DONE.
     CARD_JSON="$(awk "/$REPORT_BEGIN/{f=1;next} /$REPORT_END/{f=0} f" "$SSH_LOG" 2>/dev/null)"
-    RUN_JSON="$(awk "/$RESULT_BEGIN/{f=1;next} /$RESULT_END/{f=0} f" "$SSH_LOG" 2>/dev/null | grep -av '^run_file:')"
+    if cloudbench_skip_held_driver_teardown_race; then
+        RUN_JSON="$(awk "/$RESULT_BEGIN/{f=1;next} /$RESULT_END/{f=0} f" "$SSH_LOG" 2>/dev/null | grep -av '^run_file:')"
+    else
+        RUN_JSON="$(cat "$OUT_DIR/remote-logs/runtime-evidence/run.json")" || {
+            echo "❌ sealed runtime result is unavailable -- infrastructure failure" >&2
+            exit 70
+        }
+    fi
 else
     CARD_JSON="$(ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/report-card.json' 2>/dev/null" 2>/dev/null || true)"
     if [ -z "$CARD_JSON" ]; then
@@ -4731,6 +5351,31 @@ if [ -n "$RUN_JSON" ]; then
         )
     fi
     if python3 "$CLOUDBENCH_RESULT_SCRIPT" "$candidate_run" "${validation_args[@]}"; then
+        if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_teardown_race; then
+            if ! python3 - "$candidate_run" "$OUT_DIR/remote-logs/runtime-evidence/run.json" \
+                "$OUT_DIR/runtime-evidence.pending" "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+candidate, captured, pending, run_token, machine = sys.argv[1:]
+assert json.loads(Path(candidate).read_bytes()) == json.loads(Path(captured).read_bytes()), "runtime evidence belongs to a different result"
+intent = Path(pending)
+for path in (intent, intent.with_name("runtime-evidence.owner.json")):
+    assert path.is_file() and not path.is_symlink()
+    assert json.loads(path.read_text()) == {"version": 1, "run_token": run_token, "machine_id": machine}
+intent.unlink()
+descriptor = os.open(intent.parent, os.O_RDONLY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+            then
+                echo "❌ raw runtime evidence does not match the terminal result -- infrastructure failure" >&2
+                exit 70
+            fi
+        fi
         RUN_IDENTITY_OK="1"
     else
         echo "❌ Rejected stale or mismatched cloud benchmark artifact."

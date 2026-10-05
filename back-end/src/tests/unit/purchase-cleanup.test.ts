@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { consumePurchaseWalletFunding } from '../../providers/purchase-wallet-funding';
 import {
   cleanupAgentPurchaseCards,
   reconcileAbandonedPurchaseFunding,
@@ -46,13 +47,25 @@ async function main(): Promise<void> {
     const agentId = await seedAgent(userId, 'COMPLETED');
     const purchaseId = await seedHeld(userId, { agentId });
     await seedFunding(purchaseId, userId, PurchaseWalletFundingStatus.FUNDED);
-    await withFakeStripe(async () => {
-      await cleanupAgentPurchaseCards(
-        agentId,
-        new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 }),
-        new FakeWalletFundingProvider()
-      );
+    // Funding consumption persisted before the interrupted HELD purchase projection advanced.
+    // A closed card alone is not authoritative merchant-spend evidence.
+    await consumePurchaseWalletFunding(purchaseId);
+    const interrupted = await prisma.purchaseSpend.findUniqueOrThrow({
+      where: { id: purchaseId },
+      include: { walletFunding: true },
     });
+    assert.equal(interrupted.status, PurchaseSpendStatus.HELD);
+    assert.equal(interrupted.walletFunding?.status, PurchaseWalletFundingStatus.CONSUMED);
+    assert.ok(interrupted.walletFunding?.consumedAt);
+    const card = new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 });
+    const wallet = new FakeWalletFundingProvider();
+    await withFakeStripe(async (calls) => {
+      await cleanupAgentPurchaseCards(agentId, card, wallet);
+      assert.equal(calls.refunds.length, 0, 'confirmed spend must not be refunded');
+      assert.equal(calls.cancels.length, 0, 'confirmed spend must not be canceled');
+    });
+    assert.equal(card.getDetailsCalls, 1, 'cleanup must exercise the closed-card observation');
+    assert.equal(wallet.reclaimCalls.length, 0, 'confirmed spend must not be reclaimed');
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.CLEARED);
     const funding = await prisma.purchaseWalletFunding.findUnique({ where: { purchaseId } });
     assert.equal(funding?.status, PurchaseWalletFundingStatus.CONSUMED);

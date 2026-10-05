@@ -20,7 +20,10 @@ import {
   listArchivedObjects,
   readArchivedArtifact,
 } from '../../providers/traceArchive';
-import { assertLateArchiveManifestConvergence } from './archive-late-manifest.helper';
+import {
+  assertLateArchiveBatchConvergence,
+  assertLateArchiveManifestConvergence,
+} from './archive-late-manifest.helper';
 
 config();
 
@@ -465,6 +468,11 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
 
     // A late successful POST must not return until both manifests converge.
     await assertLateArchiveManifestConvergence({
+      baseUrl: BASE_URL,
+      headers,
+      rootAgentId: seed.rootAgentId,
+    });
+    await assertLateArchiveBatchConvergence({
       baseUrl: BASE_URL,
       headers,
       rootAgentId: seed.rootAgentId,

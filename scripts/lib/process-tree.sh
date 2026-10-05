@@ -26,19 +26,23 @@ process_running() {
 # Sends TERM to the process and every descendant, sends KILL to whatever is
 # still running after the grace period (default 10s), then reaps <pid>.
 stop_process_tree() {
-  local root="$1" grace="${2:-10}" pid tick
+  local root="$1" grace="${2:-10}" pid started
   local -a pids=() alive=()
   [[ -n "$root" ]] || return 0
   while read -r pid; do
     pids+=("$pid")
   done < <(process_tree_pids "$root")
   kill -TERM "${pids[@]}" 2>/dev/null || true
-  for ((tick = 0; tick <= grace * 10; tick++)); do
+  # Bound the grace by wall clock. Counting 0.1s sleeps also counted every
+  # per-pid `ps`, so a loaded host stretched a 1s grace past 13s.
+  started=$SECONDS
+  while :; do
     alive=()
     for pid in "${pids[@]}"; do
       if process_running "$pid"; then alive+=("$pid"); fi
     done
     ((${#alive[@]} > 0)) || break
+    ((SECONDS - started <= grace)) || break
     sleep 0.1
   done
   if ((${#alive[@]} > 0)); then kill -KILL "${alive[@]}" 2>/dev/null || true; fi

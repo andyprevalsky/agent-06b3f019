@@ -5,7 +5,8 @@
  * chatPrompts.ts). Those copies must stay byte-identical to the canonical source
  * in agents/utils/prompts.py. This test extracts the Python constants and asserts
  * they match the TS mirrors — if someone edits one phase prompt without the other,
- * this fails. It also asserts the router prompt actually embeds both mirrors.
+ * this fails. It also asserts the router prompt actually embeds both mirrors and
+ * that the structured-output `mode` field defers to the prompt's Mode Selection.
  */
 
 import { readFileSync } from 'fs';
@@ -15,6 +16,7 @@ import {
   EXECUTE_PHASE_PROMPT_MIRROR,
   ROUTER_SYSTEM_PROMPT,
 } from '../../providers/chat/chatPrompts';
+import { ROUTER_JSON_SCHEMA } from '../../providers/chat/routerDecisionJsonSchema';
 
 interface TestResult {
   name: string;
@@ -73,6 +75,20 @@ const tests: Array<[string, () => Promise<void> | void]> = [
         throw new Error(
           'EXECUTE phase prompt drift: chatPrompts.ts mirror != agents/utils/prompts.py. ' +
             'Edit BOTH together.'
+        );
+      }
+    },
+  ],
+  [
+    'router mode field defers to the Mode Selection section',
+    () => {
+      const description = ROUTER_JSON_SCHEMA.properties.mode.description;
+      if (!ROUTER_SYSTEM_PROMPT.includes('# Mode Selection')) {
+        throw new Error('ROUTER_SYSTEM_PROMPT has no "# Mode Selection" section');
+      }
+      if (!description.includes('Mode Selection')) {
+        throw new Error(
+          `mode description must defer to Mode Selection instead of its own rule: "${description}"`
         );
       }
     },

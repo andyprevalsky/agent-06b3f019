@@ -323,7 +323,7 @@ def create(path: Path, temp_root: Path, token: str, pid: int, pid_start: str) ->
                 raise SnapshotOwnershipError(
                     f"snapshot adoption interrupted by {pending_signal[0]}"
                 )
-            if not _process_matches(pid, normalized_pid_start):
+            if os.getppid() != pid:
                 raise SnapshotOwnershipError(
                     "snapshot creator's parent vanished before adoption"
                 )
@@ -467,7 +467,7 @@ def cleanup(
     _validate_path(path, temp_root, token)
     if not path.exists():
         return "absent"
-    if os.getppid() != pid or not _process_matches(pid, pid_start):
+    if os.getppid() != pid:
         raise SnapshotOwnershipError("cleanup PID birth identity does not match caller")
     try:
         with _snapshot_lock(path):
@@ -479,6 +479,10 @@ def cleanup(
                         "current owner PID birth identity does not match marker"
                     )
                 if allow_transfer:
+                    if not _process_matches(pid, expected_start):
+                        raise SnapshotOwnershipError(
+                            "cleanup observer PID birth identity does not match caller"
+                        )
                     if _stale_owner_state(
                         int(marker["owner_pid"]), str(marker["owner_pid_start"])
                     ):

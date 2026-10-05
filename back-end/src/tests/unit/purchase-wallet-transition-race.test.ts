@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { markHeldPurchaseClearedIfNoReclaim } from '../../domains/purchases/repo';
+import { settlePurchaseAfterTransactionCleared } from '../../domains/purchases/repoSettlement';
 import { prisma } from '../../providers/database';
 import {
   beginPurchaseWalletReclaim,
@@ -74,19 +75,23 @@ async function clearingWaitsForReclaimTransition(): Promise<void> {
 
 async function reclaimCannotClaimClearedPurchase(): Promise<void> {
   const purchase = await seedHeldPurchase();
-  const cleared = await markHeldPurchaseClearedIfNoReclaim(purchase.id);
-  assert.equal(cleared.count, 1);
+  assert.equal((await settlePurchaseAfterTransactionCleared(purchase.id)).outcome, 'cleared');
+  assert.equal(
+    (await markHeldPurchaseClearedIfNoReclaim(purchase.id)).count,
+    0,
+    'settlement is already terminal'
+  );
   const claim = await beginPurchaseWalletReclaim(purchase.id);
   assert.equal(claim.status, 'not_applicable');
   const funding = await findWalletFundingByPurchaseId(purchase.id);
-  assert.equal(funding?.status, PurchaseWalletFundingStatus.FUNDED);
+  assert.equal(funding?.status, PurchaseWalletFundingStatus.CONSUMED);
 }
 
 async function everyReclaimEntryPointRejectsClearedPurchase(): Promise<void> {
   const directPurchase = await seedHeldPurchase();
   const directFunding = await findWalletFundingByPurchaseId(directPurchase.id);
   assert.ok(directFunding);
-  assert.equal((await markHeldPurchaseClearedIfNoReclaim(directPurchase.id)).count, 1);
+  assert.equal((await settlePurchaseAfterTransactionCleared(directPurchase.id)).outcome, 'cleared');
   const direct = await markWalletFundingReclaiming(directFunding.id, {
     reclaimIdempotencyKey: `reclaim-${randomUUID()}`,
     reclaimLeaseToken: `lease-${randomUUID()}`,
@@ -99,7 +104,7 @@ async function everyReclaimEntryPointRejectsClearedPurchase(): Promise<void> {
   const retryPurchase = await seedHeldPurchase();
   const retryFunding = await findWalletFundingByPurchaseId(retryPurchase.id);
   assert.ok(retryFunding);
-  assert.equal((await markHeldPurchaseClearedIfNoReclaim(retryPurchase.id)).count, 1);
+  assert.equal((await settlePurchaseAfterTransactionCleared(retryPurchase.id)).outcome, 'cleared');
   const retry = await claimWalletFundingReclaimRetry(retryFunding.id, {
     reclaimIdempotencyKey: `reclaim-${randomUUID()}`,
     reclaimLeaseToken: `lease-${randomUUID()}`,
@@ -113,7 +118,7 @@ async function everyReclaimEntryPointRejectsClearedPurchase(): Promise<void> {
   ]);
   assert.deepEqual(
     current.map((funding) => funding?.status),
-    [PurchaseWalletFundingStatus.FUNDED, PurchaseWalletFundingStatus.FUNDED]
+    [PurchaseWalletFundingStatus.CONSUMED, PurchaseWalletFundingStatus.CONSUMED]
   );
 }
 

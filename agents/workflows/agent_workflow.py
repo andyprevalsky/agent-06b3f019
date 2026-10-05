@@ -183,7 +183,7 @@ def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
 
 # Tool name → executor function mapping
 TOOL_EXECUTORS = {
-    "google_oauth_demo": google_oauth_demo,
+    "google_workspace_run": google_oauth_demo,
     "spawn_agent": spawn_agent,  # Unified: browser/code/general_purpose/explore
     "wait_for": wait_for,
     "send_message_to_user": send_message_to_user,
@@ -696,13 +696,10 @@ def _canonical_pending_approval_resume(pending_approval: Any) -> Optional[Dict[s
         request_id = pending_approval.get("request_id")
         if isinstance(request_id, str) and request_id:
             question = pending_approval.get("question")
-            entry: Dict[str, Any] = {
+            return {
                 "request_id": request_id,
                 "question": question if isinstance(question, str) else "",
             }
-            if pending_approval.get("reminder_sent") is True:
-                entry["reminder_sent"] = True
-            return entry
         return None
     if isinstance(pending_approval, str) and pending_approval:
         return {"request_id": pending_approval, "question": ""}
@@ -2077,7 +2074,7 @@ class AgentWorkflow:
         # =====================================================================
         plan_tools = PLAN_PHASE_TOOLS
         execute_tools = (
-            ["google_oauth_demo", "attempt_completion"]
+            ["google_workspace_run", "attempt_completion"]
             if matches_demo_goal(self.goal)
             else EXECUTE_PHASE_TOOLS
         )

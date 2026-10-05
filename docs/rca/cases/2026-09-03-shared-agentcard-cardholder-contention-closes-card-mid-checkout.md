@@ -226,3 +226,115 @@ abandonment`. This is a recurrence of the receipt fingerprint drift already
 recorded above, not another sandbox cardholder closure. Human feedback for this
 recurrence: the operator directed the agent to fix the runtime issue without
 raising timeouts, weakening tests, or touching the separate Explore issue.
+
+## 2026-10-02 recurrence: pool-funded fixture not established
+
+The required backend coverage run on `aa76b7bf` failed treasury-rails in
+161.308 seconds. Its exact unused 1,300-cent card transfer ended `reclaimed`
+with 1,300 cents released but zero cents transferred from the pool. The strict
+pool-funding assertion correctly rejected that run; release alone does not
+prove the pool-to-card leg. The original issuance transfer was not captured.
+
+The pre-mint sweep did not exhaust its 60-second limit: the first and last logged
+post-close recoveries span about 151 seconds, leaving at most about 10.2 seconds
+for setup, sweeping, issuance, and closure. Two idle recovery rounds prove
+zero returned recovery yield, not zero cardholder headroom. AgentCard's
+[current recovery contract](https://docs.agentcard.sh/tools/mcp/org/recover_funds)
+explicitly permits closed-card balances to fund later cards through netting.
+This is consistent with the observed transfer, but the uncaptured issuance
+state prevents attributing the original zero to a particular external actor.
+
+One instrumented execution kept the original assertions and limits and ran
+all funding, closure, and recovery checks in 150.259 seconds. On the same
+shared cardholder, its own transfer showed 1,300 cents transferred before
+closure and still 1,300 after reclaim, with 1,300 released. This rules out
+claiming that reclaim necessarily resets the transferred field. It does not
+establish fixture isolation or close the original cause. An earlier 3.218-second
+diagnostic skipped before issuance because its environment did not reproduce
+the canonical credentials; it provides no funding proof.
+
+Retain the exact pool-funding and release assertions and owned-card-only
+cleanup. The fixture now captures the newly issued card's numeric transfer before
+closure, including explicit not-found or unavailable observations. It does not
+assert immediate visibility: the provider contract makes no such guarantee.
+The original post-reclaim 1,300-cent assertion still decides the result. Do not invent a
+force-funding flag, close foreign cards, raise the mint amount or deadlines,
+or retry mints until one passes. The original failed coverage remains failed;
+the next canonical backend gate must execute the complete real flow.
+
+A private offline replay executes the actual fixture body against netted,
+partial, initially absent then visible, and fully funded own-card responses,
+with a separate foreign transfer present. The original source lacks the
+pre-close observation; the same replay passes with the capture added. Netted
+and partial transfers still fail the original pool assertion; delayed visibility
+and fully funded transfers pass only with the original final funding and
+release checks. This is an observability correction, not a causal fix for the
+original provider state. Independent review and final canonical coverage are
+required before reporting this candidate gate as passed.
+
+### Separate initial-wallet-read observability gap
+
+The next canonical backend run on `15fef86b` failed in 203.784 seconds:
+231/231 units and 174/175 blackboxes passed, but treasury-rails failed after
+1.119 seconds at its initial wallet read. The returned value lacked a structured
+wallet; no card was minted and the issuance observation never ran. This is a
+separate failure boundary, not evidence of another netted mint or shared-holder
+actor. Searches for the missing-wallet error and MCP structured-response behavior
+found no archived diagnosis of this exact response. The actual failed provider
+response was not retained, so its cause remains open.
+
+One authorized read-only call with the canonical environment returned the expected
+structured wallet in 0.398 seconds. No parser or retry change follows from that
+restoration alone. One unchanged owning treasury execution then passed in
+149.456 seconds: its card showed 1,300 cents transferred at issuance, closed
+unused, and passed the original full pool-funding and 1,300-cent reclaim checks.
+It skipped only the existing optional, unconfigured Brex leg; the AgentCard flow
+did not skip. All four observed native process identities retired.
+
+That replay's private response observer captured nothing: the `tsx` CLI did not
+propagate its parent-only preload to the actual test child. Do not cite it as
+raw-response evidence. A corrected private observer uses inherited `NODE_OPTIONS`,
+retains all prior options, and guards the actual treasury script. An offline
+child-process control verified one capture, zero pending/failed captures, and
+the exact original fetch Promise, without provider requests. The original
+canonical aggregate remains failed. A fresh canonical aggregate with the
+correctly bound observer is still required; neither restored execution nor
+observation wiring proves the original provider cause fixed.
+
+## 2026-10-03 recurrence: treasury-rails unused card never released under foreign load
+
+The PR #1401 deploy backend coverage lane failed `treasury-rails` with
+`transfer for card_d9109871658de3d93171a63b ended in "consumed" — an unused
+card must reclaim/release, not stay consumed`. The test minted $13.00 at
+03:47:34Z, closed it unused at 03:47:37Z, and swept `recover_funds` every
+~10 seconds for 240 seconds. The sweeps recovered $14.48, $37.21, and $37.21,
+which match the spent-card residuals of three foreign cards on the same
+cardholder (`card_2585635f…`, `card_09f75bf8…`, `card_cf353deb…`). No sweep
+returned this card's $13.00, and its transfer stayed `consumed` with
+`released_cents: 0`.
+
+A read-only provider check at about 04:00Z found the card `CLOSED` with $0.00
+remaining. The transfer was still `consumed` with `released_cents: 0`. Between
+03:44Z and 03:58Z, the provider listed nine other cards on the one
+mint-capable cardholder. They came from $43.96 and $21.23 payment checkouts and
+another workspace's identical $13.00 treasury mint. At 03:57:25Z, a foreign
+$43.96 mint (`card_0ecf64c3…`) netted entirely against idle residual
+(`transferred_cents: 0`). This proves that unrecovered residual was on the
+cardholder even though this test's sweeps could not recover it during its
+window.
+
+This machine did not originate any of that activity. The coverage run issued
+exactly one `create_card` and one `close_card`, both for this test's card. The
+long-running local stack issued none in the window. Branch code did not touch
+the path: every org MCP call succeeded on attempt 1, so the branch's
+throttle-retry change never engaged. The same test passed in the four earlier
+backend coverage runs of this deploy (164–196 seconds each).
+
+Classification: third-party / shared-fixture contention, the same class as this
+case. How the provider attributes residual to transfers while foreign cards are
+open is not visible through the MCP, so the exact mechanism remains an open
+visibility gap. Relaxing the assertion to accept pool or residual movement
+would reopen the foreign-residual false pass fixed in `13fb3fa48`. Prevention
+item 1 still applies: the gate needs its own mint-capable cardholder. Setting
+one up is a provider fixture change (a new verified sandbox cardholder) that
+requires an operator.

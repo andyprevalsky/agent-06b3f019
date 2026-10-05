@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import re
 import time
+from contextlib import aclosing
 from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional
 
 import structlog
@@ -76,8 +77,9 @@ async def recover_truncated(
         tool_choice=kwargs.get("tool_choice"),
         response_model=kwargs.get("response_model"),
     ):
-        async for chunk in attempt(**kwargs):
-            yield chunk
+        async with aclosing(attempt(**kwargs)) as stream:
+            async for chunk in stream:
+                yield chunk
         return
 
     started = time.monotonic()
@@ -94,18 +96,19 @@ async def recover_truncated(
         finish_reason = ""
         completion_tokens = 0
         saw_tool_call = False
-        async for chunk in attempt(**current):
-            if chunk.kind == "metadata":
-                actual_model = str(chunk.data.get("actual_model") or actual_model)
-            elif chunk.kind == "tool_call":
-                saw_tool_call = True
-            elif chunk.kind == "usage":
-                finish_reason = str(chunk.data.get("finish_reason") or "")
-                completion_tokens = int(chunk.data.get("completion_tokens") or 0)
-            if chunk.kind in ("usage", "done"):
-                held.append(chunk)
-                continue
-            yield chunk
+        async with aclosing(attempt(**current)) as stream:
+            async for chunk in stream:
+                if chunk.kind == "metadata":
+                    actual_model = str(chunk.data.get("actual_model") or actual_model)
+                elif chunk.kind == "tool_call":
+                    saw_tool_call = True
+                elif chunk.kind == "usage":
+                    finish_reason = str(chunk.data.get("finish_reason") or "")
+                    completion_tokens = int(chunk.data.get("completion_tokens") or 0)
+                if chunk.kind in ("usage", "done"):
+                    held.append(chunk)
+                    continue
+                yield chunk
 
         cut_off = finish_reason == "length" and not saw_tool_call
         elapsed = time.monotonic() - started

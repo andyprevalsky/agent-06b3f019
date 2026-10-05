@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -46,6 +47,19 @@ for (const [name, harness] of [
     /SEEDED_CODEX_COUNT=.*Integration.*gpt_code/s,
     `${name} harness must preserve a connected isolated gpt_code credential when local auth is incompatible`
   );
+
+  const prepSql = /<<'SQL'\n([\s\S]*?)\nSQL\n/.exec(harness)?.[1] ?? '';
+  const scrub =
+    /DELETE FROM "Integration"\s+WHERE "userId" = '00000000-0000-0000-0000-000000000000'\s+AND name IN \('gpt_api_key_cooldown', 'anthropic_api_key_cooldown'\);/;
+  assert.match(
+    prepSql,
+    scrub,
+    `${name} harness must clear funded-key cooldowns a local stack persisted in the shared test database`
+  );
+  assert.ok(
+    harness.indexOf(prepSql) < harness.indexOf('Syncing Prisma schema to local test database'),
+    `${name} harness must clear funded-key cooldowns before any test starts`
+  );
 }
 
 assert.match(
@@ -74,3 +88,14 @@ for (const coolingCase of [
 }
 
 process.stdout.write('coverage script part 2 contracts passed\n');
+
+// Exercise the actual isolated-backend launch/trap boundary without DB or providers.
+execFileSync(
+  'python3',
+  [
+    join(process.cwd(), '..', 'scripts', 'tests', 'blackbox-process-cleanup.test.py'),
+    join(process.cwd(), '..'),
+    join(process.cwd(), 'scripts', 'run-blackbox-tests.sh'),
+  ],
+  { stdio: 'inherit', timeout: 60_000 }
+);

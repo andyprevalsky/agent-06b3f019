@@ -53,8 +53,11 @@ resolve_local_db_container() {
   return 1
 }
 
+# measure-seed-memory.sh's throwaway seedmem/seedsrc containers never host a
+# workspace stack, so they must not block another workspace's system fallback.
 system_db_fallback_is_safe() {
   local running
   running=$(docker_quick ps --filter 'name=^victoria-db-' --format '{{.Names}}') || return 1
+  running=$(printf '%s\n' "$running" | grep -vE '^victoria-db-seed(mem|src)-[0-9]+$' || true)
   [[ -z "$running" ]]
 }

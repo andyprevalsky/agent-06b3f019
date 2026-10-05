@@ -685,3 +685,5 @@ export async function __resetAnthropicApiKeyCooldown(): Promise<void> {
     },
   });
 }
+
+export { getCerebrasApiKeyCooldown, markCerebrasApiKeyOnCooldown } from './cerebrasApiKeyCooldown';

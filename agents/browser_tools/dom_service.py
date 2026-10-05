@@ -236,19 +236,24 @@ def _urls_from_dynamic_image_attr(value: str) -> List[str]:
     return []
 
 
-def _normalize_image_url(raw_url: str, page_url: str) -> Optional[str]:
+def _resolve_http_image_url(raw_url: str, page_url: str) -> Optional[str]:
     raw_url = (raw_url or "").strip().strip("\"'")
-    if not raw_url:
+    if not raw_url or raw_url.startswith("data:"):
         return None
     if raw_url.startswith("//"):
         raw_url = f"https:{raw_url}"
-    if raw_url.startswith("data:"):
-        return None
     url = urljoin(page_url, raw_url)
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return None
-    lower_path = parsed.path.lower()
+    return url
+
+
+def _normalize_image_url(raw_url: str, page_url: str) -> Optional[str]:
+    url = _resolve_http_image_url(raw_url, page_url)
+    if not url:
+        return None
+    lower_path = urlparse(url).path.lower()
     if lower_path.endswith((".svg", ".gif")):
         return None
     if any(marker in url.lower() for marker in ("transparent-pixel", "spacer", "pixel.gif")):
@@ -407,6 +412,42 @@ def _extract_media_candidates_from_dom_state(
     traverse(root)
     ranked = sorted(candidates_by_url.values(), key=_score_media_candidate, reverse=True)
     return ranked[:max_candidates]
+
+
+def _extract_image_urls_from_dom_state(dom_state: Any, *, page_url: str) -> List[str]:
+    """Every image URL the page renders, uncapped and unranked, including each srcset candidate."""
+    root = getattr(dom_state, "_root", None)
+    if not root:
+        return []
+
+    urls: Dict[str, None] = {}
+
+    def traverse(node: Any) -> None:
+        if not node:
+            return
+        original = getattr(node, "original_node", node)
+        tag = (getattr(original, "tag_name", "") or getattr(original, "node_name", "") or "").lower()
+        attrs = getattr(original, "attributes", None) or {}
+        if tag in {"img", "source", "picture"}:
+            for key in _IMAGE_ATTR_KEYS:
+                value = attrs.get(key)
+                if not value:
+                    continue
+                if key in {"srcset", "data-srcset"}:
+                    raw_urls = [part.split()[0] for part in value.split(",") if part.split()]
+                elif key == "data-a-dynamic-image":
+                    raw_urls = _urls_from_dynamic_image_attr(value)
+                else:
+                    raw_urls = [value]
+                for raw_url in raw_urls:
+                    url = _resolve_http_image_url(raw_url, page_url)
+                    if url:
+                        urls.setdefault(url, None)
+        for child in getattr(node, "children", []) or []:
+            traverse(child)
+
+    traverse(root)
+    return list(urls)
 
 
 def offcenter_click_point(center_x: float, center_y: float, width: float, height: float) -> Tuple[int, int]:
@@ -2082,6 +2123,16 @@ class DOMService:
             result["screenshot"] = screenshot_to_use
             self._analyze_screenshot(screenshot_to_use, viewport_width, viewport_height)
         return result
+
+    async def get_page_image_urls(self) -> List[str]:
+        """Every image URL rendered on the current page, read from a fresh DOM snapshot."""
+        if not self._session:
+            raise RuntimeError("Not connected. Call connect() first.")
+
+        state = await self._session.get_browser_state_summary(include_screenshot=False)
+        if state.dom_state and state.dom_state.selector_map:
+            self._selector_map = state.dom_state.selector_map
+        return _extract_image_urls_from_dom_state(state.dom_state, page_url=state.url or "")
 
     def _extract_page_statistics(self, state) -> Dict[str, int]:
         """Extract page statistics from DOM tree like browser-use does."""

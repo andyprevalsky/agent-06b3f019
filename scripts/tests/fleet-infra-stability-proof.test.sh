@@ -7,10 +7,12 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 
 PROOF="$ROOT_DIR/scripts/run-fleet-infra-stability-proof"
 SAMPLER="$ROOT_DIR/scripts/fleet_infra_sample.py"
+RUN_BENCH="$ROOT_DIR/scripts/run-bench"
 PLAN="$ROOT_DIR/docs/plans/active/fleet-demo-concurrency-e2e.md"
 
 [ -x "$PROOF" ] || fail "run-fleet-infra-stability-proof must be executable"
 [ -f "$SAMPLER" ] || fail "fleet_infra_sample.py must exist"
+[ -x "$RUN_BENCH" ] || fail "run-bench must exist"
 grep -Fq 'run-fleet-infra-stability-proof' "$PLAN" || fail "plan must document the stability proof"
 grep -Fq -- '--infra-probe' "$PROOF" || fail "proof must launch fleets with --infra-probe"
 grep -Fq 'fail closed' "$PROOF" || fail "proof must fail closed on first bad slice"
@@ -91,5 +93,425 @@ PY
 A="$(python3 "$SAMPLER" sample --repo "$ROOT_DIR" --width 20 --seed 20260908 --slice 0)"
 B="$(python3 "$SAMPLER" sample --repo "$ROOT_DIR" --width 20 --seed 20260908 --slice 0)"
 [ "$A" = "$B" ] || fail "sampler must be deterministic for a fixed seed/slice"
+
+# A capability campaign must not silently reuse a task within its accepted
+# streak or pick a name supplied from an earlier successful campaign.
+exclude_file="$(mktemp)"
+# The first sampled name is always a valid catalog name; JSON-encode it rather
+# than relying on shell escaping in an operator-provided exclusion file.
+python3 - "$exclude_file" "$A" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps([sys.argv[2].splitlines()[0]]) + "\n")
+PY
+capability_sample="$(mktemp)"
+"$RUN_BENCH" stability-proof --dry-sample --runs 3 --width 10 \
+  --seed 20260908 --exclude-file "$exclude_file" > "$capability_sample"
+python3 - "$capability_sample" "$exclude_file" <<'PY' || fail "capability slices reused or excluded a task"
+import json, sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text())
+excluded = set(json.loads(Path(sys.argv[2]).read_text()))
+names = [name for row in data["slices"] for name in row["names"]]
+assert len(names) == 30 and len(set(names)) == 30
+assert not excluded.intersection(names)
+PY
+small_pool="$(mktemp)"
+python3 - "$small_pool" "$A" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps(sys.argv[2].splitlines()[:3]) + "\n")
+PY
+if python3 "$SAMPLER" dry-proof --repo "$ROOT_DIR" --runs 2 --width 2 \
+  --seed 1 --disjoint --pool-file "$small_pool" >/dev/null 2>&1; then
+  fail "disjoint sampler must reject a campaign wider than its pool"
+fi
+rootless_pool="$(mktemp)"
+printf '["sms-supervisor-closed-no-spawn"]\n' > "$rootless_pool"
+if "$PROOF" --capability --dry-sample --runs 1 --width 1 \
+  --pool-file "$rootless_pool" >/tmp/infra-proof-rootless.out 2>&1; then
+  fail "capability proof must reject a rootless SMS runner before provisioning"
+fi
+grep -Fq 'rootless SMS tasks' /tmp/infra-proof-rootless.out \
+  || fail "rootless capability rejection must explain why"
+python3 - "$ROOT_DIR" <<'PY' || fail "capability pool must exclude rootless SMS"
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+from fleet_infra_sample import eligible_pool
+names = eligible_pool(root, None, require_cloud_root=True)
+assert "sms-supervisor-closed-no-spawn" not in names
+assert "sms-supervisor-open-spawns-agent" not in names
+assert "message-person" not in names
+PY
+mac_relay_pool="$(mktemp)"
+printf '["message-person"]\n' > "$mac_relay_pool"
+if "$PROOF" --capability --dry-sample --runs 1 --width 1 \
+  --pool-file "$mac_relay_pool" >/tmp/infra-proof-mac-relay.out 2>&1; then
+  fail "capability proof must reject a Mac Messages relay task before provisioning"
+fi
+grep -Fq 'Mac Messages relay tasks' /tmp/infra-proof-mac-relay.out \
+  || fail "Mac relay capability rejection must explain why"
+production_only_pool="$(mktemp)"
+printf '["agent-payment-production-purchase"]\n' > "$production_only_pool"
+if "$PROOF" --capability --dry-sample --runs 1 --width 1 \
+  --pool-file "$production_only_pool" >/tmp/infra-proof-production-only.out 2>&1; then
+  fail "capability proof must reject production-only tasks on isolated cloud stacks"
+fi
+grep -Fq 'production-only tasks' /tmp/infra-proof-production-only.out \
+  || fail "production-only capability rejection must explain why"
+python3 - "$ROOT_DIR" <<'PY' || fail "capability pool must exclude production-only tasks"
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+from fleet_infra_sample import eligible_pool
+assert "agent-payment-production-purchase" not in eligible_pool(
+    root, None, require_cloud_root=True)
+PY
+unassigned_callee_pool="$(mktemp)"
+printf '["phone-call-ivr-dtmf"]\n' > "$unassigned_callee_pool"
+if BENCHMARK_CALLEE_PHONE_NUMBER_IDS='phone-call-client-intake=fake-intake,phone-call-payment=fake-payment' \
+  "$PROOF" --capability --dry-sample --runs 1 --width 1 \
+  --pool-file "$unassigned_callee_pool" >/tmp/infra-proof-callee.out 2>&1; then
+  fail "capability proof must reject a phone persona without an assigned callee number"
+fi
+grep -Fq 'unassigned phone tasks' /tmp/infra-proof-callee.out \
+  || fail "unassigned phone rejection must explain why"
+BENCHMARK_CALLEE_PHONE_NUMBER_IDS='phone-call-client-intake=fake-intake,phone-call-payment=fake-payment' \
+  python3 - "$ROOT_DIR" <<'PY' || fail "capability pool must retain only configured phone callees"
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+from fleet_infra_sample import eligible_pool
+names = eligible_pool(root, None, require_cloud_root=True)
+assert "phone-call-ivr-dtmf" not in names
+assert "phone-call-payment" in names
+PY
+rm -f "$unassigned_callee_pool"
+rm -f "$production_only_pool"
+rm -f "$mac_relay_pool"
+rm -f "$rootless_pool"
+rm -f "$exclude_file" "$capability_sample" "$small_pool"
+
+tmp="$(mktemp -d)"
+export FLEET_INFRA_CANARY_STAMP="$tmp/fleet-infra-canary.last-pass"
+export FLEET_INFRA_CANARY_LOCK="$tmp/fleet-infra-canary-preflight.transaction.lock"
+cleanup() {
+  local status=$? diagnostics
+  if [ "$status" -ne 0 ]; then
+    diagnostics="${BLACKBOX_TEST_ARTIFACT_DIR:-$ROOT_DIR/.context/test-runs}/fleet-proof-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    if mkdir -p -m 700 "$diagnostics"; then
+      cp -R "$tmp/." "$diagnostics/" || true
+      chmod -R go-rwx "$diagnostics" || true
+      echo "Fixture failure evidence retained: $diagnostics" >&2
+    fi
+  fi
+  rm -rf "$tmp"
+  return "$status"
+}
+trap cleanup EXIT
+cat >"$tmp/fake-fleet" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+run_dir="$CLOUDBENCH_RUNS_ROOT/fake-$FLEET_STABILITY_SLICE"
+mkdir -p "$run_dir/_batch"
+tasks=()
+for arg in "$@"; do
+  case "$arg" in --*) break ;; *) tasks+=("$arg") ;; esac
+done
+python3 - "$run_dir/_batch/run.json" "$FLEET_STABILITY_SLICE" \
+  "${FLEET_STABILITY_FAKE_INFRA_SLICE:-}" "${tasks[@]}" <<'PY'
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+slice_index = int(sys.argv[2])
+infra_slice = sys.argv[3]
+tasks = []
+for index, name in enumerate(sys.argv[4:]):
+    if infra_slice and slice_index == int(infra_slice):
+        status = "INFRA_ERROR"
+        passed = False
+    elif slice_index == 0 and index == 0:
+        status = "FAILED"
+        passed = False
+    else:
+        status = "PASSED"
+        passed = True
+    task = {"name": name, "status": status, "passed": passed}
+    if os.environ.get("FLEET_STABILITY_FAKE_AGENT_STATUS") == "1":
+        task["benchmark_status"] = status
+        task["status"] = "ACTIVE" if not passed else "PAUSED"
+    if os.environ.get("FLEET_STABILITY_FAKE_CANCELLED") == "1":
+        task.update(status="ACTIVE", benchmark_status="CANCELLED", passed=False)
+    if os.environ.get("FLEET_STABILITY_FAKE_MALFORMED") == "1":
+        task["benchmark_status"] = []
+    tasks.append(task)
+path.write_text(json.dumps({"tasks": tasks}) + "\n")
+owner = os.environ.get("CLOUDBENCH_FLEET_OWNER_TOKEN", "0" * 32)
+run_dir = path.parent.parent
+audit = run_dir / "teardown-ownership"
+audit.mkdir()
+(audit / "pool").mkdir()
+(audit / "pool-handoffs").mkdir()
+(audit / "pool/fixture").write_text("disposition=returned-stopped-claim-released\n")
+(audit / "pool-handoffs/fixture").write_text("disposition=transferred\n")
+workspace = str(Path.cwd())
+(audit / "meta").write_text(
+    f"version=1\nfleet_owner_token={owner}\nrun_id={run_dir.name}\n"
+    f"workspace_root={workspace}\nstatus=provider-teardown-verified\n"
+)
+digest = hashlib.sha256()
+for item in sorted(audit.rglob("*"), key=lambda item: str(item.relative_to(audit))):
+    if item.is_file():
+        relative = str(item.relative_to(audit)).encode()
+        payload = item.read_bytes()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+common = subprocess.check_output(["git", "rev-parse", "--git-common-dir"], text=True).strip()
+source = (Path(common) / "cloudbench-fleet-audits" / owner).resolve()
+(audit / "source-audit").write_text(f"path={source}\nsha256={digest.hexdigest()}\n")
+teardown = os.environ.get("FLEET_STABILITY_FAKE_TEARDOWN", "verified")
+if teardown != "missing":
+    (path.parent / "lifecycle.json").write_text(json.dumps({
+        "version": 1, "fleet_owner_token": owner, "run_id": run_dir.name,
+        "workspace_root": workspace, "status": teardown,
+        "audit_sha256": digest.hexdigest(),
+        "controller_exit_code": int(os.environ["FLEET_STABILITY_FAKE_EXIT"]) if os.environ.get("FLEET_STABILITY_FAKE_EXIT") else 1 if slice_index == 0 or infra_slice == str(slice_index) else 0,
+    }))
+PY
+echo "🔏 execution provenance: $run_dir/execution-provenance.json"
+if [ "${FLEET_STABILITY_FAKE_BINARY_LOG:-0}" = 1 ]; then
+  printf '\377controller diagnostic\n'
+fi
+if [ -n "${FLEET_STABILITY_FAKE_NESTED_PROVENANCE:-}" ]; then
+  python3 - "$run_dir" <<'PY'
+import json
+import os
+import sys
+import uuid
+from pathlib import Path
+
+parent = Path(sys.argv[1])
+child = parent.with_name(parent.name + "-canary")
+(child / "_batch").mkdir(parents=True)
+receipt = json.loads((parent / "_batch/lifecycle.json").read_text())
+receipt["run_id"] = child.name
+if os.environ["FLEET_STABILITY_FAKE_NESTED_PROVENANCE"] != "ambiguous":
+    receipt["fleet_owner_token"] = uuid.uuid4().hex
+(child / "_batch/lifecycle.json").write_text(json.dumps(receipt))
+(child / "_batch/run.json").write_text((parent / "_batch/run.json").read_text())
+print(f"🔏 execution provenance: {child}/execution-provenance.json")
+PY
+fi
+if [ -n "${FLEET_STABILITY_FAKE_EXIT:-}" ]; then exit "$FLEET_STABILITY_FAKE_EXIT"; fi
+if [ "${FLEET_STABILITY_FAKE_INFRA_SLICE:-}" = "$FLEET_STABILITY_SLICE" ] \
+  || [ "$FLEET_STABILITY_SLICE" = 0 ]; then
+  exit 1
+fi
+SH
+chmod +x "$tmp/fake-fleet"
+
+# Transport/log representation must not reject genuine evaluated task failures.
+ln -s "$ROOT_DIR" "$tmp/linked-checkout"
+for variant in symlink binary-log; do
+  proof_entry="$PROOF"
+  binary_log=0
+  if [ "$variant" = symlink ]; then
+    proof_entry="$tmp/linked-checkout/scripts/run-fleet-infra-stability-proof"
+  else
+    binary_log=1
+  fi
+  FLEET_STABILITY_FAKE_BINARY_LOG="$binary_log" \
+  FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/representation-$variant" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$proof_entry" --capability --runs 1 --width 2 --seed 13 \
+    >"$tmp/representation-$variant.log" 2>&1 \
+    || fail "$variant representation rejected a verified evaluated slice"
+done
+
+mkdir "$tmp/slow-log-bin"
+cat >"$tmp/slow-log-bin/tee" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */slice-*.log)
+    sleep 1
+    "$FLEET_TEST_REAL_TEE" "$@"
+    exit "${FLEET_TEST_TEE_EXIT:-0}"
+    ;;
+esac
+exec "$FLEET_TEST_REAL_TEE" "$@"
+SH
+chmod +x "$tmp/slow-log-bin/tee"
+real_tee="$(command -v tee)"
+for log_exit in 0 1; do
+  proof_exit=0
+  PATH="$tmp/slow-log-bin:$PATH" FLEET_TEST_REAL_TEE="$real_tee" \
+  FLEET_TEST_TEE_EXIT="$log_exit" \
+  FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/log-drain-$log_exit" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+    >"$tmp/log-drain-$log_exit.log" 2>&1 || proof_exit=$?
+  if [ "$log_exit" -eq 0 ]; then
+    [ "$proof_exit" -eq 0 ] || fail "classification raced the slice log writer"
+  else
+    [ "$proof_exit" -ne 0 ] || fail "slice log publication failure was accepted"
+  fi
+done
+
+# A fresh nested canary shares stdout with its parent, so the last provenance
+# line belongs to a different controller. Select the exact parent identity.
+FLEET_STABILITY_FAKE_NESTED_PROVENANCE=canary \
+FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+FLEET_INFRA_PROOF_STATE_ROOT="$tmp/nested-canary" \
+FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+  "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+  >"$tmp/nested-canary.log" 2>&1 \
+  || fail "nested canary provenance masked the verified parent slice"
+if FLEET_STABILITY_FAKE_NESTED_PROVENANCE=ambiguous \
+  FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/ambiguous-parent" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+    >"$tmp/ambiguous-parent.log" 2>&1; then
+  fail "multiple provenance candidates claiming the parent owner must fail closed"
+fi
+
+if FLEET_STABILITY_FAKE_EXIT=143 \
+  FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/cancelled-controller" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+    >"$tmp/cancelled-controller.log" 2>&1; then
+  fail "ordinary task outcomes must not mask an interrupted controller"
+fi
+
+for teardown in failed missing; do
+  if FLEET_STABILITY_FAKE_TEARDOWN="$teardown" \
+    FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+    FLEET_INFRA_PROOF_STATE_ROOT="$tmp/teardown-$teardown" \
+    FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+      "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+      >"$tmp/teardown-$teardown.log" 2>&1; then
+    fail "ordinary task outcomes must not mask $teardown final teardown"
+  fi
+done
+
+if FLEET_STABILITY_FAKE_MALFORMED=1 \
+  FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/malformed-outcome" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+    >"$tmp/malformed-outcome.log" 2>&1; then
+  fail "malformed explicit outcome must not fall back to an accepted legacy status"
+fi
+
+# Real runner rows retain the agent lifecycle state independently of their
+# evaluator outcome. A passed payment-abandonment task is legitimately PAUSED;
+# a failed evaluated timeout can still have an ACTIVE snapshot. Interruption
+# has the same snapshot, so its explicit CANCELLED outcome must remain INFRA.
+FLEET_STABILITY_FAKE_AGENT_STATUS=1 \
+FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+FLEET_INFRA_PROOF_STATE_ROOT="$tmp/agent-status" \
+FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+  "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+  >"$tmp/agent-status.log" 2>&1 \
+  || fail "evaluated agent lifecycle states were classified as infrastructure"
+if FLEET_STABILITY_FAKE_CANCELLED=1 \
+  FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/cancelled-status" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+    >"$tmp/cancelled-status.log" 2>&1; then
+  fail "interrupted ACTIVE snapshot must remain infrastructure"
+fi
+
+broken_artifacts="$tmp/broken-artifacts"
+ln -s "$tmp/unavailable/artifacts" "$broken_artifacts"
+broken_artifact_status=0
+FLEET_INFRA_PROOF_ARTIFACT_DIR="$broken_artifacts" \
+FLEET_INFRA_PROOF_STATE_ROOT="$tmp/capability-broken-artifact" \
+FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+  "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+  >"$tmp/broken-artifact.log" 2>&1 || broken_artifact_status=$?
+[ "$broken_artifact_status" -eq 0 ] \
+  || fail "unavailable optional artifact directory masked proof status (exit=$broken_artifact_status)"
+grep -Fq "CAPABILITY STABILITY PROOF PASSED" "$tmp/broken-artifact.log" \
+  || fail "proof did not reach its canonical terminal result without artifact storage"
+
+FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+FLEET_INFRA_PROOF_STATE_ROOT="$tmp/capability-pass" \
+FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+  "$RUN_BENCH" stability-proof -k=2 --concurrency=3 --seed 17
+if FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/missing-llm-evidence" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 17 \
+      --min-successful-llm 3 >"$tmp/missing-llm-evidence.log" 2>&1; then
+  fail "capability proof accepted a verdict with no completed LLM evidence"
+fi
+grep -Fq 'lacks the required correlated successful LLM evidence' \
+  "$tmp/missing-llm-evidence.log" || fail "missing LLM proof did not explain the failure"
+python3 - "$tmp/capability-pass" "$FLEET_INFRA_CANARY_STAMP" <<'PY' || fail "capability proof summary invalid"
+import json
+import sys
+from pathlib import Path
+
+summaries = list(Path(sys.argv[1]).glob("*/summary.json"))
+assert len(summaries) == 1, summaries
+summary = json.loads(summaries[0].read_text())
+assert summary["status"] == "passed", summary
+assert summary["runs"] == 2
+assert summary["width"] == 3
+assert summary["passed_slices"] == 2
+assert [item["classification"] for item in summary["slices"]] == [
+    "harness",
+    "pass",
+]
+assert all(len(item["names"]) == 3 for item in summary["slices"])
+stamp = Path(sys.argv[2]).read_text()
+assert f"capability-proof={summary['proof_id']} slice=1" in stamp, stamp
+PY
+
+set +e
+FLEET_STABILITY_FAKE_INFRA_SLICE=1 \
+FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+FLEET_INFRA_PROOF_STATE_ROOT="$tmp/capability-infra" \
+FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+  "$RUN_BENCH" stability-proof --runs 3 --concurrency 2 --seed 19
+infra_status=$?
+set -e
+[ "$infra_status" -ne 0 ] || fail "capability proof must fail on INFRA"
+python3 - "$tmp/capability-infra" "$FLEET_INFRA_CANARY_STAMP" <<'PY' || fail "INFRA reset summary invalid"
+import json
+import sys
+from pathlib import Path
+
+summaries = list(Path(sys.argv[1]).glob("*/summary.json"))
+assert len(summaries) == 1, summaries
+summary = json.loads(summaries[0].read_text())
+assert summary["status"] == "failed", summary
+assert summary["failed_slice"] == 1
+assert summary["passed_slices"] == 1
+assert [item["classification"] for item in summary["slices"]] == [
+    "harness",
+    "infra",
+]
+stamp = Path(sys.argv[2]).read_text()
+assert f"capability-proof={summary['proof_id']} slice=0" in stamp, stamp
+PY
+
+python3 "$ROOT_DIR/scripts/tests/fleet-stability-cleanup.test.py"
 
 echo "All fleet infra stability proof structural checks passed."

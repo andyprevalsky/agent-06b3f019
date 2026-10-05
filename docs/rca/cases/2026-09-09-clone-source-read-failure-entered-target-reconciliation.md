@@ -1,0 +1,1390 @@
+---
+id: 2026-09-09-clone-source-read-failure-entered-target-reconciliation
+date: 2026-09-09
+title: Clone failure ownership was classified only after target machine-name reconciliation
+surface: infra
+component: cloudbench-fleet-clone-ownership
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: scripts/run-bench-fleet clone_machine_target entered machine_id_for_clone_name before classifying and durably recording an exact provider-returned target volume
+symptoms:
+  - "FAIL: source-machine rate-limit rejection crossed into post-mutation clone-name resolution (1 forced inventory refreshes)"
+  - "FAIL: volume-only owned audit was rejected before registry reaper; assert 91 == 0"
+  - "ERROR: exact psql command is unavailable"
+  - "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_v3g193x1j2gyezx4'"
+  - "state: pending_destroy after six accepted exact volume destroy calls"
+tags:
+  - cloudbench
+  - fly-io
+  - clone
+  - rate-limit
+  - ownership
+  - preallocation
+sources:
+  - commit 65cb5c022656ed028d7031bfb57bb8ad12e002ac
+  - commit 048872d59cb839c6ea8355441e0d1272306e05f8
+  - commit 29687015cd21161079f384f0e922edb8de80517a
+  - fleet run 20260909-215629-914100
+  - fleet run 20260910-002414-1221609
+  - fleet run 20260910-021331-1465409
+  - commit 8562f093a
+  - commit d8d1dc8dc
+  - commit 59307b5aa
+  - commit 458f9ae51
+  - commit a41d77751
+  - commit 4333f47dd
+  - commit 74c3e8006
+  - commit de67d9499
+  - commit f6609222b
+  - commit fb887cc1f
+  - commit d8d17dd2d
+  - commit a8f76d258
+  - commit 8003c8524
+  - commit 1527b074a
+  - commit 650ab1085
+  - commit 78fb850cc
+  - commit 1fa5a12fc
+  - commit 9c8e414d9
+  - commit 59a52e554
+  - commit 7af3750c2
+  - commit c400e3600
+  - fleet run capability-stability-20260910120311-2848604
+  - commit b9979c5af
+  - commit 117328730
+  - commit 4ebec8a34
+  - commit 5d90c105d
+  - commit 4f743b245
+  - commit cb7f35bd8
+  - fleet run stale-owner-539b11e970334d9db5d401fa167ac59e
+  - commit 95ab4d584
+  - commit 71197cc5b
+repro: agents/benchmarks/cloudbench_dependency_sync_test.py
+status: fixed
+---
+
+## Problem
+
+`flyctl machine clone` failed before target allocation because Fly could not read
+the source Machine under its organization rate limit. The controller nevertheless
+forced a fresh target inventory read and emitted `unresolved clone name`, adding
+provider traffic during the exact rate-limit condition it was meant to absorb.
+
+The deterministic pre-fix command was
+`CLOUDBENCH_TEST_CLONE_SOURCE_RATE_LIMIT_REPRO=1 bash scripts/tests/cloudbench-multi-workstream.test.sh`.
+It exited 1 with `FAIL: source-machine rate-limit rejection crossed into
+post-mutation clone-name resolution (1 forced inventory refreshes)`. The trace
+recorded clone status `1`, no authoritative target ID, and
+`definitivelyUnallocated=0`, followed by `clone-name lookup entered`, a successful
+`generation-0` to `generation-1` refresh, and deadline exhaustion. The refresh
+therefore did not fail; it correctly found no target because target allocation
+had never started.
+
+## Diagnosis
+
+Critical path:
+
+`fly_with_timeout machine clone <source>` → clone output/status capture →
+authoritative target-ID parse → pre-allocation classification → target-name
+inventory reconciliation → durable name retirement → retry.
+
+The first bad boundary was classification. `clone_failure_definitively_unallocated`
+recognized only `failed to create volume:`. It omitted Fly's exact source-read
+failure even though a failed source read necessarily precedes every target
+resource mutation. `clone_machine_target` then used only an empty parsed target
+ID to enter `machine_id_for_clone_name`; it did not use the already available
+command status and phase evidence to gate that post-mutation operation.
+
+Deepest-owned-cause ladder:
+
+- Target reconciliation ran because the output had no target ID.
+- A missing target ID was ambiguous because source-read, volume-create, target
+  launch, timeout, and post-create response failures all shared one empty-string
+  representation.
+- The ambiguity persisted because pre-allocation disposition was an ad hoc
+  late cleanup predicate rather than one source-aware decision made before any
+  target reconciliation.
+
+The deepest owned cause is a lifecycle-contract inconsistency: clone failure
+phase and ownership certainty were available but were not the source of truth
+for selecting pre- versus post-mutation handling.
+
+Archive searches for `source-machine rate-limit rejection post-mutation
+clone-name resolution unresolved clone name` and `fleet clone preflight mutation
+boundary provider inventory cancellation ownership` found the 2026-07-15
+unthrottled/fixed-retry rate-limit cases and the 2026-07-20 name-only reservation
+case. This incident is a relative, not a recurrence: retries and durable
+reservations worked, but the phase classifier routed a pre-allocation rejection
+through target reconciliation.
+
+## Solution
+
+`clone_failure_definitively_unallocated` now derives one fail-closed disposition
+from clone status, exact source identity, and the complete transcript. An
+ordinary single terminal error is allocation-free when it proves either that the
+exact source Machine could not be read or that target volume creation failed.
+Timeouts, mixed transcripts, mismatched source identities, and all later target
+failures remain ambiguous.
+
+`clone_machine_target` computes that disposition once, before target lookup, and
+uses the same value both to skip post-mutation reconciliation and to retire the
+prewritten name/audit record. This unifies routing and cleanup instead of adding
+a rate-limit-specific retry branch. It also prevents every nested source-read
+failure and definite volume-create rejection from spending an unnecessary
+Machines inventory refresh.
+
+The unchanged reproduction exits 0. Its post-fix trace records
+`definitivelyUnallocated=1` for attempt 1, contains no
+`machine_id_for_clone_name` entry, and then records the successful attempt-2
+authoritative ID. The contract also runs unconditionally in the permanent
+multi-workstream suite, and the dependency-sync blackbox covers mismatched
+source IDs, watchdog timeouts, and mixed error transcripts.
+
+At 10,000 agents, the change adds O(1) local transcript parsing per failed clone
+attempt and removes up to one provider inventory refresh per pre-allocation
+failure. It adds no channel, subscription, lock, poller, row, or shared mutable
+state.
+
+## Recurrence on 2026-09-10
+
+The same lifecycle-contract problem recurred one boundary later. A real clone
+attempt returned no Machine ID but did return exact target volume
+`vol_vz8m80el8w7dwqxv` in:
+
+`Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_vz8m80el8w7dwqxv' (Request ID: 01M24BSMAJSAD16GZG888ECDZG-lax)`.
+
+The focused pre-fix replay
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_failed_clone_captures_owned_volume_before_machine_name_reconciliation`
+exited 1 with `provider-owned volume failure crossed into target machine-name
+reconciliation`. Its runtime call order was `clone-name lookup entered`, then
+`volumes destroy`, then `volumes show`.
+
+H1 was confirmed: `clone_machine_target` parsed and recorded the exact volume
+only after `machine_id_for_clone_name`. H2 was confirmed: `reap_volume`
+redirected every destroy response to `/dev/null`, so the owning boundary could
+not distinguish a provider rejection from an accepted asynchronous transition.
+H3, loss of exact ownership, was rejected: the replay completed with zero owner
+records only after exact lifecycle success, while the live failed run retained
+the exact owner and reported that it could not reap the same volume. The
+provider-specific reason for the live destroy rejection remains inconclusive
+because the pre-fix boundary discarded it; no provider-specific fallback was
+added.
+
+The deepest owned cause was still the original one: clone outcome classification
+was not one ordered ownership decision. Exact target-resource evidence remained
+an ad hoc cleanup predicate below machine reconciliation, so adding the first
+pre-allocation classifier did not fix all sibling outcomes.
+
+`clone_machine_target` now classifies an exact provider-returned volume first,
+atomically records it in the owner registry, and performs exact-volume teardown
+without entering either machine-name lookup path. Only outcomes with neither an
+authoritative Machine ID nor an exact volume proceed to machine reconciliation.
+`reap_volume` now captures every destroy command's return code and at most 200
+response bytes in the owning diagnostic log; failures without a diagnostic log
+are surfaced on stderr. Exact lifecycle reads remain the only success authority,
+so response capture adds no silent fallback and ownership remains fail-closed.
+
+The unchanged replay now passes with call order `volumes destroy`, `volumes
+show`, no clone-name lookup, one durable receipt
+`id=vol_vz8m80el8w7dwqxv rc=1 response=<empty>`, and zero owner records only
+after the exact `pending_destroy` receipt. A separate permanent case proves a
+400-byte provider rejection is truncated in each of six bounded receipts and
+that a nonterminal exact lifecycle retains ownership. The replay's empty destroy
+response plus terminal lifecycle does not support an additional
+provider-rejection fix.
+
+At 10,000 agents, this adds one O(1) local transcript classification and one
+short-lived response-capture file per concurrent volume cleanup. It adds no
+provider call, shared lock, subscription, row, or fan-in; diagnostic growth is
+bounded to six 200-byte excerpts per cleanup.
+
+## Second recurrence on 2026-09-10
+
+The lifecycle-contract inconsistency recurred at stale-owner recovery. Clone
+allocation intentionally publishes two exact `owned` identity forms:
+Machine-plus-Volume after a successful VM allocation, and Volume-only when Fly
+created a target Volume but rejected the VM launch. The audit writer accepted
+both, but `recover_registry_audit_only_fresh` still required every `owned`
+record to contain a Machine ID. Its sibling shared-audit updater independently
+encoded the same obsolete Machine-plus-Volume-only rule.
+
+The unchanged pre-fix command
+`/workspace/agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper`
+exited 1 with `FAIL: volume-only owned audit was rejected before registry
+reaper` and `assert 91 == 0`. Runtime instrumentation proved that the v2 owner
+identity and dead-owner classification were valid, the recovery lock was
+acquired, and audit recovery loaded `disposition=owned`,
+`machineId=""`, `volumeId="vol_vz8m80el8w7dwqxv"`. It then emitted
+`machine identity invariant rejected audit record`; the registry-reaper entry
+event was absent.
+
+This is a second recurrence of the archived lifecycle-contract problem and a
+relative at the audit-only recovery boundary. Archive searches for `volume-only
+owned audit rejected registry reaper` and `clone allocation audit identity
+machine volume stale owner recovery` selected this case plus the
+default-volume-list and registry-retirement relatives. The first recurrence
+fixed classification order at clone allocation but did not make the resulting
+identity algebra authoritative for every later consumer.
+
+The canonical invariant now requires an exact Volume for every `owned` record
+and permits its Machine ID to be either absent or valid hexadecimal. Recovery
+validates a Machine-plus-Volume identity through the existing audit-first
+repair transaction. A Volume-only identity is accepted only when the extant
+exact-owner registry record is a regular non-symlink file containing exactly
+the matching `name` and `volume_id` fields produced by
+`fleet_registry_record_volume`; missing, partial, conflicting, duplicate,
+extra-field, malformed, and special-inode identities remain fail-closed. The
+shared-audit updater now applies the same Volume-required/Machine-optional
+contract.
+
+The unchanged reproduction now passes and its post-fix log reaches
+`entered registry clone reaper` in forced mode. The adjacent permanent
+fail-closed regression passes six noncanonical forms, while the existing
+Machine-plus-Volume crash-window regression remains green. No provider call,
+task definition, timeout, or concurrency setting changed. At 10,000 agents,
+recovery performs one bounded, local, O(1) validation per volume-only owner
+record and adds no provider traffic, polling, shared lock, row, channel,
+subscription, or fan-in.
+
+## Third recurrence on 2026-09-10
+
+The lifecycle contract recurred at the outer exact-owner recovery gate.
+Controllers intentionally publish every v2 owner with `cleanup_policy=retain`
+and `guest-cleanup-unconfirmed`, then authorize reaping only after all token-bound
+guest teardown acknowledgements. `recover_exact_stale_fleet_owner` nevertheless
+embedded `cleanup_policy=reap` in its registry identity predicate. A canonical
+quarantined owner was therefore indistinguishable from malformed ownership.
+
+The caller's exact stale-owner replay in `/tmp/rose-polar-streak-main` exited 1
+with `exact stale-owner registry identity is unsafe`. The permanent pre-fix
+reproduction,
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_classifies_cleanup_unconfirmed_owner_as_quarantined`,
+also exited 1 on that same message. Its hermetic owner contained the production
+shape of ten exact records: nine Machine-plus-Volume identities and one
+Volume-only identity. Every provider, pool, capacity, audit, and registry reaper
+was a fail-if-called stub.
+
+Runtime NDJSON established:
+
+- H1 confirmed: cleanup state was `retain` with the unconfirmed-guest sentinel.
+- H2 rejected: `meta` was a regular non-symlink file and version, app, and host
+  identity fields all matched.
+- H3 rejected: all ten clone records used canonical allocation identities,
+  specifically nine Machine-plus-Volume and one Volume-only.
+- H4 confirmed: the outer gate rejected solely because `cleanupPolicyReap=0`,
+  before audit recovery or any reaper boundary.
+
+The deepest owned cause remained the same duplicated lifecycle algebra. Cleanup
+authorization was encoded as an identity-validation field instead of a separate
+state transition, so later consumers could reinterpret a valid producer state
+as malformed. A `reap` policy with the sentinel still present was also able to
+reach audit-only recovery before the inner clone reaper finally refused it,
+despite the producer's fail-closed transition ordering.
+
+`fleet_registry_cleanup_state` is now the shared classifier for stale-owner
+consumers. `reap` without the sentinel is the only authorized recovery state;
+`retain` without the sentinel remains intentionally retained; and either known
+policy with the sentinel is canonical quarantine. Unknown policies remain
+unsafe. Exact recovery validates regular-file identity first, then reports a
+distinct non-success quarantine result before owner probes or any reaper. The
+generic successor scan uses the same classifier, so the intermediate
+`reap`-plus-sentinel transition cannot cross audit or provider cleanup.
+
+The unchanged focused reproduction now passes while retaining all ten records,
+the sentinel, and every ownership handle with no mutation stub called. The
+existing full fake-provider cancellation scenario still requires a nonzero
+detached wait, zero provider reap calls, and retention of the exact Machine,
+Volume, registry, quarantine sentinel, and capacity reservation; it now asserts
+the explicit quarantine diagnostic instead of the false unsafe-identity one.
+No provider resource, benchmark task, timeout, or concurrency setting changed.
+
+At 10,000 agents, classification is one O(1) local policy/sentinel read per
+owner encountered. It adds no provider call, poll, channel, subscription, row,
+shared lock, mutable global, or fan-in; recovery remains independently keyed by
+the exact fleet-owner token.
+
+## Fourth recurrence on 2026-09-10
+
+The lifecycle contract recurred at the next owned boundary after quarantine
+classification was corrected. Exact owner
+`03596f65144d485f8a667fc31f7e3cc6` retained nine started Machines plus one
+pending-destroy Volume after its controller received the required TERM and its
+30-second guest cleanup attempt could not receive acknowledgements. Retaining
+`cleanup_policy=retain` plus `guest-cleanup-unconfirmed` was safe, but
+`--recover-stale-owner` had no sanctioned transition out of that canonical
+state.
+
+The owner metadata preserved run `20260910-021331-1465409` under
+`/tmp/rose-polar-streak-main/.context/fleet/capability-stability-proof/capability-stability-20260910021331-1465395/runs`.
+Its ten exact clone records contained nine Machine-plus-Volume identities and
+one Volume-only identity. Each configured guest output retained `.cid` and
+`status-proxy.port`; the original local status proxies no longer existed.
+
+The first unchanged pre-fix reproduction was
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap`.
+It exited 1 through `exact stale-owner cleanup is quarantined pending guest
+acknowledgement` without requesting any guest shutdown. That proved the
+deadlock at the transition owner, independently of Fly.
+
+The next-deeper pre-fix command was
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py
+-k 'forced_exact_reaper_uses_only_owned_machine_ids_and_exact_volume_ids or
+exact_recovery_entrypoint_has_no_global_machine_or_proxy_sweep'`. It exited 1:
+the forced reaper emitted `could not verify owned fleet machine
+deadbeef000001`, and the entrypoint still contained both `machines list` and
+`reap_orphaned_fleet_proxies`. The first recovery draft therefore reconnected
+guests but still discovered or swept app-wide neighbors before and after the
+exact owner boundary.
+
+Critical path:
+
+`--recover-stale-owner <exact-token>` → validate same-host dead controller →
+read only that registry and audit → map each Machine record one-to-one to its
+run output → exact `machine status <id>` state/name/private-IP read → exact
+`machine status <id> -d` mount/token/remote-port read → reconnect one existing
+data-plane proxy per exact Machine → token-bound `POST /shutdown` → require
+`GET /shutdown-health` HTTP 204 for every guest → fsync each confirmation →
+atomically publish and fsync `cleanup_policy=reap` before removing and fsyncing
+the quarantine sentinel → exact-ID Machine/Volume, pool-claim, primary-capacity,
+and audit reaping.
+
+The deepest-owned-cause ladder was:
+
+- Quarantine had no recovery transition because guest acknowledgement existed
+  only in the dying controller's live proxy/process state.
+- The first transition draft reconstructed that state from app-wide
+  `machines.json`, provider Machine lists, name resolution, pool/capacity scans,
+  and an orphan-proxy sweep.
+- Those global sources were unnecessary because the exact registry, owner audit,
+  per-output `.cid`, and exact Machine config already formed a complete
+  token-bound recovery capability.
+- The missing invariant was that an exact-owner command must derive every read,
+  side effect, and cleanup target from one sealed owner record before crossing
+  that target's boundary.
+
+The problem class remains a lifecycle-contract inconsistency. Durable ownership
+was exact, but cancellation recovery did not use that exact capability as the
+sole source of truth.
+
+The recovery path now validates regular non-symlink owner/run/output metadata,
+requires a complete one-to-one registry-to-`.cid` mapping and valid local proxy
+port for every Machine, and ignores canonical Volume-only records only for the
+guest phase. It validates each live Machine by exact ID, requires state
+`started`, exact registry name, private IP, exact mounted Volume, safe barrier
+token, safe guest run token, and safe remote status port. Every configured
+Machine must share one barrier token.
+
+It reuses the existing data-plane proxy and
+`cloudbench_confirm_guest_shutdowns` contracts. Requests are sent in parallel
+before polling; HTTP 202/204/409 only means shutdown was requested, while
+`/shutdown-health` HTTP 204 is the sole acknowledgement. No marker is fabricated.
+Only after every marker is fsynced does the registry publish and fsync the
+ordered `reap`-then-sentinel-removal transition. Missing, malformed, absent,
+mismatched, proxy-start, token, transport, or non-204 evidence leaves the owner
+quarantined. Failed acknowledgement also releases only the exact temporary
+proxy PIDs and token-bound listed port leases; it never short-circuits local
+cleanup or scans neighboring leases.
+
+Forced provider reaping now uses `machine status <exact-id>` and exact config
+reads. Volume-only records destroy only their recorded Volume and never resolve
+their clone name. V2 pool claims come only from the owner's audit, capacity
+cleanup addresses only deterministic `<owner>-primary`, and the exact
+entrypoint derives the warm-source guard from that owner audit plus exact source
+config. It performs no Machine inventory, orphan-proxy sweep, neighbor claim
+scan, or reservation-directory scan. Autoscaler temporary probes are unchanged.
+
+The original recovery reproduction now passes. Its six NDJSON events prove the
+ordering: H6 validates two exact local mappings; H12 validates two exact-ID
+Machine states/configs; H7 reconnects two exact proxies; H8 records two
+token-bound shutdown-health acknowledgements with status 0; H9 durably reaches
+`cleanupState=reap`; only then does H10 enter the exact provider reaper.
+
+Permanent fail-closed coverage additionally exercises missing/malformed and
+mismatched `.cid`, missing/malformed `status-proxy.port`, absent/malformed exact
+Machine status, missing/malformed tokens and config, mounted-Volume mismatch,
+proxy startup failure, non-204 shutdown health, mixed
+Machine-plus-Volume/Volume-only ownership, Volume-only audit recovery,
+all-or-nothing proxy-port batch publication, exact capacity/port neighbor
+preservation, and exact v2 pool-claim selection. The complete provider-free
+suite passes: `266 passed` from
+`agents/venv/bin/pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py`; `bash -n
+scripts/run-bench-fleet` also exits 0. No provider resource, benchmark task,
+timeout, or concurrency setting changed.
+
+At 10,000 agents, recovery is O(records in the one exact owner): one bounded
+local mapping read, two exact-ID provider reads, one temporary proxy, and one
+shutdown/health stream per configured guest. Volume-only, pool, capacity, port,
+and final reaping touch only IDs or files named by that owner. There is no
+app-wide provider list, cross-owner resource scan, subscription, channel, row,
+or global result fan-in.
+
+## Fifth recurrence on 2026-09-10
+
+The exact-owner transition reached its first live Machine read but classified
+Machine `2862102a194e38` as `absent or unreadable` before starting any recovery
+proxy. The exact command itself was healthy: both that Machine and sibling
+`84ed277b490668` returned status 0 with matching started state, exact registry
+name, and private IP under `flyctl v0.4.100`.
+
+The instrumented unchanged owner recovery recorded H11 `status=0`, followed by
+H13 for the rejected Machine with `providerStatus=0`, `outputBytes=1738`,
+`hasEqualsRows=0`, and `hasTableRows=1`. This rejected provider absence,
+authentication failure, and exact-identity drift. `registry_machine_details`
+was the first bad boundary: its human-display parser recognized only legacy
+`key = value` VM rows, while current Fly renders `key │ value`. The exact status
+read succeeded, but the parser produced no VM identity fields and returned
+unsafe status 2; the caller combined statuses 1 and 2 into the observed message.
+
+The deterministic recovery fixture was changed only from legacy equals rows to
+the current Fly table rows. Before the parser fix,
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap`
+exited 1 on `exact owned Machine deadbeef000001 is absent or unreadable`.
+After the fix, the unchanged command passes and its logs proceed from two H13
+status-0 table reads through H6/H12 exact mapping and configuration, H7 exact
+proxies, H8 token-bound health, H9 durable reap authorization, and H10 provider
+reaper entry.
+
+The parser now strips terminal styling, isolates exactly one `VM` section from
+the unrelated event-log table, and accepts either the legacy `=` format or
+current `│` format only when every VM row uses one consistent separator.
+Duplicate fields, mixed formats, missing sections, mismatched IDs/states/names,
+invalid private IPs, and malformed rows remain unsafe. The provider call remains
+`machine status <exact-id>`; no inventory, name resolution, fallback, or
+neighbor read was added.
+
+The full provider-free cloudbench suite passes all 266 tests and shell syntax
+validation passes. The retained real owner has not been rerun after the fix, so
+its guest acknowledgements and provider teardown remain pending the explicit
+verification rerun.
+
+At 10,000 agents, parsing remains O(lines in one exact Machine response) and
+recovery still issues the same two exact-ID reads per owned guest. The change
+adds no provider call, app-wide read, poller, lock, row, channel, subscription,
+shared state, or fan-in.
+
+## Sixth recurrence on 2026-09-10
+
+The exact-owner recovery transition validated its warm-source guard and every
+owned guest, reconnected all exact status proxies, and then exited 127 with
+`cloudbench_confirm_guest_shutdowns: command not found`. Bash executed the
+top-level `--recover-stale-owner` entrypoint before reaching the one shared
+guest-shutdown function definition later in `run-bench-fleet`. No shutdown
+health acknowledgement or provider cleanup could occur.
+
+The unchanged pre-fix command was
+`CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY=1 bash
+scripts/tests/cloudbench-multi-workstream.test.sh`. It exited 1 after the real
+immutable script snapshot reported line 5923 `command not found`. NDJSON events
+proved the earlier boundaries were healthy: H11 resolved the warm identity with
+status 0, H13 read current table-form Machine status with provider status 0, H6
+and H12 validated one exact guest, and H7 reconnected one exact proxy. H8 then
+recorded status 127. The extracted-function Python regression remained green
+because its hand-assembled signature list placed
+`cloudbench_confirm_guest_shutdowns` before
+`fleet_recovery_reconnect_guest_shutdowns`, reversing production source order.
+
+Archive searches for `cloudbench_confirm_guest_shutdowns command not found exact
+stale owner recovery` and `bash function definition entrypoint source ordering
+extraction test` selected this case and the 2026-07-21 shell-helper extraction
+case. This incident is a recurrence of the exact recovery lifecycle work and a
+relative of the extraction-test case: production had a real ordering defect,
+while the owning regression reconstructed a different ordering and hid it.
+
+The one shared `cloudbench_confirm_guest_shutdowns` definition now appears
+before `fleet_recovery_reconnect_guest_shutdowns` and therefore before the early
+exact-recovery entrypoint. The later duplicate location was removed rather than
+copying the helper. Normal EXIT cleanup still calls the same function body.
+
+The permanent shell regression now drives a real detached controller through
+allocation, durable exact guest publication, SIGKILL, immutable-snapshot
+`--recover-stale-owner`, authenticated shutdown health, and exact provider
+reaping. Its fake provider now emits the same exact status/config/absence
+contracts consumed by production. The unchanged focused command exits 0; H8
+records shutdown status 0, H9 records `cleanupState=reap`, and H10 enters the
+provider reaper only afterward. The complete multi-workstream suite passes,
+including every mandatory-autoscaler failure probe; the full dependency-sync
+suite passes all 266 tests; the fleet infra-canary structural suite and Bash
+syntax checks pass.
+
+At 10,000 agents, this is a source-order-only move with zero added runtime work:
+the same O(guests in one exact owner) shutdown calls and exact-ID provider reads
+execute once. It adds no provider call, poller, lock, row, channel, subscription,
+shared state, or fan-in.
+
+## Seventh recurrence on 2026-09-10
+
+The real recovery of exact owner `03596f65144d485f8a667fc31f7e3cc6`
+validated all nine registry-to-output mappings, current Machine states, mounted
+Volumes, run tokens, and exact data-plane proxies. Guest cleanup then failed in
+two forms. Six `POST /shutdown` requests settled at HTTP 500 after
+`cloudbench-driver.state=exited`; three remained HTTP 202 with
+`cloudbench-driver.state=running` through the recovery deadline. All nine
+runner cleanup-status reads and token-bound acknowledgement reads returned 404.
+The six bounded `bench.log` tails ended with
+`FATAL: benchmark root cleanup was not confirmed; refusing guest cleanup
+acknowledgement`, `FATAL: could not publish guest cleanup acknowledgement`, and
+`driver exited rc=1`. H8 recorded `guestCount=9,status=1`; no H9 authorization
+or H10 provider reaper event followed, so the exact owner remained quarantined.
+
+The critical path was:
+
+`cloudbench-boot.sh` asynchronous driver launch → driver
+`run_with_heartbeat` benchmark launch → authenticated `/shutdown` TERM to the
+exact driver → driver INT to the exact runner → `run_single_task` cancellation
+archive/payment/root DELETE → atomic run-level cleanup status → driver token and
+state validation → root-owned cleanup evidence and acknowledgement → HTTP 204.
+
+Two independent boundaries were wrong. First, the non-interactive boot
+supervisor launched its driver as an ordinary background job. Bash therefore
+started that driver with SIGINT and SIGQUIT ignored; the driver's inner
+`set -m` could not reset a disposition ignored at shell entry, and the runner
+inherited it. Second, this branch exported
+`BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE` and required its clean token-bound
+value in `cloudbench-run.sh`, but `run_benchmark.py` contained no consumer,
+retained cancelled roots because `--keep-failed-agents` was set, and accepted
+any DELETE response as success. Commit `533001686` had implemented the runner
+half on a sibling branch; commit `ac6e6d72b` later imported the driver
+requirement without that half. Extracted-function and structural tests did not
+execute boot, driver, and runner together, allowing the split contract to ship.
+
+The unchanged owning-boundary command was:
+
+`agents/venv/bin/pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py::test_real_boot_driver_interrupt_requires_canonical_runner_cleanup_ack`.
+
+Before the fix it exited 1 with HTTP 202. The actual signal-target record was
+`ignored=0000000001001006 caught=0000000000000000`; the driver recorded a
+successful `kill -INT`, but no H14 runner-cancellation event followed. A direct
+runner-only cancellation then recorded H14 with both contract variables
+configured and H16 `deleteConfirmed=false`, while no status file existed. This
+confirmed both failures without provider mutation. H17 was confirmed for the
+six exited guests: a signal attempt permanently selected the strict status
+check, and the absent runner publisher made acknowledgement impossible. H18
+was resolved before implementation: `/data` is root-owned and the driver
+explicitly chowns only narrower paths, so having the `rose` runner atomically
+replace a root-level status file was not a production-safe contract.
+
+The boot supervisor now enables monitor mode only around the real driver launch,
+giving the driver and its descendants a normal interrupt disposition. The
+runner publishes atomic, file-and-directory-fsynced `pending|clean|failed`
+status under its already runner-writable context directory, counts every
+interrupted root, overrides diagnostic failed-agent retention only for
+owner-requested cancellation, and requires the canonical root DELETE to return
+HTTP 204. Completion is recorded only after the task's full `finally` cleanup.
+At process exit the runner publishes `clean` only when every started cleanup
+completed; all other states remain fail-closed.
+
+The root driver validates the private status token and state, mirrors that exact
+runner-produced evidence to the existing root-owned public status path, and
+publishes the cleanup acknowledgement only for `clean` plus the exact run token.
+It never synthesizes a runner verdict. Boot now appends status/ack presence to
+`bench.log` before sealing `driver.state=exited`, so future recovery has durable
+source-boundary evidence even when acknowledgement is absent.
+
+The unchanged owning command now exits 0. Post-fix H15 records
+`ignored=0000000001001000 caught=0000000000000002`; H14 proves cancellation
+reached the runner with the contract configured; H16 proves
+`deleteConfirmed=true`; the final H14 records `state=clean,started=1,completed=1`;
+H17 records clean state plus token match; and H18 records driver status 0 with
+both public status and acknowledgement present. The permanent regression
+executes the actual boot script, actual driver signal trap and 30-second
+heartbeat semantics, and actual runner cancellation/DELETE/finalization
+functions. The complete lifecycle suite passes all 267 tests, runner contract
+tests pass 14/14, status-service shutdown passes, fleet infra-canary structural
+checks pass, and the multi-workstream suite passes every scenario.
+
+The real retained owner has intentionally not been rerun: provider cleanup
+remains the owner's verification action. Exact-owner quarantine and the
+guest-ack-before-provider-reap ordering are unchanged.
+
+At 10,000 agents, each active guest has one isolated driver, runner, and
+constant-size pair of status files. Cancellation adds O(interrupted roots in
+that one runner) local counter updates and one canonical DELETE per root; there
+is no cross-agent channel, subscription, table scan, shared lock, provider
+poll, or global fan-in.
+
+## Eighth recurrence on 2026-09-10
+
+The post-fix controller was rerun against the same nine pre-fix guest snapshots.
+As expected, no guest could retroactively acquire the corrected boot, driver,
+or runner code. Six exact `/shutdown` requests again returned HTTP 500 after
+driver exit, three exact guests remained pending through the acknowledgement
+deadline, and recovery exited 1 without entering the reaper. This rejected the
+hypothesis that controller retry alone could make an old guest publish a new
+top-level acknowledgement.
+
+The retained owner still names exactly nine Machine-plus-Volume records and one
+Volume-only record. The nine Machine IDs are `865463eb495118`,
+`d896269c97e048`, `e82e291c433d58`, `28625d2c491758`,
+`813962a40d3148`, `84ed277b490668`, `83e202b7737028`,
+`2862102a194e38`, and `2862595b6d4328`. Their Volumes are respectively
+`vol_vjyqyjyy6eo69dmv`, `vol_vdeje7emwew5y5k4`,
+`vol_v3g1gogd8eg28mw4`, `vol_vdeje7empdn000k4`,
+`vol_r1j2jkjjp5k1kl3r`, `vol_vgnpnznj6p6xdpj4`,
+`vol_v3g1gogl7y0q5314`, `vol_r68w87833g9deyd4`, and
+`vol_vgnpnznjg87o2gj4`; the Volume-only identity is
+`vol_42kekpk3pk98yz84`.
+
+Durable, per-output runner/backend evidence names 28 exact Kernel sessions:
+
+- `polar-odysseys-b1bd700090c2`: `q2hvke6g3qpxawls7m3yhszg`,
+  `hvvnzrmo4zp9nt2fdk2icbkq`, `iykspsm83664aaqcx9remu7q`,
+  `auoqogx5ck38anof6v9a5918`, `ubxo30kk209qx8ydmowkczx2`,
+  `tj6k6vetgv600e5jgr4gsfuu`, `tn07sfczffwej3qibyy3u0uf`,
+  `vko6vhpj3hexb4r0xhtsjhkl`, `m5mtf56d9mny3pp3lye4nm17`, and
+  `rxo3dbijoilelkc5rf2h86zv`.
+- `polar-odysseys-437482860f2b`: `szf2i7xhtpj9e2ndkua3rgdr`.
+- `polar-odysseys-5aaab80dfeee`: `e31wbs1h879em8xpmtlodmdp`,
+  `hcv6elx8j1r7p1yxh594yua8`, `sln3cubtdofy060x9oo3ii9g`, and
+  `x856n4tq8d102lhw6kfzha2b`.
+- `agent-payment-abandonment`: `vi7qbg1klnml068ofov0oao3`.
+- `polar-odysseys-47b251d71185`: `ouemy82vhbr4jv4nqc0zzhmn`,
+  `jffp8rep2504828k1jabkskc`, `th7doep6r0cb9wpqyoz7b2so`,
+  `ib7tdk7j17bzlavopgnz0hb1`, and `j0wpf1jbnicxluql9gx0jtij`.
+- `polar-odysseys-753ce2163f6e`: `hc0pd5kq7spf9fslbf6tysys`.
+- `polar-odysseys-7e31dc76193f`: `tj0d946jze5lkm801z49bakj`,
+  `v8kdet6i4j30kq5by439jtxk`, `tx2y33la58weixtemlv9qfp0`,
+  `ojp37z3fxjoa2f5dyrhb4e9v`, `s7c7qp9xih5a55vxc3dwcsfy`, and
+  `s5o0mlw9m6ax4oao6rg5cmit`.
+
+No exact provider session ID appears in the durable evidence for
+`parallel-tool-calls` or `polar-bu-066`. That is a real trace-capture gap, not
+proof that those guests own no external session. Recovery must therefore find
+a valid private runner cleanup receipt for each of those outputs or leave the
+entire owner quarantined. A provider resource created before its ID reached
+durable evidence cannot be discovered safely without the prohibited
+cross-owner provider inventory.
+
+The first bad recovery boundary was the assumption that only the mirrored
+top-level guest acknowledgement could authorize teardown. The guest already
+had two narrower durable authorities that the controller did not consume: the
+runner's token-bound `state=clean` receipt, when present, and the exact provider
+IDs in that output's immutable run record and backend log. This is another
+recurrence of the duplicated lifecycle contract: production could produce
+exact cleanup evidence, but stale-owner recovery had no source-bound,
+idempotent transition from that evidence to its existing exact reaper.
+
+Recovery now first requests the unchanged top-level acknowledgement. On
+failure, it reads the exact private runner receipt through that guest's existing
+exact proxy and accepts only canonical version, run-token, and `clean` fields.
+If no runner receipt exists, it transfers a bounded quiescence helper to that
+exact Machine, requires a stopped services manifest, absent exact service PIDs,
+a closed backend port, and immutable hashes of the one-task `run.json` and
+backend log. It extracts only Kernel/Steel IDs present in those sealed files,
+calls only the provider-specific delete/release endpoints for those IDs, and
+accepts only explicit success/already-absent responses. The controller writes
+an atomic, fsynced receipt bound to owner, run, bench, Machine, run token,
+manifest, evidence hashes, and every exact provider response. It publishes the
+existing per-output cleanup confirmation only after that receipt validates.
+Any missing output, identity, receipt, evidence file, exact session ID,
+quiescence condition, credential, transport response, or provider result keeps
+the owner quarantined; driver exit is never cleanup evidence.
+
+The deterministic pre-fix regression is
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_pre_fix_guest_runner_receipt_authorizes_exact_reaper`.
+Before the fix it exited 1: the non-204 top-level acknowledgement retained the
+owner despite a canonical private runner `clean` receipt. The unchanged test
+now passes, with H8 status 1 followed by H19 runner-receipt validation, H22
+recovery success, H9 durable `reap` authorization, and H10 exact reaper entry.
+Adjacent provider-free tests prove exact-ID-only Kernel/Steel calls,
+idempotency, rejection of incomplete runner evidence, and quiescence evidence
+hashing. The focused suite passes 5 tests, the complete dependency-sync suite
+passes all 271 tests, Bash syntax and status-shutdown suites pass, fleet
+infra-canary passes, and the complete multi-workstream lifecycle suite exits 0.
+
+`run-bench-cloud` now includes both recovery helpers in the immutable boot
+`--file-local` bundle and legacy SFTP bundle, and the controller script snapshot
+includes them. Newly cloned guests therefore receive the same helper versions
+used by their controller. No benchmark task, timeout, concurrency, evaluator,
+or provider behavior changed. The retained real owner was not cleaned or
+reaped; that remains the user's explicit rerun.
+
+At 10,000 agents, recovery remains O(resources in one exact owner and one
+output): one exact proxy read or one exact Machine SSH action, bounded evidence
+reads, and one idempotent call per durably named provider session. It adds no
+inventory, neighboring-session read, global sweep, fan-in, shared lock,
+subscription, row, channel, or polling work.
+
+## Ninth recurrence on 2026-09-10
+
+The unchanged real v5 recovery reconnected all nine exact guest proxies but
+again exited 1. Six `POST /shutdown` calls returned HTTP 500 and three remained
+pending. Fallback then reported `exact guest quiescence could not be sealed` for
+`polar-odysseys-47b251d71185`, `polar-odysseys-753ce2163f6e`, and
+`polar-odysseys-7e31dc76193f`, and `exact guest run evidence is incomplete` for
+the other six outputs. H19, H20, and H21 were absent; H22 recorded
+`guestCount=9,recoveredCount=0,status=1`.
+
+The exact retained owner lives at
+`/workspace/.git/cloudbench-fleet-ownership/03596f65144d485f8a667fc31f7e3cc6`,
+while its outputs live under the metadata-selected root
+`/tmp/rose-polar-streak-main/.context/fleet/capability-stability-proof/capability-stability-20260910021331-1465395/runs`.
+Machine-pinned proxy reads proved that the runner receipt, when present, is
+`/data/cloudbench-interrupt-cleanup-<token>.status`; `run.json` and the backend
+log are `/data/repo/.context/cloudbench/run.json` and
+`/data/repo/.context/cloudbench/logs/backend.log`.
+
+Two proxy mappings were wrong. Recovery requested the runner receipt from
+`/repo/.context/cloudbench/cloudbench-interrupt-cleanup-<token>.status`, a path
+that does not exist. It then reused guest-absolute
+`/data/cloudbench-guest-quiescence-<token>.json` as the URL beneath a server
+already rooted at `/data`, effectively requesting `/data/data/...`. Because the
+quiescence transfer was first in the fetch loop, that 404 prevented the valid
+`/repo/.context/cloudbench/run.json` and backend-log URLs from ever being read.
+The prior synthetic fallback test supplied the same mistaken path shape and
+therefore could not expose the retained-owner layout mismatch.
+
+Exact process inspection rejected the competing hypothesis that all three
+quiescence failures were path or parser errors. Machines `2862102a194e38`,
+`865463eb495118`, and `e82e291c433d58` each still had a live
+token-matched driver and a live `run_benchmark.py` descendant; their services
+were stopped but no terminal `run.json` existed. They are active runs, not a
+timeout-derived quiescence verdict. The other six guests had exited and retained
+terminal run/backend evidence, but none had a valid private clean receipt.
+`parallel-tool-calls` and `polar-bu-066` each had root-agent-bound backend
+evidence with zero exact provider session IDs, so they remain explicitly
+quarantined. No absence of an ID is interpreted as clean.
+
+The permanent pre-fix retained-layout command was
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_seals_actual_retained_owner_remote_evidence_paths`.
+It exited 1 because the old request omitted the bearer token and reached the
+wrong private-receipt path. The active-state regression also exited 1 because
+the helper had no `--state-receipt` contract, and the status-service regression
+observed HTTP 200 for unauthenticated recovery evidence.
+
+Recovery now maps guest `/data` paths separately from their `/data`-rooted proxy
+URLs. Every read sends the exact barrier bearer token, applies a per-file byte
+ceiling, writes into the actual retained output directory, fsyncs the regular
+temporary file, atomically replaces the local evidence target, and fsyncs the
+directory before a proxy may close. The status server authenticates and
+size-bounds the exact allowlist, routes aliases through the same protected
+boundary, rejects symlinks and non-regular files, and verifies the opened inode.
+
+The guest helper now atomically emits an exact Machine/token-bound state receipt
+on both success and failure. It records driver PID/state/token ownership,
+bounded descendant identities, services-manifest state, terminal artifact
+state, live service PIDs, and backend-port closure. Only
+`driver-exited-services-stopped` can authorize exact provider cleanup; active,
+unsafe, malformed, incomplete, and ID-less states retain quarantine. H23
+records the validated state classification without treating a recovery deadline
+as quiescence.
+
+The unchanged retained-layout regression now passes, as do active and
+uninspectable-state fail-closed cases, the status-service authentication test,
+all 274 dependency-sync tests, fleet infra-canary, Bash/Python syntax checks,
+and the complete multi-workstream lifecycle suite. No real provider cleanup was
+run during verification, and no benchmark task, timeout, concurrency, prompt,
+evaluator, or provider behavior changed.
+
+At 10,000 agents, the repair remains O(files and processes in one exact guest):
+one bounded process-table snapshot during an explicit stale-owner recovery,
+five bounded reads through that guest's isolated proxy, and one atomic local
+seal per file. It adds no app-wide inventory, cross-owner session read, shared
+poller, row, lock, channel, subscription, or fan-in.
+
+## Tenth recurrence on 2026-09-10
+
+The v6 rerun safely recovered four quiesced guests with exact provider IDs but
+left five guests quarantined. H23 proved that Machines `2862102a194e38`,
+`865463eb495118`, and `e82e291c433d58` still had a token-owned running driver
+and four descendants after authenticated shutdown was requested. H20 proved
+that `parallel-tool-calls` and `polar-bu-066` were quiesced with complete sealed
+run/backend evidence, but the provider-manifest helper rejected both because
+their logs contained no exact provider session ID. H22 recorded
+`guestCount=9,recoveredCount=4,status=1`; H9 and H10 were absent, so no owner
+reaper ran.
+
+The focused pre-fix command was:
+
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py
+-k 'active_legacy_guest_seals_sessions or
+quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt or
+zero_allocated_receipt_rejects'`.
+
+It exited 1 with two failures. The active fixture stopped at `exact guest run is
+still active ... retaining quarantine`, and the quiesced fixture failed because
+`prove-zero-allocation` did not exist. The incomplete/nonzero-evidence case
+already passed, confirming that fail-closed rejection was healthy.
+
+The first bad boundary was `cloudbench_recover_guest_cleanup_receipts`: it had
+one terminal transition for a quiesced, nonempty provider-session manifest, but
+no terminal transition for either an immutable active legacy guest or a
+complete authoritative zero-allocation set. H24 was confirmed because every
+active H23 state immediately selected quarantine without sealing provider IDs
+or fencing the Machine. H25 was confirmed because an empty provider manifest
+could not produce any positive receipt. H26 was confirmed from both retained
+logs: each had one server start, one terminal SIGTERM, an exact root agent, zero
+provider-allocation events, and zero `BrowserSession` mutations; the isolated
+database identity in `services.json` supplies an exact root/tree query boundary.
+H27 was rejected: no provider-wide inventory is needed or safe.
+
+This is the same lifecycle-contract recurrence: terminal recovery state was
+represented by one provider-cleanup receipt shape even though the producer can
+end in three authoritative states—runner clean, exact nonempty allocation, or
+exact zero allocation—and an active immutable producer first requires a
+Machine fence.
+
+Active recovery now seals and fsyncs the exact backend-derived provider IDs
+before any stop, stops only the owner-recorded Machine ID, polls only that exact
+ID, and seals a status proof containing the matching Machine ID, clone name,
+and `stopped` state. Provider cleanup accepts only that pre-stop manifest and
+binds its receipt to the stopped-proof hash. A partially completed rerun accepts
+a stopped Machine only with the same sealed manifest, raw status, and proof.
+No provider call can occur before the stopped proof exists.
+
+Quiesced zero recovery validates one complete backend lifecycle, one-task root
+identity, zero provider-allocation events, zero `BrowserSession` mutations, and
+the quiescence hashes. On the guest it reads the exact isolated database name
+from `services.json`, checks only that database in `pg_database`, and, when the
+database exists, queries only the recursive exact root tree and
+`BrowserSession.agentId` membership. A live exact tree with zero sessions is
+soft-deleted idempotently and queried again; exact database absence, root
+absence, an already deleted root, or verified exact-tree deletion produces an
+atomic hashed `provider-zero-allocated` receipt. Any incomplete lifecycle,
+mismatched hash, nonzero event/session set, ambiguous database result, or
+failed exact query remains quarantined. The status service authenticates and
+bounds the new proof path.
+
+The unchanged focused reproduction now exits 0 with `3 passed`. The complete
+provider-free dependency suite passes all 277 tests, the authenticated
+status-service suite passes, the fleet infra-canary structural suite passes,
+Python and Bash syntax checks pass, and the complete multi-workstream
+lifecycle suite exits 0. No real provider cleanup ran during verification, and
+no benchmark task, timeout, concurrency, prompt, evaluator, or provider
+behavior changed.
+
+At 10,000 agents, explicit recovery remains O(resources in one exact owner):
+one bounded evidence read and exact stop/status stream per active guest, or one
+exact database/root/tree query stream per quiesced zero guest. It performs no
+provider inventory, app-wide Machine list, cross-owner database/session scan,
+shared poller, lock, row, channel, subscription, or global fan-in.
+
+## Eleventh recurrence on 2026-09-10
+
+The v7 exact-owner rerun safely finished the three active-guest transitions but
+left `parallel-tool-calls` and `polar-bu-066` quarantined. The three
+`ERROR: exact Machine is not proven stopped` messages were intermediate poll
+states, not terminal failures: H21 later recorded exact provider cleanup for
+Machines `2862102a194e38`, `865463eb495118`, and `e82e291c433d58`, and each
+retained output contains its stopped-Machine proof and positive cleanup receipt.
+H13's successful exact status reads and those receipts reject the hypothesis
+that Fly's status rendering blocked recovery.
+
+H20 confirmed that Machines `2862595b6d4328` and `d896269c97e048` were
+quiesced with sealed run and backend evidence. Their exact guest recovery logs
+then failed at `services evidence has no exact isolated stopped database
+identity`, before any database catalog or root-tree query. Read-only,
+Machine-pinned inspection of only those two owner-recorded IDs showed the same
+contradictory shape in both `services.json` files:
+`use_system_postgres=true`, `owned_by_run_sh=true`, an exact isolated
+`victoria_bench_<run>` name, and nonempty nominal
+`victoria-db-<run>`/`victoria-pgdata-<run>` labels.
+
+The critical path was:
+
+`run.sh` database-mode selection → `write_services_manifest` →
+Machine-local sealed `services.json` → exact guest `parse_zero_services` →
+named database catalog read → exact root/tree and `BrowserSession` query →
+hashed zero-allocation receipt → exact-owner teardown authorization.
+
+The first bad boundary was `write_services_manifest`: it serialized nominal
+Docker identifiers even when the selected backend was system Postgres.
+`parse_zero_services` then required those inactive fields to be empty, so the
+immutable legacy producer and the recovery consumer disagreed before reaching
+the positive exact-root proof. This is a logical inconsistency in the database
+ownership contract, not missing provider evidence.
+
+The deepest owned cause is that the manifest accumulated backend-independent
+resource labels instead of deriving identity from the selected backend mode.
+The sibling failure is any future system-Postgres run whose stale Docker labels
+cause a consumer to select or reject the wrong ownership semantics. New
+manifests now derive `container` and `volume` from
+`use_system_postgres`, making both empty in system mode. Recovery accepts old
+nonempty labels only when the container and volume have the same bounded safe
+suffix and that suffix deterministically maps to the exact isolated database
+name. Missing, mixed, mismatched, and wrong-database label forms still fail
+closed before `psql`.
+
+The permanent pre-fix command was:
+
+`agents/venv/bin/pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py -k
+'quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt or
+system_postgres_services_manifest_omits_inactive_docker_identity'`.
+
+It exited 1 with two failures: the captured legacy manifest produced
+`ERROR: services evidence has no exact isolated stopped database identity`, and
+the real manifest publisher emitted both inactive Docker labels. After the fix,
+the expanded unchanged acceptance command, including four adversarial identity
+forms, exits 0 with `7 passed`. The complete dependency-sync suite passes all
+283 tests; the status-service, fleet canary, cloudbench environment,
+multi-workstream lifecycle, controller-token, autoscale, fetch, guest-token,
+app-env-lock, seed-budget, restore-readiness, and orphan-proxy suites pass; Bash
+and Python syntax checks pass.
+
+No real provider cleanup was run during verification. Investigation performed
+only read-only, exact-ID inspection of the two Machines already recorded under
+owner `03596f65144d485f8a667fc31f7e3cc6`. The registry remains quarantined until
+the user reruns:
+
+`bash scripts/run-bench-fleet --recover-stale-owner
+03596f65144d485f8a667fc31f7e3cc6`.
+
+At 10,000 agents, publication remains O(1) per isolated stack and recovery
+remains O(resources in one exact owner). The change adds no provider inventory,
+cross-owner query, global poller, shared row, lock, channel, subscription, or
+fan-in.
+
+## Twelfth recurrence on 2026-09-10
+
+The v8 exact-owner rerun eliminated all three stopped-Machine failures but left
+`parallel-tool-calls` and `polar-bu-066` quarantined. H20 proved both exact
+Machines quiesced with sealed run/backend evidence, while H22 recorded
+`guestCount=9,recoveredCount=7,status=1`. The initial
+`ERROR: durable backend evidence contains no exact provider session identity`
+was the expected nonempty-session branch rejecting a zero-session run. Each
+exact output's guest recovery log then recorded the first bad zero-proof
+boundary: `ERROR: exact psql command is unavailable`.
+
+Read-only inspection of only Machines `2862595b6d4328` and `d896269c97e048`
+proved that `/usr/bin/psql` exists and is executable on both, but is the
+canonical Debian symlink to `../share/postgresql-common/pg_wrapper`; each also
+has a regular executable `/usr/lib/postgresql/15/bin/psql`. This rejected a
+missing-package hypothesis. Because `prove_zero_allocation` validates services,
+run, backend, and quiescence evidence before entering `run_exact_psql`, it also
+rejected the prior service-identity and incomplete-lifecycle hypotheses. The
+exact DB/tree result remains intentionally unknown until the live rerun; no
+absence is treated as proof.
+
+The critical path was:
+
+`sealed exact run/backend/quiescence evidence` → `prove-zero-allocation` →
+`run_exact_psql` → exact isolated-database catalog query → exact recursive root
+tree and `BrowserSession` query → hashed zero-allocation proof → exact-owner
+cleanup receipt.
+
+The first bad boundary was `run_exact_psql`. It reused `regular_file`, whose
+correct evidence-file contract rejects every symlink, for an operating-system
+executable. That made the immutable helper disagree with the retained Ubuntu
+image's package-managed executable layout before any exact query could run.
+The deepest owned cause is a path-type contract inconsistency: immutable
+evidence and executable entrypoints shared one validator despite requiring
+different symlink semantics. The sibling failure is any package-managed command
+entrypoint represented by an absolute symlink to a regular executable. The
+problem bucket is fixture/environment/data mismatch.
+
+The permanent pre-fix command was:
+
+`agents/venv/bin/pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py::test_quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt`.
+
+It exited 1 twice, for canonical and legacy system-Postgres manifests, with
+`ERROR: exact psql command is unavailable`. The fixture reproduces the retained
+layout with `usr/bin/psql -> ../share/postgresql-common/pg_wrapper`. Recovery now
+uses a separate executable validator: the command must be absolute, resolve
+strictly to a regular nonsymlink target, and be executable. It still invokes the
+original path so wrapper dispatch retains its `psql` identity. Evidence readers
+continue to reject symlinks unchanged.
+
+The unchanged regression now exits 0 with `2 passed`. The full dependency suite
+passes all 283 tests; the complete multi-workstream lifecycle suite, authenticated
+status service, fleet canary/stability/concurrency/autoscale suites, cloudbench
+environment/token/fetch/app-lock/seed/restore/orphan-proxy suites, and Python/Bash
+syntax checks all pass. No provider mutation or live recovery ran during
+verification. Benchmark definitions, timeouts, concurrency, and out-of-owner
+resources are unchanged.
+
+At 10,000 agents, the change adds one O(1) local executable-path resolution per
+explicit zero-proof attempt. Exact database and root/tree queries remain bounded
+to one owner-recorded guest and one root tree; there is no inventory, sweep,
+fan-in, global poller, shared row, lock, channel, or subscription.
+
+## Thirteenth recurrence on 2026-09-10
+
+The full dependency-sync suite intermittently failed
+`test_real_boot_driver_interrupt_requires_canonical_runner_cleanup_ack` after
+the authenticated `/shutdown-health` endpoint returned HTTP 204. The exact
+cleanup status was `clean`, the token-bound acknowledgement matched, but
+`cloudbench-driver.state` was still `running`. A later focused pass recorded
+the boot supervisor publishing `exited`, proving that terminal state was
+delayed rather than permanently absent.
+
+The critical path was:
+
+driver receives shutdown → runner completes canonical cleanup → driver
+publishes exact cleanup acknowledgement → driver trap returns → boot supervisor
+reaps the driver and appends terminal evidence → boot atomically publishes
+`driver.state=exited` → status service reports terminal shutdown.
+
+The first bad boundary was `scripts/cloudbench-status-server.py`: both repeated
+`POST /shutdown` and `GET /shutdown-health` returned 204 from the cleanup token
+alone, before the independent driver lifecycle reached `exited`. This allowed
+the controller to treat a still-running exact guest as terminal. The deepest
+owned cause is the same lifecycle-contract inconsistency as the seventh
+recurrence: cleanup completion and driver termination are distinct evidence,
+but the status service collapsed them into one terminal response.
+
+The deterministic pre-fix command was
+`bash scripts/tests/cloudbench-status-service-shutdown.test.sh`. Its exact-token
+driver published the cleanup acknowledgement and remained live in
+`state=running`; repeated POST returned 204 with
+`cleanup acknowledgement terminalized POST for a running driver`. Before the
+test was ordered to check POST first, the same fixture failed GET with
+`cleanup acknowledgement terminalized a running driver (HTTP 204)`.
+Instrumentation recorded `driverState=running` at the 204 boundary.
+
+The status service now returns 202 while an exact acknowledgement coexists with
+`booting` or `running`, 503 for an invalid acknowledged state, and 204 only when
+the exact token and `driver.state=exited` both hold. One shared state reader is
+used by POST, shutdown health, and driver health. The unchanged production boot
+regression and deterministic status-service regression pass; post-fix logs
+record `running` followed by `exited`, with 204 only at the latter. The complete
+dependency-sync and multi-workstream lifecycle suites pass.
+
+At 10,000 agents this adds one O(1) local state-file read per shutdown request.
+It adds no provider inventory, polling loop, shared row, lock, channel,
+subscription, or cross-agent fan-in.
+
+## Fourteenth recurrence on 2026-09-10
+
+Capability-stability proof
+`capability-stability-20260910120311-2848604` reset at slice 0 after Fly created
+exact volume `vol_v3g193x1j2gyezx4` for `agent-payment-abandonment` but could not
+launch its Machine because the region had insufficient resources. Six exact
+destroy calls at 12:15:22, 12:15:26, 12:15:30, 12:15:34, 12:15:38, and
+12:15:42 each exited 0 with `Destroyed volume ID`, while six exact-ID lifecycle
+reads still returned the same valid provider object. The fleet provisioned 9/10
+and classified the terminated slice as infrastructure with `passed_slices=0`.
+
+The critical path was:
+
+provider returns a volume-only failed clone → controller durably records the
+exact volume and clone name → exact destroy is accepted → exact lifecycle
+remains visible during bounded confirmation → `reap_volume` returns generic
+failure → `clone_machine_target` aborts instead of spending attempt 2.
+
+The first bad boundary was `scripts/run-bench-fleet` `reap_volume`: its binary
+return contract represented authoritative absence as success and represented
+both accepted-but-pending destruction and rejected/ambiguous destruction as the
+same failure. `clone_machine_target` therefore could not continue safely even
+though exact ownership was already durable and every provider mutation and
+lifecycle response was unambiguous. Extending the confirmation timeout would
+only move the race and was not necessary.
+
+The deterministic pre-fix command was
+`agents/venv/bin/pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py::test_clone_retries_after_accepted_destroy_outlives_confirmation_window`.
+It failed because the production function exited 1 after six accepted destroy
+receipts, the shell fixture exited 90, and clone attempt 2 never ran. The
+unchanged regression now passes with `1 passed`: it observes six accepted
+destroy calls, six still-visible exact lifecycle reads, a distinct status 75,
+and a successful second clone attempt. It also proves the first attempt's exact
+volume/name owner remains present and is never marked
+`destroyed-verified-absent`; a seventh later exact read supplies the
+authoritative not-found receipt without name or global inventory reconciliation.
+
+`reap_volume` now owns a three-outcome contract: 0 only for authoritative
+exact-ID absence, 75 only when every bounded destroy was accepted and every
+exact lifecycle response remained valid, and 1 for any rejected or ambiguous
+destroy/lifecycle response. All teardown callers continue to fail closed on
+both nonzero outcomes. Only `clone_machine_target` consumes 75 as permission to
+spend the next existing bounded allocation attempt, while retaining the prior
+attempt's exact owner. Status 0 alone retires audit, registry, and name-ledger
+ownership. No benchmark definition, timeout, concurrency, or provider-wide
+inventory behavior changed.
+
+The deepest owned cause is a lifecycle-contract inconsistency: one binary result
+collapsed provider mutation acceptance, provider convergence, and authoritative
+absence even though callers require three different decisions. Reusing one
+classification in `reap_volume` is the narrowest unification; deleting a state
+is not coherent because accepted pending destruction and ambiguous rejection
+have different safe retry semantics while neither permits ownership retirement.
+The sibling failure prevented is any provider lifecycle that accepts an
+asynchronous exact-resource destroy but remains visible beyond a bounded
+confirmation window.
+
+Post-fix instrumentation records `destroyAccepted=1`,
+`destroyAmbiguous=0`, and `lifecycleAmbiguous=0`, followed by
+`reapStatus=75` at clone attempt 1. Rejected, malformed, wrong-ID, and unknown
+lifecycle fixtures still return 1. The focused lifecycle set passes all 9
+tests; the complete dependency-sync suite passes all 287 tests; and the full
+cloudbench/fleet lifecycle shell set, fleet canary, stability-proof,
+orphan-reaper, concurrency, environment, token, autoscale, fetch, app-lock,
+seed, restore, and status-service suites pass.
+
+At 10,000 agents, each provisioning owner can retain at most the existing five
+attempt-keyed volume records and performs at most the existing six exact-ID
+destroy/lifecycle pairs per failed attempt. There is no unbounded wait, global
+inventory scan, shared row, lock, channel, subscription, or cross-agent fan-in;
+cleanup remains O(1) bounded per exact owner. The exact live stability streak
+still must pass before this recurrence's temporary instrumentation is removed.
+
+## Fifteenth recurrence on 2026-09-10
+
+Exact stale-owner recovery next failed before guest cleanup because
+`resolve_exact_recovery_warm_identity` assumed every owned clone directly named
+one identical warm source Machine. The autoscaler instead creates a hierarchical
+owner graph: a primary Machine is cloned from the external warm root, then each
+worker Machine is cloned from that owned primary. The canonical two-edge fixture
+therefore contained source IDs `feedface000001` and `deadbeef000001`.
+
+The unchanged pre-fix command was
+`agents/venv/bin/pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_resolves_warm_root_from_autoscaler_clone_graph`.
+It failed in 0.23 seconds with `ValueError: exact owner does not identify one
+warm source Machine`. NDJSON hypothesis E independently recorded
+`recordCount=2`, `sourceCount=2`, and both source IDs. This rejected malformed
+metadata as the cause: the fixture's owner/audit identities, expected/fresh
+record sets, and Machine index were all canonical and mutually consistent.
+
+The critical path was:
+
+`--recover-stale-owner <exact-token>` → validate the exact owner-local audit →
+collect every expected clone source → incorrectly require one distinct source →
+abort before resolving the external warm guard → never reach the canonical
+`guest-cleanup-unconfirmed` acknowledgement gate.
+
+The deepest owned cause was a lifecycle-contract inconsistency: allocation
+already persisted clone lineage as a parent graph, while recovery interpreted
+that same lineage as a flat set. The resolver now reconstructs parent edges from
+the exact `fresh` audit, cross-checks every expected record and `by-machine-id`
+entry, requires exactly one external root, rejects duplicate targets, cycles,
+disconnected components, source mismatches, and incomplete indexes, and resolves
+the warm Volume only from that validated root. It never derives authority from a
+provider-wide inventory.
+
+The latent quarantine sibling already had stronger permanent coverage:
+`test_exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers`
+proves an unconfirmed exact owner enters guest acknowledgement and cannot invoke
+any reaper, while
+`test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap`
+proves every acknowledgement precedes exact provider teardown. The hierarchical
+root regression additionally asserts that resolution leaves
+`guest-cleanup-unconfirmed` intact, and the worker-plan regressions map each
+hierarchical worker from its exact owner-local ledger. No duplicate point test
+was added.
+
+The accepted-destroy evidence also closed the adjacent lifecycle gap without
+changing a timeout. Six exact destroy calls returned status 0 while six exact-ID
+reads still returned valid `created`, `pending_destroy`, or `destroyed` objects.
+`reap_volume` therefore returns accepted-pending status 75, retains exact
+ownership, and lets only bounded provisioning spend its next attempt. Exact
+teardown drains later owner records but cannot retire any pending record until an
+exact-ID not-found receipt arrives. Rejected, malformed, wrong-ID, and unreadable
+lifecycle responses remain hard failures.
+
+Post-fix, the unchanged command passes with `1 passed` in 0.08 seconds. The
+nine-test hierarchy, quarantine, worker-mapping, and accepted-destroy set passes
+in 4.53 seconds. `bash -n scripts/run-bench-fleet && bash
+scripts/tests/cloudbench-multi-workstream.test.sh` exits 0 through all 16
+source-ordered scenarios. No test contacted or destroyed a provider resource,
+and no benchmark definition, timeout, or concurrency setting changed.
+
+At 10,000 agents, recovery remains independently keyed to one exact owner and
+reads only that owner's bounded local clone graph. It adds no provider inventory,
+cross-owner query, global poller, shared row, lock, channel, subscription, or
+fan-in.
+
+## Sixteenth recurrence on 2026-09-10
+
+The hierarchical recovery fix exposed the next exact lifecycle boundary for
+owner `539b11e970334d9db5d401fa167ac59e`. Recovery resolved the owner graph,
+recovered all 18 audit identities, and destroyed all 18 exact Machines. Each
+Volume destroy command exited 0, but exact `fly volumes show --json` reads
+continued to return a provider-visible identity. Read-only inspection found 16
+Volumes in `pending_destroy` and two in `destroyed`; every Volume had
+`attached_machine_id=null` and `host_status=ok`. The first exact Volume,
+`vol_42keop1j2zmenp94`, remained `pending_destroy` on a second recovery 26
+minutes later.
+
+Runtime NDJSON evaluated the competing causes:
+
+- H1, a rejected or ambiguous destroy request, was rejected. Every captured
+  mutation had `destroyStatus=0`, and every exact lifecycle read had status 0.
+- H2, an additional detach, lease, or snapshot action, was rejected. Every
+  exact Volume was already unattached, Fly exposes no Volume detach operation,
+  and `vol_42keop1j2zmenp94` had no snapshots.
+- H3, an undersized convergence bound, was rejected. The same identity remained
+  26 minutes later, and Fly documents `pending_destroy` as its intentional
+  24-hour soft-deletion state rather than a short asynchronous transition.
+- H4 was confirmed. Fly documents that `pending_destroy` Volumes accrue no
+  Volume charges, but the audit algebra had no terminal outcome for a non-billing
+  provider deletion whose exact identity remains visible.
+
+The critical path was:
+
+`--recover-stale-owner <exact-token>` → exact Machine destroy/absence →
+exact Volume destroy accepted → exact Volume state `pending_destroy` →
+`reap_volume` returns accepted-pending 75 → registry reaper retains every record
+and returns nonzero after draining the owner.
+
+The first bad boundary was `reap_volume`. Its three outcomes distinguished exact
+absence, accepted-but-still-present, and rejected-or-ambiguous, but
+accepted-but-still-present combined attachable/transitional states with Fly's
+provider-terminal soft-deletion state. Every audit consumer then inherited the
+false requirement that terminal cleanup must erase provider identity.
+
+The unchanged fast pre-fix command was:
+
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_owner_recovery_records_provider_retained_terminal_volume`.
+
+It failed after six accepted exact destroy/read pairs because recovery returned
+nonzero and retained the registry record. After the fix, the same command exits
+0 with `1 passed`. Its NDJSON records `destroyStatus=0`,
+`lifecycleStatus=0`, and exact states `pending_destroy` and `destroyed`, followed
+by `provider-retained terminal deletion receipt` on attempt 1.
+
+`reap_volume` now returns four explicit outcomes: 0 only for exact not-found, 74
+for an accepted exact deletion observed in provider-retained terminal state, 75
+for accepted deletion still in an attachable or transitional state, and 1 for
+rejected or ambiguous evidence. Audit records use the distinct
+`destroyed-provider-retained` disposition, retain the exact Volume ID, and may
+strengthen monotonically to `destroyed-verified-absent`; they can never weaken
+from exact absence back to retained identity. Every Machine, pool transfer,
+failed worker, failed clone, snapshot-failure, and exact registry reaper consumes
+the same outcome. Redundant second Volume destroy loops were removed because
+`reap_machine` already carries the exact Volume through its lifecycle.
+
+The nine-test focused lifecycle set passes, including transition ambiguity,
+provider rejection, retained-terminal idempotency, exact-absence strengthening,
+and head-of-line draining. The complete dependency lifecycle suite passes all
+297 tests. Bash syntax and the complete multi-workstream lifecycle suite pass
+all 16 source-ordered scenarios. No benchmark definition, timeout, concurrency
+bound, provider inventory, or neighboring resource was changed or accessed.
+
+The deepest owned cause remains a logical inconsistency in the harness lifecycle
+contract: provider deletion finality and provider identity disappearance were
+represented as one state even though Fly intentionally separates them. Deleting
+the redundant second destroy loops shrinks provider traffic; the distinct
+terminal audit disposition is necessary because collapsing it into exact absence
+would make the durable record untruthful.
+
+At 10,000 agents, recovery remains O(records in one exact owner). A terminal
+Volume requires one accepted exact-ID mutation and one exact-ID read instead of
+six repeated pairs. Audit state is constant-size per existing owner record, with
+no provider-wide inventory, cross-owner query, shared poller, row, lock, channel,
+subscription, or fan-in.
+
+## Human feedback
+
+The user required both occurrences to receive the deepest generalizable ordering
+fix, the exact unchanged reproduction to pass, permanent consistently-run
+coverage, an RCA case/index update, and bounded owning-boundary destroy-response
+capture. They prohibited weakening fail-closed ownership, changing benchmark
+tasks/timeouts/concurrency, provider mutations, and commits.
+
+For the second recurrence, the user required `owned` identities to accept
+exactly the Machine-plus-Volume and Volume-only forms already emitted by clone
+allocation while keeping empty and ambiguous forms fail-closed. They required
+the existing regression to remain unchanged, the correct archive case to be
+appended rather than forked, focused and full suites plus archive validation,
+preservation of autoscaler probes and stability-proof edits, and no provider
+resource mutation or commit.
+
+For the third recurrence, the user required the deepest owned fix, a permanent
+failing-before/passing-after cloudbench regression, preservation of existing
+autoscaler probes, and the exact test commands and results. Tests could not
+mutate provider resources or change benchmark tasks, timeouts, or concurrency.
+
+For the fourth recurrence, the user required recovery to reconnect only exact
+owned live guest Machines, use the existing token-bound shutdown/health
+contract, durably prove every acknowledgement before provider reaping, preserve
+mixed and Volume-only registries, and fail closed for every incomplete mapping,
+token, proxy, or HTTP result. They prohibited fabricated acknowledgements,
+neighbor listing/sweeping, out-of-owner cleanup, provider mutations during
+tests, and task/timeout/concurrency changes; the real owner remains for the user
+to recover and verify before instrumentation cleanup.
+
+For the fifth recurrence, the user required instrumentation of the exact
+Machine lookup, a deterministic regression for why
+`2862102a194e38` was classified absent/unreadable, and a fix that preserves
+fail-closed identity, exact-owner boundaries, autoscaler probes, and all
+task/timeout/concurrency settings.
+
+For the sixth recurrence, the user required a general function-definition /
+entrypoint ordering fix with one shared implementation, a regression that
+executes production source order rather than extracted functions, full relevant
+suites, unchanged fail-closed semantics and autoscaler probes, a pushed branch,
+and the exact real-owner rerun command.
+
+For the seventh recurrence, the user required bounded evidence from only the
+nine exact guests, an actual boot/driver-trap regression, the deepest owned
+cleanup-ack repair, persistent source evidence, and preservation of
+exact-owner quarantine with no fabricated acknowledgement. Provider cleanup
+remains exclusively the user's rerun action; task definitions, timeouts, and
+concurrency are unchanged.
+
+For the eighth recurrence, the user required a controller-owned recovery path
+for the immutable pre-fix guests: use an exact private runner receipt when
+available, otherwise clean only exact provider IDs from durable per-output
+evidence, persist positive receipts, and authorize the existing exact reaper
+only after all nine outputs are proved clean. They prohibited inferring cleanup
+from driver exit, fabricating acknowledgements, listing or sweeping neighboring
+resources, providerful tests, and any task, timeout, or concurrency change.
+They retained ownership of the real cleanup command and required any missing
+provider ID to be reported as a trace-capture gap.
+
+For the ninth recurrence, the user required inspection of H19-H22 and the
+command's actual retained-owner/guest evidence locations, bounded authenticated
+fetches before exact proxy release, atomic local sealing, and explicit
+active-versus-quiescent process evidence. They required valid private clean
+receipts or explicit quarantine for `parallel-tool-calls` and `polar-bu-066`,
+an actual-layout regression, fail-closed exact-only cleanup, no fabricated
+receipts, and no task, timeout, or concurrency changes.
+
+For the tenth recurrence, the user required active legacy guests to seal exact
+session evidence before exact-ID Machine stop, prove that same ID stopped before
+cleanup, and persist exact provider receipts. For zero-ID quiesced guests, they
+required complete lifecycle plus exact root-bound database evidence, idempotent
+exact-root deletion when present, and a positive hashed zero-allocation receipt.
+They prohibited provider-wide listing, task-name inference, cleanup while a
+guest could still allocate, weakened incomplete-evidence quarantine, and any
+benchmark task, timeout, or concurrency change. They retained ownership of the
+real cleanup rerun.
+
+For the eleventh recurrence, the user required permanent regressions before the
+fix, no weakening of fail-closed ownership, the complete relevant suites, and a
+pushed recovery branch. They prohibited benchmark task, timeout, or concurrency
+changes and any sweep or destruction outside exact owner
+`03596f65144d485f8a667fc31f7e3cc6`; they retained ownership of the live rerun.
+
+For the twelfth recurrence, the user required runtime-evidence RCA only for the
+two zero-session tasks, a failing regression before the fix, and authoritative
+zero-allocation proof rooted in each exact run's durable run/backend evidence.
+They prohibited absence assumptions, weakened exact-owner semantics, changes to
+task definitions/timeouts/concurrency, and touching out-of-owner resources; they
+retained ownership of the precise live rerun.
+
+For the thirteenth recurrence, the user required every surfaced lifecycle
+failure to be fixed, an unchanged failing-before/passing-after regression,
+full relevant suites, no timeout or benchmark-definition changes, and terminal
+semantics that remain bounded and exact-owner scoped.
+
+For the fourteenth recurrence, the user required accepted asynchronous destroy
+to remain distinct from rejected or ambiguous cleanup without an arbitrary
+longer wait. They required durable exact ownership until authoritative absence,
+bounded clone attempts to continue only from unambiguous acceptance, a
+failing-before/passing-after local regression, full lifecycle suites, preserved
+10,000-agent keyed behavior, and no benchmark task, timeout, or concurrency
+change. They retained ownership of the exact live stability-proof rerun and
+allowed instrumentation to remain until it passes.
+
+For the fifteenth recurrence, the user required the deepest general fix for
+hierarchical clone topology, unchanged exact-owner and fail-closed semantics,
+the unchanged regression plus any necessary quarantine sibling, and a causal
+accepted-destroy fix only where captured evidence proved it. They prohibited
+timeout or benchmark-definition changes and direct provider destruction,
+retained ownership of the exact live recovery rerun, and required the current
+branch to be committed and pushed.
+
+For the sixteenth recurrence, the user required runtime evidence to distinguish
+an additional provider action from intentional provider-retained deletion. They
+prohibited treating `pending_destroy` as absence, weakening bounds, mutating
+benchmark definitions, or touching neighboring resources. They required an
+unchanged failing-before/passing-after regression, focused lifecycle and
+multi-workstream suites, a separate pushed branch, the exact cherry-pick range,
+and the safe current-owner verification command.
+
+## Reusable lesson
+
+Separate provider-terminal non-billing deletion from exact identity absence, preserve both truthfully, and let only monotonic lifecycle evidence retire active ownership.

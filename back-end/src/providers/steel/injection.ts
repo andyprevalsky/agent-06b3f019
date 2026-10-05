@@ -9,6 +9,7 @@ import { cookieSelectionWhere } from '../browserCookies';
 import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
 import { type FingerprintData, log } from './types';
 import { steelCdpConnectionUrl } from './urls';
+import { createOriginPayloadWriter } from './injectionOriginPage';
 import {
   injectCacheStorageState,
   injectIndexedDBState,
@@ -352,10 +353,19 @@ export async function injectUserData(
       // the original behaviour without pinning an accountId.
       where: { userId, name: 'browser_fingerprint' },
     }),
-    prisma.localStorageOrigin.findMany({ where: originDomainFilter }),
-    prisma.indexedDBOrigin.findMany({ where: originDomainFilter }),
+    prisma.localStorageOrigin.findMany({
+      where: originDomainFilter,
+      select: { id: true, userId: true, origin: true, hash: true, updatedAt: true },
+    }),
+    prisma.indexedDBOrigin.findMany({
+      where: originDomainFilter,
+      select: { id: true, userId: true, origin: true, hash: true, updatedAt: true },
+    }),
     prisma.browserPermission.findMany({ where: originDomainFilter }),
-    prisma.cacheStorageOrigin.findMany({ where: originDomainFilter }),
+    prisma.cacheStorageOrigin.findMany({
+      where: originDomainFilter,
+      select: { id: true, userId: true, origin: true, hash: true, updatedAt: true },
+    }),
   ]);
   log.info(`  [1/9] DB fetch complete (${Date.now() - startTime}ms)`);
 
@@ -567,6 +577,8 @@ export async function injectUserData(
     // browser-state mutations serially and bound the entire best-effort phase.
     log.info(`  [4/5] Injecting browser state serially...`);
     const injectionTasks: Array<() => Promise<void>> = [];
+    const injectionAbort = new AbortController();
+    const originWriter = createOriginPayloadWriter(context, injectionAbort.signal);
 
     // 2. Fingerprint: NOT injected here on purpose. CDP-level settings
     // (Network.setUserAgentOverride, addInitScript, Emulation overrides) are
@@ -586,9 +598,10 @@ export async function injectUserData(
       injectionTasks.push(async () => {
         try {
           localStorageResult = await injectLocalStorageState(
-            context,
+            originWriter,
             localStorageOrigins,
-            startTime
+            startTime,
+            injectionAbort.signal
           );
         } catch (error) {
           log.error('Failed to inject localStorage', {
@@ -602,7 +615,12 @@ export async function injectUserData(
     if (hasIndexedDB) {
       injectionTasks.push(async () => {
         try {
-          indexedDBResult = await injectIndexedDBState(context, indexedDBOrigins, startTime);
+          indexedDBResult = await injectIndexedDBState(
+            originWriter,
+            indexedDBOrigins,
+            startTime,
+            injectionAbort.signal
+          );
         } catch (error) {
           log.error('Failed to inject indexedDB', {
             error: error instanceof Error ? error.message : String(error),
@@ -631,9 +649,10 @@ export async function injectUserData(
       injectionTasks.push(async () => {
         try {
           cacheStorageResult = await injectCacheStorageState(
-            context,
+            originWriter,
             cacheStorageOrigins,
-            startTime
+            startTime,
+            injectionAbort.signal
           );
         } catch (error) {
           log.error('Failed to inject cacheStorage', {
@@ -668,9 +687,13 @@ export async function injectUserData(
     try {
       await withTimeout(
         (async () => {
-          for (const injectState of injectionTasks) {
-            if (injectionAborted) break;
-            await injectState();
+          try {
+            for (const injectState of injectionTasks) {
+              if (injectionAborted) break;
+              await injectState();
+            }
+          } finally {
+            await originWriter.close();
           }
         })(),
         stateTimeoutMs,
@@ -678,6 +701,7 @@ export async function injectUserData(
       );
     } catch (error) {
       injectionAborted = true;
+      injectionAbort.abort();
       throw error;
     }
     log.info(`  [4/5] ✅ All injections complete (${Date.now() - startTime}ms)`);

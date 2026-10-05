@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -69,7 +70,70 @@ _METADATA_FIELDS = (
     "max_steps",
     "group",
     "tags",
+    "requires_browser_agent",
 )
+
+CATALOG_GROUPS = (
+    "pre-deploy",
+    "daily",
+    "rose-bench",
+    "polar-bench",
+    "incomplete",
+)
+
+
+def normalize_task_group(raw: Any) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    token = re.sub(r"[\s_]+", "-", raw.strip().lower())
+    return token if token in CATALOG_GROUPS else None
+
+
+def resolve_task_group(task: dict[str, Any]) -> str:
+    stored = normalize_task_group(task.get("group"))
+    if stored is not None:
+        return stored
+    status = task.get("status")
+    tags = task.get("tags")
+    normalized_tags = tags if isinstance(tags, list) else []
+    if status is not None and status != "ready":
+        return "incomplete"
+    if "smoke" in normalized_tags:
+        return "pre-deploy"
+    if "polar-bench" in normalized_tags:
+        return "polar-bench"
+    if task.get("bench") == "rose-bench":
+        return "rose-bench"
+    return "daily"
+
+
+def resolve_task_selection(
+    catalog_path: Path, selectors: Iterable[str]
+) -> list[str]:
+    """Resolve exact task names and canonical UI groups without duplicates."""
+    tasks = load_unified_catalog(catalog_path)
+    by_name = {task["name"]: task for task in tasks}
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for selector in selectors:
+        if selector in by_name:
+            candidates = [selector]
+        else:
+            group = normalize_task_group(selector)
+            if group is None:
+                raise CatalogError(f"unknown benchmark task or slice: {selector}")
+            candidates = [
+                task["name"] for task in tasks if resolve_task_group(task) == group
+            ]
+            if not candidates:
+                raise CatalogError(f"benchmark slice is empty: {group}")
+        for name in candidates:
+            if name not in seen:
+                seen.add(name)
+                resolved.append(name)
+    if not resolved:
+        raise CatalogError("at least one benchmark task or slice is required")
+    return resolved
 
 
 def get_task_metadata(
@@ -124,6 +188,11 @@ def _build_parser() -> argparse.ArgumentParser:
     requires_gate.add_argument("catalog", type=Path)
     requires_gate.add_argument("gate_type")
     requires_gate.add_argument("tasks", nargs="+")
+    resolve = subparsers.add_parser(
+        "resolve", help="print exact task names for task and named-slice selectors"
+    )
+    resolve.add_argument("catalog", type=Path)
+    resolve.add_argument("selectors", nargs="+")
     return parser
 
 
@@ -138,6 +207,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if selected_tasks_require_gate_type(
                 args.catalog, args.tasks, args.gate_type
             ) else 10
+        if args.command == "resolve":
+            for task in resolve_task_selection(args.catalog, args.selectors):
+                print(task)
+            return 0
     except CatalogError as exc:
         print(exc, file=sys.stderr)
         return 1

@@ -1,6 +1,7 @@
 /**
- * Cap write_lock SMS at the initial notification plus one extra reminder
- * per attention request. Temporal retries of the same kind reuse the claim.
+ * Cap write_lock SMS at the initial notification per attention request.
+ * Reminder payloads are ignored. Temporal retries of the initial send reuse
+ * the claim.
  */
 import { createLogger } from '../../providers/logger';
 import {
@@ -21,13 +22,19 @@ export async function dispatchWriteLockOnce(
   payload: Record<string, unknown>,
   channels: SupervisorChannel[]
 ): Promise<void> {
+  if (payload.reminder === true) {
+    log.info('Write-lock reminder SMS is disabled, skipping', {
+      agentId: data.agent_id,
+      attentionRequestId: (payload.attention_request_id as string | undefined) ?? '',
+    });
+    return;
+  }
+
   const attentionRequestId = (payload.attention_request_id as string | undefined) ?? '';
-  const isReminder = payload.reminder === true;
-  const kind = isReminder ? 'reminder' : 'initial';
   const operationKey =
     attentionRequestId === ''
       ? ''
-      : `${WRITE_LOCK_SMS_OPERATION_TYPE}:${attentionRequestId}:${kind}`;
+      : `${WRITE_LOCK_SMS_OPERATION_TYPE}:${attentionRequestId}:initial`;
 
   if (operationKey !== '') {
     let claim = await claimToolSideEffect({
@@ -37,7 +44,7 @@ export async function dispatchWriteLockOnce(
         user_id: data.user_id,
         agent_id: data.agent_id,
         attention_request_id: attentionRequestId,
-        kind,
+        kind: 'initial',
       },
     });
     if (claim.status === 'existing' && claim.record.status === 'FAILED') {
@@ -47,7 +54,7 @@ export async function dispatchWriteLockOnce(
       log.info('Write-lock SMS already claimed, skipping duplicate', {
         agentId: data.agent_id,
         attentionRequestId,
-        kind,
+        kind: 'initial',
         status: claim.record.status,
       });
       return;
@@ -60,12 +67,11 @@ export async function dispatchWriteLockOnce(
         attentionRequestId,
         (payload.workflow_id as string | undefined) ?? '',
         payload.metadata,
-        channels,
-        isReminder
+        channels
       );
       await markToolSideEffectSucceeded({
         operationKey,
-        externalId: `${attentionRequestId}:${kind}`,
+        externalId: `${attentionRequestId}:initial`,
       });
     } catch (error) {
       await markToolSideEffectFailed({
@@ -84,7 +90,6 @@ export async function dispatchWriteLockOnce(
     attentionRequestId,
     (payload.workflow_id as string | undefined) ?? '',
     payload.metadata,
-    channels,
-    isReminder
+    channels
   );
 }

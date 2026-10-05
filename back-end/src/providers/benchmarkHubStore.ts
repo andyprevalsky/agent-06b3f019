@@ -123,6 +123,8 @@ export interface HubRunTaskSummary {
   fast_mode: boolean;
   tree_agent_count: number | null;
   failure_reason: string | null;
+  lifecycle_stage?: string;
+  startup_label?: string;
 }
 
 export interface HubRunSummary {
@@ -342,9 +344,9 @@ async function readAgentRunIndexForMutation(
   }
 }
 
-/** Load the compact lookup without touching any full run bundle. */
+/** Read one committed compact snapshot, sharing the multi-object writer boundary. */
 export async function loadHubAgentRunIndex(): Promise<HubAgentRunIndexSnapshot | null> {
-  return readAgentRunIndexStrict();
+  return withIndexLock(readAgentRunIndexStrict);
 }
 
 /** A small exact-key tombstone keeps stale per-process maps from serving deleted runs. */
@@ -412,6 +414,8 @@ function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
     fast_mode: task.fast_mode_cache_enabled === true || task.fast_mode === true,
     tree_agent_count: typeof task.tree_agent_count === 'number' ? task.tree_agent_count : null,
     failure_reason: typeof task.failure_reason === 'string' ? task.failure_reason : null,
+    ...(typeof task.lifecycle_stage === 'string' ? { lifecycle_stage: task.lifecycle_stage } : {}),
+    ...(typeof task.startup_label === 'string' ? { startup_label: task.startup_label } : {}),
   };
 }
 

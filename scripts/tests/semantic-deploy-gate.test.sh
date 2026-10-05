@@ -176,7 +176,8 @@ require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-review-cycle.test.p
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/run-deploy-stage.test.sh' "/deploy must protect deploy-stage telemetry collection"
 require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-live-probes.test.py' "/deploy must protect concurrent live-probe scheduling"
 require_text "$DEPLOY_COMMAND" 'python3 scripts/run-deploy-structural-gates.py' "/deploy must schedule independent command-structural suites concurrently"
-require_text "$DEPLOY_STRUCTURAL_RUNNER" 'max_workers=len(GATES)' "command-structural runner must default to full independent-suite concurrency"
+require_text "$DEPLOY_STRUCTURAL_RUNNER" 'DEFAULT_MAX_WORKERS = 8' "command-structural runner must bound default host admission"
+require_text "$DEPLOY_STRUCTURAL_RUNNER" 'max_workers=DEFAULT_MAX_WORKERS' "command-structural runner must use bounded default admission"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"kill-services"' "command-structural runner must retain the benchmark-controller cleanup regression"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"deploy-structural-runner"' "command-structural runner must retain its signal-handling regression"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"seed-memory-ratchet"' "command-structural runner must protect the seed-memory deploy wiring"
@@ -267,6 +268,11 @@ require_text "$DEPLOY_COMMAND" 'Missing credentials fail closed' "/deploy must d
 require_text "$DEPLOY_COMMAND" "scripts/run-bench-hub-poller\$" "/deploy must classify poller-only changes into backend coverage"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'integration-health"' "backend coverage must isolate live credential health from deterministic coverage"
 require_text "$ROOT_DIR/agents/scripts/run-coverage.sh" 'playwright install chromium' "agents coverage must install the venv Playwright chromium revision before real-browser blackboxes"
+require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" '  export BACKEND_UNIT_DATABASE_URL="$LOCAL_DB_URL"' "backend coverage must hand unit tests the schema-synced coverage database"
+if grep -Fq 'if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then' "$ROOT_DIR/back-end/scripts/run-coverage.sh" &&
+  grep -A1 -F 'if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then' "$ROOT_DIR/back-end/scripts/run-coverage.sh" | grep -Fq 'BACKEND_UNIT_DATABASE_URL'; then
+  fail "backend coverage must not gate the unit-test database on BACKEND_COVERAGE_DATABASE_URL (unit tests fall back to a stale shared DB)"
+fi
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'playwright install chromium' "backend coverage must install Node Playwright Chromium before captcha-solve-indicator"
 require_text "$DEPLOY_COMMAND" 'Step 4c: Credential health check (runs unless explicitly overridden)' "/deploy must retain one focused credential probe unless the user explicitly overrides it"
 require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"credential-health"' "/deploy must record the focused credential probe"

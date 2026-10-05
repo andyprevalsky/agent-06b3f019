@@ -33,10 +33,14 @@ def exit_code_for(code: object) -> int:
     return 1
 
 
-def run_then_exit(main: Callable[[], Coroutine[Any, Any, object]]) -> NoReturn:
+def run_then_exit(
+    main: Callable[[], Coroutine[Any, Any, object]],
+    run: Callable[[Coroutine[Any, Any, object]], object] = asyncio.run,
+) -> NoReturn:
+    """Run ``main`` on ``run`` (the worker passes its bounded-shutdown loop), then exit."""
     code = 0
     try:
-        asyncio.run(main())
+        run(main())
     except SystemExit as exc:
         code = exit_code_for(exc.code)
     except KeyboardInterrupt:

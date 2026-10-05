@@ -28,6 +28,8 @@ const agentRunCache = new Map<string, string>();
 const agentRunMissCache = new Set<string>();
 let childIdToRun: Map<string, string> | null = null;
 let compactIndexLoadPromise: Promise<CompactIndexLoadResult> | null = null;
+let compactIndexNonReady: Exclude<CompactIndexLoadResult, { kind: 'ready' }> | null = null;
+let compactIndexRetryAt = 0;
 let legacyBackfillPromise: Promise<void> | null = null;
 let legacyBackfillFailureCount = 0;
 let legacyBackfillRetryAt = 0;
@@ -122,9 +124,20 @@ export async function loadCompactHubAgentIndex(
 
 function startCompactIndexLoad(): Promise<CompactIndexLoadResult> {
   if (compactIndexLoadPromise !== null) return compactIndexLoadPromise;
-  compactIndexLoadPromise = loadCompactHubAgentIndex().finally(() => {
-    compactIndexLoadPromise = null;
-  });
+  if (compactIndexNonReady !== null && Date.now() < compactIndexRetryAt) {
+    return Promise.resolve(compactIndexNonReady);
+  }
+  compactIndexLoadPromise = loadCompactHubAgentIndex()
+    .then((result) => {
+      // A failed cold read has no installed map to supply the normal freshness
+      // window. Bound retries independently of incoming agent request volume.
+      compactIndexNonReady = result.kind === 'ready' ? null : result;
+      compactIndexRetryAt = result.kind === 'ready' ? 0 : Date.now() + AGENT_INDEX_REFRESH_MS;
+      return result;
+    })
+    .finally(() => {
+      compactIndexLoadPromise = null;
+    });
   return compactIndexLoadPromise;
 }
 
@@ -160,7 +173,7 @@ function scheduleLegacyBackfill(seed: Map<string, string>): void {
 
 function scheduleCompactIndexRefresh(): void {
   const fresh = childIdToRun !== null && Date.now() - childIdIndexLoadedAt < AGENT_INDEX_REFRESH_MS;
-  if (fresh || compactIndexLoadPromise !== null) return;
+  if (fresh || compactIndexLoadPromise !== null || Date.now() < compactIndexRetryAt) return;
   void startCompactIndexLoad().then((result) => {
     if (result.kind === 'legacy') scheduleLegacyBackfill(result.seed);
   });
@@ -213,6 +226,8 @@ export function __resetHubResolutionCachesForTest(): void {
   agentRunMissCache.clear();
   childIdToRun = null;
   compactIndexLoadPromise = null;
+  compactIndexNonReady = null;
+  compactIndexRetryAt = 0;
   legacyBackfillPromise = null;
   legacyBackfillFailureCount = 0;
   legacyBackfillRetryAt = 0;

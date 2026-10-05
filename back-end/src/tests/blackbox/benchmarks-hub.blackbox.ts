@@ -307,11 +307,16 @@ async function testPatch_rejectsEdits(): Promise<void> {
 
 async function testRuns_uploadListDetailAgentRoundTrip(): Promise<void> {
   try {
+    // The evaluated verdict is visible while resource release is still pending.
+    const liveBundle = syntheticBundle();
+    const liveTasks = liveBundle.tasks as Array<Record<string, unknown>>;
+    liveTasks[0].lifecycle_stage = 'evaluated';
+    liveTasks[0].startup_label = 'Loading services';
     // live snapshot first
     const live = await request(`${BASE_URL}/api/benchmarks/runs?live=1`, {
       method: 'POST',
       headers: internalHeaders,
-      body: JSON.stringify(syntheticBundle()),
+      body: JSON.stringify(liveBundle),
     });
     assertStatus(live.status, 201, live.data);
     let list = await request(`${BASE_URL}/api/benchmarks/runs`, { headers: internalHeaders });
@@ -321,6 +326,16 @@ async function testRuns_uploadListDetailAgentRoundTrip(): Promise<void> {
     );
     assert(entry !== undefined, 'live snapshot missing from index');
     assert(entry!.live === true, 'snapshot not marked live');
+    const evaluated = await request(`${BASE_URL}/api/benchmarks/runs/${RUN_ID}`, {
+      headers: internalHeaders,
+    });
+    const first = (
+      evaluated.data as {
+        run: { tasks: Array<{ lifecycle_stage?: string; startup_label?: string }> };
+      }
+    ).run.tasks[0];
+    assert(first.lifecycle_stage === 'evaluated', 'live lifecycle stage was discarded');
+    assert(first.startup_label === 'Loading services', 'live startup label was discarded');
 
     // final upload upserts the same run (idempotent index)
     const final = await request(`${BASE_URL}/api/benchmarks/runs`, {

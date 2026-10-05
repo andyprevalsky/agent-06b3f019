@@ -187,12 +187,16 @@ export function buildStartNewAgentFixture(
   goal: string,
   replyText: string,
   budgetDollars = 0.5,
-  delayMs = 0
+  delayMs = 0,
+  startPhase: 'plan' | 'execute' = 'plan'
 ): string {
   return JSON.stringify({
     reasoning: 'spawn agent then send sms',
     tool_calls: [
-      { tool: 'start_new_agent', arguments: { goal, budget_dollars: budgetDollars } },
+      {
+        tool: 'start_new_agent',
+        arguments: { goal, budget_dollars: budgetDollars, start_phase: startPhase },
+      },
       { tool: 'send_user_message', arguments: { message: replyText } },
       { tool: 'attempt_completion', arguments: {} },
     ],

@@ -3,32 +3,27 @@
 Business logic orchestration for approval requests.
 Imports: own repo, own types, own config, external packages.
 
-Approval SMS reminder (per attention request):
+Approval SMS (per attention request):
 
     create row + chip
          |
          v
-    initial write_lock SMS  <--- the notification
+    initial write_lock SMS  <--- the only notification
          |
-         +-- user responds ----> done (no extra SMS)
-         |
-         +-- 15m elapses ------> one reminder SMS
-         |                            |
-         |                            +-- user responds -> done
-         |                            +-- later timeouts -> silence
-         +-- cutover -----------> stash reminder_sent, reuse same row
+         +-- user responds ----> done
+         +-- later waits -------> silence (no reminder SMS)
+         +-- cutover -----------> reuse same row, no second SMS
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator, Callable, Dict, Optional
-from asyncio import TimeoutError as AsyncTimeoutError
 
 import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
@@ -39,10 +34,8 @@ from helpers.wait_condition_or_handoff import wait_condition_or_generation_hando
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 
 from .config import (
-    APPROVAL_REMINDER_TIMEOUT_MINUTES,
     CREATE_REQUEST_MAX_ATTEMPTS,
     CREATE_REQUEST_TIMEOUT_SECONDS,
-    MAX_APPROVAL_REMINDERS,
     REJECTION_SENTINEL,
     SMS_NOTIFY_MAX_ATTEMPTS,
     SMS_NOTIFY_TIMEOUT_SECONDS,
@@ -153,15 +146,8 @@ def pending_approval_request_to_resume(messages: list[Dict[str, Any]]) -> Option
     return pending[-1]["request_id"]
 
 
-def _resume_entry(request_id: str, question: str = "", reminder_sent: bool = False) -> Dict[str, Any]:
-    entry: Dict[str, Any] = {"request_id": request_id, "question": question}
-    if reminder_sent:
-        entry["reminder_sent"] = True
-    return entry
-
-
-def _entry_reminder_sent(item: Dict[str, Any]) -> bool:
-    return item.get("reminder_sent") is True
+def _resume_entry(request_id: str, question: str = "") -> Dict[str, Any]:
+    return {"request_id": request_id, "question": question}
 
 
 def _resume_entries(pending: Any) -> list[Dict[str, Any]]:
@@ -179,7 +165,6 @@ def _resume_entries(pending: Any) -> list[Dict[str, Any]]:
                         _resume_entry(
                             request_id,
                             question if isinstance(question, str) else "",
-                            _entry_reminder_sent(item),
                         )
                     )
             return entries
@@ -190,7 +175,6 @@ def _resume_entries(pending: Any) -> list[Dict[str, Any]]:
                 _resume_entry(
                     request_id,
                     question if isinstance(question, str) else "",
-                    _entry_reminder_sent(pending),
                 )
             ]
     if isinstance(pending, str) and pending:
@@ -206,7 +190,6 @@ def _set_resume_entries(workflow_instance: Any, entries: list[Dict[str, Any]]) -
         workflow_instance._pending_approval_resume = _resume_entry(
             str(entries[0]["request_id"]),
             str(entries[0].get("question") or ""),
-            _entry_reminder_sent(entries[0]),
         )
         return
     workflow_instance._pending_approval_resume = {
@@ -214,29 +197,10 @@ def _set_resume_entries(workflow_instance: Any, entries: list[Dict[str, Any]]) -
             _resume_entry(
                 str(entry["request_id"]),
                 str(entry.get("question") or ""),
-                _entry_reminder_sent(entry),
             )
             for entry in entries
         ]
     }
-
-
-def _stashed_approval_reminder_sent(workflow_instance: Any, request_id: str) -> bool:
-    for entry in _resume_entries(getattr(workflow_instance, "_pending_approval_resume", None)):
-        if entry["request_id"] == request_id:
-            return _entry_reminder_sent(entry)
-    return False
-
-
-def _flag_is_true(value: Any) -> bool:
-    return value is True or value == "true" or value == "1"
-
-
-def _resume_request_reminder_sent(workflow_instance: Any, resume_request: Dict[str, Any]) -> bool:
-    request_id = str(resume_request.get("attention_request_id") or "")
-    return _stashed_approval_reminder_sent(workflow_instance, request_id) or _flag_is_true(
-        resume_request.get("reminder_sent")
-    )
 
 
 def _stashed_approval_request_id(
@@ -265,8 +229,6 @@ def _stash_approval_resume(
     workflow_instance: Any,
     request_id: str,
     question: str = "",
-    *,
-    reminder_sent: bool = False,
 ) -> None:
     if not request_id:
         return
@@ -275,11 +237,9 @@ def _stash_approval_resume(
         if entry["request_id"] == request_id:
             if question and not entry["question"]:
                 entry["question"] = question
-            if reminder_sent:
-                entry["reminder_sent"] = True
             _set_resume_entries(workflow_instance, entries)
             return
-    entries.append(_resume_entry(request_id, question, reminder_sent))
+    entries.append(_resume_entry(request_id, question))
     _set_resume_entries(workflow_instance, entries)
 
 
@@ -456,9 +416,8 @@ async def _send_approval_sms(
     question: str,
     request_id: str,
     metadata: Optional[Dict[str, Any]],
-    reminder: bool,
 ) -> None:
-    """Send the initial write_lock SMS or the single extra reminder."""
+    """Send the initial write_lock SMS. Never a follow-up reminder."""
     try:
         notification_args = [
             user_id,
@@ -469,7 +428,6 @@ async def _send_approval_sms(
                 "attention_request_id": request_id,
                 "workflow_id": workflow_id,
                 "metadata": metadata or None,
-                "reminder": reminder,
             },
         ]
         world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
@@ -482,14 +440,13 @@ async def _send_approval_sms(
             retry_policy=RetryPolicy(maximum_attempts=SMS_NOTIFY_MAX_ATTEMPTS),
         )
         logger.info(
-            "Sent write_lock SMS reminder" if reminder else "Sent write_lock SMS notification",
+            "Sent write_lock SMS notification",
             request_id=request_id,
             agent_id=agent_id,
-            reminder=reminder,
         )
     except Exception as sms_err:
         logger.warning(
-            "Failed to send write_lock SMS reminder: %s" if reminder else "Failed to send write_lock SMS notification: %s",
+            "Failed to send write_lock SMS notification: %s",
             sms_err,
         )
 
@@ -513,6 +470,7 @@ async def request_user_approval_direct(
     image_url: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
     *,
+    close_on_cancel: bool = False,
     park: Optional[Callable[[Dict[str, str]], bool]] = None,
     resume_request: Optional[Dict[str, str]] = None,
 ) -> ApprovalResult:
@@ -525,6 +483,8 @@ async def request_user_approval_direct(
         question: The question to ask the user.
         image_url: Optional image URL (e.g. product thumbnail).
         metadata: Optional additional metadata.
+        close_on_cancel: Close only the interrupted approval chip; never invent
+            a response.
         park: Called with ``{"attention_request_id", "tool_call_id"}`` when a
             generation handoff interrupts the wait. Returning True means the
             caller parked that request for the next generation: the request
@@ -543,7 +503,6 @@ async def request_user_approval_direct(
         request_id = str(resume_request["attention_request_id"])
         tool_call_id = str(resume_request["tool_call_id"])
         metadata_payload, event_metadata = _approval_event_metadata(question, metadata, request_id)
-        resume_info = workflow.info()
         logger.info(
             "Resuming approval wait after generation handoff",
             request_id=request_id,
@@ -557,11 +516,7 @@ async def request_user_approval_direct(
             event_metadata=event_metadata,
             metadata_payload=metadata_payload,
             park=park,
-            reminder_already_sent=_resume_request_reminder_sent(workflow_instance, resume_request),
-            user_id=workflow_instance.user_id,
-            agent_id=workflow_instance.agent_id,
-            workflow_id=resume_info.workflow_id,
-            metadata=metadata,
+            close_on_cancel=close_on_cancel,
         )
 
     info = workflow.info()
@@ -611,7 +566,6 @@ async def request_user_approval_direct(
         # approval is O(approvals) and must reach the user or the child hangs
         # silently. Benchmarks are suppressed centrally on the backend
         # (Agent.isBenchmark). Skip on resume — the original wait already notified.
-        # At most one extra reminder SMS may follow the initial notification.
         if not reused_request:
             await _send_approval_sms(
                 workflow_instance,
@@ -621,7 +575,6 @@ async def request_user_approval_direct(
                 question=question,
                 request_id=request_id,
                 metadata=metadata,
-                reminder=False,
             )
 
     except Exception as e:
@@ -642,8 +595,6 @@ async def request_user_approval_direct(
         status=MessageStatus.IN_PROGRESS,
         metadata=event_metadata,
     )
-    await workflow_instance._handle_tool_event(pre_event, tool_call_id, TOOL_NAME)
-
     return await _await_approval_response(
         workflow_instance,
         question=question,
@@ -652,13 +603,8 @@ async def request_user_approval_direct(
         event_metadata=event_metadata,
         metadata_payload=metadata_payload,
         park=park,
-        reminder_already_sent=_stashed_approval_reminder_sent(workflow_instance, request_id)
-        if reused_request
-        else False,
-        user_id=user_id,
-        agent_id=agent_id,
-        workflow_id=workflow_id,
-        metadata=metadata,
+        close_on_cancel=close_on_cancel,
+        opening_event=pre_event,
     )
 
 
@@ -671,77 +617,32 @@ async def _await_approval_response(
     event_metadata: Dict[str, Any],
     metadata_payload: Dict[str, Any],
     park: Optional[Callable[[Dict[str, str]], bool]],
-    reminder_already_sent: bool = False,
-    user_id: Any = None,
-    agent_id: Any = None,
-    workflow_id: Any = None,
-    metadata: Optional[Dict[str, Any]] = None,
+    close_on_cancel: bool = False,
+    opening_event: Optional[ToolEvent] = None,
 ) -> ApprovalResult:
-    # Snapshot context length before waiting
-    context_len_before_wait = len(workflow_instance.context)
-    reminder_sent = reminder_already_sent
-    responded = request_id in workflow_instance._signal_responses
+    completion_event: Optional[ToolEvent] = None
+    rejection_feedback_resolved = False
+    # Delivery may persist before its await acknowledges the opened chip.
+    try:
+        if opening_event is not None:
+            await workflow_instance._handle_tool_event(opening_event, tool_call_id, TOOL_NAME)
 
-    def _on_handoff(exc: GenerationHandoffRequested) -> None:
-        park_payload: Dict[str, str] = {
-            "attention_request_id": request_id,
-            "tool_call_id": tool_call_id,
-        }
-        if reminder_sent:
-            park_payload["reminder_sent"] = "true"
-        parked = park is not None and park(park_payload)
-        _stash_approval_resume(
-            workflow_instance, request_id, question, reminder_sent=reminder_sent
-        )
-        if parked:
-            raise GenerationHandoffRequested(exc.task_queue, parked=True) from None
+        # Snapshot context length before waiting
+        context_len_before_wait = len(workflow_instance.context)
 
-    # Initial notification already went out. Wait once for the reminder
-    # window; if the user is still silent, send exactly one extra SMS.
-    if not responded and not reminder_sent:
+        # Initial notification already went out. An existing response needs no wait.
         try:
-            await wait_condition_or_generation_handoff(
-                lambda: request_id in workflow_instance._signal_responses,
-                workflow_instance,
-                timeout=timedelta(minutes=APPROVAL_REMINDER_TIMEOUT_MINUTES),
-                workflow_mod=workflow,
-            )
-            responded = True
-        except GenerationHandoffRequested as exc:
-            _on_handoff(exc)
-            interrupt_event = ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="🔐 Requesting user approval",
-                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
-                status=MessageStatus.FINISHED,
-                metadata=event_metadata,
-            )
-            await workflow_instance._handle_tool_event(interrupt_event, tool_call_id, TOOL_NAME)
-            raise
-        except (AsyncTimeoutError, TemporalTimeoutError, TimeoutError):
-            if MAX_APPROVAL_REMINDERS > 0:
-                await _send_approval_sms(
+            if request_id not in workflow_instance._signal_responses:
+                await wait_condition_or_generation_handoff(
+                    lambda: request_id in workflow_instance._signal_responses,
                     workflow_instance,
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    workflow_id=workflow_id,
-                    question=question,
-                    request_id=request_id,
-                    metadata=metadata,
-                    reminder=True,
+                    workflow_mod=workflow,
                 )
-                reminder_sent = True
-
-    # After the one extra reminder, wait indefinitely with no more SMS.
-    if not responded:
-        try:
-            await wait_condition_or_generation_handoff(
-                lambda: request_id in workflow_instance._signal_responses,
-                workflow_instance,
-                workflow_mod=workflow,
-            )
         except GenerationHandoffRequested as exc:
-            _on_handoff(exc)
+            parked = park is not None and park({"attention_request_id": request_id, "tool_call_id": tool_call_id})
+            _stash_approval_resume(workflow_instance, request_id, question)
+            if parked:
+                raise GenerationHandoffRequested(exc.task_queue, parked=True) from None
             interrupt_event = ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="🔐 Requesting user approval",
@@ -749,65 +650,91 @@ async def _await_approval_response(
                 status=MessageStatus.FINISHED,
                 metadata=event_metadata,
             )
+            completion_event = interrupt_event
             await workflow_instance._handle_tool_event(interrupt_event, tool_call_id, TOOL_NAME)
             raise
 
-    signal_response = workflow_instance._signal_responses.pop(request_id)
-    _clear_approval_resume(workflow_instance, request_id)
+        signal_response = workflow_instance._signal_responses.pop(request_id)
+        _clear_approval_resume(workflow_instance, request_id)
 
-    if signal_response and signal_response.strip() == REJECTION_SENTINEL:
-        logger.info("User rejected approval request (via signal)", request_id=request_id)
+        if signal_response and signal_response.strip() == REJECTION_SENTINEL:
+            logger.info("User rejected approval request (via signal)", request_id=request_id)
 
-        # Poll messages to get the user's rejection feedback text from DB
-        await workflow_instance._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
+            reject_event = ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="✗ User rejected action",
+                message="",
+                status=MessageStatus.FINISHED,
+                metadata=event_metadata,
+            )
+            completion_event = reject_event
 
-        # Extract rejection message only from messages added during this approval window
-        rejection_text = ""
-        for i in range(len(workflow_instance.context) - 1, context_len_before_wait - 1, -1):
-            if workflow_instance.context[i].get("role") == "USER":
-                rejection_text = workflow_instance.context[i].get("text", "")
-                break
+            # Poll messages to get the user's rejection feedback text from DB
+            await workflow_instance._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
 
-        if rejection_text:
-            logger.info("User rejection message", request_id=request_id, rejection_text=rejection_text[:100])
+            # Extract rejection message only from messages added during this approval window
+            rejection_text = ""
+            for i in range(len(workflow_instance.context) - 1, context_len_before_wait - 1, -1):
+                if workflow_instance.context[i].get("role") == "USER":
+                    rejection_text = workflow_instance.context[i].get("text", "")
+                    break
 
-        # Post FINISHED to close the approval chip cleanly
-        reject_event = ToolEvent(
+            if rejection_text:
+                logger.info("User rejection message", request_id=request_id, rejection_text=rejection_text[:100])
+
+            # Post FINISHED to close the approval chip cleanly
+            reject_event.message = rejection_text
+            rejection_feedback_resolved = True
+            await workflow_instance._handle_tool_event(reject_event, tool_call_id, TOOL_NAME)
+
+            raise UserRejectedError("User rejected the approval request", rejection_message=rejection_text)
+
+        # Every deployment replaces old workflow histories before candidate workers
+        # activate, so fresh histories always consume request-scoped signal data.
+        response_text = signal_response.strip() if signal_response else ""
+
+        logger.info(
+            "User approval response received",
+            request_id=request_id,
+            response_length=len(response_text),
+            response_preview=response_text[:50] if response_text else "",
+        )
+
+        post_event = ToolEvent(
             type=EventType.POST_MESSAGE,
-            title="✗ User rejected action",
-            message=rejection_text,
+            title="✓ User approval received",
+            message=_build_approval_completion_message(question, response_text),
             status=MessageStatus.FINISHED,
             metadata=event_metadata,
         )
-        await workflow_instance._handle_tool_event(reject_event, tool_call_id, TOOL_NAME)
+        completion_event = post_event
+        await workflow_instance._handle_tool_event(post_event, tool_call_id, TOOL_NAME)
 
-        raise UserRejectedError("User rejected the approval request", rejection_message=rejection_text)
+        return {
+            "response": response_text,
+            "question": question,
+            "attention_request_id": metadata_payload.get("attentionRequestId") if metadata_payload else None,
+        }
 
-    # Every deployment replaces old workflow histories before candidate workers
-    # activate, so fresh histories always consume request-scoped signal data.
-    response_text = signal_response.strip() if signal_response else ""
-
-    logger.info(
-        "User approval response received",
-        request_id=request_id,
-        response_length=len(response_text),
-        response_preview=response_text[:50] if response_text else "",
-    )
-
-    post_event = ToolEvent(
-        type=EventType.POST_MESSAGE,
-        title="✓ User approval received",
-        message=_build_approval_completion_message(question, response_text),
-        status=MessageStatus.FINISHED,
-        metadata=event_metadata,
-    )
-    await workflow_instance._handle_tool_event(post_event, tool_call_id, TOOL_NAME)
-
-    return {
-        "response": response_text,
-        "question": question,
-        "attention_request_id": metadata_payload.get("attentionRequestId"),
-    }
+    except asyncio.CancelledError:
+        if close_on_cancel:
+            if completion_event is None:
+                _stash_approval_resume(workflow_instance, request_id, question)
+                completion_event = ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Approval interrupted",
+                    message="Approval wait interrupted.",
+                    status=MessageStatus.FINISHED,
+                    metadata={**event_metadata, "excludeFromModel": True},
+                )
+            elif completion_event.title == "✗ User rejected action" and not rejection_feedback_resolved:
+                # A poll may publish feedback before its await acknowledges it.
+                for i in range(len(workflow_instance.context) - 1, context_len_before_wait - 1, -1):
+                    if workflow_instance.context[i].get("role") == "USER":
+                        completion_event.message = workflow_instance.context[i].get("text", "")
+                        break
+            await workflow_instance._handle_tool_event(completion_event, tool_call_id, TOOL_NAME)
+        raise
 
 
 async def request_user_attention_direct(

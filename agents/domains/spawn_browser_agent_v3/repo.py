@@ -6,6 +6,7 @@ Typed args in, typed results out.
 
 from __future__ import annotations
 
+import asyncio
 import uuid as uuid_module
 from typing import Any, Dict, List, Optional
 
@@ -20,6 +21,7 @@ from domains.spawn_browser_agent_v3.config import (
     MIME_TYPE_MAP,
 )
 from helpers.http_client import get_http_client
+from helpers.tracing import traced, tracing_headers
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
     raise_if_generation_sealed,
@@ -129,6 +131,7 @@ async def report_claude_token_rate_limited(
 # ========================================
 
 
+@traced("browser.save_action_message")
 async def save_browser_action_message(
     agent_id: str,
     title: str,
@@ -204,16 +207,29 @@ async def save_browser_action_message(
         metadata = stamp_tool_workflow_generation(metadata) or metadata
 
         client = get_http_client()
-        response = await client.post(
-            f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-            timeout=5.0,
-            headers={
-                "x-api-key": config.backend.api_key or "",
-                "Content-Type": "application/json",
-                **workflow_generation_headers(),
-            },
-            json={"message": message, "role": "TOOL", "metadata": metadata},
-        )
+        headers = {
+            "x-api-key": config.backend.api_key or "",
+            "Content-Type": "application/json",
+            **tracing_headers(),
+            **workflow_generation_headers(),
+        }
+        attempts = 3 if action_type == "recording" and status == MessageStatus.FINISHED else 1
+        for attempt in range(attempts):
+            try:
+                response = await client.post(
+                    f"{config.backend.api_url}/api/agents/{agent_id}/messages",
+                    timeout=5.0,
+                    headers=headers,
+                    json={"message": message, "role": "TOOL", "metadata": metadata},
+                )
+                break
+            except (httpx.ConnectTimeout, httpx.ConnectError, httpx.PoolTimeout):
+                # These failures precede sending the request. Retain the
+                # exact recording/generation identity, and never replay an
+                # ambiguous read/write timeout or an HTTP rejection.
+                if attempt + 1 == attempts:
+                    raise
+                await asyncio.sleep(0.5 * (attempt + 1))
         raise_if_generation_sealed(response.status_code, "spawn_browser_agent_v3")
         if not response.is_success:
             logger.error(

@@ -7,6 +7,11 @@ repo's own skills by default: the `.claude/commands/*` slash-commands (`/deploy`
 `docs/root-cause-analysis.md`, `docs/testing.md`). Do not duplicate that guidance
 here.
 
+Fresh clones on Andy’s Mac: follow `CLAUDE.md` → **"Fresh clone setup (Andy’s
+Mac)"** for authoritative env-file locations, pinned toolchains, dependency
+installation, and isolated workspace/database setup. Do not substitute example
+env files for the complete local secrets.
+
 Cloud/Linux agents: see `CLAUDE.md` → **"Cursor Cloud / Linux dev environment"**
 (setup via `bash scripts/cloud-init.sh`, system Postgres, skip `mac-app`,
 injected-env-vars-override-`.env` gotchas, and which test suites need funded/live
