@@ -24,7 +24,7 @@ sources:
   - PR #1420 inline review comment 4196068552
   - plan:.context/frontend-overlay-final-20261006/review-final-normal-20261006
 repro: back-end/src/tests/unit/benchmark-hub-admission.test.ts through the normal backend coverage unit runner
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -98,10 +98,19 @@ npm run test:coverage
 
 The normal backend unit runner recursively discovers `.test.ts` files and is
 invoked by `scripts/run-coverage.sh`, so the permanent storage-owner regression
-runs in the ordinary coverage gate. The complete final-source backend coverage,
-static and unit gates remain pending while this record is open. Deployment and
-a genuine fifty-copy acceptance run remain separate; these owning controls do
-not replace them. Original reviewed bytes, unchanged RED/GREEN tests, per-phase
+runs in the ordinary coverage gate. On source commit
+`b6f4e7ccc149302b4b783dfd1265120f8dc74daf`, the normal coverage wrapper exited 0
+in 495.807 seconds: all 184 blackbox domains and all 253 unit-test files passed,
+including the fifteen admission controls. Coverage met the normal thresholds
+with 89.54% lines/statements, 80.42% branches and 92.17% functions. Both the
+normal-exit and SIGTERM teardown controls released the owned backend and port
+lock. Backend structural tests, TypeScript and affected-file ESLint also passed.
+The gate's 2,618 captured inputs stayed unchanged, as did the baseline database
+and inherited proxy values. Its source-bound receipts are private in
+`.context/normal-backend-aba-current-20261006/`; the later status/index update is
+documentation only. This closes the backend owning-boundary defect. Deployment
+and a genuine fifty-copy acceptance run remain separate; these controls do not
+replace them. Original reviewed bytes, unchanged RED/GREEN tests, per-phase
 source hashes and retained failure logs stay private in
 `.context/frontend-overlay-final-20261006/review-final-normal-20261006/`.
 
