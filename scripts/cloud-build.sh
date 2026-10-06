@@ -83,6 +83,7 @@ if ! $IS_MAC; then
             $SUDO apt-get update -qq && $SUDO apt-get install -y -qq postgresql postgresql-client
         fi
         # pgvector for the installed major (planner-memory vector columns).
+        $SUDO bash "$ROOT/scripts/lib/refresh-superseded-distro-postgres.sh"
         $SUDO bash "$ROOT/scripts/cloudbench-install-pgvector.sh"
         # Start the cluster
         PG_VER=$(pg_lsclusters -h 2>/dev/null | head -1 | awk '{print $1}')

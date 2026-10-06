@@ -174,6 +174,47 @@ cloudbench_install_pgvector
         assert len(builds) == 2 and builds[1] == builds[0] + " install"
 
 
+def test_warm_deps_preflight_cloud_build_refreshes_superseded_distro_postgres(tmp_path: Path) -> None:
+    refresher = ROOT / "scripts" / "lib" / "refresh-superseded-distro-postgres.sh"
+    cloud_build = (ROOT / "scripts" / "cloud-build.sh").read_text()
+    assert cloud_build.index('bash "$ROOT/scripts/lib/refresh-superseded-distro-postgres.sh"') < cloud_build.index(
+        'bash "$ROOT/scripts/cloudbench-install-pgvector.sh"'
+    )
+    harness = r"""set -euo pipefail
+source "$1"
+fixture="$2"
+indexed="$3"
+ls() { [[ "$*" == /usr/lib/postgresql ]]; printf '16\n'; }
+dpkg-query() { [[ "$*" == '-W -f=${Version} postgresql-16' ]]; printf '16.14-0ubuntu0.24.04.1'; }
+apt-cache() {
+    [[ "$*" == 'madison postgresql-server-dev-16' ]]
+    printf 'postgresql-server-dev-16 | %s | http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Packages\n' "$indexed"
+    printf 'postgresql-server-dev-16 | 16.2-1ubuntu4 | http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages\n'
+}
+apt-get() { printf '%s\n' "$*" >>"$fixture/apt-calls"; }
+cloud_refresh_superseded_distro_postgres
+"""
+    cases = {
+        "16.15-0ubuntu0.24.04.1": [
+            "update",
+            "install -y --only-upgrade postgresql-16 postgresql-client-16",
+        ],
+        "16.14-0ubuntu0.24.04.1": ["update"],
+    }
+    for indexed, expected_calls in cases.items():
+        fixture = tmp_path / indexed
+        fixture.mkdir()
+        result = subprocess.run(
+            ["bash", "-c", harness, "refresh-fixture", str(refresher), str(fixture), indexed],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (fixture / "apt-calls").read_text().splitlines() == expected_calls, indexed
+
+
 def test_prestart_provider_recovery_requires_exact_closed_guest_and_zero_external_ownership(tmp_path: Path) -> None:
     spec = importlib.util.spec_from_file_location("cloudbench_exact_session_cleanup", EXACT_PROVIDER_SCRIPT)
     assert spec is not None and spec.loader is not None
