@@ -1,0 +1,130 @@
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import {
+  orgRetryDeadlineAtMs,
+  type AgentCardOrgToolCaller,
+} from '../../providers/agentcard/org-runtime';
+import {
+  TRANSFER_PUBLIC_STATUSES,
+  deferredUnusedMintVerdict,
+  type DeferredUnusedMintVerdict,
+  type PendingUnusedMint,
+  type TransferStatusPage,
+} from '../../providers/agentcard/unused-mint-settle';
+
+const TRANSFER_PAGE_LIMIT = 100;
+
+type LedgerLine =
+  | ({ event: 'pending'; recordedAt: string } & PendingUnusedMint)
+  | { event: 'resolved'; cardId: string; verdict: string; detail: string; resolvedAt: string };
+
+/**
+ * Append-only JSONL of unused mints a run could not see reclaimed. It lives outside the worktree
+ * so later runs from any worktree on this machine check them, including after a merged worktree
+ * is deleted.
+ */
+export function pendingMintLedgerPath(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.TREASURY_RAILS_PENDING_MINT_LEDGER?.trim();
+  if (override) return override;
+  return join(homedir(), '.cache', 'rose-labs', 'treasury-rails-pending-mints.jsonl');
+}
+
+function appendLine(ledgerPath: string, line: LedgerLine): void {
+  mkdirSync(dirname(ledgerPath), { recursive: true });
+  appendFileSync(ledgerPath, `${JSON.stringify(line)}\n`);
+}
+
+export function readOpenPendingMints(ledgerPath: string): PendingUnusedMint[] {
+  let text: string;
+  try {
+    text = readFileSync(ledgerPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const open = new Map<string, PendingUnusedMint>();
+  text.split('\n').forEach((raw, index) => {
+    if (raw.trim() === '') return;
+    let line: LedgerLine;
+    try {
+      line = JSON.parse(raw) as LedgerLine;
+    } catch {
+      throw new Error(`${ledgerPath}:${index + 1} is not valid JSON`);
+    }
+    if (line.event === 'resolved') {
+      open.delete(line.cardId);
+      return;
+    }
+    const { cardId, transferId, cardholderId, mintCents, mintedAt } = line;
+    open.set(cardId, { cardId, transferId, cardholderId, mintCents, mintedAt });
+  });
+  return [...open.values()];
+}
+
+export function recordPendingMint(
+  ledgerPath: string,
+  entry: PendingUnusedMint,
+  nowMs = Date.now()
+): void {
+  appendLine(ledgerPath, { event: 'pending', recordedAt: new Date(nowMs).toISOString(), ...entry });
+}
+
+function verdictDetail(verdict: DeferredUnusedMintVerdict): string {
+  switch (verdict.kind) {
+    case 'settled':
+      return `${verdict.status} ${verdict.releasedCents}c`;
+    case 'failed':
+    case 'unobservable':
+      return verdict.reason;
+    default:
+      return verdict.status;
+  }
+}
+
+export type DeferredMintCheck = { entry: PendingUnusedMint; verdict: DeferredUnusedMintVerdict };
+
+/**
+ * Re-check this org's open entries. Every verdict except `waiting` is final and recorded, so a
+ * lost mint fails exactly one run instead of every run after it. Entries for cardholders outside
+ * this org belong to other credentials and are left for them.
+ */
+export async function checkPendingUnusedMints(options: {
+  callOrgTool: AgentCardOrgToolCaller;
+  ledgerPath: string;
+  cardholderIds: ReadonlySet<string>;
+  nowMs?: number;
+}): Promise<DeferredMintCheck[]> {
+  const open = readOpenPendingMints(options.ledgerPath).filter((entry) =>
+    options.cardholderIds.has(entry.cardholderId)
+  );
+  if (open.length === 0) return [];
+  const retryDeadlineAtMs = orgRetryDeadlineAtMs();
+  const pages: TransferStatusPage[] = [];
+  for (const status of TRANSFER_PUBLIC_STATUSES) {
+    const result = (await options.callOrgTool(
+      'list_transfers',
+      { status, limit: TRANSFER_PAGE_LIMIT },
+      retryDeadlineAtMs
+    )) as { structuredContent?: { transfers?: Array<Record<string, unknown>> } };
+    pages.push({
+      status,
+      limit: TRANSFER_PAGE_LIMIT,
+      rows: result.structuredContent?.transfers ?? [],
+    });
+  }
+  const nowMs = options.nowMs ?? Date.now();
+  return open.map((entry) => {
+    const verdict = deferredUnusedMintVerdict(entry, pages, nowMs);
+    if (verdict.kind !== 'waiting') {
+      appendLine(options.ledgerPath, {
+        event: 'resolved',
+        cardId: entry.cardId,
+        verdict: verdict.kind,
+        detail: verdictDetail(verdict),
+        resolvedAt: new Date(nowMs).toISOString(),
+      });
+    }
+    return { entry, verdict };
+  });
+}

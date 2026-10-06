@@ -63,8 +63,38 @@ def main() -> int:
 
     args.stamp.parent.mkdir(parents=True, exist_ok=True)
     args.lock.parent.mkdir(parents=True, exist_ok=True)
+    cohort_directory = os.environ.get("RUN_BENCH_CAMPAIGN_BARRIER_DIR")
+    cohort = Path(cohort_directory) if cohort_directory else None
+    failure = cohort / "infra-canary.failed" if cohort else None
+
+    def cohort_blocked() -> bool:
+        return bool(
+            cohort
+            and ((cohort / "abort.json").exists() or (failure and failure.exists()))
+        )
+
+    def record_cohort_failure(status: int) -> None:
+        if failure:
+            _write_stamp(failure, f"exit={status}")
+
     with args.lock.open("a+", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        if cohort:
+            while True:
+                if cohort_blocked():
+                    print(
+                        "infra canary preflight: campaign already failed",
+                        file=sys.stderr,
+                    )
+                    return 1
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(1)
+            if cohort_blocked():
+                return 1
+        else:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         lock_handle.seek(0)
         lock_handle.truncate()
         lock_handle.write(f"{os.getpid()}\n")
@@ -83,6 +113,14 @@ def main() -> int:
             f"stamp missing/stale — running N={args.width} before capability fleet"
         )
         environment = os.environ.copy()
+        # This substrate check must finish before its caller can join the
+        # campaign. The nested controller does not own the caller's slot.
+        for key in (
+            "RUN_BENCH_CAMPAIGN_BARRIER_DIR",
+            "RUN_BENCH_CAMPAIGN_COHORT",
+            "RUN_BENCH_CAMPAIGN_JOB_ID",
+        ):
+            environment.pop(key, None)
         environment.update(
             {
                 "CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE": "1",
@@ -105,10 +143,15 @@ def main() -> int:
                 f"❌ infra canary preflight FAILED (exit=1): {exc}",
                 file=sys.stderr,
             )
+            record_cohort_failure(1)
             return 1
 
         status = _shell_status(completed.returncode)
         if status != 0:
+            # Publish before releasing the transaction lock. Peers in this
+            # same cohort must not each repeat a failed infrastructure probe
+            # while the campaign parent is publishing its abort marker.
+            record_cohort_failure(status)
             return status
 
         _write_stamp(args.stamp)

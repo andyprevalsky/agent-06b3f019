@@ -102,4 +102,31 @@ grep -Fq '[cloudbench] FATAL: insufficient volume space for git fetch' "$failure
   fail "insufficient-space failure did not explain the preflight rejection"
 assert_lock_released "$lock_path"
 
+# A verified dependency image plus an empty REAL-primary volume needs an exact
+# checkout, not a restored donor Git pack. Keep transport local in this control.
+fresh_checkout="$TMP_ROOT/fresh-checkout"
+GIT_CONFIG_COUNT=1 \
+GIT_CONFIG_KEY_0="url.file://$TMP_ROOT/origin.git.insteadOf" \
+GIT_CONFIG_VALUE_0=https://github.com/Rose-Ai-Labs/rose.git \
+GITHUB_TOKEN=local-fixture-only \
+CLOUDBENCH_FRESH_VOLUME=1 CLOUDBENCH_GIT_MIN_FREE_KB=1 \
+  bash "$FETCH_SCRIPT" "$fresh_checkout" "$next_target" >/dev/null 2>&1 \
+  || fail "empty REAL-primary volume did not bootstrap its exact checkout"
+[ "$(git -C "$fresh_checkout" rev-parse HEAD)" = "$next_target" ] \
+  || fail "fresh checkout did not verify the requested commit"
+[ "$(git -C "$fresh_checkout" remote get-url origin)" = https://github.com/Rose-Ai-Labs/rose.git ] \
+  || fail "fresh checkout persisted a rewritten or authenticated origin"
+assert_lock_released "$fresh_checkout/.git/cloudbench-fetch.lock"
+if CLOUDBENCH_GIT_MIN_FREE_KB=1 bash "$FETCH_SCRIPT" "$TMP_ROOT/not-authorized" "$next_target" >/dev/null 2>&1; then
+  fail "missing checkout bootstrap must require explicit fresh-volume handoff"
+fi
+[ ! -e "$TMP_ROOT/not-authorized" ] || fail "unrequested bootstrap wrote a checkout"
+mkdir "$TMP_ROOT/non-git-data"
+printf 'preserve\n' > "$TMP_ROOT/non-git-data/asset"
+if CLOUDBENCH_FRESH_VOLUME=1 CLOUDBENCH_GIT_MIN_FREE_KB=1 \
+  bash "$FETCH_SCRIPT" "$TMP_ROOT/non-git-data" "$next_target" >/dev/null 2>&1; then
+  fail "fresh bootstrap must refuse retained non-Git data"
+fi
+[ "$(cat "$TMP_ROOT/non-git-data/asset")" = preserve ] || fail "retained data changed"
+
 echo "All cloud benchmark fetch checks passed."

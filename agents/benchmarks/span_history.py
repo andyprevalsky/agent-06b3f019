@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import subprocess
 from datetime import datetime, timezone
 from glob import glob
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -47,6 +48,21 @@ def _history_paths(history_file: Optional[str] = None) -> List[str]:
     return [HISTORY_FILE, *segments]
 
 
+def _writer_key() -> str:
+    """Slug of the checkout's branch, or "" when detached or outside git."""
+    try:
+        branch = subprocess.run(
+            ["git", "symbolic-ref", "--short", "-q", "HEAD"],
+            cwd=HISTORY_DIR,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return re.sub(r"[^a-z0-9]+", "-", branch.lower()).strip("-")[:64]
+
+
 def _append_history_path(history_file: Optional[str] = None, required_bytes: int = 0) -> str:
     configured = history_file or os.environ.get("SPAN_HISTORY_FILE")
     if configured:
@@ -62,20 +78,25 @@ def _append_history_path(history_file: Optional[str] = None, required_bytes: int
     if not glob(os.path.join(HISTORY_DIR, "span_durations.*.jsonl")) and has_room(HISTORY_FILE):
         return HISTORY_FILE
 
-    date_key = datetime.now(timezone.utc).strftime("%Y%m%d")
+    # Segments are union-merged, so two branches appending to one shared name each
+    # stay under the cap while their merge does not. Each branch owns its segments.
+    writer = _writer_key()
+    prefix = f"span_durations.{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+    if writer:
+        prefix = f"{prefix}.{writer}"
     latest_part = 1
     for part in range(1, 100):
         suffix = "" if part == 1 else f".{part:02d}"
-        if os.path.exists(os.path.join(HISTORY_DIR, f"span_durations.{date_key}{suffix}.jsonl")):
+        if os.path.exists(os.path.join(HISTORY_DIR, f"{prefix}{suffix}.jsonl")):
             latest_part = part
     for part in range(latest_part, 100):
         suffix = "" if part == 1 else f".{part:02d}"
-        candidate = os.path.join(HISTORY_DIR, f"span_durations.{date_key}{suffix}.jsonl")
+        candidate = os.path.join(HISTORY_DIR, f"{prefix}{suffix}.jsonl")
         if has_room(candidate):
             return candidate
     # More than 99 full 90 MiB segments in one day is not credible, but retaining
     # a deterministic final target keeps benchmark recording best-effort.
-    return os.path.join(HISTORY_DIR, f"span_durations.{date_key}.99.jsonl")
+    return os.path.join(HISTORY_DIR, f"{prefix}.99.jsonl")
 
 
 def _clean_record(record: Dict[str, Any]) -> Dict[str, Any]:

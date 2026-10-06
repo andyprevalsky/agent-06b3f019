@@ -133,6 +133,47 @@ provider build cancellation or a successful fifty-task run.
 
 API contract: https://docs.machines.dev/machines/Machines_upsert_metadata
 
+## Recurrence — a redundant read invalidated already hydrated proof
+
+The unchanged-dependency cached50 campaign on `271ca1cfaca0` restored donor
+metadata proof in all fifty controllers. Every controller selected the same
+exact recorded snapshot `vs_keyA4NwX50ZfKDR43l8X`; thirty-one then took the fast
+path while nineteen entered central healing. Seventeen maintenance siblings
+waited on the app-environment lock, with observed waits up to 330 seconds.
+Private ordered evidence is under `.context/fresh-cli-validation-20261005/`.
+The first two actual maintenance owners completed dependencies and stopped the
+donor before failing at snapshot publication. Those failures and the separate
+controller dotenv race remain separate from dependency installation and task
+results; no successful fifty-task outcome is inferred.
+
+Hydration already checks current node/Python hashes, app, donor, attached volume,
+exact snapshot identity, positive completed status/size and creation epoch, and
+pins its receipt in process memory. The later preflight repeated the snapshot
+listing only to obtain that same epoch, suppressing all provider errors. With
+the manifests frozen and the hydrated receipt retained, an uncertain second read
+was the remaining boundary that could reject this established proof. Git revision
+is not part of this dependency predicate. The runtime logs cannot distinguish
+transport rejection, empty listing or malformed response because the read hid
+its diagnostics; no specific provider cause is claimed.
+
+The existing owning preflight harness now captures valid matching proof, then
+makes subsequent provider reads fail, return an empty list or return malformed
+JSON. Old source fails all three unchanged reuse assertions. The repaired epoch
+helper accepts the already captured inventory only for the hydrated fast path,
+retaining every existing manifest/snapshot/epoch comparison. Legacy and pinned
+paths keep their live reads; a new negative control also requires live epoch
+and exact-complete validation after a newly created refresh snapshot.
+
+The private old-source reproduction failed three cases in 1.28 seconds. Those
+same cases plus the post-refresh refusal and existing donor/volume/hash mismatch,
+pending/expired, sibling-receipt, legacy and pinned controls passed fifteen cases
+in 3.44 seconds. Compact selectors must include these new owning controls before
+the next live campaign. At 10,000 controllers, this avoids one redundant provider
+read per proven snapshot and prevents a failed read from creating an unnecessary
+central rebuild queue. It changes no model, task, dependency recipe, authentication,
+result boundary or normal deadline. Live resolution still requires the next
+actual fifty-task validation.
+
 ## Human feedback
 
 The user requested faster startup for future agents, suggested persisted code

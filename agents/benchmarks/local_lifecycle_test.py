@@ -158,6 +158,47 @@ def load_local():
     return local
 
 
+def test_local_launchers_preserve_inherited_proxy_configuration():
+    from unittest.mock import patch
+
+    local = load_local()
+    keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy")
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        stack = local.ServiceStack(
+            "proxy-fixture", folder, folder / "services.json", folder / "services.log", True,
+            workspace_name="proxy-fixture", base_port=22001,
+        )
+        for configured in (False, True):
+            inherited = {key: "fixture-proxy-setting" for key in keys} if configured else {}
+            base = {"PATH": os.environ["PATH"], "BENCHMARK_SEED_DUMP": str(folder / "fixture.dump"), **inherited}
+            expected = {key: base[key] for key in keys if key in base}
+            assert {key: value for key, value in local.benchmark_runner_env(base).items() if key in keys} == expected
+
+            for launch in ("streamed", "stack"):
+                captured = []
+
+                def capture(_command, **kwargs):
+                    captured.append({key: value for key, value in kwargs["env"].items() if key in keys})
+                    raise RuntimeError("fixture captured launch")
+
+                with (
+                    patch.dict(os.environ, base, clear=True),
+                    patch.object(local.subprocess, "Popen", capture),
+                    patch.object(local, "_release_port_range"),
+                ):
+                    try:
+                        if launch == "streamed":
+                            local.run_streamed_command(["fixture-command"], cwd=folder)
+                        else:
+                            local.start_services(stack, clean_first=False)
+                    except RuntimeError as error:
+                        assert str(error) == "fixture captured launch"
+                    else:
+                        raise AssertionError("fixture did not observe launch")
+                assert captured == [expected], f"{launch} changed inherited proxy settings"
+
+
 def driver(folder, outcome="interrupted"):
     local = load_local()
     publish_identity(folder, "controller")

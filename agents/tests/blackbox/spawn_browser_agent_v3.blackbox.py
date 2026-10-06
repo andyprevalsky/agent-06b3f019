@@ -9537,9 +9537,6 @@ async def test_purchase_write_lock_bypassed_when_payment_card_secret_refs_presen
     secret_refs = {ref: f"val-{ref}" for ref in PAYMENT_CARD_SECRET_REFS}
 
     with patch(
-        "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
-        AsyncMock(return_value="Place order $1.00"),
-    ), patch(
         "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
         return_value="Place order $1.00",
     ):
@@ -15348,10 +15345,6 @@ async def test_click_write_lock_result_skips_plain_email_input():
         get_all_children_text=lambda: "Buy Now",
     )
     with (
-        patch(
-            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
-            AsyncMock(return_value="buynow-email-si\nBuy Now"),
-        ),
         patch("browser_tools.write_lock.is_purchase_button", return_value=True),
         patch("browser_tools.write_lock.is_email_send_button", return_value=True),
     ):
@@ -15380,15 +15373,9 @@ async def test_click_write_lock_result_still_locks_submit_input():
         parent_node=None,
         get_all_children_text=lambda: "Place Order",
     )
-    with (
-        patch(
-            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
-            AsyncMock(return_value="Place Order"),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
-            return_value="Place Order",
-        ),
+    with patch(
+        "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
+        return_value="Place Order",
     ):
         out = await _click_write_lock_result(
             session=MagicMock(),
@@ -15482,9 +15469,13 @@ def test_write_lock_email_send_excludes_resend_controls():
     assert is_email_send_button("Send hotpot photos")
     assert is_email_send_button("Send adoption papers")
 
-    # The resend exemption stays positional: retry wording welded into another
-    # token is not a resend action.
-    assert is_email_send_button("alt-action-resend")
+    # The resend exemption stays positional: a label that sends and only later
+    # mentions resending is still a send. An id like ``alt-action-resend`` has
+    # no send word at all (agent f1ef359f: Target ``showResendMessageLink``),
+    # so it is not a send; an id with its own send word still is.
+    assert is_email_send_button("Send reply or resend later")
+    assert not is_email_send_button("alt-action-resend")
+    assert is_email_send_button("alt-action-send")
     assert is_email_send_button("Send invoice to billing@corp.com")
 
     # Each newline-delimited signal is judged on its own, so a resend label can

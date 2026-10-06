@@ -4175,3 +4175,165 @@ def test_rose_client_july_explore_fallback_replays_web_search(mem, monkeypatch):
         assert tc.data["name"] == "web_search"
 
     asyncio.run(body())
+
+
+@pytest.mark.parametrize("boundary", ["unresolved-context", "browser-bypass", "non-demo-cache-miss"])
+def test_demo_cache_probe_refuses_unresolved_or_uncached_live_provider(mem, monkeypatch, boundary):
+    """The opted-in isolated probe never spends after cache admission is lost."""
+    from providers.fast_cache import client as cache_client
+    from providers.fast_cache.rose_cache import FastCacheLookupError
+    from providers.rose.client import RoseClient
+
+    monkeypatch.setenv("BENCHMARK_DEMO_CACHE_READ_ONLY", "1")
+    monkeypatch.setenv("BENCHMARK_ISOLATED_RUN", "true")
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+
+    async def unresolved(*_args, **_kwargs):
+        return None
+
+    async def normal_provider_speed(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(cache_client, "ensure_context", unresolved)
+    monkeypatch.setattr(cache_client, "resolve_provider_fast_mode", normal_provider_speed)
+
+    async def body():
+        token = set_context(
+            FastCacheContext(enabled=True, goal="ordinary goal", base_step=1)
+            if boundary == "non-demo-cache-miss" else None
+        )
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def live_boundary(**_kwargs):
+            live_calls["n"] += 1
+            for chunk in _full_stream():
+                yield chunk
+
+        monkeypatch.setattr(client, "_complete_impl", live_boundary)
+        try:
+            with pytest.raises(FastCacheLookupError, match="DEMO replay probe.*live"):
+                await _drain(client.complete(
+                    pool="rose-1-browser-use" if boundary == "browser-bypass" else "rose-1-ultra",
+                    messages=[{"role": "user", "content": "go"}],
+                    call_site="response_schema",
+                    agent_id="agent-fixture",
+                ))
+            assert live_calls["n"] == 0
+            assert mem.set_calls == 0
+        finally:
+            reset_context(token)
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("probe,isolated", [(None, "true"), ("1", None)])
+def test_demo_cache_probe_flag_off_or_nonisolated_preserves_live_fallback(mem, monkeypatch, probe, isolated):
+    """The new guard must not redefine the generic read-only write flag."""
+    from providers.fast_cache import client as cache_client
+    from providers.rose.client import RoseClient
+
+    for key, value in {"BENCHMARK_DEMO_CACHE_READ_ONLY": probe, "BENCHMARK_ISOLATED_RUN": isolated}.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+
+    async def unresolved(*_args, **_kwargs):
+        return None
+
+    async def normal_provider_speed(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(cache_client, "ensure_context", unresolved)
+    monkeypatch.setattr(cache_client, "resolve_provider_fast_mode", normal_provider_speed)
+
+    async def body():
+        token = set_context(None)
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def live_boundary(**_kwargs):
+            live_calls["n"] += 1
+            for chunk in _full_stream():
+                yield chunk
+
+        monkeypatch.setattr(client, "_complete_impl", live_boundary)
+        try:
+            chunks = await _drain(client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="response_schema",
+                agent_id="agent-fixture",
+            ))
+            assert chunks
+            assert live_calls["n"] == 1
+            assert mem.set_calls == 0
+        finally:
+            reset_context(token)
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("probe", ["1", None])
+def test_demo_cache_probe_compatibility_wrapper_fences_non_demo_miss(mem, monkeypatch, probe):
+    """Legacy callers must not bypass the opted-in task guard through _complete_impl."""
+    from providers.fast_cache.rose_cache import FastCacheLookupError
+    from providers.rose.client import RoseClient
+
+    if probe is None:
+        monkeypatch.delenv("BENCHMARK_DEMO_CACHE_READ_ONLY", raising=False)
+    else:
+        monkeypatch.setenv("BENCHMARK_DEMO_CACHE_READ_ONLY", probe)
+    monkeypatch.setenv("BENCHMARK_ISOLATED_RUN", "true")
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+
+    async def body():
+        token = set_context(FastCacheContext(enabled=True, goal="ordinary goal", base_step=1))
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def live_boundary(**_kwargs):
+            live_calls["n"] += 1
+            for chunk in _full_stream():
+                yield chunk
+
+        monkeypatch.setattr(client, "_complete_impl", live_boundary)
+        try:
+            stream = rose_cache.cached_complete(
+                client,
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="response_schema",
+                agent_id="agent-fixture",
+            )
+            if probe is not None:
+                with pytest.raises(FastCacheLookupError, match="DEMO replay probe.*live"):
+                    await _drain(stream)
+                assert live_calls["n"] == 0
+            else:
+                assert await _drain(stream)
+                assert live_calls["n"] == 1
+            assert mem.set_calls == 0
+        finally:
+            reset_context(token)
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize(
+    "replay_control",
+    [
+        test_july_gp_execute_first_step_retries_and_replays_web_search,
+        test_rose_client_july_gp_execute_retry_replays_not_stub,
+    ],
+    ids=["compatibility-wrapper", "central-client"],
+)
+def test_demo_cache_probe_preserves_existing_recorded_replay_hits(mem, monkeypatch, replay_control):
+    """Reuse the owning July replay controls under the exact CLI guard flags."""
+    monkeypatch.setenv("BENCHMARK_DEMO_CACHE_READ_ONLY", "1")
+    monkeypatch.setenv("BENCHMARK_ISOLATED_RUN", "true")
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+    replay_control(mem, monkeypatch)
+    assert mem.set_calls == 0

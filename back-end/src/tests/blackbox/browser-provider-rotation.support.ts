@@ -25,7 +25,7 @@ interface CrossProviderLadderOptions {
   currentKernelSessionId: string;
   mobileIp: string;
   post: (path: string, body?: unknown) => Promise<RotationResponse>;
-  readDifferentExitIp: (wsUrl: string, previousIp: string) => Promise<string>;
+  readDifferentExitIp: (wsUrl: string, previousIp: string, stage: string) => Promise<string>;
   readExitIp: (wsUrl: string) => Promise<string>;
   retrieveKernelBrowser: (sessionId: string) => Promise<{ deleted_at?: string | Date | null }>;
   retrieveSteelBrowser: (sessionId: string) => Promise<{ status?: string; timeout?: number }>;
@@ -314,7 +314,11 @@ export async function runCrossProviderRotationLadder(
 
   const evictedKernel = await retrieveKernelBrowser(currentKernelSessionId);
   assert(Boolean(evictedKernel.deleted_at), 'provider switch leaked the superseded Kernel session');
-  const firstSteelIp = await readDifferentExitIp(String(switched.ws_url), mobileIp);
+  const firstSteelIp = await readDifferentExitIp(
+    String(switched.ws_url),
+    mobileIp,
+    `rotation3 steel, Steel session ${String(switched.session_id)}`
+  );
   const assertSteelLifetime = async (sessionId: string): Promise<void> => {
     const timeout = (await retrieveSteelBrowser(sessionId)).timeout;
     const activityBudgetMs = browserActivityBudgetMinutes() * 60_000;
@@ -399,7 +403,11 @@ export async function runCrossProviderRotationLadder(
       'call 4 did not allocate a new Steel session'
     );
     await assertSteelReleased(String(switched.session_id));
-    await readDifferentExitIp(String(steelRotated.ws_url), firstSteelIp);
+    await readDifferentExitIp(
+      String(steelRotated.ws_url),
+      firstSteelIp,
+      `rotation4 steel, Steel session ${String(steelRotated.session_id)}`
+    );
     await assertSteelLifetime(String(steelRotated.session_id));
     await assertRotationExhausted();
     return { finalSessionId: String(steelRotated.session_id), firstSteelIp, browserUseIp: null };

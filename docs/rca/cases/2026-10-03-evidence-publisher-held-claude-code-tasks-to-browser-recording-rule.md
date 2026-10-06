@@ -17,6 +17,7 @@ tags:
   - fe-link
 sources:
   - PR #1401
+  - PR #1341
 repro: scripts/tests/publish_evidence_links_browser_validation.test.sh
 status: fixed
 ---

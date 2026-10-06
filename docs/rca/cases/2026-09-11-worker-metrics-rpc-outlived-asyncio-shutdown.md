@@ -150,6 +150,38 @@ Archive searches were `Worker shutdown pending metrics poller` and
 `python scripts/run_blackbox_tests.py worker` deploy gate. The original live
 benchmark outcome gap remains open.
 
+## October 6 recurrence: a delivered completion still had a native tail
+
+The `/deploy` agents coverage lane on a 4-core Cloud VM failed the worker
+domain once: `Worker startup/shutdown failed before process-exit assertion`.
+The test passed 18 of 18 cases when replayed alone. Under a 14-process CPU
+burn, a copy that prints the child output reproduced it twice. Both times
+`Worker stopped` and `WORKER_ENTRYPOINT_RETURNED` were already printed. One
+exit was SIGSEGV after `success-count`. The other, with `faulthandler`, was
+SIGABRT after `deadline-count`: `Fatal Python error: PyGILState_Release:
+thread state ... must be current when releasing`, `Python runtime state:
+finalizing`, from a thread with `<no Python frame>`.
+
+The earlier fix joined the metrics task, but the native callback that
+resolves the awaited RPC future can still be running. The bridge resolves it
+on a Tokio thread through `call_soon_threadsafe`, and the self-pipe `send()`
+releases the GIL before that Python call returns. The main thread can then
+return from `worker.main()` and start finalization. When the Tokio thread
+retakes the GIL, the thread is exited and pyo3's guard drop releases a
+non-current thread state. A `ctypes` pthread running Python in the same
+GIL-released state reproduces the cut-off: without a join its callback never
+finishes, and with one it does.
+
+Before logging `Worker stopped`, `worker.main()` now waits (at most 2 s)
+until no thread outside the `threading` module, dummy threads included, has a
+live Python frame. It logs a warning if the wait times out. Two unit tests
+drive real native pthreads. One proves the wait covers an in-flight Python
+callback, and fails if dummy threads are treated as owned. The other proves
+the wait is bounded. Under the same CPU burn, 60 runs of the process test
+(360 real worker exits) passed with no crash and no timeout warning; before
+the fix, roughly 1 in 60 exits crashed. The cost is one thread-table scan per
+worker exit, independent of agent count.
+
 ## Human feedback
 
 Keep the normal 120-minute backstop and use five minutes temporarily for this
@@ -160,6 +192,6 @@ results as a clean slice or retry an unexplained failure.
 
 ## Reusable lesson
 
-An awaited Python cancellation is not proof that a native callback has joined.
+An awaited Python cancellation or completion is not proof that a native callback has joined.
 Own observability tasks through shutdown and let bounded native operations finish
 while the interpreter is still available.

@@ -24,13 +24,19 @@ import {
   assertLateArchiveBatchConvergence,
   assertLateArchiveManifestConvergence,
 } from './archive-late-manifest.helper';
+import {
+  ARCHIVE_BENCHMARK_TASK,
+  purgeOrphanedArchiveMemories,
+  testCleanupLeavesNoPlannerMemoryRows,
+  trackSeededRootAgent,
+} from './archive-planner-memory.helper';
+import { ids, jsonRoundTrip, request, runTest, type TestResult } from './archive-blackbox.support';
 
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
 const RUN_ID = process.env.BLACKBOX_TEST_RUN_ID || `${Date.now()}-${randomUUID().slice(0, 8)}`;
-
 interface SeededRun {
   userId: string;
   otherUserId: string;
@@ -43,58 +49,11 @@ interface SeededRun {
   otherPersonId: string;
 }
 
-interface TestResult {
-  name: string;
-  passed: boolean;
-  error?: string;
-  duration: number;
-}
-
-async function request(url: string, options: RequestInit = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
-  const contentType = response.headers.get('content-type') || '';
-  const data = contentType.includes('application/json')
-    ? await response.json()
-    : await response.text();
-  return { status: response.status, data };
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
-}
-
-function ids(rows: unknown[] | undefined): string[] {
-  return (rows ?? [])
-    .map((row) => (row as { id?: unknown }).id)
-    .filter((id): id is string => typeof id === 'string');
-}
-
-function jsonRoundTrip<T>(value: T): T {
-  return JSON.parse(
-    JSON.stringify(value, (_key, nested) =>
-      typeof nested === 'bigint' ? nested.toString() : nested
-    )
-  ) as T;
-}
-
 async function seedRun(): Promise<SeededRun> {
   const userId = `archive-user-${RUN_ID}-${randomUUID()}`;
   const otherUserId = `archive-other-${RUN_ID}-${randomUUID()}`;
   const rootAgentId = randomUUID();
+  trackSeededRootAgent(rootAgentId);
   const childAgentId = randomUUID();
   const toolId = randomUUID();
   const messageId = randomUUID();
@@ -200,6 +159,8 @@ async function cleanup(seed: SeededRun): Promise<void> {
     where: { operationKey: { contains: seed.rootAgentId } },
   });
   await prisma.agent.deleteMany({ where: { id: { in: [seed.childAgentId, seed.rootAgentId] } } });
+  // PlannerMemory has no FK to Agent (history outlives the run), so finalize's row needs its own delete.
+  await prisma.plannerMemory.deleteMany({ where: { id: seed.rootAgentId } });
   await prisma.person.deleteMany({ where: { id: { in: [seed.personId, seed.otherPersonId] } } });
   await prisma.tool.deleteMany({ where: { id: seed.toolId } });
   await prisma.user.deleteMany({ where: { userId: { in: [seed.userId, seed.otherUserId] } } });
@@ -391,7 +352,7 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
       headers,
       body: JSON.stringify({
         rootAgentId: seed.rootAgentId,
-        benchmarkTaskName: 'archive-blackbox',
+        benchmarkTaskName: ARCHIVE_BENCHMARK_TASK,
       }),
     });
     assert.strictEqual(finalize.status, 200, JSON.stringify(finalize.data).slice(0, 300));
@@ -609,7 +570,12 @@ async function runAll(): Promise<void> {
       name: 'email provider boundary archived with agent correlation',
       fn: testEmailProviderBoundaryArchivedWithAgentCorrelation,
     },
+    {
+      name: 'cleanup leaves no planner-memory history rows',
+      fn: testCleanupLeavesNoPlannerMemoryRows,
+    },
   ];
+  await purgeOrphanedArchiveMemories();
   const results: TestResult[] = [];
   for (const test of tests) results.push(await runTest(test.name, test.fn));
   for (const result of results) {

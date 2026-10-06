@@ -19,6 +19,93 @@ if [[ "${1:-}" == "--single-box" ]]; then
     exit 2
 fi
 
+if [[ "${1:-}" == "image-activate" ]]; then
+    shift
+    if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+        echo "Usage: scripts/run-bench image-activate <exact-benchmark-image> [--ref <sha>] [--out-dir <private-directory>]"
+        echo "Activates the published image through owned warm-source setup; no image rebuild."
+        exit 0
+    fi
+    image_activate_ref="${1:-}"
+    image_activate_pattern='^registry\.fly\.io/navi-whisper-lux-bench(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})$'
+    [[ "$image_activate_ref" =~ $image_activate_pattern ]] || {
+        echo "image-activate requires an exact registry.fly.io/navi-whisper-lux-bench tag or digest" >&2
+        exit 2
+    }
+    shift
+    IMAGE_ACTIVATE_ARGS=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --ref|--out-dir)
+                [ "$#" -ge 2 ] || { echo "$1 requires a value" >&2; exit 2; }
+                image_activate_option="$1"
+                image_activate_value="$2"
+                [ -n "$image_activate_value" ] && [[ "$image_activate_value" != -* ]] || {
+                    echo "$image_activate_option requires a nonempty value" >&2
+                    exit 2
+                }
+                if [ "$image_activate_option" = --out-dir ]; then
+                    case "$image_activate_value" in
+                        /*) ;;
+                        *) image_activate_value="$CALLER_DIR/$image_activate_value" ;;
+                    esac
+                fi
+                IMAGE_ACTIVATE_ARGS+=("$image_activate_option" "$image_activate_value")
+                shift 2
+                ;;
+            *) echo "Unsupported image-activate argument: $1" >&2; exit 2 ;;
+        esac
+    done
+    echo "Activating the exact published image through owned warm-source setup; no rebuild."
+    echo "Keep the private output and verify the guest image digest before measuring the fleet."
+    IMAGE_ACTIVATE_BIN="${RUN_BENCH_CLOUD_BIN_UNDER_TEST:-$ROOT_DIR/scripts/run-bench-cloud}"
+    exec env WARM_IMAGE_REF="$image_activate_ref" bash "$IMAGE_ACTIVATE_BIN" --setup "${IMAGE_ACTIVATE_ARGS[@]}"
+fi
+
+if [[ "${1:-}" == "image-build" ]]; then
+    shift
+    IMAGE_BUILD_ARGS=()
+    image_build_builder_selected=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                echo "Usage: scripts/run-bench image-build [--no-cache] [--builder depot|native] [--build-context <checkout>] [--out-dir <private-directory>]"
+                echo "Depot is the image-build default (app scope, zstd level 3, AMD64); native is an explicit diagnostic."
+                echo "After publication, use image-activate with the exact receipt image before the benchmark fleet."
+                exit 0
+                ;;
+            --no-cache)
+                IMAGE_BUILD_ARGS+=("$1"); shift
+                ;;
+            --builder)
+                [ "$#" -ge 2 ] || { echo "--builder requires native or depot" >&2; exit 2; }
+                case "$2" in
+                    native|depot) ;;
+                    *) echo "--builder requires native or depot" >&2; exit 2 ;;
+                esac
+                IMAGE_BUILD_ARGS+=("$1" "$2"); shift 2
+                image_build_builder_selected=1
+                ;;
+            --build-context|--out-dir)
+                [ "$#" -ge 2 ] || { echo "$1 requires a directory" >&2; exit 2; }
+                image_build_option="$1"
+                image_build_path="$2"
+                case "$image_build_path" in
+                    /*) ;;
+                    *) image_build_path="$CALLER_DIR/$image_build_path" ;;
+                esac
+                IMAGE_BUILD_ARGS+=("$image_build_option" "$image_build_path"); shift 2
+                ;;
+            *) echo "Unsupported image-build argument: $1" >&2; exit 2 ;;
+        esac
+    done
+    if [ "$image_build_builder_selected" = 0 ]; then
+        IMAGE_BUILD_ARGS+=(--builder depot)
+    fi
+    IMAGE_BUILD_BIN="${RUN_BENCH_CLOUD_BIN_UNDER_TEST:-$ROOT_DIR/scripts/run-bench-cloud}"
+    exec bash "$IMAGE_BUILD_BIN" --build-image "${IMAGE_BUILD_ARGS[@]}"
+fi
+
 if [[ "${1:-}" == "stability-proof" ]]; then
     shift
     exec bash "$ROOT_DIR/scripts/run-fleet-infra-stability-proof" \
@@ -97,6 +184,13 @@ usage() {
     cat <<'EOF'
 Usage: scripts/run-bench <slice-or-task...> [options]
        scripts/run-bench monitor <exact-run-directory>
+       scripts/run-bench image-build [--no-cache] [--builder native|depot]
+       scripts/run-bench image-activate <exact-benchmark-image> [--ref <sha>] [--out-dir <private-directory>]
+
+Image builds:
+  --builder depot    App-scoped Depot builder, zstd level 3 (image-build default).
+  --builder native   Existing Fly remote builder for an explicit diagnostic.
+                     Build/push only; activate the exact receipt image before the fleet.
 
 Selections:
   daily | pre-deploy | rose-bench | polar-bench | incomplete
@@ -109,6 +203,8 @@ Campaign options:
                       Run every resolved task K times in separate fleet controllers
   --concurrency N, --concurrency=N
                       Keep at most N campaign copies active (default 1 with -k)
+  --demo-cache        Read-only task replay for existing DEMO workloads. Declared
+                      LLM judges still run and may spend. Zero LIVE proof credit.
 
 The ordinary no-flag path runs the resolved slice as one fully parallel,
 per-bench-isolated cloud fleet. Use --local first to opt into local execution.
@@ -119,6 +215,10 @@ Startup reuse:
   --provision-pool N  Prepare N stopped, reusable task Machines once. Ordinary
                       runs automatically claim and return this workspace pool.
                       Stopped Machines retain billable volume storage.
+  --fresh-volumes    Default: empty volumes for REAL task Machines; bootstrap
+                      exact source plus baked deps. SIM snapshots remain.
+                      Requires boot launch; cannot prepare a generic pool.
+  --snapshot-volumes Force restored donor volumes for a provisioning diagnostic.
   --timeout SECONDS  Set this run's task execution timeout.
   --wait             Wait for the detached fleet and return its exit status.
 
@@ -134,6 +234,7 @@ RUNS=1
 CONCURRENCY=1
 CAMPAIGN_REQUESTED=0
 INTERNAL_OPERATION=0
+DEMO_CACHE_PROBE=0
 SELECTORS=()
 FLEET_ARGS=()
 while [ "$#" -gt 0 ]; do
@@ -152,6 +253,9 @@ while [ "$#" -gt 0 ]; do
         --concurrency=*)
             CONCURRENCY="${1#*=}"; CAMPAIGN_REQUESTED=1; shift
             ;;
+        --demo-cache)
+            DEMO_CACHE_PROBE=1; shift
+            ;;
         --single-box)
             echo "❌ --single-box is disabled: running benches on the shared warm box is not parallel-safe." >&2
             echo "   Use scripts/run-bench <task...> for the isolated fleet." >&2
@@ -166,7 +270,7 @@ while [ "$#" -gt 0 ]; do
             INTERNAL_OPERATION=1
             FLEET_ARGS+=("$1" "$2"); shift 2
             ;;
-        --keep-clones|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier)
+        --keep-clones|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
             FLEET_ARGS+=("$1"); shift
             ;;
         -h|--help)
@@ -208,6 +312,10 @@ case "$CONCURRENCY" in
         ;;
 esac
 if [ "$INTERNAL_OPERATION" -eq 1 ]; then
+    [ "$DEMO_CACHE_PROBE" -eq 0 ] || {
+        echo "❌ --demo-cache cannot be combined with fleet maintenance operations" >&2
+        exit 2
+    }
     [ "$CAMPAIGN_REQUESTED" -eq 0 ] || {
         echo "❌ campaign flags cannot be combined with fleet maintenance operations" >&2
         exit 2
@@ -236,6 +344,22 @@ done <<< "$RESOLVED_OUTPUT"
 }
 echo "🎯 resolved ${#RESOLVED_TASKS[@]} benchmark task(s): ${RESOLVED_TASKS[*]}"
 
+if [ "$DEMO_CACHE_PROBE" -eq 1 ]; then
+    for arg in "${FLEET_ARGS[@]}"; do
+        case "$arg" in
+            --sim-on|--infra-probe|--skip-autoscaler)
+                echo "❌ --demo-cache preserves normal task execution and cleanup; omit $arg" >&2
+                exit 2
+                ;;
+        esac
+    done
+    "$PY" -u "$ROOT_DIR/scripts/cloudbench-demo-cache.py" \
+        "$CATALOG_PATH" "${RESOLVED_TASKS[@]}" || exit 2
+    export FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1
+    export BENCHMARK_DEMO_CACHE_READ_ONLY=1
+    echo "🧊 DEMO replay probe: read-only task cache, unchanged evaluation, zero LIVE proof credit"
+fi
+
 if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
     CAMPAIGN_ARGS=(
         "--root=$ROOT_DIR"
@@ -245,6 +369,9 @@ if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
     for task in "${RESOLVED_TASKS[@]}"; do
         CAMPAIGN_ARGS+=("--task=$task")
     done
+    if [ "$DEMO_CACHE_PROBE" -eq 1 ]; then
+        CAMPAIGN_ARGS+=("--forward-arg=--demo-cache")
+    fi
     for arg in "${FLEET_ARGS[@]}"; do
         case "$arg" in
             --foreground|--wait|--detach)

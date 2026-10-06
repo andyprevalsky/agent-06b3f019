@@ -44,6 +44,28 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
+def _proc_identity_state(pid: int, expected_start: str) -> str:
+    """Match the boot-relative /proc identity minted by run-bench-fleet on Linux.
+
+    Linux ``ps -o lstart`` shifts with wall-clock steps (for example a VM
+    snapshot fork), so the shell owner records the /proc start tick instead.
+    """
+    try:
+        boot_id = (
+            Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        )
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return "absent" if not _pid_exists(pid) else "unknown"
+    except OSError:
+        return "unknown" if _pid_exists(pid) else "absent"
+    fields = stat[stat.rfind(")") + 2 :].split()
+    if not boot_id or len(fields) <= 19 or not fields[19].isdigit():
+        return "unknown"
+    actual_start = f"proc-start:{boot_id}:{fields[19]}"
+    return "match" if actual_start == expected_start.strip() else "mismatch"
+
+
 def _process_identity_state(pid: int, expected_start: str) -> str:
     """Return match, mismatch, absent, or unknown without conflating ps failure."""
 
@@ -51,6 +73,8 @@ def _process_identity_state(pid: int, expected_start: str) -> str:
         return "mismatch"
     if not _pid_exists(pid):
         return "absent"
+    if expected_start.startswith("proc-start:"):
+        return _proc_identity_state(pid, expected_start)
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "lstart="],
@@ -85,7 +109,9 @@ def _validate_path(path: Path, temp_root: Path, token: str) -> None:
         parent = path.parent.resolve(strict=True)
         expected_parent = temp_root.resolve(strict=True)
     except OSError as exc:
-        raise SnapshotOwnershipError(f"could not resolve snapshot parent: {exc}") from exc
+        raise SnapshotOwnershipError(
+            f"could not resolve snapshot parent: {exc}"
+        ) from exc
     if parent != expected_parent:
         raise SnapshotOwnershipError("snapshot is outside its exact temp root")
     if not path.name.startswith("cloudbench-scripts."):
@@ -104,7 +130,9 @@ def _read_marker(path: Path, token: str) -> dict[str, object]:
     try:
         marker = json.loads((path / MARKER_NAME).read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        raise SnapshotOwnershipError(f"snapshot owner marker is unreadable: {exc}") from exc
+        raise SnapshotOwnershipError(
+            f"snapshot owner marker is unreadable: {exc}"
+        ) from exc
     if not isinstance(marker, dict) or marker.get("version") != 1:
         raise SnapshotOwnershipError("snapshot owner marker has an invalid version")
     if marker.get("token") != token:
@@ -115,7 +143,9 @@ def _read_marker(path: Path, token: str) -> dict[str, object]:
     if not isinstance(owner_pid, int) or owner_pid <= 0:
         raise SnapshotOwnershipError("snapshot owner marker PID is invalid")
     if not isinstance(owner_start, str) or not owner_start:
-        raise SnapshotOwnershipError("snapshot owner marker PID birth identity is invalid")
+        raise SnapshotOwnershipError(
+            "snapshot owner marker PID birth identity is invalid"
+        )
     if state not in {"claiming", "armed"}:
         raise SnapshotOwnershipError("snapshot owner marker state is invalid")
     return marker
@@ -157,7 +187,9 @@ def _snapshot_lock(path: Path, hook_scope: str = "") -> Iterator[None]:
     try:
         handle = lock_path.open("a+")
     except OSError as exc:
-        raise SnapshotOwnershipError(f"could not open exact snapshot lock: {exc}") from exc
+        raise SnapshotOwnershipError(
+            f"could not open exact snapshot lock: {exc}"
+        ) from exc
     try:
         scoped_prefix = (
             f"CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_{hook_scope}_LOCK"
@@ -200,10 +232,14 @@ def _snapshot_lock(path: Path, hook_scope: str = "") -> Iterator[None]:
             handle.close()
 
 
-def initialize(path: Path, temp_root: Path, token: str, pid: int, pid_start: str) -> None:
+def initialize(
+    path: Path, temp_root: Path, token: str, pid: int, pid_start: str
+) -> None:
     _validate_path(path, temp_root, token)
     if os.getppid() != pid or not _process_matches(pid, pid_start):
-        raise SnapshotOwnershipError("initializer PID birth identity does not match caller")
+        raise SnapshotOwnershipError(
+            "initializer PID birth identity does not match caller"
+        )
     with _snapshot_lock(path):
         _write_marker(
             path,
@@ -238,7 +274,9 @@ def create(path: Path, temp_root: Path, token: str, pid: int, pid_start: str) ->
     try:
         resolved_root = temp_root.resolve(strict=True)
     except OSError as exc:
-        raise SnapshotOwnershipError(f"could not resolve snapshot temp root: {exc}") from exc
+        raise SnapshotOwnershipError(
+            f"could not resolve snapshot temp root: {exc}"
+        ) from exc
     if not resolved_root.is_dir():
         raise SnapshotOwnershipError("snapshot temp root is not a directory")
 
@@ -260,7 +298,9 @@ def create(path: Path, temp_root: Path, token: str, pid: int, pid_start: str) ->
         if result_path.exists() or adoption_path.exists():
             raise SnapshotOwnershipError("snapshot creation rendezvous already exists")
         if path.name != f"cloudbench-scripts.{token}":
-            raise SnapshotOwnershipError("creator path is not derived from its owner token")
+            raise SnapshotOwnershipError(
+                "creator path is not derived from its owner token"
+            )
         path.mkdir(mode=0o700)
 
         # Cleanup must already be executable when the shell learns the path.
@@ -365,9 +405,13 @@ def recover_create(
 
     _validate_path(path, temp_root, token)
     if path.name != f"cloudbench-scripts.{token}":
-        raise SnapshotOwnershipError("recovery path is not derived from its owner token")
+        raise SnapshotOwnershipError(
+            "recovery path is not derived from its owner token"
+        )
     if os.getppid() != pid or not _process_matches(pid, pid_start):
-        raise SnapshotOwnershipError("recovery PID birth identity does not match caller")
+        raise SnapshotOwnershipError(
+            "recovery PID birth identity does not match caller"
+        )
     if not path.exists():
         return "absent"
     with _snapshot_lock(path):
@@ -384,7 +428,9 @@ def acknowledge_adoption(
     _validate_path(path, temp_root, token)
     normalized_pid_start = " ".join(pid_start.split())
     if os.getppid() != pid or not _process_matches(pid, normalized_pid_start):
-        raise SnapshotOwnershipError("adopting PID birth identity does not match caller")
+        raise SnapshotOwnershipError(
+            "adopting PID birth identity does not match caller"
+        )
     with _snapshot_lock(path):
         marker = _read_marker(path, token)
         if (
@@ -404,7 +450,10 @@ def acknowledge_adoption(
             adoption_handle.write(f"{path}\n{token}\n{pid}\n{normalized_pid_start}\n")
             adoption_handle.flush()
             os.fsync(adoption_handle.fileno())
-        if os.environ.get("CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_FAIL_ADOPTION_REPLACE") == "1":
+        if (
+            os.environ.get("CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_FAIL_ADOPTION_REPLACE")
+            == "1"
+        ):
             raise OSError("injected snapshot-adoption replace failure")
         os.replace(adoption_temporary, adoption_path)
     finally:
@@ -425,12 +474,14 @@ def claim(
 ) -> None:
     _validate_path(path, temp_root, token)
     if os.getppid() != pid or not _process_matches(pid, pid_start):
-        raise SnapshotOwnershipError("claimant PID birth identity does not match caller")
+        raise SnapshotOwnershipError(
+            "claimant PID birth identity does not match caller"
+        )
     with _snapshot_lock(path, "CLAIM"):
         marker = _read_marker(path, token)
-        if marker["owner_pid"] != previous_pid or marker[
-            "owner_pid_start"
-        ] != " ".join(previous_pid_start.split()):
+        if marker["owner_pid"] != previous_pid or marker["owner_pid_start"] != " ".join(
+            previous_pid_start.split()
+        ):
             raise SnapshotOwnershipError("claim source owner identity does not match")
         _write_marker(
             path,
@@ -450,8 +501,12 @@ def arm(path: Path, temp_root: Path, token: str, pid: int, pid_start: str) -> No
         raise SnapshotOwnershipError("arming PID birth identity does not match caller")
     with _snapshot_lock(path):
         marker = _read_marker(path, token)
-        if marker["owner_pid"] != pid or marker["owner_pid_start"] != " ".join(pid_start.split()):
-            raise SnapshotOwnershipError("only the exact claimant can arm snapshot cleanup")
+        if marker["owner_pid"] != pid or marker["owner_pid_start"] != " ".join(
+            pid_start.split()
+        ):
+            raise SnapshotOwnershipError(
+                "only the exact claimant can arm snapshot cleanup"
+            )
         marker["state"] = "armed"
         _write_marker(path, marker)
 
@@ -473,7 +528,10 @@ def cleanup(
         with _snapshot_lock(path):
             marker = _read_marker(path, token)
             expected_start = " ".join(pid_start.split())
-            if marker["owner_pid"] != pid or marker["owner_pid_start"] != expected_start:
+            if (
+                marker["owner_pid"] != pid
+                or marker["owner_pid_start"] != expected_start
+            ):
                 if marker["owner_pid"] == pid:
                     raise SnapshotOwnershipError(
                         "current owner PID birth identity does not match marker"

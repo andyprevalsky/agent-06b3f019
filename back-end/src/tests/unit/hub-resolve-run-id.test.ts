@@ -431,8 +431,10 @@ test('child lookup loads a persisted compact index and legacy backfill yields pe
   assert.match(storeSource, /export async function listRunsStrict/);
   assert.doesNotMatch(storeSource, /fs\.(?:readFile|writeFile|mkdir|rename)Sync/);
 
-  const putStart = storeSource.indexOf('export async function putRun');
+  assert.match(storeSource, /export const putRun = coalesceHubRunPuts\(storeRun\)/);
+  const putStart = storeSource.indexOf('async function storeRun');
   const putEnd = storeSource.indexOf('export async function persistHubAgentRunBackfill');
+  assert.ok(putStart >= 0 && putEnd > putStart, 'the actual persistence owner must be present');
   const putBody = storeSource.slice(putStart, putEnd);
   assert.match(putBody, /await listRunsStrict\(\)/);
   assert.ok(

@@ -1151,6 +1151,11 @@ async def cached_complete(
         # (spawn-sub-agents smoke timeout).
         logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
+    if (
+        os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1"
+        and os.environ.get("BENCHMARK_ISOLATED_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
+    ):
+        raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
     if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled():
         raise FastCacheLookupError(
             f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
