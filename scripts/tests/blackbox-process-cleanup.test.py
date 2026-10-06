@@ -90,7 +90,15 @@ child.wait()
                     "set -euo pipefail\n"
                     + block
                     + '\nprintf "%s\\n" "$BACKEND_PID" > "$FIXTURE_DIR/root.pid"\nwhile [[ ! -e "$FIXTURE_DIR/release" ]]; do sleep .02; done\n'
-                    + ("ps() { return 1; }; export -f ps\n" if unknown else "")
+                    # Linux reads the teardown process table from /proc, not
+                    # ps(1), so the unavailable table must be faulted at both
+                    # sources for the fail-closed path to be reached.
+                    + (
+                        "ps() { return 1; }; export -f ps\n"
+                        "cloudbench_process_birth_table() { return 1; }\n"
+                        if unknown
+                        else ""
+                    )
                     + ('kill -TERM "$$"\n' if signal_exit else "")
                     + f"exit {status}\n"
                 )

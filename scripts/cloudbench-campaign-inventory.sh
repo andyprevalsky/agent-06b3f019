@@ -32,7 +32,7 @@ finish() {
 trap finish EXIT
 trap 'exit 143' INT TERM HUP
 start_machines_snapshot_loop || exit 1
-parent_birth="$(ps -p "$INVENTORY_CAMPAIGN_PARENT_PID" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+parent_birth="$(inventory_pid_start_time "$INVENTORY_CAMPAIGN_PARENT_PID")"
 [ -n "$parent_birth" ] || exit 1
 {
     printf 'app=%s\npid=%s\npid_start=%s\ntoken=%s\nparent_pid=%s\nparent_start=%s\n' \
@@ -41,8 +41,7 @@ parent_birth="$(ps -p "$INVENTORY_CAMPAIGN_PARENT_PID" -o lstart= 2>/dev/null | 
 } > "$FLEET_DIR/.owner.tmp" && mv "$FLEET_DIR/.owner.tmp" "$FLEET_DIR/owner" || exit 1
 while [ ! -e "$FLEET_DIR/stop" ]; do
     kill -0 "$INVENTORY_CAMPAIGN_PARENT_PID" 2>/dev/null || exit 1
-    observed="$(ps -p "$INVENTORY_CAMPAIGN_PARENT_PID" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    [ "$observed" = "$parent_birth" ] || exit 1
+    inventory_pid_matches_start "$INVENTORY_CAMPAIGN_PARENT_PID" "$parent_birth" || exit 1
     kill -0 "$SNAPSHOT_LOOP_PID" 2>/dev/null || exit 1
     sleep 1
 done

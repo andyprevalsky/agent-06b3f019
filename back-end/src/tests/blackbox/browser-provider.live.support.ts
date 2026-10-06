@@ -215,12 +215,16 @@ export async function runLiveProviderParity(): Promise<void> {
           component: 'browser-provider:exit-ip-baseline',
         }
       );
-    const readDifferentExitIp = (wsUrl: string, previousIp: string): Promise<string> =>
+    const readDifferentExitIp = (
+      wsUrl: string,
+      previousIp: string,
+      stage: string
+    ): Promise<string> =>
       retryWithBackoff(
         async () => {
           const ip = await readExitIp(wsUrl);
           if (ip === '' || ip === previousIp) {
-            throw new Error(`proxy returned unchanged exit IP ${ip || '<empty>'}`);
+            throw new Error(`proxy returned unchanged exit IP ${ip || '<empty>'} (${stage})`);
           }
           return ip;
         },
@@ -271,7 +275,11 @@ export async function runLiveProviderParity(): Promise<void> {
     assert(Boolean(evicted.deleted_at), 'superseded Kernel session was not evicted after rotation');
     liveSessionId = String(rotated.session_id);
 
-    const ipAfter = await readDifferentExitIp(String(rotated.ws_url), ipBefore);
+    const ipAfter = await readDifferentExitIp(
+      String(rotated.ws_url),
+      ipBefore,
+      `rotation1 residential, Kernel session ${liveSessionId}`
+    );
     // Residential exits vary per session; a rotation should land a different IP.
     assert(
       ipAfter !== '' && ipAfter !== ipBefore,
@@ -320,7 +328,11 @@ export async function runLiveProviderParity(): Promise<void> {
       'mobile rotation did not select a distinct managed proxy tier'
     );
     const mobileMetadata = mobileRotated.browser_session_metadata ?? {};
-    const mobileIp = await readDifferentExitIp(String(mobileRotated.ws_url), residentialIp);
+    const mobileIp = await readDifferentExitIp(
+      String(mobileRotated.ws_url),
+      residentialIp,
+      `rotation2 mobile, Kernel session ${liveSessionId}`
+    );
     // Ground truth comes from ipify, not from response metadata alone.
     assert(
       mobileIp !== '' && mobileIp !== residentialIp,

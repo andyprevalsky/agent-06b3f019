@@ -6379,7 +6379,7 @@ def test_cleanup_unconfirmed_pool_claim_survives_successor_fleet(tmp_path: Path)
     the browser/session cleanup boundary.
     """
     fleet = fleet_source_text()
-    support = "".join(
+    support = _fleet_pid_identity_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",
@@ -8447,6 +8447,61 @@ def _extract_fleet_function(source: str, signature: str) -> str:
     raise ValueError(f"unterminated shell function: {signature}")
 
 
+def _fleet_pid_identity_helpers(source: str) -> str:
+    """Birth helpers for extracted fleet and shared inventory owner/lock callers.
+    A missing helper otherwise silently reads every owner as dead."""
+    return f"source {shlex.quote(str(ENV_HELPER_SCRIPT))}\n" + "".join(
+        _extract_fleet_function(source, signature)
+        for signature in (
+            "fleet_pid_start_time() {",
+            "fleet_pid_matches_start() {",
+            "inventory_pid_start_time() {",
+            "inventory_pid_matches_start() {",
+        )
+    )
+
+
+def test_extracted_fleet_pid_identity_callers_include_birth_helpers() -> None:
+    """Every fixture that extracts an identity-reading fleet function must also
+    load the birth-identity helpers, or its owner proofs pass vacuously."""
+    fleet = fleet_source_text()
+    starts = [
+        (match.start(), match.group(1))
+        for match in re.finditer(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{", fleet, re.M)
+    ]
+    helper_names = {
+        "fleet_pid_start_time",
+        "fleet_pid_matches_start",
+        "inventory_pid_start_time",
+        "inventory_pid_matches_start",
+    }
+    callers = {
+        name
+        for index, (start, name) in enumerate(starts)
+        if name not in helper_names
+        and re.search(
+            r"\b(?:fleet|inventory)_pid_(?:start_time|matches_start)\b",
+            fleet[start : starts[index + 1][0] if index + 1 < len(starts) else len(fleet)],
+        )
+    }
+    assert "registry_owner_alive" in callers
+    assert "inventory_refresh_lock_acquire" in callers
+    assert "campaign_inventory_borrow" in callers
+
+    module = Path(__file__).read_text()
+    tests = [
+        (match.start(), match.group(1))
+        for match in re.finditer(r"^def (test_\w+)\(", module, re.M)
+    ]
+    missing = {}
+    for index, (start, name) in enumerate(tests):
+        body = module[start : tests[index + 1][0] if index + 1 < len(tests) else len(module)]
+        extracted = sorted(caller for caller in callers if f'"{caller}() {{"' in body)
+        if extracted and "_fleet_pid_identity_helpers(" not in body:
+            missing[name] = extracted
+    assert not missing, missing
+
+
 def _cloudbench_incremental_log_functions() -> str:
     source = CLOUD_SCRIPT.read_text()
     return "".join(
@@ -10039,7 +10094,7 @@ def test_exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reaper
     and retain every durable handle when that boundary cannot prove teardown.
     """
     fleet = fleet_source_text()
-    functions = "\n".join(
+    functions = _fleet_pid_identity_helpers(fleet) + "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",
@@ -10296,8 +10351,11 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
     )
     (registry / "guest-cleanup-unconfirmed").touch()
     calls = tmp_path / "calls"
+    # Sourced first so the fixture's stubs below override the shared library.
+    identity = _fleet_pid_identity_helpers(fleet)
 
     script = f"""set -uo pipefail
+{identity}
 APP=bench-app
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
 FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
@@ -10540,7 +10598,10 @@ def test_pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper(
     )
     (registry / "guest-cleanup-unconfirmed").touch()
     calls = tmp_path / "calls"
+    # Sourced first so the fixture's stubs below override the shared library.
+    identity = _fleet_pid_identity_helpers(fleet)
     script = f"""set -uo pipefail
+{identity}
 APP=bench-app
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(tmp_path / "ownership"))}
 FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / "audits"))}
@@ -13909,7 +13970,7 @@ def test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper(
     identity so the registry reaper can terminalize the exact owned volume.
     """
     fleet = fleet_source_text()
-    functions = "\n".join(
+    functions = _fleet_pid_identity_helpers(fleet) + "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",
@@ -14768,7 +14829,9 @@ fleet_machines_json
     # bounded attempt can recover; no permanent mkdir-lock wedge is allowed.
     identity = _extract_fleet_function(fleet, "machines_snapshot_identity() {")
     registry_value = _extract_fleet_function(fleet, "registry_meta_value() {")
-    registry_alive = _extract_fleet_function(fleet, "registry_owner_alive() {")
+    registry_alive = _fleet_pid_identity_helpers(fleet) + _extract_fleet_function(
+        fleet, "registry_owner_alive() {"
+    )
     lock_acquire = _extract_fleet_function(fleet, "inventory_refresh_lock_acquire() {")
     lock_release = _extract_fleet_function(fleet, "inventory_refresh_lock_release() {")
     lock_script = f"""set -uo pipefail
@@ -14864,7 +14927,7 @@ def test_inventory_publishers_share_one_recoverable_atomic_lock(tmp_path: Path) 
     assert 'ln "$candidate" "$lock"' in acquire
     assert 'mkdir "$lock"' not in acquire
 
-    helpers = "".join(
+    helpers = _fleet_pid_identity_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",
@@ -14912,7 +14975,7 @@ test ! -e "$lock"
 def test_inventory_release_uses_sealed_owner_birth_identity(tmp_path: Path) -> None:
     """A fallible second ps read must not strand a live owner's keyed lock."""
     fleet = fleet_source_text()
-    helpers = "".join(
+    helpers = _fleet_pid_identity_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",
@@ -14949,9 +15012,14 @@ MACHINE_READINESS_SCRIPT="$READINESS"
 mkdir -p "$ROOT"
 mkfifo "$INVENTORY_WAIT_FIFO"
 {helpers}
-inventory_refresh_lock_acquire
-inventory_refresh_lock_release
-test ! -e "$INVENTORY_REFRESH_LOCK"
+# Linux reads birth identity from /proc rather than ps, so the drifting
+# source is injected where both formats are observed.
+inventory_pid_start_time() {{ ps -p "$1" -o lstart=; }}
+inventory_refresh_lock_acquire || exit 10
+[ -e "$INVENTORY_REFRESH_LOCK" ] || exit 11
+inventory_refresh_lock_release || exit 12
+test ! -e "$INVENTORY_REFRESH_LOCK" || exit 13
+[ "$(cat "$PS_COUNT")" -ge 1 ] || exit 14
 """,
         ],
         env={
@@ -14985,10 +15053,12 @@ def test_exceptional_inventory_refresh_coalesces_waiters(tmp_path: Path) -> None
     assert '"$prior"' in refresh
     assert '"2"' in refresh
 
-    helpers = "".join(
+    helpers = _fleet_pid_identity_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "machines_snapshot_identity() {",
+            "registry_meta_value() {",
+            "registry_owner_alive() {",
             "inventory_refresh_wait_tick() {",
             "inventory_refresh_lock_acquire() {",
             "inventory_refresh_lock_release() {",
@@ -15012,8 +15082,8 @@ CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS=3
 mkdir -p "$INVENTORY_INDEX/current"
 mkfifo "$INVENTORY_WAIT_FIFO"
 printf 'generation=.generation-one\n' > "$INVENTORY_INDEX/current/health"
-printf 'host=test-host\npid=%s\npid_start=live\ntoken=owner-token\n' "$$" > "$INVENTORY_REFRESH_LOCK"
 {helpers}
+printf 'host=test-host\npid=%s\npid_start=%s\ntoken=owner-token\n' "$$" "$(fleet_pid_start_time $$)" > "$INVENTORY_REFRESH_LOCK"
 _refresh_inventory_snapshot_unlocked() {{ printf 'called\n' >> "$CALLS"; }}
 ( sleep 0.2; printf 'generation=.generation-two\n' > "$INVENTORY_INDEX/current/health" ) &
 refresh_machines_snapshot_after .generation-one
@@ -15076,7 +15146,7 @@ with path.open("r+") as handle:
         time.sleep(0.02)
     assert ready.exists(), "fence holder did not initialize"
 
-    helpers = "".join(
+    helpers = _fleet_pid_identity_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",

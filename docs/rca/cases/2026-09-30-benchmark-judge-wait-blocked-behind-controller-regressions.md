@@ -172,6 +172,23 @@ definitions and the exact eight targets, so their earlier passing checks were
 retained rather than replaying unrelated model calls. Original failures and
 intermediate receipts remain private; none of this evidence supplies fleet credit.
 
+## October 6 recurrence: fixture commits signed by the host
+
+A branch merge with main added the eleven remaining native gate groups to
+this domain. A 4-core Cursor Cloud deploy then failed it again at 300.02
+seconds, while static, backend, and frontend lanes shared the host (load
+average 17). Replayed alone on the idle host, the domain passed in 186
+seconds. Serially, its thirteen native groups took 197.3 seconds of mostly
+sleeping wall time; one group used 1.17 s of CPU over 34.72 s.
+
+One stall was not the code under test. Throwaway fixture repositories
+inherited the host's global `commit.gpgsign=true` and its remote ssh
+signer, and individual signatures stalled for 10+ seconds; see
+`2026-10-06-fixture-git-commits-inherited-host-signing-helper`. With signing
+disabled for test processes, the next canonical lane passed the domain in
+205.03 seconds under the unchanged 300-second bound. The two-lane bound,
+assertions, and timeouts are unchanged.
+
 ## Human feedback
 
 The user required compact, robust runner tests without massive additional

@@ -25,6 +25,26 @@ registry_meta_value() {  # registry_meta_value <meta-file> <key>
     sed -n "s/^${key}=//p" "$meta" 2>/dev/null | head -1
 }
 
+inventory_pid_start_time() {
+    if [ -r /proc/self/stat ]; then
+        cloudbench_pid_start_time "$1"
+    else
+        ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+    fi
+}
+
+inventory_pid_matches_start() {  # <pid> <recorded-identity>
+    local observed
+    [ -n "$2" ] || return 1
+    case "$2" in
+        proc-start:*) cloudbench_pid_matches_start "$1" "$2" ;;
+        *)
+            observed="$(ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+            [ -n "$observed" ] && [ "$observed" = "$2" ]
+            ;;
+    esac
+}
+
 fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
     local secs="$1"; shift
     case "$secs" in ''|*[!0-9]*) return 2 ;; esac
@@ -221,7 +241,7 @@ inventory_refresh_lock_acquire() {  # inventory_refresh_lock_acquire [prior-gene
         if [ ! -e "$lock" ]; then
             if [ "$initialized" = "0" ]; then
                 owner_pid="${BASHPID:-$$}"
-                owner_start="$(ps -p "$owner_pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+                owner_start="$(inventory_pid_start_time "$owner_pid")"
                 [ -n "$owner_start" ] || return 1
                 token="$owner_pid.$RANDOM.$RANDOM.$SECONDS"
                 candidate="$lock.candidate.$owner_pid.$RANDOM"
@@ -329,7 +349,7 @@ machines_snapshot_loop() {
 }
 
 campaign_inventory_borrow() {
-    local owner="$INVENTORY_HOME/owner" key value app="" pid="" birth="" token="" parent="" parent_birth="" observed
+    local owner="$INVENTORY_HOME/owner" key value app="" pid="" birth="" token="" parent="" parent_birth=""
     [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
     while IFS='=' read -r key value; do
         case "$key" in app) app="$value" ;; pid) pid="$value" ;; pid_start) birth="$value" ;; token) token="$value" ;; parent_pid) parent="$value" ;; parent_start) parent_birth="$value" ;; esac
@@ -337,10 +357,8 @@ campaign_inventory_borrow() {
     [ "$app" = "$APP" ] && [ -n "$token" ] || return 1
     case "$pid:$parent" in *[!0-9:]*|:*) return 1 ;; esac
     kill -0 "$pid" 2>/dev/null && kill -0 "$parent" 2>/dev/null || return 1
-    observed="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    [ -n "$birth" ] && [ "$observed" = "$birth" ] || return 1
-    observed="$(ps -p "$parent" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    [ -n "$parent_birth" ] && [ "$observed" = "$parent_birth" ] || return 1
+    inventory_pid_matches_start "$pid" "$birth" || return 1
+    inventory_pid_matches_start "$parent" "$parent_birth" || return 1
     SNAPSHOT_LOOP_PID="$pid"
     SNAPSHOT_LOOP_PID_START="$birth"
     SNAPSHOT_LOOP_TOKEN="$token"
@@ -379,7 +397,7 @@ start_machines_snapshot_loop() {
         return 1
     fi
     machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!
-    SNAPSHOT_LOOP_PID_START="$(ps -p "$SNAPSHOT_LOOP_PID" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    SNAPSHOT_LOOP_PID_START="$(inventory_pid_start_time "$SNAPSHOT_LOOP_PID")"
     if [ -z "$SNAPSHOT_LOOP_PID_START" ]; then
         kill "$SNAPSHOT_LOOP_PID" 2>/dev/null || true
         SNAPSHOT_LOOP_PID=""

@@ -2810,6 +2810,10 @@ def _payment_lifecycle_settlement_state(lifecycle: object) -> str:
     wallet_funding = lifecycle.get("walletFunding")
     if isinstance(wallet_funding, dict):
         parts.append(f"walletFunding.status={wallet_funding.get('status')!r}")
+    agent_card = lifecycle.get("agentCard")
+    if isinstance(agent_card, dict):
+        fields = ("status", "balanceCents")
+        parts.append(f"agentCard={json.dumps({key: agent_card.get(key) for key in fields})}")
     org_transfer = lifecycle.get("orgTransfer")
     if isinstance(org_transfer, dict):
         fields = ("id", "cardId", "status", "transferredCents", "releasedCents")
