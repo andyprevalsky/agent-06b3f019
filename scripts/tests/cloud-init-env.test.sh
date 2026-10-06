@@ -33,6 +33,9 @@ printf '#!/bin/sh\n[ -f "%s" ]\n' "$PG_UP" >"$STUB_BIN/pg_isready"
 printf '#!/bin/sh\nexit 0\n' >"$STUB_BIN/pg_ctlcluster"
 printf '#!/bin/sh\necho "$*" >>"%s"\n[ -f "%s" ] && exit 1\ntouch "%s"\n' \
   "$SERVICE_LOG" "$PG_START_FAILS" "$PG_UP" >"$STUB_BIN/service"
+# The Docker daemon answers only while $DOCKER_UP exists.
+DOCKER_UP="$TMP_ROOT/docker-up"
+printf '#!/bin/sh\n[ -f "%s" ]\n' "$DOCKER_UP" >"$STUB_BIN/docker"
 touch "$PG_UP"
 chmod +x "$STUB_BIN"/*
 ln -s "$PYTHON_BIN" "$STUB_BIN/python3"
@@ -229,8 +232,8 @@ echo "PASS: build-matching-headers-skips-refresh"
 
 [ ! -e "$SERVICE_LOG" ] || fail "a reachable Postgres was restarted: $(cat "$SERVICE_LOG")"
 
-# Docker reachable leaves cloud-build.sh's system-Postgres fallback idle; the
-# snapshot's stopped cluster must be started before the seed targets it.
+# Without Docker, run.sh falls back to the system cluster, so a snapshot's
+# stopped cluster must be started before the seed targets it.
 rm -f "$PG_UP"
 run_cloud_init stopped-system-postgres-starts true
 [ "$(cat "$SERVICE_LOG")" = "postgresql start" ] || fail "stopped cluster: service calls '$(cat "$SERVICE_LOG")'"
@@ -246,5 +249,26 @@ grep -q 'WARN: no Postgres is reachable at localhost:5432' "$log" ||
   fail "unreachable Postgres was not reported: $(cat "$log")"
 ! grep -q 'seeding local DB' "$log" || fail "seed ran without a reachable Postgres"
 echo "PASS: unreachable-postgres-skips-seed"
+
+# With Docker, run.sh's database is its workspace container: the stopped system
+# cluster stays stopped and is neither checked nor seeded.
+rm -f "$PG_UP" "$SERVICE_LOG" "$PG_START_FAILS"
+touch "$DOCKER_UP"
+run_cloud_init docker-path-leaves-system-postgres true
+log="$TMP_ROOT/docker-path-leaves-system-postgres/cloud-init.log"
+[ ! -e "$SERVICE_LOG" ] || fail "docker path: started system Postgres: $(cat "$SERVICE_LOG")"
+grep -q 'Docker is available: run.sh creates and seeds its workspace database' "$log" ||
+  fail "docker path: skip was not reported: $(cat "$log")"
+! grep -qE 'seeding local DB|DB already seeded|no Postgres is reachable' "$log" ||
+  fail "docker path: targeted the system cluster: $(cat "$log")"
+echo "PASS: docker-path-leaves-system-postgres"
+
+# ROSE_USE_SYSTEM_PG=true selects the system cluster even when Docker answers.
+run_cloud_init forced-system-postgres-with-docker true ROSE_USE_SYSTEM_PG=true
+[ "$(cat "$SERVICE_LOG")" = "postgresql start" ] ||
+  fail "forced system Postgres: service calls '$(cat "$SERVICE_LOG" 2>/dev/null)'"
+grep -q 'DB already seeded' "$TMP_ROOT/forced-system-postgres-with-docker/cloud-init.log" ||
+  fail "forced system Postgres: seed check did not run against the started Postgres"
+echo "PASS: forced-system-postgres-with-docker"
 
 echo "All cloud-init env tests passed."
