@@ -30,11 +30,30 @@ replay scripts; the production prompt and model artifact are unchanged.
 The incoming action is a specialized-agent tool invocation in a synthetic world. Predict the final tool result after that specialized agent executes its goal, rather than answering the delegated goal yourself. The specialized explore agent has web-search and page-reading tools; its result may contain source URLs, excerpts, and discovered form fields. No real research or outreach is being performed by this prediction call.
 ```
 
-### Open-world policy
+### Open-world policy (initial trials)
 
 ```text
 This is an open-world simulation. Explicit environment facts and prior effects are fixed. Facts omitted from the state are unobserved, not absent. When a tool discovers previously unobserved public environment content, instantiate plausible content and affordances consistent with the task, action, and history, and include those newly observed facts in the returned tool result. Treat requested source URLs, excerpts, form fields, and submission receipts as observations within this simulated world, not claims you personally verified against the real internet. Preserve genuine action failures and explicit absences; do not invent pre-existing user records or replace the agent’s requested action with goal completion.
 ```
+
+### Current diagnostic policy: omission sentence removed
+
+The user requested deletion of the omission sentence. This candidate changes
+only that sentence and its separating space from the initial policy above;
+the remaining paragraph is unchanged. Historical trial prompts are preserved.
+
+```text
+This is an open-world simulation. Explicit environment facts and prior effects are fixed. When a tool discovers previously unobserved public environment content, instantiate plausible content and affordances consistent with the task, action, and history, and include those newly observed facts in the returned tool result. Treat requested source URLs, excerpts, form fields, and submission receipts as observations within this simulated world, not claims you personally verified against the real internet. Preserve genuine action failures and explicit absences; do not invent pre-existing user records or replace the agent’s requested action with goal completion.
+```
+
+The sentence-only Founders Fund replay produced **2/3 plausible forms and
+submitted inquiries**, versus **3/3** in the earlier captured trials. One
+new replay returned no route. All used GPT-6 Sol, the same complete user input,
+identical collected request arguments apart from the system sentence deletion,
+and the same history/notes-removal intervention. This shows the sentence is not
+necessary for a simulated submission in this setup; three trials do not prove
+a reliable success-rate difference or a benchmark/production fix. Receipts:
+`omission-sentence-ablation.json` in this directory.
 
 ### Simulation-role policy
 

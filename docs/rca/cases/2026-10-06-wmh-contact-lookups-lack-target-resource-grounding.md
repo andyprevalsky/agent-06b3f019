@@ -209,6 +209,37 @@ facts and epistemic history; it must not force every lookup or fundraiser to
 succeed. This open case records controlled findings, not production or
 fundraiser recovery.
 
+### Follow-up: delete only the omission sentence
+
+The user questioned and then explicitly requested removal of
+“Facts omitted from the state are unobserved, not absent.” from the diagnostic
+policy. The sentence and following separator space were deleted, preserving
+the rest of the successful Founders Fund request with history/current notes
+already removed. Three new calls through the same client path produced **2/3
+simulated form submissions with on-page acknowledgments**, and one no-route
+result. All used `gpt-6-sol-gpt`; all retained $0 funding. The earlier arm with
+the sentence returned 3/3 submissions. The sentence is not necessary for a
+submission in this setup; three trials per arm do not establish a statistically
+reliable rate difference. No broader benchmark or production repair is proven.
+
+Exact command from this worktree, with the existing activated `agents/venv`:
+
+```bash
+WMH_REPLAY_OUT=wmh-without-omission-sentence WMH_REPLAY_LABELS=browser-founders WMH_REPLAY_VARIANTS=open_world_no_history_or_notes WMH_REPLAY_TRIALS=3 python3 .context/wmh-without-omission-sentence-replay.py
+```
+
+The calls completed in 29.829, 32.813, and 35.528 seconds, without execution
+errors. Script assertions and independent adversarial review confirm each full
+user input is unchanged and the collected request differs only by the sentence
+deletion. The portable `omission-sentence-ablation.json` in the plan evidence
+directory contains exact extracted outputs, model identities, and prompt,
+request, and response hashes. The current local prompt viewer displays the
+sentence-removed candidate and retains immutable previous/original tabs.
+
+Archive follow-up searches: `WMH unobserved not absent forms simulation policy`
+and `Founders Fund no verified route context submissions`. This continues the
+same open case; it is not a recurrence of a previously deployed fix.
+
 ## Solution
 
 No production prediction prompt, model selection, corpus artifact, seed,
@@ -234,7 +265,9 @@ prediction changes. Their supplied Founders Fund screenshot is not proof about i
 They explicitly clarified that real-world form fidelity is not required: the
 simulator should generate plausible forms, while unknown Rose company facts
 remain acceptable blockers. They asked for controlled system/context/model
-comparisons and the exact browser-agent goal.
+comparisons and the exact browser-agent goal. They then questioned the broad
+omission rule, requested the entire WMH prompt in a browser, and explicitly
+asked to delete that one sentence and test the remaining diagnostic policy.
 
 ## Reusable lesson
 
