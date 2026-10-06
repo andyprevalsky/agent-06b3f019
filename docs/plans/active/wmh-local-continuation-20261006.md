@@ -46,9 +46,14 @@ terminal replay or benchmark acceptance. A subsequent full native-index audit
 found 280 empty rows caused by overlapping projected timestamps. The native
 adapter owning repro has unchanged red/green proof; schema-11 export reserves
 disjoint causal intervals and keeps recorded timestamps in canonical payloads.
-A corrected complete index is being built under
-`.context/world-model-grounded`; the running diagnostic retains its original
-in-memory index. See the October 6 OTel clock-interval RCA. Its server has also
+The corrected complete index is ready under `.context/world-model-grounded`:
+12,519 trajectories, exactly 179,169 indexed observations, and zero empty rows.
+Every action, observation, before-state, scratchpad, error flag, and ordering
+was compared with the complete original source corpus; the matrix is exactly
+(179169, 512). Build and full-audit receipts are inside that directory.
+The running diagnostic retains its original in-memory index. Future inference
+conformance and exact reruns must use `WMH_BUILD_DIR` pointing to the corrected
+directory, with `BENCHMARK_SKIP_WMH_DELTA=1` for the exact prebuilt artifact. See the October 6 OTel clock-interval RCA. Its server has also
 reported SSL bad-record-MAC errors on some predictions; these remain an open
 transport investigation, not a proven configuration or provider diagnosis.
 

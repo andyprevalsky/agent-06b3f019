@@ -74,9 +74,13 @@ The deploy-owned full world-model-harness runner passed in 2.5 seconds in
 payloads and state/order checks. The corrected uncapped full index is being
 prepared separately from the running diagnostic's immutable in-memory index,
 using all existing completed source pairs and the existing bounded native
-index refresher. No archive input or record is dropped. Full-index row count,
-empty-observation audit, matching live conformance, exact fundraiser outcome,
-and final replay verification remain pending; proxy proof is not outcome proof.
+index refresher. No archive input or record is dropped. The corrected full build finished in 210.995 seconds: 12,519 trajectories
+and exactly 179,169 indexed observations. A complete 23.098-second audit compared
+every corrected Step with the original archived action/observation/state/order
+and verified matrix shape (179169, 512), with zero empty native observations.
+Evidence is `.context/world-model-grounded/canonical-pair-audit.json`. Matching
+live conformance, the exact fundraiser outcome with this corrected index, and
+final replay verification remain pending; proxy proof is not outcome proof.
 
 ## Human feedback
 
