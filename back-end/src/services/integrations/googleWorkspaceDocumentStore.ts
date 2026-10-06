@@ -60,12 +60,13 @@ export async function applyGoogleDocuments(params: {
   listedSince?: Date;
   /** Runs after every write, so a large apply keeps its refresh lease alive. */
   keepAlive?: () => Promise<void>;
-}): Promise<{ created: number; updated: number; removed: number }> {
+}): Promise<{ created: number; updated: number; removed: number; skipped: number }> {
   const { userId, source, accountEmail, documents, listedSince, keepAlive } = params;
   const stored = params.stored ?? (await storedRows(userId, source, accountEmail));
   const seen = new Set<string>();
   const creates: Prisma.UserDataDocumentCreateManyInput[] = [];
   let updated = 0;
+  let skipped = 0;
 
   for (const doc of documents) {
     if (seen.has(doc.externalId)) continue;
@@ -105,6 +106,7 @@ export async function applyGoogleDocuments(params: {
       },
     });
     updated += written.count;
+    skipped += 1 - written.count;
     await keepAlive?.();
   }
 
@@ -122,5 +124,5 @@ export async function applyGoogleDocuments(params: {
     await prisma.userDataDocument.deleteMany({ where: { id: { in: batch } } });
     await keepAlive?.();
   }
-  return { created: creates.length, updated, removed: removedIds.length };
+  return { created: creates.length, updated, removed: removedIds.length, skipped };
 }

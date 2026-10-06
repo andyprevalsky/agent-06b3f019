@@ -46,6 +46,7 @@ import {
   SCAN,
   T0,
   type TestCase,
+  textFile,
   withUser,
 } from './google-workspace-sync.blackbox.helpers';
 config();
@@ -260,6 +261,66 @@ test('a rate-limited Drive download keeps the stored text and fails the refresh'
     assert(google.count('download') >= 3, 'the rate limit is retried before giving up');
     const [row] = await rows(userId, GOOGLE_DRIVE_SOURCE);
     equal(row.content, 'remember the lease', 'the stored text survives');
+  });
+});
+
+test('a file Google cannot serve keeps its stored text and does not fail the refresh', async () => {
+  await withUser(async ({ userId }) => {
+    const google = new FakeGoogle();
+    google.files = [NOTES];
+    google.text.set('notes', 'remember the lease');
+    await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, {
+      fetcher: google.fetcher,
+      now: T0,
+    });
+
+    // The file changes and is renamed, and its new text cannot be downloaded.
+    const edited = { ...NOTES, name: 'notes-v2.txt', modifiedTime: '2026-09-25T12:00:00.000Z' };
+    google.files = [edited];
+    google.text.set('notes', 'second draft');
+    google.driveChanged = true;
+    google.failingDownloads.add('notes');
+    const during = { fetcher: google.fetcher, now: later(5) };
+    equal(await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, during), 'refreshed', 'run');
+    let [row] = await rows(userId, GOOGLE_DRIVE_SOURCE);
+    equal(row.title, 'notes-v2.txt', 'the name still follows the listing');
+    equal(row.content, 'remember the lease', 'the stored text is kept');
+
+    // The next listing sees the text is from an older version and fetches it.
+    google.failingDownloads.clear();
+    const after = { fetcher: google.fetcher, now: later(10) };
+    equal(await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, after), 'refreshed', 'retry');
+    [row] = await rows(userId, GOOGLE_DRIVE_SOURCE);
+    equal(row.content, 'second draft', 'the text catches up');
+  });
+});
+
+test('text with NUL characters is stored without them', async () => {
+  await withUser(async ({ userId }) => {
+    const google = new FakeGoogle();
+    google.files = [NOTES];
+    google.text.set('notes', 'r\u0000e\u0000m\u0000ember');
+    const options = { fetcher: google.fetcher, now: T0 };
+    equal(await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, options), 'refreshed', 'run');
+    const [row] = await rows(userId, GOOGLE_DRIVE_SOURCE);
+    equal(row.content, 'remember', 'the row is written, without the NULs');
+  });
+});
+
+test('a listing whose last page overshoots the cap is treated as cut off', async () => {
+  await withUser(async ({ userId }) => {
+    const google = new FakeGoogle();
+    google.files = [textFile('newest', 0), textFile('newer', 1), textFile('older', 2)];
+    await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, {
+      fetcher: google.fetcher,
+      now: T0,
+    });
+    // One page returns all three files and no next page, but the cap is two.
+    google.driveChanged = true;
+    const capped = { fetcher: google.fetcher, now: later(5), driveMaxFiles: 2 };
+    equal(await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, capped), 'refreshed', 'run');
+    const titles = (await rows(userId, GOOGLE_DRIVE_SOURCE)).map((row) => row.title).sort();
+    equal(titles.join(','), 'newer.txt,newest.txt,older.txt', 'the file past the cap is kept');
   });
 });
 

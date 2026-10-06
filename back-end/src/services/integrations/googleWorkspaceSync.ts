@@ -62,6 +62,12 @@ const log = createLogger('GoogleWorkspaceSync');
 export const GOOGLE_SOURCE_FRESHNESS_MS = 60_000;
 const CONTENT_CONCURRENCY = 5;
 const ON_DEMAND_TEXT_LIMIT = 10;
+/**
+ * Rows without text to consider when a search addresses a path. Text is loaded
+ * for the newest `ON_DEMAND_TEXT_LIMIT` that can have any, so the pool has to
+ * reach past files that never will (PDFs, images) to the documents behind them.
+ */
+export const ON_DEMAND_TEXT_CANDIDATES = 200;
 
 /**
  * When a caller re-reads the state of a refresh that another caller is running.
@@ -214,6 +220,19 @@ function oldestModifiedTime(files: GoogleDriveFile[]): Date {
   return new Date(Number.isFinite(oldest) ? oldest : 8.64e15);
 }
 
+/** The text a stored row already holds, and the file version it was read from. */
+function storedText(
+  row: StoredRow | undefined
+): { content: DriveContentState; modifiedTime: string | undefined } | null {
+  const meta = asRecord(row?.metadata);
+  const digest = meta.contentDigest;
+  if (meta.contentIndexed !== true || typeof digest !== 'string') return null;
+  return {
+    content: { kind: 'stored', digest, truncated: meta.contentTruncated === true },
+    modifiedTime: typeof meta.modifiedTime === 'string' ? meta.modifiedTime : undefined,
+  };
+}
+
 /** What to do about one Drive file's text on this refresh. */
 function plannedDriveContent(
   file: GoogleDriveFile,
@@ -221,13 +240,9 @@ function plannedDriveContent(
   withinBudget: boolean
 ): DriveContentState | 'fetch' {
   if (driveTextRequest(file) === null) return { kind: 'none' };
-  const meta = asRecord(row?.metadata);
-  const digest = meta.contentDigest;
-  const indexed = meta.contentIndexed === true && typeof digest === 'string';
-  if (indexed && meta.modifiedTime === file.modifiedTime) {
-    return { kind: 'stored', digest, truncated: meta.contentTruncated === true };
-  }
-  return indexed || withinBudget ? 'fetch' : { kind: 'none' };
+  const held = storedText(row);
+  if (held !== null && held.modifiedTime === file.modifiedTime) return held.content;
+  return held !== null || withinBudget ? 'fetch' : { kind: 'none' };
 }
 
 async function syncDriveAccount(params: {
@@ -238,7 +253,7 @@ async function syncDriveAccount(params: {
   pageToken?: string;
   maxFiles: number;
   keepAlive: () => Promise<void>;
-}): Promise<{ pageToken: string }> {
+}): Promise<{ pageToken?: string }> {
   const { userId, accountEmail, token, fetcher, keepAlive } = params;
   let nextPageToken: string;
   if (params.pageToken === undefined) {
@@ -259,19 +274,29 @@ async function syncDriveAccount(params: {
   let textBudget = DRIVE_INITIAL_CONTENT_FILES;
   const plans = files.map((file) => {
     const textCapable = driveTextRequest(file) !== null;
-    const plan = plannedDriveContent(
-      file,
-      stored.get(`${accountEmail}:${file.id}`),
-      textCapable && textBudget > 0
-    );
+    const row = stored.get(`${accountEmail}:${file.id}`);
+    const plan = plannedDriveContent(file, row, textCapable && textBudget > 0);
     if (textCapable) textBudget -= 1;
-    return { file, plan };
+    return { file, row, plan };
   });
-  const documents = await mapWithConcurrency(plans, CONTENT_CONCURRENCY, async ({ file, plan }) => {
+  const documents = await mapWithConcurrency(plans, CONTENT_CONCURRENCY, async (planned) => {
+    const { file, row, plan } = planned;
     let content: DriveContentState = { kind: 'none' };
+    let version = file;
     if (plan === 'fetch') {
       const text = await fetchDriveText(token, file, fetcher);
-      if (text !== null) content = { kind: 'fetched', ...text };
+      const held = storedText(row);
+      if (text === 'unavailable') {
+        // Google could not serve this file's text right now. Keep the stored
+        // text and the version it was read from, so the next listing fetches
+        // it again; the name and path still follow the listing.
+        if (held !== null) {
+          content = held.content;
+          version = { ...file, modifiedTime: held.modifiedTime };
+        }
+      } else if (text !== null) {
+        content = { kind: 'fetched', ...text };
+      }
       // A first sync can download hundreds of files; keep the lease alive so
       // a later search does not start a second full sync alongside this one.
       await keepAlive();
@@ -279,7 +304,7 @@ async function syncDriveAccount(params: {
       content = plan;
     }
     return driveFileToDocument({
-      file,
+      file: version,
       folderPath: folderPaths.get(file.id) ?? 'My Drive',
       accountEmail,
       content,
@@ -295,7 +320,9 @@ async function syncDriveAccount(params: {
     keepAlive,
   });
   log.info('Drive refreshed', { userId, files: files.length, truncated, ...counts });
-  return { pageToken: nextPageToken };
+  // A row this refresh could not write (it changed under it) still holds the
+  // old name and path. Keeping the old cursor makes the next refresh list again.
+  return { pageToken: counts.skipped > 0 ? params.pageToken : nextPageToken };
 }
 
 async function removeDisconnectedAccounts(
@@ -431,6 +458,17 @@ export async function ensureGoogleSourceFresh(
   } catch (error) {
     if (error instanceof LeaseLostError) {
       log.info('Google source refresh stopped: another refresh took over', { userId, source });
+      // A disconnect also ends the lease (its purge deletes the state row), and
+      // rows this refresh wrote after the purge ran would otherwise stay behind.
+      await connectedAccounts(userId)
+        .then((accounts) =>
+          removeDisconnectedAccounts(
+            userId,
+            source,
+            accounts.map((account) => account.email)
+          )
+        )
+        .catch(() => undefined);
       return 'in_progress';
     }
     log.error('Google source refresh failed', {
@@ -565,7 +603,7 @@ export async function ensureDriveText(
       const token = await tokenFor(account);
       if (token === null) return false;
       const text = await fetchDriveText(token, file, fetcher);
-      if (text === null) return false;
+      if (text === null || text === 'unavailable') return false;
       const contentDigest = textDigest(text.text);
       const metadata: Record<string, unknown> = {
         ...meta,

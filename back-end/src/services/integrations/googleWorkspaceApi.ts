@@ -33,8 +33,15 @@ const DRIVE_CHANGES_MAX_PAGES = 5;
 const RETRY_DELAYS_MS = [400, 1500];
 /** A single Google request never holds a refresh or a search longer than this. */
 const REQUEST_TIMEOUT_MS = 20_000;
-/** Drive also reports rate limiting as HTTP 403 with one of these reasons. */
-const RATE_LIMIT_REASONS = new Set(['rateLimitExceeded', 'userRateLimitExceeded']);
+/** Drive also reports rate and quota limits as HTTP 403 with one of these reasons. */
+const RATE_LIMIT_REASONS = new Set([
+  'rateLimitExceeded',
+  'userRateLimitExceeded',
+  'sharingRateLimitExceeded',
+  'dailyLimitExceeded',
+  'dailyLimitExceededUnreg',
+  'quotaExceeded',
+]);
 const DRIVE_FILE_FIELDS =
   'id,name,mimeType,parents,modifiedTime,webViewLink,size,trashed,owners(emailAddress)';
 
@@ -169,7 +176,9 @@ export async function listDriveFiles(
     await onPage?.();
     pageToken = body.nextPageToken;
   } while (pageToken !== undefined && files.length < maxFiles);
-  return { files: files.slice(0, maxFiles), truncated: pageToken !== undefined };
+  // Cut off when more pages remain, or when the last page overshot the cap.
+  const truncated = pageToken !== undefined || files.length > maxFiles;
+  return { files: files.slice(0, maxFiles), truncated };
 }
 
 export function driveStartPageTokenUrl(): string {
@@ -224,27 +233,34 @@ export async function driveChangedSince(
   return { changed: true, nextPageToken: cursor };
 }
 
-/** A file's text, or null when it has no text form or Google refuses the export. */
+/**
+ * A file's text; null when it has no text form or Google refuses the export;
+ * `'unavailable'` when Google could not serve this one file right now.
+ */
 export async function fetchDriveText(
   token: string,
   file: GoogleDriveFile,
   fetcher: Fetcher = fetch
-): Promise<{ text: string; truncated: boolean } | null> {
+): Promise<{ text: string; truncated: boolean } | 'unavailable' | null> {
   const request = driveTextRequest(file);
   if (request === null) return null;
   try {
     const response = await googleGet(`${DRIVE_BASE}/${request.path}`, token, 'drive', fetcher);
-    const text = await response.text();
+    // Postgres text cannot hold NUL, and a UTF-16 file read as UTF-8 is full of them.
+    const text = (await response.text()).replaceAll('\u0000', '');
     return {
       text: text.slice(0, DRIVE_MAX_CONTENT_CHARS),
       truncated: text.length > DRIVE_MAX_CONTENT_CHARS,
     };
   } catch (error) {
-    // One unreadable file (too large to export, no download permission, gone)
-    // must not fail the whole Drive refresh; it stays a name-and-path row. An
-    // auth failure is not about the file, so it still fails the refresh.
-    const fileSpecific = error instanceof GoogleApiError && [400, 403, 404].includes(error.status);
-    if (fileSpecific) return null;
+    // One file must not fail the whole Drive refresh. Unreadable (too large to
+    // export, no download permission, gone): it stays a name-and-path row. A
+    // server error or stall on this one download: the caller keeps what it has
+    // stored. Auth failures and rate limits are not about the file, so they
+    // still fail the refresh.
+    if (!(error instanceof GoogleApiError)) throw error;
+    if ([400, 403, 404].includes(error.status)) return null;
+    if (error.status >= 500) return 'unavailable';
     throw error;
   }
 }

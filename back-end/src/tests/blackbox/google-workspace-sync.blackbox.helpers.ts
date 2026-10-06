@@ -60,6 +60,18 @@ export const SCAN: GoogleDriveFile = {
   modifiedTime: '2026-09-22T12:00:00.000Z',
 };
 
+/** A text file last modified `minutesOld` minutes before a fixed instant. */
+export function textFile(id: string, minutesOld: number): GoogleDriveFile {
+  return {
+    id,
+    name: `${id}.txt`,
+    mimeType: 'text/plain',
+    parents: ['root'],
+    size: '10',
+    modifiedTime: new Date(Date.UTC(2026, 8, 30) - minutesOld * 60_000).toISOString(),
+  };
+}
+
 /** Google at the fetch boundary: mutable state plus a log of what was asked. */
 export class FakeGoogle {
   events: GoogleCalendarEvent[] = [];
@@ -75,6 +87,8 @@ export class FakeGoogle {
   pageSize = 0;
   /** Runs while a text download is in flight, before Google answers it. */
   onDownload: ((fileId: string) => Promise<void>) | null = null;
+  /** Files whose text download Google answers with a server error. */
+  failingDownloads = new Set<string>();
   calls: string[] = [];
   private token = 1;
 
@@ -132,6 +146,7 @@ export class FakeGoogle {
     if (fileId !== undefined) {
       this.calls.push('download');
       if (this.onDownload !== null) await this.onDownload(fileId);
+      if (this.failingDownloads.has(fileId)) return this.json({ error: { code: 500 } }, 500);
       if (this.rateLimitDownloads) {
         return this.json(
           { error: { code: 403, errors: [{ reason: 'userRateLimitExceeded' }] } },

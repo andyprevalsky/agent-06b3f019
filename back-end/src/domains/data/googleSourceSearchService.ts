@@ -12,6 +12,7 @@ import {
   GOOGLE_DRIVE_SOURCE,
 } from '../../services/integrations/googleWorkspaceDocuments';
 import {
+  ON_DEMAND_TEXT_CANDIDATES,
   ensureDriveTextWithin,
   ensureGoogleSourceFreshWithin,
   googleWorkspaceAccountEmails,
@@ -29,8 +30,6 @@ import {
 } from './types';
 
 const DAY_MS = 86_400_000;
-/** Files whose text is loaded when a search addresses their path. */
-const DRIVE_TEXT_ON_ADDRESS = 10;
 /**
  * How long one search waits for a refresh. The agent's grep request times out
  * at 25 seconds, so a longer refresh continues in the background instead.
@@ -84,7 +83,7 @@ export async function searchGoogleSource(params: {
       userId,
       documentSource,
       filters.pathPrefix,
-      DRIVE_TEXT_ON_ADDRESS
+      ON_DEMAND_TEXT_CANDIDATES
     );
     await ensureDriveTextWithin(userId, unread, DRIVE_TEXT_WAIT_MS);
   }

@@ -6,7 +6,8 @@
  *   - a refresh keeps its lease while it works and stops the moment it loses it;
  *   - parallel renewals and searches racing on a first refresh never fail;
  *   - a refresh and an on-demand text download never overwrite each other;
- *   - a listing cut off at the file cap removes only files it proves are gone.
+ *   - a listing cut off at the file cap removes only files it proves are gone;
+ *   - a disconnect that ends a refresh leaves none of that account's rows.
  */
 
 import { config } from 'dotenv';
@@ -18,7 +19,9 @@ import {
   type GoogleDriveFile,
   type GoogleWorkspaceDocument,
 } from '../../services/integrations/googleWorkspaceDocuments';
+import { findDriveRowsWithoutText } from '../../domains/data/googleSourceRepo';
 import {
+  ON_DEMAND_TEXT_CANDIDATES,
   applyGoogleDocuments,
   ensureDriveText,
   ensureGoogleSourceFresh,
@@ -28,19 +31,20 @@ import {
   claimSyncLease,
 } from '../../services/integrations/googleWorkspaceSyncLease';
 import {
+  assert,
+  equal,
   FakeGoogle,
+  later,
   LEASE,
   LEGAL,
   NOTES,
-  SCAN,
-  T0,
-  type TestCase,
-  assert,
-  equal,
-  later,
   pause,
   rows,
   runSuite,
+  SCAN,
+  T0,
+  type TestCase,
+  textFile,
   withUser,
 } from './google-workspace-sync.blackbox.helpers';
 config();
@@ -48,17 +52,6 @@ config();
 const tests: TestCase[] = [];
 function test(name: string, fn: TestCase['fn']): void {
   tests.push({ name, fn });
-}
-
-function textFile(id: string, minutesOld: number): GoogleDriveFile {
-  return {
-    id,
-    name: `${id}.txt`,
-    mimeType: 'text/plain',
-    parents: ['root'],
-    size: '10',
-    modifiedTime: new Date(Date.UTC(2026, 8, 30) - minutesOld * 60_000).toISOString(),
-  };
 }
 
 test('a refresh renews its lease as it works', async () => {
@@ -258,6 +251,98 @@ test('a refresh does not wipe text an on-demand download just stored', async () 
     equal(counts.updated, 0, 'the refresh sees that its read is stale');
     const [after] = await rows(userId, GOOGLE_DRIVE_SOURCE);
     equal(after.content, 'downloaded text', 'the downloaded text survives');
+  });
+});
+
+test('a refresh stopped by a disconnect removes the rows of that account', async () => {
+  await withUser(async ({ userId }) => {
+    const google = new FakeGoogle();
+    google.files = [NOTES];
+    google.text.set('notes', 'remember the lease');
+    await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, {
+      fetcher: google.fetcher,
+      now: T0,
+    });
+    equal((await rows(userId, GOOGLE_DRIVE_SOURCE)).length, 1, 'the file is stored');
+
+    // The account is disconnected while the next refresh is talking to Google:
+    // its credential goes, and the purge deletes the state row holding the lease.
+    google.driveChanged = true;
+    google.delayMs = 300;
+    google.reset();
+    const options = { fetcher: google.fetcher, now: later(5), leaseRenewMs: 0 };
+    const refresh = ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, options);
+    for (let attempt = 0; attempt < 200 && google.calls.length === 0; attempt += 1) await pause(10);
+    await prisma.emailIntegrationCredential.deleteMany({ where: { userId } });
+    await prisma.userDataProviderSyncState.deleteMany({ where: { userId } });
+    equal(await refresh, 'in_progress', 'the refresh stops when its lease is gone');
+    equal((await rows(userId, GOOGLE_DRIVE_SOURCE)).length, 0, 'and leaves no rows behind');
+  });
+});
+
+test('a refresh that could not write a row lists again next time', async () => {
+  await withUser(async ({ userId, email }) => {
+    const google = new FakeGoogle();
+    const lease = { ...LEASE, parents: ['root'] };
+    google.files = [NOTES, lease];
+    google.text.set('notes', 'remember the lease');
+    google.text.set('lease', 'Lease ends December 31, 2026');
+    await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, {
+      fetcher: google.fetcher,
+      now: T0,
+    });
+    const cursor = async (): Promise<unknown> => {
+      const state = await prisma.userDataProviderSyncState.findUniqueOrThrow({
+        where: { userId_source: { userId, source: GOOGLE_DRIVE_SOURCE } },
+      });
+      return (state.cursor as { accounts: Record<string, { pageToken?: string }> }).accounts[email]
+        .pageToken;
+    };
+    const before = await cursor();
+
+    // The notes file is renamed and the lease edited. While the lease text is
+    // downloading, something else rewrites the notes row.
+    google.files = [
+      { ...NOTES, name: 'renamed.txt' },
+      { ...lease, modifiedTime: '2026-09-28T12:00:00.000Z' },
+    ];
+    google.driveChanged = true;
+    google.onDownload = async () => {
+      await prisma.userDataDocument.updateMany({
+        where: { userId, title: 'notes.txt' },
+        data: { contentHash: 'written-by-a-download' },
+      });
+    };
+    const second = { fetcher: google.fetcher, now: later(5) };
+    equal(await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, second), 'refreshed', 'run');
+    equal(await cursor(), before, 'the cursor is kept, so the next refresh lists again');
+  });
+});
+
+test('on-demand text reaches a document behind newer files that can never have text', async () => {
+  await withUser(async ({ userId, email }) => {
+    const google = new FakeGoogle();
+    const scans: GoogleDriveFile[] = Array.from({ length: 12 }, (_, index) => ({
+      ...SCAN,
+      id: `scan${index}`,
+      name: `scan-${index}.pdf`,
+      parents: ['root'],
+    }));
+    google.files = [...scans, textFile('minutes', 60 * 24 * 30)];
+    // Nothing can be downloaded yet, so the document starts as name and path only.
+    await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, {
+      fetcher: google.fetcher,
+      now: T0,
+    });
+    google.text.set('minutes', 'minutes of the meeting');
+    const unread = await findDriveRowsWithoutText(
+      userId,
+      GOOGLE_DRIVE_SOURCE,
+      `${email}/My Drive`,
+      ON_DEMAND_TEXT_CANDIDATES
+    );
+    const loaded = await ensureDriveText(userId, unread, { fetcher: google.fetcher });
+    equal(loaded, 1, 'the document is found past the twelve newer PDFs');
   });
 });
 
