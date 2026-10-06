@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,12 +26,14 @@ assert all(shutil.which(name) for name in ('git','curl','ps','rg')), 'requires g
 """
 
 
-def retire_owned_container(snapshot: Path, name: str, owner: str) -> bool:
+def retire_owned_container(
+    snapshot: Path, name: str, owner: str, image_id: str
+) -> bool:
     cidfile = snapshot / "container.cid"
     identity = cidfile.read_text().strip() if cidfile.is_file() else name
     if cidfile.is_file() and not re.fullmatch(r"[0-9a-f]{64}", identity):
         return False
-    format_value = '{{.Id}}\n{{.Name}}\n{{index .Config.Labels "org.rose.controller-test-owner"}}\n{{json .Mounts}}'
+    format_value = '{{.Id}}\n{{.Name}}\n{{index .Config.Labels "org.rose.controller-test-owner"}}\n{{.Image}}\n{{json .Mounts}}'
     result = subprocess.run(
         ["docker", "inspect", identity, "--format", format_value],
         capture_output=True,
@@ -43,14 +46,16 @@ def retire_owned_container(snapshot: Path, name: str, owner: str) -> bool:
         )
     fields = result.stdout.splitlines()
     if (
-        len(fields) != 4
+        len(fields) != 5
         or not re.fullmatch(r"[0-9a-f]{64}", fields[0])
         or fields[1] != "/" + name
         or fields[2] != owner
+        or fields[3] != image_id
+        or (cidfile.is_file() and fields[0] != identity)
     ):
         return False
     try:
-        mounts = json.loads(fields[3])
+        mounts = json.loads(fields[4])
     except ValueError:
         return False
     if not isinstance(mounts, list) or not all(isinstance(row, dict) for row in mounts):
@@ -58,11 +63,11 @@ def retire_owned_container(snapshot: Path, name: str, owner: str) -> bool:
     expected = [
         ("scripts", "/repo/scripts", False),
         ("agents/benchmarks", "/repo/agents/benchmarks", False),
-        ("fixture-tmp", "/fixture-tmp", True),
     ]
-    if not all(
+    if len(mounts) != len(expected) or not all(
         any(
-            Path(row.get("Source", "")).resolve() == (snapshot / relative).resolve()
+            row.get("Type") == "bind"
+            and Path(row.get("Source", "")).resolve() == (snapshot / relative).resolve()
             and row.get("Destination") == destination
             and row.get("RW") is writable
             for row in mounts
@@ -70,17 +75,61 @@ def retire_owned_container(snapshot: Path, name: str, owner: str) -> bool:
         for relative, destination, writable in expected
     ):
         return False
-    stopped = subprocess.run(
-        ["docker", "stop", "--time", "30", fields[0]], capture_output=True, text=True
-    )
-    if stopped.returncode:
-        return False
+    evidence_ok = False
+    removed = False
+    try:
+        stopped = subprocess.run(
+            ["docker", "stop", "--time", "30", fields[0]],
+            capture_output=True,
+            text=True,
+        )
+        if stopped.returncode:
+            raise subprocess.CalledProcessError(stopped.returncode, stopped.args)
+        archive = snapshot / "fixture-tmp"
+        archive.mkdir(mode=0o700, exist_ok=True)
+        exported = subprocess.run(
+            ["docker", "cp", fields[0] + ":/tmp/.", str(archive)],
+            capture_output=True,
+            text=True,
+        )
+        if exported.returncode == 0:
+            # Fixture diagnostics stay private; never follow exported symlinks.
+            for directory, directories, files in os.walk(archive, followlinks=False):
+                Path(directory).chmod(0o700)
+                directories[:] = [
+                    item
+                    for item in directories
+                    if not (Path(directory) / item).is_symlink()
+                ]
+                for item in files:
+                    path = Path(directory) / item
+                    if stat.S_ISREG(path.lstat().st_mode):
+                        path.chmod(0o600)
+        evidence_ok = stopped.returncode == 0 and exported.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        evidence_ok = False
+    finally:
+        # A failed export must not leave this exact verified owner behind.
+        try:
+            removed = (
+                subprocess.run(
+                    ["docker", "rm", fields[0]], capture_output=True, text=True
+                ).returncode
+                == 0
+            )
+        except (OSError, subprocess.SubprocessError):
+            removed = False
     gone = subprocess.run(
         ["docker", "inspect", fields[0]], capture_output=True, text=True
     )
-    return gone.returncode == 1 and any(
-        value in gone.stderr.lower()
-        for value in ("no such object", "no such container")
+    return (
+        evidence_ok
+        and removed
+        and gone.returncode == 1
+        and any(
+            value in gone.stderr.lower()
+            for value in ("no such object", "no such container")
+        )
     )
 
 
@@ -207,8 +256,7 @@ def main() -> int:
         json.dumps({"image_id": image_id, "source_file_sha256": hashes}, indent=2)
         + "\n"
     )
-    writable = snapshot / "fixture-tmp"
-    writable.mkdir()
+    (snapshot / "fixture-tmp").mkdir(mode=0o700)
     owner = uuid.uuid4().hex
     name = "rose-cloudbench-controller-tests-" + owner[:16]
     (snapshot / "container-owner.json").write_text(
@@ -217,7 +265,6 @@ def main() -> int:
     command = [
         "docker",
         "run",
-        "--rm",
         "--network",
         "none",
         "--cpus",
@@ -234,10 +281,8 @@ def main() -> int:
         f"{snapshot / 'scripts'}:/repo/scripts:ro",
         "-v",
         f"{snapshot / 'agents/benchmarks'}:/repo/agents/benchmarks:ro",
-        "-v",
-        f"{writable}:/fixture-tmp",
         "--env",
-        "TMPDIR=/fixture-tmp",
+        "TMPDIR=/tmp",
         "--env",
         "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE=1",
     ]
@@ -283,9 +328,9 @@ def main() -> int:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-            if not retire_owned_container(snapshot, name, owner):
+            if not retire_owned_container(snapshot, name, owner, image_id):
                 raise RuntimeError(
-                    "exact controller container retirement was not proven; private artifacts retained"
+                    "exact controller container retirement and private evidence export were not proven"
                 )
         finally:
             for signum, handler in prior.items():

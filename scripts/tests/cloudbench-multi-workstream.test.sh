@@ -93,7 +93,7 @@ cleanup() {
     if [ "$hub_cleanup_failed" = "1" ]; then
         echo "ℹ️  retained cloudbench fixture because exact Hub teardown did not verify: $TMP_ROOT" >&2
         exit 1
-    elif [ "$TEST_FAILED" = "1" ] \
+    elif { [ "$TEST_FAILED" = "1" ] || [ "$original_status" -ne 0 ]; } \
         && [ "${CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE:-0}" = "1" ]; then
         echo "ℹ️  retained failed cloudbench fixture: $TMP_ROOT" >&2
     else
