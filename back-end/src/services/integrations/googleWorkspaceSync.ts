@@ -208,8 +208,10 @@ export async function applyGoogleDocuments(params: {
   accountEmail: string;
   documents: GoogleWorkspaceDocument[];
   stored?: Map<string, StoredRow>;
+  /** Runs after every write, so a large apply keeps its refresh lease alive. */
+  keepAlive?: () => Promise<void>;
 }): Promise<{ created: number; updated: number; removed: number }> {
-  const { userId, source, accountEmail, documents } = params;
+  const { userId, source, accountEmail, documents, keepAlive } = params;
   const stored = params.stored ?? (await storedRows(userId, source, accountEmail));
   const seen = new Set<string>();
   const creates: Prisma.UserDataDocumentCreateManyInput[] = [];
@@ -250,16 +252,19 @@ export async function applyGoogleDocuments(params: {
       },
     });
     updated += 1;
+    await keepAlive?.();
   }
 
   for (const batch of chunks(creates, WRITE_CHUNK)) {
     await prisma.userDataDocument.createMany({ data: batch, skipDuplicates: true });
+    await keepAlive?.();
   }
   const removedIds = [...stored.values()]
     .filter((row) => !seen.has(row.externalId))
     .map((row) => row.id);
   for (const batch of chunks(removedIds, WRITE_CHUNK)) {
     await prisma.userDataDocument.deleteMany({ where: { id: { in: batch } } });
+    await keepAlive?.();
   }
   return { created: creates.length, updated, removed: removedIds.length };
 }
@@ -272,8 +277,12 @@ async function syncCalendarAccount(params: {
   now: Date;
   keepAlive: () => Promise<void>;
 }): Promise<void> {
-  const events = await listCalendarEvents(params.token, calendarWindow(params.now), params.fetcher);
-  await params.keepAlive();
+  const events = await listCalendarEvents(
+    params.token,
+    calendarWindow(params.now),
+    params.fetcher,
+    params.keepAlive
+  );
   const documents = events
     .map((event) => calendarEventToDocument(event, params.accountEmail))
     .filter((doc): doc is GoogleWorkspaceDocument => doc !== null);
@@ -282,6 +291,7 @@ async function syncCalendarAccount(params: {
     source: GOOGLE_CALENDAR_SOURCE,
     accountEmail: params.accountEmail,
     documents,
+    keepAlive: params.keepAlive,
   });
   log.info('Calendar refreshed', { userId: params.userId, events: documents.length, ...counts });
 }
@@ -315,16 +325,16 @@ async function syncDriveAccount(params: {
   if (params.pageToken === undefined) {
     // Taken before listing, so a change made during the listing is seen next time.
     nextPageToken = await getDriveStartPageToken(token, fetcher);
+    await keepAlive();
   } else {
-    const delta = await driveChangedSince(token, params.pageToken, fetcher);
+    const delta = await driveChangedSince(token, params.pageToken, fetcher, keepAlive);
     if (!delta.changed) return { pageToken: delta.nextPageToken };
     nextPageToken = delta.nextPageToken;
   }
 
   // Any change re-lists, because a folder rename moves every path below it.
   // Unchanged files keep their stored text, so only changed text is downloaded.
-  const { files, truncated } = await listDriveFiles(token, DRIVE_MAX_FILES, fetcher);
-  await keepAlive();
+  const { files, truncated } = await listDriveFiles(token, DRIVE_MAX_FILES, fetcher, keepAlive);
   const folderPaths = driveFolderPaths(files);
   const stored = await storedRows(userId, GOOGLE_DRIVE_SOURCE, accountEmail);
   let textBudget = DRIVE_INITIAL_CONTENT_FILES;
@@ -362,6 +372,7 @@ async function syncDriveAccount(params: {
     accountEmail,
     documents,
     stored,
+    keepAlive,
   });
   log.info('Drive refreshed', { userId, files: files.length, truncated, ...counts });
   return { pageToken: nextPageToken };
@@ -393,6 +404,7 @@ async function syncAccount(params: {
   const { userId, source, account, fetcher, now, keepAlive } = params;
   const token = await getValidAccessToken(account);
   if (token === null) throw new Error('No usable Google access token for this account');
+  await keepAlive();
   if (source === GOOGLE_CALENDAR_SOURCE) {
     await syncCalendarAccount({
       userId,

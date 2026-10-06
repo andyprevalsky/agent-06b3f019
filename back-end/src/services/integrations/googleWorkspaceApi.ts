@@ -18,6 +18,11 @@ import {
 const log = createLogger('GoogleWorkspaceApi');
 
 export type Fetcher = typeof fetch;
+/**
+ * Runs after every page of a listing. A refresh passes its lease renewal here,
+ * so a long listing keeps the lease alive and stops as soon as it is lost.
+ */
+export type PageHook = () => Promise<void>;
 
 const CALENDAR_BASE = 'https://www.googleapis.com/calendar/v3';
 const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
@@ -114,7 +119,8 @@ export function calendarEventsUrl(window: CalendarWindow, pageToken?: string): s
 export async function listCalendarEvents(
   token: string,
   window: CalendarWindow,
-  fetcher: Fetcher = fetch
+  fetcher: Fetcher = fetch,
+  onPage?: PageHook
 ): Promise<GoogleCalendarEvent[]> {
   const events: GoogleCalendarEvent[] = [];
   let pageToken: string | undefined;
@@ -130,6 +136,7 @@ export async function listCalendarEvents(
       nextPageToken?: string;
     };
     events.push(...(body.items ?? []));
+    await onPage?.();
     pageToken = body.nextPageToken;
     if (pageToken === undefined) break;
   }
@@ -150,7 +157,8 @@ export function driveFilesUrl(pageToken?: string): string {
 export async function listDriveFiles(
   token: string,
   maxFiles: number,
-  fetcher: Fetcher = fetch
+  fetcher: Fetcher = fetch,
+  onPage?: PageHook
 ): Promise<{ files: GoogleDriveFile[]; truncated: boolean }> {
   const files: GoogleDriveFile[] = [];
   let pageToken: string | undefined;
@@ -158,6 +166,7 @@ export async function listDriveFiles(
     const response = await googleGet(driveFilesUrl(pageToken), token, 'drive', fetcher);
     const body = (await response.json()) as { files?: GoogleDriveFile[]; nextPageToken?: string };
     files.push(...(body.files ?? []));
+    await onPage?.();
     pageToken = body.nextPageToken;
   } while (pageToken !== undefined && files.length < maxFiles);
   return { files: files.slice(0, maxFiles), truncated: pageToken !== undefined };
@@ -192,7 +201,8 @@ export function driveChangesUrl(pageToken: string): string {
 export async function driveChangedSince(
   token: string,
   pageToken: string,
-  fetcher: Fetcher = fetch
+  fetcher: Fetcher = fetch,
+  onPage?: PageHook
 ): Promise<{ changed: boolean; nextPageToken: string }> {
   let cursor = pageToken;
   let changed = false;
@@ -203,6 +213,7 @@ export async function driveChangedSince(
       nextPageToken?: string;
       newStartPageToken?: string;
     };
+    await onPage?.();
     if ((body.changes ?? []).length > 0) changed = true;
     if (body.newStartPageToken !== undefined) {
       return { changed, nextPageToken: body.newStartPageToken };

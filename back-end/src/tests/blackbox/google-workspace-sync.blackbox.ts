@@ -20,20 +20,27 @@ import {
   DRIVE_INITIAL_CONTENT_FILES,
   GOOGLE_CALENDAR_SOURCE,
   GOOGLE_DRIVE_SOURCE,
-  type GoogleDriveFile,
+  type GoogleWorkspaceDocument,
 } from '../../services/integrations/googleWorkspaceDocuments';
 import {
   GOOGLE_SOURCE_FRESHNESS_MS,
+  applyGoogleDocuments,
   ensureDriveText,
   ensureDriveTextWithin,
   ensureGoogleSourceFresh,
   ensureGoogleSourceFreshWithin,
 } from '../../services/integrations/googleWorkspaceSync';
+import {
+  LeaseLostError,
+  claimSyncLease,
+} from '../../services/integrations/googleWorkspaceSyncLease';
 import { processGoogleDataPurge } from '../../services/integrations/googleDataPurge';
 import {
-  FOLDER,
   FakeGoogle,
-  GDOC,
+  LEASE,
+  LEGAL,
+  NOTES,
+  SCAN,
   T0,
   addAccount,
   assert,
@@ -142,31 +149,6 @@ test('an unchanged calendar is not rewritten', async () => {
     );
   });
 });
-
-const LEGAL: GoogleDriveFile = { id: 'legal', name: 'Legal', mimeType: FOLDER, parents: ['root'] };
-const LEASE: GoogleDriveFile = {
-  id: 'lease',
-  name: 'Lease',
-  mimeType: GDOC,
-  parents: ['legal'],
-  modifiedTime: '2026-09-20T12:00:00.000Z',
-};
-const NOTES: GoogleDriveFile = {
-  id: 'notes',
-  name: 'notes.txt',
-  mimeType: 'text/plain',
-  parents: ['root'],
-  size: '20',
-  modifiedTime: '2026-09-21T12:00:00.000Z',
-};
-const SCAN: GoogleDriveFile = {
-  id: 'scan',
-  name: 'scan.pdf',
-  mimeType: 'application/pdf',
-  parents: ['legal'],
-  size: '900',
-  modifiedTime: '2026-09-22T12:00:00.000Z',
-};
 
 test('drive rows carry folder paths and text, and unchanged text is not re-downloaded', async () => {
   await withUser(async ({ userId, email }) => {
@@ -327,6 +309,81 @@ test('a refresh that lost its lease stops without overwriting the new owner', as
     equal(state.lastStartedAt?.toISOString(), takeover.toISOString(), 'its stamp is untouched');
     equal(state.lastSuccessfulSyncAt, null, 'the displaced refresh did not claim success');
     equal(google.count('download'), 0, 'the displaced refresh stopped before downloading');
+  });
+});
+
+test('a refresh that lost its lease stops paging through Drive', async () => {
+  await withUser(async ({ userId }) => {
+    const google = new FakeGoogle();
+    google.files = [LEGAL, LEASE, NOTES, SCAN];
+    google.pageSize = 1;
+    google.delayMs = 300;
+    const options = { fetcher: google.fetcher, now: T0, leaseRenewMs: 0 };
+    const displaced = ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, options);
+    for (let attempt = 0; attempt < 200 && google.count('list') === 0; attempt += 1)
+      await pause(10);
+    await prisma.userDataProviderSyncState.update({
+      where: { userId_source: { userId, source: GOOGLE_DRIVE_SOURCE } },
+      data: { status: 'SYNCING', lastStartedAt: later(10) },
+    });
+    equal(await displaced, 'in_progress', 'the displaced refresh defers to the new owner');
+    assert(
+      google.count('list') <= 2,
+      `it stopped paging, after ${google.count('list')} of 4 pages`
+    );
+  });
+});
+
+test('searches racing on a first refresh claim one lease and none fails', async () => {
+  await withUser(async ({ userId }) => {
+    const claims = await Promise.all(
+      Array.from({ length: 8 }, () => claimSyncLease(userId, GOOGLE_CALENDAR_SOURCE, T0))
+    );
+    equal(claims.filter((lease) => lease !== null).length, 1, 'exactly one caller refreshes');
+  });
+});
+
+test('parallel renewals keep a held lease, and work after the end is told to stop', async () => {
+  await withUser(async ({ userId }) => {
+    const lease = await claimSyncLease(userId, GOOGLE_DRIVE_SOURCE, T0, 0);
+    assert(lease !== null, 'the lease is free to claim');
+    await Promise.all(Array.from({ length: 8 }, () => lease.keepAlive()));
+    equal(await lease.finish({ status: 'CONNECTED' }), true, 'the refresh still held its lease');
+    const late = await lease.keepAlive().then(
+      () => 'renewed',
+      (error: unknown) => (error instanceof LeaseLostError ? 'stopped' : 'failed')
+    );
+    equal(late, 'stopped', 'a download still running after the refresh ended');
+  });
+});
+
+test('writing rows checks the lease after each one', async () => {
+  await withUser(async ({ userId, email }) => {
+    const doc = (id: string, revision: string): GoogleWorkspaceDocument => ({
+      source: GOOGLE_DRIVE_SOURCE,
+      googleAccountEmail: email,
+      externalId: `${email}:${id}`,
+      title: id,
+      content: revision,
+      metadata: {},
+      contentHash: `${id}:${revision}`,
+    });
+    const write = (revision: string, keepAlive: () => Promise<void>): Promise<unknown> =>
+      applyGoogleDocuments({
+        userId,
+        source: GOOGLE_DRIVE_SOURCE,
+        accountEmail: email,
+        documents: [doc('a', revision), doc('b', revision)],
+        keepAlive,
+      });
+    await write('one', () => Promise.resolve());
+    const second = await write('two', () => Promise.reject(new LeaseLostError())).then(
+      () => 'finished',
+      () => 'stopped'
+    );
+    equal(second, 'stopped', 'a lost lease stops the write');
+    const stored = (await rows(userId, GOOGLE_DRIVE_SOURCE)).map((row) => row.content);
+    equal(stored.sort().join(','), 'one,two', 'it stopped after the first row');
   });
 });
 

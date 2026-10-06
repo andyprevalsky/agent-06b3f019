@@ -29,6 +29,37 @@ export const later = (minutes: number): Date => new Date(T0.getTime() + minutes 
 export const FOLDER = 'application/vnd.google-apps.folder';
 export const GDOC = 'application/vnd.google-apps.document';
 
+/** A small Drive: one folder holding a doc, a text file and a PDF. */
+export const LEGAL: GoogleDriveFile = {
+  id: 'legal',
+  name: 'Legal',
+  mimeType: FOLDER,
+  parents: ['root'],
+};
+export const LEASE: GoogleDriveFile = {
+  id: 'lease',
+  name: 'Lease',
+  mimeType: GDOC,
+  parents: ['legal'],
+  modifiedTime: '2026-09-20T12:00:00.000Z',
+};
+export const NOTES: GoogleDriveFile = {
+  id: 'notes',
+  name: 'notes.txt',
+  mimeType: 'text/plain',
+  parents: ['root'],
+  size: '20',
+  modifiedTime: '2026-09-21T12:00:00.000Z',
+};
+export const SCAN: GoogleDriveFile = {
+  id: 'scan',
+  name: 'scan.pdf',
+  mimeType: 'application/pdf',
+  parents: ['legal'],
+  size: '900',
+  modifiedTime: '2026-09-22T12:00:00.000Z',
+};
+
 /** Google at the fetch boundary: mutable state plus a log of what was asked. */
 export class FakeGoogle {
   events: GoogleCalendarEvent[] = [];
@@ -40,6 +71,8 @@ export class FakeGoogle {
   rateLimitDownloads = false;
   /** How long Google takes to answer each call. */
   delayMs = 0;
+  /** Files per page of the Drive listing; 0 returns them all in one page. */
+  pageSize = 0;
   calls: string[] = [];
   private token = 1;
 
@@ -85,7 +118,13 @@ export class FakeGoogle {
     }
     if (path.endsWith('/drive/v3/files')) {
       this.calls.push('list');
-      return this.json({ files: this.files });
+      if (this.pageSize <= 0) return this.json({ files: this.files });
+      const start = Number(url.searchParams.get('pageToken') ?? 0);
+      const end = start + this.pageSize;
+      return this.json({
+        files: this.files.slice(start, end),
+        ...(end < this.files.length ? { nextPageToken: String(end) } : {}),
+      });
     }
     const fileId = /\/files\/([^/]+)/.exec(path)?.[1];
     if (fileId !== undefined) {
