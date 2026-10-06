@@ -517,6 +517,178 @@ def test_refreshes_stale_volume_dependency_trees(tmp_path: Path) -> None:
     assert (repo / "agents/venv/.cloudbench-deps-fingerprint").is_file()
 
 
+@pytest.mark.parametrize("fault", ["", "unsupported", "denied", "mismatch", "interrupt"])
+def test_fresh_dependency_overlay_prisma_client_preserves_checkout_and_copy_boundaries(
+    tmp_path: Path, fault: str
+) -> None:
+    """Exercise the actual hydration owner with a bounded mount transport.
+
+    Kernel copy-up is verified separately with the real image; this compact
+    deploy control owns admission, isolation, fallback and cancellation.
+    """
+    donor, repo, commands = (tmp_path / name for name in ("donor", "repo", "commands"))
+    _write_manifests(donor)
+    _write_manifests(repo, lock="different" if fault == "mismatch" else "same")
+    commands.mkdir()
+    root_tree = donor / "node_modules"
+    root_tree.mkdir()
+    (root_tree / "backend-workspace").symlink_to("../back-end")
+    for checkout, value in ((donor, "donor-source"), (repo, "current-source")):
+        (checkout / "back-end/source.js").write_text(value)
+    (donor / "back-end/node_modules/@prisma/client").mkdir(parents=True)
+    (donor / "back-end/node_modules/@prisma/client/generated").write_text("donor-schema")
+    python = donor / "agents/venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    python.chmod(0o755)
+    (python.parent / "activate").write_text(f'VIRTUAL_ENV="{python.parent.parent}"\n')
+    mounts, calls = tmp_path / "mounts.json", tmp_path / "calls.jsonl"
+    mounts.write_text("{}")
+    calls.write_text("")
+    real_rsync = shutil.which("rsync")
+    assert real_rsync
+    transport = f"""#!{sys.executable}
+import json, os, pathlib, shutil, signal, sys
+name = pathlib.Path(sys.argv[0]).name
+state = pathlib.Path({str(mounts)!r}); calls = pathlib.Path({str(calls)!r})
+fault = {fault!r}; args = sys.argv[1:]; mounted = json.loads(state.read_text())
+with calls.open('a') as log: log.write(json.dumps([name, args]) + '\\n')
+if name == 'uname': print('Darwin' if fault == 'unsupported' else 'Linux')
+elif name == 'id': print('0')
+elif name == 'mount':
+    if fault == 'denied': raise SystemExit(32)
+    options = args[args.index('-o') + 1]; target = args[-1]
+    lower = dict(part.split('=', 1) for part in options.split(',') if '=' in part)['lowerdir']
+    shutil.copytree(lower, target, symlinks=True, dirs_exist_ok=True)
+    mounted[target] = options; state.write_text(json.dumps(mounted))
+    if fault == 'interrupt': os.kill(os.getppid(), signal.SIGTERM)
+elif name == 'findmnt':
+    target = args[-1]
+    if target not in mounted: raise SystemExit(1)
+    print('overlay ' + mounted[target])
+elif name == 'umount':
+    target = args[-1]; mounted.pop(target, None); state.write_text(json.dumps(mounted))
+    shutil.rmtree(target); pathlib.Path(target).mkdir()
+elif name == 'rsync':
+    if os.environ.get('UNREADABLE_SOURCE') == args[-2]: raise SystemExit(5)
+    os.execv({real_rsync!r}, [{real_rsync!r}, *args])
+"""
+    for name in ("uname", "id", "mount", "findmnt", "umount", "rsync"):
+        command = commands / name
+        command.write_text(transport)
+        command.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}", CLOUDBENCH_DEPENDENCY_OVERLAY="1"),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    operations = [json.loads(line) for line in calls.read_text().splitlines()]
+    if fault == "mismatch":
+        assert result.returncode != 0
+        assert not any(name in ("mount", "rsync") for name, _ in operations)
+        return
+    if fault == "interrupt":
+        assert result.returncode == 143
+        assert json.loads(mounts.read_text()) == {}
+        assert not (repo / "node_modules/.cloudbench-deps-fingerprint").exists()
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    mounted = [args for name, args in operations if name == "mount"]
+    copies = [args for name, args in operations if name == "rsync"]
+    if not fault:
+        assert len(mounted) == 3 and not copies, "matching fresh dependencies were copied instead of overlaid"
+        assert all("metacopy=on" in args[args.index("-o") + 1] for args in mounted)
+        assert (repo / ".cloudbench-deps-overlays").stat().st_mode & 0o777 == 0o700
+    else:
+        assert copies and (fault != "unsupported" or not mounted)
+    assert (repo / "node_modules/backend-workspace/source.js").read_text() == "current-source"
+    assert str(repo / "agents/venv") in (repo / "agents/venv/bin/activate").read_text()
+    generated = repo / "back-end/node_modules/@prisma/client/generated"
+    generated.write_text("checkout-schema")
+    assert (donor / "back-end/node_modules/@prisma/client/generated").read_text() == "donor-schema"
+    assert str(donor / "agents/venv") in (donor / "agents/venv/bin/activate").read_text()
+    if not fault:
+        operations_before = len(operations)
+        cached = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)],
+            env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}"),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert cached.returncode == 0, cached.stdout + cached.stderr
+        later = [json.loads(line) for line in calls.read_text().splitlines()][operations_before:]
+        assert not any(name in ("mount", "rsync") for name, _ in later)
+        assert generated.read_text() == "checkout-schema"
+        cached_python = repo / "agents/venv/bin/python"
+        cached_python.write_text("#!/usr/bin/env bash\nexit 5\n")
+        repaired = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)],
+            env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}", UNREADABLE_SOURCE=f"{repo}/agents/venv/"),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert repaired.returncode == 0, "immutable donor repair attempted to read the unhealthy cached tree"
+        assert cached_python.read_text() == python.read_text()
+        shutil.rmtree(repo / "agents/venv")
+        remounted = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)],
+            env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}", CLOUDBENCH_DEPENDENCY_OVERLAY="1"),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert remounted.returncode == 0, remounted.stdout + remounted.stderr
+        old_python_marker = (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text()
+        _write_manifests(repo, requirements="replacement-requirement")
+        _write_fake_python_with_venv(commands / "python3", fail_pip=True)
+        rebuild_env = dict(
+            os.environ,
+            PATH=f"{commands}:{os.environ['PATH']}",
+            CLOUDBENCH_REBUILD_DEPS="1",
+            INSTALL_LOG=str(tmp_path / "install.log"),
+        )
+        failed_python = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)],
+            env=rebuild_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert failed_python.returncode != 0
+        assert (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text() == old_python_marker
+        assert str(repo / "agents/venv") in (repo / "agents/venv/bin/activate").read_text()
+        (commands / "python3").unlink()
+        _write_manifests(repo)
+        (repo / "back-end/package-lock.json").write_text("different revision")
+        rejected = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)],
+            env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}"),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert rejected.returncode != 0
+        assert generated.read_text() == "checkout-schema"
+        assert len(json.loads(mounts.read_text())) == 2, "new revision detached prior successful dependencies"
+        npm = commands / "npm"
+        npm.write_text("#!/usr/bin/env bash\nexit 9\n")
+        npm.chmod(0o755)
+        failed_node = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)],
+            env=rebuild_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert failed_node.returncode == 9
+        assert generated.read_text() == "checkout-schema"
+        assert not (repo / "node_modules/.cloudbench-deps-fingerprint").exists()
+
+
 def test_refreshes_fingerprinted_venv_when_runtime_files_are_unreadable(
     tmp_path: Path,
 ) -> None:
@@ -8087,6 +8259,8 @@ def test_execution_provenance_binds_immutable_snapshot_not_mutable_checkout(
         "region": "iad",
         "run_timeout_seconds": "7200",
         "benchmark_wall_clock_backstop_seconds": "300",
+        "benchmark_demo_cache_read_only": "1",
+        "fast_mode_cache_disable_write_through": "1",
     }
 
     # Editing the checkout after snapshot creation cannot alter the attested

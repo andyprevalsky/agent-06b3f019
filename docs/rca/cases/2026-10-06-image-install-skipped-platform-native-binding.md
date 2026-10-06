@@ -22,7 +22,7 @@ sources:
   - fleet run 20261006-025437-62250
   - plan:.context/benchmarks/campaigns/campaign-20261006-095345-47794/cli-validator-result.safe.json
   - plan:.context/native-rollup-installer-repro
-repro: agents/benchmarks/cloudbench_image_installer_test.py::test_cloudbench_image_build_loads_actual_rollup_native_without_version_or_manifest_changes
+repro: agents/benchmarks/cloudbench_image_installer_test.py::test_cloudbench_image_build_loads_actual_frontend_compilers_without_version_or_manifest_changes
 status: open
 ---
 

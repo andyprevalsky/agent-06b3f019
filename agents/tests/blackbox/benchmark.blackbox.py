@@ -899,8 +899,8 @@ def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    # Regeneration/fatal-marker controls plus both donor layouts and containment.
-    assert "5 passed" in result.stdout
+    # Regeneration, donor layouts, containment and isolated overlay/fallback controls.
+    assert "10 passed" in result.stdout
 
 
 def test_cloudbench_boot_payload_behavior_is_in_permanent_gate():
