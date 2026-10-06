@@ -2,6 +2,7 @@
 set -eo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CALLER_DIR="$PWD"
 # Reject --single-box BEFORE cd into agents/: cloudbench multi-workstream
 # sandboxes are scripts-only, and a failed cd would exit under `set -e` without
 # the parallel-safety message the guard exists to print.
@@ -41,6 +42,15 @@ elif command -v python >/dev/null 2>&1; then
 else
     echo "❌ No Python interpreter found (venv/bin/python, python3, or python)." >&2
     exit 127
+fi
+
+if [[ "${1:-}" == "monitor" ]]; then
+    shift
+    if [[ "$PY" == venv/* ]]; then
+        PY="$ROOT_DIR/agents/$PY"
+    fi
+    cd "$CALLER_DIR"
+    exec "$PY" -u "$ROOT_DIR/scripts/cloudbench-monitor.py" "$@"
 fi
 
 if [[ "${1:-}" == "list" || "${1:-}" == "--list" ]]; then
@@ -86,6 +96,7 @@ fi
 usage() {
     cat <<'EOF'
 Usage: scripts/run-bench <slice-or-task...> [options]
+       scripts/run-bench monitor <exact-run-directory>
 
 Selections:
   daily | pre-deploy | rose-bench | polar-bench | incomplete
@@ -101,6 +112,21 @@ Campaign options:
 
 The ordinary no-flag path runs the resolved slice as one fully parallel,
 per-bench-isolated cloud fleet. Use --local first to opt into local execution.
+
+Startup reuse:
+  Completed dependency snapshots are reused automatically, including from a
+  fresh checkout. Source-only changes synchronize code after boot.
+  --provision-pool N  Prepare N stopped, reusable task Machines once. Ordinary
+                      runs automatically claim and return this workspace pool.
+                      Stopped Machines retain billable volume storage.
+  --timeout SECONDS  Set this run's task execution timeout.
+  --wait             Wait for the detached fleet and return its exit status.
+
+Monitoring:
+  Every launch prints its exact monitoring handle. Poll every 30 seconds,
+  checking terminal lifecycle on every observation, including stale cards.
+  Task PASS/FAIL is available before cleanup. Observe through resource release;
+  a stale observation is a warning, never authorization to restart the run.
 EOF
 }
 

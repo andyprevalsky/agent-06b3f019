@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 RENDERED_ROOT = ROOT / "prompt-review" / "rendered"
-REPOS = ["ours", "claude-code-src", "openclaw", "hermes-agent", "codex"]
+REPOS = ["ours", "claude-code-src", "openclaw", "hermes-agent", "codex", "prime-agent"]
 
 # Patterns that indicate sidecar metadata accidentally emitted by renderers.
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)

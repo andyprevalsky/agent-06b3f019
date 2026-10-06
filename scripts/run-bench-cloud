@@ -2469,6 +2469,10 @@ for m in json.load(sys.stdin) or []:
     # via the git-common dir (same pattern as pool claims).
     printf '%s %s %s %s\n' "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP" \
         > "$WARM_DEPS_STATE_FILE"
+    if ! cloudbench_publish_warm_deps_state "$APP" "$maintenance_mid" "$VOL_ID" \
+        "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP"; then
+        echo "⚠️  shared dependency proof publication failed; this checkout retains its verified snapshot" >&2
+    fi
     echo "✅ warm volume deps refreshed; fresh snapshot: $NEW_SNAP"
     echo "   state: $WARM_DEPS_STATE_FILE"
     exit 0

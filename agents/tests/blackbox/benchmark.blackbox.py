@@ -942,7 +942,7 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
             "-q",
             str(behavioral_suite),
             "-k",
-            "central_refresh_ or refresh_deps_ or fetch_ref_restores_dirty_exact_sha or warm_deps_preflight or isolated_backend or local_predeploy_skips_wmh",
+            "central_refresh_ or refresh_deps_ or fetch_ref_restores_dirty_exact_sha or warm_deps_preflight or fresh_controller_reuses_only_proven_donor_dependencies or verified_legacy_snapshot or dependency_proof_publication or isolated_backend or local_predeploy_skips_wmh",
         ],
         cwd=repo_root,
         text=True,
@@ -954,8 +954,9 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     # Count tracks the -k filter above. I-03/I-04 token+fetch-ref cases,
     # controller-token/private-repo auth, bounded dependency-refresh ownership,
     # isolated-backend queue alignment, exact workspace replay, and pgvector
-    # installation plus the SIGPIPE-safe target-mode parse cover 33 cases.
-    assert "33 passed" in result.stdout
+    # installation, shared snapshot discovery, pinned controls, and the
+    # SIGPIPE-safe target-mode parse cover 44 cases.
+    assert "44 passed" in result.stdout
 
 
 def test_run_benchmark_task_selection_suite_is_in_permanent_gate():

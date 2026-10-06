@@ -19,6 +19,7 @@
   --c-openclaw: #9ece6a;  /* green */
   --c-hermes:   #e0af68;  /* yellow */
   --c-codex:    #7dcfff;  /* cyan */
+  --c-prime:    #ff9e64;  /* orange */
 
   --weak:    #5eccaf;     /* teal — weak-match flag */
   --done:    #9ece6a;     /* completed */
@@ -275,6 +276,7 @@ button { font: inherit; color: inherit; }
 .col-openclaw  { border-left-color: var(--c-openclaw); }
 .col-hermes    { border-left-color: var(--c-hermes); }
 .col-codex     { border-left-color: var(--c-codex); }
+.col-prime     { border-left-color: var(--c-prime); }
 /* First visible column never shows its left divider. */
 .cols > .col:not(.hidden):first-of-type { border-left-color: transparent; }
 
@@ -296,6 +298,7 @@ button { font: inherit; color: inherit; }
 .col-openclaw  .col-head { border-top-color: var(--c-openclaw); }
 .col-hermes    .col-head { border-top-color: var(--c-hermes); }
 .col-codex     .col-head { border-top-color: var(--c-codex); }
+.col-prime     .col-head { border-top-color: var(--c-prime); }
 
 .col-tag {
   font-family: var(--mono);
@@ -312,6 +315,7 @@ button { font: inherit; color: inherit; }
 .tag-openclaw  { background: rgba(158,206,106,0.18); color: var(--c-openclaw); }
 .tag-hermes    { background: rgba(224,175,104,0.18); color: var(--c-hermes); }
 .tag-codex     { background: rgba(125,207,255,0.18); color: var(--c-codex); }
+.tag-prime     { background: rgba(255,158,100,0.18); color: var(--c-prime); }
 
 .col-sub {
   font-size: 11px;

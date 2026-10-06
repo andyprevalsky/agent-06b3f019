@@ -178,6 +178,14 @@ Use `scripts/run-bench` for every suite, slice, task, bounded-concurrency
 campaign, and repeated isolated trial. Do not invoke `run-bench-fleet`,
 `run-bench-cloud`, or an ad hoc repetition loop directly.
 
+The ordinary CLI automatically reuses verified completed dependency snapshots
+across fresh checkouts. Follow CLAUDE.md's "Cloud startup reuse" guidance and
+`scripts/run-bench --help`; source-only changes do not require dependency rebuilds.
+
+Follow CLAUDE.md's "Monitor every cloud launch" instructions and the exact command
+printed at launch. Poll every 30 seconds, check terminal status on every poll, and
+observe through owned-resource release. A stale observation never authorizes a reset.
+
 ~~~text
 /descend or operator
   → scripts/run-bench <slice-or-task...> [--concurrency N] [-k K|--runs K]

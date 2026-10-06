@@ -4721,7 +4721,7 @@ def test_snapshot_and_pool_dependency_proofs_are_exact() -> None:
     fleet = FLEET_SCRIPT.read_text()
 
     assert '[ "$_rest" = "$SNAP_ID" ]' in fleet
-    assert 'RECORDED_SNAP_ID="$(awk' in fleet
+    assert 'RECORDED_SNAP_ID="$(warm_deps_recorded_state' in fleet
     assert 'SNAP_ID="$RECORDED_SNAP_ID"' in fleet
     assert "using recorded proven snapshot" in fleet
     assert "an interrupted refresh" in fleet
@@ -5180,6 +5180,10 @@ CALLS={shlex.quote(str(calls))}
 CAPTURED_WRAPPER={shlex.quote(str(captured_wrapper))}
 CAPTURED_ENV={shlex.quote(str(captured_env))}
 CAPTURED_ENV_MODE={shlex.quote(str(captured_env_mode))}
+WARM_SOURCE_SIZE_GB=20
+SNAP_ID=verified-snapshot
+machine_volume_size_gb() {{ printf 20; }}
+inventory_machine_field() {{ [ "$2" = "clone_cmd_inert" ] && printf 1; }}
 reserve_worker_machine_slot() {{ return 0; }}
 capacity_release_reservation() {{ return 0; }}
 clone_machine_target() {{ printf 'feedface000001'; }}
@@ -5327,7 +5331,7 @@ def test_autoscaler_stops_cleanly_when_its_benchmark_child_finishes(
     assert 'mv "$completed_tmp" "$out/autoscaler.completed-after-child"' in autoscaler
     assert "primary disappeared from provider inventory before child completion" in autoscaler
     assert "mandatory_autoscaler_process_acceptable" in final_acceptance
-    assert final_acceptance.index("worker capacity below desired") < final_acceptance.index(
+    assert final_acceptance.index("worker capacity incomplete") < final_acceptance.index(
         "mandatory_autoscaler_process_acceptable"
     )
 
@@ -15090,6 +15094,13 @@ def _preflight_harness(
     refreshed_snapshot: str = "snap-transaction",
     state_filename: str = "cloudbench-warm-deps.fp",
     selected_state_name: str = "cloudbench-warm-deps.fp",
+    warm_inventory: list | None = None,
+    node_fp: str = "NODEFP",
+    python_fp: str = "PYFP",
+    snapshot_status: str = "created",
+    publish_status: int = 0,
+    pinned_snapshot: bool = False,
+    state_after_hydrate: str | None = None,
 ) -> tuple:
     """Run warm_deps_preflight with stubbed FLY/git/refresh; returns (result, calls)."""
     fleet = FLEET_SCRIPT.read_text()
@@ -15101,6 +15112,10 @@ def _preflight_harness(
             "warm_deps_preflight() {",
         )
     )
+    if "hydrate_warm_deps_state() {" in fleet:
+        helpers += _extract_fleet_function(fleet, "hydrate_warm_deps_state() {")
+    if "warm_deps_recorded_state() {" in fleet:
+        helpers += _extract_fleet_function(fleet, "warm_deps_recorded_state() {")
     root = tmp_path / "root"
     (root / "scripts").mkdir(parents=True)
     fake_cloud = root / "scripts" / "run-bench-cloud"
@@ -15108,7 +15123,7 @@ def _preflight_harness(
         "#!/usr/bin/env bash\n"
         'echo "refresh-deps $*" >> "$CALLS_FILE"\n'
         'echo "PATCH=${CLOUDBENCH_LOCAL_PATCH_SOURCE:-}:${CLOUDBENCH_LOCAL_PATCH_SHA256:-}" >> "$CALLS_FILE"\n'
-        f'printf "NODEFP PYFP 2000 {refreshed_snapshot}\\n" > "$COMMON/cloudbench-warm-deps.fp"\n'
+        f'printf "{node_fp} {python_fp} 2000 {refreshed_snapshot}\\n" > "$COMMON/cloudbench-warm-deps.fp"\n'
         f"exit {refresh_status}\n"
     )
     fake_cloud.chmod(0o755)
@@ -15120,10 +15135,16 @@ def _preflight_harness(
     calls = tmp_path / "calls"
     calls.write_text("")
 
+    interleaving = "" if state_after_hydrate is None else (
+        'printf "%s\\n" ' + shlex.quote(state_after_hydrate) + ' > "$WARM_DEPS_STATE_FILE"'
+    )
     script = f"""set -uo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 APP=bench-app
+WARM_ID=warm-machine
 VOL_ID=vol_warm
 SNAP_ID=snap-current
+warm_json={shlex.quote(json.dumps(warm_inventory or []))}
 BENCH_REF=abc123
 FLEET_PATCH_FILE="$ROOT/pinned.diff"
 FLEET_PATCH_SHA256=pinned-digest
@@ -15135,13 +15156,21 @@ WARM_DEPS_STATE_FILE="$COMMON/{selected_state_name}"
 CLOUDBENCH_WARM_DEPS_AUTOREFRESH={autorefresh}
 export CALLS_FILE="$CALLS_FILE"
 FLY() {{
-  echo '[{{"id":"snap-current","created_at":"{__import__("datetime").datetime.fromtimestamp(snap_epoch, __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}","status":"created","size":9}},{{"id":"{refreshed_snapshot}","created_at":"2026-07-17T00:00:00Z","status":"created","size":9}},{{"id":"snap-unrelated-newer","created_at":"2026-07-17T00:01:00Z","status":"created","size":9}}]'
+  echo '[{{"id":"snap-current","created_at":"{__import__("datetime").datetime.fromtimestamp(snap_epoch, __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}","status":"{snapshot_status}","size":9}},{{"id":"{refreshed_snapshot}","created_at":"2026-07-17T00:00:00Z","status":"created","size":9}},{{"id":"snap-unrelated-newer","created_at":"2026-07-17T00:01:00Z","status":"created","size":9}}]'
 }}
-cloudbench_node_dependency_fingerprint() {{ echo NODEFP; }}
-cloudbench_manifest_fingerprint() {{ echo PYFP; }}
+cloudbench_node_dependency_fingerprint() {{ echo {node_fp}; }}
+cloudbench_manifest_fingerprint() {{ echo {python_fp}; }}
+cloudbench_publish_warm_deps_state() {{ echo "publish-proof $*" >> "$CALLS_FILE"; return {publish_status}; }}
 CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)
 git() {{ [ "{int(dirty)}" = "1" ] && return 1 || return 0; }}
 {helpers}
+{'' if pinned_snapshot else 'SNAPSHOTS_JSON="$(FLY volume snapshots list)"'}
+if [ "{int(pinned_snapshot)}" = "0" ] && declare -F hydrate_warm_deps_state >/dev/null; then hydrate_warm_deps_state; fi
+{interleaving}
+if declare -F warm_deps_recorded_state >/dev/null; then
+    recorded="$(warm_deps_recorded_state 2>/dev/null || true)"
+    [ -z "$recorded" ] || read -r _ _ _ SNAP_ID <<< "$recorded"
+fi
 warm_deps_preflight || exit $?
 echo "SNAP_AFTER=$SNAP_ID"
 """
@@ -15153,6 +15182,163 @@ echo "SNAP_AFTER=$SNAP_ID"
         check=False,
     )
     return result, calls
+
+
+@pytest.mark.parametrize("scenario", ["fresh", "interleaved", "volume-mismatch", "donor-mismatch", "deps-mismatch", "pending", "expired"])
+def test_fresh_controller_reuses_only_proven_donor_dependencies(tmp_path: Path, scenario: str) -> None:
+    node, python = "1" * 64, "2" * 64
+    key = "rose_cloudbench_deps_" + hashlib.sha256(f"{node}\0{python}".encode()).hexdigest()[:32]
+    proof = [node, python, "1000", "snap-current", "vol_warm", "warm-machine", "bench-app"]
+    if scenario == "volume-mismatch":
+        proof[4] = "vol_foreign"
+    elif scenario == "donor-mismatch":
+        proof[5] = "another-machine"
+    elif scenario == "deps-mismatch":
+        proof[0] = "3" * 64
+    inventory = [{"id": "warm-machine", "config": {
+        "mounts": [{"volume": "vol_warm"}], "metadata": {key: " ".join(proof)},
+    }}]
+    result, calls = _preflight_harness(
+        tmp_path, state_line=None, dirty=False, autorefresh="1",
+        snap_epoch=1 if scenario == "expired" else 2000,
+        snapshot_status="running" if scenario == "pending" else "created",
+        warm_inventory=inventory, node_fp=node, python_fp=python,
+        state_after_hydrate=f"{'3' * 64} {'4' * 64} 1000 snap-other" if scenario == "interleaved" else None,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    if scenario in {"fresh", "interleaved"}:
+        assert calls.read_text() == "", "fresh checkout unnecessarily rebuilt and snapshotted reusable dependencies"
+        assert "SNAP_AFTER=snap-current" in result.stdout
+        if scenario == "fresh":
+            assert (tmp_path / "common/cloudbench-warm-deps.fp").read_text().split() == proof[:4]
+    else:
+        assert calls.read_text().count("refresh-deps --refresh-deps") == 1
+        assert "SNAP_AFTER=snap-transaction" in result.stdout
+
+
+@pytest.mark.parametrize("publish_status", [0, 1])
+def test_verified_legacy_snapshot_is_shared_without_rebuild_or_run_rejection(tmp_path: Path, publish_status: int) -> None:
+    node, python = "1" * 64, "2" * 64
+    inventory = [{"id": "warm-machine", "config": {"mounts": [{"volume": "vol_warm"}]}}]
+    result, calls = _preflight_harness(
+        tmp_path, state_line=f"{node} {python} 1000 snap-current", dirty=False,
+        autorefresh="1", snap_epoch=2000, warm_inventory=inventory,
+        node_fp=node, python_fp=python, publish_status=publish_status,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert calls.read_text().splitlines() == [f"publish-proof bench-app warm-machine vol_warm {node} {python} 1000 snap-current"]
+    assert "SNAP_AFTER=snap-current" in result.stdout
+    if publish_status:
+        assert "publication failed" in result.stderr
+
+
+def test_pinned_warm_deps_preflight_keeps_verified_snapshot_without_unlisted_inventory(tmp_path: Path) -> None:
+    node, python = "1" * 64, "2" * 64
+    inventory = [{"id": "warm-machine", "config": {"mounts": [{"volume": "vol_warm"}]}}]
+    result, calls = _preflight_harness(
+        tmp_path, state_line=f"{node} {python} 1000 snap-current", dirty=False,
+        autorefresh="1", snap_epoch=2000, warm_inventory=inventory,
+        node_fp=node, python_fp=python, pinned_snapshot=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "unbound variable" not in result.stderr
+    assert calls.read_text() == ""
+    assert "SNAP_AFTER=snap-current" in result.stdout
+
+
+def test_dependency_proof_publication_uses_only_machine_metadata(tmp_path: Path) -> None:
+    requests = []
+    response_status = [204]
+
+    class MetadataHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append((self.path, body, self.headers.get("Authorization")))
+            authorized = self.headers.get("Authorization") in {
+                "Bearer fixture-token", "FlyV1 fm2_refreshed_fixture",
+            }
+            self.send_response(response_status[0] if authorized else 403)
+            self.end_headers()
+
+        def log_message(self, *_args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MetadataHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    node, python = "1" * 64, "2" * 64
+    key = "rose_cloudbench_deps_" + hashlib.sha256(f"{node}\0{python}".encode()).hexdigest()[:32]
+    try:
+        env = {"PATH": os.environ["PATH"], "FLY_API_TOKEN": "fixture-token",
+               "FLY_API_HOSTNAME": f"http://127.0.0.1:{server.server_port}"}
+        command = ["bash", "-c", f'source {shlex.quote(str(ENV_HELPER_SCRIPT))}; cloudbench_publish_warm_deps_state bench-app warm-machine vol_warm {node} {python} 1000 snap-current']
+        for expected in (0, 1):
+            response_status[0] = 204 if expected == 0 else 503
+            result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=10)
+            assert result.returncode == expected, result.stdout + result.stderr
+            assert "fixture-token" not in result.stdout + result.stderr
+        assert requests == [(f"/v1/apps/bench-app/machines/warm-machine/metadata/{key}",
+                             {"value": f"{node} {python} 1000 snap-current vol_warm warm-machine bench-app"},
+                             "Bearer fixture-token")] * 2
+        broker_dir = tmp_path / "bin"
+        broker_dir.mkdir()
+        broker = broker_dir / "flyctl"
+        broker.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, sys\n"
+            "pathlib.Path(os.environ['BROKER_RECEIPT']).write_text(json.dumps({\n"
+            "    'argv': sys.argv[1:], 'selected': os.environ.get('FLY_API_TOKEN'),\n"
+            "    'access_override': os.environ.get('FLY_ACCESS_TOKEN')}))\n"
+            "mode = os.environ.get('BROKER_MODE', 'ok')\n"
+            "if mode == 'fail':\n"
+            "    print(os.environ['FLY_API_TOKEN'], file=sys.stderr)\n"
+            "    raise SystemExit(1)\n"
+            "token = 'FlyV1 fm2_refreshed_fixture'\n"
+            "if mode == 'empty': token = ''\n"
+            "if mode == 'bad-header': token += '\\ninvalid-header'\n"
+            "print('invalid-json' if mode == 'malformed' else json.dumps({'token': token}))\n"
+        )
+        broker.chmod(0o755)
+        receipt = tmp_path / "broker.json"
+        selected_session = "fm1r_selected_fixture,fm2_discharge_one_fixture,fm2_discharge_two_fixture"
+        refresh_env = {**env, "PATH": f"{broker_dir}:{env['PATH']}",
+                       "FLY_API_TOKEN": selected_session,
+                       "FLY_ACCESS_TOKEN": "different-fixture-session",
+                       "BROKER_RECEIPT": str(receipt)}
+        response_status[0] = 204
+        refreshed = subprocess.run(command, env=refresh_env, text=True, capture_output=True, timeout=10)
+        assert refreshed.returncode == 0, refreshed.stdout + refreshed.stderr
+        assert refreshed.stdout + refreshed.stderr == ""
+        assert json.loads(receipt.read_text()) == {
+            "argv": ["auth", "token", "--json", "--quiet"],
+            "selected": selected_session, "access_override": None,
+        }
+        assert requests[-1] == (requests[0][0], requests[0][1], "FlyV1 fm2_refreshed_fixture")
+        request_count = len(requests)
+        for mode in ("fail", "malformed", "empty", "bad-header"):
+            rejected = subprocess.run(command, env={**refresh_env, "BROKER_MODE": mode},
+                                      text=True, capture_output=True, timeout=10)
+            assert rejected.returncode == 1
+            assert rejected.stdout + rejected.stderr == ""
+            assert len(requests) == request_count
+        probe = tmp_path / "transport"
+        probe.mkdir()
+        (probe / "sitecustomize.py").write_text(
+            'import urllib.request\ndef unexpected(*args, **kwargs):\n'
+            '    raise RuntimeError("remote HTTP reached transport")\n'
+            'urllib.request.urlopen = unexpected\n'
+        )
+        remote_env = {**env, "FLY_API_HOSTNAME": "http://machines.example.invalid", "PYTHONPATH": str(probe)}
+        rejected = subprocess.run(command, env=remote_env, text=True, capture_output=True, timeout=10)
+        assert rejected.returncode == 1
+        assert rejected.stdout + rejected.stderr == ""
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+    fleet = FLEET_SCRIPT.read_text()
+    assert fleet.index("    hydrate_warm_deps_state\n") < fleet.index('    RECORDED_SNAP_ID=')
+    assert 'exec bash "$ROOT_DIR/scripts/run-bench-fleet"' in RUN_BENCH_SCRIPT.read_text()
 
 
 def test_warm_deps_preflight_fast_path_and_central_heal(tmp_path: Path) -> None:
@@ -15303,6 +15489,10 @@ warm_source_fetch_ref() {{
     fi
 }}
 ssh_exec() {{ bash -c "$2"; }}
+cloudbench_publish_warm_deps_state() {{
+    echo metadata >> "$CALLS"
+    printf '%s\\n' "$@" > "$METADATA_ARGS"
+}}
 FLY() {{
     if [ "$1 $2 $3" = 'ssh sftp put' ]; then
         cp "${{@: -2:1}}" "${{@: -1}}"
@@ -15321,6 +15511,7 @@ create_volume_snapshot_exact() {{ echo snapshot >> "$CALLS"; CREATED_SNAPSHOT_ID
     env = {
         "PATH": f"{bin_dir}:{os.environ['PATH']}", "CALLS": str(calls),
         "SCENARIO": scenario, "BUILT_REQUIREMENTS": str(built),
+        "METADATA_ARGS": str(tmp_path / "metadata-args"),
     }
     if scenario not in ("direct", "no_delta"):
         env.update(CLOUDBENCH_LOCAL_PATCH_SOURCE=str(patch), CLOUDBENCH_LOCAL_PATCH_SHA256=("0" * 64 if scenario == "bad_digest" else digest))
@@ -15330,7 +15521,11 @@ create_volume_snapshot_exact() {{ echo snapshot >> "$CALLS"; CREATED_SNAPSHOT_ID
     if success:
         assert built.read_bytes() == (repo / "agents/requirements.txt").read_bytes()
         assert (common / "cloudbench-warm-deps.fp").read_text().split()[3] == "snap-exact"
-        assert calls.read_text().splitlines()[-3:] == ["stopped", "snapshot", "parked"]
+        assert calls.read_text().splitlines()[-4:] == ["stopped", "snapshot", "metadata", "parked"]
+        metadata_args = (tmp_path / "metadata-args").read_text().splitlines()
+        assert metadata_args[:3] == ["fixture", "warm-fixture", "vol-exact"]
+        assert metadata_args[3:5] == (common / "cloudbench-warm-deps.fp").read_text().split()[:2]
+        assert metadata_args[-1] == "snap-exact"
         assert subprocess.check_output(["git", "-C", str(guest), "rev-parse", "HEAD"], text=True).strip() == base
         if scenario != "no_delta":
             assert (guest / "scripts/branch-only-helper.txt").read_text() == "same source as task guests\n"
@@ -20671,7 +20866,9 @@ def test_autoscaler_worker_clones_take_a_serialized_machine_slot() -> None:
     assert 'reserve_worker_machine_slot "$worker_capacity_token"' in worker
     assert worker.index("reserve_worker_machine_slot") < worker.index("clone_machine_target")
     assert 'capacity_release_reservation "$worker_capacity_token"' in worker
-    assert worker.index("clone_machine_target") < worker.index("capacity_release_reservation")
+    clone = worker.index('wid="$(clone_machine_target')
+    assert worker.index('reserve_worker_machine_slot "$worker_capacity_token"') < clone
+    assert clone < worker.index('if ! capacity_release_reservation "$worker_capacity_token";')
 
 
 def test_watchdog_collects_cancelled_artifact_after_bounded_shutdown(tmp_path: Path) -> None:
@@ -22933,6 +23130,8 @@ def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, c
             "snapshot_created_epoch() {",
             "snapshot_is_complete_exact() {",
             "warm_deps_preflight() {",
+            "hydrate_warm_deps_state() {",
+            "warm_deps_recorded_state() {",
         )
     )
     script = f"""set -uo pipefail
