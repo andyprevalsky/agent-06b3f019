@@ -25449,6 +25449,10 @@ def test_autoscaler_runtime_handoff_preserves_collection_and_capacity(
     (out / "status-proxy.port").write_text(str(f["port"]) + "\n")
     release = tmp_path / "release-collector"
     sealed = tmp_path / "guest-sealed"
+    unverified_runtime = variant in {
+        "missing_ack", "wrong_ack", "running", "wrong_run", "wrong_owner",
+        "same_bearer_sibling", "wrong_auth",
+    }
     source = fleet_source_text()
     q = shlex.quote
     expected_token = f["token"]
@@ -25567,10 +25571,30 @@ bench_autoscaler fixture-task {q(expected_machine)} fixture-workspace 0 {q(str(o
             runtime = out / "autoscaler.runtime-completed"
             failed = out / "autoscaler.failed"
             deadline = time.monotonic() + 8
-            while not runtime.exists() and not failed.exists():
-                assert scaler.poll() is None, (tmp_path / "autoscaler.log").read_text()
-                assert time.monotonic() < deadline, "autoscaler handoff did not resolve"
-                time.sleep(0.01)
+            if unverified_runtime:
+                # Invalid guest seals cannot end observation or cancel the
+                # original collector. Cross the old six-scrape failure boundary
+                # while it is held, then release its independent finish marker.
+                while True:
+                    assert scaler.poll() is None, (tmp_path / "autoscaler.log").read_text()
+                    assert child.poll() is None
+                    assert not runtime.exists()
+                    assert not failed.exists()
+                    assert not (out / "benchmark-child.finished").exists()
+                    assert not (out / "autoscaler.completed-after-child").exists()
+                    polls = tmp_path / "metrics-polls"
+                    if polls.exists() and polls.read_text().splitlines().count("missing") >= 7:
+                        break
+                    assert time.monotonic() < deadline, "held collector observation did not progress"
+                    time.sleep(0.01)
+                assert (out / "desired-worker-count").read_text().strip() == "0"
+                assert (out / "worker-clones.ids").read_text().strip() == ""
+                assert (out / "worker-ready.ids").read_text().strip() == ""
+            else:
+                while not runtime.exists() and not failed.exists():
+                    assert scaler.poll() is None, (tmp_path / "autoscaler.log").read_text()
+                    assert time.monotonic() < deadline, "autoscaler handoff did not resolve"
+                    time.sleep(0.01)
             assert child.poll() is None
             assert not (out / "benchmark-child.finished").exists()
             assert not (out / "autoscaler.completed-after-child").exists()
@@ -25592,9 +25616,16 @@ bench_autoscaler fixture-task {q(expected_machine)} fixture-workspace 0 {q(str(o
             release.touch(exist_ok=True)
             assert child.wait(timeout=5) == child_exit
             assert (out / "benchmark-child.finished").read_text().strip() == str(child_exit)
-            expected_success = variant in {"terminal", "pending_ready", "pending_removed"}
-            assert (scaler_rc == 0) is expected_success, (variant, (tmp_path / "autoscaler.log").read_text())
-            if expected_success:
+            expected_settled = unverified_runtime or variant in {"terminal", "pending_ready", "pending_removed"}
+            assert (scaler_rc == 0) is expected_settled, (variant, (tmp_path / "autoscaler.log").read_text())
+            if unverified_runtime:
+                # The exact local child exit is separate authority. Its real
+                # failure stays 1; no rejected guest seal gains runtime credit.
+                assert child_exit == 1
+                assert not failed.exists()
+                assert not runtime.exists()
+                assert (out / "autoscaler.completed-after-child").read_text().strip() == "1"
+            elif expected_settled:
                 assert not failed.exists()
                 assert runtime.read_text().strip() == f"{expected_token}|{expected_machine}"
                 assert (out / "autoscaler.completed-after-child").read_text().strip() == str(child_exit)
@@ -25603,8 +25634,6 @@ bench_autoscaler fixture-task {q(expected_machine)} fixture-workspace 0 {q(str(o
                 assert not (out / "autoscaler.completed-after-child").exists()
                 if variant == "prior_failure":
                     assert failed.read_text() == "prior-failure"
-                elif variant not in {"pending_failed", "pending_stuck", "missing_child"}:
-                    assert (tmp_path / "metrics-polls").read_text().splitlines().count("missing") == 6
         finally:
             # Retain the assertion/spawn failure while independently joining
             # every Popen already admitted, even if releasing the fixture fails.
