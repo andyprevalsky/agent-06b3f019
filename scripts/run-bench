@@ -215,6 +215,10 @@ Startup reuse:
   --provision-pool N  Prepare N stopped, reusable task Machines once. Ordinary
                       runs automatically claim and return this workspace pool.
                       Stopped Machines retain billable volume storage.
+  --fresh-volumes    Default: empty volumes for REAL task Machines; bootstrap
+                      exact source plus baked deps. SIM snapshots remain.
+                      Requires boot launch; cannot prepare a generic pool.
+  --snapshot-volumes Force restored donor volumes for a provisioning diagnostic.
   --timeout SECONDS  Set this run's task execution timeout.
   --wait             Wait for the detached fleet and return its exit status.
 
@@ -266,7 +270,7 @@ while [ "$#" -gt 0 ]; do
             INTERNAL_OPERATION=1
             FLEET_ARGS+=("$1" "$2"); shift 2
             ;;
-        --keep-clones|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier)
+        --keep-clones|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
             FLEET_ARGS+=("$1"); shift
             ;;
         -h|--help)

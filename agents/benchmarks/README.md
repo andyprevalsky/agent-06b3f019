@@ -57,6 +57,17 @@ own run. Poll that command every 30 seconds; its `--controller-status` marker
 reports the actual controller exit independently of card freshness and cleanup.
 Follow CLAUDE.md's "Monitor every cloud launch" guidance through resource release.
 
+Standard boot-launched REAL tasks use fresh volumes for both primaries and
+workers, with verified image dependencies, an authenticated exact-ref Git
+checkout and the same canonical isolated database fixture. SIM tasks and
+`--sim-on` keep snapshots and World Model assets. Use `--snapshot-volumes` for
+a restore diagnostic; generic `--provision-pool` and legacy startup retain
+their snapshot path. Source-only bootstrap changes reuse the verified image.
+Continue monitoring through exact resource release: an accepted delete plus an
+exact owned-volume `pending_destroy` or `destroyed` terminal receipt qualifies
+release even when the provider retains that object; request acceptance alone
+does not.
+
 Ordinary source-only runs reuse verified dependency images and completed
 snapshots. For an explicitly requested cold build/push measurement, use
 `scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`
@@ -93,7 +104,6 @@ deadline supersedes the older 1,800-second proof budget only for this diagnostic
 normal 7,200-second defaults remain unchanged. A task verdict does not establish
 resource release. On a cutoff, signal only the exact owned controller, let its
 cleanup traps run, audit its resources, and grant no acceptance credit.
-
 
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 

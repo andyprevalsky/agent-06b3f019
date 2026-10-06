@@ -935,6 +935,8 @@ AUTOSCALER_FINALIZATION_WAIT_SECONDS="${CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_
 SYNCHRONIZED_START="${CLOUDBENCH_SYNCHRONIZED_START:-1}"
 CONTROLLER_RETRY_SECONDS="${CLOUDBENCH_CONTROLLER_RETRY_SECONDS:-10}"
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
+FRESH_VOLUMES="${CLOUDBENCH_FRESH_VOLUMES:-1}"
+FRESH_VOLUMES_REQUESTED=0
 INFRA_PROBE="${CLOUDBENCH_INFRA_PROBE:-0}"
 SKIP_AUTOSCALER="${CLOUDBENCH_SKIP_AUTOSCALER:-0}"
 STRICT_BARRIER="${CLOUDBENCH_STRICT_BARRIER:-0}"
@@ -1090,6 +1092,8 @@ while [ $# -gt 0 ]; do
             if [ "$#" -ge 2 ]; then shift 2; else shift; fi
             ;;
         --provision-pool) PROVISION_POOL="${2:-}"; shift 2 ;;   # one-time: create N stopped clones, then exit
+        --fresh-volumes) FRESH_VOLUMES=1; FRESH_VOLUMES_REQUESTED=1; shift ;;
+        --snapshot-volumes) FRESH_VOLUMES=0; FRESH_VOLUMES_REQUESTED=0; shift ;;
         --infra-probe)    INFRA_PROBE="1"; STRICT_BARRIER="1"; shift ;;
         --skip-autoscaler) SKIP_AUTOSCALER="1"; shift ;;
         --strict-barrier) STRICT_BARRIER="1"; shift ;;
@@ -1106,6 +1110,14 @@ while [ $# -gt 0 ]; do
                           shift ;;
     esac
 done
+case "$FRESH_VOLUMES" in 0|1) ;; *) echo "❌ invalid fresh-volume mode" >&2; exit 2 ;; esac
+if [ -n "$PROVISION_POOL" ] || [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" != 1 ]; then
+    [ "$FRESH_VOLUMES_REQUESTED" = 0 ] || {
+        echo "❌ --fresh-volumes requires task-specific boot launch, not a generic pool" >&2; exit 2;
+    }
+    FRESH_VOLUMES=0
+fi
+export CLOUDBENCH_FRESH_VOLUMES="$FRESH_VOLUMES"
 if [ "${CLOUDBENCH_TEST_FLEET_OWNER_TOKEN+x}" != "x" ]; then
     case "$FLEET_OWNER_TOKEN" in
         [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
@@ -1461,6 +1473,21 @@ private_source_allows_provider_call() {
 FLY() { private_source_allows_provider_call "$@" && flyctl "$@"; }
 
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
+primary_clone_storage_mode() {
+    local bench="$1" index
+    [ "$FRESH_VOLUMES" = 1 ] || { printf snapshot; return; }
+    is_sim_on "$bench" && { printf snapshot; return; }
+    for index in "${!BENCHES[@]}"; do
+        [ "${BENCHES[$index]}" = "$bench" ] || continue
+        case "${CATALOG_MODES[$index]}" in
+            real) printf fresh ;;
+            simulate) printf snapshot ;;
+            *) return 1 ;;
+        esac
+        return
+    done
+    return 1
+}
 
 # Print EXACTLY what code the run will execute on the box: the ref (HEAD), whether
 # it is on origin (unpushed commits never reach the box), and the uncommitted diff
@@ -8541,10 +8568,17 @@ worker_ledger_lock_release() {  # worker_ledger_lock_release <bench-output-dir>
     WORKER_LEDGER_LOCK_TOKEN=""
 }
 
-clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] [vm-size] [memory-mb] [snapshot-id]
+clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] [memory-mb] [snapshot-id] [snapshot|fresh]
     local ledger="$1" source_id="${2:-$WARM_ID}"
     local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
     local clone_snapshot="${5:-$SNAP_ID}"
+    local storage_mode="${6:-snapshot}"
+    local -a snapshot_args=()
+    case "$storage_mode" in
+        snapshot) snapshot_args=(--from-snapshot "$clone_snapshot") ;;
+        fresh) [ "${FRESH_VOLUMES:-0}" = 1 ] || return 2 ;;
+        *) return 2 ;;
+    esac
     local clone_out clone_status target_id target_name target_volume diagnostic_log names_ledger deadline
     local storage_deadline preallocation_failure reap_status terminal_disposition
     local attempt max_attempts retry_delay clone_timeout
@@ -8594,7 +8628,7 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
         fi
         printf '%s\n' "$target_name" >> "$names_ledger"
         clone_out="$(fly_with_timeout "$clone_timeout" machine clone "$source_id" -a "$APP" \
-            --from-snapshot "$clone_snapshot" --region "$REGION" --name "$target_name" \
+            "${snapshot_args[@]}" --region "$REGION" --name "$target_name" \
             --vm-size "$vm_size" --vm-memory "$vm_memory" \
             --override-cmd "sleep infinity" --detach 2>&1)"
         clone_status=$?
@@ -11910,6 +11944,12 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         && [ ! -e "$out/autoscaler.runtime-completed" ] || return 0
     local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file stage_log failure_reason
     local primary_volume_size worker_snapshot
+    local worker_storage
+    worker_storage=snapshot
+    [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && worker_storage=fresh
+    if [ "$worker_storage" = fresh ]; then
+        worker_snapshot="$SNAP_ID"  # unused: fresh workers retain no donor storage
+    else
     primary_volume_size="$(machine_volume_size_gb "$primary_id")" || primary_volume_size=""
     if [ "$primary_volume_size" = "$WARM_SOURCE_SIZE_GB" ]; then
         worker_snapshot="$SNAP_ID"
@@ -11920,6 +11960,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         printf '%s\n' "primary volume size has no proven matching worker snapshot" > "$out/autoscaler.failed"
         echo "  ❌ [$bench] mandatory autoscaler: no exact-size worker snapshot for primary" >&2
         return 1
+    fi
     fi
     worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     local worker_capacity_status=0
@@ -11938,7 +11979,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     fi
     local worker_clone_status=0
     wid="$(clone_machine_target "$out/worker-clones.ids" "$primary_id" \
-        "$FLEET_WORKER_VM_SIZE" "$FLEET_WORKER_VM_MEMORY" "$worker_snapshot")" \
+        "$FLEET_WORKER_VM_SIZE" "$FLEET_WORKER_VM_MEMORY" "$worker_snapshot" "$worker_storage")" \
         || worker_clone_status=$?
     if [ "$worker_clone_status" -eq 75 ]; then
         capacity_release_reservation "$worker_capacity_token"
@@ -12032,6 +12073,9 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         echo 'fi'
         echo "export REF=$(printf '%q' "$BENCH_REF")"
         echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
+        echo "export CLOUDBENCH_FRESH_VOLUME=$([ "$worker_storage" = fresh ] && printf 1 || printf 0)"
+        echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
+        echo "export CLOUDBENCH_SYNC_PRISMA_SCRIPT=/data/cloudbench-sync-prisma-client.sh"
         echo "export CLOUDBENCH_ENV_HELPER=/data/cloudbench-env.sh"
         echo "export CLOUDBENCH_WORKER_EVIDENCE_HELPER=/data/cloudbench-worker-evidence.py"
         echo "export CLOUDBENCH_WORKER_RUN_TOKEN=$(printf '%q' "$runtime_run_token")"
@@ -12135,7 +12179,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
             fly_with_timeout 20 machine start "$wid" -a "$APP" || true
         if ! run_worker_stage_cmd "clear stale worker stage files" \
             fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
-            -C "rm -f /data/cloudbench-worker.sh /data/cloudbench-worker-evidence.py /data/cloudbench-fetch-ref.sh /data/cloudbench-env.sh /tmp/rbw.env /tmp/rbw.sh /tmp/cloudbench-local.patch"; then
+            -C "rm -f /data/cloudbench-worker.sh /data/cloudbench-worker-evidence.py /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-env.sh /tmp/rbw.env /tmp/rbw.sh /tmp/cloudbench-local.patch"; then
             sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
             continue
         fi
@@ -12145,6 +12189,12 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-evidence.py" /data/cloudbench-worker-evidence.py \
              && run_worker_stage_cmd "upload cloudbench-fetch-ref.sh" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh \
+             && { [ "$worker_storage" != fresh ] || {
+                    run_worker_stage_cmd "upload cloudbench-sync-deps.sh" \
+                        fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-sync-deps.sh" /data/cloudbench-sync-deps.sh \
+                    && run_worker_stage_cmd "upload cloudbench-sync-prisma-client.sh" \
+                        fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-sync-prisma-client.sh" /data/cloudbench-sync-prisma-client.sh
+                }; } \
              && run_worker_stage_cmd "upload cloudbench-env.sh" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-env.sh" /data/cloudbench-env.sh \
              && run_worker_stage_cmd "upload worker environment" \
@@ -12951,7 +13001,8 @@ for bench in "${BENCHES[@]}"; do
         fi
         if [ -n "$pcid" ]; then
             printf 'pool %s\n' "$pcid" > "$out/.cid"
-        elif pcid="$(clone_machine_target "$out/primary.ids" "$WARM_ID" "$bench_vm_size" "$bench_vm_memory")"; then
+        elif pcid="$(clone_machine_target "$out/primary.ids" "$WARM_ID" "$bench_vm_size" "$bench_vm_memory" \
+            "$SNAP_ID" "$(primary_clone_storage_mode "$bench")")"; then
             printf 'clone %s\n' "$pcid" > "$out/.cid"
         fi
     ) &
@@ -13048,6 +13099,7 @@ for bench in "${BENCHES[@]}"; do
     CLOUDBENCH_LOCAL_PATCH_SOURCE="$FLEET_PATCH_FILE" \
     CLOUDBENCH_LOCAL_PATCH_SHA256="$FLEET_PATCH_SHA256" \
     CLOUDBENCH_INFRA_PROBE="${INFRA_PROBE:-0}" \
+    CLOUDBENCH_FRESH_VOLUME="$([ "$(primary_clone_storage_mode "$bench")" = fresh ] && printf 1 || printf 0)" \
     CLOUDBENCH_POOL_BOOT_VM_SIZE="$pool_boot_vm_size" \
     CLOUDBENCH_POOL_BOOT_VM_MEMORY="$pool_boot_vm_memory" \
     CLOUDBENCH_SKIP_AUTOSCALER="${SKIP_AUTOSCALER:-0}" \

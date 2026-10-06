@@ -132,6 +132,16 @@ CASE_HASH=$(hash_of "$CASE_TREE")
 echo '# actual replay surface edit' >> "$CASE_TREE/agents/keycap/ExactModule.py"
 [ "$(hash_of "$CASE_TREE")" != "$CASE_HASH" ] || fail "editing the exact uppercase module must change the generation hash"
 
+# A package-directory alias must not enter the surface even when the final
+# __init__.py basename has the exact spelling. The only directory is CamelPackage.
+cat > "$CASE_TREE/agents/workflows/agent_workflow.py" <<'PYCASE'
+from keycap.camelpackage import thing
+PYCASE
+DIR_CASE_LIST=$(hash_of "$CASE_TREE" --list)
+if grep -Fq 'agents/keycap/CamelPackage/' <<<"$DIR_CASE_LIST" || grep -Fq 'agents/keycap/camelpackage/' <<<"$DIR_CASE_LIST"; then
+  fail "case-folded package directories must not enter the generation surface"
+fi
+
 # ---- Real tree invariants ----------------------------------------------------
 REAL=$(python3 "$TOOL")
 [ "${#REAL}" -eq 12 ] || fail "default output must be the 12-char short hash, got '$REAL'"

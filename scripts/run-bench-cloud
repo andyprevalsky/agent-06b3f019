@@ -243,6 +243,14 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+case "${CLOUDBENCH_FRESH_VOLUME:-0}" in 0|1) ;; *) echo "Invalid fresh-volume handoff" >&2; exit 2 ;; esac
+if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ]; then
+    [ "$MODE" = run ] && [ "$BENCH_SIMULATE" = 0 ] && [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = 1 ] || {
+        echo "Fresh-volume bootstrap requires a REAL boot-launched task" >&2
+        exit 2
+    }
+fi
+
 if [ "$IMAGE_BUILD_BUILDER_REQUESTED" = 1 ] && [ "$MODE" != build-image ]; then
     echo "--builder requires --build-image" >&2
     exit 2
@@ -3923,6 +3931,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "CLOUDBENCH_CODEX_AUTH_MACHINE_ID=$mid"
         --env CLOUDBENCH_RUN_SCRIPT=/cloudbench-run.sh
         --env CLOUDBENCH_FETCH_REF_SCRIPT=/cloudbench-fetch-ref.sh
+        --env "CLOUDBENCH_FRESH_VOLUME=${CLOUDBENCH_FRESH_VOLUME:-0}"
         --env CLOUDBENCH_SYNC_DEPS_SCRIPT=/cloudbench-sync-deps.sh
         --env CLOUDBENCH_SYNC_PRISMA_SCRIPT=/cloudbench-sync-prisma-client.sh
         --env CLOUDBENCH_NGROK_INSTALL_SCRIPT=/cloudbench-install-ngrok.sh

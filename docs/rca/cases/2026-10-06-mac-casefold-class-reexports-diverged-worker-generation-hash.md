@@ -19,6 +19,7 @@ tags:
   - verification
 sources:
   - PR #1419
+  - PR #1420
   - commit 063bc3c639b088d77b7df718706f239279616bb3
   - task exact Fly verification of workflow 37432126476 attempt 1
 repro: scripts/tests/agent-surface-hash.test.sh class re-export and exact-case module controls
@@ -94,6 +95,19 @@ timeouts or default budgets. At 10,000 tasks, no per-task work is added: exact
 entry checks occur only during generation derivation. The unchanged deployment
 workflow path rules do not trigger a Fly rollout for this script/test/docs-only
 follow-up.
+
+Follow-up review of PR #1420 at `94f1aead` identified a prevention gap:
+although the production helper correctly checks every component, the existing
+owner did not negatively exercise a wrong-case package directory. The private
+ten-line test proposal imports `keycap.camelpackage` while only `CamelPackage`
+exists, then excludes both spellings from that import's surface. It retains the
+true uppercase module/package positives and real uppercase-module edit inverse.
+The original complete owner accepted a private basename-only helper mutation
+in 2.618 seconds. Identical expanded owner bytes rejected that mutation at the
+new assertion in 0.378 seconds and passed the unchanged production tool in
+2.762 seconds. The mutant is forensic test material only and must not be
+committed. This test-only proposal remains private while the frozen 50-task
+campaign runs; it requires no runtime change or reset of that campaign.
 
 ## Human feedback
 

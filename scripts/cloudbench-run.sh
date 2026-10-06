@@ -595,6 +595,13 @@ if [ -n "${CLOUDBENCH_CODEX_AUTH_SHA256:-}" ]; then
 fi
 
 # ── 0. Sanity: the volume + repo checkout must exist (created at box setup) ──
+if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] && [ ! -d "$REPO_DIR/.git" ]; then
+    [ "$BENCH_SIMULATE" = 0 ] && [ -n "$REF" ] || { log "FATAL: fresh checkout requires an exact REAL task ref"; finish 1; }
+    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+        log "FATAL: could not bootstrap requested ref on fresh storage"
+        finish 1
+    fi
+fi
 if [ ! -d "$REPO_DIR/.git" ]; then
     log "FATAL: $REPO_DIR is not a git checkout (expected a pre-authed volume checkout)"
     finish 1
