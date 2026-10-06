@@ -209,6 +209,22 @@ remains registered in the compact deploy gate. Required normal smoke/payment
 workloads remain separate gates with their task, model, evaluator and timeout
 contracts unchanged.
 
+The subsequent actual normal invocations on `729ffeab` passed the repaired
+provider boundary and executed every selected task. The original smoke batch
+ran seven tasks (six PASS, one genuine new-user payment evaluator FAIL) and
+exited 1 in 744.075 seconds. Its unexecuted cached selection ran once separately:
+PASS in 215.3 seconds of execution, 300.430 seconds for the complete CLI. The
+four unchanged AgentCard cases all passed in 957.005 seconds. The user's explicit
+infrastructure criteria accept genuine task FAILURE, so the original grading
+FAIL remains visible and unregraded. All twelve durable evidence publications
+verified. Native seals found all three owned stacks, ports, databases and volumes
+released, all three queues with zero Running workflows, eight exact browser
+sessions absent and the exact E2B sandbox absent. The cached nonbrowser stack
+allocated no public tunnel. Private receipts remain in
+`.context/basic-cli-native-validation-20261006T112941Z/group4-relaunch-20261006T141856Z/`.
+These executions close the provider-readiness recurrence; later reporting
+producer coverage and the independent fifty-copy campaign remain separate.
+
 ## Human feedback
 
 The October 5 standing user instruction requires preserving Freedom and its

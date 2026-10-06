@@ -304,7 +304,7 @@ def test_required_upload_retries_transient_disconnect(monkeypatch):
         server.shutdown()
 
 
-def test_starting_upload_cannot_reconcile_a_programming_error_as_success(monkeypatch):
+def test_hub_transport_starting_upload_cannot_reconcile_a_programming_error_as_success(monkeypatch):
     from benchmarks import hub_upload
 
     methods = []

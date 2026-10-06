@@ -1082,6 +1082,13 @@ until the controller exits and exact owned resources are released. Stale or
 missing observations are warnings: reconcile exact owner liveness and private
 diagnostics, never reset a run based on an observation timeout. The compact
 monitor controls run in the existing `benchmark-live-results.test.py` deploy gate.
+Live task rows use actual executor admission after scheduler and payment guards;
+waiting copies remain queued even before any agent ID exists. Repeated names keep
+separate root links, and evaluated PASS/FAIL stays visible during cleanup. Display
+state never replaces lifetime ownership of every created root. The three compact
+producer, early-outcome and exception/cancellation/composite-cleanup controls run
+in the existing agents benchmark blackbox domain and ordinary `/deploy` Step 4g.
+
 The startup tracker recognizes both legacy SSH and current boot-launch producer
 messages. An accepted boot start displays stack booting; a provider-rejected
 start does not advance it. These compact regressions run in that same gate.

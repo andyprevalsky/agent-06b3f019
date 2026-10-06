@@ -1227,6 +1227,234 @@ def test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail():
     assert get_smoke_cap("parallel-tool-calls") == 600
 
 
+def _live_report_producer_harness(tasks, executor, max_concurrency):
+    """Exercise main's real report/coordinator block without external task calls."""
+    import ast
+    import inspect
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+    from benchmarks.report_card import build_report_card
+
+    main = ast.parse(inspect.getsource(bench.main_async)).body[0]
+    start = next(i for i, node in enumerate(main.body)
+                 if isinstance(node, ast.ImportFrom) and node.module == "benchmarks.report_card")
+    end = next(i for i, node in enumerate(main.body)
+               if isinstance(node, ast.Assign) and any(
+                   isinstance(target, ast.Name) and target.id == "owned_batch_cleanup"
+                   for target in node.targets))
+    report_nodes = main.body[start:end]
+    ticker = next(node for node in report_nodes
+                  if isinstance(node, ast.AsyncFunctionDef) and node.name == "_report_ticker")
+    emit = next(node for node in ast.walk(ticker) if isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "_emit_report")
+    parallel = next(node for node in ast.walk(main) if isinstance(node, ast.If)
+                    and isinstance(node.test, ast.Attribute) and node.test.attr == "parallel")
+    drive = ast.AsyncFunctionDef(name="_drive_parallel", args=ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=parallel.body, decorator_list=[])
+    tick = ast.FunctionDef(name="_tick_report_once", args=ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=[emit], decorator_list=[])
+    cards = []
+
+    class CaptureEmitter:
+        def __init__(self, _context):
+            pass
+
+        def maybe_emit(self, state, **_kwargs):
+            cards.append(build_report_card(state))
+
+    namespace = dict(vars(bench))
+    namespace.update(tasks=tasks, skipped_claude_tasks=[], base_url="unused",
+                     run=bench.BenchmarkRun(run_id="report-admission-control"),
+                     args=SimpleNamespace(max_concurrency=max_concurrency, prod=False,
+                                          keep_failed_agents=False),
+                     run_single_task=executor, _fetch_wmh_usage=lambda: None)
+    with patch("benchmarks.report_card.ReportCardEmitter", CaptureEmitter):
+        exec(compile(ast.fix_missing_locations(ast.Module(
+            body=[*report_nodes, drive, tick], type_ignores=[])), "<live-report-producer>", "exec"), namespace)
+    return namespace, cards
+
+
+async def test_live_report_counts_executor_admission_and_drains_cancellation():
+    """Pending semaphore futures stay queued; admitted pre-agent work is running."""
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+
+    tasks = [SimpleNamespace(name="chat-mode", requires_browser_agent=False,
+                             world_model_mode=None, tags=[]) for _ in range(3)]
+    entered = asyncio.Event()
+    held = asyncio.Event()
+
+    async def executor(_base_url, _task, **_kwargs):
+        entered.set()
+        await held.wait()
+
+    namespace, cards = _live_report_producer_harness(tasks, executor, 1)
+    with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+        coordinator = asyncio.create_task(namespace["_drive_parallel"]())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=10)
+            namespace["_tick_report_once"]()
+            assert cards[-1]["tasks"] == {"total": 3, "running": 1, "completed": 0, "queued": 2}, cards[-1]["tasks"]
+            assert [row["status"] for row in cards[-1]["per_task"]] == ["running", "queued", "queued"]
+            assert all(row["agent_url"] is None for row in cards[-1]["per_task"])
+        finally:
+            coordinator.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await coordinator
+        namespace["_tick_report_once"]()
+        assert cards[-1]["tasks"] == {"total": 3, "running": 0, "completed": 3, "queued": 0}, cards[-1]["tasks"]
+        assert cards[-1]["results"]["failed"] == 3
+        assert all(result.status == "CANCELLED" for result in namespace["run"].task_results)
+
+
+async def test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_links():
+    """Child callbacks bind to their admitted occurrence; evaluation precedes cleanup."""
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+
+    tasks = [SimpleNamespace(name="chat-mode", index=index, requires_browser_agent=False,
+                             world_model_mode=None, tags=[]) for index in range(3)]
+    entered = [asyncio.Event() for _ in tasks]
+    evaluate = [asyncio.Event() for _ in tasks]
+    cleanup = [asyncio.Event() for _ in tasks]
+    evaluated = [asyncio.Event() for _ in tasks]
+
+    async def executor(_base_url, task, *, on_agent_created, on_task_evaluated, **_kwargs):
+        async def agent_child():
+            on_agent_created(task.name, f"report-test-{task.index}")
+        await asyncio.create_task(agent_child())
+        entered[task.index].set()
+        await evaluate[task.index].wait()
+        result = bench.TaskResult(name=task.name, passed=task.index != 2,
+            agent_id=f"report-test-{task.index}", status="COMPLETED", progress_score=1,
+            duration_seconds=1, cost_cents=0, message_count=0)
+        await on_task_evaluated(result)
+        evaluated[task.index].set()
+        await cleanup[task.index].wait()
+        return result
+
+    namespace, cards = _live_report_producer_harness(tasks, executor, 2)
+    with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+        coordinator = asyncio.create_task(namespace["_drive_parallel"]())
+        try:
+            await asyncio.wait_for(asyncio.gather(entered[0].wait(), entered[1].wait()), timeout=10)
+            evaluate[1].set()
+            await asyncio.wait_for(evaluated[1].wait(), timeout=10)
+            namespace["_tick_report_once"]()
+            assert cards[-1]["tasks"] == {"total": 3, "running": 1, "completed": 1, "queued": 1}, cards[-1]["tasks"]
+            running = [row for row in cards[-1]["per_task"] if row["status"] == "running"]
+            assert len(running) == 1 and running[0]["agent_url"].endswith("=report-test-0")
+            assert not namespace["run"].task_results and cards[-1]["results"]["passed"] == 1
+            cleanup[1].set()
+            await asyncio.wait_for(entered[2].wait(), timeout=10)
+            evaluate[2].set()
+            await asyncio.wait_for(evaluated[2].wait(), timeout=10)
+            namespace["_tick_report_once"]()
+            assert cards[-1]["tasks"] == {"total": 3, "running": 1, "completed": 2, "queued": 0}, cards[-1]["tasks"]
+            assert cards[-1]["results"]["passed"] == 1 and cards[-1]["results"]["failed"] == 1
+            assert [row["agent_url"] for row in cards[-1]["per_task"] if row["status"] == "running"][0].endswith("=report-test-0")
+            for event in [*evaluate, *cleanup]:
+                event.set()
+            await asyncio.wait_for(coordinator, timeout=10)
+            namespace["_tick_report_once"]()
+            assert cards[-1]["tasks"] == {"total": 3, "running": 0, "completed": 3, "queued": 0}
+            assert cards[-1]["results"]["passed"] == 2 and cards[-1]["results"]["failed"] == 1
+        finally:
+            if not coordinator.done():
+                coordinator.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await coordinator
+
+
+async def test_live_report_keeps_all_created_roots_for_batch_finalization():
+    """Report-row retirement preserves exact root custody for every exit path."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from benchmarks import run_benchmark as bench
+
+    root_ids = ["00000000-0000-4000-8000-000000000011",
+                "00000000-0000-4000-8000-000000000012"]
+    for exit_path in ("exception", "cancellation", "composite"):
+        entered = asyncio.Event()
+        task = SimpleNamespace(name="chat-mode", requires_browser_agent=False,
+                               world_model_mode=None, tags=[])
+
+        async def executor(_base_url, task, *, on_agent_created, **_kwargs):
+            async def child_callbacks():
+                for root_id in root_ids:
+                    on_agent_created(task.name, root_id)
+            await asyncio.create_task(child_callbacks())
+            entered.set()
+            if exit_path == "cancellation":
+                await asyncio.Event().wait()
+            if exit_path == "exception":
+                raise RuntimeError("test-owned failure after root callbacks")
+            return bench.TaskResult(name=task.name, passed=False,
+                agent_id=",".join(root_ids), status="COMPLETED", progress_score=0,
+                duration_seconds=1, cost_cents=0, message_count=0,
+                logs={str(index): {"tree": {root_id: {}},
+                    "worker_logs": [json.dumps({"agent_id": root_id})]}
+                    for index, root_id in enumerate(root_ids)})
+
+        namespace, _cards = _live_report_producer_harness([task], executor, 1)
+        with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+            coordinator = asyncio.create_task(namespace["_drive_parallel"]())
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=10)
+                if exit_path == "cancellation":
+                    namespace["_tick_report_once"]()
+                    assert _cards[-1]["per_task"][0]["agent_url"].endswith("=" + root_ids[0])
+                    coordinator.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait_for(coordinator, timeout=10)
+                else:
+                    await asyncio.wait_for(coordinator, timeout=10)
+            finally:
+                if not coordinator.done():
+                    coordinator.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await coordinator
+
+        prepared, released = [], []
+
+        def exact_root_sessions(_base_url, root_id):
+            prepared.append(root_id)
+            return {"root_user_id": "test-owned-user", "tree_agent_ids": [root_id],
+                    "browser_sessions": []}
+
+        def close_exact_root_sessions(_base_url, root_id, _before, **_kwargs):
+            released.append(root_id)
+            return {"test_owned": True}
+
+        # Force the archive boundary to fail: exact provider/payment release
+        # must still run, while incomplete evidence remains a failed verdict.
+        with patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", exact_root_sessions), \
+             patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", close_exact_root_sessions), \
+             patch.object(bench, "pause_agent", AsyncMock(return_value=True)), \
+             patch.object(bench, "delete_agent", AsyncMock(return_value=True)), \
+             patch.object(bench, "_refresh_browser_archive_snapshot",
+                          AsyncMock(side_effect=RuntimeError("test-owned archive failure"))), \
+             patch.object(bench, "_finalize_owned_root_payments", AsyncMock(return_value={})), \
+             patch.object(bench, "fetch_local_worker_logs", return_value=[]):
+            try:
+                await asyncio.wait_for(bench._finalize_owned_cloud_batch(
+                    "test-owned-no-network", namespace["run"].task_results,
+                    namespace["_live_task_agent_ids"]), timeout=10)
+            except RuntimeError:
+                pass
+            else:
+                assert exit_path == "composite", "missing evaluator identity unexpectedly accepted"
+        assert set(prepared) == set(root_ids), exit_path
+        assert set(released) == set(root_ids), exit_path
+        retained = {root_id for ids in namespace["_live_task_agent_ids"].values()
+                    for root_id in ids}
+        assert retained == set(root_ids), exit_path
+        assert all(not result.passed for result in namespace["run"].task_results)
+
+
 async def test_parallel_benchmark_scheduler_overlaps_isolated_browser_profiles():
     """Per-agent browser profiles let local browser benchmarks use the full batch width."""
     from benchmarks.run_benchmark import _parallel_task_runners
@@ -20199,6 +20427,18 @@ async def run_all_tests():
     r.record(
         "local_benchmark_task_queue_uses_workspace",
         test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls,
+    )
+    await r.record_async(
+        "live_report_counts_executor_admission_and_drains_cancellation",
+        test_live_report_counts_executor_admission_and_drains_cancellation,
+    )
+    await r.record_async(
+        "live_report_repeated_occurrences_keep_early_outcomes_and_agent_links",
+        test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_links,
+    )
+    await r.record_async(
+        "live_report_keeps_all_created_roots_for_batch_finalization",
+        test_live_report_keeps_all_created_roots_for_batch_finalization,
     )
     await r.record_async(
         "parallel_scheduler_overlaps_isolated_browser_profiles",

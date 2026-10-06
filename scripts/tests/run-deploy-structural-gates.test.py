@@ -59,6 +59,7 @@ class StructuralGateDocumentationTests(unittest.TestCase):
         self.assertTrue({
             "bash scripts/tests/descend-command.test.sh",
             "python3 scripts/tests/benchmark-live-results.test.py",
+            "bash scripts/tests/cloudbench-fetch-ref.test.sh",
             "python3 scripts/tests/verify-successful-llm-queries.test.py",
             "python3 scripts/tests/cloudbench-exact-session-multi-root.test.py",
             "python3 scripts/tests/cloudbench-forensic-quiesced.test.py",
