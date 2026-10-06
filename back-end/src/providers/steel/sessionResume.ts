@@ -21,6 +21,7 @@ import {
   steelCdpUrl,
   steelDebugUrl,
 } from './session';
+import { rotationGeolocation } from './sessionProxy';
 import {
   STEEL_CDP_TIMEOUT_MESSAGE,
   steelStartupProbe,
@@ -190,7 +191,11 @@ export async function recreateSession(
       ? oldSession.startUrl
       : undefined;
   log.info(`  Found old session with saved URL: ${savedUrl ?? 'NONE'}`);
-  const proxyGeo = await proxyLocationForAgent(oldSession.agentId);
+  const baseGeo = await proxyLocationForAgent(oldSession.agentId);
+  // A rotation must land on a different egress IP; see rotationGeolocation.
+  const proxyGeo = options.forceManagedRotation
+    ? rotationGeolocation(baseGeo, oldSession.sessionId)
+    : baseGeo;
   log.info(`  Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
   const userAgent = await fingerprintUserAgent(oldSession.context.userId);
   const steelRecordedProfileId = options.forceFreshProfile

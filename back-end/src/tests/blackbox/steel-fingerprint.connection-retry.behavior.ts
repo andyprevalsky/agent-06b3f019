@@ -68,7 +68,8 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       (async () => ({
         proxyCountry: 'US',
         proxyState: 'CA',
-        proxyCity: 'RCA TEST CITY',
+        // A distinct city: the rejected-city test memoizes 'RCA TEST CITY' for the process.
+        proxyCity: 'RCA RESUME CITY',
       })) as typeof prisma.agent.findUnique;
     (
       prisma.integration as unknown as { findUnique: typeof prisma.integration.findUnique }
@@ -109,6 +110,44 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
     assert(
       connectionInputs.length === 3,
       `expected three Steel create attempts after Connection error, got ${connectionInputs.length}`
+    );
+    // A rotation must land on a different egress IP: Steel's pool kept handing
+    // the same exit node back for the same state, so a rotation requests another
+    // US state and no city. Resumes keep the user's own location.
+    const rotationGeo = (
+      connectionInputs[0].useProxy as { geolocation?: Record<string, unknown> } | undefined
+    )?.geolocation;
+    assert(
+      rotationGeo !== undefined &&
+        rotationGeo.country === 'US' &&
+        typeof rotationGeo.state === 'string' &&
+        rotationGeo.state !== 'CA' &&
+        rotationGeo.city === undefined,
+      `rotation must request a different state without a city, got ${JSON.stringify(rotationGeo)}`
+    );
+    const resumeInputs: Array<Record<string, unknown>> = [];
+    await recreateSession(
+      'replacement-connection-retry-task',
+      { forceManagedRotation: false },
+      {
+        createSession: async (input) => {
+          resumeInputs.push(input as unknown as Record<string, unknown>);
+          return {
+            id: 'steel-after-resume',
+            debugUrl: 'https://steel.example/debug',
+            profileId: null,
+            proxySource: 'steel',
+          };
+        },
+        validateConnection: async () => null,
+      }
+    );
+    const resumeGeo = (
+      resumeInputs[0]?.useProxy as { geolocation?: Record<string, unknown> } | undefined
+    )?.geolocation;
+    assert(
+      resumeGeo !== undefined && resumeGeo.city === 'RCA RESUME CITY',
+      `resume must keep the user's city, got ${JSON.stringify(resumeGeo)}`
     );
 
     // A created session whose CDP validation times out must retain the
