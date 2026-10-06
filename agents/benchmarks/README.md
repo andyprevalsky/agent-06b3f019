@@ -176,8 +176,22 @@ Foreground campaigns may print no `--controller-status` marker; use only the
 actual printed handle and read each copy's controller exit separately from
 `summary.json` → `jobs[].controller_exit_code`, keyed by `job_id`. The monitor's
 null controller fields alone do not establish liveness or completion.
-Allocation timestamps are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
-`bench-e2e.finished-epoch`. The run's `teardown-ownership.path` identifies its
+Lifecycle clocks are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
+`bench-e2e.finished-epoch`. The start precedes provisioning and is conservative.
+Use the earliest retained fresh native Machine/volume `created_at` for newly
+allocated exact resources; pooled allocation needs an immutable exact original
+claim receipt. Never use inode ctime, a pooled Machine's historical creation time,
+or first observation to start/reset the 1,200-second budget. Without an original
+allocation clock, qualify the original start as a conservative operator budget;
+on cutoff use `conservative-provisioning-operator-budget` and
+`deadline_breached=false`. A native breach needs genuine original allocation
+evidence showing over 1,200 seconds without full verified release. Never
+substitute the 7,200-second execution default. Release follows complete
+primary/worker/claim verification; `pool-primary.returned-epoch` is only the
+earlier borrowed-primary return. The immutable audit's
+`provider-teardown-verified.epoch` is the producer clock, bound to the same
+owner/run by `source-audit`; legacy clockless audits keep their post-verification
+fallback. The run's `teardown-ownership.path` identifies its
 exact audit/token; while live, capture `pid` and `pid_start` from
 `<git-common>/cloudbench-fleet-ownership/<token>/meta`. Normal cleanup removes
 that active claim, so retain the captured identity and verify native process
