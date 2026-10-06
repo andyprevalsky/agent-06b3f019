@@ -9,6 +9,52 @@ install_javascript() {
     npm config set fetch-retry-maxtimeout 120000
     npm config set fetch-timeout 600000
     npm install --no-audit --no-fund
+    # npm can successfully replay a host-generated lock while omitting the
+    # target's native optional package. Let the installed loader select its
+    # binding; repair only that declared exact version in an isolated install.
+    node - <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
+const manifestPath = require.resolve('rollup/package.json', { paths: [path.resolve('front-end')] });
+const rollupDir = path.dirname(manifestPath);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const loader = path.join(rollupDir, 'dist/native.js');
+try {
+    require(loader);
+} catch (error) {
+    const missing = error.cause;
+    const name = missing?.code === 'MODULE_NOT_FOUND'
+        && missing.message.match(/^Cannot find module '(@rollup\/rollup-[a-z0-9-]+)'/)?.[1];
+    if (!name || manifest.optionalDependencies?.[name] !== manifest.version) throw error;
+    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'rose-image-native-'));
+    try {
+        fs.writeFileSync(path.join(temporary, 'package.json'), JSON.stringify({
+            name: 'rose-image-native-binding', version: '1.0.0', private: true,
+        }));
+        const install = spawnSync('npm', [
+            'install', '--ignore-scripts', '--no-save', '--package-lock=false',
+            '--no-audit', '--no-fund', `${name}@${manifest.version}`,
+        ], { cwd: temporary, stdio: 'inherit' });
+        if (install.error) throw install.error;
+        if (install.status !== 0) throw new Error(`Exact native dependency install failed: ${name}@${manifest.version}`);
+        const source = path.join(temporary, 'node_modules', name);
+        const native = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8'));
+        if (native.name !== name || native.version !== manifest.version) {
+            throw new Error(`Native dependency identity mismatch: ${name}@${manifest.version}`);
+        }
+        const destination = path.join(rollupDir, 'node_modules', name);
+        if (fs.existsSync(destination)) throw new Error(`Native dependency destination already exists: ${name}`);
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        fs.cpSync(source, destination, { recursive: true, errorOnExist: true, force: false });
+        require(loader);
+        console.log(`Verified exact Rollup native dependency: ${name}@${manifest.version}`);
+    } finally {
+        fs.rmSync(temporary, { recursive: true, force: true });
+    }
+}
+NODE
     (cd back-end && npx prisma generate)
 }
 

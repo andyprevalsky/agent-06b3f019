@@ -997,6 +997,8 @@ REAL tasks now use fresh primary and worker volumes by default with the verified
 
 Bootstrap preserves both hoisted and workspace-local baked dependencies and uses the installed Prisma CLI; do not repair a missing CLI by downloading a floating version. If a strict campaign's infrastructure canary fails, its waiting copies observe the same cohort failure instead of launching another canary each. A new CLI invocation creates a fresh cohort automatically. Genuine benchmark task failure is still a valid terminal outcome for an infrastructure/speed run; a preflight failure has no task execution credit. The compact deploy gate owns the dependency-layout, schema-cache and failed-cohort regressions.
 
+Image installation also loads the frontend compiler's native binding before readiness. A missing declared binding is repaired at the exact installed version, without changing manifests or locks; a healthy binding needs no extra install. Use the normal image CLI instead of ad hoc package upgrades. Exact-owner recovery handles an empty cleanup join without weakening ownership checks. Preserve original failure receipts and use `--recover-stale-owner`; do not delete claims manually or stop a pre-existing shared Hub. These regressions remain in the normal compact deploy gate.
+
 An accepted delete plus an exact owned-volume `pending_destroy` or `destroyed`
 terminal receipt qualifies release even when Fly retains the object. Request
 acceptance alone does not establish release.

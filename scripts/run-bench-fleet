@@ -5074,7 +5074,8 @@ PYCOHORT
             fi
         fi
     done
-    for reap_pid in "${reap_pids[@]}"; do
+    # An empty join has no work; preserve zero arguments under nounset too.
+    for reap_pid in ${reap_pids[@]+"${reap_pids[@]}"}; do
         wait "$reap_pid" || unresolved=1
     done
     unset -f reap_one_registry_record

@@ -9743,6 +9743,63 @@ rc=$?
     ]
 
 
+@pytest.mark.parametrize(
+    "mode,record_count", [("forced", 0), ("forced", 1), ("current", 0), ("current", 2), ("current", 3)]
+)
+def test_fleet_lifecycle_receipt_requires_final_registry_retirement_empty_pid_join(
+    tmp_path: Path,
+    mode: str,
+    record_count: int,
+) -> None:
+    """An exact retirement must join every submitted PID, including zero PIDs."""
+    reaper = _extract_fleet_function(fleet_source_text(), "reap_registry_clones() {")
+    selected_bash = shutil.which("bash")
+    assert selected_bash is not None, "Bash is a controller prerequisite"
+    interpreters = [Path(selected_bash)]
+    system_bash = Path("/bin/bash")
+    if system_bash.is_file() and system_bash.resolve() != interpreters[0].resolve():
+        interpreters.append(system_bash)
+    for index, interpreter in enumerate(interpreters):
+        root = tmp_path / str(index)
+        ownership = root / "ownership"
+        registry = ownership / ("6d" * 16)
+        clones = registry / "clones"
+        clones.mkdir(parents=True)
+        (registry / "meta").write_text("version=2\n")
+        machines = [f"{number + 1:014x}" for number in range(record_count)]
+        for machine in machines:
+            (clones / f"cloudbench-{machine}").write_text(
+                f"name=cloudbench-{machine}\nid={machine}\nvolume_id=vol_{machine}\n"
+            )
+        script = f"""set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership))}
+REGISTRY={shlex.quote(str(registry))}
+TEST_ROOT={shlex.quote(str(root))}
+CLOUDBENCH_REAP_MAX_IN_FLIGHT=2
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_machine_details() {{ printf 'stopped cloudbench-%s\\n' "$1"; }}
+fleet_registry_reconcile_mounted_volume() {{ printf 'vol_%s\\n' "$3"; }}
+reap_machine() {{ printf '%s\\n' "$1" > "$TEST_ROOT/native-$1"; }}
+fleet_audit_update_registry_clone() {{ printf '%s\\n' "$2" > "$TEST_ROOT/audit-$2"; }}
+{reaper}
+reap_registry_clones "$REGISTRY" {mode}
+rc=$?
+printf '%s\\n' "$BASH_VERSION" > "$TEST_ROOT/bash-version"
+exit "$rc"
+"""
+        result = subprocess.run(
+            [str(interpreter), "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 0, (str(interpreter), mode, record_count, result.stderr)
+        assert list(clones.iterdir()) == []
+        assert sorted(path.name.removeprefix("native-") for path in root.glob("native-*")) == machines
+        assert sorted(path.name.removeprefix("audit-cloudbench-") for path in root.glob("audit-*")) == machines
+
+
 @pytest.mark.parametrize("failed_disposition", [0, 75])
 def test_current_registry_retirement_is_bounded_parallel_and_joins_receipts(
     tmp_path: Path,
