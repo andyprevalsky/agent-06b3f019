@@ -17,17 +17,32 @@ import pytest
 AGENTS = Path(__file__).resolve().parents[2]
 
 
-CHILD = r'''
+CHILD = r"""
 import asyncio
+import asyncio.selector_events as selector_events
 import os
 from pathlib import Path
 import sys
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 import worker
 
 address, directory = sys.argv[1:]
 directory = Path(directory)
+
+# A starved SDK completion thread wakes the loop, then stays descheduled inside
+# Python while the loop consumes its result and the worker returns.
+main_thread_id = threading.get_ident()
+write_to_self = selector_events.BaseSelectorEventLoop._write_to_self
+
+def descheduled_after_wakeup(self):
+    write_to_self(self)
+    if threading.get_ident() != main_thread_id:
+        time.sleep(0.5)
+
+selector_events.BaseSelectorEventLoop._write_to_self = descheduled_after_wakeup
 config = SimpleNamespace(
     environment="development", health_check_port=0,
     temporal=SimpleNamespace(
@@ -58,16 +73,22 @@ def publish_status(active, **fields):
     if active and fields.get("phase") == "running":
         (directory / "worker-ready").touch()
 
+async def run_worker():
+    await worker.main()
+    started = {thread.ident for thread in threading.enumerate()}
+    native = [ident for ident in sys._current_frames() if ident not in started]
+    print(f"NATIVE_THREADS_IN_PYTHON_AT_RETURN={len(native)}", flush=True)
+
 with (
     patch.object(worker, "load_config", return_value=config),
     patch.object(worker, "Worker", IdleWorker),
     patch.object(worker, "SDK_METRICS_PORT", 0),
     patch.object(worker, "set_worker_status", side_effect=publish_status),
 ):
-    asyncio.run(worker.main())
+    asyncio.run(run_worker())
 (directory / "entrypoint-returned").touch()
 print("WORKER_ENTRYPOINT_RETURNED", flush=True)
-'''
+"""
 
 
 @pytest.mark.parametrize("phase", ["count", "describe"])
@@ -111,23 +132,34 @@ def test_worker_entrypoint_joins_inflight_metrics_rpc_before_exit(outcome, phase
 
         with ThreadPoolExecutor(max_workers=4) as executor:
             server = grpc.server(executor)
-            server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
-                "temporal.api.workflowservice.v1.WorkflowService", {
-                    "GetSystemInfo": grpc.unary_unary_rpc_method_handler(lambda request, context: b""),
-                    "CountWorkflowExecutions": grpc.unary_unary_rpc_method_handler(count),
-                    "DescribeTaskQueue": grpc.unary_unary_rpc_method_handler(describe),
-                },
-            ),))
+            server.add_generic_rpc_handlers(
+                (
+                    grpc.method_handlers_generic_handler(
+                        "temporal.api.workflowservice.v1.WorkflowService",
+                        {
+                            "GetSystemInfo": grpc.unary_unary_rpc_method_handler(lambda request, context: b""),
+                            "CountWorkflowExecutions": grpc.unary_unary_rpc_method_handler(count),
+                            "DescribeTaskQueue": grpc.unary_unary_rpc_method_handler(describe),
+                        },
+                    ),
+                )
+            )
             port = server.add_insecure_port("127.0.0.1:0")
             server.start()
             environment = os.environ.copy()
             environment.update(
-                BACKEND_API_KEY="worker-exit-test", TEMPORAL_WORKER_REQUIRE_ACTIVATION="0",
-                AUTOSCALER_ACTUATE="false", WORKER_INDEX="0", PYTHONUNBUFFERED="1",
+                BACKEND_API_KEY="worker-exit-test",
+                TEMPORAL_WORKER_REQUIRE_ACTIVATION="0",
+                AUTOSCALER_ACTUATE="false",
+                WORKER_INDEX="0",
+                PYTHONUNBUFFERED="1",
             )
             process = subprocess.Popen(
                 [sys.executable, "-c", CHILD, f"127.0.0.1:{port}", directory],
-                cwd=AGENTS, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                cwd=AGENTS,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
             try:
@@ -137,15 +169,22 @@ def test_worker_entrypoint_joins_inflight_metrics_rpc_before_exit(outcome, phase
                     process.kill()
                     output, _ = process.communicate()
                     # Only allowlisted lifecycle facts can enter failure output.
-                    pytest.fail(json.dumps({
-                        "process_hung": True,
-                        "worker_drained": (root / "worker-drained").exists(),
-                        "worker_stopped_logged": b"Worker stopped" in output,
-                        "entrypoint_returned": b"WORKER_ENTRYPOINT_RETURNED" in output,
-                        "rpc_finished": rpc_finished.is_set(),
-                    }))
+                    pytest.fail(
+                        json.dumps(
+                            {
+                                "process_hung": True,
+                                "worker_drained": (root / "worker-drained").exists(),
+                                "worker_stopped_logged": b"Worker stopped" in output,
+                                "entrypoint_returned": b"WORKER_ENTRYPOINT_RETURNED" in output,
+                                "rpc_finished": rpc_finished.is_set(),
+                            }
+                        )
+                    )
                 assert process.returncode == 0, "Worker startup/shutdown failed before process-exit assertion"
                 assert b"WORKER_ENTRYPOINT_RETURNED" in output
+                assert b"NATIVE_THREADS_IN_PYTHON_AT_RETURN=0" in output, (
+                    "Worker entry point returned while an SDK completion thread was still running Python"
+                )
                 assert observations.get("worker_drained") is True
                 assert rpc_finished.wait(10)
                 if outcome != "deadline":

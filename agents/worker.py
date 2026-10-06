@@ -217,6 +217,7 @@ logger = structlog.get_logger()
 
 import math
 import socket
+import threading
 import time
 
 import httpx
@@ -259,6 +260,7 @@ WORKFLOW_SLOT_TARGET_OCCUPANCY = float(os.getenv("WORKFLOW_SLOT_TARGET_OCCUPANCY
 ADMISSION_PRESSURE_SCALE_UP_SECS = 60
 POLL_INTERVAL_SECS = 1  # 3 Temporal API calls/s — well within 1000 req/s limit
 METRICS_RPC_TIMEOUT = timedelta(seconds=5)
+NATIVE_THREAD_DETACH_TIMEOUT_SECS = 5
 LOG_INTERVAL_SECS = 30  # Periodic summary log (avoid 86k lines/day at 1s polls)
 SDK_METRICS_PORT = int(os.getenv("SDK_METRICS_PORT", "9090"))
 HEALTH_CHECK_PORT = int(os.getenv("HEALTH_CHECK_PORT", "8080"))
@@ -1056,6 +1058,26 @@ def _start_sdk_runtime(port: int) -> tuple[Runtime, int]:
     raise AssertionError("runtime port allocation exhausted without a result")
 
 
+def _native_threads_running_python() -> list[int]:
+    """Return threads not started by ``threading`` that are executing Python frames."""
+    started = {thread.ident for thread in threading.enumerate()}
+    return [ident for ident in sys._current_frames() if ident not in started]
+
+
+async def _wait_for_native_threads_to_leave_python() -> list[int]:
+    """Let SDK completion threads finish their Python callbacks before the worker returns.
+
+    The Temporal bridge completes an RPC on a tokio thread that attaches to Python and calls
+    ``call_soon_threadsafe``. Its self-pipe write releases the GIL, so the loop can consume the
+    result and let ``main`` return before that thread re-attaches. Interpreter finalization then
+    aborts the process in ``PyGILState_Release`` or parks the thread. Polling yields the GIL.
+    """
+    deadline = time.monotonic() + NATIVE_THREAD_DETACH_TIMEOUT_SECS
+    while (attached := _native_threads_running_python()) and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    return attached
+
+
 async def main():
     """Main worker entry point."""
     global SDK_METRICS_PORT, HEALTH_CHECK_PORT
@@ -1487,6 +1509,13 @@ async def main():
             lag_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await lag_task
+        attached_native_threads = await _wait_for_native_threads_to_leave_python()
+        if attached_native_threads:
+            logger.warning(
+                "Native threads still running Python at worker exit",
+                thread_count=len(attached_native_threads),
+                timeout_seconds=NATIVE_THREAD_DETACH_TIMEOUT_SECS,
+            )
         if _profiler is not None:
             _profiler.disable()
             out = f"worker-profile-{os.getenv('WORKER_INDEX', '0')}.prof"
