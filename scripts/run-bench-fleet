@@ -185,7 +185,10 @@ cleanup_owned_script_snapshot() {
     )
     [ "$SCRIPT_SNAPSHOT_ALLOW_TRANSFER" = "1" ] && cleanup_args+=(--allow-transfer)
     if [ -n "${CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_VANISH_BEFORE_CLEANUP:-}" ]; then
-        rm -rf "$CLOUDBENCH_SCRIPT_SNAPSHOT"
+        # Vanish in one rename. Deleting in place shows the launcher's poll a
+        # snapshot that exists without its helper, which it reports as failed.
+        mv "$CLOUDBENCH_SCRIPT_SNAPSHOT" "$CLOUDBENCH_SCRIPT_SNAPSHOT.vanished" \
+            && rm -rf "$CLOUDBENCH_SCRIPT_SNAPSHOT.vanished"
     fi
     python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/$SCRIPT_SNAPSHOT_OWNER_HELPER" \
         "${cleanup_args[@]}" >/dev/null || {
