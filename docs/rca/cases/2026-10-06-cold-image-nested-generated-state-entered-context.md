@@ -19,7 +19,7 @@ sources:
   - commit 71241f2ef38162553df25d81d2e56c848e265aab
   - agent /root/final_basic_cli_validation fresh basic CLI native build receipt
 repro: agents/benchmarks/cloudbench_image_build_test.py::test_cloudbench_image_build_actual_context_excludes_nested_generated_state
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -48,8 +48,8 @@ On the original ignore file, the build reached `COPY . /ctx` and the unchanged
 Adding recursive generated-state exclusions made those same assertions pass in
 2.498 seconds. Required runtime and task-history files remained present. The
 native transfer measurement establishes the symptom; the actual Docker fixture
-establishes filtering causality. A new uncached CLI measurement is still needed
-to quantify the whole-build improvement.
+establishes filtering causality. The subsequent uncached CLI comparison below
+measures the complete build rather than inferring speed from archive size.
 
 Archive searches used `Docker build context .context generated nested upload`
 and `846.54MB context transfer dockerignore image source packaging`. The October 5
@@ -88,9 +88,39 @@ diagnosis; Ruff format/check and source whitespace checks passed.
 The unchanged normal quick owner discovered and passed 174 controls in 61.309
 seconds; its exact process, Docker client children and receiver were retired.
 
-A matched fresh-context uncached build and normal activation remain pending.
-This case stays open until those proofs are recorded; the owning reproduction
-alone does not establish a benchmark outcome or a measured whole-build speedup.
+A second fresh-context agent then used only the basic documented CLI. Its
+clean pre-launch source was `9efb3dfa64ac71403e31d65612d21bdd74752f05`.
+The one-attempt no-cache build and publication completed in 285.500 seconds;
+the same Depot app scope, zstd level 3, Linux amd64 platform, pinned publisher,
+recipe and config were retained. Dependencies installed in 123.4 seconds,
+source copied in 15.3 seconds, and export/push took 75.9 seconds. The baseline
+was 483.683 seconds: these two complete invocations differ by 198.183 seconds
+(41.0%). This is one observed comparison per side, rather than a repeatability
+guarantee or an attribution of every timing difference to the ignore rules.
+
+The final builder log reports 1.78 MB transferred in 1.4 seconds. That is
+transported context, not the logical size of all runtime files. Provider-retained
+content was not evicted; image layer reuse was disabled normally. Ten tracked
+recipe/dependency inputs match between the baseline and candidate. The existing
+ignored root npm lock was not edited and its modification time precedes both
+builds, but a baseline content hash was not captured for it.
+
+Normal exact-image activation took 158.589 seconds. Native inventory verified
+donor `683e47df5094d8` stopped on its original volume with manifest
+`sha256:ff89d601f928e032dc3cbc22430e5d725fc04a535aafcb4e02929652e1115d91`.
+The image-build receipt captured clean `9efb3dfa`; activation requested clean
+`32a1c951acd6b67dac817ec3ed9636656bf09a30`, which differs only in an existing
+RCA result paragraph. Those sources are recorded separately. Activation's
+accepted output directory contains no native receipt, so the independently
+captured owner, exit and inventory evidence establish this result without
+claiming a full donor Git HEAD verification.
+
+Build plus activation sum to 444.089 seconds (7 minutes 24 seconds), versus
+649.537 seconds previously. Actual build start through activation end was
+519.977 seconds, including the separate 75.889-second verification gap. Stage
+durations may overlap internally and are not summed as native layer totals.
+These proofs establish the packaging correction and actual cold CLI timing;
+the production fleet and benchmark outcome remain separate required work.
 
 ## Human feedback
 

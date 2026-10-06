@@ -952,8 +952,10 @@ do not trim runtime inputs to improve startup measurements.
 `--builder native` for an explicit native diagnostic. Setup consumes the exact
 prebuilt receipt image through `image-activate`. Depot uses app scope, zstd level 3
 and `linux/amd64`; the receipt records requested builder/scope/compression/platform.
-The independent `807edee9f` no-cache build/push completed in 493.6 seconds in one attempt;
-this excludes image activation and fleet startup. Activate the exact receipt image
+The independent `9efb3dfa` no-cache build/push completed in 285.5 seconds in one
+attempt; exact-image activation took 158.6 seconds (7 minutes 24 seconds of
+combined CLI stage time, excluding the gap between commands and fleet startup).
+These are measured invocations, not a guaranteed latency. Activate the exact receipt image
 and verify guest digest/runtime consumption before the benchmark cohort.
 Image publication automatically caches the checksum-verified pinned Fly client
 in the Git common directory. Native publishing uses child-only
