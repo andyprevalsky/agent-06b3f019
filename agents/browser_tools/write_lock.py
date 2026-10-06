@@ -13,7 +13,7 @@ the agent must request user approval before proceeding.
 import logging
 import re
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,45 @@ AUTH_FLOW_URL_PATTERNS = [
     "onboarding",
 ]
 
-# Payment field patterns (case-insensitive, check name, id, autocomplete, placeholder)
+# Auth-flow markers are whole host labels / path words, never substrings of the
+# raw URL: "auth" inside r/AuthorsGuild or a ``redirect_after_login`` query
+# parameter on a composer URL must not switch the social write lock off.
+_AUTH_FLOW_URL_WORDS = frozenset(
+    {
+        *AUTH_FLOW_URL_PATTERNS,
+        "logon",
+        "signin",
+        "oauth",
+        "oauth2",
+        "authorize",
+        "authenticate",
+        "authentication",
+        "register",
+        "registration",
+        "sso",
+    }
+)
+# Joined path words such as ``emailsignup`` or ``wplogin``.
+_AUTH_FLOW_URL_WORD_SUFFIXES = ("login", "signin", "signup")
+# A route segment that ends in one of these after at most one qualifier
+# (``ServiceLogin``, ``user-sign-in``) is an auth step; a longer slug such as
+# ``i_cant_log_in`` is a post title that only mentions one.
+_AUTH_FLOW_URL_TAIL_PHRASES = (
+    ("login",),
+    ("signin",),
+    ("signup",),
+    ("log", "in"),
+    ("log", "on"),
+    ("sign", "in"),
+    ("sign", "on"),
+    ("sign", "up"),
+)
+_URL_FILE_EXTENSION_RE = re.compile(r"\.[a-z0-9]{1,5}$", re.IGNORECASE)
+
+# Payment field patterns (case-insensitive, check name, id, autocomplete, placeholder).
+# Generic checkout words ("billing", "payment", "expir") are deliberately absent:
+# billing addresses, payment-amount inputs, and passport/ID expiry dates are not
+# card details, and blocking them demanded a virtual card for a ZIP code.
 PAYMENT_FIELD_PATTERNS = [
     "card",
     "cc-",
@@ -82,9 +120,6 @@ PAYMENT_FIELD_PATTERNS = [
     "cvv",
     "cvc",
     "csv",
-    "expir",
-    "payment",
-    "billing",
     "cardnumber",
     "card-number",
     "card_number",
@@ -92,6 +127,34 @@ PAYMENT_FIELD_PATTERNS = [
     "security-code",
     "security_code",
 ]
+
+# Visible-label test for card fields (the accessible name, which includes the
+# <label> text). Needs a card word next to a card detail, or a card security
+# code word, so "Gift message" / "Billing address" / "Passport expiration date"
+# stay open while "Name on card" / "Card number" / "CVV" lock.
+_CARD_CONTEXT_WORDS = frozenset({"card", "cc", "credit", "debit"})
+_CARD_DETAIL_WORDS = frozenset(
+    {
+        "number",
+        "num",
+        "no",
+        "holder",
+        "name",
+        "owner",
+        "exp",
+        "expiry",
+        "expiration",
+        "expires",
+        "date",
+        "code",
+        "security",
+        "verification",
+    }
+)
+_CARD_SECURITY_CODE_WORDS = frozenset({"cvv", "cvv2", "cvc", "cvc2", "csc", "cvn"})
+_CARD_JOINED_WORDS = frozenset({"cardnumber", "ccnumber", "cardholder", "creditcard", "debitcard"})
+_EXPIRY_WORDS = frozenset({"exp", "expiry", "expiration", "expires", "expdate"})
+_CARD_EXPIRY_PLACEHOLDER_RE = re.compile(r"^\s*mm\s*[/-]\s*yy(?:yy)?\s*$")
 
 # Payment autocomplete values (exact matches)
 PAYMENT_AUTOCOMPLETE_VALUES = [
@@ -120,7 +183,9 @@ def autocomplete_indicates_payment(autocomplete: str) -> bool:
         return False
     return any(token in PAYMENT_AUTOCOMPLETE_TOKENS for token in autocomplete.split())
 
-# Submit button text patterns (case-insensitive contains)
+
+# Submit button verbs, matched as whole words of the label ("Posts", "12 Comments",
+# "Postal code" are not submits; "tweetButtonInline" splits to "tweet button inline").
 SUBMIT_BUTTON_PATTERNS = [
     "post",
     "tweet",
@@ -130,6 +195,8 @@ SUBMIT_BUTTON_PATTERNS = [
     "publish",
     "share",
     "submit",
+    "repost",
+    "retweet",
 ]
 
 SUBMIT_BUTTON_EXCLUSION_PATTERNS = [
@@ -140,13 +207,6 @@ SUBMIT_BUTTON_EXCLUSION_PATTERNS = [
     "sign up",
     "signup",
     "create account",
-]
-
-EMAIL_SEND_BUTTON_PATTERNS = [
-    "send",
-    "send message",
-    "send email",
-    "send mail",
 ]
 
 # A resend action re-issues something the site already sent; it never composes a
@@ -177,25 +237,55 @@ ONE_TIME_CODE_PATTERNS = (
     "passcode",
 )
 
-# Marketing / newsletter opt-in checkboxes ask the site to send info TO the
-# shopper. That is not an outbound message the agent composed, so it must not
-# trip the email_send write lock. Eventim checkout labels like
-# "Send me info about other shows by this organizer" previously parked the
-# agent on write_lock approval and blocked request_payment_card.
-MARKETING_OPT_IN_PATTERNS = (
-    "send me info",
-    "send me update",
-    "send me news",
-    "send me email",
-    "send me offer",
-    "send me deal",
-    "send me promo",
-    "email me about",
-    "email me info",
-    "keep me informed",
-    "subscribe to",
-    "sign me up for",
+# Bare "code" requests ("Send code", "Text me a code", "Get a new code", "Send
+# code to •••-7432") are the same one-time-code action. The trailing clause is
+# bounded so sharing content ("Send code snippet", "Send discount code to a
+# friend") still locks.
+_ONE_TIME_CODE_REQUEST_RE = re.compile(
+    r"\b(?:send|resend|get|request|email|text|sms)"
+    r"(?:\s+(?:me|us|a|an|the|new|another|my|your))*"
+    r"\s+codes?"
+    r"(?:\s+(?:again|instead|now|to|via|by)\b.*)?$"
 )
+
+# Sign-in links, password resets, and verification messages are delivered TO
+# the account being signed into, exactly like a one-time code. Matched against
+# the word-split form, so "sign-in" is written "sign in".
+ACCOUNT_SELF_DELIVERY_PATTERNS = (
+    "magic link",
+    "sign in link",
+    "login link",
+    "log in link",
+    "reset link",
+    "password reset",
+    "reset password",
+    "reset my password",
+    "verification email",
+    "verification text",
+    "verification link",
+    "verification sms",
+)
+
+# Cancelling or undoing a send stops an outbound message instead of sending one
+# (scheduled-send cancel, Gmail's undo window). The phrase is removed before the
+# leftover-send test, like "send me", so a co-located real send still locks.
+_CANCELLED_SEND_RE = re.compile(
+    r"\b(?:cancel|undo|stop|abort|unschedule)(?:\s+(?:the|this|that|scheduled|my|your))*\s+send(?:ing)?\b"
+)
+
+# "Send me …" asks the site to send something to the shopper (receipts, order
+# texts, reminders, marketing opt-ins such as Eventim's "Send me info about
+# other shows by this organizer", which once blocked request_payment_card). The
+# phrase is removed before the leftover-send test so a co-located real send
+# ("Send me a copy and send") still locks. Opt-ins without "send" ("Subscribe
+# to", "Keep me informed") never contain a send word in the first place.
+_SEND_TO_SELF_RE = re.compile(r"\bsend me\b")
+
+# A send action is a word that STARTS with "send" (send, sendBtn → "send btn",
+# sendmsg). "send" inside another word — resend, godsend, and camelCase ids like
+# showResendMessageLink — is not a send.
+_SEND_WORD_RE = re.compile(r"\bsend")
+_SPECIFIC_EMAIL_SEND_RE = re.compile(r"\bsend (?:e ?)?mail\b")
 
 # In-product AI composers submit a prompt to the current product. That is not
 # an outbound message to a third party, so it must not trip email_send.
@@ -208,13 +298,15 @@ AI_COMPOSER_SUBMIT_PHRASES = (
 
 # Generic composer labels that are email_send elsewhere ("Send", "Send
 # message") become composer submits only on known AI-assistant hosts.
-AI_COMPOSER_SUBMIT_EXACT = frozenset({
-    "send",
-    "send message",
-    "submit",
-    "send prompt",
-    "submit prompt",
-})
+AI_COMPOSER_SUBMIT_EXACT = frozenset(
+    {
+        "send",
+        "send message",
+        "submit",
+        "send prompt",
+        "submit prompt",
+    }
+)
 
 AI_ASSISTANT_COMPOSER_HOSTS = (
     "chatgpt.com",
@@ -260,6 +352,42 @@ RETURN_BUTTON_PHRASES = [
     "complete return",
     "submit return",
 ]
+
+# Amazon SPR final-commit routes. Intermediate wizard Continues live under
+# `/spr/returns/cart` and must NOT lock; only the contract/confirm commit does.
+# Agent 785a3207 (2026-09-28 browser-amazon-return): Continue on
+# `/spr/returns/contract/…` submitted the refund with no write_lock attention
+# because the CTA is labeled "Continue", not "Confirm your return".
+RETURN_COMMIT_URL_PATH_PATTERNS = (
+    "/spr/returns/contract",
+    "/spr/returns/confirm",
+)
+
+# Exact (whitespace-stripped) labels that commit a return on RETURN_COMMIT URLs.
+# Do not use bare substring "return" — "Return to your orders" must stay open.
+RETURN_COMMIT_CONTINUE_LABELS = frozenset(
+    {
+        "continue",
+        "submit",
+        "confirm",
+    }
+)
+
+# Wizard-step Continues that share `/spr/returns/contract` with the final commit.
+# Agent c1b33ca5 (2026-09-28 browser-amazon-return): clicked
+# ``resolutions-section-continue-button`` (Continue after picking Visa refund)
+# intending to reach drop-off selection; write_lock treated it as the final
+# commit, so the approval lacked a named drop-off and the judge failed.
+# Agent cf4935f5 (2026-09-29): same button via shadow ``input type=submit``;
+# signal was only ``submit\nContinue`` until ancestor ids were joined into
+# ``_element_write_lock_signal``. These machine ids must keep Continue unlocked;
+# phrase-only Continues on the same URL still lock (agent 785a3207 final commit).
+RETURN_COMMIT_CONTINUE_EXCLUSION_MARKERS = (
+    "resolutions-section-continue",
+    "productconditioncontinue",
+    "reasoncontinue",
+    "methodcontinue",
+)
 
 # Legal/consent copy often quotes the purchase button ("By clicking Buy Now, you
 # agree…"). That prose is not a submit control. Eventim checkout (2026-08-10
@@ -325,6 +453,50 @@ def _purchase_signal_match_forms(signal: str) -> list[str]:
     return forms
 
 
+def _purchase_phrase_pattern(phrase: str) -> re.Pattern[str]:
+    body = r"\s*".join(re.escape(word) for word in phrase.split())
+    return re.compile(r"(?<![a-z0-9])" + body + r"s?(?![a-z0-9])")
+
+
+# Phrases match whole words of the word-split label (any spacing between the
+# words, optional plural), so "Marketplace orders" does not contain "place order".
+_PURCHASE_PHRASE_PATTERNS = tuple((phrase, _purchase_phrase_pattern(phrase)) for phrase in PURCHASE_BUTTON_PHRASES)
+
+# "Pay" followed by a currency amount is the hosted-checkout commit
+# ("Pay $42.10", "Pay €18,00", "Pay USD 12", "Pay 30 €").
+_CURRENCY = r"(?:[$€£¥₹]|us\$|a\$|c\$|usd|eur|gbp|cad|aud|inr|jpy|chf)"
+_PAY_AMOUNT_RE = re.compile(rf"(?<![a-z0-9])pay\s+(?:{_CURRENCY}\s*\d|\d[\d.,]*\s*{_CURRENCY}(?![a-z]))")
+
+
+def _purchase_signal_word_forms(signal: str) -> list[str]:
+    """Word-split forms of a signal: raw, and with fulfillment-mode words removed."""
+    words = _action_words((signal or "").replace("&", " and "))
+    if not words:
+        return []
+    forms = [words]
+    collapsed = " ".join(_PURCHASE_FULFILLMENT_TRANSPARENT_RE.sub(" ", words).split())
+    if collapsed and collapsed != words:
+        forms.append(collapsed)
+    return forms
+
+
+def _purchase_phrase_match(signal: str, match_forms: list[str]) -> Optional[str]:
+    """Return the purchase phrase a signal commits to, if any."""
+    if not any(ch.isspace() for ch in signal.strip()):
+        # Single joined token (``placeOrderBtn``, ``BUYNOW``): word boundaries
+        # are unknowable, so keep the whitespace-stripped substring test.
+        for phrase, _ in _PURCHASE_PHRASE_PATTERNS:
+            if any(normalize_write_lock_text(phrase) in form for form in match_forms):
+                return phrase
+    word_forms = _purchase_signal_word_forms(signal)
+    for phrase, pattern in _PURCHASE_PHRASE_PATTERNS:
+        if any(pattern.search(form) for form in word_forms):
+            return phrase
+    if _PAY_AMOUNT_RE.search(" ".join(signal.lower().split())):
+        return "pay <amount>"
+    return None
+
+
 def _is_purchase_informational_exclusion(normalized: str) -> bool:
     """True when the label is BNPL / learn-more chrome, not a charge commit.
 
@@ -337,6 +509,7 @@ def _is_purchase_informational_exclusion(normalized: str) -> bool:
     if not alnum:
         return False
     return any(pattern in alnum for pattern in PURCHASE_INFORMATIONAL_EXCLUSION_PATTERNS)
+
 
 _DOM_IDENTIFIER_SIGNAL = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
@@ -371,9 +544,7 @@ def is_click_write_lock_eligible_control(element: Any) -> bool:
     if element is None:
         return True
 
-    tag = str(
-        getattr(element, "tag_name", "") or getattr(element, "node_name", "") or ""
-    ).strip().lower()
+    tag = str(getattr(element, "tag_name", "") or getattr(element, "node_name", "") or "").strip().lower()
     # Missing / mock tags are not form-field exclusions.
     if not tag or tag.startswith("<") or "magicmock" in tag:
         return True
@@ -388,6 +559,35 @@ def is_click_write_lock_eligible_control(element: Any) -> bool:
     if tag == "input":
         return input_type in _SUBMIT_INPUT_TYPES
     return True
+
+
+def _is_auth_flow_segment(segment: str) -> bool:
+    tokens = _action_words(_URL_FILE_EXTENSION_RE.sub("", segment)).split()
+    if not tokens:
+        return False
+    if "".join(tokens) in _AUTH_FLOW_URL_WORDS:
+        return True
+    if len(tokens) == 1:
+        return tokens[0].endswith(_AUTH_FLOW_URL_WORD_SUFFIXES)
+    return any(
+        tuple(tokens[-len(phrase) :]) == phrase and len(tokens) - len(phrase) <= 1
+        for phrase in _AUTH_FLOW_URL_TAIL_PHRASES
+    )
+
+
+def _is_auth_flow_url(url: str) -> bool:
+    """True when a host label or a whole path/fragment segment is a login/signup step.
+
+    Segments are judged whole: ``/login``, ``/i/flow/signup``, ``wp-login.php``
+    are auth steps, while a post slug that mentions one (``i_cant_log_in``,
+    ``how_to_register``) is a public thread whose reply box still posts. The
+    query string is ignored: ``?redirect_after_login=/compose/post`` names
+    where to go after auth, not the page the agent is on.
+    """
+    parsed = urlparse(url)
+    host_labels = (parsed.hostname or "").split(".")
+    segments = unquote(f"{parsed.path}/{parsed.fragment}").split("/")
+    return any(_is_auth_flow_segment(part) for part in (*host_labels, *segments))
 
 
 def is_social_domain(url: str) -> bool:
@@ -407,7 +607,7 @@ def is_social_domain(url: str) -> bool:
         domain = parsed.netloc
         full_url = url.lower()
 
-        if any(pattern in full_url for pattern in AUTH_FLOW_URL_PATTERNS):
+        if _is_auth_flow_url(url):
             logger.debug(f"URL {url} matched auth-flow pattern; skipping social write lock")
             return False
 
@@ -452,8 +652,9 @@ def is_submit_button(element_text: str) -> bool:
             logger.debug(f"Element text '{element_text}' matched submit exclusion pattern: {pattern}")
             return False
 
+    words = set(_action_words(element_text).split())
     for pattern in SUBMIT_BUTTON_PATTERNS:
-        if normalize_write_lock_text(pattern) in text_lower:
+        if pattern in words:
             logger.debug(f"Element text '{element_text}' matched submit pattern: {pattern}")
             return True
 
@@ -463,16 +664,37 @@ def is_submit_button(element_text: str) -> bool:
 ONE_TIME_CODE_TOKEN_RE = re.compile(r"\botps?\b")
 
 
-def _is_one_time_code_action(normalized: str) -> bool:
-    """Return True when the label asks the site for a one-time code.
+def _action_words(text: str) -> str:
+    """Split a click signal into lowercase words, including DOM identifiers.
 
-    Content test, anywhere in the label. A code is issued to the account being
-    signed into, never composed for a third party, so the phrasing and the word
-    order carry no risk signal worth gating on.
+    Click signals mix visible labels with id/name attributes
+    (``showResendMessageLink``, ``resend_sms_code``, ``auth-resend-cta``).
+    Splitting camelCase and separators lets word-level tests see ``resend`` as
+    its own word instead of matching ``send`` inside it.
     """
-    if ONE_TIME_CODE_TOKEN_RE.search(normalized) is not None:
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text or "")
+    spaced = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", spaced)
+    words = re.sub(r"[^a-z0-9]+", " ", spaced.lower())
+    words = re.sub(r"\bre\s+send", "resend", words)
+    return " ".join(words.split())
+
+
+def _is_one_time_code_action(normalized: str, words: str = "") -> bool:
+    """Return True when the label asks the site for a one-time code or sign-in message.
+
+    Content test, anywhere in the label. A code, sign-in link, reset, or
+    verification message is issued to the account being signed into, never
+    composed for a third party, so the phrasing and the word order carry no
+    risk signal worth gating on.
+    """
+    words = words or _action_words(normalized)
+    if ONE_TIME_CODE_TOKEN_RE.search(words) is not None:
         return True
-    return any(pattern in normalized for pattern in ONE_TIME_CODE_PATTERNS)
+    if any(pattern in normalized for pattern in ONE_TIME_CODE_PATTERNS):
+        return True
+    if _ONE_TIME_CODE_REQUEST_RE.search(words) is not None:
+        return True
+    return any(re.search(rf"\b{pattern}\b", words) for pattern in ACCOUNT_SELF_DELIVERY_PATTERNS)
 
 
 def _is_email_otp_retry(normalized: str) -> bool:
@@ -484,19 +706,7 @@ def _is_email_otp_retry(normalized: str) -> bool:
     tests only made safe retry labels fail closed and hang the run on an approval
     that never arrives.
     """
-    return any(
-        normalized == prefix or normalized.startswith(f"{prefix} ")
-        for prefix in EMAIL_OTP_RETRY_PREFIXES
-    )
-
-
-def _is_marketing_opt_in_action(normalized: str) -> bool:
-    """Return True when the label opts into receiving marketing/info from the site.
-
-    Content test, anywhere in the label. Opting in asks the merchant to email the
-    shopper later; it is not composing and sending an outbound message now.
-    """
-    return any(pattern in normalized for pattern in MARKETING_OPT_IN_PATTERNS)
+    return any(normalized == prefix or normalized.startswith(f"{prefix} ") for prefix in EMAIL_OTP_RETRY_PREFIXES)
 
 
 def is_ai_assistant_composer_host(url: str) -> bool:
@@ -525,56 +735,42 @@ def _is_ai_composer_submit(normalized: str, url: str = "") -> bool:
     return bool(url) and is_ai_assistant_composer_host(url) and normalized in AI_COMPOSER_SUBMIT_EXACT
 
 
-def _matches_specific_email_send(normalized: str) -> bool:
-    """True for exact ``send`` or multi-word outbound-send phrases.
-
-    Bare substring ``send`` is handled separately so marketing opt-in labels
-    ("Send me info…") are not locked solely because they contain ``send``.
-    """
-    for pattern in EMAIL_SEND_BUTTON_PATTERNS:
-        if pattern == "send":
-            if normalized == "send":
-                return True
-            continue
-        if pattern == normalized or pattern in normalized:
-            return True
-    return False
-
-
 def is_email_send_button(element_text: str, url: str = "") -> bool:
     """Check whether any local action signal is an outbound send.
 
-    Exemptions: one-time code (content, anywhere), resend (positional prefix),
-    marketing/newsletter opt-in (content), and in-product AI composer submits
-    (``send prompt`` anywhere; generic send/submit only on AI-assistant hosts)
-    — but none of those suppress a specific outbound-send phrase (e.g.
-    ``send email`` in a composite label). Each newline-delimited signal is
-    classified on its own so an exempt label can never unlock a neighbouring
-    send control or action-bearing attribute.
+    A send is a word starting with ``send`` in the word-split signal, so
+    ``resend`` / ``godsend`` / ``showResendMessageLink`` are not sends while
+    ``Send``, ``sendBtn``, and ``compose-send`` are. Exemptions: one-time code
+    or sign-in delivery to the account (content, anywhere), resend (positional
+    prefix), ``send me …`` (removed before the leftover-send test), and
+    in-product AI composer submits (``send prompt`` anywhere; generic
+    send/submit only on AI-assistant hosts). ``send email`` / ``send mail``
+    beats the composer exemption. Each newline-delimited signal is classified
+    on its own so an exempt label can never unlock a neighbouring send control
+    or action-bearing attribute.
     """
     if not element_text:
         return False
 
     for candidate in element_text.splitlines():
         normalized = re.sub(r"\s+", " ", candidate.lower()).strip()
-        if not normalized:
+        words = _action_words(candidate)
+        if not words:
             continue
-        if _is_one_time_code_action(normalized) or _is_email_otp_retry(normalized):
+        if _is_one_time_code_action(normalized, words) or _is_email_otp_retry(normalized):
             continue
         # Email-only phrases win over the AI composer exemption so a composite
         # label like "Send prompt and send email" cannot skip write-lock.
         # Do not hoist ``send message`` here — that is a composer submit on
         # ChatGPT/Claude/Gemini.
-        if "send email" in normalized or "send mail" in normalized:
-            return True
-        if _is_ai_composer_submit(normalized, url):
+        words = _CANCELLED_SEND_RE.sub(" ", words).strip()
+        if not words:
             continue
-        # Specific outbound phrases win over marketing opt-in (composite labels).
-        if _matches_specific_email_send(normalized):
+        if _SPECIFIC_EMAIL_SEND_RE.search(words):
             return True
-        if _is_marketing_opt_in_action(normalized):
+        if _is_ai_composer_submit(words, url):
             continue
-        if "send" in normalized:
+        if _SEND_WORD_RE.search(_SEND_TO_SELF_RE.sub(" ", words)):
             return True
     return False
 
@@ -596,9 +792,7 @@ def is_purchase_button(element_text: str) -> bool:
     # "Terms of Service" in one signal cannot veto "Buy Now" in another.
     for signal in element_text.split("\n"):
         if is_dom_identifier_write_lock_signal(signal):
-            logger.debug(
-                f"Element signal '{signal[:80]}' skipped as DOM id/name, not a purchase label"
-            )
+            logger.debug(f"Element signal '{signal[:80]}' skipped as DOM id/name, not a purchase label")
             continue
         match_forms = _purchase_signal_match_forms(signal)
         if not match_forms:
@@ -609,35 +803,272 @@ def is_purchase_button(element_text: str) -> bool:
             for form in match_forms
             for pattern in PURCHASE_CONSENT_PROSE_PATTERNS
         ):
-            logger.debug(
-                f"Element signal '{signal[:80]}' matched purchase consent-prose exclusion"
-            )
+            logger.debug(f"Element signal '{signal[:80]}' matched purchase consent-prose exclusion")
             continue
         if any(_is_purchase_informational_exclusion(form) for form in match_forms):
-            logger.debug(
-                f"Element signal '{signal[:80]}' matched purchase informational exclusion"
-            )
+            logger.debug(f"Element signal '{signal[:80]}' matched purchase informational exclusion")
             continue
 
-        for phrase in PURCHASE_BUTTON_PHRASES:
-            phrase_norm = normalize_write_lock_text(phrase)
-            if any(phrase_norm in form for form in match_forms):
-                logger.debug(f"Element text '{signal[:80]}' matched purchase pattern: {phrase}")
-                return True
+        phrase = _purchase_phrase_match(signal, match_forms)
+        if phrase:
+            logger.debug(f"Element text '{signal[:80]}' matched purchase pattern: {phrase}")
+            return True
 
     return False
 
 
-def is_return_button(element_text: str) -> bool:
-    """Check if element text indicates a return/refund confirmation control."""
+def is_return_commit_url(url: str) -> bool:
+    """True when the URL is an irreversible Amazon (or similar) return commit page.
+
+    ``/spr/returns/confirmation/…`` is the *post*-submit receipt and must not
+    match the ``/spr/returns/confirm`` commit pattern.
+    """
+    if not url:
+        return False
+    path = (urlparse(url).path or "").lower()
+    if "/spr/returns/confirmation" in path:
+        return False
+    return any(pattern in path for pattern in RETURN_COMMIT_URL_PATH_PATTERNS)
+
+
+# Amazon self-service return dead-end copy. Agent 338f26c8 (2026-09-28
+# browser-amazon-return): after mis-selecting Barebells protein bars, Amazon
+# showed "Your return request needs to be reviewed. Please contact customer
+# service." The agent opened Contact Us, burned the remaining step budget,
+# never reached a return write_lock, and the root respawned a second browser
+# (exact count expected 1, got 2).
+AMAZON_RETURN_SELF_SERVICE_BLOCK_MARKERS = (
+    "your return request needs to be reviewed",
+    "please contact customer service",
+)
+
+AMAZON_RETURN_SELF_SERVICE_BLOCK_NOTE = (
+    "Amazon self-service return is blocked for this item "
+    "(return request needs review / contact customer service). "
+    "Do not open Contact Us. Abandon this item and select the next "
+    "eligible non-excluded physical item, or report this exact blocker "
+    "if no other eligible item remains."
+)
+
+
+def detect_amazon_return_self_service_block(url: str, page_text: str) -> Optional[str]:
+    """Return a recovery note when Amazon blocks self-service return for an item.
+
+    Matches only on ``/spr/returns/`` pages so generic Help/Contact copy on
+    order-history does not fire.
+    """
+    if "/spr/returns/" not in (url or "").lower():
+        return None
+    text = (page_text or "").lower()
+    if not text:
+        return None
+    if all(marker in text for marker in AMAZON_RETURN_SELF_SERVICE_BLOCK_MARKERS):
+        return AMAZON_RETURN_SELF_SERVICE_BLOCK_NOTE
+    return None
+
+
+# Selected drop-off appears in the refund summary as ``Shipping (<name Dropoff>)``
+# once the agent has chosen a method (agent 788d17cf / cf4935f5 amazon-return).
+_AMAZON_RETURN_SHIPPING_DROPOFF_RE = re.compile(
+    r"Shipping\s*\(\s*([^)]*Drop[\s-]?off[^)]*)\)",
+    re.IGNORECASE,
+)
+_AMAZON_RETURN_SELECTED_DROPOFF_RE = re.compile(
+    r"(Whole Foods(?:\s+Market)?\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|Amazon Stores?\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|Staples\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|FedEx Office\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|(?:The\s+)?UPS Store\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|Kohl'?s\s+Drop[\s-]?off[^\n,]{0,60})",
+    re.IGNORECASE,
+)
+_AMAZON_RETURN_VISA_RE = re.compile(
+    r"Visa(?:\s+card)?\s+ending\s+in\s+(\d{4})",
+    re.IGNORECASE,
+)
+_AMAZON_RETURN_REFUND_TOTAL_RE = re.compile(
+    r"(?:Estimated\s+)?total\s+refund\s*[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
+_AMAZON_RETURN_REFUND_SUBTOTAL_RE = re.compile(
+    r"Refund\s+subtotal\s*[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
+
+
+def extract_amazon_return_approval_fields(page_text: str) -> dict[str, str]:
+    """Pull named drop-off / refund / payment from an Amazon return commit page.
+
+    Used to enrich the deterministic write-lock fallback so approval copy still
+    names the selected free drop-off when the notification fork is slow or killed
+    (agent 788d17cf: fork in flight at timeout after Whole Foods was selected).
+    """
+    text = page_text or ""
+    fields: dict[str, str] = {}
+    shipping = _AMAZON_RETURN_SHIPPING_DROPOFF_RE.search(text)
+    if shipping:
+        fields["drop_off"] = re.sub(r"\s+", " ", shipping.group(1)).strip(" -:")
+    else:
+        # Prefer a drop-off whose own option/control is selected. Bound the
+        # selection window to this match (and before the next drop-off) so a
+        # later option's [checked] cannot select an earlier one.
+        drop_matches = list(_AMAZON_RETURN_SELECTED_DROPOFF_RE.finditer(text))
+        for index, match in enumerate(drop_matches):
+            next_start = drop_matches[index + 1].start() if index + 1 < len(drop_matches) else len(text)
+            option_end = min(next_start, match.end() + 40)
+            window = text[match.start() : option_end].lower()
+            # Reject negated markers (unchecked / aria-*-false / not selected).
+            has_selection = False
+            for marker in re.finditer(
+                r"\b(checked|selected|pressed)\b",
+                window,
+            ):
+                token = marker.group(1)
+                start = marker.start()
+                prefix = window[max(0, start - 12) : start]
+                suffix = window[start : start + 18]
+                negated_prefix = prefix.endswith("un") or prefix.rstrip().endswith("not")
+                false_attr = f"{token}=false" in suffix or f'{token}="false"' in suffix or f"{token}='false'" in suffix
+                if negated_prefix or false_attr:
+                    continue
+                has_selection = True
+                break
+            if has_selection:
+                fields["drop_off"] = re.sub(r"\s+", " ", match.group(1)).strip(" -:")
+                break
+        # Do not guess the first listed drop-off from "no box" alone — multiple
+        # options can share that copy. Require shipping summary or selection
+        # evidence before naming a drop-off in the approval question.
+
+    visa = _AMAZON_RETURN_VISA_RE.search(text)
+    if visa:
+        fields["payment_method"] = f"Visa ending in {visa.group(1)}"
+
+    # Prefer the displayed total; never promote a subtotal as the total refund.
+    refund_total = _AMAZON_RETURN_REFUND_TOTAL_RE.search(text)
+    if refund_total:
+        fields["refund_amount"] = f"${refund_total.group(1)}"
+        fields["refund_label"] = "Estimated total refund"
+    else:
+        refund_subtotal = _AMAZON_RETURN_REFUND_SUBTOTAL_RE.search(text)
+        if refund_subtotal:
+            fields["refund_amount"] = f"${refund_subtotal.group(1)}"
+            fields["refund_label"] = "Refund subtotal"
+
+    return fields
+
+
+def _amazon_return_dropoff_terms(page_text: str, drop_off: str) -> str:
+    """Describe free/no-box/no-label only when the page establishes those terms."""
+    lower = (page_text or "").lower()
+    terms: list[str] = []
+    shipping_free = bool(
+        re.search(
+            r"shipping\s*\([^)]*drop[\s-]?off[^)]*\)\s*:\s*\$0\.00",
+            lower,
+        )
+        or re.search(r"\bfree\s+(?:drop[\s-]?off|return\s+shipping)\b", lower)
+    )
+    if shipping_free:
+        terms.append("free")
+    if "no box" in lower or "no-box" in lower:
+        terms.append("no-box")
+    if "no label" in lower or "no-label" in lower:
+        terms.append("no-label")
+    if not terms:
+        return f"Selected drop-off: {drop_off}."
+    return f"Selected {'/'.join(terms)} drop-off: {drop_off}."
+
+
+def enrich_return_write_lock_question(
+    question: str,
+    page_text: str,
+    *,
+    url: str = "",
+    system_name: str = "Rose",
+) -> str:
+    """Ensure return write-lock approval text names the selected drop-off when visible."""
+    fields = extract_amazon_return_approval_fields(page_text)
+    drop_off = fields.get("drop_off")
+    if not drop_off:
+        return question
+
+    payment = fields.get("payment_method") or "original payment method"
+    amount = fields.get("refund_amount") or "the refund amount shown"
+    refund_label = fields.get("refund_label") or "Refund"
+    drop_off_line = _amazon_return_dropoff_terms(page_text, drop_off)
+    domain = urlparse(url).netloc if url else "Amazon"
+    lines = [
+        "**Approval Needed**",
+        "",
+        f"{system_name} wants to confirm a return on **{domain}**.",
+        "Action: Confirm return",
+        f"Change: {refund_label} {amount} to {payment}. {drop_off_line}",
+    ]
+    if url:
+        lines.append(f"**Page:** {url}")
+    return "\n".join(lines)
+
+
+def _has_return_commit_continue_exclusion(element_text: str) -> bool:
+    """True when the click signal is a mid-wizard Continue on a commit URL."""
+    haystack = normalize_write_lock_text(element_text)
+    if not haystack:
+        return False
+    return any(marker in haystack for marker in RETURN_COMMIT_CONTINUE_EXCLUSION_MARKERS)
+
+
+def _return_commit_label_tokens(element_text: str) -> list[str]:
+    """Visible/type tokens from a click signal, excluding DOM id/name lines."""
+    tokens: list[str] = []
+    for signal in (element_text or "").split("\n"):
+        if is_dom_identifier_write_lock_signal(signal):
+            continue
+        text_lower = normalize_write_lock_text(signal)
+        if text_lower:
+            tokens.append(text_lower)
+    return tokens
+
+
+def _is_return_commit_continue_signal(element_text: str) -> bool:
+    """True for irreversible Continue/Submit/Confirm on a return commit URL.
+
+    Agent 785a3207: final commit was ``submit\\nContinue`` (form submit).
+    Agent 13e735c9: mid-wizard span ``Continue`` (no submit type) after picking
+    Visa refund — must stay unlocked so drop-off can be selected first.
+    Exclusion markers (resolutions-section-continue, …) also keep Continues open.
+    """
+    if _has_return_commit_continue_exclusion(element_text):
+        return False
+    tokens = _return_commit_label_tokens(element_text)
+    if not tokens:
+        return False
+    token_set = set(tokens)
+    if "confirm" in token_set:
+        return True
+    # Require submit+continue (form submit CTA). A bare type=submit token on a
+    # return-commit URL is not enough — an unrelated unlabeled submit must not
+    # mint a domain-scoped return approval that later lets the real commit through.
+    if "submit" in token_set and "continue" in token_set:
+        return True
+    return False
+
+
+def is_return_button(element_text: str, url: str = "") -> bool:
+    """Check if element text indicates a return/refund confirmation control.
+
+    Phrase matches ("Confirm your return", …) apply on any URL. On Amazon SPR
+    contract/confirm commit URLs, form-submit Continues also lock; plain span
+    Continues used mid-wizard do not.
+    """
     if not element_text:
         return False
 
+    on_return_commit_url = is_return_commit_url(url)
+
     for signal in element_text.split("\n"):
         if is_dom_identifier_write_lock_signal(signal):
-            logger.debug(
-                f"Element signal '{signal[:80]}' skipped as DOM id/name, not a return label"
-            )
+            logger.debug(f"Element signal '{signal[:80]}' skipped as DOM id/name, not a return label")
             continue
         text_lower = normalize_write_lock_text(signal)
         if not text_lower:
@@ -646,7 +1077,19 @@ def is_return_button(element_text: str) -> bool:
             if normalize_write_lock_text(phrase) in text_lower:
                 logger.debug(f"Element text '{signal[:80]}' matched return pattern: {phrase}")
                 return True
+
+    if on_return_commit_url and _is_return_commit_continue_signal(element_text):
+        logger.debug(f"Element text '{element_text[:80]}' matched return-commit Continue on {url[:80]}")
+        return True
     return False
+
+
+def _label_indicates_payment(label: str) -> bool:
+    """True when a field's name/label text describes card details."""
+    words = set(_action_words(label).split())
+    if words & (_CARD_SECURITY_CODE_WORDS | _CARD_JOINED_WORDS):
+        return True
+    return bool(words & _CARD_CONTEXT_WORDS and words & _CARD_DETAIL_WORDS)
 
 
 async def is_payment_field(
@@ -654,14 +1097,17 @@ async def is_payment_field(
     element: Any,
     element_index: int,
 ) -> bool:
-    """Check if element is a payment input field.
+    """Check if element is a payment (card details) input field.
 
-    Uses Playwright to get element attributes and check for payment patterns.
+    Reads the element's own attributes and its accessible name. The accessible
+    name is Chrome's computed label (``<label for>``, ``aria-labelledby``), so a
+    card field with generic ids such as ``field7`` is still recognized by the
+    "Name on card" label shown next to it.
 
     Args:
-        session: BrowserSession instance
+        session: BrowserSession instance (unused; kept for call-site compatibility)
         element: EnhancedDOMTreeNode element
-        element_index: Element's backend_node_id
+        element_index: Element's backend_node_id (unused)
 
     Returns:
         True if the element appears to be a payment field
@@ -672,88 +1118,34 @@ async def is_payment_field(
     try:
         element_attrs = getattr(element, "attributes", None) or {}
         if isinstance(element_attrs, dict):
-            attrs = {str(k).lower(): str(v).lower() for k, v in element_attrs.items() if v is not None}
+            attrs = {str(k).lower(): str(v) for k, v in element_attrs.items() if v is not None}
 
-            autocomplete = attrs.get("autocomplete", "")
+            autocomplete = attrs.get("autocomplete", "").lower()
             if autocomplete_indicates_payment(autocomplete):
                 logger.info(f"Payment field detected: autocomplete='{autocomplete}'")
                 return True
 
-            for attr_name in ["name", "id", "placeholder", "aria-label"]:
-                attr_value = attrs.get(attr_name, "")
+            values = {name: attrs.get(name, "") for name in ("name", "id", "placeholder", "aria-label")}
+            for attr_name, attr_value in values.items():
+                lowered = attr_value.lower()
                 for pattern in PAYMENT_FIELD_PATTERNS:
-                    if pattern in attr_value:
+                    if pattern in lowered:
                         logger.info(f"Payment field detected: {attr_name}='{attr_value}' matches '{pattern}'")
                         return True
-
-        if not session:
-            return False
-
-        # Get the Playwright page
-        get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
-        if not callable(get_page):
-            return False
-
-        page = await get_page()
-        if not page:
-            return False
-
-        # Get element attributes via CDP
-        # We need to resolve the backend_node_id to a selector or use CDP directly
-        try:
-            # Use CDP to get node info
-            result = await page.client.send("DOM.describeNode", {
-                "backendNodeId": element_index
-            })
-
-            node = result.get("node", {})
-            attributes = node.get("attributes", [])
-
-            # Parse attributes into a dict (attributes come as [name, value, name, value, ...])
-            attrs = {}
-            for i in range(0, len(attributes), 2):
-                if i + 1 < len(attributes):
-                    attrs[attributes[i].lower()] = attributes[i + 1].lower()
-
-            # Check autocomplete attribute (token-based match)
-            autocomplete = attrs.get("autocomplete", "")
-            if autocomplete_indicates_payment(autocomplete):
-                logger.info(f"Payment field detected: autocomplete='{autocomplete}'")
-                return True
-
-            # Check name, id, placeholder for payment patterns
-            for attr_name in ["name", "id", "placeholder", "aria-label"]:
-                attr_value = attrs.get(attr_name, "")
-                for pattern in PAYMENT_FIELD_PATTERNS:
-                    if pattern in attr_value:
-                        logger.info(f"Payment field detected: {attr_name}='{attr_value}' matches '{pattern}'")
-                        return True
-
-            # Check type="password" on payment domains (could be CVV)
-            if attrs.get("type") == "password":
-                # Check if we're on a payment-related domain
-                url = page.url.lower() if page.url else ""
-                payment_domains = ["stripe.com", "paypal.com", "checkout.", "payment.", "pay."]
-                for domain in payment_domains:
-                    if domain in url:
-                        logger.info(f"Password field on payment domain detected: {url}")
-                        return True
-
-            return False
-
-        except Exception as cdp_error:
-            logger.warning(f"CDP error getting element attributes: {cdp_error}")
-
-            # Fallback: check element text_content for payment hints
-            text_content = getattr(element, "text_content", "") or ""
-            text_lower = text_content.lower()
-            for pattern in PAYMENT_FIELD_PATTERNS:
-                if pattern in text_lower:
-                    logger.info(f"Payment field detected via text content: '{text_content}'")
+                if _label_indicates_payment(attr_value):
+                    logger.info(f"Payment field detected: {attr_name}='{attr_value}' names card details")
                     return True
 
-            return False
+            expiry_words = set(_action_words(" ".join(values.values())).split()) & _EXPIRY_WORDS
+            if expiry_words and _CARD_EXPIRY_PLACEHOLDER_RE.match(values["placeholder"].lower()):
+                logger.info(f"Payment field detected: card expiry placeholder '{values['placeholder']}'")
+                return True
 
+        ax_name = getattr(getattr(element, "ax_node", None), "name", None)
+        if isinstance(ax_name, str) and _label_indicates_payment(ax_name):
+            logger.info(f"Payment field detected: accessible name '{ax_name[:80]}' names card details")
+            return True
+        return False
     except Exception as e:
         logger.warning(f"Error checking payment field: {e}")
         return False
@@ -818,8 +1210,4 @@ def get_write_lock_approval_question(
             f"**Page:** {url}"
         )
     else:
-        return (
-            f"**Write Action Detected**\n\n"
-            f"{system_name} wants to perform a write action.\n\n"
-            f"**Page:** {url}"
-        )
+        return f"**Write Action Detected**\n\n" f"{system_name} wants to perform a write action.\n\n" f"**Page:** {url}"

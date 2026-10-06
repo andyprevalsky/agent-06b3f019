@@ -2,10 +2,12 @@ import { type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import { cancelAuthorizedHold } from '../../providers/stripe';
 import { type WalletFundingProvider } from '../../providers/wallet-funding';
+import { findSameAgentHeldCart } from './agentCartReuse';
 import { tryGetLiveCardDetails } from './cardLiveness';
 import {
   benchmarkPurchaseKycRequired,
   MAX_PURCHASE_CENTS,
+  PURCHASE_ABOVE_MAX_LIMIT_CODE,
   PURCHASE_APPROVAL_CACHE_HOURS,
   PURCHASE_STALE_CHARGING_MS,
 } from './config';
@@ -239,6 +241,16 @@ async function recoverStaleChargingPurchase(purchase: PurchaseSpend): Promise<vo
   });
 }
 
+async function reuseSameAgentHeldCart(
+  input: MintPurchaseInput,
+  cardProvider: CardProvider | undefined,
+  now: Date
+): Promise<MintPurchaseResult | null> {
+  const since = new Date(now.getTime() - PURCHASE_APPROVAL_CACHE_HOURS * 60 * 60 * 1000);
+  const held = await findSameAgentHeldCart(input, since);
+  return held === null ? null : tryReuseExistingPurchase(held, cardProvider, now, input.agentId);
+}
+
 /** Open a PENDING_APPROVAL purchase row for this fingerprint. */
 async function openPendingPurchase(input: MintPurchaseInput) {
   const receipt = purchaseReceipt(input);
@@ -266,10 +278,16 @@ export async function mintPurchaseCard(
   assertPositiveCents(input.totalCents, 'totalCents');
   normalizeCurrency(input.currency);
 
+  await repo.assertPurchaseAgentAdmitted(input);
+
   if (input.totalCents > MAX_PURCHASE_CENTS) {
+    // Distinct from subscription 402s: the browser tool surfaces this as a hard
+    // error ("purchase is above max limit of X"), not a subscribe gate.
     throw new PurchaseError(
-      `Purchase exceeds max purchase limit of ${MAX_PURCHASE_CENTS} cents`,
-      402
+      `Purchase is above max limit of ${MAX_PURCHASE_CENTS}`,
+      400,
+      PURCHASE_ABOVE_MAX_LIMIT_CODE,
+      { maxPurchaseCents: MAX_PURCHASE_CENTS }
     );
   }
 
@@ -287,6 +305,10 @@ export async function mintPurchaseCard(
       input.fingerprint,
       input.agentId
     );
+  }
+  if (!existing) {
+    const sameCart = await reuseSameAgentHeldCart(input, cardProvider, now);
+    if (sameCart) return sameCart;
   }
   let resumedPurchase: PurchaseSpend | null = null;
   if (existing) {

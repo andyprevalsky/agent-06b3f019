@@ -7,11 +7,11 @@
 import { stripe } from '../../providers/stripe';
 import { PurchaseError } from './errors';
 
-/**
- * Resolve the customer's default payment method id, or throw a 402 PurchaseError
- * if the customer is deleted or has no default method on file.
- */
-export async function getCustomerDefaultPaymentMethodId(customerId: string): Promise<string> {
+/** Resolve a payment method saved for this customer or its active subscription. */
+export async function getCustomerDefaultPaymentMethodId(
+  customerId: string,
+  subscriptionId?: string
+): Promise<string> {
   const customer = await stripe.customers.retrieve(customerId);
   if ('deleted' in customer && customer.deleted) {
     throw new PurchaseError('Stripe billing customer has been deleted', 402);
@@ -29,6 +29,49 @@ export async function getCustomerDefaultPaymentMethodId(customerId: string): Pro
     defaultPaymentMethod.id.trim() !== ''
   ) {
     return defaultPaymentMethod.id;
+  }
+
+  // Hosted subscription Checkout saves the card on the Subscription, while the
+  // Customer's invoice default can remain empty. The same customer owns both.
+  if (subscriptionId !== undefined && subscriptionId.trim() !== '') {
+    let subscription: Awaited<ReturnType<typeof stripe.subscriptions.retrieve>> | undefined;
+    try {
+      subscription = await stripe.subscriptions.retrieve(subscriptionId);
+    } catch (error) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === 'resource_missing'
+      ) {
+        subscription = undefined;
+      } else {
+        throw error;
+      }
+    }
+    if (subscription !== undefined) {
+      const subscriptionCustomerId =
+        typeof subscription.customer === 'string'
+          ? subscription.customer
+          : subscription.customer?.id;
+      const subscriptionMethod = subscription.default_payment_method;
+      if (
+        subscriptionCustomerId === customerId &&
+        (subscription.status === 'active' || subscription.status === 'trialing')
+      ) {
+        if (typeof subscriptionMethod === 'string' && subscriptionMethod.trim() !== '') {
+          return subscriptionMethod;
+        }
+        if (
+          subscriptionMethod !== null &&
+          typeof subscriptionMethod === 'object' &&
+          typeof subscriptionMethod.id === 'string' &&
+          subscriptionMethod.id.trim() !== ''
+        ) {
+          return subscriptionMethod.id;
+        }
+      }
+    }
   }
 
   throw new PurchaseError('User does not have a default Stripe payment method', 402);

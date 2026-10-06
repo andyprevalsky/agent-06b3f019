@@ -43,7 +43,9 @@ async function main(): Promise<void> {
 
   const secretKey = (process.env.STRIPE_SECRET_KEY || '').trim();
   if (secretKey === '' || secretKey.startsWith('sk_live_')) {
-    throw new Error('STRIPE_SECRET_KEY must be a test-mode key for gate-subscription-webhook fixture');
+    throw new Error(
+      'STRIPE_SECRET_KEY must be a test-mode key for gate-subscription-webhook fixture'
+    );
   }
 
   const prisma = new PrismaClient();
@@ -53,7 +55,7 @@ async function main(): Promise<void> {
     const stripeCustomerId = await createSandboxBillingCustomer(stripe, userId);
     const cardholderId = await resolveBenchmarkCardholderId();
     await ensureBenchmarkOrgCardholder(cardholderId);
-    await seedOrgManagedAgentCardForUser(userId, cardholderId);
+    await seedOrgManagedAgentCardForUser(userId, cardholderId, prisma);
 
     console.log(
       JSON.stringify({

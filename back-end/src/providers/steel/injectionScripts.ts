@@ -86,6 +86,127 @@ export function buildFingerprintScript(fp: FingerprintData): string {
                 });
               } catch (e) {}
 
+              // ── Worker / SharedWorker navigator parity ───────────────────
+              // CDP/Playwright init scripts do NOT run inside workers. FCaptcha
+              // PoW (and stealth-corroboration-v1) compare page vs Worker
+              // navigator.hardwareConcurrency and flag
+              // worker-hardware-concurrency-mismatch when they disagree
+              // (agent 7f8b9c24 — score 0.168 / pow_not_satisfied). Wrap Worker
+              // constructors so blob/http classic workers (and module workers)
+              // apply the same navigator spoof before the real script runs.
+              try {
+                const _workerNavPreamble =
+                  '(function(){try{' +
+                  'function d(proto,k,v){try{Object.defineProperty(proto,k,{get:function(){return v},configurable:true})}catch(e){}}' +
+                  'function apply(proto){' +
+                  'if(!proto)return;' +
+                  'd(proto,"hardwareConcurrency",' +
+                  JSON.stringify(fp.navigator.hardwareConcurrency) +
+                  ');' +
+                  'd(proto,"deviceMemory",' +
+                  JSON.stringify(fp.navigator.deviceMemory) +
+                  ');' +
+                  'd(proto,"platform",' +
+                  JSON.stringify(fp.navigator.platform) +
+                  ');' +
+                  'd(proto,"userAgent",' +
+                  JSON.stringify(fp.navigator.userAgent) +
+                  ');' +
+                  'd(proto,"language",' +
+                  JSON.stringify(fp.navigator.language) +
+                  ');' +
+                  'd(proto,"languages",Object.freeze(' +
+                  JSON.stringify(fp.navigator.languages) +
+                  '));' +
+                  'd(proto,"vendor",' +
+                  JSON.stringify(fp.navigator.vendor) +
+                  ');' +
+                  'd(proto,"maxTouchPoints",' +
+                  JSON.stringify(fp.navigator.maxTouchPoints) +
+                  ');' +
+                  'try{Object.defineProperty(proto,"webdriver",{get:function(){return false},configurable:false,enumerable:true})}catch(e){}' +
+                  '}' +
+                  // Workers expose WorkerNavigator, not Navigator — patching only
+                  // Navigator.prototype leaves self.navigator.hardwareConcurrency
+                  // on the host value (FCaptcha worker-hardware-concurrency-mismatch).
+                  'if(typeof WorkerNavigator!=="undefined")apply(WorkerNavigator.prototype);' +
+                  'if(typeof Navigator!=="undefined")apply(Navigator.prototype);' +
+                  '}catch(e){}})();';
+
+                const _blobUrl = (src) => {
+                  const blob = new Blob([src], { type: 'text/javascript' });
+                  return URL.createObjectURL(blob);
+                };
+                const _absUrl = (u) => {
+                  try {
+                    return new URL(u, location.href).href;
+                  } catch (e) {
+                    return String(u);
+                  }
+                };
+                const _wrapWorkerCtor = (Native, name) => {
+                  if (typeof Native !== 'function') return Native;
+                  const Wrapped = function (...args) {
+                    try {
+                      const scriptURL = args[0];
+                      const options = args[1];
+                      const isModule =
+                        options && typeof options === 'object' && options.type === 'module';
+                      const url =
+                        typeof scriptURL === 'string' ||
+                        (typeof URL !== 'undefined' && scriptURL instanceof URL)
+                          ? _absUrl(scriptURL)
+                          : String(scriptURL);
+                      // Only wrap classic blob/data workers. FCaptcha PoW uses
+                      // blob: workers; importScripts(blob:) from a wrapper blob
+                      // fails with NetworkError on Kernel Chromium (opaque
+                      // origin). Inline via sync XHR + navigator preamble.
+                      // http(s)/module workers keep Native so relative
+                      // importScripts/fetch and module hoist semantics stay
+                      // intact (and SharedWorker identity stays shareable).
+                      if (isModule || !(url.startsWith('blob:') || url.startsWith('data:'))) {
+                        return new Native(...args);
+                      }
+                      try {
+                        const xhr = new XMLHttpRequest();
+                        xhr.open('GET', url, false);
+                        xhr.send();
+                        if (xhr.status !== 0 && xhr.status !== 200) {
+                          return new Native(...args);
+                        }
+                        const wrappedSrc = _workerNavPreamble + '\\n' + xhr.responseText;
+                        const blobUrl = _blobUrl(wrappedSrc);
+                        const worker = new Native(blobUrl, options);
+                        try {
+                          setTimeout(() => {
+                            try {
+                              URL.revokeObjectURL(blobUrl);
+                            } catch (e) {}
+                          }, 60_000);
+                        } catch (e) {}
+                        return worker;
+                      } catch (e) {
+                        return new Native(...args);
+                      }
+                    } catch (e) {
+                      return new Native(...args);
+                    }
+                  };
+                  Wrapped.prototype = Native.prototype;
+                  try {
+                    Object.defineProperty(Wrapped, 'name', { value: name });
+                    Object.defineProperty(Wrapped, 'toString', {
+                      value: () => 'function ' + name + '() { [native code] }',
+                      configurable: true,
+                    });
+                  } catch (e) {}
+                  return Wrapped;
+                };
+                // Classic Worker only — wrapping SharedWorker would mint a new
+                // blob URL per construction and break same-URL worker sharing.
+                window.Worker = _wrapWorkerCtor(window.Worker, 'Worker');
+              } catch (e) {}
+
               // Override navigator.plugins with user's plugins
               if (fp.plugins && fp.plugins.length > 0) {
                 try {

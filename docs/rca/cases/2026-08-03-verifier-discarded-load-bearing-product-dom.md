@@ -60,3 +60,19 @@ None recorded.
 ## Reusable lesson
 
 Give acting agents an explicit bounded path to preserve browser-grounded facts whenever verification intentionally omits arbitrary historical DOM.
+
+## Recurrence 2026-10-01 (FCaptcha checkbox)
+
+On Browser Use WebDecoy runs, the agent observed the checkbox's `Verified`
+result, then scrolled to fill the invisible-mode form. The final page showed
+the form's score, while the verifier's bounded history could omit the earlier
+checkbox result. The acting agent had not asked to preserve that DOM before
+scrolling.
+
+The browser action loop now retains a bounded browser-grounded checkpoint when
+a screenshot or state read follows an interaction. It uses the existing
+three-checkpoint cap and the same browser observation path as explicit
+`preserve_evidence`. The full `spawn-browser-agent-v3` blackbox suite passed,
+and the unchanged `browser-biometrics-webdecoy` run
+`a7474a47-c181-4572-bf03-232a1542c4a0` scored 100% with the checkbox
+`Verified` result and the form's `0.00` risk score.

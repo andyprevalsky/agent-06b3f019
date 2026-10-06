@@ -2,15 +2,23 @@
 /**
  * Unit tests for the rotate_ip building blocks that need no DB or Kernel SDK:
  *  - the mobile proxy-candidate builder (geo relaxation + type-prefixed keys)
- *  - the deterministic Kernel residential → mobile → Steel ladder
+ *  - the deterministic Kernel residential → mobile → Steel → Browser Use ladder
  */
 import assert from 'node:assert';
+import type Kernel from '@onkernel/sdk';
 import { rotateProxySchema } from '../../domains/browser-session/types';
-import { kernelProxyCandidates } from '../../providers/browser/kernelProxy';
+import {
+  createSessionOnKernelProxyLadder,
+  getOrCreateKernelProxy,
+  kernelProxyCandidates,
+  selectReusableKernelProxy,
+} from '../../providers/browser/kernelProxy';
 import { ROTATION_CAP, selectRotationStep } from '../../providers/browser/rotation';
+import { prisma } from '../../providers/database';
 import {
   isSteelProvisioningOutage,
   isSteelSessionRateLimited,
+  runCrossProviderRotationLadder,
 } from '../blackbox/browser-provider-rotation.support';
 
 function testMobileCandidates(): void {
@@ -46,6 +54,327 @@ function testResidentialUnchanged(): void {
   assert.strictEqual(candidates[0].source, 'kernel_residential_city');
 }
 
+function testBenchmarkProxyReuseRequiresSameLocationAndTier(): void {
+  const candidate = kernelProxyCandidates({ country: 'US', state: 'CA', city: 'PALO ALTO' })[0];
+  assert.strictEqual(
+    selectReusableKernelProxy(
+      [
+        {
+          status: 'available',
+          id: 'wrong-tier',
+          name: candidate.name,
+          type: 'mobile',
+          config: candidate.config,
+        },
+        {
+          status: 'available',
+          id: 'wrong-city',
+          name: candidate.name,
+          type: 'residential',
+          config: { country: 'US', state: 'CA', city: 'san_francisco' },
+        },
+        {
+          status: 'available',
+          id: 'same-proxy',
+          name: candidate.name,
+          type: 'residential',
+          config: { country: 'us', state: 'ca', city: 'palo_alto' },
+        },
+      ],
+      candidate
+    ),
+    'same-proxy'
+  );
+  assert.strictEqual(
+    selectReusableKernelProxy(
+      [
+        {
+          status: 'available',
+          id: 'different-name',
+          name: 'another-proxy',
+          type: 'residential',
+          config: candidate.config,
+        },
+        {
+          status: 'available',
+          id: 'extra-setting',
+          name: candidate.name,
+          type: 'residential',
+          config: { ...candidate.config, zip: '94301' },
+        },
+      ],
+      candidate
+    ),
+    undefined
+  );
+}
+
+function testRestoredProxyReuse(): void {
+  const candidate = kernelProxyCandidates({ country: 'US', state: 'CA', city: 'PALO ALTO' })[0]!;
+  const matching = {
+    id: 'ready-proxy',
+    name: candidate.name,
+    type: candidate.type,
+    status: 'available' as const,
+    config: { country: 'us', state: 'ca', city: 'palo_alto' },
+  };
+  assert.strictEqual(selectReusableKernelProxy([matching], candidate), 'ready-proxy');
+  assert.strictEqual(
+    selectReusableKernelProxy([{ ...matching, bypass_hosts: ['example.com'] }], candidate),
+    undefined,
+    'a proxy that bypasses hosts cannot satisfy a geographic proxy candidate'
+  );
+  assert.strictEqual(
+    selectReusableKernelProxy([{ ...matching, status: 'unavailable' }], candidate),
+    undefined
+  );
+  assert.strictEqual(
+    selectReusableKernelProxy(
+      [{ ...matching, config: { ...matching.config, city: 'berkeley' } }],
+      candidate
+    ),
+    undefined
+  );
+  const countryCandidate = kernelProxyCandidates({ country: 'US' })[0]!;
+  assert.strictEqual(
+    selectReusableKernelProxy(
+      [
+        {
+          ...matching,
+          name: countryCandidate.name,
+          config: { country: ['US'] as unknown as string },
+        },
+      ],
+      countryCandidate
+    ),
+    undefined,
+    'a malformed array location must not match a geographic proxy candidate'
+  );
+  assert.strictEqual(
+    selectReusableKernelProxy(
+      [{ ...matching, name: countryCandidate.name, config: { country: 'US', state: 'CA' } }],
+      countryCandidate
+    ),
+    undefined,
+    'a state-restricted proxy must not satisfy a country-only candidate'
+  );
+}
+
+async function testPaginatedProxyReuseAndConcurrentOwnership(): Promise<void> {
+  const model = prisma.browserProviderProxy;
+  const originalFind = model.findUnique;
+  const originalCreate = model.create;
+  const candidate = kernelProxyCandidates({ country: 'US' })[0]!;
+  const matching = {
+    id: 'proxy-on-second-page',
+    name: candidate.name,
+    type: candidate.type,
+    status: 'available' as const,
+    config: candidate.config,
+  };
+  let nextPageCalls = 0;
+  let remoteCreateCalls = 0;
+  let remoteDeleteCalls = 0;
+  const lastPage = {
+    items: [matching],
+    hasNextPage: () => false,
+  };
+  const firstPage = {
+    items: [],
+    hasNextPage: () => true,
+    getNextPage: async () => {
+      nextPageCalls += 1;
+      return lastPage;
+    },
+  };
+
+  try {
+    model.findUnique = (async () => null) as typeof model.findUnique;
+    model.create = (async ({ data }: { data: { proxyKey: string; proxyId: string } }) =>
+      data) as typeof model.create;
+    const paginatedClient = {
+      proxies: {
+        list: async () => firstPage,
+        create: async () => {
+          remoteCreateCalls += 1;
+          return { id: 'unexpected' };
+        },
+      },
+    } as unknown as Kernel;
+    const reused = await getOrCreateKernelProxy(paginatedClient, candidate);
+    assert.strictEqual(reused.proxyId, matching.id);
+    assert.strictEqual(nextPageCalls, 1);
+    assert.strictEqual(remoteCreateCalls, 0, 'a later page must be searched before provisioning');
+
+    let findCalls = 0;
+    model.findUnique = (async () => {
+      findCalls += 1;
+      return findCalls === 1 ? null : { proxyId: 'new-proxy', proxyKey: candidate.proxyKey };
+    }) as typeof model.findUnique;
+    model.create = (async () => {
+      throw new Error('unique conflict');
+    }) as typeof model.create;
+    const racingClient = {
+      proxies: {
+        list: async () => ({ items: [], hasNextPage: () => false }),
+        create: async () => ({ id: 'new-proxy' }),
+        delete: async () => {
+          remoteDeleteCalls += 1;
+        },
+      },
+    } as unknown as Kernel;
+    const winner = await getOrCreateKernelProxy(racingClient, candidate);
+    assert.strictEqual(winner.proxyId, 'new-proxy');
+    assert.strictEqual(remoteDeleteCalls, 0, 'the winner may own the created proxy');
+
+    model.findUnique = (async () => null) as typeof model.findUnique;
+    await assert.rejects(() => getOrCreateKernelProxy(racingClient, candidate), /unique conflict/);
+    assert.strictEqual(remoteDeleteCalls, 0, 'a pending winner may still be saving the proxy');
+  } finally {
+    model.findUnique = originalFind;
+    model.create = originalCreate;
+  }
+}
+
+type CachedProxyRow = { proxyKey: string; proxyId: string };
+
+async function withProxyCache<T>(rows: Map<string, string>, run: () => Promise<T>): Promise<T> {
+  const model = prisma.browserProviderProxy;
+  const originalFind = model.findUnique;
+  const originalCreate = model.create;
+  const originalDeleteMany = model.deleteMany;
+  model.findUnique = (async ({
+    where,
+  }: {
+    where: { provider_proxyKey: { proxyKey: string } };
+  }): Promise<CachedProxyRow | null> => {
+    const proxyKey = where.provider_proxyKey.proxyKey;
+    const proxyId = rows.get(proxyKey);
+    return proxyId === undefined ? null : { proxyKey, proxyId };
+  }) as unknown as typeof model.findUnique;
+  model.create = (async ({ data }: { data: CachedProxyRow }) => {
+    rows.set(data.proxyKey, data.proxyId);
+    return data;
+  }) as unknown as typeof model.create;
+  model.deleteMany = (async ({ where }: { where: { proxyKey: string } }) => {
+    const count = rows.delete(where.proxyKey) ? 1 : 0;
+    return { count };
+  }) as unknown as typeof model.deleteMany;
+  try {
+    return await run();
+  } finally {
+    model.findUnique = originalFind;
+    model.create = originalCreate;
+    model.deleteMany = originalDeleteMany;
+  }
+}
+
+function ladderClient(listedIds: Record<string, string>): {
+  client: Kernel;
+  created: string[];
+} {
+  const created: string[] = [];
+  const client = {
+    proxies: {
+      list: async ({ query }: { query: string }) => ({
+        items:
+          listedIds[query] === undefined
+            ? []
+            : [
+                {
+                  id: listedIds[query],
+                  name: query,
+                  type: 'residential',
+                  status: 'available',
+                  config: kernelProxyCandidates({
+                    country: 'US',
+                    state: 'CA',
+                    city: 'SAN FRANCISCO',
+                  }).find((c) => c.name === query)?.config,
+                },
+              ],
+        hasNextPage: () => false,
+      }),
+      create: async ({ name }: { name: string }) => {
+        created.push(name);
+        return { id: `created-${name}` };
+      },
+    },
+  } as unknown as Kernel;
+  return { client, created };
+}
+
+// Another run's cleanup (or Kernel) can delete a shared geo proxy after this
+// database cached its ID. That proves the ID is stale, not that the city is out
+// of inventory, so resume must keep the city instead of downgrading to state.
+async function testDeletedCachedProxyKeepsLocation(): Promise<void> {
+  const candidates = kernelProxyCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
+  const [city, state] = candidates;
+  const rows = new Map([[city!.proxyKey, 'deleted-by-another-run']]);
+  const { client, created } = ladderClient({ [city!.name]: 'live-city-proxy' });
+  const relaxed: string[] = [];
+  const attempted: string[] = [];
+
+  const session = await withProxyCache(rows, () =>
+    createSessionOnKernelProxyLadder(
+      client,
+      candidates,
+      async (proxy) => {
+        attempted.push(proxy.proxyId);
+        if (proxy.proxyId === 'deleted-by-another-run') {
+          throw new Error('400 proxy not found');
+        }
+        return proxy;
+      },
+      { onRelax: (candidate) => relaxed.push(candidate.proxyKey) }
+    )
+  );
+
+  assert.strictEqual(session.source, 'kernel_residential_city', 'resume lost the city proxy');
+  assert.deepStrictEqual(session.location, city!.location);
+  assert.strictEqual(session.proxyId, 'live-city-proxy');
+  assert.deepStrictEqual(attempted, ['deleted-by-another-run', 'live-city-proxy']);
+  assert.deepStrictEqual(relaxed, [], 'a stale proxy ID must not relax location specificity');
+  assert.strictEqual(rows.get(city!.proxyKey), 'live-city-proxy', 'stale cache row was kept');
+  assert.strictEqual(rows.has(state!.proxyKey), false);
+  assert.deepStrictEqual(created, [], 'a listed live proxy must be reused, not re-created');
+
+  // A refreshed ID that is also missing is refreshed once, then relaxes.
+  const missingRows = new Map([[city!.proxyKey, 'deleted-by-another-run']]);
+  const missing = ladderClient({});
+  const relaxedAfterRefresh: string[] = [];
+  const cityAttempts: string[] = [];
+  const fallback = await withProxyCache(missingRows, () =>
+    createSessionOnKernelProxyLadder(
+      missing.client,
+      candidates,
+      async (proxy) => {
+        if (proxy.source === 'kernel_residential_city') {
+          cityAttempts.push(proxy.proxyId);
+          throw new Error('400 proxy not found');
+        }
+        return proxy;
+      },
+      { onRelax: (candidate) => relaxedAfterRefresh.push(candidate.proxyKey) }
+    )
+  );
+  assert.deepStrictEqual(cityAttempts, ['deleted-by-another-run', `created-${city!.name}`]);
+  assert.deepStrictEqual(relaxedAfterRefresh, [city!.proxyKey]);
+  assert.strictEqual(fallback.source, 'kernel_residential_state');
+
+  // A transport timeout does not prove the proxy is gone: keep the row, relax.
+  const timeoutRows = new Map([[city!.proxyKey, 'healthy-city-proxy']]);
+  const timeout = ladderClient({});
+  const timedOut = await withProxyCache(timeoutRows, () =>
+    createSessionOnKernelProxyLadder(timeout.client, candidates, async (proxy) => {
+      if (proxy.source === 'kernel_residential_city') throw new Error('Request timed out.');
+      return proxy;
+    })
+  );
+  assert.strictEqual(timedOut.source, 'kernel_residential_state');
+  assert.strictEqual(timeoutRows.get(city!.proxyKey), 'healthy-city-proxy');
+}
+
 function testRotationTierLadder(): void {
   assert.strictEqual(ROTATION_CAP, 4);
   assert.deepStrictEqual(selectRotationStep(1, 'kernel'), {
@@ -64,16 +393,36 @@ function testRotationTierLadder(): void {
     recoveryAction: 'provider_switched',
   });
   assert.deepStrictEqual(selectRotationStep(4, 'steel'), {
-    provider: 'steel',
+    provider: 'browser-use',
     proxyType: 'residential',
-    recoveryAction: 'ip_rotated',
+    recoveryAction: 'provider_switched',
   });
 
-  // A run that starts on Steel stays on Steel; provider rotation is one-way.
+  // A run that starts on Steel retries there before switching infrastructure.
   assert.deepStrictEqual(selectRotationStep(1, 'steel'), {
     provider: 'steel',
     proxyType: 'residential',
     recoveryAction: 'ip_rotated',
+  });
+  assert.deepStrictEqual(selectRotationStep(3, 'steel'), {
+    provider: 'browser-use',
+    proxyType: 'residential',
+    recoveryAction: 'provider_switched',
+  });
+  assert.deepStrictEqual(selectRotationStep(1, 'browser-use'), {
+    provider: 'browser-use',
+    proxyType: 'residential',
+    recoveryAction: 'ip_rotated',
+  });
+  assert.deepStrictEqual(selectRotationStep(4, 'steel', false), {
+    provider: 'steel',
+    proxyType: 'residential',
+    recoveryAction: 'ip_rotated',
+  });
+  assert.deepStrictEqual(selectRotationStep(1, 'browser-use', false), {
+    provider: 'steel',
+    proxyType: 'residential',
+    recoveryAction: 'provider_switched',
   });
   assert.throws(() => selectRotationStep(0, 'kernel'), RangeError);
   assert.throws(() => selectRotationStep(ROTATION_CAP + 1, 'steel'), RangeError);
@@ -185,13 +534,86 @@ function testSteelOutageDetector(): void {
   );
 }
 
-function main(): void {
+async function testCrossProviderLadderLabelsSteelExitIpReads(): Promise<void> {
+  const responses = [
+    {
+      task_id: 'task-1',
+      provider: 'steel',
+      proxy_tier: 'residential',
+      previous_provider: 'kernel',
+      recovery_action: 'provider_switched',
+      rotations_used: 3,
+      rotations_remaining: 1,
+      next_recovery: 'rotate_steel_residential_ip',
+      saved_url: 'https://example.com/provider-switch-check',
+      browser_session_metadata: { provider: 'steel', steel_profile_id: 'profile-1' },
+      session_id: 'steel-session-1',
+      ws_url: 'wss://steel/1',
+    },
+    {
+      task_id: 'task-1',
+      provider: 'steel',
+      proxy_tier: 'residential',
+      previous_provider: 'steel',
+      recovery_action: 'ip_rotated',
+      rotations_used: 4,
+      rotations_remaining: 0,
+      next_recovery: 'rotation_budget_exhausted',
+      browser_session_metadata: { provider: 'steel', steel_profile_id: 'profile-1' },
+      session_id: 'steel-session-2',
+      ws_url: 'wss://steel/2',
+    },
+  ];
+  const stages: unknown[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({ error: 'proxy_rotation_exhausted', message: 'PROXY_ROTATION_EXHAUSTED' }),
+      { status: 409 }
+    );
+  try {
+    await runCrossProviderRotationLadder({
+      baseUrl: 'http://ladder.test',
+      headers: {},
+      taskId: 'task-1',
+      currentKernelSessionId: 'kernel-session-2',
+      mobileIp: '10.0.0.2',
+      post: async () => responses.shift()!,
+      readDifferentExitIp: async (...args: unknown[]) => {
+        stages.push(args[2]);
+        return `10.0.1.${stages.length}`;
+      },
+      retrieveKernelBrowser: async () => ({ deleted_at: new Date() }),
+      retrieveSteelBrowser: async () => ({ status: 'released', timeout: Number.MAX_SAFE_INTEGER }),
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.deepStrictEqual(
+    stages,
+    [
+      'rotation3 steel, Steel session steel-session-1',
+      'rotation4 steel, Steel session steel-session-2',
+    ],
+    'a Steel exit-IP failure must name the Steel session it read, not the evicted Kernel one'
+  );
+}
+
+async function main(): Promise<void> {
   testMobileCandidates();
   testResidentialUnchanged();
+  testBenchmarkProxyReuseRequiresSameLocationAndTier();
+  testRestoredProxyReuse();
+  await testPaginatedProxyReuseAndConcurrentOwnership();
+  await testDeletedCachedProxyKeepsLocation();
   testRotationTierLadder();
   testRotationRequestSchema();
   testSteelOutageDetector();
+  await testCrossProviderLadderLabelsSteelExitIpReads();
   process.stdout.write('PASS rotate_ip mobile candidates + escalation ladder\n');
 }
 
-main();
+void main().catch((error: unknown) => {
+  process.stderr.write(`${String(error)}\n`);
+  process.exitCode = 1;
+});

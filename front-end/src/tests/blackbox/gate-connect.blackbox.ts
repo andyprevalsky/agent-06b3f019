@@ -112,7 +112,11 @@ describe('runGateConnectAction', () => {
       '_blank',
       'noopener,noreferrer',
     );
-    expect(open).not.toHaveBeenCalledWith('https://checkout.stripe.com/c/stale', expect.anything(), expect.anything());
+    expect(open).not.toHaveBeenCalledWith(
+      'https://checkout.stripe.com/c/stale',
+      expect.anything(),
+      expect.anything(),
+    );
     expect(startGmailOAuthApi).not.toHaveBeenCalled();
   });
 

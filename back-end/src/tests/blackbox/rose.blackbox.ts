@@ -36,6 +36,7 @@ import path from 'node:path';
 
 import {
   __resetAnthropicApiKeyCooldown,
+  __resetGptApiKeyCooldown,
   buildOpenAiResponseFormat,
   createStreamingCompletion,
   getPool,
@@ -70,6 +71,7 @@ import {
   parseOpenAISSE,
   parseResponsesSSE,
 } from '../../providers/rose/streaming';
+import { RosePaymentRequiredError } from '../../providers/rose/errors';
 import {
   applyAnthropicResponseFormat,
   applyAnthropicToolConfig,
@@ -86,6 +88,7 @@ import {
   OPENROUTER_API_URL,
 } from '../../providers/rose/transport';
 import { SUPERVISOR_RESPONSE_SCHEMA } from '../../providers/smsSupervisor/schema';
+import { withIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
 
 // ==================== TEST INFRASTRUCTURE ====================
 
@@ -770,14 +773,23 @@ async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
 
   // Collapsing the union must not drop the model-facing field documentation.
   const startAgent = extracted.tools.find((tool) => tool.name === 'start_new_agent');
-  const budget = (
-    ((startAgent?.input_schema as Record<string, unknown>).properties as Record<string, unknown>)
-      .arguments as Record<string, unknown>
-  ).properties as Record<string, Record<string, unknown>>;
+  const startAgentArgs = (
+    (startAgent?.input_schema as Record<string, unknown>).properties as Record<string, unknown>
+  ).arguments as { properties: Record<string, Record<string, unknown>>; required?: string[] };
+  const budget = startAgentArgs.properties;
   assert(
     typeof budget.budget_dollars.description === 'string' &&
       budget.budget_dollars.description.length > 0,
     'budget_dollars description must survive the Anthropic transform'
+  );
+  assertEqual(
+    JSON.stringify(budget.start_phase?.enum),
+    '["plan","execute"]',
+    'start_phase enum must survive the Anthropic transform'
+  );
+  assert(
+    (startAgentArgs.required ?? []).includes('start_phase'),
+    'start_phase must stay required so the native tool path always chooses a phase'
   );
 }
 
@@ -824,7 +836,7 @@ async function testWaterfall_openAiToolCallsCarryFunctionType() {
     },
     {
       label: 'buildOpenRouterFastChatBody',
-      build: (messages) => buildOpenRouterFastChatBody({ messages }),
+      build: (messages) => buildOpenRouterFastChatBody({ messages }, 'req-tool-shape'),
     },
   ];
 
@@ -868,6 +880,37 @@ interface JsonSchemaNode {
   properties?: Record<string, JsonSchemaNode>;
   additionalProperties?: JsonSchemaNode;
   required?: string[];
+}
+
+async function testClaudeAuth_haikuOmitsUnsupportedControls() {
+  // Captured Anthropic response from the spawn-sub-agents smoke:
+  // HTTP 400 "This model does not support the effort parameter."
+  const poolSpec = getPool('rose-1-mini');
+  const messages: CompletionMessage[] = [{ role: 'user', content: 'Summarize the source.' }];
+  const plain = buildAnthropicBody({ poolSpec, messages });
+  assertEqual(plain.model, 'claude-haiku-4-5', 'mini Claude model');
+  assert(!('thinking' in plain), 'Haiku 4.5 must not receive adaptive thinking');
+  assert(
+    !('effort' in ((plain.output_config as Record<string, unknown> | undefined) ?? {})),
+    'Haiku 4.5 must not receive output_config.effort'
+  );
+
+  const structured = buildAnthropicBody({
+    poolSpec,
+    messages,
+    responseFormat: SUPERVISOR_RESPONSE_SCHEMA,
+    effort: 'low',
+  });
+  assertEqual(
+    (structured.tool_choice as Record<string, unknown>).type,
+    'any',
+    'structured Haiku response keeps forced tool choice'
+  );
+  assert(!('thinking' in structured), 'structured Haiku call omits adaptive thinking');
+  assert(
+    !('effort' in ((structured.output_config as Record<string, unknown> | undefined) ?? {})),
+    'explicit effort is also omitted for Haiku 4.5'
+  );
 }
 
 async function testAnthropic_nullableRelaxationPreservesNonNullableRequired() {
@@ -1172,6 +1215,27 @@ async function testStreaming_responsesFailedContextLengthIsInvalidRequest() {
     raised = err instanceof RoseInvalidRequest;
   }
   assert(raised, 'context_length_exceeded raises RoseInvalidRequest');
+}
+
+async function testStreaming_inBandCreditExhaustionIsPaymentRequired() {
+  let raised = false;
+  try {
+    await collect(
+      parseResponsesSSE(
+        sseResponse([
+          'event: error',
+          'data: {"type":"error","error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"You have no credits remaining"}}',
+          '',
+          'data: [DONE]',
+          '',
+        ]).body!,
+        { actualModel: 'gpt-6-sol-openai', poolName: 'openai-api-key', requestId: 'r-credit-event' }
+      )
+    );
+  } catch (err) {
+    raised = err instanceof RosePaymentRequiredError;
+  }
+  assert(raised, 'in-band credit exhaustion triggers the shared API-key cooldown');
 }
 
 async function testClaudeAuth_401FallsThroughToWaterfall() {
@@ -1696,6 +1760,7 @@ async function testFlash_cerebrasFailureFallsToOpenRouterQwen() {
 }
 
 async function testOpenAiApiKey_servesBeforeAnthropicAndOpenRouter() {
+  await __resetGptApiKeyCooldown();
   process.env.GPT_API_KEY = 'sk-proj-test-key';
   process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test-key';
   process.env.OPENROUTER_API_KEY = 'or-test-key';
@@ -1740,10 +1805,12 @@ async function testOpenAiApiKey_servesBeforeAnthropicAndOpenRouter() {
     delete process.env.GPT_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     restoreFetch();
+    await __resetGptApiKeyCooldown();
   }
 }
 
 async function testOpenAiApiKey_failureFallsThroughToAnthropicBeforeOpenRouter() {
+  await __resetGptApiKeyCooldown();
   process.env.GPT_API_KEY = 'sk-proj-test-key';
   process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test-key';
   process.env.OPENROUTER_API_KEY = 'or-test-key';
@@ -1782,11 +1849,60 @@ async function testOpenAiApiKey_failureFallsThroughToAnthropicBeforeOpenRouter()
     delete process.env.GPT_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     await __resetAnthropicApiKeyCooldown();
+    await __resetGptApiKeyCooldown();
     restoreFetch();
   }
 }
 
+async function testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry() {
+  await __resetGptApiKeyCooldown();
+  process.env.GPT_API_KEY = 'sk-proj-test-key';
+  process.env.ANTHROPIC_API_KEY = '';
+  process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
+  process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  const seen = { openai: 0, foundry: 0, openrouter: 0 };
+  installFetchStub((url) => {
+    if (url === OPENAI_RESPONSES_API_URL) {
+      seen.openai++;
+      return errorResponse(
+        429,
+        JSON.stringify({ error: { code: 'credit_balance_exhausted', type: 'insufficient_quota' } })
+      );
+    }
+    if (url === 'https://a-4989-resource.openai.azure.com/openai/v1/responses') {
+      seen.foundry++;
+      return sseResponse(RESPONSES_OK_SSE);
+    }
+    if (url === OPENROUTER_API_URL) seen.openrouter++;
+    throw new Error(`Unexpected provider URL: ${url}`);
+  });
+  try {
+    for (let i = 0; i < 2; i++) {
+      const chunks = await collect(
+        await createStreamingCompletion({
+          model: 'rose-labs/rose-1-ultra',
+          messages: [{ role: 'user', content: 'hi' }],
+        })
+      );
+      assert(chunks[0].actual_model.endsWith('-foundry'), 'Foundry served completion');
+    }
+    assertEqual(seen.openai, 1, 'exhausted GPT key only attempted once');
+    assertEqual(seen.foundry, 2, 'Foundry served both requests');
+    assertEqual(seen.openrouter, 0, 'OpenRouter not reached');
+  } finally {
+    restoreFetch();
+    delete process.env.GPT_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.AZURE_FOUNDRY_ENDPOINT;
+    delete process.env.AZURE_FOUNDRY_API_KEY;
+    delete process.env.AZURE_FOUNDRY_DEPLOYMENTS;
+    await __resetGptApiKeyCooldown();
+  }
+}
+
 async function testSharedOpenAiPriorityRoute_isExclusiveAndPreservesRouterConfig() {
+  await __resetGptApiKeyCooldown();
   process.env.GPT_API_KEY = 'sk-proj-router-priority';
   process.env.ANTHROPIC_API_KEY = 'sk-ant-must-not-run';
   process.env.OPENROUTER_API_KEY = 'sk-or-must-not-run';
@@ -1888,6 +2004,7 @@ async function testSharedOpenAiPriorityRoute_missingKeyFailsClosedWithoutProvide
 }
 
 async function testSharedOpenAiPriorityRoute_invalidKeyFailsClosedWithoutFallbackCalls() {
+  await __resetGptApiKeyCooldown();
   process.env.GPT_API_KEY = 'sk-proj-invalid';
   process.env.ANTHROPIC_API_KEY = 'sk-ant-must-not-run';
   process.env.OPENROUTER_API_KEY = 'sk-or-must-not-run';
@@ -1916,17 +2033,14 @@ async function testSharedOpenAiPriorityRoute_invalidKeyFailsClosedWithoutFallbac
     }
 
     assert(thrown instanceof Error, 'invalid key should throw');
-    assert(
-      (thrown as Error).message.includes('OpenAI 401') &&
-        (thrown as Error).message.includes('invalid api key'),
-      `expected clear OpenAI auth error, got ${String(thrown)}`
-    );
+    assertEqual((thrown as Error).message, 'OpenAI 401', 'safe OpenAI auth error');
     assertEqual(JSON.stringify(calledUrls), JSON.stringify([OPENAI_RESPONSES_API_URL]), 'calls');
   } finally {
     restoreFetch();
     delete process.env.GPT_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENROUTER_API_KEY;
+    await __resetGptApiKeyCooldown();
   }
 }
 
@@ -2160,8 +2274,8 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
   //   OpenAI/Codex Responses → reasoning.effort (default xhigh)
   //   OpenRouter waterfall → reasoning.effort (default xhigh)
   //   OpenRouter fast chat → reasoning.effort (default xhigh)
-  //   Cerebras direct → reasoning_effort: 'low' (gpt-oss-120b minimum)
-  //   OpenRouter→Cerebras → reasoning.effort: 'low' (gpt-oss-120b minimum)
+  //   Cerebras direct → reasoning_effort: 'low' (rose-fast Qwen stall budget)
+  //   OpenRouter→Cerebras → reasoning.effort: 'low' (same Qwen stall budget)
   const messages: CompletionMessage[] = [
     { role: 'system', content: 'be helpful' },
     { role: 'user', content: 'hi' },
@@ -2258,7 +2372,7 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
     );
   }
 
-  // Latency chat routes: effort still ALWAYS set (low for Cerebras/gpt-oss; xhigh default for OR-fast).
+  // Latency chat routes: effort still ALWAYS set (low for Cerebras/Qwen; xhigh default for OR-fast).
   const cerebras = buildCerebrasChatBody({ messages });
   assertEqual(cerebras.reasoning_effort, 'low', 'cerebras stamps reasoning_effort=low');
   const cerebrasCached = buildCerebrasChatBody({
@@ -2288,13 +2402,16 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
     'openrouter→cerebras stamps reasoning.effort=low'
   );
 
-  const orFast = buildOpenRouterFastChatBody({ messages });
+  const orFast = buildOpenRouterFastChatBody({ messages }, 'req-effort');
   assertEqual(
     (orFast.reasoning as Record<string, unknown>).effort,
     'xhigh',
     'openrouter-fast default effort=xhigh'
   );
-  const orFastMinimal = buildOpenRouterFastChatBody({ messages, effort: 'minimal' });
+  const orFastMinimal = buildOpenRouterFastChatBody(
+    { messages, effort: 'minimal' },
+    'req-effort-minimal'
+  );
   assertEqual(
     (orFastMinimal.reasoning as Record<string, unknown>).effort,
     'low',
@@ -2319,6 +2436,43 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
       `${label} must stamp non-empty effort (got ${JSON.stringify(effort)})`
     );
   }
+}
+
+async function testClaudeAuth_omitsEffortForHaiku() {
+  // rose-1-mini claudeAuth is claude-haiku-4-5, which 400s on
+  // output_config.effort. Mirror agents rose.blackbox (spawn-sub-agents
+  // timeout e6b39a7f — summarize_web_fetch burned 90s TTFT after invalid_request).
+  const messages: CompletionMessage[] = [
+    { role: 'system', content: 'be helpful' },
+    { role: 'user', content: 'hi' },
+  ];
+  const mini = buildAnthropicBody({
+    poolSpec: getPool('rose-1-mini'),
+    messages,
+    effort: 'xhigh',
+  });
+  assertEqual(mini.model, 'claude-haiku-4-5', 'mini model');
+  const miniOc = mini.output_config as Record<string, unknown> | undefined;
+  assert(
+    miniOc === undefined || miniOc.effort === undefined,
+    'haiku must not receive output_config.effort'
+  );
+  assert(mini.thinking === undefined, 'haiku must not receive thinking.type=adaptive');
+
+  const flash = buildAnthropicBody({
+    poolSpec: getPool('rose-1-flash'),
+    messages,
+  });
+  assertEqual(
+    (flash.output_config as Record<string, unknown>).effort,
+    'xhigh',
+    'non-haiku still stamps xhigh'
+  );
+  assertEqual(
+    (flash.thinking as Record<string, unknown> | undefined)?.type,
+    'adaptive',
+    'non-haiku still stamps adaptive thinking'
+  );
 }
 
 async function testWaterfall_firstFailsSecondSucceeds() {
@@ -3854,6 +4008,10 @@ async function main(): Promise<void> {
       fn: testClaudeAuth_fable51DowngradesForcedToolChoice,
     },
     {
+      name: 'claudeAuth / Haiku omits unsupported controls',
+      fn: testClaudeAuth_haikuOmitsUnsupportedControls,
+    },
+    {
       name: 'claudeAuth / nullable relaxation keeps non-nullable fields required',
       fn: testAnthropic_nullableRelaxationPreservesNonNullableRequired,
     },
@@ -3864,6 +4022,10 @@ async function main(): Promise<void> {
     {
       name: 'streaming / Responses failed context length is invalid request',
       fn: testStreaming_responsesFailedContextLengthIsInvalidRequest,
+    },
+    {
+      name: 'streaming / in-band credit exhaustion is payment required',
+      fn: testStreaming_inBandCreditExhaustionIsPaymentRequired,
     },
     {
       name: 'claudeAuth / 401 falls through to waterfall',
@@ -3914,6 +4076,10 @@ async function main(): Promise<void> {
       fn: testOpenAiApiKey_failureFallsThroughToAnthropicBeforeOpenRouter,
     },
     {
+      name: 'openai api-key / insufficient quota cools later requests before Foundry',
+      fn: testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry,
+    },
+    {
       name: 'shared OpenAI priority / exclusive route preserves router config',
       fn: testSharedOpenAiPriorityRoute_isExclusiveAndPreservesRouterConfig,
     },
@@ -3944,6 +4110,10 @@ async function main(): Promise<void> {
     {
       name: 'waterfall / body builders always stamp effort=xhigh',
       fn: testWaterfall_bodyBuildersAlwaysStampEffortXhigh,
+    },
+    {
+      name: 'claudeAuth / omits effort for haiku (rose-1-mini)',
+      fn: testClaudeAuth_omitsEffortForHaiku,
     },
     { name: 'waterfall / first 500 → second succeeds', fn: testWaterfall_firstFailsSecondSucceeds },
     { name: 'waterfall / all fail → RoseAllFailed', fn: testWaterfall_allFailRaisesRoseAllFailed },
@@ -4112,12 +4282,14 @@ async function main(): Promise<void> {
 
   const results: TestResult[] = [];
   // Run sequentially — tests share process.env + global.fetch state.
-  for (const t of tests) {
-    const r = await runTest(t.name, t.fn);
-    results.push(r);
-    console.log(`  ${r.passed ? 'PASS' : 'FAIL'}  ${r.name} (${r.duration}ms)`);
-    if (!r.passed) console.log(`    ${r.error}`);
-  }
+  await withIsolatedFundedKeyCooldowns(async () => {
+    for (const t of tests) {
+      const r = await runTest(t.name, t.fn);
+      results.push(r);
+      console.log(`  ${r.passed ? 'PASS' : 'FAIL'}  ${r.name} (${r.duration}ms)`);
+      if (!r.passed) console.log(`    ${r.error}`);
+    }
+  });
 
   const passed = results.filter((r) => r.passed).length;
   const failed = results.length - passed;

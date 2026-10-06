@@ -1,4 +1,4 @@
-"""Process-wide pooled HTTP client for agent-side backend/tool calls.
+"""Process-wide pooled HTTP clients for agent-side backend/tool calls.
 
 Opening a fresh ``httpx.AsyncClient`` per call builds a brand-new ``SSLContext``
 every time — ``ssl.create_default_context`` parses the whole CA bundle on each
@@ -17,11 +17,38 @@ module generalises the pattern for the tool/domain repos.
 
 from __future__ import annotations
 
-from typing import Optional
+import asyncio
+from http.cookiejar import DefaultCookiePolicy
+from typing import Dict, Optional, Tuple
 
 import httpx
 
-_client: Optional[httpx.AsyncClient] = None
+_clients: Dict[str, Tuple[httpx.AsyncClient, Optional[asyncio.AbstractEventLoop]]] = {}
+
+
+def _running_loop() -> Optional[asyncio.AbstractEventLoop]:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+def _pooled_client(name: str, limits: httpx.Limits) -> httpx.AsyncClient:
+    # Pooled connections belong to the event loop that opened them, so a new
+    # loop (e.g. a fresh ``asyncio.run``) gets its own client.
+    loop = _running_loop()
+    cached = _clients.get(name)
+    if cached is not None:
+        client, client_loop = cached
+        if not client.is_closed and (loop is None or loop is client_loop):
+            return client
+    client = httpx.AsyncClient(limits=limits, timeout=30.0)
+    # One client serves every user's and provider's credentials, so a Set-Cookie
+    # from one account's response must never ride along on the next account's
+    # request. AsyncClient copies a passed-in jar, so set the policy in place.
+    client.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+    _clients[name] = (client, loop)
+    return client
 
 
 def get_http_client() -> httpx.AsyncClient:
@@ -31,14 +58,14 @@ def get_http_client() -> httpx.AsyncClient:
     it lives for the worker process lifetime. Pass per-request ``timeout=`` and
     ``follow_redirects=`` on the ``.get()``/``.post()`` call.
     """
-    global _client  # noqa: PLW0603
-    if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(
-            # Bounded, keep-alive pool. One SSLContext is built here (once) and
-            # reused for every connection this client makes.
-            limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
-            # Sensible default for callers that don't pass a per-request timeout;
-            # hot callers override with their own timeout= on the request.
-            timeout=30.0,
-        )
-    return _client
+    return _pooled_client("default", httpx.Limits(max_connections=200, max_keepalive_connections=50))
+
+
+def get_streaming_http_client() -> httpx.AsyncClient:
+    """Shared client for long-lived streams (LLM completions).
+
+    Streams hold a connection for their whole lifetime, so a bounded pool would
+    turn concurrent races into pool-acquisition timeouts. Connections are
+    unbounded; only keep-alive reuse is capped.
+    """
+    return _pooled_client("streaming", httpx.Limits(max_connections=None, max_keepalive_connections=100))

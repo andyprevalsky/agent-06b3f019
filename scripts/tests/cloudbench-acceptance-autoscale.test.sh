@@ -48,7 +48,7 @@ assert_rejected_before_fly() { # assert_rejected_before_fly <label> <expected-te
 
 assert_rejected_before_fly public-no-autoscale \
     "Unknown flag: --no-autoscale" \
-    bash "$ROOT_DIR/scripts/run-bench" acceptance-probe --no-autoscale
+    bash "$ROOT_DIR/scripts/run-bench" chat-mode --no-autoscale
 assert_rejected_before_fly fleet-no-autoscale \
     "Unknown flag: --no-autoscale" \
     bash "$ROOT_DIR/scripts/run-bench-fleet" acceptance-probe --no-autoscale
@@ -91,3 +91,41 @@ grep -qF 'cloudbench_fleet_workspace_name "$bench" "$$" "$i"' \
     }
 
 echo "PASS: cloud benchmarks expose no autoscale off-state"
+
+# Finalization must wait for a live autoscaler's terminal marker even when the
+# shell job table omits it (observed under heavy controller load: acceptance
+# then found the autoscaler running without autoscaler.completed-after-child).
+finalization_harness="$TMP_ROOT/finalization-harness.sh"
+{
+    printf 'set -uo pipefail\n'
+    for fn in fleet_job_running fleet_job_may_be_running wait_for_autoscaler_finalization; do
+        awk -v start="^${fn}\\\\(\\\\) \\\\{" '$0 ~ start {p=1} p {print} p && /^\}/ {exit}' \
+            "$ROOT_DIR/scripts/run-bench-fleet"
+    done
+    # Simulate the job-table omission: the shell never lists the autoscaler.
+    printf 'fleet_job_running() { return 1; }\n'
+    printf 'out="$1"; AUTOSCALER_FINALIZATION_WAIT_SECONDS=20\n'
+    printf '( sleep 1.5; : > "$out/autoscaler.completed-after-child"; sleep 0.5 ) &\n'
+    printf 'AUTOSCALER_PIDS=("$!"); CHILD_OUT=("$out")\n'
+    printf 'wait_for_autoscaler_finalization\n'
+    printf '[ -e "$out/autoscaler.completed-after-child" ] || exit 3\n'
+    # An autoscaler that exits without a marker must not hold the wait open.
+    printf 'rm -f "$out/autoscaler.completed-after-child"; ( sleep 0.3 ) &\n'
+    printf 'AUTOSCALER_PIDS=("$!"); started=$SECONDS\n'
+    printf 'wait_for_autoscaler_finalization\n'
+    printf '[ $((SECONDS - started)) -lt 10 ] || exit 4\n'
+} > "$finalization_harness"
+grep -q '^wait_for_autoscaler_finalization() {' "$finalization_harness" || {
+    echo "FAIL: could not extract wait_for_autoscaler_finalization from run-bench-fleet" >&2
+    exit 1
+}
+finalization_out="$TMP_ROOT/finalization-out"
+mkdir -p "$finalization_out"
+finalization_status=0
+bash "$finalization_harness" "$finalization_out" || finalization_status=$?
+case "$finalization_status" in
+    0) echo "PASS: finalization waits for a live autoscaler the job table omits" ;;
+    3) echo "FAIL: finalization stopped before a live autoscaler published its marker" >&2; exit 1 ;;
+    4) echo "FAIL: an exited autoscaler without a marker held finalization open" >&2; exit 1 ;;
+    *) echo "FAIL: finalization harness exited $finalization_status" >&2; exit 1 ;;
+esac

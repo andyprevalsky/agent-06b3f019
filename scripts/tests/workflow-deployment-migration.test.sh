@@ -131,6 +131,8 @@ require_text "$PREFLIGHT" 'readAgentWorkflowLaunchConfig' "preflight must prove 
 require_text "$MANIFEST" 'pg_advisory_xact_lock' "deployment manifest creation must be serialized"
 require_text "$MANIFEST" 'Workflow deployment manifest contains a malformed candidate' "deployment manifest must fail closed on corrupt candidates"
 
+require_text "$PROD_VALIDATOR" "for (const signal of ['SIGTERM', 'SIGINT'] as const)" "production validator must clean up its fixtures when it is terminated"
+require_text "$PROD_VALIDATOR" "cleanupInterruptedRun()" "production validator must remove a terminated run's fixtures by its run-unique user and queue"
 require_text "$PROD_VALIDATOR" "process.argv.includes('--execute')" "production validator must require explicit execution mode"
 require_text "$PROD_VALIDATOR" "process.env.PRODUCTION_WORKFLOW_MIGRATION_VALIDATION !== '1'" "production validator must require a dedicated opt-in"
 require_text "$PROD_VALIDATOR" "process.env.TEMPORAL_TASK_QUEUE !== 'navi-agent-tasks'" "production validator must reject non-production target queues"
@@ -446,6 +448,14 @@ require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-clear-g
   "generation cutover must force-clear stragglers on the old queue (not deployment migrate)"
 require_text "$ROOT/back-end/scripts/force-clear-generation-queue.ts" '--execute' \
   "generation force-clear must require --execute"
+require_text "$ROOT/back-end/scripts/force-clear-generation-queue.ts" 'clearSupersededGenerationWorkflow' \
+  "generation force-clear must replace stragglers via clearSupersededGenerationWorkflow"
+require_text "$ROOT/back-end/src/providers/generationQueueCutover.ts" 'restartAgent' \
+  "generation cutover stragglers must be replaced, not marked FAILED"
+if grep -n "status: 'FAILED'" "$ROOT/back-end/scripts/force-clear-generation-queue.ts" \
+  | grep -v 'summary.failed' >/dev/null; then
+  fail "force-clear must not mark owned agents FAILED"
+fi
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'count-open-workflows-on-queue.ts' \
   "cooperative cutover must poll open workflows on the old generation queue"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" '--image-label' \
@@ -472,5 +482,10 @@ require_file "$ROOT/back-end/scripts/monitor-cooperative-cutover.ts" \
   "cooperative cutover monitor used by /deploy post-merge verification must exist"
 require_file "$ROOT/back-end/src/domains/agent-queue-pointer/routes.ts" \
   "live pointer HTTP route must exist for run_agent checkpoints"
+
+# Behavioral: run the real cutover script against Fly fakes (clone adoption,
+# fresh provisioning, transient Machines API update failures).
+bash "$ROOT/scripts/tests/deploy-agent-clone-recovery.test.sh" ||
+  fail "cooperative cutover must recover clones and retry transient Fly machine-update failures"
 
 

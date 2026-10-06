@@ -317,13 +317,24 @@ export async function refundCapturedPurchase(
   paymentIntentId: string,
   purchaseId: string
 ): Promise<void> {
-  await stripe.refunds.create(
+  const acknowledgement = await stripe.refunds.create(
     {
       payment_intent: paymentIntentId,
       metadata: { purchaseSpendId: purchaseId },
     },
     { idempotencyKey: `purchase-refund:${purchaseId}` }
   );
+  // Retried creates may replay a cached pending acknowledgement. Read that
+  // exact refund to observe completion without creating another compensation.
+  const refund =
+    acknowledgement.status === 'succeeded'
+      ? acknowledgement
+      : await stripe.refunds.retrieve(acknowledgement.id);
+  if (refund.status !== 'succeeded') {
+    throw new Error(
+      `Purchase refund ${refund.id} has not succeeded (status: ${String(refund.status)})`
+    );
+  }
 }
 
 function paymentIntentStatus(paymentIntent: unknown): {

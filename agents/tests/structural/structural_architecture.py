@@ -11,12 +11,16 @@ Invariants tested here:
   7. Framework leak    — temporalio.workflow not in types/config/repo layers
   8. No circular imports — no cycles in the first-party module graph
   9. Wiring correctness — worker.py should import refactored domains from domains/
+  10. Cutover classification — every workflow.wait_condition/sleep is tagged
+  11. Activity registration — every activity a workflow schedules is registered in worker.py
+  12. Workflow sandbox — workers and tests run workflows under the production restrictions
 
 All tests auto-discover domains. No hardcoded domain names.
 """
 
 import ast
 import asyncio
+import re
 import sys
 from pathlib import Path
 
@@ -453,6 +457,138 @@ def test_wiring_correctness():
     assert not violations, "\n".join(violations)
 
 
+_WORKFLOW_PARK_RE = re.compile(r"\b(?:workflow|wf)\.(wait_condition|sleep)\s*\(")
+_CUTOVER_CLASS_RE = re.compile(r"cutover-class:\s*(primitive|activity-bound|bounded|deploy-gate)")
+_CUTOVER_SCAN_DIRS = ("workflows", "domains", "loop", "helpers")
+
+
+def test_every_workflow_park_is_cutover_classified():
+    """Every Temporal workflow park must declare how cutover treats it.
+
+    Unbounded in-tool waits must use wait_condition_or_generation_handoff
+    (primitive). Activity-bound waits cannot continue_as_new until the
+    activity ends (force-clear replaces). Bounded 30s slices re-check at
+    the next run_agent checkpoint. Deploy-gate parks are isolated validation
+    runs, never user agents.
+    """
+    violations: list[str] = []
+    for dirname in _CUTOVER_SCAN_DIRS:
+        root = AGENTS_ROOT / dirname
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.py"):
+            if "test" in path.parts:
+                continue
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                stripped = line.lstrip()
+                if stripped.startswith("#"):
+                    continue
+                if not _WORKFLOW_PARK_RE.search(line):
+                    continue
+                window = "\n".join(lines[max(0, index - 3) : index + 1])
+                if _CUTOVER_CLASS_RE.search(window):
+                    continue
+                rel = path.relative_to(AGENTS_ROOT)
+                violations.append(f"{rel}:{index + 1}: {stripped}")
+    assert not violations, (
+        "Every workflow.wait_condition / workflow.sleep must be tagged "
+        "`# cutover-class: primitive|activity-bound|bounded|deploy-gate` "
+        "on the call or within the 3 preceding lines.\n" + "\n".join(violations)
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Invariant 11: Activity registration
+# An activity the workflow schedules but worker.py never registers fails
+# only at runtime, on the first workflow that reaches that call.
+# ═══════════════════════════════════════════════════════════════════════
+
+_ACTIVITY_SCAN_DIRS = ("workflows", "domains", "loop", "helpers", "tools")
+
+
+def _worker_registered_activities() -> set[str]:
+    tree = ast.parse(WORKER_PY.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "registered_activities" for target in node.targets
+        ):
+            assert isinstance(node.value, ast.List), "worker.py registered_activities must be a list literal"
+            return {
+                elt.id if isinstance(elt, ast.Name) else elt.attr
+                for elt in node.value.elts
+                if isinstance(elt, (ast.Name, ast.Attribute))
+            }
+    raise AssertionError("worker.py no longer assigns registered_activities")
+
+
+def test_every_scheduled_activity_is_registered():
+    """workflow.execute_activity / start_activity targets are all in worker.py's registered_activities."""
+    registered = _worker_registered_activities()
+    violations: list[str] = []
+    for dirname in _ACTIVITY_SCAN_DIRS:
+        root = AGENTS_ROOT / dirname
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.py")):
+            if "test" in path.parts or "tests" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("execute_activity", "start_activity")
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "workflow"
+                    and node.args
+                ):
+                    continue
+                target = node.args[0]
+                if isinstance(target, ast.Name):
+                    name = target.id
+                elif isinstance(target, ast.Attribute):
+                    name = target.attr
+                elif isinstance(target, ast.Constant) and isinstance(target.value, str):
+                    name = target.value
+                else:
+                    continue
+                if name not in registered:
+                    violations.append(f"{path.relative_to(AGENTS_ROOT)}:{node.lineno}: {name}")
+    assert not violations, (
+        "Scheduled activities missing from worker.py registered_activities:\n" + "\n".join(violations)
+    )
+
+
+_WORKFLOW_SANDBOX_MODULE = AGENTS_ROOT / "helpers" / "workflow_sandbox.py"
+_SANDBOX_CONFIG_NAMES = frozenset({"SandboxRestrictions", "SandboxedWorkflowRunner", "UnsandboxedWorkflowRunner"})
+
+
+def test_workflow_sandbox_is_production_only():
+    """Only helpers/workflow_sandbox.py builds workflow sandbox restrictions or runners.
+
+    A test sandbox that passes every module through hides workflow code that
+    only fails under the worker's restrictions: a lazily imported module that
+    calls os.getenv failed every production agent's first workflow task while
+    the passthrough-all workflow suites stayed green.
+    """
+    violations: list[str] = []
+    for path in sorted(AGENTS_ROOT.rglob("*.py")):
+        if "venv" in path.parts or path == _WORKFLOW_SANDBOX_MODULE:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("temporalio.worker"):
+                names = {alias.name for alias in node.names} & _SANDBOX_CONFIG_NAMES
+                if names:
+                    violations.append(f"{path.relative_to(AGENTS_ROOT)}:{node.lineno}: imports {sorted(names)}")
+            elif isinstance(node, ast.Attribute) and node.attr in _SANDBOX_CONFIG_NAMES:
+                violations.append(f"{path.relative_to(AGENTS_ROOT)}:{node.lineno}: uses {node.attr}")
+    assert not violations, (
+        "Run workflows with helpers.workflow_sandbox.production_workflow_runner():\n" + "\n".join(violations)
+    )
+
+
 async def run_all_tests():
     print("structural-architecture tests:")
     r = BlackboxResult()
@@ -462,6 +598,9 @@ async def run_all_tests():
     r.record("no_framework_in_data_layers", test_no_framework_in_data_layers)
     r.record("no_circular_imports", test_no_circular_imports)
     r.record("wiring_correctness", test_wiring_correctness)
+    r.record("every_workflow_park_is_cutover_classified", test_every_workflow_park_is_cutover_classified)
+    r.record("every_scheduled_activity_is_registered", test_every_scheduled_activity_is_registered)
+    r.record("workflow_sandbox_is_production_only", test_workflow_sandbox_is_production_only)
     return r.all_passed
 
 

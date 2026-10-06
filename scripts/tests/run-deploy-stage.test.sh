@@ -4,7 +4,29 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 RUN_ROOT="$TEST_ROOT/default"
-trap 'rm -rf "$TEST_ROOT"' EXIT
+cleanup() {
+    local result=$?
+    touch "$TEST_ROOT/slow-release"
+    for pid in "${slow_pid:-}" "${finish_pid:-}"; do
+        if [ -n "$pid" ] && jobs -pr | grep -Fxq "$pid"; then
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+    for pid in "${slow_pid:-}" "${finish_pid:-}"; do
+        [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+    done
+    if [ "$result" -ne 0 ]; then
+        local artifacts="${BLACKBOX_TEST_ARTIFACT_DIR:-$ROOT_DIR/.context/test-runs}"
+        local retained="$artifacts/deploy-stage-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+        if mkdir -p "$artifacts" && mkdir -m 700 "$retained"; then
+            cp -R "$TEST_ROOT/." "$retained/" 2>/dev/null || true
+            echo "deploy-stage fixture retained: $retained" >&2
+        fi
+    fi
+    rm -rf "$TEST_ROOT"
+    return "$result"
+}
+trap cleanup EXIT
 
 fail() {
     echo "FAIL: $*" >&2
@@ -129,30 +151,37 @@ grep -q "failed to initialize deploy timing run" "$TEST_ROOT/init.out" \
 # already-admitted stage completes and records its result.
 RUN_ROOT="$TEST_ROOT/concurrent"
 run_stage --start --run-id concurrent >/dev/null
-run_stage slow -- bash -c 'sleep 1' >"$TEST_ROOT/slow.out" 2>&1 &
+run_stage slow -- bash -c 'while [ ! -e "$1" ]; do sleep 0.05; done' _ "$TEST_ROOT/slow-release" >"$TEST_ROOT/slow.out" 2>&1 &
 slow_pid=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+for _ in $(seq 1 1200); do
     find "$RUN_ROOT/concurrent/admissions" -name '*.json' -print -quit 2>/dev/null | grep -q . && break
     sleep 0.05
 done
+find "$RUN_ROOT/concurrent/admissions" -name '*.json' -print -quit 2>/dev/null | grep -q . \
+    || fail "slow stage did not publish its admission"
 run_stage --finish >"$TEST_ROOT/concurrent-finish.out" 2>&1 &
 finish_pid=$!
-# Under a loaded /deploy host the finish supervisor can take longer than 0.5s
-# to persist "finishing", or it can pass through that state so quickly the
-# 10x50ms poll misses it and only sees "finished". Either way admission is
-# closed; wait for one of those statuses instead of a single 0.5s snapshot.
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 \
-         21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
-    grep -Eq '"status": "(finishing|finished)"' "$RUN_ROOT/concurrent/metadata.json" && break
+# Under a loaded /deploy host the finish supervisor can take seconds just to
+# start Python and persist "finishing", or it can pass through that state so
+# quickly a poll only sees "completed". Either way admission is closed. Wait on
+# the event itself: stop as soon as either status is written or the finish
+# process exits (it cannot exit cleanly without writing one), instead of a fixed
+# wall-clock window. The iteration cap only prevents a hung test.
+for _ in $(seq 1 1200); do
+    grep -Eq '"status": "(finishing|completed)"' "$RUN_ROOT/concurrent/metadata.json" && break
+    kill -0 "$finish_pid" 2>/dev/null || break
     sleep 0.05
 done
-grep -Eq '"status": "(finishing|finished)"' "$RUN_ROOT/concurrent/metadata.json" \
+grep -Eq '"status": "(finishing|completed)"' "$RUN_ROOT/concurrent/metadata.json" \
     || fail "finish did not close stage admission"
 if run_stage late -- true >"$TEST_ROOT/concurrent-late.out" 2>&1; then
     fail "admitted a stage after finish began"
 fi
+touch "$TEST_ROOT/slow-release"
 wait "$slow_pid" || fail "admitted stage failed during finish"
+slow_pid=""
 wait "$finish_pid" || fail "finish failed while waiting for an admitted stage"
+finish_pid=""
 [ ! -e "$RUN_ROOT/current" ] || fail "concurrent finish left the pointer behind"
 grep -q '"stage":"slow"' "$RUN_ROOT/concurrent/stages.jsonl" \
     || fail "finish raced the admitted stage append"

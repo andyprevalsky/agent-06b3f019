@@ -2,8 +2,11 @@
  * StructuredResponseDisplay — renders the extracted output of a completed Claude Code task.
  *
  * Stateless: receives a structured response object and an optional schema, then
- * renders each field's value via type-aware formatters (FilePointer → chip, arrays
- * → comma-joined, objects → JSON, null/undefined → em-dash).
+ * renders each field's value via type-aware formatters (FilePointer → chip,
+ * primitive arrays → comma-joined, structured values → JSON,
+ * null/undefined → em-dash).
+ *
+ * STATE MACHINE: Stateless. Each value renders as file, structured JSON, or text.
  */
 
 import { type ResponseSchemaField } from '../hooks';
@@ -12,7 +15,6 @@ import { formatFieldType, humanizeFieldKey, isFilePointer } from './claudeCodeCh
 
 function formatPrimitive(value: unknown): string {
   if (Array.isArray(value)) return value.join(', ');
-  if (typeof value === 'object' && value !== null) return JSON.stringify(value, null, 2);
   if (value === null || value === undefined) return '—';
   return String(value);
 }
@@ -44,6 +46,17 @@ function FieldValue({
   // Auto-detect FilePointer even if field type isn't specified
   if (isFilePointer(value)) {
     return <FilePointerDisplay file={value} />;
+  }
+
+  if (
+    (Array.isArray(value) && value.some((item) => typeof item === 'object' && item !== null)) ||
+    (!Array.isArray(value) && typeof value === 'object' && value !== null)
+  ) {
+    return (
+      <pre className="max-h-80 overflow-auto rounded bg-muted/40 p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words">
+        {JSON.stringify(value, null, 2)}
+      </pre>
+    );
   }
 
   return (

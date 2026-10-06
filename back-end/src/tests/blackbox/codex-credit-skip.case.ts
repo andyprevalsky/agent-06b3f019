@@ -1,4 +1,4 @@
-import { codexSmokeCreditSkipReason } from './codex-credit-skip';
+import { codexCreateUnavailableSkipReason, codexSmokeCreditSkipReason } from './codex-credit-skip';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`ASSERTION FAILED: ${message}`);
@@ -47,6 +47,24 @@ export function testCodexCreditSkip_authRevocationStillFailsHard() {
     codexSmokeCreditSkipReason('401 Unauthorized: please log out and sign in again', []) === null,
     'auth/OAuth revocation is user-fixable and must remain a hard failure, not a funding skip'
   );
+  assert(
+    codexSmokeCreditSkipReason(
+      '[Codex] Error: Your access token could not be refreshed because your refresh token was revoked.\n' +
+        '[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n' +
+        'You have no credits remaining. Add credits to continue.',
+      [
+        { type: 'auth_fallback', reason: 'oauth_refresh_invalid' },
+        { type: 'error', message: 'You have no credits remaining.' },
+      ]
+    ) === null,
+    'funded-key exhaustion cannot excuse a revoked OAuth credential'
+  );
+  assert(
+    codexSmokeCreditSkipReason('You have no credits remaining.', [
+      { type: 'error', error: { message: 'token_revoked' } },
+    ]) === null,
+    'code-only token_revoked must remain a hard failure even with funded-key exhaustion'
+  );
 }
 
 export function testCodexCreditSkip_matchesE2bTeamBlockedWording() {
@@ -61,5 +79,22 @@ export function testCodexCreditSkip_matchesE2bTeamBlockedWording() {
   assert(
     codexSmokeCreditSkipReason('Expected status 200, got 403: {"error":"Forbidden"}', []) === null,
     'a generic 403 must remain a hard failure, not a funding skip'
+  );
+}
+
+export function testCodexCreditSkip_createUnavailableOnCooldownIsSkip() {
+  // Verbatim from the 2026-10-02 coverage fail: create returned this 500 body
+  // after waitForFundedGptKeyRestore exhausted, because the shared funded key
+  // was still on its leftover out-of-credits cooldown and no OAuth/pool token
+  // existed. That is every Codex path unusable — deploy-approved SKIP.
+  const createBody =
+    '{"error":"Code agent credentials are unavailable; the session could not be started"}';
+  assert(
+    codexCreateUnavailableSkipReason(createBody, true) !== null,
+    'create-time credentials-unavailable + funded-key cooldown must skip'
+  );
+  assert(
+    codexCreateUnavailableSkipReason(createBody, false) === null,
+    'create-time credentials-unavailable without cooldown must stay a hard failure'
   );
 }

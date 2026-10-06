@@ -10,6 +10,8 @@
  * triggers can reuse the same commit/abort safety boundary.
  */
 
+import { isChatLlmTransientMiss } from './chatStructuredRetry';
+
 type BufferedDelivery = () => Promise<void>;
 
 export interface TransactionalStreamGate {
@@ -42,6 +44,10 @@ interface SpeculativeChatMessage {
 const NON_DIRECT_INTENT =
   /\b(?:search\s+(?:the\s+)?web|browse\s+(?:the\s+)?web|look\s+up|latest|today(?:'s)?|current\s+(?:news|events?|prices?)|research|autonomous\s+agent|agent\s+mode|plan\s+mode|execute\s+mode)\b/i;
 
+function latestUserText(messages: readonly SpeculativeChatMessage[]): string {
+  return [...messages].reverse().find((message) => message.role === 'USER')?.text ?? '';
+}
+
 export interface EarlyDirectGeneratorCoordinator<T> {
   start(): void;
   commitDirectAnswer(): Promise<T | null>;
@@ -59,9 +65,9 @@ export interface EarlyDirectGeneratorCoordinator<T> {
 export function shouldStartEarlyDirectGenerator(
   messages: readonly SpeculativeChatMessage[]
 ): boolean {
-  const latestUserMessage = [...messages].reverse().find((message) => message.role === 'USER');
-  if (!latestUserMessage?.text.trim()) return false;
-  return !NON_DIRECT_INTENT.test(latestUserMessage.text);
+  const text = latestUserText(messages);
+  if (!text.trim()) return false;
+  return !NON_DIRECT_INTENT.test(text);
 }
 
 export function createTransactionalStreamGate(): TransactionalStreamGate {
@@ -147,7 +153,12 @@ export function createEarlyDirectGeneratorCoordinator<T>(
       if (!outcome || explicitlyDiscarded) return null;
       await streamGate.commit();
       const settled = await outcome;
-      if (settled.status === 'rejected') throw settled.reason;
+      if (settled.status === 'rejected') {
+        // A speculative empty/parse/deadline miss must not kill the turn.
+        // The canonical generator still runs via `?? runGenerator(...)`.
+        if (isChatLlmTransientMiss(settled.reason)) return null;
+        throw settled.reason;
+      }
       return settled.value as T;
     },
     async discard(): Promise<void> {

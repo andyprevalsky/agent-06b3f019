@@ -52,7 +52,7 @@ async function testDirectOverlapBuffersUntilCommit(): Promise<void> {
   coordinator.start();
   await flushMicrotasks();
   assert.strictEqual(starts, 1, 'direct generator should start before Router completes');
-  assert.deepStrictEqual(events, [], 'early generator frames must remain buffered');
+  assert.strictEqual(events.length, 0, 'early generator frames must remain buffered');
   assert.strictEqual(usageWrites, 0, 'usage remains gated');
   assert.strictEqual(messageWrites, 0, 'messages remain gated');
 
@@ -165,6 +165,21 @@ async function testEarlyFailureOnlyPropagatesForCommittedDirect(): Promise<void>
     (error: unknown) => error === committedFailure
   );
   assert.strictEqual(leakedFrames, 0, 'failed speculative frames must be discarded');
+
+  const { ChatLlmTransientMissError } = await import('../../providers/chat/chatStructuredRetry');
+  const transient = new ChatLlmTransientMissError('empty', 'Generator LLM returned no content');
+  const recoverable = createEarlyDirectGeneratorCoordinator({
+    start: async () => {
+      throw transient;
+    },
+  });
+  recoverable.start();
+  await flushMicrotasks();
+  assert.strictEqual(
+    await recoverable.commitDirectAnswer(),
+    null,
+    'speculative structured-output miss must fall through to the canonical generator'
+  );
 }
 
 async function testDiscardDoesNotWaitForNonCooperativeProvider(): Promise<void> {
@@ -213,7 +228,7 @@ async function testCompletedSpeculationAndCanonicalBranchesStayIsolated(): Promi
   coordinator.start();
   assert.strictEqual(starts, 1, 'Generator starts at Router start before any action');
   await coordinator.discard();
-  assert.deepStrictEqual(visibleFrames, [], 'completed speculative frames stay hidden');
+  assert.strictEqual(visibleFrames.length, 0, 'completed speculative frames stay hidden');
   assert.strictEqual(cacheWrites, 0, 'completed speculative cache remains uncommitted');
   assert.strictEqual(usageWrites, 0);
   assert.strictEqual(messageWrites, 0);

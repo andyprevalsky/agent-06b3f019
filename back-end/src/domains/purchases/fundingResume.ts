@@ -237,7 +237,10 @@ export async function tryClaimFundingResume(
       'purchase_funding_resume_invalid'
     );
   }
-  const claimed = await repo.claimFundingPendingPurchase(candidate.id);
+  const claimed = await repo.claimFundingPendingPurchase(candidate.id, {
+    userId: input.userId,
+    agentId: input.agentId,
+  });
   if (claimed === null) {
     throw new PurchaseError('This purchase is already in progress', 409);
   }

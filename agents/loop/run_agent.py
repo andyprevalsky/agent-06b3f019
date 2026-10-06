@@ -35,7 +35,6 @@ from helpers.llm import (
     _completed_child_handoff_identity,
     _completed_child_task_structured_handoff,
     _pending_llm_context,
-    _structured_response_ready_for_infra_soft_accept,
     build_llm_messages,
     call_llm_activity,
     call_llm_structured_streaming,
@@ -43,7 +42,12 @@ from helpers.llm import (
 )
 from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
 from helpers.summarize import ESTIMATE_SAFETY_MULTIPLIER as SUMMARIZE_ESTIMATE_SAFETY_MULTIPLIER
-from helpers.summarize import compaction_saved_ratio, compress_context, estimate_context_tokens
+from helpers.summarize import (
+    compaction_saved_ratio,
+    compress_context,
+    estimate_context_tokens,
+    hard_cap_tool_result_text,
+)
 from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
 from helpers.workflow_safe import safe_now as _safe_now
@@ -339,6 +343,9 @@ async def run_agent(
     # run_agent is workflow-scope, so raw uuid4 is regenerated on replay and
     # breaks event/id correlation across a worker migration.
     stream_id = str(_safe_uuid4())
+    # Per-LLM-turn identity for the `_pending_llm_context` handoff. Deterministic
+    # (stream_id + counter) so a replay on another worker reproduces the same tokens.
+    pending_context_seq = 0
 
     # Set up execute_activity based on context (workflow vs activity)
     execute_activity = (
@@ -1041,6 +1048,12 @@ async def run_agent(
         ):
             llm_context = _context_with_plan_fsm_labels(context)
 
+        # A slot left on another worker by an earlier turn (this workflow migrated
+        # away mid-run) never carries this token, so call_llm_activity cannot build
+        # this turn's prompt from that stale conversation.
+        pending_context_seq += 1
+        pending_context_token = f"{stream_id}:{pending_context_seq}"
+
         if build_messages:
             async with span(
                 "run_loop.build_messages_custom",
@@ -1074,6 +1087,7 @@ async def run_agent(
                 current_system_prompt,
                 pre_resolved_ids,
                 user_id,
+                pending_context_token,
             )
             messages = None  # Signals to use shared state path below
         else:
@@ -1448,6 +1462,11 @@ async def run_agent(
                         False,
                         False,
                         resolved_cache_sequence_id,
+                        # Appended LAST on purpose: these args are positional and recorded in
+                        # Temporal history, so a new parameter may only be added at the end, where
+                        # an older replayed history falls back to the default.
+                        exclude_anthropic_family_on_llm_retry,
+                        pending_context_token,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
@@ -1798,6 +1817,7 @@ async def run_agent(
             tool_results = await asyncio.gather(*tasks)
 
             # Process results in order (for determinism)
+            in_tool_handoff_queue: Optional[str] = None
             async with span(
                 "run_loop.process_tool_results",
                 agent_id=agent_id,
@@ -1833,7 +1853,7 @@ async def run_agent(
                             context.append(
                                 {
                                     "role": "TOOL",
-                                    "text": f"Error: {error}",
+                                    "text": hard_cap_tool_result_text(f"Error: {error}"),
                                     "timestamp": _safe_now().isoformat(),
                                     "metadata": {
                                         "toolCallId": tool_call_id,
@@ -1884,6 +1904,12 @@ async def run_agent(
                     else:
                         result_message = result.get("message", "") if isinstance(result, dict) else str(result)
 
+                    # Activity-mode agents (explore/browser leaves) append
+                    # locally. Bound the payload so one grep/email dump cannot
+                    # push the protected compaction tail past the overflow
+                    # trigger (prod a890a362: 228k→210k still above 167k).
+                    if not poll_messages:
+                        result_message = hard_cap_tool_result_text(result_message or "")
                     if is_error:
                         new_msg = {
                             "role": "TOOL",
@@ -1925,12 +1951,37 @@ async def run_agent(
                         context_len=len(context),
                     )
                     # When no poll_messages, locally append so agent sees tool results
-                    if not poll_messages:
+                    if isinstance(result, dict) and result.get("pending_tool_resume"):
+                        # Parked across the handoff: the next generation re-enters
+                        # this call and posts its real result before the next LLM turn.
+                        pass
+                    elif not poll_messages:
                         context.append(new_msg)
+                    elif isinstance(result, dict) and result.get("generation_handoff"):
+                        # Cut over this turn; poll will not run again before continue_as_new.
+                        context.append(new_msg)
+
+                    if isinstance(result, dict) and result.get("generation_handoff"):
+                        handoff_queue = result.get("handoff_task_queue")
+                        if isinstance(handoff_queue, str) and handoff_queue.strip():
+                            in_tool_handoff_queue = handoff_queue.strip()
 
                     # Track set_plan success (only if no error)
                     if tool_name == "set_plan" and not is_error:
                         set_plan_succeeded = True
+            if in_tool_handoff_queue:
+                _pending_llm_context.pop(agent_id, None)
+                return {
+                    "status": "generation_handoff",
+                    "handoff_task_queue": in_tool_handoff_queue,
+                    "context": context,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "token_count": token_count,
+                    "context_size": context_size,
+                    "cache_read_input_tokens": cache_read_total,
+                    "cache_creation_input_tokens": cache_write_total,
+                }
         # Repetition detection: if the agent keeps calling the same tools with identical
         # args, it's stuck. Inject a strong nudge after 3 consecutive identical iterations.
         if processed_tools:
@@ -2040,7 +2091,11 @@ async def run_agent(
                     completion_error_posted = False
                     if post_message:
                         try:
-                            await post_message(completion_tool_error, "TOOL", error_metadata)
+                            await post_message(
+                                hard_cap_tool_result_text(completion_tool_error),
+                                "TOOL",
+                                error_metadata,
+                            )
                             completion_error_posted = True
                         except Exception as post_error:
                             logger.warning(
@@ -2053,7 +2108,7 @@ async def run_agent(
                         context.append(
                             {
                                 "role": "TOOL",
-                                "text": f"Error: {completion_tool_error}",
+                                "text": hard_cap_tool_result_text(f"Error: {completion_tool_error}"),
                                 "timestamp": _safe_now().isoformat(),
                                 "metadata": {
                                     key: value for key, value in error_metadata.items() if key != "subAgentId"
@@ -2223,57 +2278,7 @@ async def run_agent(
                     logger.warning(
                         f"[run_agent] Verifier failed (consecutive={consecutive_verifier_errors}): {v_reasoning[:100]}"
                     )
-                    # 2026-09-04 RCA (cuda-kernel-github-top100-code-agent k=3):
-                    # The execute-loop attempt_completion verifier soft-fails at
-                    # score=0.5 after RoseDeadlineError / 420s total fence, then
-                    # the agent retries attempt_completion and burns another ~7
-                    # minutes per bounce — often the entire remaining 4200s task
-                    # budget — even when the ranking deliverable is already in
-                    # context. Infrastructure failure is not a judgment that the
-                    # deliverable is missing: accept the agent's completion
-                    # claim on the first infra soft-fail (execute loop only)
-                    # WHEN the structured response already covers the schema.
-                    # Soft-accepting without a schema-shaped deliverable
-                    # COMPLETED r30 a1 with repos as truncated markdown and the
-                    # harness declared evaluator scored progress=0.
-                    # Plan-loop verification still soft-fails and continues so a
-                    # broken plan cannot skip review by starving the verifier.
-                    # Soft-accept only when a response schema is configured.
-                    # Schema-less agents must keep the 0.5 soft-fail + retry
-                    # path and trip the consecutive-error circuit breaker —
-                    # otherwise the first verifier outage reports completed
-                    # with no deliverable check (CodeRabbit #1260).
-                    _verified_schema = verifier_result.get("resolved_response_schema")
-                    if not isinstance(_verified_schema, dict):
-                        _verified_schema = response_schema
-                    _schema_fields = (
-                        _verified_schema.get("fields")
-                        if isinstance(_verified_schema, dict)
-                        else None
-                    ) or []
-                    if (
-                        not is_plan_loop
-                        and _schema_fields
-                        and _structured_response_ready_for_infra_soft_accept(
-                            structured_response, _verified_schema
-                        )
-                    ):
-                        logger.warning(
-                            "[run_agent] Accepting attempt_completion after "
-                            "verifier infrastructure failure "
-                            f"(consecutive={consecutive_verifier_errors})"
-                        )
-                        score = 1.0
-                        v_reasoning = (
-                            "Verifier infrastructure failed; accepting agent "
-                            f"attempt_completion. Original error: {v_reasoning}"
-                        )
-                    elif consecutive_verifier_errors >= 3:
-                        # Circuit breaker must stay reachable for execute-loop
-                        # infra soft-fails that are NOT schema-ready. A prior
-                        # `elif not is_plan_loop` branch consumed every execute
-                        # path and silently disabled this guard (CodeRabbit
-                        # 2026-09-04 on #1260).
+                    if consecutive_verifier_errors >= 3:
                         return {
                             "status": "error",
                             "context": context,
@@ -2285,13 +2290,6 @@ async def run_agent(
                             "cache_creation_input_tokens": cache_write_total,
                             "message": f"Verifier unavailable after {consecutive_verifier_errors} consecutive failures: {v_reasoning}",
                         }
-                    elif not is_plan_loop:
-                        logger.warning(
-                            "[run_agent] Verifier infrastructure failed but "
-                            "structured response is not schema-ready — not "
-                            "accepting attempt_completion "
-                            f"(consecutive={consecutive_verifier_errors})"
-                        )
                 else:
                     consecutive_verifier_errors = 0
 

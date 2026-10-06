@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from domains.spawn_agent.oai_demo_july import july_gp_goal_hash_for_goal
+from utils.oai_demo import (
+    OAI_DEMO_CACHE_DISPLAY_NAME,
+    OAI_DEMO_CACHE_SOURCE_NAME,
+    is_oai_demo_goal,
+)
+from utils.oai_demo_july import july_gp_goal_hash_for_goal
 
 CACHE_KEY_VERSION = "v42"
 
@@ -706,37 +711,9 @@ def normalize_url(raw_url: str) -> str:
 # Display-name swap for test-mass-agent-run-0 only. Child/explore goals that
 # say Andy Prevalsky must hash as the July Aman namespace so they replay the
 # original trajectories instead of cold-passthrough stubbing.
-OAI_DEMO_ROOT_GOAL_PREFIX = (
-    "I'm building a personal brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
-)
-OAI_DEMO_CHILD_WINDOW = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
-OAI_DEMO_CHILD_GOAL_PREFIX = "You are analyzing ONE creator"
-OAI_DEMO_CACHE_SOURCE_NAME = "Aman Gottumukkala"
-OAI_DEMO_CACHE_DISPLAY_NAME = "Andy Prevalsky"
-
-
-def is_oai_demo_bound_child_goal(text: str | None) -> bool:
-    """Child prefix alone is not enough — require a DEMO identity binding."""
-    blob = str(text or "")
-    if OAI_DEMO_CHILD_GOAL_PREFIX not in blob:
-        return False
-    return (
-        OAI_DEMO_CACHE_DISPLAY_NAME in blob
-        or OAI_DEMO_CACHE_SOURCE_NAME in blob
-        or OAI_DEMO_CHILD_WINDOW in blob
-        or OAI_DEMO_ROOT_GOAL_PREFIX in blob
-    )
-
-
-def is_oai_demo_goal_text(text: str | None) -> bool:
-    """True for mass-agent DEMO root, window, or identity-bound child goals."""
-    blob = str(text or "")
-    return OAI_DEMO_ROOT_GOAL_PREFIX in blob or OAI_DEMO_CHILD_WINDOW in blob or is_oai_demo_bound_child_goal(blob)
-
-
 def canonicalize_oai_demo_goal_for_hash(goal: str) -> str:
     """Fold Andy-named OAi-demo goals back onto the July Aman cache namespace."""
-    if not is_oai_demo_goal_text(goal):
+    if not is_oai_demo_goal(goal):
         return goal
     return goal.replace(OAI_DEMO_CACHE_DISPLAY_NAME, OAI_DEMO_CACHE_SOURCE_NAME).replace("Andy's", "Aman's")
 
@@ -766,7 +743,7 @@ def goal_hash(goal: str) -> str:
     """
     canonical = re.sub(r"@ref:message:" + _UUID_RE.pattern, "@ref:message:<uuid>", goal)
     canonical = canonicalize_oai_demo_goal_for_hash(canonical)
-    if is_oai_demo_goal_text(canonical):
+    if is_oai_demo_goal(canonical):
         aliased = july_gp_goal_hash_for_goal(canonical)
         if aliased:
             return aliased
@@ -960,6 +937,39 @@ def content_key(goal: str, call_site: str, messages: Any) -> str:
     return build_key("llm", goal, f"{normalize_call_site(call_site)}:c:{sha256(canonical_messages(messages))[:32]}")
 
 
+# Product pool rename rose-1-lite → rose-1-flash (2026-09-27) is part of the
+# content-addressed fingerprint for response_schema / other non-position rows.
+# Dual-read both names so July/Aug warm cache rows keep hitting after the rename.
+_POOL_CONTENT_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "rose-1-flash": ("rose-1-flash", "rose-1-lite"),
+    "rose-1-lite": ("rose-1-lite", "rose-1-flash"),
+}
+
+
+def content_lookup_keys_with_pool_aliases(goal: str, call_site: str, messages: Any) -> list[str]:
+    """Ordered content keys: current pool first, then lite↔flash rename aliases.
+
+    Position rows already dual-read via ``position_lookup_keys``. Content-addressed
+    call sites (notably ``response_schema``) only had a single exact key, so the
+    pool rename silently missed the warm schema row and left root agents untitled.
+    """
+    current = content_key(goal, call_site, messages)
+    keys = [current]
+    if not isinstance(messages, dict):
+        return keys
+    pool = messages.get("pool")
+    aliases = _POOL_CONTENT_KEY_ALIASES.get(pool) if isinstance(pool, str) else None
+    if not aliases:
+        return keys
+    for alias in aliases:
+        if alias == pool:
+            continue
+        aliased_key = content_key(goal, call_site, {**messages, "pool": alias})
+        if aliased_key not in keys:
+            keys.append(aliased_key)
+    return keys
+
+
 # claudeAuth pin bumps inside a family must not bust Fast Mode exact keys.
 # Ultra now routes to claude-opus-5-5 and must not alias onto fable. A leftover
 # fable-5.1 pin still fingerprints as fable-5 so the July / Sep-8 warm cache
@@ -1068,6 +1078,16 @@ OAI_DEMO_ROOT_GOAL_HASH = "4ae3193053ac1d8f"
 # ---------------------------------------------------------------------------
 
 _DEMO_TAG = "DEMO"
+GOOGLE_OAUTH_DEMO_PROMPT_PREFIX = (
+    "Please work through my Google account in this order."
+)
+GOOGLE_OAUTH_DEMO_GOAL_HASH = "dd6b2b7bbe5256a1"
+
+
+@functools.lru_cache(maxsize=1)
+def google_oauth_demo_goal_hash() -> str:
+    """Exact DEMO namespace, available even in worker images without benchmarks/."""
+    return GOOGLE_OAUTH_DEMO_GOAL_HASH
 
 
 def _task_has_demo_tag(task: dict) -> bool:
@@ -1085,7 +1105,7 @@ def demo_cache_goal_hashes() -> frozenset[str]:
     cannot drift if the catalog load fails in workers. Also accepts legacy
     ``fast_cache: "on"`` so older catalog rows keep working until retagged.
     """
-    hashes: set[str] = {OAI_DEMO_ROOT_GOAL_HASH}
+    hashes: set[str] = {OAI_DEMO_ROOT_GOAL_HASH, GOOGLE_OAUTH_DEMO_GOAL_HASH}
     try:
         tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
         with tasks_path.open(encoding="utf-8") as fh:
@@ -1129,8 +1149,8 @@ def demo_cache_allowed(
     if root_goal and goal_hash(root_goal) in allowed:
         return True
     # Identity-bound prefix fallback for truncated child goals / resolver
-    # failures (bare OAI_DEMO_CHILD_GOAL_PREFIX is rejected — see is_oai_demo_goal_text).
-    if is_oai_demo_goal_text(goal) or is_oai_demo_goal_text(root_goal):
+    # failures (bare OAI_DEMO_CHILD_GOAL_PREFIX is rejected — see is_oai_demo_goal).
+    if is_oai_demo_goal(goal) or is_oai_demo_goal(root_goal):
         return True
     return False
 

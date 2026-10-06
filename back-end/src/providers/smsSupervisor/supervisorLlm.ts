@@ -2,10 +2,11 @@
  * SMS Supervisor LLM call.
  *
  * Owns exactly one thing: turn a list of messages into a `SupervisorResponse`.
- * Streams a rose-1-flash completion (Cerebras-first), honours the per-user
- * blackbox fixture override, and shapes the consumed stream into
- * `{ reasoning, tool_calls }` whether the model answered with native tool_use
- * blocks or with the structured-output JSON envelope as content.
+ * Streams a rose-fast (rose-1-flash) completion through the normal pool path
+ * (Cerebras Qwen → OpenRouter waterfall), honours the per-user blackbox fixture
+ * override, and shapes the consumed stream into `{ reasoning, tool_calls }`
+ * whether the model answered with native tool_use blocks or with the
+ * structured-output JSON envelope as content.
  *
  * Split out of supervisorHandler.ts so the handler stays about the tool loop.
  */
@@ -13,13 +14,18 @@
 import { createStreamingCompletion, CompletionMessage, CompletionOptions } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { createLogger } from '../logger';
-import { SUPERVISOR_RESPONSE_MODEL } from './schema';
+import {
+  SmsSupervisorResponseSchema,
+  SmsSupervisorToolCallSchema,
+  SUPERVISOR_RESPONSE_MODEL,
+} from './schema';
 import { loadBlackboxSupervisorResponseFixture } from './supervisorFixtures';
 import type { SupervisorComputeToken } from './supervisorComputeToken';
 import type { ToolCall } from './supervisorTools';
 
 const log = createLogger('SmsSupervisor');
 
+/** Display alias rose-fast; pool id rose-1-flash. */
 export const SMS_SUPERVISOR_MODEL = 'rose-labs/rose-1-flash';
 
 export interface SupervisorResponse {
@@ -37,31 +43,30 @@ export async function callSupervisorLlm(
   const gptToken = computeToken?.type === 'gpt' ? computeToken.accessToken : null;
   const gptAccountId = computeToken?.type === 'gpt' ? computeToken.accountId : undefined;
 
-  // Same provider path as chat: Cerebras GLM first, with that route's own
-  // failover (quota/rate → OpenRouter unpinned same-model → generic waterfall).
-  // Do not prefer claudeAuth here — SMS reliability must not depend on a user
-  // OAuth token / funded Anthropic key / Anthropic union-schema ceiling.
+  // Default: rose-fast pool path (no provider_route). That hits pool.cerebrasModel
+  // (qwen-3.8-27b) then the pool waterfall — NOT the exclusive chat Cerebras
+  // route, which hardcodes gpt-oss-120b.
   // BENCHMARK_SMS_SUPERVISOR_MODEL(+_ROUTE) overrides for eval isolation only.
   const modelOverride = process.env.BENCHMARK_SMS_SUPERVISOR_MODEL;
   const activeModel =
     modelOverride !== undefined && modelOverride !== '' ? modelOverride : SMS_SUPERVISOR_MODEL;
   const routeOverride = process.env.BENCHMARK_SMS_SUPERVISOR_ROUTE;
-  const providerRoute: NonNullable<CompletionOptions['provider_route']> =
-    modelOverride !== undefined && modelOverride !== ''
-      ? routeOverride === 'direct-cerebras' ||
-        routeOverride === 'openrouter-cerebras' ||
-        routeOverride === 'shared-openai-priority' ||
-        routeOverride === 'openrouter-waterfall'
-        ? routeOverride
-        : 'openrouter-waterfall'
-      : 'direct-cerebras';
+  const hasBenchmarkModel = modelOverride !== undefined && modelOverride !== '';
+  const providerRoute: CompletionOptions['provider_route'] | undefined = hasBenchmarkModel
+    ? routeOverride === 'direct-cerebras' ||
+      routeOverride === 'openrouter-cerebras' ||
+      routeOverride === 'shared-openai-priority' ||
+      routeOverride === 'openrouter-waterfall'
+      ? routeOverride
+      : 'openrouter-waterfall'
+    : undefined;
 
   log.info('[SmsSupervisorLLM] Request', {
     model: activeModel,
-    providerRoute,
+    providerRoute: providerRoute ?? 'pool-default',
     messageCount: messages.length,
-    hasClaudeToken: !!claudeToken && providerRoute !== 'direct-cerebras',
-    hasGptToken: !!gptToken && providerRoute !== 'direct-cerebras',
+    hasClaudeToken: !!claudeToken && providerRoute !== undefined,
+    hasGptToken: !!gptToken && providerRoute !== undefined,
     systemPromptLength: messages[0]?.content
       ? typeof messages[0].content === 'string'
         ? messages[0].content.length
@@ -93,9 +98,11 @@ export async function callSupervisorLlm(
     messages,
     temperature: 0.3,
     response_model: SUPERVISOR_RESPONSE_MODEL,
-    provider_route: providerRoute,
-    ...(providerRoute !== 'direct-cerebras' && claudeToken ? { claude_token: claudeToken } : {}),
-    ...(providerRoute !== 'direct-cerebras' && gptToken
+    ...(providerRoute !== undefined ? { provider_route: providerRoute } : {}),
+    // Compute tokens only on benchmark-overridden routes that need them.
+    // Default rose-fast has directAuthEnabled=false; never send tokens there.
+    ...(providerRoute !== undefined && claudeToken ? { claude_token: claudeToken } : {}),
+    ...(providerRoute !== undefined && gptToken
       ? { gpt_token: gptToken, gpt_account_id: gptAccountId }
       : {}),
   });
@@ -191,21 +198,12 @@ export function finalizeSupervisorResponse(
     };
   }
 
-  // Content-path envelope (Codex / waterfall). finalText() is INSIDE the try:
-  // a reasoning-only / empty / ambiguous stream makes the extractor throw
-  // StructuredOutputCardinalityError — same "nothing actionable" condition as
-  // a JSON parse failure. Empty tool_calls → supervisor loop nudge-and-retry.
-  let accumulatedContent = '';
-  let parsed: SupervisorResponse;
+  // Content-path envelope (Codex / waterfall). currentText() never throws
+  // cardinality. Empty / unparseable / schema-invalid envelopes nudge-retry.
+  const accumulatedContent = structuredOutput.currentText();
+  let candidate: unknown;
   try {
-    accumulatedContent = structuredOutput.finalText();
-    const candidate: unknown = JSON.parse(accumulatedContent);
-    // JSON.parse happily returns null / primitives / arrays. Treat non-objects
-    // as parse failure so we take the nudge-retry path instead of throwing.
-    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
-      throw new Error(`Structured output was not a JSON object (got ${typeof candidate})`);
-    }
-    parsed = candidate as SupervisorResponse;
+    candidate = accumulatedContent ? JSON.parse(accumulatedContent) : null;
   } catch (error) {
     log.error('[SmsSupervisorLLM] No actionable structured output; nudging for a retry round', {
       error: error instanceof Error ? error.message : String(error),
@@ -214,20 +212,43 @@ export function finalizeSupervisorResponse(
     });
     return { reasoning: accumulatedReasoning, tool_calls: [] };
   }
+  if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    log.error('[SmsSupervisorLLM] No actionable structured output; nudging for a retry round', {
+      error: `Structured output was not a JSON object (got ${typeof candidate})`,
+      rawContent: accumulatedContent.substring(0, 500),
+      contentLength: accumulatedContent.length,
+    });
+    return { reasoning: accumulatedReasoning, tool_calls: [] };
+  }
 
-  const reasoning = typeof parsed.reasoning === 'string' ? parsed.reasoning : '';
-  // Provider JSON is untrusted: drop entries without a string `tool` rather
-  // than letting them reach the dispatcher (or throw inside this log call).
-  const rawToolCalls = Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [];
-  const toolCalls = rawToolCalls.filter(
-    (tc): tc is (typeof rawToolCalls)[number] =>
-      tc !== null && typeof tc === 'object' && typeof (tc as { tool?: unknown }).tool === 'string'
-  );
+  const raw = candidate as { reasoning?: unknown; tool_calls?: unknown };
+  const reasoning = typeof raw.reasoning === 'string' ? raw.reasoning : '';
+  const rawToolCalls = Array.isArray(raw.tool_calls) ? raw.tool_calls : [];
+  const toolCalls: ToolCall[] = [];
+  for (const tc of rawToolCalls) {
+    const parsedTool = SmsSupervisorToolCallSchema.safeParse(tc);
+    if (parsedTool.success) {
+      toolCalls.push({
+        tool: parsedTool.data.tool,
+        arguments: parsedTool.data.arguments as Record<string, unknown>,
+      });
+    }
+  }
   if (toolCalls.length !== rawToolCalls.length) {
     log.warn('[SmsSupervisorLLM] Discarded malformed tool_call entries', {
       received: rawToolCalls.length,
       usable: toolCalls.length,
     });
+  }
+
+  const envelope = SmsSupervisorResponseSchema.safeParse({ reasoning, tool_calls: toolCalls });
+  if (!envelope.success) {
+    log.error('[SmsSupervisorLLM] No actionable structured output; nudging for a retry round', {
+      error: envelope.error.issues[0]?.message ?? 'invalid supervisor envelope',
+      rawContent: accumulatedContent.substring(0, 500),
+      contentLength: accumulatedContent.length,
+    });
+    return { reasoning: accumulatedReasoning, tool_calls: [] };
   }
 
   log.info('[SmsSupervisorLLM] Parsed response', {

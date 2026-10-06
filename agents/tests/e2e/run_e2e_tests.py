@@ -283,13 +283,15 @@ async def run_single_test(test: TestPrompt, timeout_override: int | None = None)
         from test_workflow_cutover import (
             run_browser_cutover_test,
             run_explore_cutover_test,
+            run_park_cutover_test,
         )
 
-        runner = (
-            run_browser_cutover_test
-            if test.workflow_cutover == "spawn_browser_agent"
-            else run_explore_cutover_test
-        )
+        if test.workflow_cutover == "spawn_browser_agent":
+            runner = run_browser_cutover_test
+        elif test.workflow_cutover == "spawn_agent":
+            runner = run_explore_cutover_test
+        else:
+            runner = run_park_cutover_test
         return await runner(test, timeout_override)
 
     timeout = timeout_override or test.timeout

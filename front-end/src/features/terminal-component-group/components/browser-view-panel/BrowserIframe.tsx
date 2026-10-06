@@ -7,7 +7,7 @@
  *     recover_from_challenge progress messages are IN_PROGRESS
  *
  * [WAITING_FOR_AUTH_ASSISTANCE]
- *   - iframe + blurred Start Agent overlay
+ *   - interactive iframe + compact Start Agent button
  *   - no active-agent glow/cursor indicators
  *
  * [DISCONNECTED]
@@ -25,8 +25,8 @@ import BrowserBorderGlow from '../BrowserBorderGlow';
 import { resolveBrowserBorderGlowTone } from '../browserBorderGlow/resolveTone';
 import BrowserCursorOverlay from '../BrowserCursorOverlay';
 import { resolveBrowserControlState } from '../browserControlState';
-import { LiveViewFrame } from '../browser-status-bar/LiveViewFrame';
-import { resolveLiveViewDisplaySize } from '../browser-status-bar/liveViewFrame';
+import { LiveViewFrame } from '../browser-status-bar/BrowserLiveViewFrame';
+import { resolveLiveViewDisplaySize } from '../browser-status-bar/liveViewDisplay';
 import { StatusOverlay } from './StatusOverlay';
 import type { Message } from '../../hooks';
 
@@ -65,6 +65,7 @@ export function BrowserIframe({
     <LiveViewFrame
       url={url}
       title="Browser Session"
+      interactive={controlState === 'waiting'}
       className={cn(
         'border-x border-b border-border bg-white',
         isFullscreen ? 'flex-1' : isMobile ? 'h-[60vh]' : 'w-full',
@@ -89,6 +90,7 @@ export function BrowserIframe({
           onResume={onResume}
           buttonLabel="Start Agent"
           loadingLabel="Loading..."
+          compact
         />
       )}
     </LiveViewFrame>

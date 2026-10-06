@@ -23,6 +23,7 @@ import { getTemporalClient } from '../temporal';
 import { createMessage } from '../messages';
 import { createLogger } from '../logger';
 import { deleteAgentRecursive } from '../agentKill';
+import { deliverUserMessageToWorkflow } from '../agentResume';
 import {
   resolveAgentPrefix,
   smsIntendsAgentReply,
@@ -38,6 +39,13 @@ import type { FilePointer } from '../storage';
 // what the model learns, so the run scores a trajectory nobody chose — the
 // closed-store task ordered from a restaurant whose closure it was never shown.
 import { executeWebSearchTool, type WebSearchArgs } from './supervisorTools.webSearch';
+import {
+  agentNeedsCutoverRecovery,
+  formatReplyToAgentAction,
+  isDeploymentSealedWorkflowId,
+  recoverCutoverKilledAgent,
+} from '../generationQueueCutover';
+import { DEPLOY_INTERRUPTED_TOOL_MESSAGE } from '../workflowGeneration';
 
 const log = createLogger('SmsSupervisorTools');
 
@@ -396,6 +404,19 @@ function validateStartNewAgent(args: StartNewAgentArgs, pendingWrites: PendingOp
       error: 'goal is required and must be a non-empty string',
     };
   }
+  if (
+    args.start_phase !== undefined &&
+    args.start_phase !== null &&
+    args.start_phase !== 'plan' &&
+    args.start_phase !== 'execute'
+  ) {
+    return {
+      tool: 'start_new_agent',
+      success: false,
+      result: '',
+      error: `start_phase must be 'plan' or 'execute', got ${JSON.stringify(args.start_phase)}`,
+    };
+  }
   if (args.budget_dollars !== undefined) {
     if (!Number.isFinite(args.budget_dollars) || args.budget_dollars <= 0) {
       return {
@@ -494,32 +515,29 @@ async function commitReplyToAgent(
   // received.
   const canonicalUserResponse = reject ? '__REJECTED__' : message || 'Approved';
 
-  // 2. Signal the workflow to unblock any waiting tool
-  if (agent.temporalWorkflowId) {
-    try {
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      const signalValue = attention_request_id
-        ? JSON.stringify({
-            request_id: attention_request_id,
-            response: canonicalUserResponse,
-          })
-        : message;
-      await handle.signal('receive_user_response', signalValue);
-
+  // 2. Signal the workflow to unblock any waiting tool.
+  // A deployment-sealed id is a tombstone, not a running execution — the
+  // Temporal signal can only 404 (prod agent 3eb6da5a, late approve 13:00Z).
+  if (agent.temporalWorkflowId && !isDeploymentSealedWorkflowId(agent.temporalWorkflowId)) {
+    const signalValue = attention_request_id
+      ? JSON.stringify({
+          request_id: attention_request_id,
+          response: canonicalUserResponse,
+        })
+      : message;
+    // Never fails the reply: the message is in DB and the workflow polls for it.
+    const { signaled } = await deliverUserMessageToWorkflow(
+      agent.id,
+      agent.temporalWorkflowId,
+      signalValue
+    );
+    if (signaled) {
       log.info('Signaled workflow', {
         phase: 'reply',
         workflowId: agent.temporalWorkflowId,
         agentId: agent.id,
         reject: !!reject,
       });
-    } catch (error) {
-      log.error('Failed to signal workflow', {
-        phase: 'reply',
-        workflowId: agent.temporalWorkflowId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      // Don't fail — message is in DB, workflow will poll
     }
   }
 
@@ -562,17 +580,33 @@ async function commitReplyToAgent(
     }
   }
 
-  // Only claim the approve/reject happened when a row actually changed. The
-  // message IS delivered either way, so this stays a success — but reporting
-  // "Approved request" for an unowned or already-resolved id would tell the
-  // operator a decision landed that never did.
-  const action = !attention_request_id
-    ? 'Replied to'
-    : attentionResolved
-      ? reject
-        ? 'Rejected request and replied to'
-        : 'Approved request and replied to'
-      : 'Replied to (request was already resolved or not found for)';
+  // A deploy-fenced approval or cutover-FAILED/sealed agent cannot consume a
+  // Temporal signal. Restart so a late approve is not a dead-end.
+  let recoveredCutover = false;
+  const attention = attention_request_id
+    ? await prisma.agentAttentionRequest.findFirst({
+        where: { id: attention_request_id, agentId: agent.id, userId },
+        select: { userResponse: true },
+      })
+    : null;
+  const fencedApproval = attention?.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE;
+  if (agentNeedsCutoverRecovery(agent) || (fencedApproval && !attentionResolved)) {
+    recoveredCutover = await recoverCutoverKilledAgent(agent.id);
+    if (recoveredCutover) {
+      log.info('Restarted cutover-killed agent after late approval', {
+        phase: 'reply',
+        agentId: agent.id,
+        requestId: attention_request_id,
+      });
+    }
+  }
+
+  const action = formatReplyToAgentAction({
+    recoveredCutover,
+    reject: !!reject,
+    attentionRequestId: attention_request_id,
+    attentionResolved,
+  });
   return {
     tool: 'reply_to_agent',
     success: true,

@@ -26,21 +26,30 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
+import http.client
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+AGENTS_VENV_PYTHON = REPO_ROOT / "agents" / "venv" / "bin" / "python"
 DEFAULT_HUB = "https://navi-j9a9.onrender.com"
 DURABLE_ORIGIN = "https://www.roselabs.ai"
-ARTIFACTS_ROOT = Path("/opt/cursor/artifacts/rca_evidence")
+ARTIFACTS_ROOT = Path(
+    os.getenv("RCA_EVIDENCE_ARTIFACTS_ROOT")
+    or Path(os.getenv("CURSOR_ARTIFACTS_DIR", "/opt/cursor/artifacts")) / "rca_evidence"
+)
 _AGENT_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -54,8 +63,15 @@ def _normalize_agent_id(raw: str) -> str:
     return agent_id.lower()
 
 
+class _LoopbackProxyHandler(urllib.request.ProxyHandler):
+    def proxy_open(self, request, proxy, proxy_type):
+        if urllib.parse.urlsplit(request.full_url).hostname in {"localhost", "127.0.0.1", "::1"}:
+            return None
+        return super().proxy_open(request, proxy, proxy_type)
+
+
 def _opener() -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(_LoopbackProxyHandler())
 
 
 def _auth_headers() -> dict[str, str]:
@@ -75,15 +91,151 @@ def _auth_headers() -> dict[str, str]:
     }
 
 
-def durable_fe_url(agent_id: str) -> str:
-    return f"{DURABLE_ORIGIN}/?agent-id={agent_id}"
+def benchmark_share_token(run_id: str) -> str:
+    key = os.getenv("BENCHMARK_SHARE_SECRET")
+    if not key:
+        raise SystemExit("BENCHMARK_SHARE_SECRET is required to sign benchmark share links")
+    expiry = int(time.time()) + 30 * 24 * 60 * 60
+    signature = hmac.new(
+        key.encode(),
+        f"benchmark-share:v1:{run_id.lower()}:{expiry}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{run_id.lower()}.{expiry}.{signature}"
 
 
-def upload_run_json(run_json: Path) -> str:
+def durable_fe_url(agent_id: str, run_id: str, token: str) -> str:
+    query = urllib.parse.urlencode({"agent-id": agent_id})
+    fragment = urllib.parse.urlencode({"benchmark-share": token})
+    return f"{DURABLE_ORIGIN}/?{query}#{fragment}"
+
+
+def evidence_bundle_for_agent(bundle: dict, agent_id: str) -> dict:
+    """Expose one real root from a composite bench without changing its result.
+
+    Composite benches retain their aggregate result under a comma-joined
+    ``agent_id`` and keep each root's captured transcript in a named stage.
+    The Hub cannot resolve either UUID from that aggregate task. Publish a
+    separate, deterministic evidence run containing the original stage logs;
+    never rewrite the aggregate benchmark run or invent transcript messages.
+    """
+    tasks = bundle.get("tasks") or []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        logs = task.get("logs") or {}
+        if task.get("agent_id") == agent_id or (
+            isinstance(logs, dict)
+            and isinstance(logs.get("tree"), dict)
+            and agent_id in logs["tree"]
+        ):
+            return bundle
+
+    matches = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        joined = task.get("agent_id")
+        if not isinstance(joined, str) or agent_id not in joined.split(","):
+            continue
+        logs = task.get("logs") or {}
+        if not isinstance(logs, dict):
+            continue
+        for stage_name, stage_logs in logs.items():
+            if not isinstance(stage_logs, dict):
+                continue
+            tree = stage_logs.get("tree")
+            messages = stage_logs.get("messages")
+            if isinstance(tree, dict) and agent_id in tree and isinstance(messages, list) and messages:
+                matches.append((task, stage_name, stage_logs))
+    if len(matches) != 1:
+        raise SystemExit(
+            f"expected exactly one captured stage transcript for {agent_id}; found {len(matches)}"
+        )
+    task, stage_name, stage_logs = matches[0]
+    run_id = bundle.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise SystemExit("run bundle is missing run_id")
+    projected_task = dict(task)
+    projected_task.update(
+        agent_id=agent_id,
+        name=f"{task.get('name', 'composite')} [{stage_name} evidence]",
+        logs=stage_logs,
+        message_count=len(stage_logs["messages"]),
+        tree_agent_count=len(stage_logs["tree"]),
+        evidence_projection_of=task.get("name"),
+    )
+    return {
+        **bundle,
+        "run_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"rose-benchmark-evidence:{run_id}:{agent_id}")),
+        "source": "durable-evidence-projection",
+        "source_run_id": run_id,
+        "tasks": [projected_task],
+    }
+
+
+def verified_zero_session_tasks(bundle: dict, agent_id: str) -> set[str]:
+    """Bind pre-session cancellation to exact owned DB and cleanup receipts."""
+    projected = evidence_bundle_for_agent(bundle, agent_id)
+    matches = [
+        task for task in projected.get("tasks", [])
+        if task.get("agent_id") == agent_id
+        or agent_id in ((task.get("logs") or {}).get("tree") or {})
+    ]
+    if len(matches) != 1:
+        return set()
+    logs = matches[0].get("logs") or {}
+    receipt = logs.get("browser_zero_allocation_receipt")
+    if receipt is None:
+        return set()
+    cleanup = logs.get("cloud_cleanup_evidence") or {}
+    provider = logs.get("cloud_provider_cleanup") or {}
+    ids = receipt.get("task_ids") if isinstance(receipt, dict) else None
+    tree = receipt.get("tree_agent_ids") if isinstance(receipt, dict) else None
+    task_map = receipt.get("task_ids_by_agent") if isinstance(receipt, dict) else None
+    owner = receipt.get("root_agent_id") if isinstance(receipt, dict) else None
+    valid = (
+        isinstance(ids, list) and bool(ids)
+        and all(isinstance(value, str) and value for value in ids)
+        and len(ids) == len(set(ids))
+        and isinstance(tree, list) and all(isinstance(value, str) for value in tree)
+        and agent_id in tree
+        and isinstance(task_map, dict)
+        and set(task_map).issubset(set(tree))
+        and all(isinstance(values, list) and all(isinstance(value, str) and value for value in values)
+                for values in task_map.values())
+        and sorted(value for values in task_map.values() for value in values) == sorted(ids)
+        and isinstance(owner, str) and owner in tree
+        and receipt.get("before_browser_sessions") == []
+        and receipt.get("archive_browser_sessions") == []
+        and cleanup.get("errors") == []
+        and cleanup.get("provider_receipts") == []
+        and provider.get("tree_sealed") is True
+        and provider.get("root_deleted") is True
+        and provider.get("provider_receipts") == []
+    )
+    for phase in ("before", "after", "final"):
+        snapshot = cleanup.get(phase) if isinstance(cleanup, dict) else None
+        valid = valid and (
+            isinstance(snapshot, dict)
+            and snapshot.get("root_exists") is True
+            and isinstance(snapshot.get("tree_agent_ids"), list)
+            and all(isinstance(value, str) for value in snapshot["tree_agent_ids"])
+            and sorted(snapshot["tree_agent_ids"]) == sorted(tree)
+            and snapshot.get("browser_sessions") == []
+        )
+    if not valid:
+        raise SystemExit("invalid exact zero-browser-allocation ownership receipt")
+    return set(task_map.get(agent_id, []))
+
+
+def upload_run_json(run_json: Path, agent_id: str) -> str:
     sys.path.insert(0, str(REPO_ROOT / "agents"))
-    from benchmarks.hub_upload import upload_run_bundle  # type: ignore
+    from benchmarks.hub_upload import upload_run_bundle
 
-    bundle = json.loads(run_json.read_text(encoding="utf-8"))
+    bundle = evidence_bundle_for_agent(
+        json.loads(run_json.read_text(encoding="utf-8")), agent_id
+    )
     os.environ.setdefault("BENCHMARK_HUB_UPLOAD_URL", DEFAULT_HUB)
     if not (os.getenv("BENCHMARK_HUB_API_KEY") or os.getenv("BACKEND_API_KEY")):
         raise SystemExit(
@@ -130,7 +282,7 @@ def _probe_recording_view_url(url: str, *, timeout: float = 20.0) -> bool:
     try:
         with _opener().open(request, timeout=timeout) as response:
             return int(response.status) < 400
-    except Exception:
+    except (OSError, ValueError, http.client.HTTPException):
         return False
 
 
@@ -152,7 +304,9 @@ def _probe_recording_file_pointer(
     try:
         with _opener().open(request, timeout=timeout) as response:
             payload = json.loads(response.read() or b"{}")
-    except Exception:
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+    if not isinstance(payload, dict):
         return False
     signed = payload.get("signed_url") or payload.get("signedUrl") or payload.get("url")
     if not isinstance(signed, str) or not signed:
@@ -161,7 +315,7 @@ def _probe_recording_file_pointer(
 
 
 def validate_browser_agents_terminated_with_recording(
-    agent_id: str, messages: list
+    agent_id: str, messages: list, *, zero_session_task_ids: set[str] | None = None,
 ) -> list[str]:
     """Return failure reasons when any browser task is still live or missing recording.
 
@@ -170,8 +324,17 @@ def validate_browser_agents_terminated_with_recording(
       * ``action_type=task_complete`` (terminated for FE panels)
       * a FINISHED recording message with a reachable ``recording_view_url`` or a
         fetchable ``recording_file_pointer``
+    An exact owned zero-session receipt permits a task cancelled before its
+    session was allocated; an allocated browser still requires a recording.
     Agents with no browser tasks pass.
+    Code agents share lifecycle action names with browsers. Explicit code
+    identity exempts those tasks unless the same task also has browser evidence;
+    lifecycle events with unknown identity retain the fail-closed checks.
     """
+    sys.path.insert(0, str(REPO_ROOT / "agents"))
+    from benchmarks.browser_zero_allocation import cancelled_before_session_task_ids
+
+    verified_zero = (zero_session_task_ids or set()) & cancelled_before_session_task_ids(messages)
     tasks: dict[str, dict[str, bool]] = {}
     recording_candidates: dict[str, list[dict]] = {}
     for message in messages:
@@ -183,7 +346,11 @@ def validate_browser_agents_terminated_with_recording(
             continue
         action = str(meta.get("action_type") or "")
         tool_name = str(meta.get("toolName") or "")
-        browser_related = tool_name == "spawn_browser_agent" or action in {
+        code_related = tool_name == "spawn_claude_code_agent" or meta.get("agentType") == "code"
+        explicit_browser = tool_name == "spawn_browser_agent" or meta.get("agentType") == "browser" or action in {
+            "browser", "recording", "network_recording",
+        }
+        browser_related = explicit_browser or (not tool_name and action in {
             "browser",
             "session_init",
             "session_started",
@@ -191,13 +358,18 @@ def validate_browser_agents_terminated_with_recording(
             "recording",
             "network_recording",
             "task_complete",
-        }
-        if not browser_related:
+        })
+        if not browser_related and not code_related:
             continue
         state = tasks.setdefault(
-            task_id, {"seen": False, "complete": False, "recording_ok": False}
+            task_id, {
+                "seen": False, "complete": False, "recording_ok": False,
+                "code": False, "browser": False,
+            }
         )
-        if action in {
+        state["code"] = state["code"] or code_related
+        state["browser"] = state["browser"] or explicit_browser
+        if explicit_browser or action in {
             "browser",
             "session_init",
             "session_started",
@@ -214,7 +386,7 @@ def validate_browser_agents_terminated_with_recording(
 
     failures: list[str] = []
     for task_id, state in sorted(tasks.items()):
-        if not state["seen"]:
+        if not state["seen"] or (state["code"] and not state["browser"]):
             continue
         if not state["complete"]:
             failures.append(
@@ -223,17 +395,20 @@ def validate_browser_agents_terminated_with_recording(
         recording_ok = False
         for meta in recording_candidates.get(task_id, []):
             view_url = meta.get("recording_view_url")
-            if isinstance(view_url, str) and view_url.strip():
-                if _probe_recording_view_url(view_url.strip()):
-                    recording_ok = True
-                    break
+            if (
+                isinstance(view_url, str)
+                and view_url.strip()
+                and _probe_recording_view_url(view_url.strip())
+            ):
+                recording_ok = True
+                break
             pointer = meta.get("recording_file_pointer")
             if isinstance(pointer, dict) and _probe_recording_file_pointer(
                 agent_id, pointer
             ):
                 recording_ok = True
                 break
-        if not recording_ok:
+        if not recording_ok and task_id not in verified_zero:
             failures.append(
                 f"browser task {task_id} has no correctly attached recording "
                 "(need reachable recording_view_url or fetchable recording_file_pointer)"
@@ -243,17 +418,95 @@ def validate_browser_agents_terminated_with_recording(
     return failures
 
 
-def verify_agent_reachable(agent_id: str, *, timeout: float = 60.0) -> tuple[str, int]:
+def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
+    """Extract short, rendered phrases from each visible transcript role."""
+    markdown = None
+    snippets: dict[str, list[str]] = {"user": [], "assistant": []}
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        content = str(message.get("text") or "")
+        metadata = _message_metadata(message)
+        if role not in ("USER", "ASSISTANT") or metadata.get("hidden"):
+            continue
+        # Match MessageList's root scope: nested browser reasoning is rendered
+        # inside its browser panel, not in the root transcript being checked.
+        # Explore progress and Claude Code lifecycle anchors remain root-visible.
+        if (
+            metadata.get("subAgentId") is not None
+            and metadata.get("agentType") != "explore"
+            and not (
+                metadata.get("toolName") == "spawn_claude_code_agent"
+                and metadata.get("action_type")
+                in {"claude_code_started", "task_complete", "session_cancelled"}
+            )
+        ):
+            continue
+        if role == "USER" or message.get("file_pointer"):
+            # UserBubble and AssistantAttachmentBubble render literal text.
+            lines = content.splitlines()
+        else:
+            # Use the existing agents dependency rather than approximating
+            # CommonMark: adjacent emphasis delimiters may remain literal text.
+            if markdown is None:
+                from markdown_it import MarkdownIt
+
+                markdown = MarkdownIt("commonmark", {"html": False}).enable(
+                    ["strikethrough", "table"]
+                )
+            # Match the FE's normalizeMarkdownText before parsing. Keep block
+            # and line boundaries; image alt/link destinations are not innerText.
+            content = re.sub(
+                r"\\([nt*_`#\[\]()])",
+                lambda match: {"n": "\n", "t": "\t"}.get(match[1], match[1]),
+                content,
+            )
+            lines: list[str] = []
+            for token in markdown.parse(content):
+                if token.type == "inline":
+                    rendered = "".join(
+                        child.content
+                        if child.type in {"text", "code_inline"}
+                        else "\n" if child.type in {"softbreak", "hardbreak"} else ""
+                        for child in token.children or []
+                    )
+                    lines.extend(rendered.splitlines())
+                elif token.type in {"fence", "code_block"}:
+                    lines.extend(token.content.splitlines())
+        for line in lines:
+            visible_line = line.strip()
+            if len(visible_line) >= 12:
+                snippets[str(role).lower()].append(visible_line[:60])
+                break
+    return {role: values[:8] for role, values in snippets.items()}
+
+
+def verify_agent_reachable(
+    agent_id: str, token: str, *, timeout: float = 60.0,
+    zero_session_task_ids: set[str] | None = None,
+) -> tuple[str, int]:
     """Probe archive-backed agent detail; return (status_label, message_count).
 
     Fails closed when any browser agent on the FE link is still live or missing
     a correctly attached recording.
     """
-    url = f"{DEFAULT_HUB}/api/agents/{agent_id}"
-    request = urllib.request.Request(url, headers=_auth_headers(), method="GET")
+    url = f"{DEFAULT_HUB}/api/benchmarks/shared-agent/{agent_id}"
+    request = urllib.request.Request(
+        url, headers={"Authorization": f"BenchmarkShare {token}"}, method="GET"
+    )
     try:
-        with _opener().open(request, timeout=timeout) as response:
-            payload = json.loads(response.read() or b"{}")
+        for attempt in range(2):
+            try:
+                with _opener().open(request, timeout=timeout) as response:
+                    payload = json.loads(response.read() or b"{}")
+                break
+            except TimeoutError:
+                # This read-only request can safely start a fresh connection.
+                # Preserve the per-attempt timeout and the caller's outer bound;
+                # HTTP/auth, malformed JSON, and evidence failures never retry.
+                if attempt:
+                    raise
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise SystemExit(f"agent API HTTP {exc.code}: {body[:300]}") from exc
@@ -266,21 +519,36 @@ def verify_agent_reachable(agent_id: str, *, timeout: float = 60.0) -> tuple[str
             f"agent {agent_id} returned no messages — Hub archive not readable yet"
         )
     browser_failures = validate_browser_agents_terminated_with_recording(
-        agent_id, messages
+        agent_id, messages, zero_session_task_ids=zero_session_task_ids,
     )
     if browser_failures:
         raise SystemExit(
             "FE link browser validation failed:\n- " + "\n- ".join(browser_failures)
         )
-    fe = durable_fe_url(agent_id)
+    run_id = token.split('.', 1)[0]
+    fe = durable_fe_url(agent_id, run_id, token)
     fe_req = urllib.request.Request(fe, method="GET")
     try:
         with _opener().open(fe_req, timeout=20) as fe_resp:
             if int(fe_resp.status) >= 400:
-                return "verified reachable", count
-    except Exception:
-        return "verified reachable", count
-    return "verified reachable", count
+                raise SystemExit(f"FE page returned HTTP {fe_resp.status}")
+    except Exception as exc:
+        raise SystemExit(f"FE page unreachable: {exc}") from exc
+    snippets = visible_transcript_snippets(messages)
+    if not snippets["user"]:
+        raise SystemExit("FE browser verification has no visible transcript snippets")
+    browser = subprocess.run(
+        ["node", str(REPO_ROOT / "scripts" / "verify_benchmark_share_link.cjs")],
+        input=json.dumps({"url": fe, "agentId": agent_id, "snippets": snippets}),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=90,
+        cwd=str(REPO_ROOT),
+    )
+    if browser.returncode != 0:
+        raise SystemExit(f"FE browser verification failed: {browser.stderr.strip()[:500]}")
+    return "verified in fresh browser", count
 
 
 def latest_dump_for_agent(agent_id: str) -> Path:
@@ -293,31 +561,42 @@ def latest_dump_for_agent(agent_id: str) -> Path:
     return dumps[-1]
 
 
-def publish_llm_dump(dump: Path, agent_id: str) -> Path:
+def publish_llm_dump(dump: Path, agent_id: str) -> tuple[Path, str]:
+    """Render the dump; return the local HTML and the HTTPS URL ("" when not uploaded)."""
     out_dir = ARTIFACTS_ROOT / agent_id
     out_dir.mkdir(parents=True, exist_ok=True)
     out_html = out_dir / "last_llm_call.html"
+    # The R2 HTTPS upload needs boto3, which lives in agents/venv rather than
+    # the system python3 this script is documented to run under.
+    python = AGENTS_VENV_PYTHON if AGENTS_VENV_PYTHON.is_file() else Path(sys.executable)
     cmd = [
-        sys.executable,
+        str(python),
         str(REPO_ROOT / "scripts" / "render_llm_dump.py"),
         str(dump),
         "-o",
         str(out_html),
         "--no-open",
     ]
-    subprocess.run(cmd, check=True, cwd=str(REPO_ROOT))
+    result = subprocess.run(cmd, check=True, cwd=str(REPO_ROOT), capture_output=True, text=True)
+    sys.stderr.write(result.stderr)
+    https_url = next(
+        (line.strip() for line in result.stdout.splitlines() if line.startswith("https://")),
+        "",
+    )
     # Copy source JSON alongside for greppability.
     shutil.copy2(dump, out_dir / dump.name)
-    return out_html
+    return out_html, https_url
 
 
 def write_manifest(
     *,
     agent_id: str,
     run_id: str,
+    token: str,
     fe_status: str,
     message_count: int,
     dump_html: Path,
+    dump_https_url: str,
     source_dump: Path,
 ) -> Path:
     out_dir = ARTIFACTS_ROOT / agent_id
@@ -325,10 +604,11 @@ def write_manifest(
     manifest = {
         "agent_id": agent_id,
         "run_id": run_id,
-        "fe_url": durable_fe_url(agent_id),
+        "fe_url": durable_fe_url(agent_id, run_id, token),
         "fe_verified": fe_status,
         "message_count": message_count,
         "llm_dump_artifact": str(dump_html),
+        "llm_dump_https_url": dump_https_url,
         "source_dump": str(source_dump),
         "call_site": source_dump.stem,
     }
@@ -341,6 +621,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent-id", required=True)
     parser.add_argument("--run-json", type=Path, help="Upload this run bundle to the durable Hub")
+    parser.add_argument("--run-id", help="Existing Hub run ID when --run-json is unavailable")
     parser.add_argument("--dump", type=Path, help="Specific LLM dump JSON (default: latest)")
     parser.add_argument("--skip-hub-upload", action="store_true")
     parser.add_argument("--skip-fe-verify", action="store_true")
@@ -350,27 +631,40 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     agent_id = _normalize_agent_id(args.agent_id)
-    run_id = ""
-    if args.run_json and not args.skip_hub_upload:
+    run_id = args.run_id or ""
+    zero_session_task_ids: set[str] = set()
+    if args.run_json:
         run_path = args.run_json.resolve()
-        run_id = upload_run_json(run_path)
-        dual_write_claude_code_sessions(run_path, agent_id)
+        bundle = json.loads(run_path.read_text(encoding="utf-8"))
+        zero_session_task_ids = verified_zero_session_tasks(bundle, agent_id)
+        if args.skip_hub_upload:
+            run_id = str(evidence_bundle_for_agent(bundle, agent_id).get("run_id") or "")
+        else:
+            run_id = upload_run_json(run_path, agent_id)
+            dual_write_claude_code_sessions(run_path, agent_id)
+    if not _AGENT_ID_RE.fullmatch(run_id):
+        raise SystemExit("a UUID run_id from --run-json or --run-id is required for a share link")
+    token = benchmark_share_token(run_id)
     dump = (args.dump or latest_dump_for_agent(agent_id)).resolve()
-    dump_html = publish_llm_dump(dump, agent_id)
+    dump_html, dump_https_url = publish_llm_dump(dump, agent_id)
     if args.skip_fe_verify:
         fe_status, message_count = "skipped", 0
     else:
-        fe_status, message_count = verify_agent_reachable(agent_id)
+        fe_status, message_count = verify_agent_reachable(
+            agent_id, token, zero_session_task_ids=zero_session_task_ids,
+        )
     manifest = write_manifest(
         agent_id=agent_id,
         run_id=run_id,
+        token=token,
         fe_status=fe_status,
         message_count=message_count,
         dump_html=dump_html,
+        dump_https_url=dump_https_url,
         source_dump=dump,
     )
-    print(f"FE link: {durable_fe_url(agent_id)} — {fe_status} ({message_count} msgs)")
-    print(f"LLM dump: {dump_html}")
+    print(f"FE link: {durable_fe_url(agent_id, run_id, token)} — {fe_status} ({message_count} msgs)")
+    print(f"LLM dump: {dump_https_url or f'{dump_html} (local only — not reviewable remotely)'}")
     print(f"manifest: {manifest}")
     return 0
 

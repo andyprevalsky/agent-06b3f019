@@ -21,7 +21,10 @@ stale. Adding a NEW entry is never the right fix — register the test instead.
 
 import ast
 import asyncio
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from _result import Result as BlackboxResult
@@ -125,28 +128,38 @@ def test_known_unregistered_ledger_is_not_stale():
     )
 
 
-def test_every_structural_suite_runs_in_test_sh():
-    """Structural suites are hardcoded in scripts/test.sh — the same footgun, one level up.
+STRUCTURAL_GATE = "scripts/tests/agents-structural.test.sh"
 
-    `tests/structural/*.py` is not auto-discovered either: each file is named
-    explicitly in scripts/test.sh's serial AND background invocation. A new
-    structural file that is not added to BOTH lines never runs.
+
+def test_every_structural_suite_runs_in_test_sh_and_deploy():
+    """Every structural suite runs wherever the agents structural gate runs.
+
+    `/deploy` Step 4s and both scripts/test.sh paths (serial and background)
+    run the one gate script, and the gate must run every suite file: a suite
+    named by hand in only some of those places silently never runs there.
     """
-    test_sh = (AGENTS_ROOT.parent / "scripts" / "test.sh").read_text()
-    missing = []
-    for path in sorted(STRUCTURAL_DIR.glob("structural*.py")):
-        invocation = f"tests/structural/{path.name}"
-        # Must appear in both the serial (run_suite) and background (bg_suite) paths.
-        if test_sh.count(invocation) < 2:
-            missing.append(f"{path.name} (found {test_sh.count(invocation)}x, need 2)")
-
-    assert not missing, (
-        f"{len(missing)} structural suite(s) are not wired into both scripts/test.sh "
-        f"invocations, so they never run:\n"
-        + "\n".join(f"  - {v}" for v in missing)
-        + "\n\nFix: append `&& python tests/structural/<file>.py` to BOTH the "
-        '`run_suite "Agents Structural"` and `bg_suite "Agents Structural"` lines.'
+    repo_root = AGENTS_ROOT.parent
+    test_sh = (repo_root / "scripts" / "test.sh").read_text()
+    assert test_sh.count(f"bash {STRUCTURAL_GATE}") >= 2, (
+        f'both the run_suite and bg_suite "Agents Structural" lines of scripts/test.sh must run {STRUCTURAL_GATE}'
     )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        record = Path(tmp) / "ran.txt"
+        recorder = Path(tmp) / "python"
+        recorder.write_text(f'#!/bin/sh\necho "$1" >> "{record}"\n')
+        recorder.chmod(0o755)
+        gate = subprocess.run(
+            ["bash", str(repo_root / STRUCTURAL_GATE)],
+            env={**os.environ, "PYTHON_BIN": str(recorder)},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        ran = record.read_text().split() if record.exists() else []
+    assert gate.returncode == 0, gate.stderr
+    expected = [f"tests/structural/{path.name}" for path in sorted(STRUCTURAL_DIR.glob("structural*.py"))]
+    assert sorted(ran) == expected, f"{STRUCTURAL_GATE} ran {ran}, expected every suite {expected}"
 
 
 async def run_all_tests():
@@ -154,7 +167,9 @@ async def run_all_tests():
     r = BlackboxResult()
     r.record("every_blackbox_test_is_registered", test_every_blackbox_test_is_registered)
     r.record("known_unregistered_ledger_is_not_stale", test_known_unregistered_ledger_is_not_stale)
-    r.record("every_structural_suite_runs_in_test_sh", test_every_structural_suite_runs_in_test_sh)
+    r.record(
+        "every_structural_suite_runs_in_test_sh_and_deploy", test_every_structural_suite_runs_in_test_sh_and_deploy
+    )
     return r.all_passed
 
 

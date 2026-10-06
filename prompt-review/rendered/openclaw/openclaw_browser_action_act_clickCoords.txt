@@ -1,6 +1,6 @@
 {
   "name": "browser",
-  "description": "Control the browser via OpenClaw's browser control server (status/start/stop/profiles/tabs/open/snapshot/screenshot/actions). Browser choice: omit profile by default for the isolated OpenClaw-managed browser (`openclaw`). user user node When using refs from snapshot (e.g. e12), keep the same tab: prefer passing targetId from the snapshot response into subsequent actions (act/click/type/etc). For tab operations, targetId also accepts tabId handles (t1) and labels from action=tabs. For multi-step browser work, login checks, stale refs, duplicate tabs, or Google Meet flows, use the bundled browser-automation skill when it is available. aria role Use snapshot+act for UI automation. Avoid act:wait by default; use only in exceptional cases when no reliable UI state exists.\n\nFocus: browser(action='act', request.kind='clickCoords').",
+  "description": "OpenClaw browser control tool.\n\nFocus: browser(action='act', request.kind='clickCoords').",
   "parameters": {
     "type": "object",
     "properties": {
@@ -12,6 +12,7 @@
           "start",
           "stop",
           "profiles",
+          "importprofile",
           "tabs",
           "open",
           "focus",
@@ -20,7 +21,13 @@
           "screenshot",
           "navigate",
           "console",
+          "requests",
+          "errors",
+          "text",
+          "emulate",
           "pdf",
+          "download",
+          "waitfordownload",
           "upload",
           "dialog",
           "act"
@@ -63,11 +70,13 @@
           "kind": {
             "type": "string",
             "enum": [
+              "batch",
               "click",
               "clickCoords",
               "type",
               "press",
               "hover",
+              "scrollIntoView",
               "drag",
               "select",
               "fill",

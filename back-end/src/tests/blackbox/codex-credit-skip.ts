@@ -36,6 +36,8 @@ export class CredentialExhaustionSkip extends Error {
 // depend on which leg reported the exhaustion.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
   /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|credit[_ ]balance[_ ]exhausted|credit balance is too low|billing (?:hard )?limit reached|missing payment method|team is blocked|payment method required|billing_not_active/i;
+const CODEX_OAUTH_REVOCATION_PATTERN =
+  /refresh_token_invalidated|token_revoked|refresh token (?:was )?revoked|access token could not be refreshed|your session has ended|log out and sign in again|oauth_refresh_invalid/i;
 
 /**
  * Detect whether a Codex smoke run terminated because every available credential
@@ -50,7 +52,11 @@ const CODEX_CREDIT_EXHAUSTION_PATTERN =
 export function detectCodexCreditExhaustion(output: string, events: unknown[]): string | null {
   const haystacks: string[] = [output];
   for (const event of events) {
-    const typed = event as { message?: unknown; reason?: unknown; error?: unknown };
+    const typed = event as {
+      message?: unknown;
+      reason?: unknown;
+      error?: unknown;
+    };
     // `error` arrives as a bare string on some providers and as
     // `{ message }` on others; only reading the string form let a nested
     // out-of-funds message slip past the detector and hard-fail the deploy.
@@ -74,7 +80,40 @@ export function detectCodexCreditExhaustion(output: string, events: unknown[]): 
  */
 export function codexSmokeCreditSkipReason(output: string, events: unknown[]): string | null {
   if (output.includes('CODEX_E2B_DONE')) return null;
+  // A revoked OAuth token needs reauthentication even if the fallback key is
+  // also out of credits. Both paths have to fail from funding to earn a skip.
+  if (CODEX_OAUTH_REVOCATION_PATTERN.test(output)) return null;
+  for (const event of events) {
+    const typed = event as { message?: unknown; reason?: unknown; error?: unknown };
+    const nestedError = (typed?.error as { message?: unknown } | null | undefined)?.message;
+    for (const field of [typed?.message, typed?.reason, typed?.error, nestedError]) {
+      if (typeof field === 'string' && CODEX_OAUTH_REVOCATION_PATTERN.test(field)) return null;
+    }
+  }
   return detectCodexCreditExhaustion(output, events);
+}
+
+const CODEX_CREATE_UNAVAILABLE_BODY =
+  'Code agent credentials are unavailable; the session could not be started';
+
+/**
+ * Create-time 500 with a generic "credentials unavailable" body is a hard
+ * failure when a credential path still exists. When the funded GPT key is
+ * already on its out-of-credits/bad-key cooldown and create still cannot
+ * start a session, every Codex path is unusable — same deploy-approved SKIP
+ * as mid-run exhaustion. Observed 2026-10-02: leftover cooldown from a prior
+ * coverage process plus no synced OAuth/pool token hard-failed Step 4a.
+ */
+export function codexCreateUnavailableSkipReason(
+  createBody: string,
+  onCooldown: boolean
+): string | null {
+  const exhaustion = detectCodexCreditExhaustion(createBody, []);
+  if (exhaustion) return exhaustion;
+  if (onCooldown && createBody.includes(CODEX_CREATE_UNAVAILABLE_BODY)) {
+    return 'funded GPT key on out-of-credits/bad-key cooldown and session create reported credentials unavailable';
+  }
+  return null;
 }
 
 function assert(condition: boolean, message: string): void {
@@ -92,7 +131,10 @@ export function testDetectCreditExhaustion_positive(): void {
   // Exhaustion surfaced only in structured events (message/reason fields).
   assert(
     detectCodexCreditExhaustion('normal output', [
-      { type: 'error', message: 'Quota exceeded. Check your plan and billing details.' },
+      {
+        type: 'error',
+        message: 'Quota exceeded. Check your plan and billing details.',
+      },
     ]) !== null,
     'quota-exceeded event message must be detected'
   );
@@ -240,4 +282,59 @@ export function testCreditExhaustion_neverOverridesSuccessSentinel(): void {
     codexSmokeCreditSkipReason('all credentials returned insufficient_quota', []) !== null,
     'no success sentinel + exhaustion must yield a skip reason'
   );
+}
+
+export function testCreateUnavailableSkip_cooldownOnly(): void {
+  const createBody =
+    '{"error":"Code agent credentials are unavailable; the session could not be started"}';
+  assert(
+    codexCreateUnavailableSkipReason(createBody, true) !== null,
+    'credentials-unavailable create body + cooldown must skip'
+  );
+  assert(
+    codexCreateUnavailableSkipReason(createBody, false) === null,
+    'credentials-unavailable create body without cooldown must not skip'
+  );
+  assert(
+    codexCreateUnavailableSkipReason(
+      '{"error":"403: team is blocked: missing payment method"}',
+      false
+    ) !== null,
+    'existing create-time funding wording still skips without a cooldown flag'
+  );
+}
+
+export interface TestResult {
+  name: string;
+  passed: boolean;
+  skipped?: boolean;
+  skipReason?: string;
+  error?: string;
+  duration: number;
+}
+
+export async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
+  const start = Date.now();
+  try {
+    await fn();
+    return { name, passed: true, duration: Date.now() - start };
+  } catch (error) {
+    if (error instanceof CredentialExhaustionSkip) {
+      // Not a failure: the third-party account is out of credits/quota. Report
+      // as a loud SKIP so the deploy gate is not blocked by external funding.
+      return {
+        name,
+        passed: true,
+        skipped: true,
+        skipReason: error.message,
+        duration: Date.now() - start,
+      };
+    }
+    return {
+      name,
+      passed: false,
+      error: error instanceof Error ? error.message : String(error),
+      duration: Date.now() - start,
+    };
+  }
 }

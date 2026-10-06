@@ -5,7 +5,7 @@
 
 import type { Browser } from 'playwright';
 import type { ProxyGeoLocation } from '../geoip';
-import { connectValidatedBrowser } from './sessionConnection';
+import { steelStartupProbe, validateBrowserConnection } from './sessionConnection';
 import { installCaptchaSolveIndicator } from '../browser/captchaSolveIndicator';
 import {
   buildSteelProxySettings,
@@ -17,6 +17,7 @@ import {
   type SteelProxyConfig,
 } from './session';
 import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
+import { steelSessionTimeoutMs } from './sessionLifetime';
 import { log } from './types';
 import { steelCdpUrl, steelDebugUrl } from './urls';
 
@@ -39,7 +40,7 @@ export function buildSteelRecoveryBrowserOptions(input: {
     solveCaptcha: true,
     debugConfig: { systemCursor: false },
     stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
-    timeout: 900000,
+    timeout: steelSessionTimeoutMs(),
     dimensions: { width: 1288, height: 891 },
   };
 }
@@ -57,7 +58,8 @@ export async function createSteelRecoverySession(
       profileId?: string | null;
       proxySource?: string | null;
     }>;
-    connectValidatedBrowser?: typeof connectValidatedBrowser;
+    connect?: (wsUrl: string) => Promise<Browser>;
+    retrieveSession?: (id: string) => Promise<{ status: string; releaseReason?: unknown }>;
     releaseRemoteSession?: typeof releaseSteelRemoteSession;
   }
 ) {
@@ -69,7 +71,7 @@ export async function createSteelRecoverySession(
     input.proxyMode === 'managed' && isKnownRejectedProxyCity(input.proxyLocation);
   let lastError: Error | null = null;
   const createSession = deps?.createSession ?? ((options) => steel.sessions.create(options));
-  const connectBrowser = deps?.connectValidatedBrowser ?? connectValidatedBrowser;
+  const retrieveSession = deps?.retrieveSession ?? ((id: string) => steel.sessions.retrieve(id));
   const releaseRemote = deps?.releaseRemoteSession ?? releaseSteelRemoteSession;
 
   for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
@@ -90,10 +92,16 @@ export async function createSteelRecoverySession(
         })
       )) as SteelSessionResult;
       const wsUrl = steelCdpUrl(session.id);
-      validationBrowser = await connectBrowser(wsUrl);
+      const validation = await validateBrowserConnection(wsUrl, {
+        connect: deps?.connect,
+        startupProbe: steelStartupProbe(session.id, retrieveSession),
+      });
+      validationBrowser = validation.browser;
       if (validationBrowser === null) {
         await releaseRemote(session.id).catch(() => {});
-        lastError = new Error(`Steel recovery candidate ${session.id} failed CDP validation`);
+        lastError = new Error(
+          `Steel recovery candidate ${session.id} failed CDP validation: ${validation.failure}`
+        );
         if (attempt < MAX_SESSION_RETRIES) {
           await sleepBeforeSteelRetry(attempt);
         }

@@ -199,7 +199,7 @@ CHANGED_AGENT_RUNTIME=$(printf '%s\n' "$CHANGED_AGENTS" |
   bash "$(git rev-parse --show-toplevel)/scripts/classify-agent-runtime-changes.sh")
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
-CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|setup-db\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
+CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|setup-db\.sh|run-in-new-session\.py|run-bench|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/(cloud_batch_cleanup_test|cloudbench_(dependency_sync|recovery_review)_test|run_benchmark|wall_clock_backstop_test)\.py)' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS" ] && echo "yes" || echo "")
 CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 
@@ -318,8 +318,8 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
 **Execution model for Steps 1–4a (run in this order):**
 
 1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them, then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
-1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
-1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them, then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
+   1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
+   1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them, then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
 2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 3. **Parallel Group 3** (all read-only after the mutators; start every applicable
    lane in one assistant message with separate Bash tool calls, using the worker
@@ -342,7 +342,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
    **Static verify:**
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
-   - Step 4: structural tests (skip if `CHANGED_TS` is empty)
+   - Step 4: structural tests (no skip)
    - Step 4s: deploy environment + command structural tests (no skip)
    - Step 4m-lint: mac-app format:check + lint + type-check (skip if `CHANGED_MAC_APP` is empty)
    - Step 4cb: cloud benchmark controller regressions (skip if `CHANGED_CLOUDBENCH` is empty). If
@@ -446,15 +446,20 @@ cd back-end && bash ../scripts/run-deploy-stage typescript --reuse-passed -- npx
 
 Catches type errors that ESLint misses (wrong argument types, missing properties, bad generics). Fix any errors before proceeding — pre-existing type errors in touched files are your responsibility.
 
-## Step 4: Structural tests + fix
-
-**Skip if `$CHANGED_TS` is empty** (structural invariants only apply to back-end TS changes).
+## Step 4: Structural tests + fix (no skip)
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage backend-structural --reuse-passed -- npx tsx src/tests/structural/layer-deps.test.ts
+cd back-end && bash ../scripts/run-deploy-stage backend-structural --reuse-passed -- npm run test:structural
 ```
 
-This enforces architectural invariants across all domains: import direction, cross-domain isolation, provider/util boundaries, domain completeness, Prisma/Express encapsulation, and circular import detection.
+`npm run test:structural` runs every back-end structural suite listed in
+`back-end/package.json`: `layer-deps` (import direction, cross-domain
+isolation, provider/util boundaries, domain completeness, Prisma/Express
+encapsulation, circular imports) plus migration drift, the Claude Code
+ws-server prompt/env contract, the RCA archive schema, and the rest. It runs on
+every deploy because several suites guard non-TS inputs (migrations, the E2B
+template, `docs/rca/`). `scripts/tests/semantic-deploy-gate.test.sh` fails if a
+`*.test.ts` file in `back-end/src/tests/structural/` is missing from that list.
 
 If any invariant fails, fix the violation. The test output includes remediation guidance (e.g., "Move the needed logic to service.ts or extract to a provider.").
 
@@ -475,11 +480,24 @@ their assertions or test counts:
 `bash scripts/tests/approval-format.test.sh`,
 `bash scripts/tests/durable-evidence-links.test.sh`,
 `bash scripts/tests/publish_evidence_links_browser_validation.test.sh`,
+`bash scripts/tests/publish_evidence_links_composite.test.sh`,
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
 `bash scripts/tests/cooperative-cutover-monitor.test.sh`,
+`bash scripts/tests/agents-structural.test.sh`,
+`bash scripts/tests/deploy-agent-clone-recovery.test.sh`,
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
+`bash scripts/tests/descend-command.test.sh`,
+`python3 scripts/tests/benchmark-live-results.test.py`,
+`bash scripts/tests/cloudbench-fetch-ref.test.sh`,
+`python3 scripts/tests/verify-successful-llm-queries.test.py`,
+`python3 scripts/tests/cloudbench-exact-session-multi-root.test.py`,
+`python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
+`python3 scripts/tests/cloudbench-controller-linux.test.py`,
 `python3 scripts/tests/factory-review.test.py`,
+`python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
+`python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
+`python3 scripts/tests/cloudbench-bootstrap-recovery.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
@@ -490,14 +508,99 @@ their assertions or test counts:
 `bash scripts/tests/run-seed-exit-code.test.sh`,
 `bash scripts/tests/run-public-tunnel-routing.test.sh`,
 `bash scripts/tests/setup-db-concurrency.test.sh`,
-`bash scripts/tests/run-port-collision.test.sh`, and
-`bash scripts/tests/run-cloud-benchmark-workers.test.sh`.
+`bash scripts/tests/run-port-collision.test.sh`,
+`bash scripts/tests/run-cloud-benchmark-workers.test.sh`,
+`bash scripts/tests/blackbox-archive-env.test.sh`, and
+`python3 agents/tests/structural/structural_test_registration.py`.
 
 This list is deliberately explicit, not a registry pointer: several of these
 suites assert that their own command still appears here, which is how a gate
 cannot be silently dropped from the deploy path. `run-deploy-structural-gates.test.py`
 asserts this list and the `GATES` registry match exactly in both directions, so
 adding a gate without documenting it here fails the build.
+
+The compact benchmark gates above run on every deploy, including deploys
+without cloud-runner changes. They exercise the canonical CLI dispatch (including
+one 50-task dispatch and production-only routing), completed LIVE-query evidence,
+exact composite-root cleanup, and quiesced resource retirement offline. Larger
+paid fleet campaigns remain explicit human-requested validation; they are not
+added to this automatic gate.
+
+The same compact `benchmark-live-results.test.py` gate also covers cold-image
+CLI context/provenance, joined image installers and retained artifacts, actual
+Vite/SWC/Rollup/esbuild native readiness, isolated dependency overlay/copy fallback
+and Prisma freshness, immutable read-only cache receipts, explicit DEMO replay
+admission, task-only read-only guards, genuine replay hits, ordinary flag-off
+behavior and pooled/worker handoff. It calls the owning controls through
+the supported scripts; it adds no paid fleet stage. Explicit cold/cached startup
+experiments use `/benchmark` and CLAUDE.md's commands, without replacing deploy
+smoke outcomes. The mass-demo `-k 50 --concurrency 50 --strict-barrier` diagnostic
+means 50 controllers and 2,500 first-level children; task replay has zero LIVE proof
+credit and its unchanged declared judges may make provider calls. Ordinary
+source-only deploy benchmarks reuse the pinned dependency image and exact source
+checkout; REAL runs use fresh volumes by default.
+Cold `image-build` defaults to Fly-integrated Depot (app scope, zstd level 3,
+`linux/amd64`); explicit `--builder native` remains available for diagnostics.
+The independent `807edee9f` no-cache build/push completed in 493.6 seconds in one attempt,
+excluding activation/fleet startup. Retain its receipt, activate the exact image
+and verify guest digest/runtime consumption before the benchmark cohort.
+Image publication automatically caches its checksum-verified pinned Fly client
+in the Git common directory; native uses child-only classic Docker over HTTPS
+(`DOCKER_BUILDKIT=0`, `--wg=false`). Shared Fly/PATH and runtime remain unchanged.
+The 31.6-second tiny CLI control is not full cold-image timing. Strict repeated
+campaigns also have compact cohort readiness/abort/inverse controls here, with
+the existing startup budget and normal owned cleanup. Controller count alone
+does not prove execution overlap; ordinary non-strict scheduling is unchanged.
+
+For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
+
+```bash
+scripts/run-bench image-build --builder depot --no-cache --build-context <committed-checkout> --out-dir .context/image-build
+benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/image-build/cloudbench-image-build.json"))["image_ref"])')
+scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
+```
+
+`image-activate` uses the existing app environment lock and owned warm-source setup, activates the published image on the donor and this workspace's pool, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
+
+Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
+
+The existing recorded mass-demo diagnostic, when explicitly requested:
+
+```bash
+CLOUDBENCH_APP_MACHINE_CEILING=138 \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  scripts/run-bench test-mass-agent-run-0 --demo-cache \
+  -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
+```
+
+For this explicitly requested 50-copy cached stress run, use the command-scoped
+Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
+Machines plus 50 primaries, up to 50 optional autoscaler workers and two transient
+slots. Inspect native app inventory and headroom again before a future run;
+ordinary ceiling 56 cannot hold this current cohort, and ceiling 88 leaves only
+two worker slots. This profile creates no idle resources and changes no default
+ceiling, shared-CPU governor or production headroom. `--strict-barrier` keeps all
+50 copies in one ready cohort; controller occupancy does not prove execution overlap.
+
+Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
+seconds, then follow each job log's exact printed fleet-monitor handle through
+controller exit and owned teardown. The campaign directory itself is not a
+fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
+
+During deploy benchmarks, follow CLAUDE.md's "Monitor every cloud launch"
+instructions and the exact metrics command in the printed controller log.
+Poll every 30 seconds, check the printed controller exit marker on every poll,
+and observe through owned-resource release. Early task PASS/FAIL and stale cards
+are distinct from controller exit and cleanup. The existing live-results gate
+also runs the compact monitor controls; no additional live verification is added.
+
+The structural runner admits eight suites concurrently by default and runs the
+complete registry. Use `--max-workers N` to choose a host-appropriate limit;
+this changes test scheduling only, not benchmark fleet width or task deadlines.
+Activate `agents/venv` and keep its `bin` before Homebrew in `PATH`, since the
+registered Python children inherit that interpreter selection.
+Fixture process-start and cleanup observations allow sixty seconds of host
+breathing room while retaining terminal-state and exact-owner assertions.
 
 ```bash
 bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \
@@ -528,6 +631,11 @@ cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox --reus
 This one command runs all 91 deterministic back-end blackbox domains plus unit
 tests under V8 coverage. It must both pass every test and meet
 `back-end/.c8rc.json`; the real provider credential probe runs once in Step 4c.
+After coverage passes it runs `scripts/tests/blackbox-backend-teardown.test.sh`,
+which drives the isolated-backend runner through a normal exit and a SIGTERM and
+fails if either leaves its backend or port lock behind. It runs here, after the
+coverage server stops, rather than in Step 4s because it boots a real backend
+and regenerates the Prisma client.
 
 ## Step 4b: Front-end coverage + blackbox (skip if no front-end/ changes)
 
@@ -593,22 +701,37 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
 bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
+# Native Linux with ripgrep: driver ownership reads /proc.
+bash scripts/tests/cloudbench-status-service-shutdown.test.sh
+bash scripts/tests/fleet-infra-canary.test.sh
+bash scripts/tests/fleet-infra-stability-proof.test.sh
+python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py
+# Linux Python3.11.9/Node22.13.0; Mac dispatches this same suite to an offline container.
+# It reuses the recipe-fingerprinted local image, building the small committed
+# scripts/tests/cloudbench-controller-linux.Dockerfile once if absent. An existing
+# verified local image may be selected with CLOUDBENCH_CONTROLLER_TEST_IMAGE.
 bash scripts/tests/cloudbench-multi-workstream.test.sh
+python3 scripts/tests/cloudbench-controller-linux.test.py
 bash scripts/tests/cloudbench-github-token.test.sh
 bash scripts/tests/seed-dump-toolchain.test.sh
+agents/venv/bin/python -m pytest -q agents/benchmarks/wall_clock_backstop_test.py
 agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
-  -k 'prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or exact_volume_ownership_survives_delayed_visibility_and_failed_delete'
+  agents/benchmarks/cloudbench_worker_snapshot_test.py \
+  agents/benchmarks/cloudbench_recovery_review_test.py \
+  agents/benchmarks/cloudbench_codex_auth_test.py \
+  agents/benchmarks/cloud_batch_cleanup_test.py \
+  -k 'fly_with_timeout or test_clone_retries_transient_volume_not_found or test_clone_gives_up_after_max_attempts or test_clone_times_out_and_retries_a_hung_clone or clone_creation_cannot_start_copied_primary or cloudbench_codex_auth or autoscaler_runtime_handoff or prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or boot_payload or boot_launch_compresses_complete_payload or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or refresh_deps_applies_exact_workspace_before_rebuild or fetch_ref_restores_dirty_exact_sha or warm_deps_preflight or fresh_controller_reuses_only_proven_donor_dependencies or verified_legacy_snapshot or dependency_proof_publication or exact_volume_ownership_survives_delayed_visibility_and_failed_delete or exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers or pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper or exact_recovery_seals_actual_retained_owner_remote_evidence_paths or hub_transport or guest_shutdown_child_confirmation or exact_guest_recovery_archives_bound_child_token or fleet_lifecycle_receipt_requires_final_registry_retirement or watchdog_collects_cancelled_artifact_after_bounded_shutdown or terminal_projection_preserves_benchmark_outcome or boot_driver_state_write_failure or driver_cleanup_persists_evidence_in_fresh_data_directory or driver_cleanup_requires_current_stack_receipt_on_normal_completion or autoscaled_worker_uses_authenticated_fetch_ref_helper or terminal_projection_empty_tasks or terminal_projection_rejection_removes_all_artifacts or status_recovery_read_closes_descriptor or cloudbench_recovery_review or migration or migrated_registry or owned_worker_volume or composite_result_finalizes_each_exact_root or minted_dispatch_preserves_live_root_observer or boot_terminal_runtime_evidence_collects_complete_logs or cloudbench_worker_snapshot or quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt'
 if [ -z "$CHANGED_AGENTS" ]; then
   cd agents && ./venv/bin/python scripts/run_blackbox_tests.py benchmark
 fi
 ```
 
-The six controller commands must pass. The agents `benchmark` blackbox domain
+The controller commands above must pass. The agents `benchmark` blackbox domain
 must also pass exactly once: Step 4g's agents coverage already runs it whenever
 `$CHANGED_AGENTS` is non-empty, so Step 4cb runs it directly only when agents
 coverage was skipped. Never launch the same controller-owning domain in both
 parallel lanes; they share local lock and fixture state. When `$CHANGED_AGENTS`
-is non-empty, wait for Step 4g to finish before starting the six controller
+is non-empty, wait for Step 4g to finish before starting the controller
 commands above. This operational
 verification wiring is pre-authorized by Step 0p and must never pause for human
 approval.
@@ -642,15 +765,30 @@ repeats only this focused probe—not the complete coverage suite.
 
 ## Step 4p: Concurrent focused live probes
 
-The credential and Amplitude probes are independent and both read-only. Launch
-them under one foreground supervisor so a failing lane cannot interrupt or hide
-the sibling's evidence:
+The credential and Amplitude probes are independent and both read-only, so they
+run concurrently under one foreground supervisor; a failing lane cannot
+interrupt or hide the sibling's evidence. The chat-router-failover live probe
+starts after the Amplitude probe exits, because both boot the blackbox
+runner's db push and trigger hooks:
 
 ```bash
 python3 scripts/run_deploy_live_probes.py
 ```
 
-Both stage records must pass before closing the `runtime-blackbox` boundary.
+All three stage records must pass before closing the `runtime-blackbox`
+boundary.
+
+`chat-router-failover-live` replays the e8f2279b address-correction follow-up
+on its exact 30-message router context during a simulated Cerebras-wide
+stall, with the real OpenRouter GLM failover as the only path that can serve.
+It must run on the OpenRouter account `back-end/.env` configures, escalate on
+router attempt 1, and start the workflow with a goal anchored on the corrected
+address and not on the rejected one. A miss OpenRouter caused (the connection
+opened but no response headers came, or no first content within the 14.2s
+pre-content budget) is re-probed once 60s later. A second miss, or any other
+failure, blocks the deploy. A block means the failover could not serve that
+turn at that moment: diagnose it from the printed host, connect, and response
+timings and the `openrouter_fast_chat.end` records before rerunning.
 
 ## Step 4r: Cold-seed memory ratchet (no skip)
 
@@ -668,6 +806,7 @@ cd back-end && bash ../scripts/run-deploy-stage seed-memory-ratchet -- \
 The checked-in budget is the maximum of the last five stable runs plus exactly
 20% headroom, rounded up. If this gate fails, reduce the seed's peak and re-run
 all five measurements. Never raise the budget or a machine size to make it pass.
+
 ## Step 5: Spin up local services
 
 **Step 5.0 (MANDATORY pre-flight garbage collection):** before spinning up anything, kill any stale run.sh trees + orphaned backend/worker/supabase processes from prior aborted runs in this worktree. This guarantees a clean local blackbox/semantic stack; cloud smoke uses separate task-scoped queues.
@@ -711,7 +850,7 @@ if ! docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q
   else
     docker run -d --name "$DB_CONTAINER" -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=victoria \
       -p "$LOCAL_DB_PORT:5432" -v "$DB_VOLUME:/var/lib/postgresql/data" \
-      postgres:16-alpine >/dev/null
+      pgvector/pgvector:pg16 >/dev/null
     # Wait + push schema + seed for fresh containers
     for i in $(seq 1 30); do docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null && break; sleep 1; done
     (cd back-end && DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
@@ -876,7 +1015,7 @@ cd "$(git rev-parse --show-toplevel)"
 bash scripts/run-deploy-stage smoke -- bash scripts/run-predeploy-local
 ```
 
-`scripts/run-predeploy-local` selects tasks via `agents/benchmarks/select_predeploy_benches.py` (identical selection to the cloud path, so they can't drift): **existing `smoke` always runs**, then **history gate for added canaries/path extras only** (last 3 eligibility attempts in `agents/benchmarks/history/task_attempts.jsonl` all passed; predeploy/worktree attempts excluded so assignment cannot self-invalidate), then a **category floor** (one history-qualified canary per floor category: payment, grep, sms, browser_stateful) plus **path-triggered depth** from the git diff, hard-capped at **20**. Before running it prints a clear selection report (`TOTAL SELECTED: N / 20`, plus skipped-for-history and uncovered floor categories). Hitting the hard cap prints a loud scream and drops extras (floor always fits or the gate fails closed). New catalog tasks auto-attach by `deploy_category` / tags — set `deploy_canary: true` to prefer a task as its category canary. Override the cap only with review via `PREDEPLOY_BENCH_CAP`. It then runs the selected set through `scripts/run-bench --local` at full selected-task concurrency on the isolated stack, ordering longest-recent-median first when an emergency/debug concurrency cap is supplied. It exits non-zero unless every requested task passes, so the command IS the gate.
+`scripts/run-predeploy-local` selects tasks via `agents/benchmarks/select_predeploy_benches.py` (identical selection to the cloud path, so they can't drift): **existing `smoke` always runs**, then **history gate for added canaries/path extras only** (last 3 eligibility attempts in `agents/benchmarks/history/task_attempts.jsonl` all passed; predeploy/worktree attempts excluded so assignment cannot self-invalidate), then a **category floor** (one history-qualified canary per floor category: payment, grep, sms, browser_stateful) plus **path-triggered depth** from the git diff, hard-capped at **20**. Before running it prints a clear selection report (`TOTAL SELECTED: N / 20`, plus skipped-for-history and uncovered floor categories). Hitting the hard cap prints a loud scream and drops extras (floor always fits or the gate fails closed). New catalog tasks auto-attach by `deploy_category` / tags — set `deploy_canary: true` to prefer a task as its category canary. Override the cap only with review via `PREDEPLOY_BENCH_CAP`. It then runs the selected set through `scripts/run-bench --local` with default concurrency 2 on the isolated stack, scheduling longest-recent-median first. `PREDEPLOY_LOCAL_CONCURRENCY` is an emergency/debug override; it does not change the selected task count or the 20-task ceiling. It exits non-zero unless every requested task passes, so the command IS the gate.
 
 Every invocation tees its console output to `.context/predeploy-runs/<run-id>/runner.log` and writes actual start/end time, total wall duration, status, concurrency, task set, and schedule to `summary.json` beside it. Inspect the accumulated actual totals plus per-task pass history at any time:
 
@@ -1079,6 +1218,8 @@ billing state.
 cd "$(git rev-parse --show-toplevel)"
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
   BENCHMARK_SKIP_WMH_BUILD=1 \
+  BENCHMARK_ATTEMPT_SUITE=predeploy \
+  BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0 \
   bash scripts/run-deploy-stage agentcard-lifecycle -- \
   bash scripts/run-bench --local agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment --bootstrap --max-concurrency 1 --no-dashboard
 ```
@@ -1086,6 +1227,11 @@ CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
 These four real-mode payment tasks never use the simulated World Model Harness.
 The explicit opt-out prevents every fresh deploy workspace from downloading the
 full trace archive and running a first-time GEPA build before the payment gate.
+
+`BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0` keeps these active-worktree attempts
+out of the canary pass-streak history, exactly like `run-predeploy-local`. Without
+it an unmerged branch's AgentCard failure (or a provider blip) evicted the payment
+canaries from the smoke floor of every later deploy until three fresh passes.
 
 The bootstrap must report an AgentCard sandbox pool of at least $500. This is
 test-only float provisioned through the authenticated admin session; it does not
@@ -1107,16 +1253,25 @@ With the full stack from Step 5 still running (backend, worker, **and frontend o
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-SEMANTIC_WORKERS=4 BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+CONDUCTOR_PORT=$(jq -er '.ports.backend' .context/services.json)
+LOCAL_DB_PORT=$(jq -er '.database.runtime_port' .context/services.json)
+# UI specs: four workers. Exclude the latency ratchet so Chromium renderer
+# contention cannot become part of the product latency measurement (same split
+# as chat-lifecycle-ratchet.yml).
+SEMANTIC_GREP_INVERT="chat full-lifecycle latency" SEMANTIC_WORKERS=4 \
+  LOCAL_DB_PORT=$LOCAL_DB_PORT BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
   bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh
+# Latency ratchet: one worker, sequential samples across every chat path.
+SEMANTIC_WORKERS=1 LOCAL_DB_PORT=$LOCAL_DB_PORT BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+  bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh chat-lifecycle-latency
 ```
 
-The runner generates one authenticated session and shares it across all four Playwright workers. Every semantic spec runs. Inside the lifecycle spec, the `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` paths run concurrently; each path takes five independent samples and every sample must complete the full browser lifecycle in under five seconds.
+The runner generates one authenticated session per Playwright invocation. UI specs run on four workers with the latency ratchet excluded (`SEMANTIC_GREP_INVERT`). The latency ratchet then runs alone on one worker so renderer contention cannot become part of the product latency measurement — the same split as `chat-lifecycle-ratchet.yml`. Inside the lifecycle spec, `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` each take five independent samples; every sample must complete the full browser lifecycle in under six seconds.
 
 This runs every `.spec.ts` under `front-end/tests-e2e/` via headless Chromium. To run a single test:
 
 ```bash
-BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+LOCAL_DB_PORT=$LOCAL_DB_PORT BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
   bash front-end/scripts/run-semantic-tests.sh login
 ```
 
@@ -1151,13 +1306,25 @@ Step 4a's coverage run deliberately keeps `BLACKBOX_SMOKE` unset and never spins
 real sandbox. Do NOT downgrade this to WARN, gate it behind a change classifier,
 or skip it because "claude-code wasn't touched."
 
-With the full stack from Step 5 still running (backend on `$CONDUCTOR_PORT`, DB on
-`$LOCAL_DB_PORT`), run the claude-code blackbox with the smoke phase enabled
-against the existing backend:
+With the full stack from Step 5 still running, resolve its actual backend and
+database ports from the live service manifest. Create the separate local
+database required by the standalone blackbox runner. This command runs in a
+fresh shell and chooses the runtime port for Docker or system Postgres:
 
 ```bash
+cd "$(git rev-parse --show-toplevel)"
+. scripts/lib/workspace-env.sh
+normalize_conductor_workspace_env
+STACK_PORTS=$(bash scripts/resolve-deploy-stack-db.sh) || exit 1
+read -r CONDUCTOR_PORT SMOKE_DB_PORT <<< "$STACK_PORTS"
+export CONDUCTOR_PORT
+E2B_DB_NAME="victoria_$CONDUCTOR_WORKSPACE_NAME"
+if ! psql "postgresql://postgres:postgres@localhost:$SMOKE_DB_PORT/$E2B_DB_NAME" \
+  -At -c 'SELECT 1' >/dev/null 2>&1; then
+  PGPASSWORD=postgres createdb -h localhost -p "$SMOKE_DB_PORT" -U postgres "$E2B_DB_NAME"
+fi
 cd back-end && BLACKBOX_SMOKE=1 \
-  BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
+  BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$SMOKE_DB_PORT/victoria_$CONDUCTOR_WORKSPACE_NAME" \
   bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- \
   bash scripts/run-blackbox-tests.sh claude-code
 ```
@@ -1256,7 +1423,7 @@ bash scripts/run-deploy-stage --finish
 
 # ║ Includes four concurrent chat paths × five full-lifecycle samples, ║
 
-# ║ with every sample below the five-second ratchet. ║
+# ║ with every sample below the six-second ratchet. ║
 
 # ║ 6c. Claude Code E2B sandbox smoke: PASS on every /deploy; never ║
 
@@ -1280,7 +1447,7 @@ bash scripts/run-deploy-stage --finish
 
 # ║ - "The code changes don't touch agent/Temporal code" (check the ║
 
-# ║ Step 6 table — back-end/ changes ALSO require              ║
+# ║ Step 6 table — back-end/ changes ALSO require ║
 
 # ║ smoke, not just agents/) ║
 
@@ -1420,6 +1587,7 @@ Inspect the newest CodeRabbit-authored content from all three endpoints. Treat C
 - The check is missing, failed, or timed out.
 - The newest bot output contains `Review limit reached`, `rate limited`, `usage spending cap`, `review skipped`, or a service/internal error.
 - The check is green but there is no substantive review result for `REVIEW_HEAD`. A quota/error comment is not a review.
+- The `@coderabbitai review` comment was posted by a bot account (for example `cursor[bot]` when a Cloud Agent comments through its PR tool). CodeRabbit silently ignores bot-authored commands, so the push only produces `Review skipped: incremental reviews are disabled` and no review follows. Go straight to the fallback instead of re-requesting.
 
 Do not repeatedly request more CodeRabbit reviews during a quota window. Trigger exactly one Claude review for `REVIEW_HEAD` by toggling the opt-in label. The fallback remains part of the already-open lifecycle; it does not consume another review cycle:
 
@@ -2190,6 +2358,11 @@ if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
 fi
 ```
 
+The matrix takes several minutes. Run it in the background and poll it; a
+foreground tool timeout shorter than its runtime terminates it mid-matrix. The
+script removes its own fixtures on SIGTERM/SIGINT, but an interrupted run proves
+nothing and must be re-run.
+
 Retain the JSON output as the production migration report card. Any failed row,
 including fixture cleanup, blocks deploy completion and must be diagnosed and
 fixed before Step 13b.
@@ -2238,12 +2411,8 @@ gate because the two checks are isolated:
 
 ```bash
 python3 scripts/record_factory_event.py deploy production-start agentcard
-cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
-python benchmarks/run_benchmark.py \
-  --task agent-payment-production-abandonment \
-  --prod \
-  --ci \
-  --bootstrap
+cd "$(git rev-parse --show-toplevel)" && source agents/venv/bin/activate
+scripts/run-bench agent-payment-production-abandonment
 python3 scripts/record_factory_event.py deploy production-finish agentcard
 ```
 

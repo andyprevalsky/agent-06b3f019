@@ -24,17 +24,26 @@
  *              and round-trip databases by server-side md5
  */
 
-import { spawn } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { PrismaClient } from '@prisma/client';
 import { assertLocalDatabase } from './assertLocalDatabase';
+import {
+  BLOB_FIXTURE_BACKEND_PEAK_MB,
+  blobOriginDatabasesSql,
+  measureBackendPeak,
+} from './blob-origin-fixture.helpers';
 import { ingestIndexedDBUploadJson } from '../../domains/integrations/uploadService';
 
 assertLocalDatabase();
 
-const USER_ID = 'idb-upload-memory-user';
+const isChildMode = process.argv.includes('--child') || process.argv.includes('--control');
+const USER_ID =
+  (isChildMode ? process.env.IDB_UPLOAD_MEMORY_USER_ID : undefined) ??
+  `idb-upload-memory-${randomUUID()}`;
 const BIG_ORIGIN = 'https://drive.google.com';
 const SMALL_ORIGIN = 'https://idb-upload-small.test';
 /** ~50MB nested JSON — matches seed-blob-origin-memory density. */
@@ -54,9 +63,48 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-const payloadPath =
-  process.env.IDB_UPLOAD_MEMORY_PAYLOAD_PATH ??
-  path.join(os.tmpdir(), 'idb-upload-memory-payload.json');
+const payloadFixture = (() => {
+  const inheritedPath = isChildMode ? process.env.IDB_UPLOAD_MEMORY_PAYLOAD_PATH : undefined;
+  if (inheritedPath !== undefined) return { payloadPath: inheritedPath, ownedDirectory: null };
+  const ownedDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'idb-upload-memory-'));
+  return { payloadPath: path.join(ownedDirectory, 'payload.json'), ownedDirectory };
+})();
+const { payloadPath, ownedDirectory: ownedPayloadDirectory } = payloadFixture;
+
+test('payload fixture path belongs to one run', async () => {
+  const env = {
+    ...process.env,
+    IDB_UPLOAD_MEMORY_PAYLOAD_PATH: path.join(os.tmpdir(), 'shared-idb-payload.json'),
+  };
+  const childPath = () =>
+    execFileSync(
+      process.execPath,
+      ['--import', 'tsx', new URL(import.meta.url).pathname, '--print-payload-path'],
+      { env, encoding: 'utf8' }
+    ).trim();
+  const first = childPath();
+  const second = childPath();
+  assert(
+    first !== second && first !== payloadPath && second !== payloadPath,
+    `independent runs shared the payload fixture: parent=${payloadPath} children=${first},${second}`
+  );
+});
+
+test('database fixture user ID belongs to one run', async () => {
+  const env = { ...process.env, IDB_UPLOAD_MEMORY_USER_ID: 'shared-idb-user' };
+  const childUserId = () =>
+    execFileSync(
+      process.execPath,
+      ['--import', 'tsx', new URL(import.meta.url).pathname, '--print-user-id'],
+      { env, encoding: 'utf8' }
+    ).trim();
+  const first = childUserId();
+  const second = childUserId();
+  assert(
+    first !== second && first !== USER_ID && second !== USER_ID,
+    `independent runs shared the database fixture user: parent=${USER_ID} children=${first},${second}`
+  );
+});
 
 async function runChildIngest(): Promise<void> {
   let peakRssMb = 0;
@@ -104,56 +152,38 @@ function runChildJsonParseControl(): void {
 
 const prisma = new PrismaClient();
 
-async function buildPayloadFile(): Promise<number> {
-  // Prisma may lease a different pooled connection for every query. Build and
-  // read the fixture in one statement so its lifetime cannot depend on a
-  // connection-local TEMP table surviving between client calls.
-  const rows = await prisma.$queryRawUnsafe<Array<{ chars: number; doc: string }>>(`
-    WITH idb_upload_memory_fixture AS MATERIALIZED (
-      SELECT jsonb_build_object(
-        'batchIndex', 0,
-        'totalBatches', 1,
-        'hashes', jsonb_build_object(
-          ${sqlString(BIG_ORIGIN)}, 'big-hash',
-          ${sqlString(SMALL_ORIGIN)}, 'small-hash'
-        ),
-        'origins', jsonb_build_array(
-          jsonb_build_object(
-            'origin', ${sqlString(BIG_ORIGIN)},
-            'databases', jsonb_build_array(jsonb_build_object(
-              'name', 'DocsErrors',
-              'objectStores', jsonb_build_array(jsonb_build_object(
-                'name', 'Errors',
-                'records', (
-                  SELECT jsonb_agg(jsonb_build_object(
-                    'key', 'record-key-' || i,
-                    'value', jsonb_build_object(
-                      'key', 'record-key-' || i,
-                      'value', md5(i::text) || md5((i * 7)::text)
-                    )
-                  ))
-                  FROM generate_series(1, ${BLOB_RECORDS}) i
-                )
-              ))
-            ))
-          ),
-          jsonb_build_object(
-            'origin', ${sqlString(SMALL_ORIGIN)},
-            'databases', '[{"name":"tiny","objectStores":[]}]'::jsonb
-          )
-        )
-      ) AS doc
-    )
-    SELECT length(doc::text)::int AS chars, doc::text AS doc
-    FROM idb_upload_memory_fixture
-  `);
-  const chars = Number(rows[0]?.chars ?? 0);
-  fs.writeFileSync(payloadPath, rows[0]?.doc ?? '');
-  return chars;
+/** jsonb's canonical rendering around the big origin's `databases` value. */
+const PAYLOAD_PREFIX =
+  `{"hashes": {${JSON.stringify(BIG_ORIGIN)}: "big-hash", ${JSON.stringify(SMALL_ORIGIN)}: ` +
+  `"small-hash"}, "origins": [{"origin": ${JSON.stringify(BIG_ORIGIN)}, "databases": `;
+const PAYLOAD_SUFFIX =
+  `}, {"origin": ${JSON.stringify(SMALL_ORIGIN)}, "databases": [{"name": "tiny", ` +
+  `"objectStores": []}]}], "batchIndex": 0, "totalBatches": 1}`;
+
+/** Upload document plus `md5:length` of the big origin's `databases` text. */
+function payloadSql(records: number): string {
+  return `WITH blob AS MATERIALIZED (${blobOriginDatabasesSql(records)})
+    SELECT $1::text || databases || $2::text AS doc,
+           md5(databases) || ':' || length(databases)::text AS databases_digest
+    FROM blob`;
 }
 
-function sqlString(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
+let fixtureBackendPeakMb = 0;
+let bigDatabasesDigest = '';
+
+async function buildPayloadFile(): Promise<number> {
+  const { result: rows, backendPeakMb } = await measureBackendPeak((client) =>
+    client.$queryRawUnsafe<Array<{ doc: string; databases_digest: string }>>(
+      payloadSql(BLOB_RECORDS),
+      PAYLOAD_PREFIX,
+      PAYLOAD_SUFFIX
+    )
+  );
+  fixtureBackendPeakMb = backendPeakMb;
+  bigDatabasesDigest = rows[0]?.databases_digest ?? '';
+  const doc = rows[0]?.doc ?? '';
+  fs.writeFileSync(payloadPath, doc);
+  return doc.length;
 }
 
 async function cleanupUser(): Promise<void> {
@@ -176,7 +206,11 @@ async function runChildProcess(mode: '--child' | '--control'): Promise<ChildResu
         mode,
       ],
       {
-        env: { ...process.env, IDB_UPLOAD_MEMORY_PAYLOAD_PATH: payloadPath },
+        env: {
+          ...process.env,
+          IDB_UPLOAD_MEMORY_PAYLOAD_PATH: payloadPath,
+          IDB_UPLOAD_MEMORY_USER_ID: USER_ID,
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
       }
     );
@@ -195,6 +229,24 @@ async function runChildProcess(mode: '--child' | '--control'): Promise<ChildResu
 let control: ChildResult = { code: null, stdout: '', stderr: '' };
 let treatment: ChildResult = { code: null, stdout: '', stderr: '' };
 let payloadChars = 0;
+
+test(`building the fixture keeps one Postgres backend under ${BLOB_FIXTURE_BACKEND_PEAK_MB}MB`, async () => {
+  assert(
+    fixtureBackendPeakMb > 0 && fixtureBackendPeakMb <= BLOB_FIXTURE_BACKEND_PEAK_MB,
+    `building the ${(payloadChars / 1024 / 1024).toFixed(0)}MB fixture peaked the Postgres ` +
+      `backend at ${fixtureBackendPeakMb}MB (budget ${BLOB_FIXTURE_BACKEND_PEAK_MB}MB). Build it ` +
+      'as text: nested jsonb_build_* levels each keep a full copy of the blob.'
+  );
+});
+
+test('the fixture is jsonb canonical text, so the stored blob must equal it byte for byte', async () => {
+  const rows = await prisma.$queryRawUnsafe<Array<{ canonical: boolean }>>(
+    `SELECT doc = doc::jsonb::text AS canonical FROM (${payloadSql(3)}) fixture`,
+    PAYLOAD_PREFIX,
+    PAYLOAD_SUFFIX
+  );
+  assert(rows[0]?.canonical === true, 'fixture text must equal its own jsonb rendering');
+});
 
 test(`control JSON.parse OOMs under a ${CHILD_HEAP_MB}MB heap`, async () => {
   const oom =
@@ -307,20 +359,21 @@ test('both origins land and the large blob round-trips by md5', async () => {
     Number(big.chars) > 4_000_000,
     `stored big origin must remain large; got ${big.chars} chars`
   );
-
-  const fileText = fs.readFileSync(payloadPath, 'utf8');
-  const expected = await prisma.$queryRawUnsafe<Array<{ digest: string }>>(
-    `SELECT md5((($1::jsonb)->'origins'->0->'databases')::text) || ':' ||
-            length((($1::jsonb)->'origins'->0->'databases')::text)::text AS digest`,
-    fileText
-  );
   assert(
-    expected[0]?.digest === big.digest,
-    `big origin databases must round-trip byte-identically: stored ${big.digest}, source ${expected[0]?.digest}`
+    bigDatabasesDigest !== '' && big.digest === bigDatabasesDigest,
+    `big origin databases must round-trip byte-identically: stored ${big.digest}, source ${bigDatabasesDigest}`
   );
 });
 
 async function main(): Promise<void> {
+  if (process.argv.includes('--print-payload-path') || process.argv.includes('--print-user-id')) {
+    process.stdout.write(`${process.argv.includes('--print-user-id') ? USER_ID : payloadPath}\n`);
+    await prisma.$disconnect();
+    if (ownedPayloadDirectory !== null) {
+      fs.rmSync(ownedPayloadDirectory, { recursive: true, force: true });
+    }
+    return;
+  }
   if (process.argv.includes('--child')) {
     await runChildIngest();
     return;
@@ -335,7 +388,10 @@ async function main(): Promise<void> {
     await cleanupUser();
     payloadChars = await buildPayloadFile();
     assert(payloadChars >= MIN_PAYLOAD_CHARS, `fixture payload too small: ${payloadChars} chars`);
-    console.log(`fixture payload: ${(payloadChars / 1024 / 1024).toFixed(1)}MB at ${payloadPath}`);
+    console.log(
+      `fixture payload: ${(payloadChars / 1024 / 1024).toFixed(1)}MB at ${payloadPath} ` +
+        `(Postgres backend peak ${fixtureBackendPeakMb}MB)`
+    );
 
     // Run control first so a broken fixture fails before we claim the fix works.
     control = await runChildProcess('--control');
@@ -351,12 +407,16 @@ async function main(): Promise<void> {
       }
     }
   } finally {
-    await cleanupUser();
-    await prisma.$disconnect();
     try {
-      fs.unlinkSync(payloadPath);
-    } catch {
-      // ignore
+      await cleanupUser();
+    } finally {
+      try {
+        await prisma.$disconnect();
+      } finally {
+        if (ownedPayloadDirectory !== null) {
+          fs.rmSync(ownedPayloadDirectory, { recursive: true, force: true });
+        }
+      }
     }
   }
 

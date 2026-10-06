@@ -4,9 +4,14 @@ import { REJECTED_RESPONSE } from './config';
 import { createMessage } from '../../providers/messages';
 import { createLogger } from '../../providers/logger';
 import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
+import { resumePausedAgentForUserMessage } from '../../providers/agentResume';
 import { logJson } from '../../utils/log';
 import { emitGateMessage, extractGate, maybeDispatchGateSms, toCreateResult } from './gateHelpers';
-import { resolveAndSignal, signalWorkflow } from '../../providers/gateResolution';
+import {
+  resolveAndSignal,
+  signalWorkflow,
+  type ResolvableGateRequest,
+} from '../../providers/gateResolution';
 
 const log = createLogger('Attention');
 
@@ -158,14 +163,27 @@ export async function respond(id: string, userId: string, data: RespondInput) {
     if (result.status === 'not_found') throw new NotFoundError('Attention request not found');
     if (result.status === 'forbidden') throw new ForbiddenError('Not authorized');
     if (result.status === 'missing_steel_context') {
-      throw new BadRequestError('Steel context is not available for this live_view request');
+      throw new BadRequestError('Browser context is not available for this live_view request');
     }
     return { success: true, request_id: id };
   }
 
-  await resolveAndSignal(request, data.response);
+  await resolveAndSignalForUser(request, data.response);
 
   return { success: true, request_id: id };
+}
+
+/**
+ * The user's answer is a send like any message, so it lifts a pause they set.
+ * Gates resolved by webhooks (payments, OAuth) go through `resolveAndSignal`
+ * alone and leave the pause to the user.
+ */
+async function resolveAndSignalForUser(
+  request: ResolvableGateRequest,
+  response: string
+): Promise<void> {
+  const { resolved } = await resolveAndSignal(request, response);
+  if (resolved) await resumePausedAgentForUserMessage(request.agentId);
 }
 
 export async function skip(id: string, userId: string) {
@@ -192,7 +210,7 @@ export async function reject(id: string, userId: string, message: string | undef
     });
   }
 
-  await resolveAndSignal(request, REJECTED_RESPONSE);
+  await resolveAndSignalForUser(request, REJECTED_RESPONSE);
 
   return { success: true, request_id: id };
 }

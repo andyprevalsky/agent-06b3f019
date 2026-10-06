@@ -256,6 +256,18 @@ def _supports_anthropic_fast_mode(model: str) -> bool:
     return model in {"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"}
 
 
+def _model_supports_output_config_effort(model: str) -> bool:
+    """Return whether Anthropic accepts ``output_config.effort`` for ``model``.
+
+    ``claude-haiku-4-5`` (rose-1-mini claudeAuth) 400s with
+    "This model does not support the effort parameter." Stamping effort on
+    every body (DoorDash xhigh default) therefore fails every mini claudeAuth
+    call, forcing summarize_web_fetch onto a paid waterfall that can burn the
+    full TTFT budget (90s) per fetch — enough to time out spawn-sub-agents.
+    """
+    return "haiku" not in model.lower()
+
+
 def _model_rejects_forced_tool_choice(model: str) -> bool:
     """Fable 5.1 / Mythos 5.1 400 on tool_choice type any/tool.
 
@@ -392,12 +404,21 @@ def build_anthropic_body(
     _add_tool_cache_breakpoint(body)
     _enforce_cache_control_cap(body)
 
-    # Always stamp output_config.effort so every Anthropic body is well-formed.
-    # Default is xhigh; callers may override (planner_llm still passes "max",
-    # which normalizes to xhigh).
-    oc = body.get("output_config") or {}
-    oc["effort"] = _normalize_reasoning_effort(effort)
-    body["output_config"] = oc
+    # Stamp output_config.effort when the model accepts it (default xhigh;
+    # planner_llm still passes "max" → xhigh). Haiku rejects effort — omit
+    # rather than 400 every rose-1-mini claudeAuth call (see helper docstring).
+    if _model_supports_output_config_effort(pool_spec.claude_auth_model):
+        oc = body.get("output_config") or {}
+        oc["effort"] = _normalize_reasoning_effort(effort)
+        body["output_config"] = oc
+    else:
+        oc = body.get("output_config")
+        if isinstance(oc, dict) and "effort" in oc:
+            oc = {k: v for k, v in oc.items() if k != "effort"}
+            if oc:
+                body["output_config"] = oc
+            else:
+                body.pop("output_config", None)
 
     def _h(obj: Any) -> str:
         return hashlib.md5(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:8]
@@ -597,28 +618,28 @@ async def anthropic_api_key_complete(
                 error_body = get_error_body(response)
                 if status == 402:
                     raise RosePaymentRequiredError(
-                        f"Anthropic 402 (out of credits): {error_body[:2000]}", status=status
+                        "Anthropic 402 (out of credits)", status=status
                     )
                 if status in (401, 403):
-                    raise RoseAuthError(f"Anthropic {status}: {error_body[:2000]}", status=status)
+                    raise RoseAuthError(f"Anthropic {status}", status=status)
                 if status == 429:
-                    raise RoseRateLimitError(f"Anthropic 429: {error_body[:2000]}", status=status)
+                    raise RoseRateLimitError("Anthropic 429", status=status)
                 if status == 400 and re.search(
                     r"credit balance is too low|out of credits|purchase credits",
                     error_body,
                     re.IGNORECASE,
                 ):
                     raise RosePaymentRequiredError(
-                        f"Anthropic 400 (out of credits): {error_body[:2000]}", status=status
+                        "Anthropic 400 (out of credits)", status=status
                     )
                 if status == 400:
-                    raise RoseInvalidRequest(f"Anthropic 400: {error_body[:2000]}", status=status)
+                    raise RoseInvalidRequest("Anthropic 400", status=status)
                 if status >= 500:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
                         await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                         continue
-                    raise RoseServerError(f"Anthropic {status}: {error_body[:2000]}", status=status)
-                raise RoseError(f"Anthropic {status}: {error_body[:2000]}", status=status)
+                    raise RoseServerError(f"Anthropic {status}", status=status)
+                raise RoseError(f"Anthropic {status}", status=status)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
                 await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
@@ -774,10 +795,10 @@ async def _attempt_with_token(
                         request_id=request_id,
                         agent_id=agent_id,
                         call_site=call_site,
-                        body=error_body[:2000],
+                        body_len=len(error_body),
                     )
                     raise RoseInvalidRequest(
-                        f"Anthropic 400: {error_body[:2000]}",
+                        "Anthropic 400",
                         status=status,
                     )
 
@@ -786,12 +807,12 @@ async def _attempt_with_token(
                         await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                         continue
                     raise RoseServerError(
-                        f"Anthropic {status}: {error_body[:2000]}",
+                        f"Anthropic {status}",
                         status=status,
                     )
 
                 raise RoseError(
-                    f"Anthropic {status}: {error_body[:2000]}",
+                    f"Anthropic {status}",
                     status=status,
                 )
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:

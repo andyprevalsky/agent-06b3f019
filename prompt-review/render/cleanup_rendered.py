@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 RENDERED_ROOT = ROOT / "prompt-review" / "rendered"
-REPOS = ["ours", "claude-code-src", "openclaw", "hermes-agent"]
+REPOS = ["ours", "claude-code-src", "openclaw", "hermes-agent", "codex", "prime-agent"]
 
 # Patterns that indicate sidecar metadata accidentally emitted by renderers.
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
@@ -81,10 +81,10 @@ def main() -> int:
         if not d.exists():
             continue
         for f in sorted(d.glob("*.txt")):
-            original = f.read_text()
+            original = f.read_text(encoding="utf-8")
             cleaned = cleanup(original)
             if cleaned != original:
-                f.write_text(cleaned)
+                f.write_text(cleaned, encoding="utf-8")
                 print(f"  cleaned {repo}/{f.name} ({len(original)} -> {len(cleaned)} chars)")
                 total += 1
     print(f"[cleanup] modified {total} files across {len(REPOS)} repos")

@@ -43,7 +43,7 @@ import {
 } from './BrowserFullscreenOverlays';
 import { TaskProgressSidebar } from './BrowserTaskProgressPanel';
 import { BrowserProxyLocationChip } from './BrowserProxyLocationChip';
-import { LiveViewFrame } from './LiveViewFrame';
+import { LiveViewFrame } from './BrowserLiveViewFrame';
 import type {
   BrowserSessionMetadata,
   OutputSchemaRef,
@@ -174,6 +174,7 @@ function BrowserPaneBody({
     <LiveViewFrame
       url={browserUrl}
       title="Browser"
+      interactive={isUserControlling || controlState === 'waiting'}
       iframeKey={`${taskId}:${browserUrl}`}
       className={cn('flex min-h-0 flex-col bg-white', isMobile ? 'w-full flex-none' : 'flex-1')}
       style={isMobile ? { aspectRatio: '8 / 5' } : undefined}

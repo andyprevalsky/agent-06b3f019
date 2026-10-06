@@ -77,8 +77,13 @@ snapshot_loop() {  # snapshot_loop <request_id> <hub_run_id> <start_epoch> <arti
     # This function is launched in the background. exec makes SNAP_PID the
     # uploader itself (not a wrapper shell with a python child), so teardown can
     # terminate and reap the complete snapshot loop before a terminal PATCH.
-    HUB_CODE_SUMMARY="$CODE_SUMMARY" HUB_SNAPSHOT_INTERVAL_SECONDS="$HUB_SNAPSHOT_INTERVAL_SECONDS" exec python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$start_epoch" "$artifact_root" "$local_artifact_root" "$task_names" <<'PY'
+    ROOT_DIR="$ROOT_DIR" HUB_CODE_SUMMARY="$CODE_SUMMARY" HUB_SNAPSHOT_INTERVAL_SECONDS="$HUB_SNAPSHOT_INTERVAL_SECONDS" exec python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$start_epoch" "$artifact_root" "$local_artifact_root" "$task_names" <<'PY'
 import collections, glob, json, math, os, sys, time, urllib.request
+sys.path.insert(0, os.path.join(os.environ["ROOT_DIR"], "agents"))
+from benchmarks.hub_upload import live_bundle_from_report_card
+from benchmarks.hub_upload import live_response_matches
+from benchmarks.outcome_publication import acknowledge_published
+from pathlib import Path
 hub, key, user, req_id, run_id, start, artifact_root, local_artifact_root, expected_raw = sys.argv[1:10]
 start = float(start)
 snapshot_interval = float(os.environ.get("HUB_SNAPSHOT_INTERVAL_SECONDS", "15"))
@@ -92,7 +97,7 @@ def post(path, body, method="POST"):
     req = urllib.request.Request(hub.rstrip("/") + path, data=json.dumps(body).encode(),
         headers={"X-API-Key": key, "X-User-Id": user, "Content-Type": "application/json"},
         method=method)
-    opener.open(req, timeout=20).read()
+    return json.loads(opener.open(req, timeout=20).read())
 
 # Poll first, then sleep. Sleeping before the first inspect lost the live
 # snapshot under coverage load: the stub can finish and reap this loop during
@@ -107,29 +112,18 @@ while True:
                  glob.glob(os.path.join(artifact_root, "fleet", "runs", "*", "_batch", "report-card.json"))
                  if os.path.getmtime(p) > start]
         if cards:
-            card = json.load(open(max(cards, key=os.path.getmtime)))
+            card_path = max(cards, key=os.path.getmtime)
+            card = json.load(open(card_path))
             actual = collections.Counter(row.get("name") for row in card.get("per_task") or [])
             if actual == expected:
-                tasks = []
-                for row in card.get("per_task") or []:
-                    url = row.get("agent_url") or ""
-                    agent_id = url.split("agent-id=")[-1] if "agent-id=" in url else None
-                    dur = row.get("duration_s")
-                    cost = row.get("cost_usd")
-                    tasks.append({
-                        "name": row.get("name"), "status": row.get("status") or "running",
-                        "passed": True if row.get("status") == "passed" else (False if row.get("status") in ("failed", "error") else None),
-                        "agent_id": agent_id, "duration_seconds": dur,
-                        "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
-                        "world_model_mode": row.get("world_model_mode"),
-                        "fast_mode": bool(row.get("fast_mode")),
-                    })
-                bundle = {"run_id": run_id, "timestamp": card.get("timestamp") or "", "suite": "hub-dispatch",
-                          "source": "hub-poller", "tasks": tasks,
-                          "code": os.environ.get("HUB_CODE_SUMMARY") or None,
-                          "elapsed_s": card.get("elapsed_s"),
-                          "cost": card.get("cost"), "metadata": card.get("metadata")}
-                post("/api/benchmarks/runs?live=1", bundle)
+                bundle = live_bundle_from_report_card(card, run_id=run_id, source="hub-poller")
+                bundle["suite"] = "hub-dispatch"
+                bundle["code"] = os.environ.get("HUB_CODE_SUMMARY") or None
+                stored = post("/api/benchmarks/runs?live=1", bundle).get("run") or {}
+                if live_response_matches(bundle, stored):
+                    # The same exact-parent publisher acknowledges the packet
+                    # before guest cleanup, just like direct fleet dispatch.
+                    acknowledge_published(card, run_id=run_id, fleet_dir=Path(card_path).parent.parent)
                 # the run-request update route is PATCH-only (urllib defaults data= to POST)
                 post(f"/api/benchmarks/run-requests/{req_id}",
                      {"action": "progress", "progress": card, "run_id": run_id}, method="PATCH")

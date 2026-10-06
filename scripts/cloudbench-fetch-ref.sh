@@ -7,12 +7,35 @@ REPO_DIR="${1:?usage: cloudbench-fetch-ref.sh <repo-dir> <ref>}"
 REF="${2:?usage: cloudbench-fetch-ref.sh <repo-dir> <ref>}"
 APP_USER="${CLOUDBENCH_APP_USER:-}"
 auth_config=""
+tracked_paths=""
 fetch_lock_kind=""
 fetch_lock_fd=""
 fetch_lock_path="$REPO_DIR/.git/cloudbench-fetch.lock"
 
+# Empty Fly volumes carry no Git metadata. Only an explicit REAL-primary
+# handoff may initialize a blank checkout; retained non-Git data stays intact.
+if [ ! -d "$REPO_DIR/.git" ]; then
+    [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] || {
+        echo "[cloudbench] FATAL: checkout missing and fresh-volume bootstrap was not requested" >&2
+        exit 1
+    }
+    [ ! -L "$REPO_DIR" ] && { [ ! -e "$REPO_DIR" ] || {
+        [ -d "$REPO_DIR" ] && [ -z "$(find "$REPO_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ];
+    }; } || {
+        echo "[cloudbench] FATAL: fresh-volume checkout must be absent or empty" >&2
+        exit 1
+    }
+    git init -q "$REPO_DIR"
+    git -C "$REPO_DIR" remote add origin https://github.com/Rose-Ai-Labs/rose.git
+    if [ -n "$APP_USER" ]; then
+        chown "$APP_USER" "$REPO_DIR"
+        chown -R "$APP_USER" "$REPO_DIR/.git"
+    fi
+fi
+
 cleanup() {
     [ -n "$auth_config" ] && rm -f "$auth_config" 2>/dev/null || true
+    [ -n "$tracked_paths" ] && rm -f "$tracked_paths" 2>/dev/null || true
     if [ "$fetch_lock_kind" = "flock" ] && [ -n "$fetch_lock_fd" ]; then
         flock -u "$fetch_lock_fd" 2>/dev/null || true
         exec 9>&-
@@ -104,18 +127,38 @@ maintain_object_store() {
 
 acquire_fetch_lock
 
-# Idempotent fast path: when the warm volume is already at the exact SHA, skip
-# maintain/fetch/checkout/reset. A full-tree reset on a large /data/repo burned
-# the controller ssh_exec budget after HEAD already matched (descend I-08).
+# A snapshot may retain an applied workspace patch while HEAD still names its
+# fetchable base. Restore only changed tracked paths before the next patch;
+# leave dependency trees, env files, and unrelated untracked data alone. Clean
+# exact-SHA checkouts still skip writes, maintenance, and network fetches. A
+# full-tree reset on a large /data/repo previously exhausted the SSH budget.
 if [[ "$REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
     current="$(git_cmd rev-parse HEAD 2>/dev/null || true)"
     if [ "$(printf '%s' "$current" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$REF" | tr '[:upper:]' '[:lower:]')" ]; then
+        tracked_paths="$(mktemp /tmp/cloudbench-tracked-paths.XXXXXX)"
+        git_cmd diff --no-ext-diff --no-renames --name-only -z "$current" -- > "$tracked_paths"
+        # Worktree and staged edits can cancel in a HEAD-to-worktree diff.
+        # Include both path streams; Git treats repeated literal paths equally.
+        git_cmd diff --no-ext-diff --no-renames --cached --name-only -z "$current" -- >> "$tracked_paths"
+        if [ -s "$tracked_paths" ]; then
+            [ -z "$APP_USER" ] || chown "$APP_USER" "$tracked_paths"
+            git_cmd --literal-pathspecs restore --source="$current" --staged --worktree \
+                --pathspec-from-file="$tracked_paths" --pathspec-file-nul
+            if ! git_cmd diff --no-ext-diff --quiet "$current" -- \
+                || ! git_cmd diff --no-ext-diff --cached --quiet "$current" --; then
+                echo "[cloudbench] FATAL: tracked workspace did not match requested base" >&2
+                exit 1
+            fi
+            echo "[cloudbench] restored tracked workspace at $current"
+        fi
         echo "[cloudbench] already-at $current"
         exit 0
     fi
 fi
 
+stage_started="$(date +%s)"
 maintain_object_store
+echo "[cloudbench] git-maintenance $(( $(date +%s) - stage_started ))s"
 
 remote_url="$(git_cmd remote get-url origin)"
 if [[ "$remote_url" == https://github.com/* || "$remote_url" == *github.com/* ]]; then
@@ -138,7 +181,24 @@ if [[ "$remote_url" == https://github.com/* || "$remote_url" == *github.com/* ]]
     [ -n "$APP_USER" ] && chown "$APP_USER" "$auth_config"
 fi
 
-git_cmd fetch --no-tags origin "$REF" || fetch_status=$?
+stage_started="$(date +%s)"
+# This checkout has one relevant parent: its current HEAD. Advertising every
+# historic detached ref wastes negotiation on persistent pool volumes. Object
+# maintenance already ran above under our exact lock, so do not repeat Git's
+# opportunistic auto-maintenance on every fresh-code boot.
+fetch_args=(--no-tags --no-auto-gc)
+if git_cmd rev-parse --verify HEAD >/dev/null 2>&1; then
+    fetch_args+=(--negotiation-tip=HEAD)
+elif [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ]; then
+    # The first exact checkout has no HEAD to advertise. Keep ordinary full
+    # history fetch semantics without an invalid negotiation tip.
+    :
+else
+    echo "[cloudbench] FATAL: retained checkout has no verified HEAD" >&2
+    exit 1
+fi
+git_cmd fetch "${fetch_args[@]}" origin "$REF" || fetch_status=$?
+echo "[cloudbench] git-fetch $(( $(date +%s) - stage_started ))s"
 if [ "${fetch_status:-0}" -ne 0 ]; then
     echo "[cloudbench] FATAL: could not fetch requested ref $REF" >&2
     exit 1
@@ -149,8 +209,12 @@ if [[ "$REF" =~ ^[0-9a-fA-F]{40}$ ]] \
     echo "[cloudbench] FATAL: fetched $fetched instead of requested SHA $REF" >&2
     exit 1
 fi
+stage_started="$(date +%s)"
 git_cmd checkout -f "$fetched"
+echo "[cloudbench] git-checkout $(( $(date +%s) - stage_started ))s"
+stage_started="$(date +%s)"
 git_cmd reset --hard "$fetched"
+echo "[cloudbench] git-reset $(( $(date +%s) - stage_started ))s"
 actual="$(git_cmd rev-parse HEAD)"
 if [ "$actual" != "$fetched" ]; then
     echo "[cloudbench] FATAL: checkout verification failed ($actual != $fetched)" >&2

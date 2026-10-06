@@ -43,6 +43,7 @@ import {
   type TransactionalSqlClient,
 } from '../../../scripts/seed-local-credentials';
 import { createHash } from 'node:crypto';
+import { registerSeedCopyTests } from './fixtures/seed-copy-cases';
 import { Readable, Writable } from 'node:stream';
 import {
   cookieSourceCopySql,
@@ -424,7 +425,7 @@ test('streamed cookie copy carries every column so the seed stays byte-faithful'
 });
 
 test('streamed cookie copy merges on the natural key and only rewrites changed content', () => {
-  const sql = cookieTargetCopySql();
+  const sql = cookieTargetCopySql().join('\n');
 
   assert(
     sql.includes(
@@ -597,7 +598,7 @@ test('oversized JSONB crosses the database boundary incrementally without fideli
 
 test('streamed JSONB copy stays scoped and preserves local identities on merge', async () => {
   const sourceSql = jsonbOriginSourceCopySql('IndexedDBOrigin', "user'quoted", ['amazon.com']);
-  const targetSql = jsonbOriginTargetCopySql('IndexedDBOrigin');
+  const targetSql = jsonbOriginTargetCopySql('IndexedDBOrigin').join('\n');
 
   assert(sourceSql.includes(`"userId" = 'user''quoted'`), 'source COPY must quote the user id');
   assert(
@@ -623,6 +624,8 @@ test('streamed JSONB copy stays scoped and preserves local identities on merge',
     'psql transport must strip Prisma-only URL parameters while preserving libpq parameters'
   );
 });
+
+registerSeedCopyTests(test, assert);
 
 async function main(): Promise<void> {
   let failed = 0;

@@ -47,6 +47,7 @@ codex_funded_fallback_configured() {
 # Docker database and silently fall back to a shared system Postgres instance.
 cd "$ROOT_DIR"
 source scripts/lib/workspace-env.sh
+source scripts/lib/run-process-cleanup.sh
 normalize_conductor_workspace_env
 cd "$BACKEND_DIR"
 source "$SCRIPT_DIR/local-db-container.sh"
@@ -60,7 +61,17 @@ mkdir -p "$ARTIFACT_DIR" "$PORT_LOCK_ROOT"
 export BLACKBOX_TEST_ARTIFACT_DIR="$ARTIFACT_DIR"
 export CONTRACT_TEST_ARTIFACT_DIR="$ARTIFACT_DIR"
 export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
-export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
+# Cursor Cloud injects TRACE_ARCHIVE_BACKEND=r2 from prod secrets. Force a
+# local backend so archive fixtures the test process writes are the same
+# files the isolated backend greps. `${VAR:-local}` cannot override an
+# already-set r2 value.
+case "${TRACE_ARCHIVE_BACKEND:-}" in
+  local|fake-r2) ;;
+  *)
+    echo "⚠️  TRACE_ARCHIVE_BACKEND='${TRACE_ARCHIVE_BACKEND:-}' is not a local blackbox backend; forcing local."
+    export TRACE_ARCHIVE_BACKEND=local
+    ;;
+esac
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES="${BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES:-weekly}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
@@ -75,6 +86,11 @@ RUNNER_CMD=(node --import tsx src/tests/blackbox/run.ts)
 RUNNER_LOG="$ARTIFACT_DIR/runner.log"
 MANIFEST_PATH="$ARTIFACT_DIR/manifest.json"
 USE_EXISTING_BACKEND="${BLACKBOX_TEST_USE_EXISTING_BACKEND:-${CONTRACT_TEST_USE_EXISTING_BACKEND:-0}}"
+if [[ "$USE_EXISTING_BACKEND" != "1" ]]; then
+  # This script owns both processes, so the share-link contract can use a
+  # local-only key without depending on a production benchmark secret.
+  export BENCHMARK_SHARE_SECRET="${BENCHMARK_SHARE_SECRET:-blackbox-local-benchmark-share-secret}"
+fi
 
 # --list only needs filesystem discovery; skip backend boot for speed.
 for arg in "$@"; do
@@ -83,6 +99,12 @@ for arg in "$@"; do
     exit $?
   fi
 done
+
+# A standalone blackbox run starts its own backend. Keep the benchmark-share
+# bearer-link fixture self-contained when no share key was exported.
+if [[ "$USE_EXISTING_BACKEND" != "1" && -z "${BENCHMARK_SHARE_SECRET:-}" ]]; then
+  export BENCHMARK_SHARE_SECRET="$(openssl rand -hex 32)"
+fi
 
 # Fixture-backed domains write deterministic outbound responses into the
 # fast-forward cache. When the full suite targets an existing backend, prove
@@ -131,14 +153,21 @@ STACK_DB_EXPECTED=false
 SELECTED_DB_URL=""
 ISOLATED_DB_RESOLVED=false
 
-# Managed existing-backend callers (for example, run-coverage.sh) know the
-# exact database used by the backend they launched. Prefer that explicit
-# contract over every local discovery mechanism.
+# Managed callers (for example, run-coverage.sh) may know the exact isolated
+# database to use. Prefer that explicit contract over local discovery.
 EXPLICIT_TEST_DB_URL="${BLACKBOX_TEST_DATABASE_URL:-${CONTRACT_TEST_DATABASE_URL:-}}"
-if [[ "$USE_EXISTING_BACKEND" == "1" && -n "$EXPLICIT_TEST_DB_URL" ]]; then
+if [[ -n "$EXPLICIT_TEST_DB_URL" ]]; then
   STACK_DB_EXPECTED=true
   if [[ ! "$EXPLICIT_TEST_DB_URL" =~ ^postgres(ql)?://([^/]*@)?(localhost|127\.0\.0\.1)(:[0-9]+)?/ ]]; then
     echo "❌ BLACKBOX_TEST_DATABASE_URL must point at localhost for fixture safety."
+    exit 1
+  fi
+  if [[ "$USE_EXISTING_BACKEND" != "1" ]] && ! node -e '
+    const url = new URL(process.env.BLACKBOX_TEST_DATABASE_URL || process.env.CONTRACT_TEST_DATABASE_URL);
+    const expectedName = `victoria_${process.argv[1]}`;
+    if (decodeURIComponent(url.pathname.slice(1)) !== expectedName || url.search !== "" || url.hash !== "") process.exit(1);
+  ' "$WORKSPACE_HINT"; then
+    echo "❌ Standalone blackbox DATABASE_URL must name the local victoria_$WORKSPACE_HINT database." >&2
     exit 1
   fi
   # Prisma accepts connection-pool tuning in the URL query string, but libpq
@@ -148,7 +177,7 @@ if [[ "$USE_EXISTING_BACKEND" == "1" && -n "$EXPLICIT_TEST_DB_URL" ]]; then
   if psql "$EXPLICIT_TEST_PSQL_URL" -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
     DB_FOUND=true
     SELECTED_DB_URL="$EXPLICIT_TEST_DB_URL"
-    echo "Using database explicitly provided by the existing backend launcher"
+    echo "Using explicitly provided isolated test database"
   fi
 fi
 
@@ -233,7 +262,7 @@ if ! $STACK_DB_EXPECTED && ! $DB_FOUND; then
 fi
 
 if $STACK_DB_EXPECTED && ! $DB_FOUND; then
-  echo "❌ The database recorded for existing backend $TEST_BASE_URL is unavailable."
+  echo "❌ The explicitly selected local test database is unavailable."
   echo "   Refusing to select a different local database because fixtures would be invisible to the backend."
   exit 1
 fi
@@ -251,6 +280,7 @@ if $DB_FOUND; then
     fi
     echo "Skipping local DB schema sync; existing backend caller prepared the test database."
   else
+    node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
     if command -v psql >/dev/null 2>&1; then
       psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 DO $$
@@ -264,11 +294,18 @@ BEGIN
       WHERE attention.id = request.id
     );
   END IF;
+  -- On system Postgres this database is shared with the local stack, whose
+  -- real provider quota failures persist process-global funded-key cooldowns.
+  -- Tests that exercise the funded routes assume no backoff is active.
+  IF to_regclass('"Integration"') IS NOT NULL THEN
+    DELETE FROM "Integration"
+    WHERE "userId" = '00000000-0000-0000-0000-000000000000'
+      AND name IN ('gpt_api_key_cooldown', 'anthropic_api_key_cooldown');
+  END IF;
 END $$;
 SQL
     fi
     echo "Syncing Prisma schema to local test database..."
-    npx prisma generate >/dev/null
     npx prisma db push --skip-generate --accept-data-loss >/dev/null
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
     # Credential seeding and smoke execution are separate controls. A caller may
@@ -355,7 +392,37 @@ BASE_PORT="${CONDUCTOR_PORT:-55000}"
 START_PORT="${BLACKBOX_TEST_BACKEND_START_PORT:-${CONTRACT_TEST_BACKEND_START_PORT:-$((BASE_PORT + 100))}}"
 PORT="${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-$START_PORT}}"
 PORT_LOCK_DIR=""
+BACKEND_PID=""
 
+# npm/tsx can leave the server below a launcher process. Snapshot and drain
+# the owned descendants before terminating that launcher, then join its PID.
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+cleanup() {
+  local result=$? cleaned=1
+  trap - EXIT INT TERM
+  if [[ -n "$BACKEND_PID" ]]; then
+    if cloudbench_terminate_tree_and_wait 5 "$BACKEND_PID"; then
+      wait "$BACKEND_PID" 2>/dev/null || true
+    else
+      echo "❌ Could not verify isolated backend process-tree cleanup" >&2
+      result=1
+      cleaned=0
+    fi
+  fi
+
+  if [[ "$cleaned" == 1 && -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
+    rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
+  fi
+  exit "$result"
+}
+# Bash resumes the script after a signal trap returns, so INT/TERM must exit
+# (and let the EXIT trap clean up) rather than release the lock and keep going.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Sets PORT and PORT_LOCK_DIR in the caller's shell; running it in a command
+# substitution would drop PORT_LOCK_DIR and leave the lock behind forever.
 reserve_port() {
   local candidate="$1"
 
@@ -366,7 +433,7 @@ reserve_port() {
         rmdir "$lock_dir" >/dev/null 2>&1 || true
       else
         PORT_LOCK_DIR="$lock_dir"
-        echo "$candidate"
+        PORT="$candidate"
         return 0
       fi
     fi
@@ -375,13 +442,13 @@ reserve_port() {
 }
 
 if [[ -z "${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-}}" ]]; then
-  PORT="$(reserve_port "$START_PORT")"
+  reserve_port "$START_PORT"
 else
-  PORT_LOCK_DIR="$PORT_LOCK_ROOT/$PORT"
-  if ! mkdir "$PORT_LOCK_DIR" 2>/dev/null; then
+  if ! mkdir "$PORT_LOCK_ROOT/$PORT" 2>/dev/null; then
     echo "❌ Failed to reserve requested black-box test port $PORT"
     exit 1
   fi
+  PORT_LOCK_DIR="$PORT_LOCK_ROOT/$PORT"
 fi
 
 export TEST_BASE_URL="http://localhost:$PORT"
@@ -397,6 +464,9 @@ export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
 export BLACKBOX_TEST_FAKE_TEMPORAL="${BLACKBOX_TEST_FAKE_TEMPORAL:-1}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND=1
 export BLACKBOX_TEST_REPLAY_OUTBOUND=1
+# OAuth start tests only inspect the generated consent URL. Keep their client
+# separate from the verified production client, which local development rejects.
+export GOOGLE_CLIENT_ID="${BLACKBOX_GOOGLE_CLIENT_ID:-rose-local-blackbox.apps.googleusercontent.com}"
 source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 # The isolated backend must not inherit a developer's workspace tunnel. E2B
 # cannot reach localhost, and stale ngrok URLs turn the direct Codex smoke into
@@ -416,22 +486,21 @@ echo "Starting isolated backend for black-box tests on port $PORT"
 echo "Backend log: $BACKEND_LOG"
 echo "Artifacts: $ARTIFACT_DIR"
 
+# Defer cancellation only across the background-child ownership handoff.
+BACKEND_PENDING_SIGNAL=0
+trap 'BACKEND_PENDING_SIGNAL=130' INT
+trap 'BACKEND_PENDING_SIGNAL=143' TERM
+
 PORT="$PORT" \
 DISABLE_GMAIL_SYNC=1 \
 npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ "$BACKEND_PENDING_SIGNAL" != 0 ]]; then
+  exit "$BACKEND_PENDING_SIGNAL"
+fi
 
-cleanup() {
-  if kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
-    kill "$BACKEND_PID" >/dev/null 2>&1 || true
-    wait "$BACKEND_PID" 2>/dev/null || true
-  fi
-
-  if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
-    rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup EXIT INT TERM
 
 READY=0
 for _ in $(seq 1 120); do

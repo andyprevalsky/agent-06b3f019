@@ -1,21 +1,24 @@
 /**
  * Chat model selection boundary.
  *
- * requested model ──┬─ router ──> Rose Flash ──> Cerebras gpt-oss-120b
- *                   ├─ generator ──> Rose Flash ──> Cerebras gpt-oss-120b
+ * requested model ──┬─ router ──> rose-fast via direct-cerebras (Qwen + 0.8s hedge)
+ *                   ├─ generator ──> rose-fast via direct-cerebras (same)
  *                   └─ Temporal ──> persisted requested model (outside this module)
  *
- * Both synchronous chat phases are latency-sensitive and use the Rose Flash pool.
- * The persisted requested model remains separate for autonomous Temporal work.
+ * `direct-cerebras` selects the exclusive chat hedge path in Rose client; the
+ * model on that path is rose-fast Qwen (`CEREBRAS_CHAT_MODEL` = pool
+ * cerebrasModel), not the legacy gpt-oss-120b pin. Omitting the route falls
+ * through to the 90s/high-effort pool hop and breaches the 5s FE lifecycle
+ * ratchet (web_search samples).
  */
 
 import type { CompletionOptions } from '../rose';
 
-const CHAT_ROUTER_MODEL = 'rose-labs/rose-1-flash';
-const CHAT_ROUTER_PROVIDER_ROUTE: NonNullable<CompletionOptions['provider_route']> =
-  'direct-cerebras';
-const CHAT_GENERATOR_PROVIDER_ROUTE: NonNullable<CompletionOptions['provider_route']> =
-  'direct-cerebras';
+/** Display alias rose-fast; pool id rose-1-flash. */
+export const ROSE_FAST_MODEL = 'rose-labs/rose-1-flash';
+
+/** Chat-only: arms stall hedge; model remains rose-fast Qwen. */
+export const ROSE_FAST_CHAT_PROVIDER_ROUTE = 'direct-cerebras' as const;
 
 export type ChatProviderRoute = NonNullable<CompletionOptions['provider_route']>;
 
@@ -30,9 +33,9 @@ export interface ChatPhaseModels {
 export function selectChatPhaseModels(requestedModel: string): ChatPhaseModels {
   return {
     requested: requestedModel,
-    router: CHAT_ROUTER_MODEL,
-    routerProviderRoute: CHAT_ROUTER_PROVIDER_ROUTE,
-    generator: CHAT_ROUTER_MODEL,
-    generatorProviderRoute: CHAT_GENERATOR_PROVIDER_ROUTE,
+    router: ROSE_FAST_MODEL,
+    routerProviderRoute: ROSE_FAST_CHAT_PROVIDER_ROUTE,
+    generator: ROSE_FAST_MODEL,
+    generatorProviderRoute: ROSE_FAST_CHAT_PROVIDER_ROUTE,
   };
 }

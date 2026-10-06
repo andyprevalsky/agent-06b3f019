@@ -36,7 +36,7 @@ test('ratchets down only — never raise the budget to make a run pass', () => {
   const HIGH_WATER_MB = 400;
   assert.ok(SEED_PEAK_RSS_BUDGET_MB <= HIGH_WATER_MB);
   assert.equal(SEED_RSS_HEADROOM_RATIO, 0.2);
-  assert.equal(SEED_PEAK_RSS_BUDGET_MB, Math.ceil(191 * (1 + SEED_RSS_HEADROOM_RATIO)));
+  assert.equal(SEED_PEAK_RSS_BUDGET_MB, Math.ceil(190 * (1 + SEED_RSS_HEADROOM_RATIO)));
 });
 
 test('every large table is paged, not materialised', () => {
@@ -62,7 +62,7 @@ test('large JSONB never materializes in the Node process', () => {
 test('cookies stream between databases instead of paging through Prisma', () => {
   // A ~22k-cookie account made paging a false choice: 25 rows/page cost ~880
   // production round trips (past the deploy stack's 120s readiness contract)
-  // and 500 rows/page measured a 239MB peak against this 230MB budget. COPY
+  // and 500 rows/page measured a 239MB peak against the former 230MB budget. COPY
   // pays one round trip and keeps every cookie row out of the V8 heap, so the
   // budget never has to move.
   assert.ok(SEED_SOURCE.includes('streamCookies({'));

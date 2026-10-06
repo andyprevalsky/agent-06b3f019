@@ -287,6 +287,7 @@ cloudbench_tcp_listener_present() {  # <port>
   #   2 — bad argument
   #   3 — probe failed (timeout / python / unexpected); callers must fail closed
   python3 - "$1" <<'PY'
+import errno
 import socket
 import sys
 
@@ -294,11 +295,20 @@ try:
     port = int(sys.argv[1])
 except (IndexError, ValueError):
     raise SystemExit(2)
+if not 1 <= port <= 65535:
+    raise SystemExit(2)
 
 try:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(0.2)
-        raise SystemExit(0 if probe.connect_ex(("127.0.0.1", port)) == 0 else 1)
+        result = probe.connect_ex(("127.0.0.1", port))
+        if result in (0, errno.EAGAIN, errno.EWOULDBLOCK):
+            # A full accept backlog can return EAGAIN on macOS; the port is
+            # still occupied and must not be selected for another hub.
+            raise SystemExit(0)
+        if result == errno.ECONNREFUSED:
+            raise SystemExit(1)
+        raise SystemExit(3)
 except SystemExit:
     raise
 except Exception:
@@ -384,11 +394,11 @@ cloudbench_validate_browser_provider_contract() {
   agents_provider="$(cloudbench_env_value "$agents_env" BROWSER_PROVIDER)"
   backend_provider="$(cloudbench_env_value "$backend_env" BROWSER_PROVIDER)"
 
-  case "$prod_backend" in kernel|steel) ;; *)
+  case "$prod_backend" in kernel|steel|browser-use) ;; *)
     echo "FATAL: production backend BROWSER_PROVIDER is invalid: ${prod_backend:-<unset>}" >&2
     return 1
   esac
-  case "$prod_worker" in kernel|steel) ;; *)
+  case "$prod_worker" in kernel|steel|browser-use) ;; *)
     echo "FATAL: production worker BROWSER_PROVIDER is invalid: ${prod_worker:-<unset>}" >&2
     return 1
   esac
@@ -425,6 +435,22 @@ os.dup2(fd, 1)
 os.dup2(fd, 2)
 null = os.open(os.devnull, os.O_RDONLY)
 os.dup2(null, 0)
+for directory in ("/proc/self/fd", "/dev/fd"):
+    try:
+        inherited_descriptors = os.listdir(directory)
+        break
+    except OSError:
+        inherited_descriptors = None
+if inherited_descriptors is None:
+    os.closerange(3, os.sysconf("SC_OPEN_MAX"))
+else:
+    for value in inherited_descriptors:
+        try:
+            descriptor = int(value)
+            if descriptor > 2:
+                os.close(descriptor)
+        except (OSError, ValueError):
+            pass
 os.execvp(argv[0], argv)
 PY
 }
@@ -516,18 +542,44 @@ if before_owner_ready:
         handle.write(f"{pid}\n")
     while before_owner_release and not os.path.exists(before_owner_release):
         time.sleep(0.01)
-pid_start = " ".join(
-    subprocess.check_output(
-        ["ps", "-p", str(pid), "-o", "lstart="],
-        text=True,
-        stderr=subprocess.DEVNULL,
-    ).split()
-)
+if os.path.exists("/proc/self/stat"):
+    with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as handle:
+        boot_id = handle.read().strip()
+    with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+        stat = handle.read()
+    stat_fields = stat[stat.rfind(")") + 2 :].split()
+    if not boot_id or len(stat_fields) <= 19 or not stat_fields[19].isdigit():
+        raise SystemExit("FATAL: could not read the detached process birth identity")
+    pid_start = f"proc-start:{boot_id}:{stat_fields[19]}"
+else:
+    pid_start = " ".join(
+        subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).split()
+    )
 fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
 os.dup2(fd, 1)
 os.dup2(fd, 2)
 null = os.open(os.devnull, os.O_RDONLY)
 os.dup2(null, 0)
+for directory in ("/proc/self/fd", "/dev/fd"):
+    try:
+        inherited_descriptors = os.listdir(directory)
+        break
+    except OSError:
+        inherited_descriptors = None
+if inherited_descriptors is None:
+    os.closerange(3, os.sysconf("SC_OPEN_MAX"))
+else:
+    for value in inherited_descriptors:
+        try:
+            descriptor = int(value)
+            if descriptor > 2:
+                os.close(descriptor)
+        except (OSError, ValueError):
+            pass
 os.environ["CLOUDBENCH_TRACKED_GROUP_TOKEN"] = group_token
 
 release_read, release_write = os.pipe()
@@ -964,14 +1016,89 @@ cloudbench_fleet_workspace_name() {  # <bench-name> <controller-id> <ordinal>
   printf 'flt-%s%s' "$sanitized" "$suffix"
 }
 
+cloudbench_origin_advertises_commit() {  # <repo-root> <full-sha>
+  # Only admit an exact ref currently advertised by the same private repository
+  # the guest helper fetches. Local origin/* refs may be stale after deletion.
+  # An unreadable origin is uncertainty, so callers retain full patch delivery.
+  local root="$1" resolved="$2" origin token header
+  origin="$(git -C "$root" config --get remote.origin.url 2>/dev/null)" || return 1
+  case "$origin" in
+    https://github.com/Rose-Ai-Labs/rose.git|https://github.com/Rose-Ai-Labs/rose|git@github.com:Rose-Ai-Labs/rose.git|ssh://git@github.com/Rose-Ai-Labs/rose.git) ;;
+    *) return 1 ;;
+  esac
+  token="$(cloudbench_controller_github_token "$root" 2>/dev/null)" || return 1
+  [ -n "$token" ] || return 1
+  header="$(cloudbench_github_basic_auth_header "$token")" || return 1
+  CLOUDBENCH_FETCHABLE_AUTH_HEADER="$header" python3 - "$root" "$resolved" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+
+env = os.environ.copy()
+header = env.pop("CLOUDBENCH_FETCHABLE_AUTH_HEADER")
+# Discovery must not inherit repository-local URL rewrites, alternate Git dirs,
+# or ambient command-line config that could redirect credentials or advertise a
+# different repository. Auth is URL scoped and redirects are never followed.
+for key in tuple(env):
+    if key.startswith(("GIT_CONFIG", "GIT_TRACE")) or key in {
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CURL_VERBOSE",
+    }:
+        del env[key]
+env.update(GIT_CONFIG_COUNT="3",
+           GIT_CONFIG_KEY_0="http.https://github.com/Rose-Ai-Labs/rose.git.extraheader",
+           GIT_CONFIG_VALUE_0=header, GIT_CONFIG_KEY_1="credential.helper",
+           GIT_CONFIG_VALUE_1="", GIT_CONFIG_KEY_2="http.followRedirects",
+           GIT_CONFIG_VALUE_2="false", GIT_TERMINAL_PROMPT="0",
+           GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+           GIT_CONFIG_NOSYSTEM="1")
+
+def interrupted(_signum, _frame):
+    raise InterruptedError("source admission interrupted")
+
+signal.signal(signal.SIGTERM, interrupted)
+signal.signal(signal.SIGINT, interrupted)
+child = None
+try:
+    # A file prevents a remote helper retaining stdout from holding communicate
+    # open after git has exited. Ref advertisements above 4 MiB stay unverified.
+    with tempfile.TemporaryFile() as output_file:
+        child = subprocess.Popen(
+            ["git", "ls-remote", "--heads", "--tags",
+             "https://github.com/Rose-Ai-Labs/rose.git"],
+            cwd="/", env=env, stdout=output_file, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        child.wait(timeout=10)
+        if child.returncode == 0:
+            output_file.seek(0)
+            output = output_file.read(4 * 1024 * 1024 + 1)
+            if len(output) <= 4 * 1024 * 1024:
+                for line in output.splitlines():
+                    fields = line.split()
+                    if len(fields) == 2 and fields[0] == sys.argv[2].encode("ascii") and fields[1].startswith((b"refs/heads/", b"refs/tags/")):
+                        raise SystemExit(0)
+except (OSError, ValueError, subprocess.TimeoutExpired):
+    pass
+finally:
+    if child is not None and child.returncode is None:
+        # This unreaped Popen owns the new session; never signal a discovered PID.
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+raise SystemExit(1)
+PY
+}
+
 cloudbench_fetchable_ref() {  # <repo-root> <requested-ref> <allow-local-patch-01>
-  # Fly guests can fetch only objects already reachable from origin/main.
-  # A SHA that exists only on a pushed feature branch is not guest-fetchable:
-  # warm-box git-sync has no interactive GitHub credentials, and treating any
-  # origin/* containment as fetchable made --refresh-deps fetch a feature SHA
-  # over unauthenticated HTTPS (`could not read Username for 'https://github.com'`).
-  # When the requested commit is not on origin/main, run from that ancestor and
-  # let create-worktree-patch carry the complete committed + uncommitted delta.
+  # Guest and warm-refresh fetches both use the controller-token exact-SHA
+  # helper. Preserve the main fast path; admit feature/tag tips only after a
+  # bounded authenticated live-origin advertisement, never local tracking refs.
+  # Otherwise carry the complete committed + uncommitted delta from main.
   local root="$1" requested="$2" allow_patch="$3" resolved base
   if ! resolved="$(git -C "$root" rev-parse --verify "${requested}^{commit}" 2>/dev/null)"; then
     # Preserve remote-only branch/tag names that this checkout cannot resolve.
@@ -980,6 +1107,10 @@ cloudbench_fetchable_ref() {  # <repo-root> <requested-ref> <allow-local-patch-0
   fi
   if git -C "$root" rev-parse --verify 'origin/main^{commit}' >/dev/null 2>&1 \
       && git -C "$root" merge-base --is-ancestor "$resolved" origin/main 2>/dev/null; then
+    printf '%s' "$resolved"
+    return 0
+  fi
+  if cloudbench_origin_advertises_commit "$root" "$resolved"; then
     printf '%s' "$resolved"
     return 0
   fi
@@ -1059,15 +1190,18 @@ cloudbench_github_basic_auth_header() {  # <token>
   printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 }
 
-# Upsert KEY=value in a dotenv file without printing the value.
+# Serialize sibling updates and publish complete dotenvs without printing values.
 cloudbench_upsert_env_key() {
   local dest="$1" key="$2" val="$3"
   [ -n "$dest" ] && [ -n "$key" ] || return 1
   DEST="$dest" KEY="$key" VAL="$val" python3 - <<'PYINNER'
+import fcntl
 import os
 from pathlib import Path
+import tempfile
 
-p = Path(os.environ["DEST"])
+# Resolve aliases before choosing the lock, preserving existing dotenv symlinks.
+p = Path(os.environ["DEST"]).resolve()
 key = os.environ["KEY"]
 val = os.environ["VAL"]
 if any(ch in val for ch in ' \t\n"\'#$`\\'):
@@ -1075,20 +1209,38 @@ if any(ch in val for ch in ' \t\n"\'#$`\\'):
     rendered = f'{key}="{escaped}"'
 else:
     rendered = f"{key}={val}"
-lines = p.read_text().splitlines() if p.exists() else []
-out = []
-found = False
-for line in lines:
-    if line.startswith(key + "="):
-        out.append(rendered)
-        found = True
-    else:
-        out.append(line)
-if not found:
-    out.append(rendered)
 p.parent.mkdir(parents=True, exist_ok=True)
-p.write_text("\n".join(out) + "\n")
-os.chmod(p, 0o600)
+# Keep this inode: unlinking a lock can let a later writer lock a different file.
+lock_fd = os.open(p.with_name(p.name + ".cloudbench-upsert.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+with os.fdopen(lock_fd, "a") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    original = p.read_text() if p.exists() else ""
+    out = []
+    found = False
+    for line in original.splitlines():
+        if line.startswith(key + "="):
+            out.append(rendered)
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        out.append(rendered)
+    updated = "\n".join(out) + "\n"
+    if updated == original:
+        if p.stat().st_mode & 0o777 != 0o600:
+            os.chmod(p, 0o600)
+    else:
+        fd, name = tempfile.mkstemp(dir=p.parent, prefix=p.name + ".cloudbench-upsert.")
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "w") as output:
+                os.fchmod(output.fileno(), 0o600)
+                output.write(updated)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, p)
+        finally:
+            temporary.unlink(missing_ok=True)
 PYINNER
 }
 
@@ -1169,17 +1321,193 @@ cloudbench_terminate_and_wait() {
   done
 }
 
-cloudbench_pid_start_time() {
+cloudbench_status_proxy_lifecycle_response_accepted() {
+  case "$1" in
+    204|410|425) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> <label> [timeout]
+  local local_port="$1" remote_port="$2" host="$3" log_file="$4"
+  local pid_var="$5" label="$6" timeout="${7:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}"
+  local started_at pid attempt=0 probe_path="/" health_code
+  started_at="$(date +%s)"
+  : > "$log_file"
+  [ "$label" = "status" ] && probe_path="/driver-health"
+  while [ $(( $(date +%s) - started_at )) -lt "$timeout" ]; do
+    attempt=$((attempt + 1))
+    printf '[%s] %s proxy attempt %s: localhost:%s -> %s:%s\n' \
+      "$(date -u +%H:%M:%S)" "$label" "$attempt" "$local_port" "$host" "$remote_port" \
+      >> "$log_file"
+    flyctl proxy "$local_port:$remote_port" "$host" -a "$APP" --bind-addr 127.0.0.1 -q \
+      >> "$log_file" 2>&1 &
+    pid=$!
+    # flyctl resolves the remote host lazily on the first client connection.
+    # Trigger lazy DNS, but classify a local bind collision before waiting.
+    sleep 0.5
+    curl --noproxy '*' -sS --max-time 2 -o /dev/null \
+      "http://127.0.0.1:$local_port$probe_path" 2>/dev/null || true
+    if grep -Eiq 'listen tcp .*bind: address already in use|address already in use' "$log_file"; then
+      wait "$pid" 2>/dev/null || true
+      printf -v "$pid_var" '%s' ""
+      return 98
+    fi
+    # Require a short post-probe survival window for asynchronous lazy-DNS failures.
+    sleep "${CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS:-3}"
+    if kill -0 "$pid" 2>/dev/null; then
+      if [ "$label" != "status" ]; then
+        printf -v "$pid_var" '%s' "$pid"
+        return 0
+      fi
+      health_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true)"
+      if cloudbench_status_proxy_lifecycle_response_accepted "$health_code" \
+        && kill -0 "$pid" 2>/dev/null; then
+        printf -v "$pid_var" '%s' "$pid"
+        return 0
+      fi
+      printf '[%s] status proxy lifecycle HTTP %s not accepted; restarting pid %s\n' \
+        "$(date -u +%H:%M:%S)" "${health_code:-000}" "$pid" >> "$log_file"
+      cloudbench_terminate_and_wait 5 "$pid"
+    else
+      wait "$pid" 2>/dev/null || true
+    fi
+    sleep 2
+  done
+  printf -v "$pid_var" '%s' ""
+  echo "❌ $label data-plane proxy did not become ready within ${timeout}s" >&2
+  tail -20 "$log_file" 2>/dev/null | sed 's/^/   /' >&2 || true
+  # Ordinary remote readiness failures retain the bounded same-host retry
+  # behavior above; only local ownership collisions ask the caller to rotate.
+  return 1
+}
+
+# Process birth identity must stay fixed for one process incarnation. Linux
+# ps(1) renders lstart as the kernel's *current* boot-time estimate plus the
+# start tick, so every wall-clock step (observed: +143s after a VM snapshot
+# fork) rewrites the lstart of every live process and turns live owners into
+# "replaced" PIDs. Linux therefore uses the boot-relative /proc start tick,
+# qualified by boot_id. macOS has no /proc and records lstart once at fork.
+# Matching dispatches on the recorded format, so lstart records written by an
+# older controller keep their original meaning.
+cloudbench_legacy_pid_start_time() {
   local pid="$1"
   ps -p "$pid" -o lstart= 2>/dev/null |
     awk '{$1=$1; print}'
 }
 
+cloudbench_proc_pid_observation() {  # <pid> -> "<proc-start identity>\t<state>"
+  local pid="$1" boot_id="" stat_line="" rest
+  local -a fields=()
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  { IFS= read -r boot_id < /proc/sys/kernel/random/boot_id; } 2>/dev/null || return 1
+  { IFS= read -r stat_line < "/proc/$pid/stat"; } 2>/dev/null || return 1
+  case "$stat_line" in *') '*) ;; *) return 1 ;; esac
+  rest="${stat_line##*) }"
+  read -r -a fields <<< "$rest"
+  [ -n "$boot_id" ] && [ "${#fields[@]}" -gt 19 ] || return 1
+  case "${fields[19]}" in ''|*[!0-9]*) return 1 ;; esac
+  printf 'proc-start:%s:%s\t%s\n' "$boot_id" "${fields[19]}" "${fields[0]}"
+}
+
+cloudbench_pid_start_time() {
+  local pid="$1" observation
+  if [ -r /proc/self/stat ]; then
+    observation="$(cloudbench_proc_pid_observation "$pid")" || return 0
+    printf '%s\n' "${observation%%$'\t'*}"
+    return 0
+  fi
+  cloudbench_legacy_pid_start_time "$pid"
+}
+
+cloudbench_pid_start_time_like() {  # <pid> <recorded-identity>
+  case "$2" in
+    proc-start:*)
+      [ -r /proc/self/stat ] || return 0
+      cloudbench_pid_start_time "$1"
+      ;;
+    *) cloudbench_legacy_pid_start_time "$1" ;;
+  esac
+}
+
+cloudbench_pid_observation_like() {  # <pid> <recorded-identity> -> "<identity>\t<state>"
+  case "$2" in
+    proc-start:*)
+      [ -r /proc/self/stat ] || return 0
+      cloudbench_proc_pid_observation "$1" || true
+      ;;
+    *)
+      ps -p "$1" -o lstart= -o stat= 2>/dev/null |
+        awk 'NF >= 6 {state=$NF; NF--; $1=$1; print $0 "\t" state}'
+      ;;
+  esac
+}
+
+cloudbench_pid_birth_state() {  # <pid> <expected-start> -> live|absent|unknown
+  local pid="$1" expected_start="$2" actual_start ps_status
+  case "$pid" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
+  [ "$pid" -gt 1 ] && [ -n "$expected_start" ] \
+    || { echo unknown; return 0; }
+  actual_start="$(cloudbench_pid_start_time_like "$pid" "$expected_start")"
+  if [ -n "$actual_start" ]; then
+    if [ "$actual_start" = "$expected_start" ]; then
+      echo live
+    else
+      # The numeric PID exists, but the recorded process birth does not.
+      echo absent
+    fi
+    return 0
+  fi
+  # procps/BSD ps use status 1 for a well-formed PID that does not exist.
+  # If the PID concurrently appeared, kill -0 catches it and preserves the
+  # fail-closed unknown state rather than claiming an absence.
+  ps_status=0
+  ps -p "$pid" -o pid= >/dev/null 2>&1 || ps_status=$?
+  if [ "$ps_status" -eq 1 ] && ! kill -0 "$pid" 2>/dev/null; then
+    echo absent
+  else
+    echo unknown
+  fi
+}
+
 cloudbench_pid_matches_start() {
-  local pid="$1" expected_start="$2" actual_start
-  [ -n "$expected_start" ] || return 1
-  actual_start="$(cloudbench_pid_start_time "$pid")"
-  [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ]
+  [ "$(cloudbench_pid_birth_state "$1" "$2")" = "live" ]
+}
+
+# Teardown calls these from EXIT traps, where a bare `return` reports the
+# status from before the trap rather than the last command. Let the scanner or
+# matcher be the final command so its own status is the function's status.
+cloudbench_process_birth_table() {  # -> "<pid> <ppid> <birth identity>" per live process
+  if [ -r /proc/self/stat ]; then
+    python3 - <<'PY'
+import os
+import sys
+
+with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as handle:
+    boot_id = handle.read().strip()
+if not boot_id:
+    raise SystemExit(1)
+rows = []
+for name in os.listdir("/proc"):
+    if not name.isdigit():
+        continue
+    try:
+        with open(f"/proc/{name}/stat", encoding="utf-8", errors="replace") as handle:
+            stat = handle.read()
+    except OSError:
+        continue
+    fields = stat[stat.rfind(")") + 2 :].split()
+    if len(fields) <= 19 or not fields[1].isdigit() or not fields[19].isdigit():
+        raise SystemExit(1)
+    rows.append(f"{name} {fields[1]} proc-start:{boot_id}:{fields[19]}")
+if not rows:
+    raise SystemExit(1)
+sys.stdout.write("\n".join(rows) + "\n")
+PY
+  else
+    ps -axo pid=,ppid=,lstart= 2>/dev/null
+  fi
 }
 
 cloudbench_terminate_tree_and_wait() {
@@ -1221,7 +1549,7 @@ cloudbench_terminate_tree_and_wait() {
   # any signal. Capture ps(1) and parser status synchronously: process
   # substitution discards both exit codes and can turn an unavailable process
   # table into an empty, falsely successful teardown.
-  if ! process_table="$(ps -axo pid=,ppid=,lstart= 2>/dev/null)"; then
+  if ! process_table="$(cloudbench_process_birth_table)"; then
     echo "Could not capture the process table for owned tree teardown" >&2
     return 1
   fi
@@ -1370,10 +1698,7 @@ for pid, start in ordered:
       fi
     done
     [ -n "$expected_start" ] || continue
-    observation="$(
-      ps -p "$pid" -o lstart= -o stat= 2>/dev/null |
-        awk 'NF >= 6 {state=$NF; NF--; $1=$1; print $0 "\t" state}'
-    )" || observation=""
+    observation="$(cloudbench_pid_observation_like "$pid" "$expected_start")" || observation=""
     case "$observation" in
       *$'\t'*)
         actual_start="${observation%$'\t'*}"
@@ -1398,10 +1723,8 @@ for pid, start in ordered:
     unresolved=0
     target_states=()
     for ((i = 0; i < ${#targets[@]}; i++)); do
-      observation="$(
-        ps -p "${targets[$i]}" -o lstart= -o stat= 2>/dev/null |
-          awk 'NF >= 6 {state=$NF; NF--; $1=$1; print $0 "\t" state}'
-      )" || observation=""
+      observation="$(cloudbench_pid_observation_like "${targets[$i]}" "${target_starts[$i]}")" ||
+        observation=""
       case "$observation" in
         *$'\t'*)
           actual_start="${observation%$'\t'*}"
@@ -1542,6 +1865,113 @@ for machine in json.load(sys.stdin) or []:
 # the fleet preflight, and --refresh-deps must agree byte-for-byte or the
 # warm-snapshot freshness check misfires).
 CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)
+
+# Dependency snapshots belong to the donor, not to a controller checkout. Keep
+# each manifest set independently addressable so concurrent branches can reuse
+# their own completed snapshot without rebuilding one another's dependencies.
+cloudbench_warm_deps_metadata_key() {
+  python3 -c 'import hashlib,sys; print("rose_cloudbench_deps_" + hashlib.sha256((sys.argv[1] + "\0" + sys.argv[2]).encode()).hexdigest()[:32])' "$1" "$2"
+}
+
+cloudbench_publish_warm_deps_state() {
+  local key
+  key="$(cloudbench_warm_deps_metadata_key "$4" "$5")" || return 1
+  # The metadata-only endpoint does not update, start, or restart a Machine.
+  # Auth stays in the process environment, never in argv or output.
+  python3 -c '
+import json, os, shutil, subprocess, sys, urllib.error, urllib.parse, urllib.request
+
+app, machine, volume, node, python, epoch, snapshot, key = sys.argv[1:]
+token = os.environ.get("FLY_API_TOKEN", "")
+if not token:
+    raise SystemExit(1)
+scheme = "Bearer"
+for prefix in ("Bearer ", "FlyV1 "):
+    if token.startswith(prefix):
+        scheme, token = prefix.strip(), token[len(prefix):].strip()
+        break
+# Fly sessions can contain expired third-party discharges. Refresh the same
+# selected credential through flyctl rather than posting its raw .env value.
+# Short-lived refreshed auth stays in memory; publication remains optional.
+if token.startswith(("fm1r_", "fm1a_", "fm2_")):
+    fly = shutil.which("flyctl") or shutil.which("fly")
+    if not fly:
+        raise SystemExit(1)
+    auth_env = os.environ.copy()
+    auth_env.pop("FLY_ACCESS_TOKEN", None)
+    try:
+        auth = subprocess.run([fly, "auth", "token", "--json", "--quiet"],
+                              env=auth_env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, check=True, timeout=60)
+        refreshed = json.loads(auth.stdout).get("token")
+        if not isinstance(refreshed, str) or not refreshed.strip():
+            raise ValueError("missing refreshed auth")
+        token = refreshed.strip()
+        scheme = "FlyV1"
+        for prefix in ("Bearer ", "FlyV1 "):
+            if token.startswith(prefix):
+                scheme, token = prefix.strip(), token[len(prefix):].strip()
+                break
+        if not token:
+            raise ValueError("empty refreshed auth")
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        raise SystemExit(1)
+host = os.environ.get("FLY_API_HOSTNAME", "https://api.machines.dev").rstrip("/")
+if not host.startswith(("https://", "http://")):
+    host = "https://" + host
+endpoint = urllib.parse.urlsplit(host)
+if endpoint.scheme != "https" and not (
+    endpoint.scheme == "http" and endpoint.hostname in {"localhost", "127.0.0.1", "::1"}
+):
+    raise SystemExit(1)
+path = "/v1/apps/{}/machines/{}/metadata/{}".format(*(urllib.parse.quote(part, safe="") for part in (app, machine, key)))
+value = " ".join((node, python, epoch, snapshot, volume, machine, app))
+request = urllib.request.Request(host + path, data=json.dumps({"value": value}).encode(), method="POST", headers={"Authorization": scheme + " " + token, "Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(request, timeout=60) as response:
+        raise SystemExit(0 if response.status == 204 else 1)
+except (urllib.error.URLError, OSError, ValueError):
+    raise SystemExit(1)
+' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$key"
+}
+
+cloudbench_warm_deps_state_from_inventory() {
+  local key
+  key="$(cloudbench_warm_deps_metadata_key "$4" "$5")" || return 1
+  python3 -c '
+import datetime, json, re, sys
+
+app, machine_id, volume_id, node, python, key = sys.argv[1:]
+try:
+    inventory = json.load(sys.stdin)
+    machines = [m for m in inventory["machines"] if m.get("id") == machine_id]
+    if len(machines) != 1:
+        raise ValueError("ambiguous donor")
+    config = machines[0]["config"]
+    if not any(m.get("volume") == volume_id for m in config.get("mounts", [])):
+        raise ValueError("donor volume changed")
+    fields = config.get("metadata", {}).get(key, "").split()
+    if len(fields) != 7 or fields[:2] != [node, python] or fields[4:] != [volume_id, machine_id, app]:
+        raise ValueError("unproven dependencies")
+    if not all(re.fullmatch(r"[0-9a-f]{64}", fp) for fp in fields[:2]):
+        raise ValueError("invalid fingerprints")
+    epoch = int(fields[2])
+    if epoch <= 0 or not re.fullmatch(r"[A-Za-z0-9_-]+", fields[3]):
+        raise ValueError("invalid snapshot identity")
+    complete = {"created", "complete", "completed", "ready"}
+    for snapshot in inventory["snapshots"]:
+        if snapshot.get("id") != fields[3] or str(snapshot.get("status", "")).lower() not in complete or int(snapshot.get("size") or 0) <= 0:
+            continue
+        created = datetime.datetime.fromisoformat(snapshot["created_at"].replace("Z", "+00:00")).timestamp()
+        if created >= epoch - 60:
+            print(" ".join(fields[:4]))
+            raise SystemExit(0)
+except (KeyError, TypeError, ValueError, AttributeError):
+    pass
+raise SystemExit(1)
+' "$1" "$2" "$3" "$4" "$5" "$key"
+}
+
 cloudbench_manifest_fingerprint() {
     local root="$1"
     shift

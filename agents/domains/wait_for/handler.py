@@ -9,14 +9,12 @@ workflow_instance for pause/cost-limit state and workflow.start_activity.
 
 from __future__ import annotations
 
-import uuid as uuid_module
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator, Optional
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from domains.spawn_agent.config import is_oai_demo_mass_agent_task
 from domains.wait_for.config import (
     DEFAULT_CHECK_INTERVAL_SECONDS,
     DEFAULT_MAX_CHECKS,
@@ -28,6 +26,12 @@ from domains.wait_for.config import (
     MIN_CHECKS,
 )
 from domains.wait_for.service import cap_evidence, evaluate_condition_activity, format_duration
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
+from helpers.source_connect_gates import raise_source_connect_gates
+from helpers.wait_condition_or_handoff import sleep_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from utils.simulated_clock import (
     advance_simulated_clock,
@@ -35,7 +39,7 @@ from utils.simulated_clock import (
     simulated_skip_metadata,
     simulated_time_skip_enabled,
 )
-from utils.source_connect_gates import raise_source_connect_gates
+from utils.oai_demo import is_oai_demo_mass_agent_task
 
 
 def skip_wait_wall_clock_for_fast_mode_replay(workflow_instance: Any) -> bool:
@@ -226,7 +230,23 @@ class WaitForManager(ToolManager):
         # so on replay the wait is pure dead wall-clock — skip it. Live Fast
         # Mode still sleeps so until_timestamp remains a real wall-clock wait.
         if not skip_wait_wall_clock_for_fast_mode_replay(workflow_instance):
-            await workflow.sleep(delta_seconds)
+            try:
+                await sleep_or_generation_handoff(
+                    workflow_instance, delta_seconds, workflow_mod=workflow
+                )
+            except GenerationHandoffRequested:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"Waiting until {until_timestamp}",
+                    message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    status=MessageStatus.FINISHED,
+                    metadata={
+                        "waitForMode": "timestamp",
+                        "untilTimestamp": until_timestamp,
+                        "durationSeconds": delta_seconds,
+                    },
+                )
+                raise
 
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
@@ -297,7 +317,25 @@ class WaitForManager(ToolManager):
                     # time, so advance the simulated clock instead of sleeping.
                     advance_simulated_clock(workflow_instance, check_interval_seconds)
                 elif not skip_wait_wall_clock_for_fast_mode_replay(workflow_instance):
-                    await workflow.sleep(check_interval_seconds)
+                    try:
+                        await sleep_or_generation_handoff(
+                            workflow_instance, check_interval_seconds, workflow_mod=workflow
+                        )
+                    except GenerationHandoffRequested:
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title=f"Waiting for {description}",
+                            message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                            status=MessageStatus.FINISHED,
+                            metadata={
+                                "waitForMode": "condition",
+                                "description": description,
+                                "condition": condition,
+                                "checkIntervalSeconds": check_interval_seconds,
+                                "maxChecks": max_checks_param,
+                            },
+                        )
+                        raise
 
             # Check pause / cost limit
             await workflow_instance._check_parent_state()
@@ -319,8 +357,8 @@ class WaitForManager(ToolManager):
                 return
 
             # Spawn explore agent via SpawnAgentManager
-            task_id = str(uuid_module.uuid4())
-            explore_tool_call_id = str(uuid_module.uuid4())
+            task_id = str(workflow.uuid4())
+            explore_tool_call_id = str(workflow.uuid4())
             explore_goal = (
                 f'Gather evidence for whether this is currently true: "{condition}". '
                 f"Try to complete your task in as few tool calls as possible."

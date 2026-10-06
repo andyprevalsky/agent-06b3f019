@@ -60,16 +60,37 @@ set -uo pipefail
 EVENTS="$EVENTS"
 stamp() { printf '%s %s %s\n' "\$(date +%s%N)" "\${SETUP_DB_TEST_TAG:-?}" "\$1" >> "\$EVENTS"; }
 case "\$1" in
-  ps)   exit 0 ;;                       # daemon reachable; no container listed
-  run)  stamp CREATE_CONTAINER; exit 0 ;;
-  start|rm) exit 0 ;;
-  port) exit 1 ;;
+  ps)
+    if [ "\${SETUP_DB_TEST_CONFLICT:-}" = 1 ] && [[ "\$*" == *--format* ]]; then
+      printf '%s\n' 'victoria-db-sibling 0.0.0.0:59005->5432/tcp'
+      if [[ "\$*" == *-a* ]]; then printf '%s\n' 'victoria-db-fake-repo'; fi
+    fi
+    exit 0 ;;                           # daemon reachable
+  inspect)
+    if [ "\${SETUP_DB_TEST_CONFLICT:-}" = 1 ]; then printf '%s\n' 'postgres:16-alpine'; fi
+    exit 0 ;;
+  run)  stamp CREATE_CONTAINER; [ "\${SETUP_DB_TEST_DOCKER_FAIL:-0}" != 1 ] ;;
+  start) exit 0 ;;
+  rm) stamp RM_CONTAINER; exit 0 ;;
+  port) printf '%s\n' '0.0.0.0:59006'; exit 0 ;;
   exec)
     if printf '%s\n' "\$@" | grep -q 'pg_isready'; then exit 0; fi
     if printf '%s\n' "\$@" | grep -q 'DROP SCHEMA'; then stamp RESET; exit 0; fi
     exit 0 ;;
   *) exit 0 ;;
 esac
+STUB
+
+# If a buggy setup-db falls back to system Postgres on a port collision, keep
+# this hermetic test from touching the host's shared database.
+cat > "$TMP/bin/pg_isready" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+cat > "$TMP/bin/psql" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' SYSTEM_PG >> "$EVENTS"
+exit 1
 STUB
 
 # ── Stub npx ──────────────────────────────────────────────────────────────────
@@ -117,6 +138,47 @@ mkdir -p "$TMP/fake-repo/back-end/prisma"
 touch "$TMP/fake-repo/back-end/prisma/schema.prisma"
 chmod +x "$TMP/bin"/* "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.sh" \
   "$TMP/fake-repo/scripts/benchmark-seed-cache"
+
+# A failed Mac container must never redirect a destructive setup to shared PG.
+cp "$TMP/bin/pg_isready" "$TMP/mac-control-pg_isready"
+cp "$TMP/bin/psql" "$TMP/mac-control-psql"
+cat > "$TMP/bin/uname" <<'STUB'
+#!/usr/bin/env bash
+echo Darwin
+STUB
+cat > "$TMP/bin/pg_isready" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+cat > "$TMP/bin/psql" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' SYSTEM_PG_TOUCHED >> "$EVENTS"
+exit 0
+STUB
+cat > "$TMP/bin/createdb" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' SYSTEM_PG_TOUCHED >> "$EVENTS"
+exit 0
+STUB
+chmod +x "$TMP/bin/uname" "$TMP/bin/pg_isready" "$TMP/bin/psql" "$TMP/bin/createdb"
+set +e
+(
+  cd "$TMP/fake-repo"
+  PATH="$TMP/bin:$PATH" SETUP_DB_TEST_DOCKER_FAIL=1 \
+    CONDUCTOR_PORT=59000 CONDUCTOR_WORKSPACE_NAME=fake-repo \
+    CONDUCTOR_WORKSPACE_PATH="$TMP/fake-repo" ROSE_USE_SYSTEM_PG=false \
+    ROSE_WORKSPACE_DB_LOCK_DIR="$TMP/locks" \
+    bash scripts/setup-db.sh > "$TMP/mac-fallback.out" 2>&1
+)
+mac_fallback_rc=$?
+set -e
+[ "$mac_fallback_rc" -ne 0 ] || fail "failed Mac Docker setup unexpectedly succeeded through shared Postgres"
+! grep -q SYSTEM_PG_TOUCHED "$EVENTS" || fail "failed Mac Docker setup touched shared Postgres"
+! grep -q 'PUSH\|SEED_START' "$EVENTS" || fail "failed Mac Docker setup reached destructive schema/seed work"
+rm "$TMP/bin/uname" "$TMP/bin/createdb"
+mv "$TMP/mac-control-pg_isready" "$TMP/bin/pg_isready"
+mv "$TMP/mac-control-psql" "$TMP/bin/psql"
+: > "$EVENTS"
 
 run_setup_db() { # run_setup_db <tag> <workspace-name>
   local tag="$1" ws="$2"
@@ -401,7 +463,13 @@ if os.fork():
     while True:
         time.sleep(0.1)
 
-Path("$DETACHED_PID_FILE").write_text(str(os.getpid()))
+pid_file = Path("$DETACHED_PID_FILE")
+pending = pid_file.with_suffix(".tmp")
+with pending.open("w") as handle:
+    # Existence must imply a complete PID, even with a delayed write.
+    time.sleep(0.2)
+    handle.write(str(os.getpid()))
+pending.replace(pid_file)
 while not trigger.exists():
     time.sleep(0.02)
 os.setsid()
@@ -429,9 +497,11 @@ done
 [ -f "$DETACHED_PID_FILE" ] || case10_fail \
   "case 10: could not observe the forked seed child"
 detached_pid="$(cat "$DETACHED_PID_FILE")"
+# `|| true`: under errexit + pipefail a failed probe would exit silently and skip
+# the diagnostic below.
 detached_record="$(ps -o pid=,ppid=,pgid=,lstart= -p "$detached_pid" 2>/dev/null | awk '
   NR == 1 { print $1 "|" $2 "|" $3 "|" $4 " " $5 " " $6 " " $7 " " $8 }
-')"
+' || true)"
 [ -n "$detached_record" ] || case10_fail \
   "case 10: could not capture the seed child's original identity"
 IFS='|' read -r _ expected_parent expected_group _ <<< "$detached_record"
@@ -449,7 +519,7 @@ kill -TERM "$detach_parent_pid" 2>/dev/null || true
 wait "$detach_parent_pid" 2>/dev/null || true
 for _ in $(seq 1 100); do
   current_parent_group="$(ps -o ppid=,pgid= -p "$detached_pid" 2>/dev/null | awk \
-    'NR == 1 { print $1 "|" $2 }')"
+    'NR == 1 { print $1 "|" $2 }' || true)"
   IFS='|' read -r current_parent current_group <<< "$current_parent_group"
   if [ -n "$current_parent" ] \
       && [ "$current_parent" != "$expected_parent" ] \
@@ -472,3 +542,26 @@ setup_db_pid_matches_record "$detached_record" || case10_fail \
 case10_cleanup
 
 echo "PASS: setup-db.sh serializes its destructive reset/push/seed per workspace database"
+
+# Case 11: a foreign port owner must stop setup before stale-image migration
+# removes the workspace container or the fallback resets shared system PG.
+: > "$EVENTS"
+collision_status=0
+(
+  cd "$TMP/fake-repo"
+  PATH="$TMP/bin:$PATH" \
+  SETUP_DB_TEST_CONFLICT=1 \
+  CONDUCTOR_PORT=59000 \
+  CONDUCTOR_WORKSPACE_NAME=fake-repo \
+  CONDUCTOR_WORKSPACE_PATH="$TMP/fake-repo" \
+  ROSE_USE_SYSTEM_PG=false \
+    bash "$TMP/fake-repo/scripts/setup-db.sh"
+) > "$TMP/collision.out" 2>&1 || collision_status=$?
+[ "$collision_status" -eq 42 ] || fail "case 11: collision exited $collision_status, expected 42
+$(cat "$TMP/collision.out")"
+grep -q "already bound by container 'victoria-db-sibling'" "$TMP/collision.out" || \
+  fail "case 11: error did not name the foreign port owner"
+if grep -Eq 'RM_CONTAINER|CREATE_CONTAINER|SYSTEM_PG|RESET|PUSH|SEED_START' "$EVENTS"; then
+  fail "case 11: collision changed a database: $(cat "$EVENTS")"
+fi
+echo "PASS: setup-db.sh preserves the workspace DB and shared system PG on a port collision"

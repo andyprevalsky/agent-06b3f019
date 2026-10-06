@@ -26,13 +26,15 @@ import contextlib
 import os
 import time
 import uuid
+from contextlib import aclosing
 from typing import Any, AsyncIterator, Dict, List, Optional, Type, cast
 
-import httpx
 import structlog
 from pydantic import BaseModel
 
 from config import load_config
+from helpers.activity_heartbeat import safe_heartbeat
+from helpers.http_client import get_http_client
 from providers.rose.browser_use import (
     build_browser_use_messages,
     build_browser_use_tools,
@@ -57,6 +59,7 @@ from providers.rose.errors import (
     RoseServerError,
     RoseStallError,
 )
+from providers.rose.foundry import foundry_complete, foundry_configured
 from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
@@ -66,6 +69,7 @@ from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
 )
+from providers.rose.streaming import _stream_progress
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.types import (
     ChunkKind,
@@ -176,14 +180,15 @@ async def _anthropic_api_key_on_cooldown() -> bool:
     if not base:
         return False
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(
-                f"{base}/api/integrations/compute-code/anthropic-key/cooldown",
-                headers={"X-API-Key": cfg.backend.api_key or ""},
-            )
-            if resp.status_code == 200 and resp.json().get("onCooldown") is True:
-                _anthropic_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
-                return True
+        client = get_http_client()
+        resp = await client.get(
+            f"{base}/api/integrations/compute-code/anthropic-key/cooldown",
+            timeout=5.0,
+            headers={"X-API-Key": cfg.backend.api_key or ""},
+        )
+        if resp.status_code == 200 and resp.json().get("onCooldown") is True:
+            _anthropic_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
+            return True
     except Exception:
         return False
     return False
@@ -199,14 +204,74 @@ async def _mark_anthropic_api_key_cooldown(reason: str) -> None:
     if not base:
         return
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
-                f"{base}/api/integrations/compute-code/token/rate-limited",
-                headers={"X-API-Key": cfg.backend.api_key or "", "Content-Type": "application/json"},
-                json={"type": "anthropic", "source": "pool", "failureReason": reason},
-            )
+        client = get_http_client()
+        await client.post(
+            f"{base}/api/integrations/compute-code/token/rate-limited",
+            timeout=5.0,
+            headers={"X-API-Key": cfg.backend.api_key or "", "Content-Type": "application/json"},
+            json={"type": "anthropic", "source": "pool", "failureReason": reason},
+        )
     except Exception:
         logger.warning("rose.anthropic_apikey.cooldown_mark_failed", reason=reason)
+
+
+# The shared GPT_API_KEY uses the same cross-worker DB cooldown as Anthropic,
+# with its own row so one provider cannot suppress the other.
+_gpt_api_key_cooldown_skip_until = 0.0
+_gpt_api_key_cooldown_last_check = 0.0
+
+
+def _reset_gpt_api_key_cooldown_cache() -> None:
+    global _gpt_api_key_cooldown_skip_until, _gpt_api_key_cooldown_last_check
+    _gpt_api_key_cooldown_skip_until = 0.0
+    _gpt_api_key_cooldown_last_check = 0.0
+
+
+async def _gpt_api_key_on_cooldown() -> bool:
+    global _gpt_api_key_cooldown_skip_until, _gpt_api_key_cooldown_last_check
+    now = time.monotonic()
+    if now < _gpt_api_key_cooldown_skip_until:
+        return True
+    if now - _gpt_api_key_cooldown_last_check < _ANTHROPIC_COOLDOWN_RECHECK_S:
+        return False
+    _gpt_api_key_cooldown_last_check = now
+    cfg = load_config()
+    base = (cfg.backend.api_url or "").rstrip("/")
+    if not base:
+        return False
+    try:
+        client = get_http_client()
+        resp = await client.get(
+            f"{base}/api/integrations/compute-code/gpt-key/cooldown",
+            timeout=5.0,
+            headers={"X-API-Key": cfg.backend.api_key or ""},
+        )
+        if resp.status_code == 200 and resp.json().get("onCooldown") is True:
+            _gpt_api_key_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
+            return True
+    except Exception:
+        return False
+    return False
+
+
+async def _mark_gpt_api_key_cooldown(reason: str) -> None:
+    global _gpt_api_key_cooldown_skip_until
+    _gpt_api_key_cooldown_skip_until = time.monotonic() + _ANTHROPIC_COOLDOWN_RECHECK_S
+    cfg = load_config()
+    base = (cfg.backend.api_url or "").rstrip("/")
+    if not base:
+        return
+    try:
+        client = get_http_client()
+        resp = await client.post(
+            f"{base}/api/integrations/compute-code/token/rate-limited",
+            timeout=5.0,
+            headers={"X-API-Key": cfg.backend.api_key or "", "Content-Type": "application/json"},
+            json={"type": "gpt_api_key", "source": "pool", "failureReason": reason},
+        )
+        resp.raise_for_status()
+    except Exception:
+        logger.warning("rose.gpt_apikey.cooldown_mark_failed", reason=reason)
 
 
 def _single_attempt_auth(auth: ComputeAuthContext) -> ComputeAuthContext:
@@ -334,10 +399,7 @@ async def _mark_direct_auth_stalled(
 def _safe_heartbeat(message: str) -> None:
     """Emit a Temporal activity heartbeat if we're inside an activity,
     otherwise silently skip. Matches the pattern in `helpers/llm.py`."""
-    with contextlib.suppress(Exception):
-        from temporalio import activity
-
-        activity.heartbeat(message)
+    safe_heartbeat(message)
 
 
 def _cache_input_accounting(
@@ -408,6 +470,8 @@ def _dump_display_model(actual_model: str) -> str:
         return actual_model[: -len("-gpt")]
     if actual_model.endswith("-openai"):
         return actual_model[: -len("-openai")]
+    if actual_model.endswith("-foundry"):
+        return actual_model[: -len("-foundry")]
     return actual_model
 
 
@@ -569,7 +633,7 @@ class RoseClient:
             empty_response as _fc_empty,
         )
         from providers.fast_cache.rose_cache import (
-            replay as _fc_replay,
+            replay_with_context as _fc_replay,
         )
         from providers.fast_cache.rose_cache import (
             request_key_material as _fc_request_key_material,
@@ -581,15 +645,19 @@ class RoseClient:
         agent_id = kwargs.get("agent_id")
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
-        exclude_anthropic_family = anthropic_family_excluded(
-            bool(kwargs.get("_exclude_anthropic_family", False))
-        )
+        probe_read_only = os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1" and os.environ.get(
+            "BENCHMARK_ISOLATED_RUN", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        exclude_anthropic_family = anthropic_family_excluded(bool(kwargs.get("_exclude_anthropic_family", False)))
         if exclude_anthropic_family != bool(kwargs.get("_exclude_anthropic_family", False)):
             kwargs = {**kwargs, "_exclude_anthropic_family": exclude_anthropic_family}
 
         if pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
-            async for chunk in self._complete_impl(**kwargs):
-                yield chunk
+            if probe_read_only:
+                raise FastCacheLookupError("DEMO replay probe forbids live browser LLM calls")
+            async with aclosing(self._complete_impl(**kwargs)) as live_stream:
+                async for chunk in live_stream:
+                    yield chunk
             return
 
         ctx = current_context()
@@ -608,8 +676,11 @@ class RoseClient:
                 }
 
         if ctx is None or not ctx.active or messages is None:
-            async for chunk in self._complete_impl(**kwargs):
-                yield chunk
+            if probe_read_only:
+                raise FastCacheLookupError("DEMO replay probe has no usable cache context; live fallback is disabled")
+            async with aclosing(self._complete_impl(**kwargs)) as live_stream:
+                async for chunk in live_stream:
+                    yield chunk
             return
 
         key = ctx.llm_key(call_site, _fc_request_key_material(kwargs))
@@ -620,9 +691,7 @@ class RoseClient:
             try:
                 from providers.fast_cache.rose_cache import lookup_llm_cache
 
-                stored, hit_key = await lookup_llm_cache(
-                    ctx, call_site, _fc_request_key_material(kwargs)
-                )
+                stored, hit_key = await lookup_llm_cache(ctx, call_site, _fc_request_key_material(kwargs))
             except FastCacheLookupError as exc:
                 logger.warning(
                     "fast_cache.get_error",
@@ -659,8 +728,18 @@ class RoseClient:
                     hit_key=hit_key or key,
                     alias_hit=bool(hit_key and hit_key != key),
                 )
-                async for chunk in _fc_replay(stored):
-                    yield chunk
+                async with aclosing(
+                    _fc_replay(
+                        stored,
+                        call_site=call_site,
+                        complete_kwargs=kwargs,
+                        cache_key=key,
+                        hit_key=hit_key or key,
+                        reason="cache_hit",
+                    )
+                ) as replay_stream:
+                    async for chunk in replay_stream:
+                        yield chunk
                 return
             # Mirror cached_complete: cache-read failures must not look like a
             # clean miss and must not emit synthetic passthrough completions.
@@ -679,8 +758,18 @@ class RoseClient:
                             hit_key="scrape_passthrough",
                             reason="swf_scrape_passthrough",
                         )
-                        async for chunk in _fc_replay(derived):
-                            yield chunk
+                        async with aclosing(
+                            _fc_replay(
+                                derived,
+                                call_site=call_site,
+                                complete_kwargs=kwargs,
+                                cache_key=key,
+                                hit_key="scrape_passthrough",
+                                reason="swf_scrape_passthrough",
+                            )
+                        ) as replay_stream:
+                            async for chunk in replay_stream:
+                                yield chunk
                         return
                     # Non-demo FM: fall through to live summarize.
                 if site in {"completion_summary", "context_compression"}:
@@ -693,8 +782,18 @@ class RoseClient:
                             hit_key="terminal_passthrough",
                             reason="fm_terminal_passthrough",
                         )
-                        async for chunk in _fc_replay(terminal):
-                            yield chunk
+                        async with aclosing(
+                            _fc_replay(
+                                terminal,
+                                call_site=call_site,
+                                complete_kwargs=kwargs,
+                                cache_key=key,
+                                hit_key="terminal_passthrough",
+                                reason="fm_terminal_passthrough",
+                            )
+                        ) as replay_stream:
+                            async for chunk in replay_stream:
+                                yield chunk
                         return
                 soft = _fc_soft_complete(call_site)
                 # Warm end-of-trajectory: emit as replay passthrough (not soft_complete)
@@ -711,8 +810,18 @@ class RoseClient:
                         hit_key="trajectory_end_passthrough",
                         reason="fm_trajectory_end_passthrough",
                     )
-                    async for chunk in _fc_replay(soft):
-                        yield chunk
+                    async with aclosing(
+                        _fc_replay(
+                            soft,
+                            call_site=call_site,
+                            complete_kwargs=kwargs,
+                            cache_key=key,
+                            hit_key="trajectory_end_passthrough",
+                            reason="fm_trajectory_end_passthrough",
+                        )
+                    ) as replay_stream:
+                        async for chunk in replay_stream:
+                            yield chunk
                     return
                 # Cold allowlisted sites must not burn live LLM under Fast Mode read.
                 # Known July GP execute namespaces start at p:1 — do not stub them
@@ -732,8 +841,18 @@ class RoseClient:
                         hit_key="cold_namespace_passthrough",
                         reason="fm_cold_namespace_passthrough",
                     )
-                    async for chunk in _fc_replay(soft):
-                        yield chunk
+                    async with aclosing(
+                        _fc_replay(
+                            soft,
+                            call_site=call_site,
+                            complete_kwargs=kwargs,
+                            cache_key=key,
+                            hit_key="cold_namespace_passthrough",
+                            reason="fm_cold_namespace_passthrough",
+                        )
+                    ) as replay_stream:
+                        async for chunk in replay_stream:
+                            yield chunk
                     return
             logger.info("llm.cache.miss", call_site=call_site, key=key, lookup_failed=lookup_failed)
         else:
@@ -744,6 +863,8 @@ class RoseClient:
             # loops with cache-status stubs instead of substantive tool evidence.
             logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
+        if probe_read_only:
+            raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
         if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled() and not ctx.should_write:
             raise FastCacheLookupError(
                 f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
@@ -751,12 +872,13 @@ class RoseClient:
 
         structured_response_model = kwargs.get("response_model") is not None
         acc = _fc_empty()
-        async for chunk in self._complete_impl(**kwargs):
-            _fc_accumulate(acc, chunk)
-            if chunk.kind == "done" and ctx.should_write and not structured_response_model:
-                await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
-                logger.info("llm.cache.stored", call_site=call_site, key=key)
-            yield chunk
+        async with aclosing(self._complete_impl(**kwargs)) as live_stream:
+            async for chunk in live_stream:
+                _fc_accumulate(acc, chunk)
+                if chunk.kind == "done" and ctx.should_write and not structured_response_model:
+                    await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
+                    logger.info("llm.cache.stored", call_site=call_site, key=key)
+                yield chunk
 
     async def _complete_impl(
         self,
@@ -765,7 +887,9 @@ class RoseClient:
         messages: List[Dict[str, Any]],
         response_model: Optional[Type[BaseModel]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
-        context_tools: Optional[List[Dict[str, Any]]] = None,  # Declared-only tools legalizing forked tool history (never called)
+        context_tools: Optional[
+            List[Dict[str, Any]]
+        ] = None,  # Declared-only tools legalizing forked tool history (never called)
         tool_choice: Any = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
@@ -800,6 +924,8 @@ class RoseClient:
         _exclude_anthropic_family = anthropic_family_excluded(_exclude_anthropic_family)
         pool_spec = get_pool(pool)
         rid = request_id or uuid.uuid4().hex[:12]
+        auth_identity = claude_auth or gpt_auth
+        foundry_route_key = agent_id or (auth_identity.user_id if auth_identity else rid)
         started = time.monotonic()
         first_contentful_at: Optional[float] = None
 
@@ -851,9 +977,7 @@ class RoseClient:
                         },
                         # Effective wire effort: callers may omit; body builders
                         # always stamp DEFAULT_REASONING_EFFORT (xhigh).
-                        "reasoning_effort": (
-                            effort if effort is not None else DEFAULT_REASONING_EFFORT
-                        ),
+                        "reasoning_effort": (effort if effort is not None else DEFAULT_REASONING_EFFORT),
                         "response_model": response_model.__name__ if response_model else None,
                         "direct_auth": {
                             "claude": claude_auth is not None,
@@ -1026,6 +1150,8 @@ class RoseClient:
         last_chunk_kind: Optional[str] = None
         chunk_counts: Dict[str, int] = {}
         active_route = "not_started"
+        buffered_tool_argument_fragments = 0
+        last_tool_argument_at: Optional[float] = None
 
         def _elapsed_s(timestamp: Optional[float]) -> Optional[float]:
             return round(timestamp - started, 3) if timestamp is not None else None
@@ -1039,6 +1165,8 @@ class RoseClient:
                 "last_chunk_s": _elapsed_s(last_chunk_at),
                 "last_chunk_kind": last_chunk_kind,
                 "chunk_counts": dict(chunk_counts),
+                "buffered_tool_argument_fragments": buffered_tool_argument_fragments,
+                "last_tool_argument_s": _elapsed_s(last_tool_argument_at),
             }
 
         async def _guarded(
@@ -1057,26 +1185,46 @@ class RoseClient:
               full deadline before the loop can retry. Hitting the idle
               window raises `RoseDeadlineError`; the outer deadline still
               caps total time.
+
+            Nonempty buffered tool-argument fragments are also real progress.
+            They refresh a configured idle window without emitting partial
+            tools. When idle checks are disabled, TTFT still bounds the wait
+            for the first emitted productive chunk.
+            Each HTTP attempt resets TTFT; metadata/keepalives do not refresh it.
             """
             nonlocal first_chunk_at, first_contentful_at, first_productive_kind
             nonlocal last_chunk_at, last_chunk_kind, last_heartbeat
+            nonlocal buffered_tool_argument_fragments, last_tool_argument_at
             ttft_budget = ttft_override if ttft_override is not None else ttft_timeout_s
             it = source.__aiter__()
             saw_productive_chunk = False
+            saw_emitted_productive_chunk = False
+            attempt_started = time.monotonic()
+            last_progress_at: Optional[float] = None
             productive_kinds = {"content", "reasoning", "tool_call", "codex_reasoning_item"}
+
+            def note_progress(kind: str, size: int) -> None:
+                nonlocal saw_productive_chunk, attempt_started, last_progress_at
+                nonlocal saw_emitted_productive_chunk
+                nonlocal buffered_tool_argument_fragments, last_tool_argument_at
+                now = time.monotonic()
+                if kind == "attempt":
+                    attempt_started = now
+                    saw_productive_chunk = False
+                    saw_emitted_productive_chunk = False
+                    last_progress_at = None
+                    last_tool_argument_at = None
+                elif kind == "tool_arguments" and size > 0:
+                    saw_productive_chunk = True
+                    last_progress_at = now
+                    last_tool_argument_at = now
+                    buffered_tool_argument_fragments += 1
+
             while True:
                 r = remaining()
                 if r <= 0:
                     raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s")
-                if saw_productive_chunk:
-                    # Per-chunk idle ceiling once content has started. None
-                    # means "let the deadline handle it" (legacy behavior);
-                    # a finite value catches silent half-closes faster.
-                    progress_timeout = idle_timeout_s if idle_timeout_s is not None else r
-                else:
-                    progress_timeout = ttft_budget
-                wait_timeout = min(r, progress_timeout)
-                outer_deadline_limited = r <= progress_timeout
+                wait_started = time.monotonic()
                 # Slice long waits so Temporal heartbeats keep firing during
                 # TTFT / mid-stream idle gaps. Without this, a single
                 # wait_for up to ttft_timeout_s (90s) or idle_timeout_s (120s)
@@ -1084,16 +1232,39 @@ class RoseClient:
                 # cancel the activity mid-call (seen as "activity Heartbeat
                 # timeout" on dag_reasoning while provider_read was still
                 # blocked on the first token).
-                wait_deadline = time.monotonic() + wait_timeout
                 chunk = None
                 timed_out = False
                 # Do NOT use asyncio.wait_for for sliced waits — on timeout it
                 # cancels the pending __anext__ and permanently closes the
                 # upstream async generator. Use asyncio.wait so heartbeats can
                 # fire while the same __anext__ awaitable stays outstanding.
-                next_item = asyncio.ensure_future(it.__anext__())
+                progress_token = _stream_progress.set(note_progress)
+                try:
+                    next_item = asyncio.ensure_future(it.__anext__())
+                finally:
+                    # The pending task inherits this request's callback; the
+                    # consumer and concurrent sibling requests never do.
+                    _stream_progress.reset(progress_token)
                 try:
                     while True:
+                        using_idle_budget = saw_productive_chunk and (
+                            idle_timeout_s is not None or saw_emitted_productive_chunk
+                        )
+                        if using_idle_budget:
+                            progress_timeout = idle_timeout_s
+                            # Preserve consumer backpressure tolerance between
+                            # normalized chunks, while refreshing a pending
+                            # chunk only from actual parser progress.
+                            progress_deadline = (
+                                max(wait_started, last_progress_at or wait_started) + progress_timeout
+                                if progress_timeout is not None
+                                else started + deadline_s
+                            )
+                        else:
+                            progress_timeout = ttft_budget
+                            progress_deadline = attempt_started + ttft_budget
+                        outer_deadline_limited = started + deadline_s <= progress_deadline
+                        wait_deadline = min(started + deadline_s, progress_deadline)
                         slice_timeout = min(
                             _HEARTBEAT_INTERVAL_S,
                             wait_deadline - time.monotonic(),
@@ -1110,13 +1281,10 @@ class RoseClient:
                             break
                         now = time.monotonic()
                         if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
-                            _safe_heartbeat(
-                                f"rose.complete waiting call_site={call_site} request_id={rid}"
-                            )
+                            _safe_heartbeat(f"rose.complete waiting call_site={call_site} request_id={rid}")
                             last_heartbeat = now
-                        if now >= wait_deadline:
-                            timed_out = True
-                            break
+                        # Recompute before declaring expiry: the parser may
+                        # have consumed arguments without yielding a chunk.
                 finally:
                     # If the chunk landed in the same tick as the deadline,
                     # consume it instead of reporting a stall (CodeRabbit #1260).
@@ -1139,13 +1307,9 @@ class RoseClient:
                     return
                 if timed_out:
                     if outer_deadline_limited:
-                        raise RoseDeadlineError(
-                            f"rose.complete deadline exceeded after {deadline_s}s"
-                        )
-                    if saw_productive_chunk:
-                        raise RoseDeadlineError(
-                            f"rose.complete idle for {progress_timeout}s (deadline {deadline_s}s)"
-                        )
+                        raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s")
+                    if using_idle_budget:
+                        raise RoseDeadlineError(f"rose.complete idle for {progress_timeout}s (deadline {deadline_s}s)")
                     raise RoseStallError(f"rose.complete TTFT exceeded {ttft_budget}s")
                 assert chunk is not None
                 now = time.monotonic()
@@ -1179,10 +1343,18 @@ class RoseClient:
                             chunk_counts=dict(chunk_counts),
                         )
                     saw_productive_chunk = True
+                    saw_emitted_productive_chunk = True
+                    last_progress_at = now
                 if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
                     _safe_heartbeat(f"rose.complete call_site={call_site} request_id={rid}")
                     last_heartbeat = now
+                yielded_at = time.monotonic()
                 yield chunk
+                if not saw_productive_chunk:
+                    # TTFT measures provider waits, excluding time a downstream
+                    # consumer deliberately keeps this generator suspended.
+                    # The fixed whole-call deadline still includes that time.
+                    attempt_started += time.monotonic() - yielded_at
 
         def _with_timing_if_done(chunk: StreamChunk) -> StreamChunk:
             if chunk.kind != "done":
@@ -1232,7 +1404,7 @@ class RoseClient:
                 agent_id=agent_id,
                 actual_model=_seen_actual_model,
                 is_claude=_seen_actual_model.endswith("-claude"),
-                is_gpt=_seen_actual_model.endswith(("-gpt", "-openai")),
+                is_gpt=_seen_actual_model.endswith(("-gpt", "-openai", "-foundry")),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cache_read=cache_read,
@@ -1469,7 +1641,7 @@ class RoseClient:
             # API keys either -- gating only the OAuth routes left this hole,
             # through which a pinned run could still be served by gpt_auth_model.
             openai_api_key = _openai_api_key() if pool_spec.direct_auth_enabled else ""
-            if openai_api_key:
+            if openai_api_key and not await _gpt_api_key_on_cooldown():
                 active_route = "openai_apikey"
                 openai_yielded_any = False
                 try:
@@ -1528,6 +1700,8 @@ class RoseClient:
                     if openai_yielded_any:
                         raise
                     cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                    if isinstance(cause, (RosePaymentRequiredError, RoseAuthError)):
+                        await _mark_gpt_api_key_cooldown(type(cause).__name__)
                     logger.info(
                         "rose.complete.openai_apikey.fall_through",
                         request_id=rid,
@@ -1618,12 +1792,74 @@ class RoseClient:
                         reason=type(cause).__name__ if cause else "unknown",
                     )
 
+            # Funded Azure fallback for the same GPT model and Responses shape
+            # as the compute-token route. A pre-content failure continues to
+            # OpenRouter; an interrupted visible response remains an error.
+            if foundry_configured(pool_spec):
+                active_route = "foundry"
+                foundry_yielded_any = False
+                try:
+                    async with aclosing(
+                        foundry_complete(
+                            pool_spec=pool_spec,
+                            messages=messages,
+                            response_format=None if gpt_api_key_tools else openrouter_response_format,
+                            tools=gpt_api_key_tools,
+                            context_tools=context_tools,
+                            tool_choice=gpt_api_key_tool_choice,
+                            temperature=temperature,
+                            effort=effort,
+                            provider_fast_mode=provider_fast_mode,
+                            request_id=rid,
+                            route_key=foundry_route_key,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            cache_namespace=cache_namespace,
+                            ttft_timeout_s=ttft_timeout_s,
+                            idle_timeout_s=idle_timeout_s,
+                        )
+                    ) as foundry_source:
+                        async for chunk in _guarded(foundry_source):
+                            chunk = _with_timing_if_done(chunk)
+                            foundry_yielded_any = True
+                            if chunk.kind == "metadata":
+                                metadata = dict(chunk.data)
+                                if claude_token_error is not None:
+                                    metadata["claude_token_error"] = claude_token_error
+                                if gpt_token_error is not None:
+                                    metadata["gpt_token_error"] = gpt_token_error
+                                chunk = StreamChunk(kind="metadata", data=metadata)
+                                if chunk.data.get("actual_model"):
+                                    _seen_actual_model = chunk.data["actual_model"]
+                            elif chunk.kind == "usage":
+                                _emit_llm_cache(chunk.data)
+                                chunk = StreamChunk(
+                                    kind="usage", data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data)
+                                )
+                            chunk = _with_cache_sequence(chunk)
+                            _record_dump_chunk(chunk)
+                            yield chunk
+                    logger.info("rose.complete.foundry.done", request_id=rid, agent_id=agent_id, call_site=call_site)
+                    _finalize_dump()
+                    return
+                except (_FallThrough, RoseStallError, RoseError) as exc:
+                    if foundry_yielded_any:
+                        raise
+                    cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                    logger.info(
+                        "rose.complete.foundry.fall_through",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        reason=type(cause).__name__ if cause else "unknown",
+                    )
+
             cerebras_key = _cerebras_api_key() if pool_spec.cerebras_model else ""
             if cerebras_key:
                 active_route = "cerebras"
                 cerebras_yielded_any = False
                 try:
-                    async for chunk in _guarded(
+                    async with aclosing(
                         cerebras_complete(
                             pool_spec=pool_spec,
                             messages=messages,
@@ -1639,27 +1875,28 @@ class RoseClient:
                             per_step_timeout_s=ttft_timeout_s,
                             idle_timeout_s=idle_timeout_s,
                         )
-                    ):
-                        chunk = _with_timing_if_done(chunk)
-                        cerebras_yielded_any = True
-                        if chunk.kind == "metadata":
-                            metadata = dict(chunk.data)
-                            if claude_token_error is not None:
-                                metadata["claude_token_error"] = claude_token_error
-                            if gpt_token_error is not None:
-                                metadata["gpt_token_error"] = gpt_token_error
-                            chunk = StreamChunk(kind="metadata", data=metadata)
-                            if chunk.data.get("actual_model"):
-                                _seen_actual_model = chunk.data["actual_model"]
-                        elif chunk.kind == "usage":
-                            _emit_llm_cache(chunk.data)
-                            chunk = StreamChunk(
-                                kind="usage",
-                                data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
-                            )
-                        chunk = _with_cache_sequence(chunk)
-                        _record_dump_chunk(chunk)
-                        yield chunk
+                    ) as cerebras_source:
+                        async for chunk in _guarded(cerebras_source):
+                            chunk = _with_timing_if_done(chunk)
+                            cerebras_yielded_any = True
+                            if chunk.kind == "metadata":
+                                metadata = dict(chunk.data)
+                                if claude_token_error is not None:
+                                    metadata["claude_token_error"] = claude_token_error
+                                if gpt_token_error is not None:
+                                    metadata["gpt_token_error"] = gpt_token_error
+                                chunk = StreamChunk(kind="metadata", data=metadata)
+                                if chunk.data.get("actual_model"):
+                                    _seen_actual_model = chunk.data["actual_model"]
+                            elif chunk.kind == "usage":
+                                _emit_llm_cache(chunk.data)
+                                chunk = StreamChunk(
+                                    kind="usage",
+                                    data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                                )
+                            chunk = _with_cache_sequence(chunk)
+                            _record_dump_chunk(chunk)
+                            yield chunk
                     logger.info(
                         "rose.complete.cerebras.done",
                         request_id=rid,
@@ -1797,8 +2034,11 @@ class RoseClient:
         the model does not return a parseable browser action.
         """
         pool_spec = get_pool("rose-1-browser-use")
-        max_tokens = 16000
-        temperature = 1.0
+        # A browser step needs one action. A 16k cap let a malformed Qwen
+        # response stream for 215s without a tool call (WebDecoy bench),
+        # consuming half the task deadline before the caller could retry.
+        max_tokens = 2048
+        temperature = 0.3
         state_actions = filter_browser_use_actions_for_state(available_actions, browser_state)
         tools = build_browser_use_tools(state_actions)
         # IMPORTANT: "auto", not "any". Forcing tool use ("any") forbids the model from
@@ -1905,6 +2145,7 @@ class RoseClient:
             "claude_token_error": response.claude_token_error,
             "gpt_token_error": response.gpt_token_error,
             "mode": mode,
+            "timing": response.timing,
         }
 
     async def collect(
@@ -1957,8 +2198,10 @@ class RoseClient:
                 structured_output.add_chunk(chunk)
             else:
                 _fold(result, chunk)
-        if structured_output is not None and structured_output.has_content():
-            result.content = structured_output.final_text()
+        if structured_output is not None:
+            extracted = structured_output.current_text()
+            if extracted:
+                result.content = extracted
         return result
 
 

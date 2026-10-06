@@ -8,40 +8,12 @@ import {
   CHROME_EPOCH_OFFSET_MICROSECONDS,
   AUTH_DOMAINS_CACHE_TTL_MS,
 } from './config';
+export { findIntegrationsByUser } from './repo.integrationsList';
 
 const log = createLogger('Integrations');
 
 // Cache authenticated domains per user (5 min TTL)
 const authDomainsCache = new Map<string, { domains: string[]; expiresAt: number }>();
-
-export async function findIntegrationsByUser(userId: string) {
-  return prisma.integration.findMany({
-    where: { userId },
-    orderBy: { updatedAt: 'desc' },
-    include: {
-      // Scoped to genuinely-connected accounts so callers can derive the
-      // connected-address list from the source of truth in this one query
-      // (no per-integration follow-up). An abandoned OAuth flow leaves a
-      // null-email, tokenless row, which must never surface as an account.
-      // Ordered so the derived primary is stable: without it Postgres may
-      // return a different first row per query and the displayed primary
-      // address would flicker between the user's accounts.
-      emailCredentials: {
-        where: { email: { not: null }, accessToken: { not: null } },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        // Health drives the per-account FE chips. Token columns stay unselected
-        // so credentials never cross the API edge.
-        select: {
-          id: true,
-          email: true,
-          state: true,
-          lastErrorReason: true,
-          lastFailedSyncAt: true,
-        },
-      },
-    },
-  });
-}
 
 export async function getAuthenticatedDomains(userId: string): Promise<string[]> {
   const cached = authDomainsCache.get(userId);

@@ -12,6 +12,9 @@ persisted goal share one cache namespace. It is the same source the
 activity-side fallback (`ensure_position_context` → `resolve_agent_fast_mode`)
 already uses, which is why DAG calls replayed for chat-originated runs while
 the explicitly-threaded plan/execute/verifier calls missed.
+
+It also returns the tree ``root_goal``. Child agents keep their own goal for
+cache keys but inherit DEMO wait_for / spawn gates from the root prompt.
 """
 
 from typing import Any, Optional
@@ -22,9 +25,25 @@ from temporalio import activity
 logger = structlog.get_logger()
 
 
+def unpack_fast_cache_goal_resolution(
+    resolved: Any,
+) -> tuple[Optional[str], Optional[str]]:
+    """Accept the current dict payload or a legacy persisted-goal string."""
+    if isinstance(resolved, dict):
+        goal = resolved.get("goal")
+        root_goal = resolved.get("root_goal")
+        return (
+            goal if isinstance(goal, str) and goal else None,
+            root_goal if isinstance(root_goal, str) and root_goal else None,
+        )
+    if isinstance(resolved, str) and resolved:
+        return resolved, None
+    return None, None
+
+
 @activity.defn
-async def resolve_fast_cache_goal_activity(agent_id: str) -> Optional[str]:
-    """Return the persisted Agent-row goal for Fast Mode cache keying.
+async def resolve_fast_cache_goal_activity(agent_id: str) -> Optional[dict[str, Optional[str]]]:
+    """Return persisted child goal plus tree root goal for DEMO inheritance.
 
     Returns None when the agent row can't be resolved; the workflow falls back
     to its input goal (pre-fix behavior).
@@ -35,15 +54,18 @@ async def resolve_fast_cache_goal_activity(agent_id: str) -> Optional[str]:
 
     # resolve_agent_fast_mode returns
     # (enabled, goal, write_enabled, root_agent_id, root_goal, provider_fast_mode).
-    _enabled, goal, _write_enabled, _root_agent_id, _root_goal, _pfm = await resolve_agent_fast_mode(
+    _enabled, goal, _write_enabled, _root_agent_id, root_goal, _pfm = await resolve_agent_fast_mode(
         agent_id
     )
     logger.info(
         "fast_cache.goal_resolved",
         agent_id=agent_id,
         resolved=bool(goal),
+        root_resolved=bool(root_goal),
     )
-    return goal
+    if not goal and not root_goal:
+        return None
+    return {"goal": goal, "root_goal": root_goal}
 
 
 @activity.defn

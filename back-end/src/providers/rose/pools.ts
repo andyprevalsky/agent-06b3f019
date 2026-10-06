@@ -6,7 +6,8 @@
  *
  * claudeAuth = direct Anthropic Messages API call (user/pool OAuth token).
  * gptAuth    = direct ChatGPT Codex Responses call (user/pool OAuth token).
- * waterfall  = OpenRouter sequential fallback if claudeAuth fails / absent.
+ * foundry    = GPT-6 Sol fallback for ultra after direct credentials.
+ * waterfall  = OpenRouter sequential fallback after the direct routes.
  *
  * rose-1-flash / rose-1-browser-use skip Claude/GPT auth. Primary is
  * Cerebras qwen-3.8-27b (direct). OpenRouter fallback is qwen/qwen3.8-27b
@@ -21,6 +22,8 @@ export interface PoolSpec {
   claudeAuthModel: string;
   /** OpenAI model ID used when a ChatGPT/Codex OAuth token is supplied. */
   gptAuthModel: string;
+  /** Try a matching Microsoft Foundry deployment after direct credentials. */
+  foundryEnabled?: boolean;
   /** Provider-prefixed model IDs tried in order if claudeAuth fails. */
   waterfall: readonly string[];
   /**
@@ -61,6 +64,7 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     name: 'rose-1-ultra',
     claudeAuthModel: 'claude-opus-5-5',
     gptAuthModel: 'gpt-6-sol',
+    foundryEnabled: true,
     // Opus 5.5 leads AA v4.3.2 (58) at $4/$20. Paid waterfall is gpt-6-sol
     // ($2/$10, index 48) then kimi-k3 (index 44).
     waterfall: ['openai/gpt-6-sol', 'moonshotai/kimi-k3'],

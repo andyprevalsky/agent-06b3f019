@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from collections import Counter
 from pathlib import Path
@@ -63,3 +64,50 @@ def test_limited_upsert_preserves_cache(monkeypatch, tmp_path: Path) -> None:
 
     assert module.main() == 0
     assert module.CACHE_PATH.exists()
+
+
+def test_embed_pending_drains_until_nothing_remains(monkeypatch) -> None:
+    import asyncio
+
+    import httpx
+
+    module = _load_script()
+    batches = iter(
+        [
+            {"embedded": 50, "failed": 0, "remaining": 1},
+            {"embedded": 8, "failed": 0, "remaining": 0},
+        ]
+    )
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/planner-memory/embed-pending"
+        assert request.headers["X-API-Key"] == "k"
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json=next(batches))
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        module.httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw)
+    )
+    totals = asyncio.run(module.embed_pending(backend="http://backend.test", api_key="k"))
+    assert totals == {"embedded": 58, "failed": 0, "remaining": 0}
+    assert seen == [{"limit": 50}, {"limit": 50}]
+
+
+def test_embed_pending_stops_when_a_batch_makes_no_progress(monkeypatch) -> None:
+    import asyncio
+
+    import httpx
+
+    module = _load_script()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"embedded": 0, "failed": 3, "remaining": 3})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        module.httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw)
+    )
+    totals = asyncio.run(module.embed_pending(backend="http://backend.test", api_key="k"))
+    assert totals["remaining"] == 3 and totals["failed"] == 3, "a stuck provider must not loop forever"

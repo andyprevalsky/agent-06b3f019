@@ -2,6 +2,7 @@
 set -eo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CALLER_DIR="$PWD"
 # Reject --single-box BEFORE cd into agents/: cloudbench multi-workstream
 # sandboxes are scripts-only, and a failed cd would exit under `set -e` without
 # the parallel-safety message the guard exists to print.
@@ -16,6 +17,99 @@ if [[ "${1:-}" == "--single-box" ]]; then
     echo "   Use the default per-bench isolated fleet (clones a dedicated machine per bench):" >&2
     echo "       bash scripts/run-bench <task...>" >&2
     exit 2
+fi
+
+if [[ "${1:-}" == "image-activate" ]]; then
+    shift
+    if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+        echo "Usage: scripts/run-bench image-activate <exact-benchmark-image> [--ref <sha>] [--out-dir <private-directory>]"
+        echo "Activates the published image through owned warm-source setup; no image rebuild."
+        exit 0
+    fi
+    image_activate_ref="${1:-}"
+    image_activate_pattern='^registry\.fly\.io/navi-whisper-lux-bench(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})$'
+    [[ "$image_activate_ref" =~ $image_activate_pattern ]] || {
+        echo "image-activate requires an exact registry.fly.io/navi-whisper-lux-bench tag or digest" >&2
+        exit 2
+    }
+    shift
+    IMAGE_ACTIVATE_ARGS=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --ref|--out-dir)
+                [ "$#" -ge 2 ] || { echo "$1 requires a value" >&2; exit 2; }
+                image_activate_option="$1"
+                image_activate_value="$2"
+                [ -n "$image_activate_value" ] && [[ "$image_activate_value" != -* ]] || {
+                    echo "$image_activate_option requires a nonempty value" >&2
+                    exit 2
+                }
+                if [ "$image_activate_option" = --out-dir ]; then
+                    case "$image_activate_value" in
+                        /*) ;;
+                        *) image_activate_value="$CALLER_DIR/$image_activate_value" ;;
+                    esac
+                fi
+                IMAGE_ACTIVATE_ARGS+=("$image_activate_option" "$image_activate_value")
+                shift 2
+                ;;
+            *) echo "Unsupported image-activate argument: $1" >&2; exit 2 ;;
+        esac
+    done
+    echo "Activating the exact published image through owned warm-source setup; no rebuild."
+    echo "Keep the private output and verify the guest image digest before measuring the fleet."
+    IMAGE_ACTIVATE_BIN="${RUN_BENCH_CLOUD_BIN_UNDER_TEST:-$ROOT_DIR/scripts/run-bench-cloud}"
+    exec env WARM_IMAGE_REF="$image_activate_ref" bash "$IMAGE_ACTIVATE_BIN" --setup "${IMAGE_ACTIVATE_ARGS[@]}"
+fi
+
+if [[ "${1:-}" == "image-build" ]]; then
+    shift
+    IMAGE_BUILD_ARGS=()
+    image_build_builder_selected=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                echo "Usage: scripts/run-bench image-build [--no-cache] [--builder depot|native] [--build-context <checkout>] [--out-dir <private-directory>]"
+                echo "Depot is the image-build default (app scope, zstd level 3, AMD64); native is an explicit diagnostic."
+                echo "After publication, use image-activate with the exact receipt image before the benchmark fleet."
+                exit 0
+                ;;
+            --no-cache)
+                IMAGE_BUILD_ARGS+=("$1"); shift
+                ;;
+            --builder)
+                [ "$#" -ge 2 ] || { echo "--builder requires native or depot" >&2; exit 2; }
+                case "$2" in
+                    native|depot) ;;
+                    *) echo "--builder requires native or depot" >&2; exit 2 ;;
+                esac
+                IMAGE_BUILD_ARGS+=("$1" "$2"); shift 2
+                image_build_builder_selected=1
+                ;;
+            --build-context|--out-dir)
+                [ "$#" -ge 2 ] || { echo "$1 requires a directory" >&2; exit 2; }
+                image_build_option="$1"
+                image_build_path="$2"
+                case "$image_build_path" in
+                    /*) ;;
+                    *) image_build_path="$CALLER_DIR/$image_build_path" ;;
+                esac
+                IMAGE_BUILD_ARGS+=("$image_build_option" "$image_build_path"); shift 2
+                ;;
+            *) echo "Unsupported image-build argument: $1" >&2; exit 2 ;;
+        esac
+    done
+    if [ "$image_build_builder_selected" = 0 ]; then
+        IMAGE_BUILD_ARGS+=(--builder depot)
+    fi
+    IMAGE_BUILD_BIN="${RUN_BENCH_CLOUD_BIN_UNDER_TEST:-$ROOT_DIR/scripts/run-bench-cloud}"
+    exec bash "$IMAGE_BUILD_BIN" --build-image "${IMAGE_BUILD_ARGS[@]}"
+fi
+
+if [[ "${1:-}" == "stability-proof" ]]; then
+    shift
+    exec bash "$ROOT_DIR/scripts/run-fleet-infra-stability-proof" \
+        --capability "$@"
 fi
 
 cd "$ROOT_DIR/agents"
@@ -37,6 +131,15 @@ else
     exit 127
 fi
 
+if [[ "${1:-}" == "monitor" ]]; then
+    shift
+    if [[ "$PY" == venv/* ]]; then
+        PY="$ROOT_DIR/agents/$PY"
+    fi
+    cd "$CALLER_DIR"
+    exec "$PY" -u "$ROOT_DIR/scripts/cloudbench-monitor.py" "$@"
+fi
+
 if [[ "${1:-}" == "list" || "${1:-}" == "--list" ]]; then
     exec "$PY" -u benchmarks/run_benchmark.py --list
 fi
@@ -50,6 +153,14 @@ fi
 # on THIS machine). Without it, a benchmark run defaults to CLOUD.
 if [[ "${1:-}" == "--local" ]]; then
     shift
+    for arg in "$@"; do
+        case "$arg" in
+            -k|--runs|--runs=*|-k=*|--concurrency|--concurrency=*)
+                echo "❌ -k/--runs and --concurrency currently require the default cloud fleet." >&2
+                exit 2
+                ;;
+        esac
+    done
     exec "$PY" -u benchmarks/local.py "$@"
 fi
 
@@ -69,6 +180,210 @@ if [[ "${1:-}" == "--single-box" ]]; then
     exit 2
 fi
 
+usage() {
+    cat <<'EOF'
+Usage: scripts/run-bench <slice-or-task...> [options]
+       scripts/run-bench monitor <exact-run-directory>
+       scripts/run-bench image-build [--no-cache] [--builder native|depot]
+       scripts/run-bench image-activate <exact-benchmark-image> [--ref <sha>] [--out-dir <private-directory>]
+
+Image builds:
+  --builder depot    App-scoped Depot builder, zstd level 3 (image-build default).
+  --builder native   Existing Fly remote builder for an explicit diagnostic.
+                     Build/push only; activate the exact receipt image before the fleet.
+
+Selections:
+  daily | pre-deploy | rose-bench | polar-bench | incomplete
+  or one or more exact benchmark task names
+  stability-proof    Run random ready-catalog slices sequentially; ordinary
+                     benchmark failures advance and any INFRA outcome aborts
+
+Campaign options:
+  -k K, -k=K, --runs K, --runs=K
+                      Run every resolved task K times in separate fleet controllers
+  --concurrency N, --concurrency=N
+                      Keep at most N campaign copies active (default 1 with -k)
+  --demo-cache        Read-only task replay for existing DEMO workloads. Declared
+                      LLM judges still run and may spend. Zero LIVE proof credit.
+
+The ordinary no-flag path runs the resolved slice as one fully parallel,
+per-bench-isolated cloud fleet. Use --local first to opt into local execution.
+
+Startup reuse:
+  Completed dependency snapshots are reused automatically, including from a
+  fresh checkout. Source-only changes synchronize code after boot.
+  --provision-pool N  Prepare N stopped, reusable task Machines once. Ordinary
+                      runs automatically claim and return this workspace pool.
+                      Stopped Machines retain billable volume storage.
+  --fresh-volumes    Default: empty volumes for REAL task Machines; bootstrap
+                      exact source plus baked deps. SIM snapshots remain.
+                      Requires boot launch; cannot prepare a generic pool.
+  --snapshot-volumes Force restored donor volumes for a provisioning diagnostic.
+  --timeout SECONDS  Set this run's task execution timeout.
+  --wait             Wait for the detached fleet and return its exit status.
+
+Monitoring:
+  Every launch prints its exact monitoring handle. Poll every 30 seconds,
+  checking terminal lifecycle on every observation, including stale cards.
+  Task PASS/FAIL is available before cleanup. Observe through resource release;
+  a stale observation is a warning, never authorization to restart the run.
+EOF
+}
+
+RUNS=1
+CONCURRENCY=1
+CAMPAIGN_REQUESTED=0
+INTERNAL_OPERATION=0
+DEMO_CACHE_PROBE=0
+SELECTORS=()
+FLEET_ARGS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -k|--runs)
+            [ "$#" -ge 2 ] || { echo "❌ $1 requires a positive integer" >&2; exit 2; }
+            RUNS="$2"; CAMPAIGN_REQUESTED=1; shift 2
+            ;;
+        -k=*|--runs=*)
+            RUNS="${1#*=}"; CAMPAIGN_REQUESTED=1; shift
+            ;;
+        --concurrency)
+            [ "$#" -ge 2 ] || { echo "❌ --concurrency requires a positive integer" >&2; exit 2; }
+            CONCURRENCY="$2"; CAMPAIGN_REQUESTED=1; shift 2
+            ;;
+        --concurrency=*)
+            CONCURRENCY="${1#*=}"; CAMPAIGN_REQUESTED=1; shift
+            ;;
+        --demo-cache)
+            DEMO_CACHE_PROBE=1; shift
+            ;;
+        --single-box)
+            echo "❌ --single-box is disabled: running benches on the shared warm box is not parallel-safe." >&2
+            echo "   Use scripts/run-bench <task...> for the isolated fleet." >&2
+            exit 2
+            ;;
+        --sim-on|--ref|--dash-base|--timeout|--autoscale-max)
+            [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
+            FLEET_ARGS+=("$1" "$2"); shift 2
+            ;;
+        --recover-stale-owner|--provision-pool)
+            [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
+            INTERNAL_OPERATION=1
+            FLEET_ARGS+=("$1" "$2"); shift 2
+            ;;
+        --keep-clones|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
+            FLEET_ARGS+=("$1"); shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            while [ "$#" -gt 0 ]; do
+                SELECTORS+=("$1")
+                shift
+            done
+            ;;
+        --*)
+            echo "❌ Unknown flag: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+        *)
+            # Match run-bench-fleet's compatibility for one space-joined task
+            # list while keeping each resolved catalog name shell-safe.
+            read -r -a split_selectors <<< "$1"
+            SELECTORS+=("${split_selectors[@]}")
+            shift
+            ;;
+    esac
+done
+
+case "$RUNS" in
+    ''|*[!0-9]*|0)
+        echo "❌ -k/--runs and --concurrency must be positive integers" >&2
+        exit 2
+        ;;
+esac
+case "$CONCURRENCY" in
+    ''|*[!0-9]*|0)
+        echo "❌ -k/--runs and --concurrency must be positive integers" >&2
+        exit 2
+        ;;
+esac
+if [ "$INTERNAL_OPERATION" -eq 1 ]; then
+    [ "$DEMO_CACHE_PROBE" -eq 0 ] || {
+        echo "❌ --demo-cache cannot be combined with fleet maintenance operations" >&2
+        exit 2
+    }
+    [ "$CAMPAIGN_REQUESTED" -eq 0 ] || {
+        echo "❌ campaign flags cannot be combined with fleet maintenance operations" >&2
+        exit 2
+    }
+    if [ -n "${RUN_BENCH_FLEET_BIN_UNDER_TEST:-}" ]; then
+        exec bash "$RUN_BENCH_FLEET_BIN_UNDER_TEST" "${FLEET_ARGS[@]}"
+    fi
+    FLEET_MAINTENANCE_BIN="$ROOT_DIR/scripts/run-bench-fleet"
+    exec bash "$FLEET_MAINTENANCE_BIN" "${FLEET_ARGS[@]}"
+fi
+[ "${#SELECTORS[@]}" -gt 0 ] || { usage >&2; exit 2; }
+
+CATALOG_PATH="${RUN_BENCH_CATALOG_UNDER_TEST:-$ROOT_DIR/agents/benchmarks/tasks.json}"
+RESOLVED_OUTPUT="$("$PY" -u "$ROOT_DIR/scripts/cloudbench_catalog.py" \
+    resolve "$CATALOG_PATH" "${SELECTORS[@]}")" || {
+    echo "❌ benchmark selection failed" >&2
+    exit 2
+}
+RESOLVED_TASKS=()
+while IFS= read -r task; do
+    [ -n "$task" ] && RESOLVED_TASKS+=("$task")
+done <<< "$RESOLVED_OUTPUT"
+[ "${#RESOLVED_TASKS[@]}" -gt 0 ] || {
+    echo "❌ benchmark selection resolved no tasks" >&2
+    exit 2
+}
+echo "🎯 resolved ${#RESOLVED_TASKS[@]} benchmark task(s): ${RESOLVED_TASKS[*]}"
+
+if [ "$DEMO_CACHE_PROBE" -eq 1 ]; then
+    for arg in "${FLEET_ARGS[@]}"; do
+        case "$arg" in
+            --sim-on|--infra-probe|--skip-autoscaler)
+                echo "❌ --demo-cache preserves normal task execution and cleanup; omit $arg" >&2
+                exit 2
+                ;;
+        esac
+    done
+    "$PY" -u "$ROOT_DIR/scripts/cloudbench-demo-cache.py" \
+        "$CATALOG_PATH" "${RESOLVED_TASKS[@]}" || exit 2
+    export FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1
+    export BENCHMARK_DEMO_CACHE_READ_ONLY=1
+    echo "🧊 DEMO replay probe: read-only task cache, unchanged evaluation, zero LIVE proof credit"
+fi
+
+if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
+    CAMPAIGN_ARGS=(
+        "--root=$ROOT_DIR"
+        "--runs=$RUNS"
+        "--concurrency=$CONCURRENCY"
+    )
+    for task in "${RESOLVED_TASKS[@]}"; do
+        CAMPAIGN_ARGS+=("--task=$task")
+    done
+    if [ "$DEMO_CACHE_PROBE" -eq 1 ]; then
+        CAMPAIGN_ARGS+=("--forward-arg=--demo-cache")
+    fi
+    for arg in "${FLEET_ARGS[@]}"; do
+        case "$arg" in
+            --foreground|--wait|--detach)
+                echo "❌ campaign lifecycle is foreground-owned; omit $arg" >&2
+                exit 2
+                ;;
+        esac
+        CAMPAIGN_ARGS+=("--forward-arg=$arg")
+    done
+    exec "$PY" -u "$ROOT_DIR/scripts/run-bench-campaign.py" "${CAMPAIGN_ARGS[@]}"
+fi
+
 # Production-only tasks hit live Temporal/API (roselabs / Render). They must not
 # provision Fly guests or contend for the shared warm donor — that path is both
 # unnecessary and races every concurrent workspace. Route them through the same
@@ -79,7 +394,7 @@ fi
 #   1 — valid catalog, but not an all-production_only batch → fall through to fleet
 #   2 — unknown task, catalog unreadable, or invalid names → fail closed
 PROD_ONLY_STATUS=0
-PROD_ONLY_TASKS="$("$PY" -u "$ROOT_DIR/scripts/cloudbench-production-only-tasks.py" "$@")" || PROD_ONLY_STATUS=$?
+PROD_ONLY_TASKS="$("$PY" -u "$ROOT_DIR/scripts/cloudbench-production-only-tasks.py" "${RESOLVED_TASKS[@]}")" || PROD_ONLY_STATUS=$?
 if [ "$PROD_ONLY_STATUS" -eq 2 ]; then
     echo "❌ production-only classifier failed (unknown task, unreadable catalog, or invalid task name)" >&2
     exit 2
@@ -103,4 +418,7 @@ fi
 # autoscaling with prod's params scoped to that bench's queue. The whole run is
 # shown in ONE aggregated batch dashboard (auto-opened) covering ALL benches.
 # Sim is per-bench and OFF by default — pass --sim-on <a,b> to enable it.
-exec bash "$ROOT_DIR/scripts/run-bench-fleet" "$@"
+if [ -n "${RUN_BENCH_FLEET_BIN_UNDER_TEST:-}" ]; then
+    exec bash "$RUN_BENCH_FLEET_BIN_UNDER_TEST" "${RESOLVED_TASKS[@]}" "${FLEET_ARGS[@]}"
+fi
+exec bash "$ROOT_DIR/scripts/run-bench-fleet" "${RESOLVED_TASKS[@]}" "${FLEET_ARGS[@]}"

@@ -3600,6 +3600,103 @@ def test_simulated_browser_resume_payload_is_compact_and_media_free():
     assert len(encoded) < 100_000
 
 
+async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed_policy():
+    from domains.spawn_browser_agent_v3 import handler as browser_handler
+
+    class FakeWorldModel:
+        world_model_name = "payment-test"
+        session_id = None
+
+        async def ensure_session(self, *, task, seed_state):
+            self.session_id = "wmh-payment-session"
+            return self.session_id
+
+    class FakeStream:
+        def __init__(self, **kwargs):
+            pass
+
+        async def start(self):
+            pass
+
+        async def finish(self):
+            pass
+
+        async def finish_tools(self, status):
+            pass
+
+    class FakeRoseClient:
+        def set_thinking_stream(self, stream):
+            pass
+
+    policy = AsyncMock(
+        side_effect=[
+            {
+                "action": {
+                    "action": "request_payment_card",
+                    "params": {
+                        "merchant": "Rose Labs Test Payment",
+                        "line_items": [
+                            {
+                                "name": "Aurora Notebook",
+                                "product_url": "https://shop.example.test/products/aurora-notebook",
+                                "rating": "4.9 stars",
+                                "review_count": "217 reviews",
+                                "unit_price_cents": 1200,
+                                "quantity": 1,
+                                "line_total_cents": 1200,
+                            }
+                        ],
+                        "subtotal_cents": 1200,
+                        "total_cents": 4396,
+                        "currency": "USD",
+                    },
+                },
+                "tool_call_id": "payment-call",
+                "usage": {},
+            },
+            {"action": {"action": "attempt_completion"}, "tool_call_id": "completion-call", "usage": {}},
+        ]
+    )
+    verifier = AsyncMock(return_value={"score": 1, "reasoning": "Confirmed", "structured_response": {}})
+    kwargs = dict(
+        user_id="user-1", agent_id="agent-1", goal="Complete checkout", tool_call_id="browser-call",
+        task_id="browser-task", session_id=None, cdp_url=None, is_resume=False,
+        output_schema={"fields": []}, attachments=None, write_lock_enabled=True,
+        start_url="https://shop.example.test", write_lock_resume_state=None,
+        system_name="Rose", use_claude_mode=False, gpt_token=None, gpt_account_id=None,
+        gpt_token_source=None, gpt_token_pool_id=None, world_model=FakeWorldModel(),
+    )
+    with (
+        patch.object(browser_handler, "load_config", return_value=types.SimpleNamespace()),
+        patch.object(browser_handler, "get_model_pricing_with_fallback", AsyncMock(return_value={})),
+        patch.object(browser_handler, "BrowserThinkingStream", FakeStream),
+        patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
+        patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
+        patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
+        patch.object(browser_handler, "save_browser_action_message", AsyncMock()),
+        patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
+        patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
+    ):
+        pending = await browser_handler._spawn_browser_agent_activity_v3_simulated(**kwargs)
+        assert pending["status"] == "awaiting_payment_card_approval"
+        assert json.loads(pending["simulated_turn_messages"][-1]["content"])["status"] == "awaiting_payment_card_approval"
+        kwargs["is_resume"] = True
+        kwargs["write_lock_resume_state"] = {
+            **pending, "approval_type": "payment",
+            "payment_card_refs": {
+                "card_number": "4111111111111111", "card_name": "Rose Labs",
+                "card_expiry": "12/30", "card_cvv": "123",
+            },
+            "payment_card_last4": "1111",
+        }
+        completed = await browser_handler._spawn_browser_agent_activity_v3_simulated(**kwargs)
+
+    assert completed["status"] == "completed"
+    resumed_turns = policy.await_args_list[1].kwargs["turn_messages"]
+    assert json.loads(resumed_turns[-1]["content"])["status"] == "payment_card_ready"
+    assert "4111111111111111" not in resumed_turns[-1]["content"]
+
+
 async def test_simulated_browser_runs_five_policy_steps_then_verified_completion():
     from domains.spawn_browser_agent_v3 import handler as browser_handler
 
@@ -3698,7 +3795,6 @@ async def test_simulated_browser_runs_five_policy_steps_then_verified_completion
         patch.object(browser_handler, "save_browser_action_message", AsyncMock()),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
-        patch.object(browser_handler, "ACTION_LOOP_DELAY_SECONDS", 0),
     ):
         result = await browser_handler._spawn_browser_agent_activity_v3_simulated(
             user_id="user-1",
@@ -3868,7 +3964,6 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
         patch.object(browser_handler, "save_browser_action_message", saved_actions),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
-        patch.object(browser_handler, "ACTION_LOOP_DELAY_SECONDS", 0),
     ):
         result = await browser_handler._spawn_browser_agent_activity_v3_simulated(
             user_id="user-1",
@@ -5020,6 +5115,10 @@ async def run_all_tests():
     r.record(
         "wmh_parallel_calls_finish_real_fast_cache_batch_lookups",
         test_wmh_parallel_calls_finish_real_fast_cache_batch_lookups,
+    )
+    await r.record_async(
+        "simulated_payment_approval_finishes_pending_tool",
+        test_simulated_payment_card_approval_finishes_pending_tool_for_resumed_policy,
     )
     teardown_mock()
     return r.all_passed

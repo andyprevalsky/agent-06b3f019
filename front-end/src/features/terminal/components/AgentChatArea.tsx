@@ -15,16 +15,13 @@
  *   terminal-input-area[data-chat-mode] mirrors the rendered chat/agent mode
  *   transition without changing interaction or visual behavior.
  *
- * MOBILE CHROME:
- *   Legal links sit below the mobile visual viewport so Safari's bottom URL bar
- *   occludes them, while desktop keeps the links visible above the bottom edge.
- *   The input stack hugs the mobile visual viewport bottom; desktop keeps the
- *   roomier bottom padding.
+ * LEGAL LINKS:
+ *   About, Privacy, and Terms remain available while chatting.
  */
 
 import { useRef, Suspense, type ComponentType } from 'react';
-import { Link } from 'react-router-dom';
 import * as analytics from '@/lib/analytics';
+import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
 import { ApprovalChip } from '@/features/terminal-component-group';
 import { QueryInput } from '@/features/terminal-component-group';
@@ -47,6 +44,7 @@ import { ChatScrollArea } from './ChatScrollArea';
 import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
 import { PopularGoalsCarousel } from './PopularGoalsCarousel';
+import { TerminalLegalFooter } from './TerminalLegalFooter';
 
 interface AgentChatAreaProps {
   agents: AgentSlice;
@@ -76,6 +74,7 @@ export function AgentChatArea({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const opening = useOpeningAnimation(a.selectedAgentId, a.isLoadingNetwork);
   const { tickerOffset, tickerRef } = useTickerCarousel(a.selectedAgentId);
+  const sharedView = isBenchmarkSharedView();
 
   const canSubmit =
     !a.selectedAgentId ||
@@ -116,31 +115,32 @@ export function AgentChatArea({
         </Suspense>
       )}
 
-      <InputArea
-        agents={a}
-        drip={drip}
-        models={models}
-        modelsLoading={modelsLoading}
-        pendingApproval={pendingApproval}
-        pendingGates={pendingGates}
-        canSubmit={canSubmit}
-        tickerOffset={tickerOffset}
-        tickerRef={tickerRef}
-      />
+      {sharedView ? (
+        <SharedRecordingNotice />
+      ) : (
+        <InputArea
+          agents={a}
+          drip={drip}
+          models={models}
+          modelsLoading={modelsLoading}
+          pendingApproval={pendingApproval}
+          pendingGates={pendingGates}
+          canSubmit={canSubmit}
+          tickerOffset={tickerOffset}
+          tickerRef={tickerRef}
+        />
+      )}
 
-      <div
-        data-testid="terminal-legal-links"
-        className="absolute -bottom-8 left-0 right-0 z-10 flex justify-center gap-2 text-[11px] text-muted-foreground/50 md:bottom-1"
-      >
-        <Link to="/privacy" className="hover:text-muted-foreground transition-colors">
-          Privacy
-        </Link>
-        <span>&middot;</span>
-        <Link to="/terms" className="hover:text-muted-foreground transition-colors">
-          Terms
-        </Link>
-      </div>
+      <TerminalLegalFooter />
     </>
+  );
+}
+
+function SharedRecordingNotice() {
+  return (
+    <div className="relative z-10 pb-8 text-center text-sm text-muted-foreground">
+      Read-only benchmark recording
+    </div>
   );
 }
 

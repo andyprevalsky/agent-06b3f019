@@ -29,16 +29,30 @@ if [ "$installed" = "$fingerprint" ]; then
 fi
 
 echo "[cloudbench] Prisma schema changed — regenerating client"
-# Use the prisma already hoisted into the repo-root node_modules (npm workspaces
-# hoist runtime packages to the root; back-end/node_modules is only a marker).
-# `--no-install` forbids npx's registry fallback: without it, npx silently ran
-# `npm i prisma@5.22.0 -D --silent`, which fails on the isolated box and aborted
-# the whole run. This regen path only fires when the checked-out schema differs
-# from the warm image's baked one, so it stayed latent until a schema change
-# (e.g. syncing main) exposed it.
+# Resolve the installed package from the backend's actual Node dependency graph.
+# npm may place Prisma in the workspace or at the root; never ask npx to select
+# a registry package when one of those immutable trees was omitted.
+if ! PRISMA_CLI="$(node - "$REPO_DIR" <<'JS'
+const fs = require("node:fs");
+const path = require("node:path");
+const repo = fs.realpathSync(process.argv[2]);
+const manifestPath = require.resolve("prisma/package.json", {paths: [path.join(repo, "back-end")]});
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+const bin = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.prisma;
+if (!bin) throw new Error("Installed Prisma package has no CLI");
+const cli = fs.realpathSync(path.resolve(path.dirname(manifestPath), bin));
+for (const installed of [fs.realpathSync(manifestPath), cli]) {
+    if (!installed.startsWith(repo + path.sep)) throw new Error("Prisma CLI must belong to this checkout");
+}
+process.stdout.write(cli);
+JS
+)"; then
+    echo "[cloudbench] FATAL: installed Prisma CLI could not be resolved" >&2
+    exit 1
+fi
 if ! (
     cd "$REPO_DIR"
-    gosu "$APP_USER" npx --no-install prisma generate --schema "$SCHEMA"
+    gosu "$APP_USER" node "$PRISMA_CLI" generate --schema "$SCHEMA"
 ); then
     echo "[cloudbench] FATAL: Prisma client generation failed" >&2
     exit 1

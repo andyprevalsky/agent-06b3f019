@@ -18,12 +18,21 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
+# Own bootstrap as well as the final worker, so failed starts retain their logs.
+if [ "${CLOUDBENCH_WORKER_SUPERVISED:-}" != "1" ]; then
+    exec python3 "${CLOUDBENCH_WORKER_EVIDENCE_HELPER:?worker evidence helper required}" \
+        run --run-token "${CLOUDBENCH_WORKER_RUN_TOKEN:?worker run token required}" \
+        --machine-id "${CLOUDBENCH_WORKER_MACHINE_ID:?worker machine identity required}" \
+        -- bash "${BASH_SOURCE[0]}" "$@"
+fi
+
 REPO_DIR="/data/repo"
 APP_USER="rose"
-FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-/data/cloudbench-fetch-ref.sh}"
+CONTROL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+[ -d "$CONTROL_DIR/lib" ] && CONTROL_LIB_DIR="$CONTROL_DIR/lib" || CONTROL_LIB_DIR="$CONTROL_DIR"
+FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$CONTROL_DIR/cloudbench-fetch-ref.sh}"
+ENV_HELPER="${CLOUDBENCH_ENV_HELPER:-$CONTROL_LIB_DIR/cloudbench-env.sh}"
 log() { echo "[cloudbench-worker] $*"; }
-
-cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
 
 # ── Sync the exact ref + local patch the primary box is running ─────────────
 # Fail CLOSED: a worker on the wrong code would silently pull this bench's
@@ -33,10 +42,7 @@ cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
 if [ -n "${REF:-}" ]; then
     log "git-syncing → $REF"
     if [ ! -x "$FETCH_REF_SCRIPT" ]; then
-        FETCH_REF_SCRIPT="$REPO_DIR/scripts/cloudbench-fetch-ref.sh"
-    fi
-    if [ ! -x "$FETCH_REF_SCRIPT" ]; then
-        log "FATAL: missing executable cloudbench-fetch-ref helper"
+        log "FATAL: missing controller-owned executable cloudbench-fetch-ref helper"
         exit 1
     fi
     if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
@@ -44,6 +50,7 @@ if [ -n "${REF:-}" ]; then
         exit 1
     fi
 fi
+cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
 # The controller credential is needed only for the exact ref fetch. Do not let
 # it flow into the benchmark worker or agent subprocess environments.
 unset CLOUDBENCH_GITHUB_TOKEN_B64
@@ -88,10 +95,26 @@ if [ -n "${LOCAL_PATCH_FILE:-}" ]; then
     log "verified local workspace patch $_actual_patch_sha"
 fi
 
+# REAL workers on fresh storage reuse the same verified image dependency donor
+# as the primary. Ref/patch verification precedes these manifest-bound helpers.
+if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ]; then
+    [ "${BENCH_SIMULATE:-0}" = 0 ] || { log "FATAL: fresh worker requires REAL mode"; exit 1; }
+    SYNC_DEPS_SCRIPT="${CLOUDBENCH_SYNC_DEPS_SCRIPT:?fresh worker dependency helper required}"
+    SYNC_PRISMA_SCRIPT="${CLOUDBENCH_SYNC_PRISMA_SCRIPT:?fresh worker Prisma helper required}"
+    if ! bash "$SYNC_DEPS_SCRIPT" /app "$REPO_DIR"; then
+        log "FATAL: could not synchronize verified image dependencies"
+        exit 1
+    fi
+    chown -R "$APP_USER:$APP_USER" "$REPO_DIR/node_modules" "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/venv" || exit 1
+    if ! bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"; then
+        log "FATAL: could not synchronize verified Prisma client"
+        exit 1
+    fi
+fi
+
 # Every autoscaled worker clone starts from a volume snapshot that may predate
 # the current run. Refresh from the app-level blobs and verify exact bytes before
 # joining the benchmark queue.
-ENV_HELPER="$REPO_DIR/scripts/lib/cloudbench-env.sh"
 [ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; exit 1; }
 # shellcheck source=lib/cloudbench-env.sh
 source "$ENV_HELPER"

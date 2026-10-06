@@ -2,11 +2,11 @@
 
 from typing import Any, Dict, List
 
-import httpx
 import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.http_client import get_http_client
 from helpers.workflow_generation import workflow_generation_headers
 
 logger = structlog.get_logger()
@@ -57,30 +57,31 @@ async def save_tool_usage(
             logger.error("BACKEND_API_KEY not configured")
             raise ValueError("BACKEND_API_KEY required for saving tool usage")
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{backend_url}/api/tool-usage",
-                headers={
-                    "X-API-Key": api_key,
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
-                },
-                json={
-                    "agent_id": agent_id,
-                    "user_id": user_id,
-                    "tool_name": tool_name,
-                    "total_cost_cents": total_cost_cents,
-                    "usage_items": usage_items,
-                    "operation_key": operation_key,
-                    **({"accounting_checkpoint": accounting_checkpoint} if accounting_checkpoint is not None else {}),
-                },
-            )
+        client = get_http_client()
+        response = await client.post(
+            f"{backend_url}/api/tool-usage",
+            timeout=10.0,
+            headers={
+                "X-API-Key": api_key,
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
+            json={
+                "agent_id": agent_id,
+                "user_id": user_id,
+                "tool_name": tool_name,
+                "total_cost_cents": total_cost_cents,
+                "usage_items": usage_items,
+                "operation_key": operation_key,
+                **({"accounting_checkpoint": accounting_checkpoint} if accounting_checkpoint is not None else {}),
+            },
+        )
 
-            if response.status_code not in (200, 201):
-                logger.error("Failed to save tool usage", status_code=response.status_code, response_text=response.text)
-                response.raise_for_status()
+        if response.status_code not in (200, 201):
+            logger.error("Failed to save tool usage", status_code=response.status_code, response_text=response.text)
+            response.raise_for_status()
 
-            logger.info("Tool usage saved", agent_id=agent_id, tool_name=tool_name, total_cost_cents=total_cost_cents)
+        logger.info("Tool usage saved", agent_id=agent_id, tool_name=tool_name, total_cost_cents=total_cost_cents)
 
     except Exception as e:
         logger.error("Failed to save tool usage", error=str(e), agent_id=agent_id, tool_name=tool_name)

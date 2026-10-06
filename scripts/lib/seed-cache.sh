@@ -67,6 +67,19 @@ benchmark_base_cache_token() {
     fi
 }
 
+# pg_dump major that writes (and must be able to read) this host's seed archive:
+# the host client under system Postgres, the pinned postgres:16 image otherwise.
+# Anchor at the first X.Y: Ubuntu's "16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)"
+# contains a later "24.04" that a greedy "last X.Y" match treats as the major.
+benchmark_seed_client_major() {
+    local use_system_pg="${1:-false}"
+    local major=16
+    if [ "$use_system_pg" = "true" ]; then
+        major="$(pg_dump --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/')"
+    fi
+    printf '%s\n' "${major:-unknown}"
+}
+
 # Producers and consumers hold the same per-dump directory lock across every
 # read/delete/restore or replacement of the dump + sidecar pair. The lock is
 # host-local: it coordinates sibling isolated stacks without creating a global
@@ -198,9 +211,54 @@ materialize_benchmark_seed_dump() (
         return 1
     fi
 
-    printf '%s' "$schema_hash" > "$temp_hash"
-    mv "$temp_dump" "$target_dump"
-    mv "$temp_hash" "${target_dump}.schemahash"
+    printf '%s' "$schema_hash" > "$temp_hash" || return 1
+    mv "$temp_dump" "$target_dump" || return 1
+    mv "$temp_hash" "${target_dump}.schemahash" || return 1
+    release_benchmark_seed_lock "$target_dump"
+    trap - EXIT INT TERM
+    printf '%s\n' "$target_dump"
+)
+
+# Fetch the reviewed canonical base fixture from the shared cache into the exact
+# dump + sidecar pair an isolated benchmark restores (agents/benchmarks/local.py),
+# so a box that has not run a benchmark yet still has the artifact. A valid pair
+# is reused as-is; a miss leaves no partial pair behind.
+pull_canonical_benchmark_seed_dump() (
+    local schema_path="$1"
+    local cache_dir="$2"
+    local pg_major="$3"
+    local repo_root
+    local python_bin
+    local token
+    local schema_hash
+    local target_dump
+    local temp_dump
+
+    repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    python_bin="$repo_root/agents/venv/bin/python"
+    [ -x "$python_bin" ] || python_bin="$(command -v python3)"
+    mkdir -p "$cache_dir"
+    cache_dir="$(cd "$cache_dir" && pwd)"
+    token="$(benchmark_base_cache_token "$schema_path" "$pg_major")" || return 1
+    schema_hash="${token%%-*}"
+    target_dump="$("$python_bin" "$repo_root/agents/benchmarks/seed_cache_path.py" \
+        --canonical-path "$schema_path" "$cache_dir")" || return 1
+    temp_dump="${target_dump}.tmp.$$"
+
+    acquire_benchmark_seed_lock "$target_dump" || return 1
+    trap 'rm -f "$temp_dump" "$temp_dump.schemahash" "$temp_dump.cachetoken" 2>/dev/null || true; release_benchmark_seed_lock "$target_dump"' EXIT INT TERM
+    if [ "$(seed_cache_decision "$target_dump" "$schema_hash" 0 "$token")" != restore-local ]; then
+        if ! (cd "$repo_root/back-end" && npx tsx scripts/seed-dump-cache.ts get "$token" "$temp_dump") \
+           || [ ! -s "$temp_dump" ]; then
+            echo "canonical base fixture is unavailable in the shared cache: $token" >&2
+            return 1
+        fi
+        printf '%s' "$schema_hash" > "$temp_dump.schemahash"
+        printf '%s' "$token" > "$temp_dump.cachetoken"
+        mv "$temp_dump" "$target_dump"
+        mv "$temp_dump.schemahash" "${target_dump}.schemahash"
+        mv "$temp_dump.cachetoken" "${target_dump}.cachetoken"
+    fi
     release_benchmark_seed_lock "$target_dump"
     trap - EXIT INT TERM
     printf '%s\n' "$target_dump"

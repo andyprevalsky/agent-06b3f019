@@ -19,6 +19,7 @@ PROVIDER_ORDER = (
     "claude_oauth_token",
     "gpt_api_key",
     "anthropic_api_key",
+    "foundry",
     "openrouter_model_1",
     "openrouter_model_2",
 )
@@ -37,6 +38,7 @@ def classify_model(model: str) -> tuple[str, str]:
         ("-claude", "claude_oauth_token"),
         ("-openai", "gpt_api_key"),
         ("-anthropic", "anthropic_api_key"),
+        ("-foundry", "foundry"),
     )
     for suffix, provider in suffixes:
         if model.endswith(suffix):

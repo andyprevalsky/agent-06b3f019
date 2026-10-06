@@ -18,14 +18,17 @@ from temporalio import activity
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 
-from helpers.llm import _safe_heartbeat
-
 from domains.spawn_claude_code_agent.config import (
+    CODE_AGENT_DRAIN_YIELD_STATUS,
+    CODE_SESSION_HEARTBEAT_KEY,
+    DRAIN_CHECK_INTERVAL_S,
     E2B_COST_CENTS_PER_SECOND,
     ECHO_SUPPRESS_S,
     FATAL_ERROR_PATTERNS,
     MAX_RUNTIME_S,
     MAX_UNCHANGED_OUTPUTS,
+    REATTACH_PROBE_ATTEMPTS,
+    REATTACH_PROBE_BACKOFF_S,
     SDK_IDLE_TIMEOUT_S,
     SDK_POST_RESULT_EXIT_GRACE_S,
     SDK_POST_RESULT_STRETCH_TOOL_NAMES,
@@ -42,13 +45,16 @@ from domains.spawn_claude_code_agent.repo import (
     save_claude_code_message,
 )
 from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
-from helpers.claude_code_ws_client import ClaudeCodeWsClient
+from helpers.activity_generation_drain import activity_drain_reason
+from helpers.activity_heartbeat import heartbeat_resume_details, safe_heartbeat
+from helpers.claude_code_ws_client import ClaudeCodeWsClient, ws_endpoint_reachable
 from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
 from helpers.tracing import traced
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
 from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
+from utils.response_schema_constraints import explicitly_allows_empty_value, value_satisfies_output_field_constraints
 from utils.terminal_filter import TerminalFilter
 
 logger = structlog.get_logger()
@@ -505,6 +511,67 @@ Files in this directory will be automatically uploaded and returned to the user.
 # ---------------------------------------------------------------------------
 
 
+# Claude Code CLI stream-json messages that ws-server forwards verbatim as
+# `cli_message` events. (log field, CLI field) pairs; values are scalars from the
+# SDK schema (status enums, epoch seconds, counts, categorized error enum).
+_CLI_RATE_LIMIT_FIELDS = (
+    ("rate_limit_status", "status"),
+    ("rate_limit_type", "rateLimitType"),
+    ("utilization", "utilization"),
+    ("resets_at", "resetsAt"),
+    ("overage_status", "overageStatus"),
+    ("overage_resets_at", "overageResetsAt"),
+    ("overage_disabled_reason", "overageDisabledReason"),
+    ("is_using_overage", "isUsingOverage"),
+    ("surpassed_threshold", "surpassedThreshold"),
+)
+_CLI_API_RETRY_FIELDS = (
+    ("attempt", "attempt"),
+    ("max_retries", "max_retries"),
+    ("retry_delay_ms", "retry_delay_ms"),
+    ("error_status", "error_status"),
+    ("error", "error"),
+)
+_CLI_LOG_VALUE_MAX_CHARS = 200
+
+
+def _bounded_cli_log_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:_CLI_LOG_VALUE_MAX_CHARS]
+
+
+def _log_claude_cli_message(
+    event: dict[str, Any],
+    *,
+    agent_id: str,
+    task_id: str,
+    sandbox_id: str,
+) -> None:
+    """Log CLI rate-limit status and API retries; other CLI messages stay unlogged."""
+    message = event.get("cli_message")
+    if not isinstance(message, dict):
+        return
+    ids = {"agent_id": agent_id, "task_id": task_id, "sandbox_id": sandbox_id}
+
+    if message.get("type") == "rate_limit_event":
+        info = message.get("rate_limit_info")
+        info = info if isinstance(info, dict) else {}
+        logger.info(
+            "[ClaudeCode] CLI rate-limit status",
+            **ids,
+            **{key: _bounded_cli_log_value(info.get(src)) for key, src in _CLI_RATE_LIMIT_FIELDS},
+        )
+        return
+
+    if message.get("type") == "system" and message.get("subtype") == "api_retry":
+        logger.info(
+            "[ClaudeCode] CLI API retry",
+            **ids,
+            **{key: _bounded_cli_log_value(message.get(src)) for key, src in _CLI_API_RETRY_FIELDS},
+        )
+
+
 def _log_code_agent_event(
     event: dict[str, Any],
     *,
@@ -579,6 +646,10 @@ def _log_code_agent_event(
             )
             return
 
+    if event_type == "cli_message":
+        _log_claude_cli_message(event, agent_id=agent_id, task_id=task_id, sandbox_id=sandbox_id)
+        return
+
     # Progress events for Claude Code + Codex — must survive info-level retention.
     if event_type in {"tool_use", "tool_result", "agent_message", "result", "error", "session"}:
         tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
@@ -630,7 +701,88 @@ def codex_completed_turn_count(code_events: list[Dict[str, Any]]) -> int:
     return len(seen)
 
 
-async def _run_agentic_loop(  # noqa: C901
+class CodeSessionDrained(Exception):
+    """The worker is draining; the activity detaches while the sandbox keeps running."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+_CODE_SESSION_FIELDS = (
+    "task_id",
+    "sandbox_id",
+    "ws_url",
+    "code_provider",
+    "github_repo_url",
+    "started_at",
+    "loop_started_at",
+    # Sandbox events already logged by an earlier attachment; the reattached
+    # attempt logs only the ones that arrived while nobody was attached.
+    "logged_events",
+)
+
+
+def code_session_record(raw: Any) -> Optional[Dict[str, Any]]:
+    """Return the reattachable session in ``raw``, or None when it lacks a sandbox identity."""
+    if not isinstance(raw, dict):
+        return None
+    if not all(isinstance(raw.get(key), str) and raw[key] for key in ("task_id", "sandbox_id", "ws_url")):
+        return None
+    return {key: raw[key] for key in _CODE_SESSION_FIELDS if raw.get(key) is not None}
+
+
+@activity.defn
+async def close_detached_code_session_activity(agent_id: str, code_session: Dict[str, Any]) -> bool:
+    """Close a sandbox a drained attempt left running when no attempt will reattach to it.
+
+    Idempotent: closing an already-closed session is a no-op on the backend.
+    """
+    session = code_session_record(code_session)
+    if session is None:
+        return False
+    logger.info(
+        "[ClaudeCode] Closing detached sandbox",
+        agent_id=agent_id,
+        task_id=session["task_id"],
+        sandbox_id=session["sandbox_id"],
+    )
+    await close_e2b_session(task_id=session["task_id"], code_provider=session.get("code_provider", "claude"))
+    return True
+
+
+def _next_attempt_reattaches(cancellation: activity.ActivityCancellationDetails) -> bool:
+    """Whether Temporal will run another attempt of this activity that reattaches.
+
+    A terminated or reset workflow (``not_found`` / ``reset``) never schedules
+    one, and a timeout or worker shutdown leads to one only while the retry
+    policy has attempts left. A paused activity resumes with its heartbeats.
+    """
+    if cancellation.not_found or cancellation.reset:
+        return False
+    if cancellation.paused:
+        return True
+    info = activity.info()
+    max_attempts = info.retry_policy.maximum_attempts if info.retry_policy else 0
+    return max_attempts <= 0 or info.attempt < max_attempts
+
+
+def _code_session_from_heartbeat() -> Optional[Dict[str, Any]]:
+    """Session the previous attempt of this activity was attached to, if any."""
+    if not activity.in_activity():
+        return None
+    info = activity.info()
+    if info.attempt <= 1:
+        return None
+    for detail in info.heartbeat_details or ():
+        if isinstance(detail, dict):
+            session = code_session_record(detail.get(CODE_SESSION_HEARTBEAT_KEY))
+            if session is not None:
+                return session
+    return None
+
+
+async def _run_agentic_loop(
     *,
     agent_id: str,
     task_id: str,
@@ -650,6 +802,9 @@ async def _run_agentic_loop(  # noqa: C901
     code_provider: str = "claude",
     code_events: list[Dict[str, Any]] | None = None,
     terminal_output_persisted: Optional[list[bool]] = None,
+    loop_started_at: Optional[float] = None,
+    generation_yield: bool = True,
+    code_session: Optional[Dict[str, Any]] = None,
 ) -> tuple[int, bool, list[Dict[str, str]], int, int, list[Dict[str, Any]]]:
     """Run the WebSocket-based agentic loop monitoring Claude Code output.
 
@@ -659,6 +814,12 @@ async def _run_agentic_loop(  # noqa: C901
 
     ``terminal_output_persisted`` is an optional single-element list shared with
     the activity so fatal-path persistence is visible to outer cleanup.
+
+    Raises ``CodeSessionDrained`` when the worker drains (or, with
+    ``generation_yield``, its generation is superseded) before Claude Code
+    exits. ``loop_started_at`` keeps MAX_RUNTIME_S cumulative across reattaches.
+    ``code_session["logged_events"]`` is kept current so each sandbox event is
+    logged once across every attachment to the session.
     """
     last_output_time = safe_time()
     exit_code: Optional[int] = None
@@ -683,6 +844,7 @@ async def _run_agentic_loop(  # noqa: C901
     # Wall-clock of first SDK type=result. Stretch must not re-arm after this;
     # grace backstop ends the monitor if the CLI never exits.
     sdk_result_at: float | None = None
+    logged_events = int((code_session or {}).get("logged_events") or 0)
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -724,9 +886,25 @@ async def _run_agentic_loop(  # noqa: C901
         )
         pending_output = True
 
+    async def on_events_replay(events: list[dict[str, Any]]) -> None:
+        # The ws-server resends its whole history on every (re)connect, so it
+        # replaces everything seen so far instead of appending to it.
+        nonlocal completed_codex_turns, effective_idle_timeout_s, wait_tool_armed, in_flight_tool_count
+        code_events.clear()
+        completed_codex_turn_keys.clear()
+        completed_codex_turns = 0
+        in_flight_tool_count = 0
+        wait_tool_armed = False
+        effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+        for event in events:
+            await on_event(event)
+        logger.info(
+            "[ClaudeCode] Replayed sandbox event history", agent_id=agent_id, task_id=task_id, events=len(events)
+        )
+
     async def on_event(event: dict[str, Any]) -> None:
         nonlocal completed_codex_turns, last_output_time, effective_idle_timeout_s
-        nonlocal wait_tool_armed, in_flight_tool_count, sdk_result_at
+        nonlocal wait_tool_armed, in_flight_tool_count, sdk_result_at, logged_events
         last_output_time = safe_time()
         code_events.append(event)
         if is_codex_completed_turn_event(event):
@@ -819,6 +997,13 @@ async def _run_agentic_loop(  # noqa: C901
                     status=event.get("status"),
                 )
             effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+        # code_events mirrors the sandbox's append-only event history, so an
+        # event's index identifies it across reconnect replays and reattaches.
+        if len(code_events) <= logged_events:
+            return
+        logged_events = len(code_events)
+        if code_session is not None:
+            code_session["logged_events"] = logged_events
         _log_code_agent_event(event, agent_id=agent_id, task_id=task_id, sandbox_id=sandbox_id)
         logger.debug(
             "[ClaudeCode] Received code-agent event",
@@ -835,7 +1020,8 @@ async def _run_agentic_loop(  # noqa: C901
         on_connection_change=on_connection_change,
         on_stdin_error=on_stdin_error,
         on_event=on_event,
-        heartbeat_fn=lambda msg: _safe_heartbeat(msg),
+        heartbeat_fn=safe_heartbeat,
+        on_events_replay=on_events_replay,
     )
 
     if not await ws_client.connect():
@@ -844,8 +1030,9 @@ async def _run_agentic_loop(  # noqa: C901
     listen_task = asyncio.create_task(ws_client.listen())
     action_summary.append("Connected to Claude Code WebSocket")
 
-    loop_start = safe_time()
-    last_status_update = loop_start
+    loop_start = loop_started_at if loop_started_at is not None else safe_time()
+    last_status_update = safe_time()
+    last_drain_check = 0.0
 
     async def on_chunk(text: str, tokens: int) -> None:
         pass  # Parent LLM streaming not needed
@@ -853,7 +1040,21 @@ async def _run_agentic_loop(  # noqa: C901
     try:
         while exit_code is None and not attempt_completion:
             elapsed = safe_time() - loop_start
-            _safe_heartbeat(f"Monitoring Claude Code ({int(elapsed)}s)")
+            safe_heartbeat(f"Monitoring Claude Code ({int(elapsed)}s)")
+
+            if safe_time() - last_drain_check >= DRAIN_CHECK_INTERVAL_S:
+                last_drain_check = safe_time()
+                drain_reason = await activity_drain_reason(allow_generation_handoff=generation_yield)
+                if drain_reason:
+                    logger.info(
+                        "[ClaudeCode] Worker draining; detaching from the running sandbox",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        sandbox_id=sandbox_id,
+                        reason=drain_reason,
+                        elapsed_s=int(elapsed),
+                    )
+                    raise CodeSessionDrained(drain_reason)
 
             if elapsed > MAX_RUNTIME_S:
                 logger.warning("[ClaudeCode] Max runtime exceeded", agent_id=agent_id, task_id=task_id, elapsed=elapsed)
@@ -1087,6 +1288,10 @@ async def _run_agentic_loop(  # noqa: C901
         listen_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await listen_task
+        # Close the socket too: after a drain the sandbox outlives this attempt
+        # and would otherwise keep buffering broadcasts for a dead reader.
+        with contextlib.suppress(Exception):
+            await ws_client.disconnect()
 
     logger.info(
         "[ClaudeCode] Agentic loop finished",
@@ -1171,20 +1376,8 @@ async def _handle_reconnect_exhausted(
 # ---------------------------------------------------------------------------
 
 
-_TERMINAL_TRUNCATION_RE = re.compile(r"\+\s*\d+\s+lines?\s*\(ctrl\+o to expand\)", re.IGNORECASE)
 _ABSOLUTE_PATH_RE = re.compile(r"/home/user/[A-Za-z0-9._/\-]+")
 _CODEX_COMMAND_RE = re.compile(r"\[Codex command (?:started|completed)\]\s*(.+)")
-
-
-def _terminal_output_is_truncated(final_output: str) -> bool:
-    """Detect Claude Code's TUI truncation marker (e.g. '+225 lines (ctrl+o to expand)').
-
-    When Claude Code prints long output, the terminal shows only the first ~3 lines
-    followed by a collapse indicator. The grounded-evidence verifier can't see the
-    hidden lines, so any schema field that needs them (e.g. a sequence list) becomes
-    unpopulatable from the visible terminal alone.
-    """
-    return bool(_TERMINAL_TRUNCATION_RE.search(final_output or ""))
 
 
 def _build_codex_evidence_summary(final_output: str) -> str:
@@ -1328,22 +1521,31 @@ def _synthesize_codex_structured_response(
         if "file_pointer" in field_type:
             path = script_paths[0] if script_paths else (paths[0] if paths else None)
             if not path:
-                return None
+                if field.get("required", True):
+                    return None
+                continue
             structured[name] = {"path": path}
         elif field_type.startswith("list") and "sequence" in descriptor:
             if not numbers:
-                return None
+                if field.get("required", True):
+                    return None
+                continue
             if "collatz" in descriptor and not _is_valid_collatz_sequence(numbers, total_steps):
-                return None
+                if field.get("required", True):
+                    return None
+                continue
             structured[name] = numbers
         elif field_type in {"integer", "int", "number"} and "step" in descriptor:
             if total_steps is None:
-                return None
+                if field.get("required", True):
+                    return None
+                continue
             structured[name] = total_steps
         elif "path" in descriptor and paths:
             structured[name] = script_paths[0] if script_paths else paths[0]
         else:
-            return None
+            if field.get("required", True):
+                return None
 
     return structured or None
 
@@ -1386,20 +1588,38 @@ def _structured_response_satisfies_declared_schema(
     output_schema: Optional[Dict[str, Any]],
     structured_response: Optional[Dict[str, Any]],
 ) -> bool:
-    """Return true only when every declared field has a non-empty value."""
+    """Return true only when every declared field satisfies its output contract."""
     fields = output_schema.get("fields", []) if isinstance(output_schema, dict) else []
     if not fields:
         return True
+    if structured_response is None:
+        # No structured evidence at all: equivalent to an empty response, so a
+        # schema whose fields are all optional is still satisfied.
+        structured_response = {}
     if not isinstance(structured_response, dict):
         return False
     for field in fields:
         if not isinstance(field, dict):
             return False
         name = field.get("name")
-        if not name or name not in structured_response:
+        if not name:
+            return False
+        if name not in structured_response:
+            if field.get("required", True) is False:
+                continue
             return False
         value = structured_response[name]
-        if value is None or value == "" or value == [] or value == {}:
+        if value is None and field.get("nullable") is True:
+            continue
+        # A present empty value only satisfies a required field when its bounds
+        # explicitly allow it; an optional field may be present and empty.
+        if (
+            field.get("required", True) is not False
+            and (value is None or value == "" or value == [] or value == {})
+            and not explicitly_allows_empty_value(value, field)
+        ):
+            return False
+        if not value_satisfies_output_field_constraints(value, field):
             return False
     return True
 
@@ -1477,7 +1697,10 @@ def _structured_response_from_code_evidence(
             str(field.get(key, "")) for key in ("name", "label", "description") if field.get(key)
         ).lower()
         if field_type.startswith("list") and "sequence" in descriptor and sequence:
-            structured[name] = sequence
+            # A sequence outside the field's declared bounds would fail the
+            # whole response; leave the field unset instead.
+            if value_satisfies_output_field_constraints(sequence, field):
+                structured[name] = sequence
         elif field_type in {"integer", "int", "number"} and "step" in descriptor:
             if total_steps is not None:
                 structured[name] = total_steps
@@ -1805,40 +2028,6 @@ async def _run_verifier(
         v_reasoning = progress_result.get("reasoning", "")
         structured_response = progress_result.get("structured_response")
 
-        # Terminal-truncation override: when Claude Code's TUI collapses long
-        # output (e.g. "+225 lines (ctrl+o to expand)"), the grounded-evidence
-        # verifier cannot see the hidden lines and scores partial. The parent
-        # LLM monitoring Claude Code DID see the full unfiltered conversation
-        # and signaled completion (attempt_completion=True). When that signal
-        # is present AND the process didn't crash AND the visible output is
-        # truncated, accept the parent LLM's judgment instead of penalising
-        # the agent for terminal-display truncation it cannot control. Without
-        # this override the parent loop retries spawn_claude_code_agent on
-        # every Collatz/long-output task and burns 50s+ per retry, blowing
-        # the smoke-suite cap (claude-code-agent: 65s passing → 115s+ failing).
-        terminal_truncated = _terminal_output_is_truncated(final_output)
-        if (
-            score < 1.0
-            and attempt_completion
-            and (exit_code is None or exit_code == 0)
-            and terminal_truncated
-        ):
-            logger.info(
-                "[ClaudeCode] Verifier score override: parent LLM signaled completion + terminal truncated",
-                agent_id=agent_id,
-                task_id=task_id,
-                original_score=score,
-                attempt_completion=attempt_completion,
-                exit_code=exit_code,
-            )
-            override_note = (
-                f" [override: parent LLM signaled completion (attempt_completion=True, "
-                f"exit_code={exit_code}); terminal output truncated by Claude Code TUI "
-                f"so grounded-evidence score {score:.2f} reflects display limits, not task failure]"
-            )
-            v_reasoning = v_reasoning + override_note
-            score = 1.0
-
         await save_claude_code_message(
             agent_id=agent_id,
             title=f"⚖️ Progress: {score * 100:.0f}%",
@@ -2000,7 +2189,7 @@ async def _resolve_claude_token_for_activity(user_id: str, code_provider: str) -
 
 @activity.defn
 @traced("spawn_claude_code_activity")
-async def spawn_claude_code_activity(  # noqa: C901
+async def spawn_claude_code_activity(
     user_id: str,
     agent_id: str,
     goal: str,
@@ -2016,6 +2205,7 @@ async def spawn_claude_code_activity(  # noqa: C901
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
+    resume_session: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Claude Code agent activity using E2B Desktop Sandbox.
 
@@ -2026,6 +2216,13 @@ async def spawn_claude_code_activity(  # noqa: C901
     4. Run verifier to confirm completion
     5. On completion, close session and extract output files
 
+    A worker drain detaches instead: the sandbox keeps running and the activity
+    returns ``CODE_AGENT_DRAIN_YIELD_STATUS`` with the ``code_session`` to pass
+    back as ``resume_session``. A retry after a crashed or timed-out attempt
+    reattaches to the session carried on the previous attempt's heartbeats. The
+    sandbox is closed whenever no attempt will reattach: a requested cancel, a
+    terminated workflow, or the last attempt the retry policy allows.
+
     Args:
         output_schema: Response schema from parent agent's tool call (required for structured responses)
         attachments: File attachments from context to upload to sandbox
@@ -2033,6 +2230,9 @@ async def spawn_claude_code_activity(  # noqa: C901
         github_repo_url: Optional GitHub repo URL to clone before starting Claude Code
         _legacy_claude_token: Ignored compatibility slot for activities scheduled by older workers
         code_provider: "claude" for Claude Code or "codex" for Codex CLI
+        resume_session: Session returned by a drained attempt; its sandbox is reattached
+            when still reachable. ``generation_yield=False`` keeps the run on this worker
+            when its generation is superseded (no parked handoff is available).
     """
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
 
@@ -2043,6 +2243,12 @@ async def spawn_claude_code_activity(  # noqa: C901
     ws_url = None
     start_time = safe_time()
     log_collector: Optional[SandboxLogCollector] = None
+    session_record: Optional[Dict[str, Any]] = None
+    session_heartbeats = contextlib.ExitStack()
+    generation_yield = not (isinstance(resume_session, dict) and resume_session.get("generation_yield") is False)
+    # A retry's heartbeat session is newer than the scheduled resume_session: the
+    # earlier attempt may have replaced an unreachable sandbox with a fresh one.
+    attached = _code_session_from_heartbeat() or code_session_record(resume_session)
 
     total_input_tokens = 0
     total_output_tokens = 0
@@ -2064,107 +2270,191 @@ async def spawn_claude_code_activity(  # noqa: C901
     terminal = TerminalFilter(cols=200, rows=500)
 
     try:
-        _safe_heartbeat("Creating E2B sandbox with Claude Code")
+        if attached is not None:
+            # A pause landing during the reattach probe must still find the sandbox to close.
+            task_id = attached["task_id"]
+        if attached is not None and not await ws_endpoint_reachable(
+            attached["ws_url"], attempts=REATTACH_PROBE_ATTEMPTS, backoff_s=REATTACH_PROBE_BACKOFF_S
+        ):
+            logger.warning(
+                "[ClaudeCode] Previous sandbox unreachable; closing it before a fresh start",
+                agent_id=agent_id,
+                task_id=attached["task_id"],
+                sandbox_id=attached["sandbox_id"],
+            )
+            try:
+                await close_e2b_session(
+                    task_id=attached["task_id"],
+                    code_provider=attached.get("code_provider", code_provider),
+                )
+            except Exception as close_error:
+                logger.warning(
+                    "[ClaudeCode] Closing the unreachable sandbox failed",
+                    agent_id=agent_id,
+                    task_id=attached["task_id"],
+                    error=str(close_error),
+                )
+            attached = None
+
+        if attached is not None:
+            code_provider = attached.get("code_provider", code_provider)
+            task_id = attached["task_id"]
+            sandbox_id = attached["sandbox_id"]
+            ws_url = attached["ws_url"]
+            start_time = attached.get("started_at") or start_time
+            actual_github_repo_url = attached.get("github_repo_url")
+            loop_started_at = attached.get("loop_started_at")
+            uploaded_files = []
+            logger.info(
+                "[ClaudeCode] Reattaching to running sandbox",
+                agent_id=agent_id,
+                task_id=task_id,
+                sandbox_id=sandbox_id,
+                attempt=activity.info().attempt,
+            )
+            action_summary.append(f"Reattached to E2B sandbox: {sandbox_id}")
+
         claude_token = await _resolve_claude_token_for_activity(user_id, code_provider)
 
-        # 1. Create E2B session via back-end API
-        logger.info(
-            "[ClaudeCode] Creating E2B session",
-            agent_id=agent_id,
-            goal=goal[:200],
-            num_attachments=len(attachments) if attachments else 0,
-        )
+        if attached is None:
+            # 1. Create E2B session via back-end API
+            logger.info(
+                "[ClaudeCode] Creating E2B session",
+                agent_id=agent_id,
+                goal=goal[:200],
+                num_attachments=len(attachments) if attachments else 0,
+            )
 
-        session_data = await create_e2b_session(
-            agent_id=agent_id,
-            goal=goal,
-            user_id=user_id,
-            attachments=attachments,
-            github_repo_url=github_repo_url,
-            code_provider=code_provider,
-            fast_mode_cache_enabled=fast_mode_cache_enabled,
-        )
-        task_id = session_data["task_id"]
-        sandbox_id = session_data["sandbox_id"]
-        ws_url = session_data["ws_url"]
-        uploaded_files = session_data.get("uploaded_files", [])
-        actual_github_repo_url = session_data.get("github_repo_url")
+            session_data = await create_e2b_session(
+                agent_id=agent_id,
+                goal=goal,
+                user_id=user_id,
+                attachments=attachments,
+                github_repo_url=github_repo_url,
+                code_provider=code_provider,
+                fast_mode_cache_enabled=fast_mode_cache_enabled,
+            )
+            task_id = session_data["task_id"]
+            sandbox_id = session_data["sandbox_id"]
+            ws_url = session_data["ws_url"]
+            uploaded_files = session_data.get("uploaded_files", [])
+            actual_github_repo_url = session_data.get("github_repo_url")
+            loop_started_at = None
 
-        logger.info(
-            "[ClaudeCode] Session created",
-            agent_id=agent_id,
-            task_id=task_id,
-            sandbox_id=sandbox_id,
-            ws_url=ws_url[:100] if ws_url else None,
-            uploaded_files=len(uploaded_files),
-        )
-        action_summary.append(f"Created E2B sandbox: {sandbox_id}")
+            logger.info(
+                "[ClaudeCode] Session created",
+                agent_id=agent_id,
+                task_id=task_id,
+                sandbox_id=sandbox_id,
+                ws_url=ws_url[:100] if ws_url else None,
+                uploaded_files=len(uploaded_files),
+            )
+            action_summary.append(f"Created E2B sandbox: {sandbox_id}")
+
+        session_record = {
+            "task_id": task_id,
+            "sandbox_id": sandbox_id,
+            "ws_url": ws_url,
+            "code_provider": code_provider,
+            "github_repo_url": actual_github_repo_url,
+            "started_at": start_time,
+            "loop_started_at": loop_started_at,
+            "logged_events": int((attached or {}).get("logged_events") or 0),
+        }
+        # An attempt's first heartbeat goes out at once and later ones only every
+        # throttle interval, so nothing may heartbeat before the session rides
+        # along, and the session must ride along before anything else can fail:
+        # a crash in either window would hide the sandbox from the retry.
+        session_heartbeats.enter_context(heartbeat_resume_details({CODE_SESSION_HEARTBEAT_KEY: session_record}))
+        safe_heartbeat("Claude Code sandbox attached")
 
         log_collector = SandboxLogCollector(sandbox_id, agent_id, task_id)
         await log_collector.start()
-        if uploaded_files:
-            action_summary.append(f"Uploaded {len(uploaded_files)} files to /home/user/attachments/")
 
-        # 2. Post init message
-        await save_claude_code_message(
-            agent_id=agent_id,
-            title="Claude Code Started",
-            task_id=task_id,
-            message=f"Goal: {goal}",
-            status=MessageStatus.IN_PROGRESS,
-            action_type="claude_code_started",
-            tool_call_id=tool_call_id,
-            is_init_message=True,
-            ws_url=ws_url,
-            output_schema=output_schema,
-            github_repo_url=actual_github_repo_url,
-            code_provider=code_provider,
-        )
+        if attached is None:
+            if uploaded_files:
+                action_summary.append(f"Uploaded {len(uploaded_files)} files to /home/user/attachments/")
 
-        await save_claude_code_message(
-            agent_id=agent_id,
-            title="Task Started",
-            task_id=task_id,
-            message=goal,
-            status=MessageStatus.FINISHED,
-            action_type="task_started",
-            tool_call_id=tool_call_id,
-            code_provider=code_provider,
-        )
-        action_summary.append(f"Started task: {goal[:100]}")
+            # 2. Post init message
+            await save_claude_code_message(
+                agent_id=agent_id,
+                title="Claude Code Started",
+                task_id=task_id,
+                message=f"Goal: {goal}",
+                status=MessageStatus.IN_PROGRESS,
+                action_type="claude_code_started",
+                tool_call_id=tool_call_id,
+                is_init_message=True,
+                ws_url=ws_url,
+                output_schema=output_schema,
+                github_repo_url=actual_github_repo_url,
+                code_provider=code_provider,
+            )
+
+            await save_claude_code_message(
+                agent_id=agent_id,
+                title="Task Started",
+                task_id=task_id,
+                message=goal,
+                status=MessageStatus.FINISHED,
+                action_type="task_started",
+                tool_call_id=tool_call_id,
+                code_provider=code_provider,
+            )
+            action_summary.append(f"Started task: {goal[:100]}")
 
         # 3. WebSocket-based agentic loop
-        _safe_heartbeat("Connecting to Claude Code WebSocket")
+        if loop_started_at is None:
+            loop_started_at = safe_time()
+            session_record["loop_started_at"] = loop_started_at
+        safe_heartbeat("Connecting to Claude Code WebSocket")
 
         model_pricing = await get_model_pricing_with_fallback(model)
 
-        (
-            exit_code,
-            attempt_completion,
-            conversation_history,
-            loop_input_tokens,
-            loop_output_tokens,
-            code_events,
-        ) = await _run_agentic_loop(
-            agent_id=agent_id,
-            task_id=task_id,
-            sandbox_id=sandbox_id,
-            goal=goal,
-            ws_url=ws_url,
-            terminal=terminal,
-            model=model,
-            claude_token=claude_token,
-            gpt_token=gpt_token,
-            gpt_account_id=gpt_account_id,
-            gpt_token_source=gpt_token_source,
-            gpt_token_pool_id=gpt_token_pool_id,
-            gpt_token_user_id=user_id if gpt_token else None,
-            code_provider=code_provider,
-            action_summary=action_summary,
-            tool_call_id=tool_call_id,
-            code_events=code_events,
-            terminal_output_persisted=terminal_output_persisted_box,
-        )
+        try:
+            (
+                exit_code,
+                attempt_completion,
+                conversation_history,
+                loop_input_tokens,
+                loop_output_tokens,
+                code_events,
+            ) = await _run_agentic_loop(
+                agent_id=agent_id,
+                task_id=task_id,
+                sandbox_id=sandbox_id,
+                goal=goal,
+                ws_url=ws_url,
+                terminal=terminal,
+                model=model,
+                claude_token=claude_token,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                gpt_token_source=gpt_token_source,
+                gpt_token_pool_id=gpt_token_pool_id,
+                gpt_token_user_id=user_id if gpt_token else None,
+                code_provider=code_provider,
+                action_summary=action_summary,
+                tool_call_id=tool_call_id,
+                code_events=code_events,
+                terminal_output_persisted=terminal_output_persisted_box,
+                loop_started_at=loop_started_at,
+                generation_yield=generation_yield,
+                code_session=session_record,
+            )
+        except CodeSessionDrained as drained:
+            # Cleared before awaiting so a cancel landing in stop() reaches the
+            # cancel handler below without stopping the collector twice.
+            collector, log_collector = log_collector, None
+            if collector:
+                await collector.stop()
+            return {
+                "status": CODE_AGENT_DRAIN_YIELD_STATUS,
+                "yield_reason": drained.reason,
+                "code_session": session_record,
+                "task_id": task_id,
+                "code_provider": code_provider,
+            }
         total_input_tokens += loop_input_tokens
         total_output_tokens += loop_output_tokens
 
@@ -2225,6 +2515,8 @@ async def spawn_claude_code_activity(  # noqa: C901
         )
         output_files = close_data.get("output_files", [])
         claude_code_usage = close_data.get("usage")
+        session_heartbeats.close()
+        safe_heartbeat("Verifying Claude Code result")
 
         logger.info(
             "[ClaudeCode] Session closed",
@@ -2337,10 +2629,38 @@ async def spawn_claude_code_activity(  # noqa: C901
         return result
 
     except asyncio.CancelledError:
-        logger.info("[ClaudeCode] Activity cancelled", agent_id=agent_id, task_id=task_id)
+        cancellation = activity.cancellation_details()
+        logger.info(
+            "[ClaudeCode] Activity cancelled",
+            agent_id=agent_id,
+            task_id=task_id,
+            cancellation=repr(cancellation),
+        )
 
         if log_collector:
             await log_collector.stop()
+
+        if cancellation is not None and not cancellation.cancel_requested:
+            # Not a cancel the workflow asked for, so the run is not reported as
+            # cancelled. The sandbox stays open only for an attempt that will
+            # reattach to it from this attempt's heartbeats.
+            if task_id and not _next_attempt_reattaches(cancellation):
+                logger.info(
+                    "[ClaudeCode] No attempt will reattach; closing the sandbox",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    cancellation=repr(cancellation),
+                )
+                try:
+                    await close_e2b_session(task_id=task_id, code_provider=code_provider)
+                except Exception as close_error:
+                    logger.warning(
+                        "[ClaudeCode] Closing the abandoned sandbox failed",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        error=str(close_error),
+                    )
+            raise
 
         if task_id:
             try:
@@ -2466,3 +2786,6 @@ async def spawn_claude_code_activity(  # noqa: C901
                 )
 
         raise
+
+    finally:
+        session_heartbeats.close()

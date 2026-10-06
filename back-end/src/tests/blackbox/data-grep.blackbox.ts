@@ -578,13 +578,23 @@ async function testRegexAndSources(userId: string, agentId: string): Promise<voi
   });
   assertStatus(res.status, 200, res.data);
   const body = assertBody(res.data);
-  for (const role of ['USER', 'ASSISTANT', 'TOOL', 'SYSTEM'] as const) {
+  for (const role of ['USER', 'ASSISTANT', 'TOOL'] as const) {
     if (!body.matches.some((match) => match.role === role && match.location.role === role)) {
       throw new Error(
         `Expected agent_network result with role ${role}, got ${JSON.stringify(body)}`
       );
     }
   }
+  if (body.matches.some((match) => match.role === 'SYSTEM')) {
+    throw new Error(`agent_network exposed a SYSTEM message: ${JSON.stringify(body)}`);
+  }
+  res = await requestGrep(userId, {
+    pattern: 'Atlas handoff',
+    source: 'agent_network',
+    agent_id: agentId,
+    role: 'SYSTEM',
+  });
+  assertStatus(res.status, 400, res.data);
 
   res = await requestGrep(userId, {
     pattern: 'Nimbus milestone|Calypso archive',

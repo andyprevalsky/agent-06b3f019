@@ -12,6 +12,7 @@ from typing import Optional
 import psutil
 import structlog
 from flask import Flask, jsonify
+from werkzeug.serving import make_server
 
 logger = structlog.get_logger()
 
@@ -418,10 +419,17 @@ def set_worker_status(healthy: bool, phase: Optional[str] = None, build_id: Opti
     worker_status["last_heartbeat"] = datetime.utcnow().isoformat()
 
 
-def run_health_server(port: int = 8080):
-    """Run the health check server in a separate thread."""
-    logger.info(f"Starting health check server on port {port}")
+class HealthServerThread(threading.Thread):
+    """A bound health endpoint whose port is known before worker startup proceeds."""
 
+    def __init__(self, port: int):
+        self.server = make_server("::", port, app, threaded=True)
+        self.port = self.server.server_port
+        super().__init__(target=self.server.serve_forever, daemon=True)
+
+
+def run_health_server(port: int = 8080) -> HealthServerThread:
+    """Bind the health endpoint, then serve it in a separate thread."""
     # Bind dual-stack (::) not 0.0.0.0. Fly's private 6PN network is IPv6-only,
     # and the autoscaler leader scrapes each peer's /metrics over IPv6
     # (http://[fdaa:...]:PORT/metrics, peer IPs resolved via AF_INET6 AAAA DNS).
@@ -429,10 +437,10 @@ def run_health_server(port: int = 8080):
     # scrapes fail ("All connection attempts failed") and the leader can only see
     # its own pressure → it under-scales the fleet. `::` accepts both IPv6 (peers)
     # and IPv4-mapped (local health checks) on Linux (bindv6only=0).
-    server_thread = threading.Thread(target=lambda: app.run(host="::", port=port, debug=False), daemon=True)
+    server_thread = HealthServerThread(port)
     server_thread.start()
 
-    logger.info(f"Health check server running at http://[::]:{port}/health")
+    logger.info(f"Health check server running at http://[::]:{server_thread.port}/health")
 
     return server_thread
 

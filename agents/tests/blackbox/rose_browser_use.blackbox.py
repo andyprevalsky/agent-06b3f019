@@ -350,6 +350,24 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "Do not classify final credential failures yourself" not in prompt
 
 
+def test_auth_assistance_requires_sign_in_form_open_with_and_without_challenge_recovery():
+    """Cement: the auth handoff lands the user on the sign-in form, so they never navigate."""
+    rule = (
+        "leave the site's sign-in form (username/password or code entry) open and visible, "
+        "so the user can sign in without navigating."
+    )
+    for disable_recover in ("", "1"):
+        with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": disable_recover}):
+            (auth_help,) = build_browser_use_tools(["request_user_assistance_for_authentication"])
+            prompt = build_browser_use_system_prompt(
+                ["request_user_assistance_for_authentication", "recover_from_challenge"]
+            )
+        assert rule in auth_help["description"], f"tool description missing rule (disable={disable_recover!r})"
+        assert f"- Before calling request_user_assistance_for_authentication, {rule}" in prompt, (
+            f"system prompt missing rule (disable={disable_recover!r})"
+        )
+
+
 def test_build_browser_use_system_prompt_reuses_main_grading_prompt():
     prompt = build_browser_use_system_prompt([])
 
@@ -1818,6 +1836,8 @@ async def test_complete_browser_use_waterfall_only_path():
     assert openrouter_bodies
     body = openrouter_bodies[0]
     assert body["tool_choice"] == "auto"
+    assert body["max_tokens"] == 2048
+    assert body["temperature"] == 0.3
     assert body["tools"][0]["function"]["name"] == "click"
     assert body["tools"][0]["function"]["description"] == BROWSER_USE_TOOLS["click"]["description"]
     assert "# Available Actions" not in body["messages"][0]["content"]
@@ -2379,6 +2399,10 @@ async def run_all_tests():
     r.record(
         "build_browser_use_system_prompt_auth_priority_is_numbered",
         test_build_browser_use_system_prompt_auth_priority_is_numbered,
+    )
+    r.record(
+        "auth_assistance_requires_sign_in_form_open",
+        test_auth_assistance_requires_sign_in_form_open_with_and_without_challenge_recovery,
     )
     r.record(
         "build_browser_use_system_prompt_reuses_main_grading_prompt",

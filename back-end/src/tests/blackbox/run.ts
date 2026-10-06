@@ -157,6 +157,14 @@ const lateExclusiveDomainNames = new Set([
   'benchmarks-hub',
   'benchmarks-hub.part2',
   'benchmarks-test-prompts',
+  // These owning injection tests exercise cancellation and a process RSS
+  // budget. Run them after the fixture-writing pool has drained so CPU/DB
+  // contention from sibling domains cannot obscure their runtime contract.
+  'browser-origin-injection-memory',
+  'steel-injection',
+  // Its feedback cases deliberately set a process-wide funded-key cooldown.
+  // Keep that mutation after every other domain that may need the key.
+  'codex-code',
 ]);
 const domainWeights = new Map<string, number>([
   ['benchmarks-hub-pipeline', 90],
@@ -213,11 +221,20 @@ function runDomain(domain: string, workerIndex: number): Promise<Result> {
     const start = Date.now();
     const chunks: Buffer[] = [];
     let settled = false;
+    let lockAcquired = false;
+    let lockMarkerTail = '';
 
     // `npx tsx` creates npm + tsx wrapper processes for every domain. Under
     // NODE_V8_COVERAGE those wrappers emit irrelevant coverage blobs that slow
     // merging without exercising product code.
-    const child = spawn(process.execPath, ['--import', 'tsx', file], {
+    // The live treasury rail uses the same sandbox cardholders as agent benchmarks.
+    // Hold their host-wide payment lock across mint, close, and recovery.
+    const paymentDomain = domain === 'treasury-rails';
+    const command = paymentDomain ? 'python3' : process.execPath;
+    const args = paymentDomain
+      ? [resolve(cwd, 'scripts/with-agentcard-lock.py'), process.execPath, '--import', 'tsx', file]
+      : ['--import', 'tsx', file];
+    const child = spawn(command, args, {
       cwd,
       env: {
         ...process.env,
@@ -235,20 +252,36 @@ function runDomain(domain: string, workerIndex: number): Promise<Result> {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    child.stdout.on('data', (d: Buffer) => chunks.push(d));
-    child.stderr.on('data', (d: Buffer) => chunks.push(d));
+    function armTimeout(limitMs: number, phase: string): ReturnType<typeof setTimeout> {
+      return setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        child.kill('SIGTERM');
+        res({
+          domain,
+          passed: false,
+          duration: Date.now() - start,
+          output: `${Buffer.concat(chunks).toString()}\n[runner] ${phase} timed out after ${limitMs}ms`,
+        });
+      }, limitMs);
+    }
 
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill('SIGTERM');
-      res({
-        domain,
-        passed: false,
-        duration: Date.now() - start,
-        output: `${Buffer.concat(chunks).toString()}\n[runner] Timed out after ${timeoutMs}ms`,
-      });
-    }, timeoutMs);
+    // The provider sandbox is shared across workspaces. Give the test its normal
+    // per-domain budget only after its host-wide lock has been acquired.
+    let timeout = armTimeout(
+      paymentDomain ? 2 * 60 * 60 * 1000 : timeoutMs,
+      paymentDomain ? 'AgentCard lock wait' : 'Domain'
+    );
+    child.stdout.on('data', (d: Buffer) => chunks.push(d));
+    child.stderr.on('data', (d: Buffer) => {
+      chunks.push(d);
+      if (!paymentDomain || lockAcquired) return;
+      lockMarkerTail = (lockMarkerTail + d.toString()).slice(-128);
+      if (!lockMarkerTail.includes('AGENTCARD_LOCK_ACQUIRED')) return;
+      lockAcquired = true;
+      clearTimeout(timeout);
+      timeout = armTimeout(timeoutMs, 'Domain');
+    });
 
     child.on('error', (error) => {
       if (settled) return;
@@ -355,7 +388,9 @@ async function main(): Promise<void> {
       )
     );
   }
-  if (failed > 0) process.exit(1);
+  // process.exit() drops stdout still queued for the `tee` pipe, which cut the
+  // failed-domain FAILURES section out of runner.log after the first 64 KB.
+  if (failed > 0) process.exitCode = 1;
 }
 
 main().catch((error) => {

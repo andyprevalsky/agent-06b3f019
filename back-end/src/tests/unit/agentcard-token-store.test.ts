@@ -122,9 +122,10 @@ async function main(): Promise<void> {
 
   await test('saveOrgCardholderId promotes to org-managed and clears onboarding keys', async () => {
     const userId = await seedUser();
+    const cardholderId = `ch_test_${randomUUID()}`;
     await saveOrgOnboardingConfig(userId, { sessionId: 'sess-2', setupUrl: 'https://s/2' });
-    await saveOrgCardholderId(userId, 'ch_live_123');
-    assert.equal(await getOrgManagedCardholderId(userId), 'ch_live_123');
+    await saveOrgCardholderId(userId, cardholderId);
+    assert.equal(await getOrgManagedCardholderId(userId), cardholderId);
     assert.equal(
       await getOrgOnboardingConfig(userId),
       undefined,

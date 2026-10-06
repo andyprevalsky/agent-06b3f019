@@ -17,10 +17,7 @@ import type { Dot } from './browserBorderGlow/config';
 import { generateGlow } from './browserBorderGlow/glow';
 import { generateDots } from './browserBorderGlow/dots';
 import { renderFrame } from './browserBorderGlow/render';
-import {
-  glowToneColors,
-  type BrowserBorderGlowTone,
-} from './browserBorderGlow/tones';
+import { glowToneColors, type BrowserBorderGlowTone } from './browserBorderGlow/tones';
 
 interface BrowserBorderGlowProps {
   className?: string;
@@ -33,10 +30,7 @@ interface Dimensions {
   dpr: number;
 }
 
-export default function BrowserBorderGlow({
-  className,
-  tone = 'default',
-}: BrowserBorderGlowProps) {
+export default function BrowserBorderGlow({ className, tone = 'default' }: BrowserBorderGlowProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>(0);
   const dotsRef = useRef<Dot[]>([]);

@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { AgentCardProviderError, type CardProvider } from '../../providers/card-provider';
 import { prisma } from '../../providers/database';
+import { consumePurchaseWalletFunding } from '../../providers/purchase-wallet-funding';
 import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import { FakeWalletFundingProvider, withFakeStripe } from '../blackbox/purchases.testkit';
 
@@ -13,12 +14,14 @@ const userId = `cleanup-closed-card-${randomUUID()}`;
 
 class ClosedCardErrorProvider implements CardProvider {
   closeCalls = 0;
+  detailsCalls = 0;
 
   async mintCard(): Promise<never> {
     throw new Error('ClosedCardErrorProvider.mintCard should not be called');
   }
 
   async getDetails(): Promise<never> {
+    this.detailsCalls += 1;
     throw new AgentCardProviderError(
       'get_card_details failed: card_closed: credentials are unavailable',
       409,
@@ -77,8 +80,21 @@ async function main(): Promise<void> {
     `pi_${randomUUID()}`
   );
   const settledWallet = new FakeWalletFundingProvider();
-  await withFakeStripe(async () => {
-    await cleanupAgentPurchaseCards(agent.id, new ClosedCardErrorProvider(), settledWallet);
+  // Model an interrupted settlement projection: funding consumption was persisted before
+  // the separate purchase update. Card closure alone does not establish merchant spend.
+  await consumePurchaseWalletFunding(settledPurchaseId);
+  const interruptedSettlement = await prisma.purchaseSpend.findUniqueOrThrow({
+    where: { id: settledPurchaseId },
+    include: { walletFunding: true },
+  });
+  assert.equal(interruptedSettlement.status, PurchaseSpendStatus.HELD);
+  assert.equal(interruptedSettlement.walletFunding?.status, PurchaseWalletFundingStatus.CONSUMED);
+  assert.ok(interruptedSettlement.walletFunding?.consumedAt);
+  const settledProvider = new ClosedCardErrorProvider();
+  await withFakeStripe(async (calls) => {
+    await cleanupAgentPurchaseCards(agent.id, settledProvider, settledWallet);
+    assert.equal(calls.refunds.length, 0, 'confirmed spend must not be refunded');
+    assert.equal(calls.cancels.length, 0, 'confirmed spend must not be canceled');
   });
   const settledPurchase = await prisma.purchaseSpend.findUniqueOrThrow({
     where: { id: settledPurchaseId },
@@ -86,6 +102,12 @@ async function main(): Promise<void> {
   });
   assert.equal(settledPurchase.status, PurchaseSpendStatus.CLEARED);
   assert.equal(settledPurchase.walletFunding?.status, PurchaseWalletFundingStatus.CONSUMED);
+  assert.equal(
+    settledProvider.detailsCalls,
+    1,
+    'cleanup must observe the typed closed-card response'
+  );
+  assert.equal(settledProvider.closeCalls, 0);
   assert.equal(settledWallet.reclaimCalls.length, 0);
 
   const noChargePurchaseId = await seedPurchase(

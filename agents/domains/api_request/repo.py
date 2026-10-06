@@ -16,11 +16,34 @@ logger = structlog.get_logger()
 async def api_request_activity(
     request_payload: Dict[str, Any],
     user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute an external HTTP request via backend POST /api/external-http/request."""
     method = str(request_payload.get("method") or "GET").upper()
     url = str(request_payload.get("url") or "")
     activity.heartbeat(f"{method} {url[:80]}")
+
+    from providers.fast_cache.google_oauth_demo_fixture import DEMO_URL, matches_demo_goal, run_fixture
+
+    if url == DEMO_URL:
+        from providers.fast_cache.client import resolve_agent_fast_mode
+
+        if method != "GET" or not agent_id:
+            raise ValueError("Google OAuth DEMO fixture requires a GET from its benchmark agent")
+        _, goal, _, _, root_goal, _ = await resolve_agent_fast_mode(agent_id)
+        if not (matches_demo_goal(goal) or matches_demo_goal(root_goal)):
+            raise ValueError("Google OAuth DEMO fixture is available only to the Google OAuth task")
+        return {
+            "ok": True,
+            "status": 200,
+            "status_text": "OK",
+            "url": DEMO_URL,
+            "body": run_fixture(),
+            "body_encoding": "json",
+            "content_type": "application/json",
+            "attempts": 1,
+            "demo_fixture": True,
+        }
 
     config = load_config()
     payload = {

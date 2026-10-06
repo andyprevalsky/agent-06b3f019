@@ -103,6 +103,41 @@ with tempfile.TemporaryDirectory() as tmp:
 print("ok self-contained dump publish")
 PY
 
+# 2b) The publisher surfaces the renderer's HTTPS dump URL (not the local path)
+#     and renders under agents/venv, where the boto3 R2 upload is importable.
+"$PYTHON_BIN" - <<'PY' || fail "publisher HTTPS dump URL"
+import json, subprocess, tempfile
+from pathlib import Path
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("publish_evidence_links", Path("scripts/publish_evidence_links.py"))
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(mod)
+
+calls = []
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    Path(cmd[cmd.index("-o") + 1]).write_text("<html></html>")
+    return subprocess.CompletedProcess(cmd, 0, stdout="https://example.r2.dev/dump.html?sig=1\n", stderr="")
+mod.subprocess.run = fake_run
+
+with tempfile.TemporaryDirectory() as tmp:
+    mod.ARTIFACTS_ROOT = Path(tmp)
+    dump = Path(tmp) / "dump.json"
+    dump.write_text("{}")
+    html, url = mod.publish_llm_dump(dump, "agent-1")
+    assert url == "https://example.r2.dev/dump.html?sig=1", url
+    if mod.AGENTS_VENV_PYTHON.is_file():
+        assert calls[0][0] == str(mod.AGENTS_VENV_PYTHON), calls[0][0]
+    manifest = mod.write_manifest(
+        agent_id="agent-1", run_id="", token="", fe_status="skipped", message_count=0,
+        dump_html=html, dump_https_url=url, source_dump=dump,
+    )
+    assert json.loads(manifest.read_text())["llm_dump_https_url"] == url
+print("ok publisher HTTPS dump URL")
+PY
+
 # 3) Approval format still demands durable FE + no invalid recordings.
 FORMAT="$ROOT/.claude/shared/approval-format.md"
 grep -Fq 'https://roselabs.ai/?agent-id=' "$FORMAT" || fail "approval format missing durable FE"
@@ -115,6 +150,8 @@ grep -Fq 'every `spawn_browser_agent` task on that agent to be terminated' "$FOR
 # 3b) publish_evidence_links enforces browser terminate + recording attach.
 bash "$ROOT/scripts/tests/publish_evidence_links_browser_validation.test.sh" \
   || fail "publish_evidence_links browser validation checks failed"
+bash "$ROOT/scripts/tests/publish_evidence_links_composite.test.sh" \
+  || fail "publish_evidence_links composite projection checks failed"
 
 # 4) Gate must stay wired into /deploy structural suites (both docs + registry).
 DEPLOY="$ROOT/.claude/commands/deploy.md"

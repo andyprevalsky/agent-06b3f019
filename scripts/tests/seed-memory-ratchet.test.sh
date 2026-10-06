@@ -67,9 +67,18 @@ require_text "$MEASUREMENT" \
 require_text "$MEASUREMENT" \
     'docker rm -fv "$SRC_CONTAINER"' \
     "cold source cleanup must remove its postgres anonymous volume"
+require_text "$MEASUREMENT" \
+    'wait_for_seed_memory_host_postgres "$PORT" victoria "$HOST_PROBE_LOG"' \
+    "cold target schema push must wait for the published host port"
+require_text "$MEASUREMENT" \
+    'PGCONNECT_TIMEOUT=2 PGPASSWORD=postgres psql -h localhost' \
+    "host readiness must probe the same hostname Prisma uses with bounded connection attempts"
+require_text "$MEASUREMENT" \
+    'SCHEMA_PUSH_LOG="$OUT_DIR/schema-push-$i.log"' \
+    "schema push failures must retain the Prisma diagnostic"
 require_text "$BUDGET" \
-    'SEED_PEAK_RSS_BUDGET_MB = 230' \
-    "budget must remain cemented to ceil(191MB * 1.20)"
+    'SEED_PEAK_RSS_BUDGET_MB = 228' \
+    "budget must remain cemented to ceil(190MB * 1.20)"
 require_text "$BUDGET" \
     'SEED_RSS_HEADROOM_RATIO = 0.2' \
     "headroom ratio must remain exactly 20%"
@@ -132,4 +141,70 @@ require_text "$MEASUREMENT" \
     'restore that original mode before measuring' \
     "restore validation must not leave errexit enabled for the measured seed"
 
-echo "PASS: /deploy enforces five fidelity-verified cold seeds at the measured 230MB ratchet"
+# Execute the actual progress statement: unbraced variables adjoining Unicode
+# punctuation can be parsed as a different identifier by macOS Bash.
+MEASUREMENT="$MEASUREMENT" TEST_SHELL="$BASH" python3 - <<'PY'
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+source = Path(os.environ["MEASUREMENT"]).read_text()
+statements = [
+    line.strip()
+    for line in source.splitlines()
+    if "restoring source into " in line
+]
+assert len(statements) == 1, statements
+cleanup = re.search(r"(?ms)^cleanup\(\) \{.*?^trap cleanup_all EXIT INT TERM$", source)
+assert cleanup is not None
+for locale in ("C", "en_US.UTF-8", "C.UTF-8"):
+    for pipeline_failure in (False, True):
+        command = "\n".join([
+            'dropdb() { printf "drop %s\\n" "${!#}" >> "$TRACE"; }',
+            cleanup.group(),
+            'unset SEED_TEST_UNSET; printf "%s\\n" "$SEED_TEST_UNSET" | tee -a "$SUMMARY"'
+            if pipeline_failure else statements[0],
+            'status=$?; printf "after:%s\\n" "$status" >> "$TRACE"; exit "$status"',
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "cleanup.log"
+            summary = Path(directory) / "summary.txt"
+            script = Path(directory) / "source-progress.sh"
+            script.write_text(command + "\n")
+            env = dict(os.environ, LC_ALL=locale, LC_CTYPE=locale, LANG=locale,
+                       SRC_DB="local_source", TARGET_DB="local_target", USE_SYSTEM_PG="true",
+                       SUMMARY=str(summary), TRACE=str(trace))
+            result = subprocess.run(
+                [os.environ["TEST_SHELL"], "-uo", "pipefail", str(script)],
+                env=env, capture_output=True, timeout=5,
+            )
+            assert (result.returncode != 0) is pipeline_failure, (locale, result.stderr)
+            expected = b"" if pipeline_failure else "   restoring source into local_source…\n".encode()
+            assert result.stdout == summary.read_bytes() == expected, (locale, result.stdout)
+            assert trace.read_text() == (
+                f"after:{result.returncode}\ndrop local_target\ndrop local_source\n"
+            ), (locale, pipeline_failure, trace.read_text())
+print("PASS: source progress is locale-safe and pipeline children cannot retire owner databases")
+PY
+
+# The container can report ready before Docker publishes its host port. Exercise
+# the exact host readiness helper with mocked psql failures followed by success.
+eval "$(sed -n '/^wait_for_seed_memory_host_postgres() {/,/^}/p' "$MEASUREMENT")"
+probe_diagnostic="$(mktemp)"
+trap 'rm -f "$probe_diagnostic"' EXIT
+attempts=0
+psql() { attempts=$((attempts + 1)); [ "$attempts" -ge 3 ]; }
+sleep() { :; }
+wait_for_seed_memory_host_postgres 55175 victoria "$probe_diagnostic" || fail "host readiness must retry a delayed published port"
+[ "$attempts" -eq 3 ] || fail "host readiness must wait for the successful published-port probe"
+attempts=0
+psql() { attempts=$((attempts + 1)); echo 'simulated connection refusal' >&2; return 1; }
+if wait_for_seed_memory_host_postgres 55175 victoria "$probe_diagnostic"; then
+    fail "host readiness must reject an unreachable published port"
+fi
+[ "$attempts" -eq 30 ] || fail "host readiness must stop after its bounded retry window"
+grep -Fq 'simulated connection refusal' "$probe_diagnostic" || fail "host readiness must retain the last probe diagnostic"
+
+echo "PASS: /deploy enforces five fidelity-verified cold seeds at the measured 228MB ratchet"

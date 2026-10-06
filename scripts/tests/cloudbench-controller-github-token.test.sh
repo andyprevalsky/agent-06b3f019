@@ -76,36 +76,36 @@ require_text() {
 }
 
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'cloudbench_export_controller_github_token' \
-  "run-bench-cloud must resolve the controller token through the shared resolver"
+  'token="$(resolve_github_token)"' \
+  "run-bench-cloud must resolve a controller token for warm git-sync"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'FATAL: missing controller git auth header' \
-  "warm git-sync must fail closed on the box when no controller auth header is delivered"
+  'export CLOUDBENCH_GITHUB_TOKEN_B64=\$(cat' \
+  "warm git-sync must load its request-scoped controller token"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'No controller GitHub token for warm-source git-sync' \
+  "warm git-sync must fail closed when no controller token is available"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_controller_github_token' \
+  'token="$(cloudbench_controller_github_token "$ROOT_DIR"' \
   "fleet worker token resolution must use the shared controller resolver"
-# Stronger: the sync snippet must gate on the controller header before any
-# fetch, never embed the token itself, and refresh-deps must go through it.
-python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "warm git-sync must gate the controller auth header before git fetch"
+# Stronger: refresh-deps must enter the one request-scoped token delivery path,
+# and that path must export the token before invoking the guest fetch helper.
+python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "refresh-deps must stage its controller token before git fetch"
 from pathlib import Path
 import sys
 text = Path(sys.argv[1]).read_text()
-start = text.find("build_controller_authenticated_git_sync_cmd() {")
-if start < 0:
-    raise SystemExit("missing build_controller_authenticated_git_sync_cmd")
-block = text[start : text.find("\n}\n", start)]
-if "resolve_controller_git_auth_header" not in block:
-    raise SystemExit("git-sync snippet builder must fail closed via resolve_controller_git_auth_header")
-gate_at = block.find("FATAL: missing controller git auth header")
-fetch_at = block.find("fetch --quiet origin")
-if gate_at < 0 or fetch_at < 0 or gate_at > fetch_at:
-    raise SystemExit("AUTH_HDR gate must precede git fetch in the sync snippet")
-if "CONTROLLER_B64=" in block or "base64" in block:
-    raise SystemExit("sync snippet must not embed the controller token")
-refresh = text.find('if [ "$MODE" = "refresh-deps" ]')
-refresh_end = text.find('if [ "$MODE" = "refresh-wmh"', refresh)
-if "warm_source_fetch_ref" not in text[refresh:refresh_end]:
-    raise SystemExit("refresh-deps must sync through warm_source_fetch_ref")
+start = text.find('if [ "$MODE" = "refresh-deps" ]')
+end = text.find('if [ "$MODE" = "refresh-wmh"', start)
+block = text[start:end]
+if 'warm_source_fetch_ref "$mid" "$EXPECTED_REF"' not in block:
+    raise SystemExit("refresh-deps bypasses warm_source_fetch_ref")
+start = text.find("warm_source_fetch_ref()")
+end = text.find("# SSH-exec a shell snippet", start)
+helper = text[start:end]
+resolve_at = helper.find('token="$(resolve_github_token)"')
+export_at = helper.find("export CLOUDBENCH_GITHUB_TOKEN_B64=")
+fetch_at = helper.find("bash /data/cloudbench-fetch-ref.sh")
+if min(resolve_at, export_at, fetch_at) < 0 or not resolve_at < export_at < fetch_at:
+    raise SystemExit("request-scoped controller token must be resolved and exported before fetch-ref")
 PY
 pass "refresh-deps and fleet source wiring deliver the controller token into warm git-sync fail-closed"
 

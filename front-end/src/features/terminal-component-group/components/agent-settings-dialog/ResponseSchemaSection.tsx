@@ -14,7 +14,7 @@
 import { FileJson } from 'lucide-react';
 import { Label } from '@/components/ui/label';
 import type { AgentDetail } from '../../hooks';
-import { formatFieldType } from './helpers';
+import { formatFieldConstraints, formatFieldType } from './helpers';
 
 interface ResponseSchemaSectionProps {
   agent: AgentDetail;
@@ -44,8 +44,25 @@ export default function ResponseSchemaSection({ agent }: ResponseSchemaSectionPr
                     required
                   </span>
                 )}
+                {field.required === false && (
+                  <span className="text-[10px] text-muted-foreground font-medium">optional</span>
+                )}
               </div>
-              <p className="text-xs text-muted-foreground mt-0.5 pl-1">{field.description}</p>
+              {formatFieldConstraints(field) && (
+                <p className="text-xs text-muted-foreground mt-0.5 pl-1">
+                  {formatFieldConstraints(field)}
+                </p>
+              )}
+              {field.properties?.map((property) => (
+                <p key={property.name} className="text-xs text-muted-foreground mt-0.5 pl-3">
+                  {property.name}: {formatFieldType(property.type)}
+                  {property.required === false ? ' · optional' : ''}
+                  {formatFieldConstraints(property) ? ` · ${formatFieldConstraints(property)}` : ''}
+                </p>
+              ))}
+              {field.description && (
+                <p className="text-xs text-muted-foreground mt-0.5 pl-1">{field.description}</p>
+              )}
             </div>
           ))}
         </div>

@@ -21,6 +21,8 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
   const injectedScripts: string[] = [];
   const injectionEvents: string[] = [];
   let callerBrowserCloseCount = 0;
+  let ownedPageCount = 0;
+  let ownedPageCloseCount = 0;
 
   await prisma.user.createMany({
     data: [
@@ -127,6 +129,25 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
           injectionEvents.push('browser-state');
           injectedScripts.push(script);
         },
+        newCDPSession: async () => ({ send: async () => undefined }),
+        newPage: async () => {
+          ownedPageCount += 1;
+          let pageUrl = 'about:blank';
+          return {
+            route: async () => undefined,
+            url: () => pageUrl,
+            goto: async (url: string) => {
+              pageUrl = url;
+            },
+            evaluate: async (script: string) => {
+              injectionEvents.push('browser-state');
+              injectedScripts.push(script);
+            },
+            close: async () => {
+              ownedPageCloseCount += 1;
+            },
+          };
+        },
       },
     ],
     close: async () => {
@@ -149,6 +170,10 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
     assert(addedCookies[0]?.value === '', 'valid empty cookie value was filtered out');
     assert(injectionEvents[0] === 'cookies', 'browser state mutated before cookie injection');
     assert(callerBrowserCloseCount === 0, 'caller-owned browser connection was closed');
+    assert(
+      ownedPageCount > 0 && ownedPageCloseCount === ownedPageCount,
+      'owned credential restoration page was not closed'
+    );
     assert(
       result.passwords.length === 1 && result.passwords[0]?.id === password.id,
       'realm password missing from unified payload'
@@ -188,7 +213,8 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
       contexts: () => [
         {
           addCookies: async () => undefined,
-          addInitScript: async () => {
+          addInitScript: async () => undefined,
+          newPage: async () => {
             throw new Error('best-effort browser state failed');
           },
         },
@@ -300,6 +326,10 @@ async function main(): Promise<void> {
   assert(
     canonicalAuthRealm('https://localhost.evil.com/?authRealm=doordash.com') === 'evil.com',
     'backend trusted an authRealm override from a lookalike localhost domain'
+  );
+  assert(
+    canonicalAuthRealm('https://anyone.loca.lt/?authRealm=doordash.com') !== 'doordash.com',
+    'backend trusted an authRealm override from a public localtunnel origin no dev stack serves'
   );
 
   await verifyUnifiedCredentialBoundary();

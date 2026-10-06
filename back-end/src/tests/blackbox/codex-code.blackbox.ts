@@ -1,10 +1,10 @@
 #!/usr/bin/env tsx
 import { config } from 'dotenv';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
+import { testCodexWsServerOverlayUsesLocalSource } from './codex-code-overlay.case';
 import {
   testResolveCodexAuthEnvs_apiKeyFallback,
   testResolveCodexAuthEnvs_cooldownExcludesFundedKey,
@@ -19,16 +19,30 @@ import {
   testCodexCreditSkip_successStillWins,
   testCodexCreditSkip_authRevocationStillFailsHard,
   testCodexCreditSkip_matchesE2bTeamBlockedWording,
+  testCodexCreditSkip_createUnavailableOnCooldownIsSkip,
 } from './codex-credit-skip.case';
 import {
+  testPromptBuilder_sharedContractMentionsOutputRules,
+  testRuntimeFallback_recognizesRevokedOAuthRefreshToken,
+  testTemplate_pinsCodexCliForGpt56,
+} from './codex-template-contract.case';
+import {
   CredentialExhaustionSkip,
+  runTest,
+  type TestResult,
+  codexCreateUnavailableSkipReason,
   codexSmokeCreditSkipReason,
   detectCodexCreditExhaustion,
+  testCreateUnavailableSkip_cooldownOnly,
   testCreditExhaustion_neverOverridesSuccessSentinel,
   testDetectCreditExhaustion_negative,
   testDetectCreditExhaustion_observedOpenAiWording,
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
+import { waitForCodexOutput } from './codex-ws-output.support';
+import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
+import { assert, assertStatus, request } from './codex-sandbox.support';
+import { waitForCodexOutput } from './codex-smoke-output.support';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -37,70 +51,8 @@ const DEV_USER_ID = process.env.CODEX_BLACKBOX_USER_ID || '1f85ff25-6e29-4c1b-87
 
 const ErrorResponse = z.object({ error: z.string() });
 
-interface TestResult {
-  name: string;
-  passed: boolean;
-  skipped?: boolean;
-  skipReason?: string;
-  error?: string;
-  duration: number;
-}
-
-function assert(condition: boolean, message: string): void {
-  if (!condition) throw new Error(message);
-}
-
-function assertStatus(actual: number, expected: number, data: unknown): void {
-  if (actual !== expected) {
-    throw new Error(
-      `Expected status ${expected}, got ${actual}: ${JSON.stringify(data).substring(0, 400)}`
-    );
-  }
-}
-
-async function request(
-  url: string,
-  options: RequestInit = {}
-): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
-  const contentType = response.headers.get('content-type') || '';
-  const data = contentType.includes('application/json')
-    ? await response.json()
-    : await response.text();
-  return { status: response.status, data, headers: response.headers };
-}
-
 function apiKeyHeaders(): Record<string, string> {
   return { 'X-API-Key': API_KEY };
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    if (error instanceof CredentialExhaustionSkip) {
-      // Not a failure: the third-party account is out of credits/quota. Report
-      // as a loud SKIP so the deploy gate is not blocked by external funding.
-      return {
-        name,
-        passed: true,
-        skipped: true,
-        skipReason: error.message,
-        duration: Date.now() - start,
-      };
-    }
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
 }
 
 async function testCreate_noAuth() {
@@ -124,129 +76,6 @@ async function testCreate_missingUserId() {
   });
   assertStatus(res.status, 500, res.data);
   ErrorResponse.parse(res.data);
-}
-
-async function waitForCodexOutput(
-  wsUrl: string,
-  timeoutMs = 240_000
-): Promise<{ output: string; events: unknown[]; exitCode?: number }> {
-  const WebSocket = (await import('ws')).default;
-  let output = '';
-  const events: unknown[] = [];
-  let connected = false;
-  let exitSeen = false;
-
-  return await new Promise<{ output: string; events: unknown[]; exitCode?: number }>(
-    (resolve, reject) => {
-      const ws = new WebSocket(wsUrl);
-      const timeout = setTimeout(() => {
-        ws.close();
-        reject(
-          new Error(
-            `Timed out waiting for Codex smoke. connected=${connected}, exit=${exitSeen}, output=${output.slice(-1200)}`
-          )
-        );
-      }, timeoutMs);
-
-      ws.on('open', () => {
-        connected = true;
-      });
-      ws.on('message', (data: Buffer) => {
-        const raw = data.toString();
-        try {
-          const msg = JSON.parse(raw);
-          if (
-            (msg.type === 'stdout' || msg.type === 'stderr' || msg.type === 'buffer') &&
-            msg.data
-          ) {
-            output += msg.data;
-          }
-          if (msg.type === 'code_agent_event' && msg.data) {
-            events.push(msg.data);
-          }
-          if (msg.type === 'code_agent_events' && Array.isArray(msg.data)) {
-            events.push(...msg.data);
-          }
-          if (msg.type === 'exit') {
-            exitSeen = true;
-            clearTimeout(timeout);
-            ws.close();
-            resolve({
-              output,
-              events,
-              exitCode: typeof msg.code === 'number' ? msg.code : undefined,
-            });
-          }
-        } catch {
-          output += raw;
-        }
-      });
-      ws.on('error', (err: Error) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
-      ws.on('close', () => {
-        if (!exitSeen && output.includes('CODEX_E2B_DONE')) {
-          clearTimeout(timeout);
-          resolve({ output, events });
-        }
-      });
-    }
-  );
-}
-
-async function testPromptBuilder_sharedContractMentionsOutputRules() {
-  const { buildCodeAgentSystemPrompt, CODE_AGENT_INSTRUCTIONS_VERSION } =
-    await import('../../providers/codeAgentPrompt');
-
-  const prompt = buildCodeAgentSystemPrompt({
-    githubRepoUrl: 'https://github.com/acme/widgets.git',
-    workDir: '/home/user/workspace',
-  });
-
-  assert(prompt.includes(CODE_AGENT_INSTRUCTIONS_VERSION), 'Prompt version missing');
-  assert(prompt.includes('/home/user/attachments'), 'Attachments directory missing');
-  assert(prompt.includes('/home/user/output'), 'Output directory missing');
-  assert(
-    prompt.includes('Files outside this directory are not returned to the user'),
-    'Output directory return contract missing'
-  );
-  assert(
-    prompt.includes('verify each requested artifact exists in /home/user/output'),
-    'Output artifact verification rule missing'
-  );
-  assert(prompt.includes('Do not return the original attachment path'), 'Transform rule missing');
-  assert(
-    prompt.includes('Do not launch a separate claude/Claude Code CLI'),
-    'Nested Claude CLI guard missing'
-  );
-  assert(prompt.includes('/home/user/workspace'), 'Repo workDir missing');
-}
-
-async function testTemplate_pinsCodexCliForGpt56() {
-  const dockerfile = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'e2b.Dockerfile'),
-    'utf8'
-  );
-  assert(
-    dockerfile.includes('ARG CODEX_VERSION=0.144.1') &&
-      dockerfile.includes('npm install -g "@openai/codex@$CODEX_VERSION"') &&
-      !dockerfile.includes('ubuntu.mirror.constant.com'),
-    'Codex E2B template must pin the GPT-5.6-compatible Codex CLI and use reliable Ubuntu sources'
-  );
-}
-
-async function testRuntimeFallback_recognizesRevokedOAuthRefreshToken() {
-  const wsServer = readFileSync(
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'ws-server.mjs'),
-    'utf8'
-  );
-  assert(
-    wsServer.includes('refresh_token_invalidated') &&
-      wsServer.includes('oauth_refresh_invalid') &&
-      wsServer.includes('oauthFallbackReason ??= classifyOAuthFallbackReason(message)'),
-    'Codex ws-server must classify revoked refresh tokens for funded-key fallback'
-  );
 }
 
 async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
@@ -325,6 +154,12 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
         name: 'gpt_api_key_cooldown',
       },
     });
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: false,
+    });
   }
 }
 
@@ -340,15 +175,53 @@ async function testPersistOutput_rejectsInvalidCredentialFeedback() {
   assertStatus(res.status, 400, res.data);
 }
 
+/**
+ * Feedback cases on this backend cool the shared funded key and then delete
+ * its row; the backend honors that within its 15-second recheck interval.
+ */
+async function waitForFundedGptKeyRestore(): Promise<void> {
+  await retryWithBackoff(
+    () =>
+      request(`${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`, {
+        headers: apiKeyHeaders(),
+      }),
+    {
+      maxRetries: 21,
+      fixedDelays: Array.from({ length: 20 }, () => 1500),
+      shouldRetryResult: (res) => (res.data as { onCooldown?: boolean }).onCooldown === true,
+      component: 'CodexSmokeFundedKey',
+    }
+  );
+}
+
 async function testSmoke_codexCompletesE2bTask() {
   assert(API_KEY !== '', 'BACKEND_API_KEY is required');
   assert(
     process.env.E2B_API_KEY !== undefined && process.env.E2B_API_KEY !== '',
     'E2B_API_KEY is required'
   );
+  await waitForFundedGptKeyRestore();
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
+  const sharedCooldown = await prisma.integration.findUnique({
+    where: {
+      userId_name_accountId: {
+        userId: '00000000-0000-0000-0000-000000000000',
+        name: 'gpt_api_key_cooldown',
+        accountId: '',
+      },
+    },
+    select: { rateLimitedUntil: true },
+  });
+  if (!cooldownIsLive(sharedCooldown)) {
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: false,
+    });
+  }
 
   try {
     const createRes = await request(`${BASE_URL}/api/codex-code-session/create`, {
@@ -365,7 +238,17 @@ async function testSmoke_codexCompletesE2bTask() {
     if (createRes.status !== 200) {
       const createBody =
         typeof createRes.data === 'string' ? createRes.data : JSON.stringify(createRes.data ?? {});
-      const createSkip = detectCodexCreditExhaustion(createBody, []);
+      let createSkip = detectCodexCreditExhaustion(createBody, []);
+      if (!createSkip) {
+        const cooldownRes = await request(
+          `${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`,
+          {
+            headers: apiKeyHeaders(),
+          }
+        );
+        const onCooldown = (cooldownRes.data as { onCooldown?: boolean }).onCooldown === true;
+        createSkip = codexCreateUnavailableSkipReason(createBody, onCooldown);
+      }
       if (createSkip) {
         throw new CredentialExhaustionSkip(
           `Codex/E2B session create blocked by external funding/billing (${createRes.status}); smoke SKIPPED without failing the deploy gate. Signal: ${createSkip}. Body: ${createBody.slice(0, 400)}`
@@ -374,7 +257,11 @@ async function testSmoke_codexCompletesE2bTask() {
     }
     assertStatus(createRes.status, 200, createRes.data);
 
-    const body = createRes.data as { ws_url?: string; task_id?: string; sandbox_id?: string };
+    const body = createRes.data as {
+      ws_url?: string;
+      task_id?: string;
+      sandbox_id?: string;
+    };
     assert(!!body.ws_url, 'Missing ws_url');
     assert(!!body.task_id, 'Missing task_id');
     assert(!!body.sandbox_id, 'Missing sandbox_id');
@@ -442,8 +329,12 @@ async function testSmoke_codexCompletesE2bTask() {
     }
 
     const { Sandbox } = await import('e2b');
-    const sandbox = await Sandbox.connect(sandboxId!, { apiKey: process.env.E2B_API_KEY });
-    const promptFile = await sandbox.files.read('/home/user/AGENTS.md', { format: 'text' });
+    const sandbox = await Sandbox.connect(sandboxId!, {
+      apiKey: process.env.E2B_API_KEY,
+    });
+    const promptFile = await sandbox.files.read('/home/user/AGENTS.md', {
+      format: 'text',
+    });
     assert(
       String(promptFile).includes('/home/user/output') &&
         String(promptFile).includes('Do not return the original attachment path'),
@@ -471,9 +362,26 @@ async function runAll() {
   console.log('Codex Code Session Black-Box Tests\n');
   console.log(`Testing against: ${BASE_URL}\n`);
 
-  const tests: { name: string; fn: () => Promise<void> }[] = [
+  const tests: { name: string; fn: () => Promise<void> }[] = [];
+  // The feedback cases put the shared funded GPT key on cooldown, and the backend caches that
+  // cooldown in-process for its full window; deleting the DB row afterwards does not undo it.
+  // Without a synced Codex OAuth credential the smoke depends on that key, so it must run first.
+  if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
+    console.log(
+      '  SKIP  smoke -- Codex completes task in real E2B sandbox (BACKEND_CODEX_SMOKE_SKIP=1)'
+    );
+  } else {
+    tests.push({
+      name: 'smoke -- Codex completes task in real E2B sandbox',
+      fn: testSmoke_codexCompletesE2bTask,
+    });
+  }
+  tests.push(
     { name: 'POST /create -- no auth -> 401', fn: testCreate_noAuth },
-    { name: 'POST /create -- missing user_id -> 500', fn: testCreate_missingUserId },
+    {
+      name: 'POST /create -- missing user_id -> 500',
+      fn: testCreate_missingUserId,
+    },
     {
       name: 'prompt -- shared code-agent contract includes output rules',
       fn: testPromptBuilder_sharedContractMentionsOutputRules,
@@ -481,6 +389,10 @@ async function runAll() {
     {
       name: 'template -- pins GPT-5.6-compatible Codex CLI',
       fn: testTemplate_pinsCodexCliForGpt56,
+    },
+    {
+      name: 'template -- overlays the local Codex fallback server for default and custom IDs',
+      fn: testCodexWsServerOverlayUsesLocalSource,
     },
     {
       name: 'auth -- revoked OAuth refresh token triggers funded-key fallback',
@@ -517,6 +429,10 @@ async function runAll() {
     {
       name: 'credit-skip -- E2B team-blocked / missing payment method is recognized',
       fn: async () => testCodexCreditSkip_matchesE2bTeamBlockedWording(),
+    },
+    {
+      name: 'credit-skip -- create unavailable + funded-key cooldown is recognized',
+      fn: async () => testCodexCreditSkip_createUnavailableOnCooldownIsSkip(),
     },
     {
       name: 'auth -- throws when no credential and no funded key',
@@ -558,17 +474,11 @@ async function runAll() {
       name: 'smoke-skip -- success sentinel is never overridden by exhaustion',
       fn: async () => testCreditExhaustion_neverOverridesSuccessSentinel(),
     },
-  ];
-  if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
-    console.log(
-      '  SKIP  smoke -- Codex completes task in real E2B sandbox (BACKEND_CODEX_SMOKE_SKIP=1)'
-    );
-  } else {
-    tests.push({
-      name: 'smoke -- Codex completes task in real E2B sandbox',
-      fn: testSmoke_codexCompletesE2bTask,
-    });
-  }
+    {
+      name: 'smoke-skip -- create unavailable + cooldown is a funding skip',
+      fn: async () => testCreateUnavailableSkip_cooldownOnly(),
+    }
+  );
 
   const results: TestResult[] = [];
   for (const test of tests) {

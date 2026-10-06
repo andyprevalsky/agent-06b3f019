@@ -8,6 +8,8 @@ Providers differ on where session listing sees those bytes:
 - Kernel: CDP ``downloads_path`` + upload ``directory`` must be ``/tmp/downloads``
 - Steel: CDP ``downloads_path`` is ``/files``; the Files API owns that root, so
   materialize uploads must omit ``directory`` (backend rejects ``/files``)
+- Browser Use: the cloud browser publishes Chrome downloads directly through
+  its downloads API; wait for that listing instead of uploading a second copy.
 
 When CDP reports a real download (``Browser.downloadWillBegin`` /
 ``downloadProgress``) or goto hits ``net::ERR_ABORTED`` on a download
@@ -80,6 +82,36 @@ def is_kernel_browser_provider(provider: Optional[str] = None) -> bool:
 
 def is_steel_browser_provider(provider: Optional[str] = None) -> bool:
     return resolve_browser_provider(provider) == "steel"
+
+
+async def wait_for_browser_use_download(
+    config: Any, session_id: str, filename: str
+) -> Optional[Dict[str, Any]]:
+    """Wait for the cloud browser's native download to reach its files API."""
+    from domains.spawn_browser_agent_v3.repo import list_session_files
+
+    safe_name = os.path.basename(filename)
+    for attempt in range(12):
+        files = await list_session_files(config, session_id)
+        match = next(
+            (
+                item
+                for item in files
+                if os.path.basename(str(item.get("path") or "")) == safe_name
+                and int(item.get("size") or 0) > 0
+            ),
+            None,
+        )
+        if match:
+            return {
+                "path": match["path"],
+                "size": match["size"],
+                "filename": safe_name,
+                "mime_type": mime_from_headers_or_name(mime_type="", filename=safe_name),
+            }
+        if attempt < 11:
+            await asyncio.sleep(1)
+    return None
 
 
 def session_upload_directory_for_provider(provider: Optional[str] = None) -> Optional[str]:
@@ -485,6 +517,14 @@ class BrowserDownloadPersister:
         if dedupe in self._persisted_keys:
             return None
 
+        if self.provider == "browser-use":
+            result = await wait_for_browser_use_download(
+                self.config, self.session_id, filename
+            )
+            if result:
+                self._persisted_keys.add(dedupe)
+            return result
+
         # Do NOT skip solely because a same-basename file already exists in the
         # session. TinyPNG (and similar) upload the source as rs.jpeg under the
         # provider downloads root, then Chrome downloads the compressed output
@@ -624,7 +664,6 @@ async def persist_navigation_download_via_page_fetch(
     payload = (evaluated.get("result") or {}).get("value") or {}
     if not payload.get("ok") or not payload.get("base64"):
         return None
-    file_bytes = base64.b64decode(payload["base64"])
     filename = str(payload.get("filename") or suggested)
     headers = {"content-disposition": str(payload.get("disposition") or "attachment")}
     if not trust_download and not (
@@ -641,6 +680,38 @@ async def persist_navigation_download_via_page_fetch(
         mime_type=str(payload.get("contentType") or ""),
         filename=filename,
     )
+    if resolve_browser_provider(provider) == "browser-use":
+        native = await wait_for_browser_use_download(config, session_id, filename)
+        if not native:
+            if int(payload.get("size") or 0) > _MAX_PERSIST_BYTES:
+                return None
+            # Browser Use exposes Chrome downloads, not a session-file upload.
+            # Recreate the credentialed fetch as a browser download when the
+            # original navigation did not leave a native download behind.
+            expression = f"""(() => {{
+              const binary = atob({json.dumps(payload['base64'])});
+              const bytes = new Uint8Array(binary.length);
+              for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+              const blob = new Blob([bytes], {{ type: {json.dumps(mime_type)} }});
+              const href = URL.createObjectURL(blob);
+              const link = document.createElement('a');
+              link.href = href;
+              link.download = {json.dumps(filename)};
+              document.documentElement.appendChild(link);
+              link.click();
+              link.remove();
+              setTimeout(() => URL.revokeObjectURL(href), 60000);
+              return true;
+            }})()"""
+            triggered = await cdp_session.cdp_client.send.Runtime.evaluate(
+                params={"expression": expression, "returnByValue": True},
+                session_id=cdp_session.session_id,
+            )
+            if triggered.get("exceptionDetails") or not (triggered.get("result") or {}).get("value"):
+                return None
+            native = await wait_for_browser_use_download(config, session_id, filename)
+        return {**native, "content_type": mime_type, "source_url": url} if native else None
+    file_bytes = base64.b64decode(payload["base64"])
     uploaded = await persist_bytes_to_session_downloads(
         config,
         session_id,

@@ -286,6 +286,15 @@ function harness(options: {
     },
     async recordSuccess() {},
     async releaseClaim() {},
+    async claimFiatPull() {
+      return { claimed: true, claimId: 'fiat-claim-1' };
+    },
+    async recordFiatSuccess() {
+      /* no-op */
+    },
+    async releaseFiatClaim() {
+      /* no-op */
+    },
   };
   const deps: Parameters<typeof runOrgWalletTopUp>[0] = {
     policy: POLICY,
@@ -293,6 +302,11 @@ function harness(options: {
     treasury: {
       async getUsdcBalanceCents() {
         return options.floatCents ?? 100_000;
+      },
+      // Unconverted USD in Coinbase counts as in-flight toward the org wallet. Zero here so these
+      // recovery cases exercise the no-in-flight path.
+      async getUsdBalanceCents() {
+        return 0;
       },
       async transferUsdcCents() {
         recorded.transfers += 1;

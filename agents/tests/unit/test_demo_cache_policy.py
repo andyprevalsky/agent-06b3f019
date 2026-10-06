@@ -5,17 +5,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from domains.spawn_agent.config import (
-    OAI_DEMO_CHILD_GOAL_PREFIX,
-    OAI_DEMO_CHILD_WINDOW,
-    OAI_DEMO_ROOT_GOAL_PREFIX,
-    is_oai_demo_goal,
-)
 from providers.fast_cache.normalize import (
     OAI_DEMO_ROOT_GOAL_HASH,
     demo_cache_allowed,
     demo_cache_goal_hashes,
     soft_complete_allowed,
+)
+from utils.oai_demo import (
+    OAI_DEMO_CHILD_GOAL_PREFIX,
+    OAI_DEMO_CHILD_WINDOW,
+    OAI_DEMO_ROOT_GOAL_PREFIX,
+    OAI_DEMO_ROOT_TITLE,
+    is_oai_demo_goal,
+    mass_agent_root_title,
 )
 
 
@@ -25,6 +27,13 @@ def test_mass_agent_0_is_tagged_demo():
     mass = next(t for t in tasks if t.get("name") == "test-mass-agent-run-0")
     tags = {str(t).upper() for t in (mass.get("tags") or [])}
     assert "DEMO" in tags
+
+
+def test_mass_agent_root_title_only_overrides_demo_roots():
+    assert mass_agent_root_title(OAI_DEMO_ROOT_GOAL_PREFIX, True, None) == OAI_DEMO_ROOT_TITLE
+    assert mass_agent_root_title(OAI_DEMO_ROOT_GOAL_PREFIX, True, "Task Output") == OAI_DEMO_ROOT_TITLE
+    assert mass_agent_root_title(OAI_DEMO_ROOT_GOAL_PREFIX, False, None) is None
+    assert mass_agent_root_title("Buy socks", True, "Goal Summary") == "Goal Summary"
 
 
 def test_demo_cache_goal_hashes_include_mass_agent_prompt():
@@ -91,6 +100,13 @@ def test_is_demo_cache_task_covers_fleet_and_mass_agent():
     assert is_oai_demo_mass_agent_task(fleet) is False
     assert is_demo_cache_task(mass) is True
     assert is_oai_demo_mass_agent_task(mass) is True
+    leftover = SimpleNamespace(
+        goal="Produce fresh tool-grounded evidence for Andy Prevalsky's brand task.",
+        fast_cache_goal="",
+        root_goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+    )
+    assert is_demo_cache_task(leftover) is True
+    assert is_oai_demo_mass_agent_task(leftover) is True
     assert is_demo_cache_task(live) is False
 
 
@@ -115,3 +131,8 @@ def test_is_demo_cache_task_reads_restored_fast_cache_goal():
         restore_idx,
     )
     assert recompute_idx > restore_idx
+    resolve_idx = workflow_src.index("unpack_fast_cache_goal_resolution(")
+    guard_block = workflow_src[workflow_src.rfind("if (", 0, resolve_idx) : resolve_idx]
+    assert "self.parent_workflow_id" in guard_block, (
+        "leftover children must resolve root_goal even when Fast Mode is off"
+    )

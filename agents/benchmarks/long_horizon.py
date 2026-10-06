@@ -49,22 +49,29 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "first_level_gp_count",
     "first_level_gp_explore_research",
     "first_level_gp_july_trajectories",
+    "fully_cached_agent",
     "general_purpose_explore_spawn_limit",
+    "google_oauth_demo_trace",
     "zero_live_spend",
     "no_nested_general_purpose",
     "no_synthetic_agent_skip_messages",
     "plan_shape",
-        "principal_user_andy",
+    "principal_user_andy",
     "agent_task_title",
     "root_deliverable_markers",
     "tree_agent_status",
     "expected_gate",
     "expected_payment_receipt",
+    "attention_kind_sequence",
+    "subscription_checkout_completed",
+    "expected_payment_lifecycle",
     "no_browser_agent_failures",
     "no_tool_failures",
     "claude_code_session_output",
     "explore_research_not_reject_loop",
     "explore_completion_summary",
+    "google_oauth_demo_trace",
+    "fully_cached_agent",
     # runner="sms" — trajectory checks over the literal outbound text thread.
     # Implemented in benchmarks/sms_runner.py:run_sms_static_check.
     "sms_no_forbidden_phrases",
@@ -327,6 +334,13 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     expected_attention_kinds = raw.get("expected_attention_kinds")
     if expected_attention_kinds is not None:
         _require_string_list(raw, "expected_attention_kinds", item_id)
+    if raw.get("require_attention_order") and not expected_attention_kinds:
+        raise ValueError(f"{item_id}: require_attention_order needs expected_attention_kinds")
+    if raw.get("complete_subscription_checkout") and (
+        raw.get("simulate_gate_webhook") or not isinstance(raw.get("expected_gate"), dict)
+        or raw["expected_gate"].get("type") != "subscription"
+    ):
+        raise ValueError(f"{item_id}: complete_subscription_checkout needs a subscription gate without a simulated webhook")
     expected_attention_kind_any_of = raw.get("expected_attention_kind_any_of")
     if expected_attention_kind_any_of is not None:
         _require_string_list(raw, "expected_attention_kind_any_of", item_id)

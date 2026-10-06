@@ -1,9 +1,13 @@
 import { PrismaClient } from '@prisma/client';
 import { FAST_CACHE_POOL_LIMIT, prisma } from './database';
 import { demoCacheAllowed } from './demoCachePolicy';
+import { demoCacheWriteEnabled, fastCacheWritesDisabled } from './fastCacheAccountPolicy';
 import { type CacheKind } from './fastCacheNormalizeConstants';
 import { stripSecrets } from './fastCacheNormalizeCore';
+import { createLogger } from './logger';
 import { withSpan } from './tracing';
+
+const log = createLogger('FastCacheStore');
 
 const globalForFastCachePrisma = global as unknown as {
   fastCacheMemory?: Map<string, FastCacheMemoryEntry>;
@@ -299,6 +303,10 @@ export async function cacheSet(args: {
   value: unknown;
   blobPath?: string | null;
 }): Promise<void> {
+  if (fastCacheWritesDisabled()) {
+    log.info('fast_cache.write_skipped_read_only', { key: args.key, kind: args.kind });
+    return;
+  }
   const value = stripSecrets(args.value);
   const blobPath = args.blobPath ?? null;
   deleteMemoryCache(args.key);
@@ -385,87 +393,77 @@ export async function cacheGetPosition(args: {
   // Prefer explicit CACHE_KEY_VERSION values (v42/v43) over `fastmode:%:llm:` —
   // a middle `%` also matches `fastmode:vN:sim.<model>:llm:...` and would
   // cross-replay world-model-scoped entries into real runs (and vice versa).
-  const VERSION_PREFIXES = ['v42', 'v43'] as const;
-  const patterns: Array<{ like: string; minStep: number | null }> =
-    step === null
-      ? VERSION_PREFIXES.map((v) => ({
-          like: `fastmode:${v}:llm:${args.goalHash}:${site}:c:%`,
-          minStep: null,
-        }))
-      : VERSION_PREFIXES.flatMap((v) => [
-          {
-            like: `fastmode:${v}:llm:${args.goalHash}:${site}:p:${step}:c:%`,
-            minStep: null,
-          },
-          {
-            like: `fastmode:${v}:llm:${args.goalHash}:${site}:p:%:c:%`,
-            minStep: step,
-          },
-        ]);
-
-  for (const { like: pattern, minStep } of patterns) {
-    for (const warmOnly of [true, false]) {
-      const rows = await getFastCachePrisma().$queryRawUnsafe<
-        Array<{ key: string; value: unknown; blobPath: string | null }>
-      >(
-        warmOnly
-          ? minStep === null
-            ? `
-            SELECT key, value, "blobPath"
-            FROM "FastModeCacheEntry"
-            WHERE "goalHash" = $1
-              AND kind = 'llm'
-              AND key LIKE $2 ESCAPE '\\'
-              AND "createdAt" < TIMESTAMPTZ '2026-08-25'
-            ORDER BY "createdAt" ASC
-            LIMIT 1
-          `
-            : `
-            SELECT key, value, "blobPath"
-            FROM "FastModeCacheEntry"
-            WHERE "goalHash" = $1
-              AND kind = 'llm'
-              AND key LIKE $2 ESCAPE '\\'
-              AND "createdAt" < TIMESTAMPTZ '2026-08-25'
-              AND (substring(key from ':p:([0-9]+):c:'))::int >= $3
-            ORDER BY (substring(key from ':p:([0-9]+):c:'))::int ASC, "createdAt" ASC
-            LIMIT 1
-          `
-          : minStep === null
-            ? `
-            SELECT key, value, "blobPath"
-            FROM "FastModeCacheEntry"
-            WHERE "goalHash" = $1
-              AND kind = 'llm'
-              AND key LIKE $2 ESCAPE '\\'
-            ORDER BY "createdAt" ASC
-            LIMIT 1
-          `
-            : `
-            SELECT key, value, "blobPath"
-            FROM "FastModeCacheEntry"
-            WHERE "goalHash" = $1
-              AND kind = 'llm'
-              AND key LIKE $2 ESCAPE '\\'
-              AND (substring(key from ':p:([0-9]+):c:'))::int >= $3
-            ORDER BY (substring(key from ':p:([0-9]+):c:'))::int ASC, "createdAt" ASC
-            LIMIT 1
-          `,
-        ...(minStep === null ? [args.goalHash, pattern] : [args.goalHash, pattern, minStep])
-      );
-      const row = rows[0];
-      if (!row) continue;
-      const result: CacheGetResult & { key: string | null } = {
-        hit: true,
-        value: row.value,
-        blobPath: row.blobPath,
-        key: row.key,
-      };
-      writeMemoryCache(row.key, args.goalHash, result);
-      return result;
-    }
+  const v42 = `fastmode:v42:llm:${args.goalHash}:${site}:`;
+  const v43 = `fastmode:v43:llm:${args.goalHash}:${site}:`;
+  let rows: Array<{ key: string; value: unknown; blobPath: string | null }>;
+  if (step === null) {
+    // One goalHash-indexed scan replaces up to four serial remote DB round
+    // trips. The ranking is version, warm-era row, then creation time.
+    rows = await getFastCachePrisma().$queryRawUnsafe(
+      `
+        SELECT key, value, "blobPath"
+        FROM "FastModeCacheEntry"
+        WHERE "goalHash" = $1 AND kind = 'llm'
+          AND (key LIKE $2 ESCAPE '\\' OR key LIKE $3 ESCAPE '\\')
+        ORDER BY
+          CASE WHEN key LIKE $2 ESCAPE '\\' THEN 0 ELSE 1 END,
+          CASE WHEN "createdAt" < TIMESTAMPTZ '2026-08-25' THEN 0 ELSE 1 END,
+          "createdAt" ASC
+        LIMIT 1
+      `,
+      args.goalHash,
+      `${v42}c:%`,
+      `${v43}c:%`
+    );
+  } else {
+    // Rank exact v42, forward v42, exact v43, forward v43. Within each
+    // bucket prefer warm-era entries, then the nearest forward step and
+    // oldest write. Filtering to this goalHash keeps the scan bounded.
+    rows = await getFastCachePrisma().$queryRawUnsafe(
+      `
+        WITH candidates AS (
+          SELECT key, value, "blobPath", "createdAt",
+            (substring(key from ':p:([0-9]+):c:'))::int AS slot_step
+          FROM "FastModeCacheEntry"
+          WHERE "goalHash" = $1 AND kind = 'llm'
+            AND (key LIKE $2 ESCAPE '\\' OR key LIKE $3 ESCAPE '\\')
+        )
+        SELECT key, value, "blobPath"
+        FROM candidates
+        WHERE slot_step >= $6
+        ORDER BY
+          CASE
+            WHEN key LIKE $4 ESCAPE '\\' THEN 0
+            WHEN key LIKE $2 ESCAPE '\\' THEN 1
+            WHEN key LIKE $5 ESCAPE '\\' THEN 2
+            ELSE 3
+          END,
+          CASE WHEN "createdAt" < TIMESTAMPTZ '2026-08-25' THEN 0 ELSE 1 END,
+          CASE
+            WHEN key LIKE $4 ESCAPE '\\' OR key LIKE $5 ESCAPE '\\' THEN NULL
+            ELSE slot_step
+          END ASC,
+          "createdAt" ASC
+        LIMIT 1
+      `,
+      args.goalHash,
+      `${v42}p:%:c:%`,
+      `${v43}p:%:c:%`,
+      `${v42}p:${step}:c:%`,
+      `${v43}p:${step}:c:%`,
+      step
+    );
   }
-  return { hit: false, value: null, blobPath: null, key: null };
+  const row = rows[0];
+  if (!row) return { hit: false, value: null, blobPath: null, key: null };
+  const result: CacheGetResult & { key: string | null } = {
+    hit: true,
+    value: row.value,
+    blobPath: row.blobPath,
+    key: row.key,
+  };
+  writeMemoryCache(row.key, args.goalHash, result);
+  return result;
 }
 
 export async function agentFastMode(agentId: string): Promise<{
@@ -500,7 +498,7 @@ export async function agentFastMode(agentId: string): Promise<{
   return {
     enabled,
     goal,
-    writeEnabled: enabled,
+    writeEnabled: demoCacheWriteEnabled(enabled),
     rootAgentId,
     rootGoal,
     providerFastMode,

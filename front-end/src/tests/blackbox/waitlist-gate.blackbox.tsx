@@ -18,6 +18,7 @@ import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import { WaitlistGate } from '@/features/auth';
+import { captureBenchmarkShareToken } from '@/lib/benchmarkShare';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -62,10 +63,12 @@ describe('WaitlistGate', () => {
   beforeEach(() => {
     clearCaptures();
     localStorage.clear();
+    window.history.replaceState({}, '', '/');
   });
 
   afterEach(() => {
     localStorage.clear();
+    window.history.replaceState({}, '', '/');
   });
 
   it('shows the waitlist modal for a gated authenticated user', async () => {
@@ -116,6 +119,47 @@ describe('WaitlistGate', () => {
       expect(container.textContent).not.toContain("You're On The Waitlist!");
     });
     expect(screen.queryByLabelText('Invite code')).not.toBeInTheDocument();
+  });
+
+  it('does not cover a shared benchmark recording for a waitlisted visitor', async () => {
+    mockSession();
+    gateOn();
+    window.history.replaceState({}, '', '/?agent-id=shared-agent#benchmark-share=signed-run-token');
+    captureBenchmarkShareToken();
+    server.use(
+      http.get(`${API_BASE}/benchmarks/shared-agent/:agentId`, () =>
+        HttpResponse.json({
+          agent: { agent_id: 'shared-agent' },
+          messages: [],
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
+    );
+    renderWithProviders(<WaitlistGate />, {
+      route: '/?agent-id=shared-agent',
+    });
+    await waitFor(() => {
+      expect(capturedRequests.some((r) => r.url.includes('/benchmarks/shared-agent/'))).toBe(true);
+      expect(screen.queryByText("You're On The Waitlist!")).not.toBeInTheDocument();
+    });
+  });
+
+  it('keeps the gate for an invalid shared benchmark token', async () => {
+    mockSession();
+    gateOn();
+    window.history.replaceState({}, '', '/?agent-id=shared-agent#benchmark-share=invalid');
+    captureBenchmarkShareToken();
+    server.use(
+      http.get(`${API_BASE}/benchmarks/shared-agent/:agentId`, () =>
+        HttpResponse.json({ error: 'Invalid share' }, { status: 403 }),
+      ),
+    );
+    renderWithProviders(<WaitlistGate />, {
+      route: '/?agent-id=shared-agent',
+    });
+    await waitFor(() => {
+      expect(screen.getByText("You're On The Waitlist!")).toBeInTheDocument();
+    });
   });
 
   it('redeems a valid invite code and dismisses the gate', async () => {

@@ -136,33 +136,50 @@ test('chat router caches successful output without gating downstream work', () =
     join(process.cwd(), 'src', 'providers', 'chat', 'routerLlm.ts'),
     'utf8'
   );
+  const routerRead = readFileSync(
+    join(process.cwd(), 'src', 'providers', 'chat', 'routerFastCache.ts'),
+    'utf8'
+  );
   assert.ok(router.includes('agentFastMode'), 'router must read Fast Mode flag');
   assert.ok(
     router.includes("contentKey(fastMode.goal, 'chat_router'"),
     'router must use a canonical request key'
   );
   assert.ok(router.includes('fastMode.writeEnabled'), 'router must honor write-through accounts');
-  assert.ok(router.includes('cacheGet(cacheKey)'), 'router must read before live LLM');
+  assert.ok(
+    router.includes('readCache: () => readRouterFastCache('),
+    'router must read through the shared router cache lookup before live LLM'
+  );
+  assert.ok(routerRead.includes('cacheGet(cacheKey)'), 'router must read before live LLM');
   assert.ok(
     router.includes('awaitCacheFirst: isOaiDemoGoal(fastMode.goal)'),
     'router must wait for cache only on the OAi demo Fast Mode goal'
   );
   assert.ok(router.includes('cacheSet({'), 'router must store successful router output');
   assert.ok(
-    router.includes('isValidRouterCacheJson(json)'),
-    'router must validate cached output before accepting a hit'
+    routerRead.includes('isValidRouterCacheJson(json)') &&
+      routerRead.includes('isValidRouterCacheJson(replay)'),
+    'router must validate exact and drift-replayed output before accepting a hit'
   );
   assert.ok(
-    router.indexOf('cacheSet({') > router.indexOf('parseRouterDecisionJson(fullJson)'),
+    router.indexOf('cacheSet({') > router.indexOf('requireRouterDecision'),
     'router must validate generated output before caching it'
   );
-  assert.ok(router.includes('fast_cache.chat_router_hit'), 'router must log Fast Mode hits');
-  assert.ok(router.includes('fast_cache.chat_router_miss'), 'router must log Fast Mode misses');
+  assert.ok(routerRead.includes('fast_cache.chat_router_hit'), 'router must log Fast Mode hits');
+  assert.ok(
+    routerRead.includes('fast_cache.chat_router_drift_hit'),
+    'router must log drift replays'
+  );
+  assert.ok(routerRead.includes('fast_cache.chat_router_miss'), 'router must log Fast Mode misses');
   assert.ok(
     router.includes('fast_cache.chat_router_write_only'),
     'router must log write-only mode'
   );
   assert.ok(router.includes('fast_cache.chat_router_stored'), 'router must log Fast Mode writes');
+  assert.ok(
+    router.includes('fcKey && fastModeRead && !skipFastCache'),
+    'router must skip Fast Mode cache only after a cache-won miss'
+  );
   assert.doesNotMatch(
     router,
     /await cacheSet\(/,
@@ -203,6 +220,10 @@ test('backend chat cache sites support write-only without reads', () => {
   assert.ok(
     generator.includes('fast_cache.chat_generator_write_only'),
     'generator must skip reads in write-only mode'
+  );
+  assert.ok(
+    generator.includes('fcKey && fastModeRead && !skipFastCache'),
+    'generator must skip Fast Mode cache only after a cache-won miss'
   );
   assert.ok(
     tools.includes('fastModeReadEnabled'),

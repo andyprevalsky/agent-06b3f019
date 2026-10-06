@@ -168,6 +168,29 @@ async def test_grep_boundary_normalizes_model_dump_keys():
     }
 
 
+async def test_grep_agent_metadata_only():
+    """Typed trajectory selectors reach the backend without a text pattern."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from tools.grep import grep_activity
+
+        await grep_activity(
+            {"role": "USER", "record_kind": "message", "surface": "SMS"},
+            user_id="user-42",
+            agent_id="agent-1",
+        )
+
+    call = assert_captured_call(url_contains="/api/data/grep", method="POST")
+    body = json.loads(call["requestBody"])
+    assert body == {
+        "role": "USER",
+        "record_kind": "message",
+        "surface": "SMS",
+        "user_id": "user-42",
+        "agent_id": "agent-1",
+    }
+
+
 async def test_fetch_local_data_summary():
     """fetch_local_data_summary returns formatted summary string."""
     _setup()
@@ -651,6 +674,7 @@ async def run_all_tests():
     await r.record_async("happy_path", test_grep_happy_path)
     await r.record_async("boundary", test_grep_boundary)
     await r.record_async("boundary_normalizes_model_dump_keys", test_grep_boundary_normalizes_model_dump_keys)
+    await r.record_async("agent_metadata_only", test_grep_agent_metadata_only)
     await r.record_async("fetch_local_data_summary", test_fetch_local_data_summary)
     await r.record_async("empty_pattern", test_grep_empty_pattern)
     await r.record_async("summary_source", test_grep_summary_source_returns_compact_inventory)

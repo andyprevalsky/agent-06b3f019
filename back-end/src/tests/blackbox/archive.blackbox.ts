@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
+import { GOOGLE_OAUTH_SCOPES } from '../../domains/integrations/googleScopes';
 import {
   collectFixture,
   collectFixtureSnapshot,
@@ -19,14 +20,23 @@ import {
   listArchivedObjects,
   readArchivedArtifact,
 } from '../../providers/traceArchive';
-import { assertLateArchiveManifestConvergence } from './archive-late-manifest.helper';
+import {
+  assertLateArchiveBatchConvergence,
+  assertLateArchiveManifestConvergence,
+} from './archive-late-manifest.helper';
+import {
+  ARCHIVE_BENCHMARK_TASK,
+  purgeOrphanedArchiveMemories,
+  testCleanupLeavesNoPlannerMemoryRows,
+  trackSeededRootAgent,
+} from './archive-planner-memory.helper';
+import { ids, jsonRoundTrip, request, runTest, type TestResult } from './archive-blackbox.support';
 
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
 const RUN_ID = process.env.BLACKBOX_TEST_RUN_ID || `${Date.now()}-${randomUUID().slice(0, 8)}`;
-
 interface SeededRun {
   userId: string;
   otherUserId: string;
@@ -39,58 +49,11 @@ interface SeededRun {
   otherPersonId: string;
 }
 
-interface TestResult {
-  name: string;
-  passed: boolean;
-  error?: string;
-  duration: number;
-}
-
-async function request(url: string, options: RequestInit = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
-  const contentType = response.headers.get('content-type') || '';
-  const data = contentType.includes('application/json')
-    ? await response.json()
-    : await response.text();
-  return { status: response.status, data };
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
-}
-
-function ids(rows: unknown[] | undefined): string[] {
-  return (rows ?? [])
-    .map((row) => (row as { id?: unknown }).id)
-    .filter((id): id is string => typeof id === 'string');
-}
-
-function jsonRoundTrip<T>(value: T): T {
-  return JSON.parse(
-    JSON.stringify(value, (_key, nested) =>
-      typeof nested === 'bigint' ? nested.toString() : nested
-    )
-  ) as T;
-}
-
 async function seedRun(): Promise<SeededRun> {
   const userId = `archive-user-${RUN_ID}-${randomUUID()}`;
   const otherUserId = `archive-other-${RUN_ID}-${randomUUID()}`;
   const rootAgentId = randomUUID();
+  trackSeededRootAgent(rootAgentId);
   const childAgentId = randomUUID();
   const toolId = randomUUID();
   const messageId = randomUUID();
@@ -196,6 +159,8 @@ async function cleanup(seed: SeededRun): Promise<void> {
     where: { operationKey: { contains: seed.rootAgentId } },
   });
   await prisma.agent.deleteMany({ where: { id: { in: [seed.childAgentId, seed.rootAgentId] } } });
+  // PlannerMemory has no FK to Agent (history outlives the run), so finalize's row needs its own delete.
+  await prisma.plannerMemory.deleteMany({ where: { id: seed.rootAgentId } });
   await prisma.person.deleteMany({ where: { id: { in: [seed.personId, seed.otherPersonId] } } });
   await prisma.tool.deleteMany({ where: { id: seed.toolId } });
   await prisma.user.deleteMany({ where: { userId: { in: [seed.userId, seed.otherUserId] } } });
@@ -357,7 +322,15 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
     ]) {
       const encrypted = encryptArtifact(
         artifactPath,
-        Buffer.from(`ciphertext:${artifactPath}`),
+        Buffer.from(
+          artifactPath.startsWith('llm/')
+            ? JSON.stringify({
+                root_agent_id: seed.rootAgentId,
+                agent_id: seed.rootAgentId,
+                messages: [{ role: 'assistant', content: 'Archived test LLM result' }],
+              })
+            : `ciphertext:${artifactPath}`
+        ),
         artifactPath.endsWith('.png.enc') ? 'image/png' : 'application/json'
       );
       assert(encrypted, 'expected test artifact encryption to be available');
@@ -379,7 +352,7 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
       headers,
       body: JSON.stringify({
         rootAgentId: seed.rootAgentId,
-        benchmarkTaskName: 'archive-blackbox',
+        benchmarkTaskName: ARCHIVE_BENCHMARK_TASK,
       }),
     });
     assert.strictEqual(finalize.status, 200, JSON.stringify(finalize.data).slice(0, 300));
@@ -460,6 +433,11 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
       headers,
       rootAgentId: seed.rootAgentId,
     });
+    await assertLateArchiveBatchConvergence({
+      baseUrl: BASE_URL,
+      headers,
+      rootAgentId: seed.rootAgentId,
+    });
   } finally {
     await cleanup(seed);
   }
@@ -496,7 +474,7 @@ async function testEmailProviderBoundaryArchivedWithAgentCorrelation(): Promise<
         email: 'sender@example.com',
         accessToken: 'gmail-access-token',
         refreshToken: 'gmail-refresh-token',
-        scopes: ['https://www.googleapis.com/auth/gmail.send'],
+        scopes: [...GOOGLE_OAUTH_SCOPES],
       },
     });
     global.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -538,7 +516,7 @@ async function testEmailProviderBoundaryArchivedWithAgentCorrelation(): Promise<
     assert(stored, 'expected readable encrypted Gmail provider archive artifact');
     const payload = JSON.parse(decryptAndValidateArtifact(stored).toString('utf8')) as {
       provider: string;
-      request: { body: { raw?: unknown } };
+      request: { method?: string; url?: string; body?: unknown };
       response: { id?: string; threadId?: string };
       status_code: number;
       success: boolean;
@@ -555,12 +533,17 @@ async function testEmailProviderBoundaryArchivedWithAgentCorrelation(): Promise<
     assert.strictEqual(payload.status_code, 200);
     assert.strictEqual(payload.response.id, 'gmail-message-1');
     assert.strictEqual(payload.response.threadId, 'gmail-thread-1');
-    assert.strictEqual(typeof payload.request.body.raw, 'string');
+    assert.strictEqual(payload.request.method, 'POST');
+    assert.strictEqual(
+      payload.request.url,
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages/send'
+    );
+    assert.strictEqual(payload.request.body, undefined);
     assert.strictEqual(payload.context.agent_id, seed.rootAgentId);
     assert.strictEqual(payload.context.user_id, seed.userId);
-    assert.strictEqual(payload.context.from_email, 'sender@example.com');
-    assert.strictEqual(payload.context.to, 'recipient@example.com');
-    assert.strictEqual(payload.context.subject, 'Archive boundary');
+    assert.strictEqual(payload.context.from_email, undefined);
+    assert.strictEqual(payload.context.to, undefined);
+    assert.strictEqual(payload.context.subject, undefined);
   } finally {
     global.fetch = originalFetch;
     await prisma.integration.deleteMany({ where: { userId: seed.userId, name: 'gmail' } });
@@ -587,7 +570,12 @@ async function runAll(): Promise<void> {
       name: 'email provider boundary archived with agent correlation',
       fn: testEmailProviderBoundaryArchivedWithAgentCorrelation,
     },
+    {
+      name: 'cleanup leaves no planner-memory history rows',
+      fn: testCleanupLeavesNoPlannerMemoryRows,
+    },
   ];
+  await purgeOrphanedArchiveMemories();
   const results: TestResult[] = [];
   for (const test of tests) results.push(await runTest(test.name, test.fn));
   for (const result of results) {

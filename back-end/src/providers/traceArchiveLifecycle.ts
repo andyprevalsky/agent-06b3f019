@@ -1,4 +1,7 @@
 import { createLogger } from './logger';
+import { prisma } from './database';
+import { indexArchivedTrace, indexArchivedTraceFromR2 } from './traceArchiveSearchIndex';
+import { scheduleFinalizeEmbedding } from './plannerMemoryEmbedding';
 import { type PlannerMemoryRunInput, upsertPlannerMemoryFromRun } from './plannerMemoryStore';
 import { collectFixture, collectFixtureSnapshot } from './traceArchiveFixture';
 import {
@@ -13,6 +16,7 @@ import {
 } from './traceArchive';
 import {
   type ManifestArtifact,
+  artifactPath,
   encryptedManifestIndex,
   excludeControlArtifacts,
   finalizationFenceExists,
@@ -46,6 +50,129 @@ export interface StoreEncryptedArtifactRequest {
   metadata: EncryptedArtifactMetadata;
 }
 
+export const ARCHIVE_BATCH_MAX_RECORDS = 256;
+export const ARCHIVE_BATCH_MAX_BYTES = 64 * 1024 * 1024;
+const ARCHIVE_BATCH_UPLOAD_CONCURRENCY = 4;
+
+export interface StoreEncryptedArtifactsRequest {
+  rootAgentId: string;
+  artifacts: Omit<StoreEncryptedArtifactRequest, 'rootAgentId'>[];
+}
+
+/** Validate the entire request before writing any artifact or finalization fence. */
+function validatedArtifactBatch(input: unknown) {
+  if (input === null || typeof input !== 'object') {
+    throw new Error('Archive batch must be an object');
+  }
+  const body = input as StoreEncryptedArtifactsRequest;
+  if (
+    typeof body.rootAgentId !== 'string' ||
+    !/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,95}$/.test(body.rootAgentId)
+  ) {
+    throw new Error('Archive batch requires one canonical rootAgentId');
+  }
+  if (
+    !Array.isArray(body.artifacts) ||
+    body.artifacts.length === 0 ||
+    body.artifacts.length > ARCHIVE_BATCH_MAX_RECORDS
+  ) {
+    throw new Error('Archive batch record count exceeds bounds');
+  }
+  if (Buffer.byteLength(JSON.stringify(input), 'utf8') > ARCHIVE_BATCH_MAX_BYTES) {
+    throw new Error('Archive batch byte count exceeds bounds');
+  }
+  const paths = new Set<string>();
+  const artifacts = body.artifacts.map((artifact) => {
+    if (
+      artifact === null ||
+      typeof artifact !== 'object' ||
+      'rootAgentId' in artifact ||
+      typeof artifact.path !== 'string' ||
+      artifact.path.length === 0 ||
+      artifact.path.length > 4096 ||
+      safeArchivePath(artifact.path) !== artifact.path ||
+      artifact.path.endsWith('.meta.json') ||
+      artifact.path.endsWith('.transaction') ||
+      /\.transaction\.\d+(?:\.\d+)?\.tmp$/.test(artifact.path) ||
+      paths.has(artifact.path)
+    ) {
+      throw new Error('Archive batch paths must be canonical and unique within one root');
+    }
+    paths.add(artifact.path);
+    if (
+      typeof artifact.ciphertextB64 !== 'string' ||
+      artifact.ciphertextB64.length === 0 ||
+      artifact.ciphertextB64.length > 44 * 1024 * 1024
+    ) {
+      throw new Error('Archive batch ciphertext must be canonical base64');
+    }
+    if (
+      artifact.metadata === null ||
+      typeof artifact.metadata !== 'object' ||
+      Buffer.byteLength(JSON.stringify(artifact.metadata), 'utf8') > 8192
+    ) {
+      throw new Error('Archive batch metadata exceeds bounds');
+    }
+    const ciphertext = Buffer.from(artifact.ciphertextB64, 'base64');
+    if (
+      ciphertext.length > 33 * 1024 * 1024 ||
+      ciphertext.toString('base64') !== artifact.ciphertextB64
+    ) {
+      throw new Error('Archive batch ciphertext exceeds bounds');
+    }
+    const metadata = validateEncryptedArtifactEnvelope({
+      objectPath: artifact.path,
+      ciphertext,
+      metadata: artifact.metadata,
+    });
+    if (
+      !Number.isSafeInteger(metadata.plaintext_bytes) ||
+      metadata.plaintext_bytes < 0 ||
+      metadata.plaintext_bytes > 32 * 1024 * 1024
+    ) {
+      throw new Error('Archive batch plaintext byte count exceeds bounds');
+    }
+    return { objectPath: artifact.path, ciphertext, metadata };
+  });
+  return { rootAgentId: body.rootAgentId, artifacts };
+}
+
+/** Preserve individual artifact envelopes; amortize terminal manifest publication. */
+export async function storeWorkerArtifacts(input: unknown): Promise<{
+  artifacts: { path: string; ref: string }[];
+}> {
+  const batch = validatedArtifactBatch(input);
+  const refs: { path: string; ref: string }[] = new Array(batch.artifacts.length);
+  let next = 0;
+  const uploads = await Promise.allSettled(
+    Array.from(
+      { length: Math.min(ARCHIVE_BATCH_UPLOAD_CONCURRENCY, batch.artifacts.length) },
+      async () => {
+        while (next < batch.artifacts.length) {
+          const index = next++;
+          const artifact = batch.artifacts[index];
+          const ref = await storeEncryptedArtifact({ rootAgentId: batch.rootAgentId, ...artifact });
+          if (ref === null) throw new Error('Trace archive is disabled or unavailable');
+          refs[index] = { path: artifact.objectPath, ref };
+        }
+      }
+    )
+  );
+  const failure = uploads.find((result) => result.status === 'rejected');
+  if (failure?.status === 'rejected') throw failure.reason;
+  if (await finalizationFenceExists(batch.rootAgentId)) {
+    const reconciled = await reconcileFinalizedManifest(batch.rootAgentId, { markerExists: true });
+    if (reconciled.status === 'updated') {
+      log.info('Trace archive manifest reconciled after late worker artifact batch', {
+        root_agent_id: batch.rootAgentId,
+        batch_count: batch.artifacts.length,
+        artifact_count: reconciled.actualArtifactCount,
+      });
+    }
+  }
+  return { artifacts: refs };
+}
+
 export interface AgentStartRequest {
   agentId: string;
 }
@@ -76,10 +203,13 @@ const finalizeInFlight = new Map<string, Promise<FinalizeAgentResult>>();
 /** Keep the finalized archive authoritative when its derived search index is unavailable. */
 export async function bestEffortIndexPlannerMemory(
   input: PlannerMemoryRunInput,
-  write: (value: PlannerMemoryRunInput) => Promise<void> = upsertPlannerMemoryFromRun
+  write: (value: PlannerMemoryRunInput) => Promise<void> = upsertPlannerMemoryFromRun,
+  embed: (rootAgentId: string) => void = scheduleFinalizeEmbedding
 ): Promise<boolean> {
   try {
     await write(input);
+    // Detached: the retrieval embedding round trip never delays finalize.
+    embed(input.rootAgentId);
     return true;
   } catch (error) {
     log.warn('Planner memory index update failed after trace archive finalization', {
@@ -209,12 +339,30 @@ export async function storeWorkerArtifact(
     const reconciled = await reconcileFinalizedManifest(input.rootAgentId, {
       markerExists: true,
     });
+    if (reconciled.status !== 'current' && reconciled.status !== 'updated') {
+      throw new Error(`Trace archive manifest is ${reconciled.status} for ${input.rootAgentId}`);
+    }
     if (reconciled.status === 'updated') {
       log.info('Trace archive manifest reconciled after late worker artifact', {
         root_agent_id: input.rootAgentId,
         object_path: objectPath,
         artifact_count: reconciled.actualArtifactCount,
       });
+    }
+    if (/^(llm|llm-updates)\/.*\.json\.gz\.enc$/.test(objectPath)) {
+      // A stale worker can still submit to a reused local benchmark port. In
+      // production the SQL Agent may already have been purged, so do not use
+      // its presence as the condition for indexing the archived bundle.
+      const localRoot =
+        process.env.NODE_ENV === 'production'
+          ? true
+          : (await prisma.agent.findUnique({
+              where: { id: input.rootAgentId },
+              select: { id: true },
+            })) !== null;
+      if (localRoot) {
+        await indexArchivedTraceFromR2(input.rootAgentId);
+      }
     }
   }
   return { ref };
@@ -505,6 +653,11 @@ async function finalizeAgentOnce(input: AgentFinalizeRequest): Promise<FinalizeA
             ? run.root_created_at
             : null,
       });
+      await indexArchivedTrace(
+        input.rootAgentId,
+        endFixture,
+        refs.map(artifactPath).filter((path): path is string => path !== null)
+      );
     }
     log.info('Trace archive finalized', {
       root_agent_id: input.rootAgentId,

@@ -30,6 +30,7 @@ import assert from 'node:assert/strict';
 
 import { createStreamingCompletion, type CompletionChunk } from '../../providers/rose';
 import { OPENROUTER_CEREBRAS_MODEL } from '../../providers/rose/openrouterCerebrasRoute';
+import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 
 /** A successful OpenRouter SSE stream carrying real content from a fallback model. */
@@ -195,13 +196,22 @@ async function runEmptyCerebrasStream(): Promise<void> {
   process.env.CEREBRAS_API_KEY = 'blackbox-cerebras-key';
 
   const openRouterModels: string[] = [];
+  let exclusiveModelAttempts = 0;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     if (url === OPENROUTER_API_URL) {
       const model = requestedModel(init);
       openRouterModels.push(model);
-      // Cerebras returns a clean, empty stream; the waterfall model serves content.
-      return sseResponse(model === OPENROUTER_CEREBRAS_MODEL ? EMPTY_SSE : FALLBACK_SSE);
+      // Exclusive chat and rose-1-flash waterfall[0] share the same OpenRouter
+      // id (qwen/qwen3.8-27b). The first attempt is the exclusive empty stream;
+      // a later same-model waterfall hop must fail closed so gemini (step 2)
+      // is reached — otherwise the empty stream is replayed and throws.
+      if (model === OPENROUTER_CEREBRAS_MODEL) {
+        exclusiveModelAttempts += 1;
+        if (exclusiveModelAttempts === 1) return sseResponse(EMPTY_SSE);
+        return new Response('cerebras upstream unavailable', { status: 503 });
+      }
+      return sseResponse(FALLBACK_SSE);
     }
     return originalFetch(input, init);
   }) as typeof fetch;
@@ -247,8 +257,65 @@ async function runEmptyCerebrasStream(): Promise<void> {
   process.stdout.write('PASS chat falls through when Cerebras ends cleanly with no output\n');
 }
 
+async function runRateLimitedCerebrasWithSlowSameModelSpill(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const oldOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  const oldCerebrasKey = process.env.CEREBRAS_API_KEY;
+  const oldHedge = process.env.CEREBRAS_CHAT_HEDGE_MS;
+  process.env.OPENROUTER_API_KEY = 'blackbox-openrouter-key';
+  process.env.CEREBRAS_API_KEY = 'blackbox-cerebras-key';
+  process.env.CEREBRAS_CHAT_HEDGE_MS = '0';
+
+  const openRouterModels: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url === CEREBRAS_API_URL) return new Response('rate limited', { status: 429 });
+    if (url === OPENROUTER_API_URL) {
+      const model = requestedModel(init);
+      openRouterModels.push(model);
+      if (model === OPENROUTER_CEREBRAS_MODEL) return stallingCerebrasResponse(init?.signal);
+      if (model === OPENROUTER_FAST_CHAT_MODEL) {
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        return sseResponse(FALLBACK_SSE);
+      }
+      return new Response('unexpected model', { status: 400 });
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+
+  const content: string[] = [];
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-flash',
+      messages: [
+        { role: 'system', content: 'You are Rose.' },
+        { role: 'user', content: 'Route this chat request' },
+      ],
+      provider_route: 'direct-cerebras',
+    });
+    for await (const chunk of stream) {
+      const text = chunk.choices?.[0]?.delta?.content;
+      if (text) content.push(text);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (oldOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = oldOpenRouterKey;
+    if (oldCerebrasKey === undefined) delete process.env.CEREBRAS_API_KEY;
+    else process.env.CEREBRAS_API_KEY = oldCerebrasKey;
+    if (oldHedge === undefined) delete process.env.CEREBRAS_CHAT_HEDGE_MS;
+    else process.env.CEREBRAS_CHAT_HEDGE_MS = oldHedge;
+  }
+
+  assert.ok(openRouterModels.includes(OPENROUTER_CEREBRAS_MODEL));
+  assert.ok(openRouterModels.includes(OPENROUTER_FAST_CHAT_MODEL));
+  assert.ok(content.join('').trim(), 'rate-limited Cerebras must return alternate-model output');
+  process.stdout.write('PASS rate-limited Cerebras races a fast alternate model\n');
+}
+
 void run()
   .then(runEmptyCerebrasStream)
+  .then(runRateLimitedCerebrasWithSlowSameModelSpill)
   .catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
     process.exit(1);

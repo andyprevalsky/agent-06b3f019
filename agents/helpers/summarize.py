@@ -295,6 +295,28 @@ def _truncate_middle(value: str, limit: int) -> str:
     return f"{value[:head]}\n...[truncated {omitted} chars]...\n{value[-tail:]}"
 
 
+def hard_cap_tool_result_text(
+    tool_result_text: str,
+    *,
+    limit: int = TOOL_RESULT_HARD_CAP_CHARS,
+) -> str:
+    """Bound a tool result before it enters an agent context.
+
+    Explore/activity agents append tool results locally (no poll_messages path).
+    Unbounded grep/email dumps have pushed those contexts past the compaction
+    trigger with a protected tail that cannot shrink (prod a890a362: 228k→210k
+    still above 167k). Same hard cap the tool-result summarizer uses on LLM failure.
+    """
+    if not isinstance(tool_result_text, str):
+        tool_result_text = str(tool_result_text)
+    if limit <= 0 or len(tool_result_text) <= limit:
+        return tool_result_text
+    return (
+        tool_result_text[:limit]
+        + f"\n\n...[truncated, original_len={len(tool_result_text)}]"
+    )
+
+
 def _json_dumps_safe(value: Any, *, limit: int = SUMMARY_FIELD_CHAR_BUDGET) -> str:
     try:
         rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, default=str)

@@ -133,6 +133,163 @@ async def _drain(agen) -> List[Any]:
     return [c async for c in agen]
 
 
+@pytest.mark.parametrize("entrypoint", ["central", "compatibility"])
+@pytest.mark.parametrize("capture", [True, False])
+def test_cache_replay_captures_actual_completion(mem, monkeypatch, tmp_path, entrypoint, capture):
+    """The real replay and disk writer must retain current input and synthetic output."""
+    from helpers import observability
+    from providers.rose.client import RoseClient
+
+    monkeypatch.setattr(observability, "_DUMP_ROOT", tmp_path)
+    monkeypatch.setattr(observability, "_IS_PRODUCTION", False)
+    monkeypatch.setattr(observability, "archive_json", lambda **kwargs: None)
+    agent_id = "replay-evidence-contract"
+    messages = [{"role": "user", "content": "Current replay request"}]
+    tools = [{"type": "function", "function": {"name": "set_plan", "parameters": {"type": "object"}}}]
+    kwargs = dict(
+        pool="rose-1-ultra",
+        messages=messages,
+        tools=tools,
+        agent_id=agent_id,
+        provider_fast_mode=True,
+        dump_context=capture,
+    )
+    stored = rose_cache.empty_response()
+    for chunk in _full_stream():
+        rose_cache.accumulate_chunk(stored, chunk)
+
+    async def body():
+        context = FastCacheContext(enabled=True, goal="evidence contract", write_enabled=False)
+        set_context(context)
+        key = context.llm_key("execute_loop", rose_cache.request_key_material(kwargs))
+        mem.data[key] = stored
+        client = RoseClient(openrouter_key="must-not-call-live")
+
+        async def forbid_live(**_kwargs):
+            raise AssertionError("a replay must never call a live provider")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(client, "_complete_impl", forbid_live)
+        expected = await _drain(rose_cache.replay(stored))
+        stream = (
+            client.complete(call_site="execute_loop", **kwargs)
+            if entrypoint == "central"
+            else rose_cache.cached_complete(client, call_site="execute_loop", **kwargs)
+        )
+        chunks = await _drain(stream)
+        assert chunks == expected
+        assert mem.set_calls == 0
+        return key
+
+    key = asyncio.run(body())
+    dumps = list(tmp_path.rglob("*.json"))
+    assert len(dumps) == int(capture)
+    if capture:
+        dump = json.loads(dumps[0].read_text())
+        assert dump["agent_id"] == agent_id
+        assert dump["messages"] == messages
+        assert dump["tools"] == tools
+        assert dump["extra"]["completion_source"] == "fast_cache"
+        assert dump["extra"]["cache_key"] == key
+        assert dump["output"]["actual_model"] == "fast-cache"
+        assert dump["output"]["content"] == "Hello world"
+        assert dump["output"]["tool_calls"] == stored["tool_calls"]
+        assert dump["output"]["usage"]["completion_tokens"] == 0
+        assert dump["output"]["replay_complete"] is True
+
+
+@pytest.mark.parametrize("entrypoint", ["central", "compatibility"])
+def test_cache_passthrough_dump_is_labeled(mem, monkeypatch, tmp_path, entrypoint):
+    from helpers import observability
+    from providers.rose.client import RoseClient
+
+    monkeypatch.setattr(observability, "_DUMP_ROOT", tmp_path)
+    monkeypatch.setattr(observability, "_IS_PRODUCTION", False)
+    monkeypatch.setattr(observability, "archive_json", lambda **kwargs: None)
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal=_soft_complete_bench_goal()))
+        client = RoseClient(openrouter_key="must-not-call-live")
+        kwargs = dict(
+            pool="rose-1-ultra",
+            agent_id="passthrough-contract",
+            messages=[{"role": "user", "content": "Current completion context"}],
+        )
+        stream = (
+            client.complete(call_site="completion_summary", **kwargs)
+            if entrypoint == "central"
+            else rose_cache.cached_complete(client, call_site="completion_summary", **kwargs)
+        )
+        chunks = await _drain(stream)
+        assert chunks[-1].kind == "done"
+
+    asyncio.run(body())
+    dumps = list(tmp_path.rglob("*.json"))
+    assert len(dumps) == 1
+    dump = json.loads(dumps[0].read_text())
+    assert dump["extra"]["completion_source"] == "fast_cache"
+    assert dump["extra"]["replay_reason"] == "fm_terminal_passthrough"
+    assert dump["extra"]["cache_hit_key"] == "terminal_passthrough"
+    assert dump["output"]["actual_model"] == "fast-cache"
+    assert dump["output"]["replay_complete"] is True
+
+
+@pytest.mark.parametrize("entrypoint", ["central", "compatibility"])
+def test_cache_dump_marks_consumer_abandonment(mem, monkeypatch, tmp_path, entrypoint):
+    from helpers import observability
+    from providers.rose.client import RoseClient
+
+    monkeypatch.setattr(observability, "_DUMP_ROOT", tmp_path)
+    monkeypatch.setattr(observability, "_IS_PRODUCTION", False)
+    monkeypatch.setattr(observability, "archive_json", lambda **kwargs: None)
+
+    async def body():
+        ctx = FastCacheContext(enabled=True, goal="abandonment contract", write_enabled=False)
+        set_context(ctx)
+        kwargs = dict(pool="rose-1-ultra", agent_id="abandoned-contract", messages=[])
+        key = ctx.llm_key("execute_loop", rose_cache.request_key_material({**kwargs, "provider_fast_mode": True}))
+        mem.data[key] = {"content": "not consumed"}
+        client = RoseClient(openrouter_key="must-not-call-live")
+        stream = (client.complete(call_site="execute_loop", **kwargs)
+                  if entrypoint == "central" else
+                  rose_cache.cached_complete(client, call_site="execute_loop", **kwargs))
+        assert (await anext(stream)).kind == "metadata"
+        await stream.aclose()
+        # Check before event-loop shutdown/GC can finalize a leaked inner iterator.
+        dump = json.loads(next(tmp_path.rglob("*.json")).read_text())
+        assert dump["output"]["replay_complete"] is False
+        assert dump["output"]["content"] == ""
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("failure", ["start", "finish"])
+def test_cache_dump_failure_preserves_stream(monkeypatch, failure):
+    from helpers import observability
+
+    def fail(**kwargs):
+        raise OSError("capture unavailable")
+
+    monkeypatch.setattr(observability, "dump_llm_context", fail if failure == "start" else lambda **kwargs: "dump")
+    monkeypatch.setattr(observability, "update_llm_dump", lambda *args, **kwargs: fail())
+
+    async def body():
+        stored = {"content": "unchanged response"}
+        expected = await _drain(rose_cache.replay(stored))
+        actual = await _drain(
+            rose_cache.replay_with_context(
+                stored,
+                call_site="execute_loop",
+                cache_key="key",
+                hit_key="key",
+                complete_kwargs={"agent_id": "failure-contract", "messages": []},
+            )
+        )
+        assert actual == expected
+
+    asyncio.run(body())
+
+
 # ---------------------------------------------------------------------------
 # Normalization / keys  (anti-bust, exact-match, PII)
 # ---------------------------------------------------------------------------
@@ -2484,7 +2641,36 @@ def test_resolve_fast_cache_goal_activity_returns_persisted_row_goal(monkeypatch
     monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
 
     async def body():
-        assert await resolve_fast_cache_goal_activity("agent-1") == "persisted row goal"
+        assert await resolve_fast_cache_goal_activity("agent-1") == {
+            "goal": "persisted row goal",
+            "root_goal": "persisted row goal",
+        }
+
+    asyncio.run(body())
+
+
+def test_resolve_fast_cache_goal_activity_returns_child_and_root_goal(monkeypatch):
+    import providers.fast_cache.client as cache_client_module
+    from helpers.fast_cache_goal import (
+        resolve_fast_cache_goal_activity,
+        unpack_fast_cache_goal_resolution,
+    )
+
+    leftover = "Produce fresh tool-grounded evidence for Andy Prevalsky"
+    root = "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"
+
+    async def fake_resolve(agent_id: str):
+        assert agent_id == "leftover-child"
+        return True, leftover, True, "root-agent", root, True
+
+    monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
+
+    async def body():
+        resolved = await resolve_fast_cache_goal_activity("leftover-child")
+        assert resolved == {"goal": leftover, "root_goal": root}
+        assert unpack_fast_cache_goal_resolution(resolved) == (leftover, root)
+        assert unpack_fast_cache_goal_resolution("legacy-string") == ("legacy-string", None)
+        assert unpack_fast_cache_goal_resolution(None) == (None, None)
 
     asyncio.run(body())
 
@@ -2632,7 +2818,7 @@ def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
     andy_goal = aman_goal.replace("Aman Gottumukkala", "Andy Prevalsky")
     assert "Andy Prevalsky" in andy_goal
     assert normalize.goal_hash(andy_goal) == normalize.goal_hash(aman_goal)
-    from domains.spawn_agent.oai_demo_july import JULY_GP_GOAL_HASHES
+    from utils.oai_demo_july import JULY_GP_GOAL_HASHES
 
     assert normalize.goal_hash(andy_goal) == JULY_GP_GOAL_HASHES["Eric Topol"]
     sahil = andy_goal.replace("Dr. Eric Topol", "Sahil Bloom")
@@ -2681,6 +2867,180 @@ def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
     other_andy = "Find the current professional profile of Andy Prevalsky, founder of Rose Labs."
     other_aman = other_andy.replace("Andy Prevalsky", "Aman Gottumukkala")
     assert normalize.goal_hash(other_andy) != normalize.goal_hash(other_aman)
+
+
+@pytest.mark.parametrize("cancelled_party", ["waiter", "owner", "owner_and_waiter"])
+def test_position_fallback_cancellation_preserves_singleflight_ownership(monkeypatch, cancelled_party):
+    """Caller cancellation stays local; the shared HTTP task resolves live followers."""
+    import httpx
+
+    import providers.fast_cache.client as cache_client
+
+    async def body():
+        cache_client.clear_position_memo()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        joined = asyncio.Event()
+        requests = []
+        cancelled_http = []
+        tasks = []
+        expected_body = {"goalHash": "cancel-goal", "callSite": "explore_agent", "step": 7}
+        expected_result = ({"step": 7}, "cancel-key")
+
+        async def handle(request):
+            assert request.url.path == "/api/fast-cache/get-position"
+            assert json.loads(request.content) == expected_body
+            requests.append(request)
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled_http.append(request)
+                raise
+            return httpx.Response(
+                200,
+                json={"hit": True, "value": expected_result[0], "key": expected_result[1]},
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            monkeypatch.setattr(cache_client, "_backend", lambda: ("http://cache.test", "test-key"))
+            monkeypatch.setattr(cache_client, "_shared_client", lambda: client)
+            monkeypatch.setattr(cache_client, "_POSITION_PREFETCH_AHEAD", 0)
+
+            async def lookup(waiter=False):
+                if waiter:
+                    joined.set()
+                return await cache_client.cache_get_position_fallback("cancel-goal", "explore_agent", 7)
+
+            try:
+                owner = asyncio.create_task(lookup())
+                tasks.append(owner)
+                await asyncio.wait_for(started.wait(), 10)
+                shared = cache_client._position_inflight[("cancel-goal", "explore_agent", 7)]
+                waiter = asyncio.create_task(lookup(waiter=True))
+                tasks.append(waiter)
+                await asyncio.wait_for(joined.wait(), 10)
+                target = waiter if cancelled_party == "waiter" else owner
+                target.cancel()
+                if cancelled_party == "owner_and_waiter":
+                    waiter.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await target
+
+                if cancelled_party == "waiter":
+                    assert not shared.cancelled(), "waiter cancellation poisoned the shared result"
+                    assert not owner.done()
+                    assert not cancelled_http
+                    joined.clear()
+                    later = asyncio.create_task(lookup(waiter=True))
+                    tasks.append(later)
+                    await asyncio.wait_for(joined.wait(), 10)
+                    release.set()
+                    results = await asyncio.wait_for(asyncio.gather(owner, later), 10)
+                    assert results == [expected_result, expected_result]
+                    assert len(requests) == 1
+                else:
+                    assert not shared.cancelled(), "caller cancellation poisoned the shared HTTP task"
+                    assert not cancelled_http
+                    assert cache_client._position_inflight.get(("cancel-goal", "explore_agent", 7)) is shared
+                    release.set()
+                    if cancelled_party == "owner_and_waiter":
+                        with pytest.raises(asyncio.CancelledError):
+                            await waiter
+                        assert len(requests) == 1
+                        assert await lookup() == expected_result
+                    else:
+                        assert await asyncio.wait_for(waiter, 10) == expected_result
+                    assert len(requests) == 1
+
+                assert await lookup() == expected_result
+                assert len(requests) == 1
+                assert not cache_client._position_inflight
+            finally:
+                release.set()
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(*cache_client._position_inflight.values(), return_exceptions=True)
+                cache_client.clear_position_memo()
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("with_follower", [False, True])
+def test_position_fallback_failure_is_owned_and_propagated(monkeypatch, with_follower):
+    """The shared promise adds no unhandled error; real HTTP failures still propagate."""
+    import gc
+
+    import httpx
+
+    import providers.fast_cache.client as cache_client
+
+    async def body():
+        loop = asyncio.get_running_loop()
+        original_handler = loop.get_exception_handler()
+        unhandled = []
+        loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+
+        async def exercise():
+            cache_client.clear_position_memo()
+            started, release, joined = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            requests, tasks = [], []
+
+            async def handle(request):
+                assert request.url.path == "/api/fast-cache/get-position"
+                assert json.loads(request.content) == {
+                    "goalHash": "failure-goal",
+                    "callSite": "explore_agent",
+                    "step": 8,
+                }
+                requests.append(request)
+                started.set()
+                await release.wait()
+                raise httpx.ReadTimeout("owned fixture timeout", request=request)
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+                monkeypatch.setattr(cache_client, "_backend", lambda: ("http://cache.test", "test-key"))
+                monkeypatch.setattr(cache_client, "_shared_client", lambda: client)
+                monkeypatch.setattr(cache_client, "_POSITION_PREFETCH_AHEAD", 0)
+
+                async def lookup(follower=False):
+                    if follower:
+                        joined.set()
+                    return await cache_client.cache_get_position_fallback("failure-goal", "explore_agent", 8)
+
+                try:
+                    tasks.append(asyncio.create_task(lookup()))
+                    await asyncio.wait_for(started.wait(), 10)
+                    if with_follower:
+                        tasks.append(asyncio.create_task(lookup(follower=True)))
+                        await asyncio.wait_for(joined.wait(), 10)
+                    release.set()
+                    results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 10)
+                    assert all(isinstance(result, httpx.ReadTimeout) for result in results)
+                    assert all(result is results[0] for result in results)
+                    assert len(requests) == 3
+                    assert not cache_client._position_inflight
+                    assert cache_client._position_memo_get("failure-goal", "explore_agent", 8) is None
+                finally:
+                    release.set()
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    cache_client.clear_position_memo()
+
+        try:
+            await exercise()
+            await asyncio.sleep(0)
+            gc.collect()
+            await asyncio.sleep(0)
+            assert not unhandled, "shared HTTP failure leaked an unowned Future error"
+        finally:
+            loop.set_exception_handler(original_handler)
+
+    asyncio.run(body())
 
 
 def test_position_fallback_memos_and_single_flights_http(monkeypatch):
@@ -2802,6 +3162,90 @@ def test_position_fallback_retries_timeout_then_hits(monkeypatch):
     cache_client.clear_position_memo()
 
 
+def _slow_position_client(cache_client, monkeypatch, release_holder: dict, posts: list[int]):
+    """get-position stub that blocks every POST until ``release_holder['event']`` is set."""
+
+    class _Resp:
+        def __init__(self, step: int):
+            self.status_code = 200
+            self._step = step
+
+        def json(self):
+            return {"hit": True, "value": {"step": self._step}, "key": f"k-{self._step}"}
+
+    class _Client:
+        async def post(self, *args, **kwargs):
+            del args
+            step = int((kwargs.get("json") or {}).get("step") or 0)
+            posts.append(step)
+            await release_holder["event"].wait()
+            return _Resp(step)
+
+    monkeypatch.setattr(cache_client, "_backend", lambda: ("http://cache.test", "key"))
+    monkeypatch.setattr(cache_client, "_shared_client", lambda: _Client())
+
+
+def test_position_fallback_waiter_timeout_does_not_cancel_shared_slot(monkeypatch):
+    """A timed-out waiter must not hand CancelledError to the slot's other callers.
+
+    test-mass-agent-run-0 / 855ae867: summarize_web_fetch's 90s wait_for
+    (loop/activity_helper.py) expired while awaiting a single-flighted
+    get-position slot. Task cancellation cancelled the SHARED future, so the
+    retry 1s later awaited that cancelled future and a bare CancelledError
+    failed the whole explore activity (spawn_agent ERROR, t10-no-tool-failures).
+    """
+    import providers.fast_cache.client as cache_client
+
+    cache_client.clear_position_memo()
+    posts: list[int] = []
+    release: dict = {}
+    _slow_position_client(cache_client, monkeypatch, release, posts)
+
+    async def body():
+        release["event"] = asyncio.Event()
+        slot = ("hash-d", "summarize_web_fetch", 2)
+        owner = asyncio.create_task(cache_client.cache_get_position_fallback(*slot))
+        sibling = asyncio.create_task(cache_client.cache_get_position_fallback(*slot))
+        await asyncio.sleep(0)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(cache_client.cache_get_position_fallback(*slot), timeout=0.01)
+        retry = asyncio.create_task(cache_client.cache_get_position_fallback(*slot))
+        await asyncio.sleep(0)
+        release["event"].set()
+        results = await asyncio.gather(owner, sibling, retry, return_exceptions=True)
+        assert results == [({"step": 2}, "k-2")] * 3
+        assert posts.count(2) == 1
+
+    asyncio.run(body())
+    cache_client.clear_position_memo()
+
+
+def test_position_fallback_owner_timeout_still_resolves_waiters(monkeypatch):
+    """The caller that started the fetch may time out; waiters still get the row."""
+    import providers.fast_cache.client as cache_client
+
+    cache_client.clear_position_memo()
+    posts: list[int] = []
+    release: dict = {}
+    _slow_position_client(cache_client, monkeypatch, release, posts)
+
+    async def body():
+        release["event"] = asyncio.Event()
+        slot = ("hash-e", "summarize_web_fetch", 5)
+        owner = asyncio.create_task(asyncio.wait_for(cache_client.cache_get_position_fallback(*slot), timeout=0.01))
+        await asyncio.sleep(0)
+        waiter = asyncio.create_task(cache_client.cache_get_position_fallback(*slot))
+        with pytest.raises(asyncio.TimeoutError):
+            await owner
+        release["event"].set()
+        assert await asyncio.wait_for(waiter, timeout=1.0) == ({"step": 5}, "k-5")
+        assert await cache_client.cache_get_position_fallback(*slot) == ({"step": 5}, "k-5")
+        assert posts.count(5) == 1
+
+    asyncio.run(body())
+    cache_client.clear_position_memo()
+
+
 def test_cache_replay_usage_zeros_live_output_tokens():
     """Replay must not report stored completion tokens as live streamed output."""
     usage = rose_cache._cache_replay_usage(
@@ -2853,6 +3297,32 @@ def test_oai_demo_replay_rewrites_aman_to_andy_only_for_this_task():
         assert "Aman Gottumukkala" not in blob
     finally:
         reset_context(token)
+
+
+def test_content_lookup_keys_dual_read_flash_and_lite_pools():
+    """rose-1-flash content keys must dual-read the pre-rename rose-1-lite row."""
+    material = {
+        "pool": "rose-1-flash",
+        "system": "schema system",
+        "user": "Goal: mass agent",
+        "response_model": "_GeneratedResponseSchemaWithTitle",
+        "temperature": 0.3,
+        "max_tokens": [2000, 4000],
+    }
+    keys = normalize.content_lookup_keys_with_pool_aliases("mass agent", "response_schema", material)
+    flash_key = normalize.content_key("mass agent", "response_schema", material)
+    lite_key = normalize.content_key(
+        "mass agent", "response_schema", {**material, "pool": "rose-1-lite"}
+    )
+    assert keys[0] == flash_key
+    assert lite_key in keys
+    assert flash_key != lite_key
+    # Reverse alias direction (legacy callers still on lite) also dual-reads flash.
+    reverse = normalize.content_lookup_keys_with_pool_aliases(
+        "mass agent", "response_schema", {**material, "pool": "rose-1-lite"}
+    )
+    assert reverse[0] == lite_key
+    assert flash_key in reverse
 
 
 def test_position_lookup_keys_include_july_demo_aliases():
@@ -3547,7 +4017,7 @@ def _july_explore_casey_goal() -> str:
 
 
 def test_extract_oai_demo_creator_from_rank_template_and_free_text():
-    from domains.spawn_agent.oai_demo_july import (
+    from utils.oai_demo_july import (
         extract_oai_demo_creator_name,
         july_explore_goal_hash_for_goal,
     )
@@ -3821,3 +4291,165 @@ def test_rose_client_july_explore_fallback_replays_web_search(mem, monkeypatch):
         assert tc.data["name"] == "web_search"
 
     asyncio.run(body())
+
+
+@pytest.mark.parametrize("boundary", ["unresolved-context", "browser-bypass", "non-demo-cache-miss"])
+def test_demo_cache_probe_refuses_unresolved_or_uncached_live_provider(mem, monkeypatch, boundary):
+    """The opted-in isolated probe never spends after cache admission is lost."""
+    from providers.fast_cache import client as cache_client
+    from providers.fast_cache.rose_cache import FastCacheLookupError
+    from providers.rose.client import RoseClient
+
+    monkeypatch.setenv("BENCHMARK_DEMO_CACHE_READ_ONLY", "1")
+    monkeypatch.setenv("BENCHMARK_ISOLATED_RUN", "true")
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+
+    async def unresolved(*_args, **_kwargs):
+        return None
+
+    async def normal_provider_speed(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(cache_client, "ensure_context", unresolved)
+    monkeypatch.setattr(cache_client, "resolve_provider_fast_mode", normal_provider_speed)
+
+    async def body():
+        token = set_context(
+            FastCacheContext(enabled=True, goal="ordinary goal", base_step=1)
+            if boundary == "non-demo-cache-miss" else None
+        )
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def live_boundary(**_kwargs):
+            live_calls["n"] += 1
+            for chunk in _full_stream():
+                yield chunk
+
+        monkeypatch.setattr(client, "_complete_impl", live_boundary)
+        try:
+            with pytest.raises(FastCacheLookupError, match="DEMO replay probe.*live"):
+                await _drain(client.complete(
+                    pool="rose-1-browser-use" if boundary == "browser-bypass" else "rose-1-ultra",
+                    messages=[{"role": "user", "content": "go"}],
+                    call_site="response_schema",
+                    agent_id="agent-fixture",
+                ))
+            assert live_calls["n"] == 0
+            assert mem.set_calls == 0
+        finally:
+            reset_context(token)
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("probe,isolated", [(None, "true"), ("1", None)])
+def test_demo_cache_probe_flag_off_or_nonisolated_preserves_live_fallback(mem, monkeypatch, probe, isolated):
+    """The new guard must not redefine the generic read-only write flag."""
+    from providers.fast_cache import client as cache_client
+    from providers.rose.client import RoseClient
+
+    for key, value in {"BENCHMARK_DEMO_CACHE_READ_ONLY": probe, "BENCHMARK_ISOLATED_RUN": isolated}.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+
+    async def unresolved(*_args, **_kwargs):
+        return None
+
+    async def normal_provider_speed(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(cache_client, "ensure_context", unresolved)
+    monkeypatch.setattr(cache_client, "resolve_provider_fast_mode", normal_provider_speed)
+
+    async def body():
+        token = set_context(None)
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def live_boundary(**_kwargs):
+            live_calls["n"] += 1
+            for chunk in _full_stream():
+                yield chunk
+
+        monkeypatch.setattr(client, "_complete_impl", live_boundary)
+        try:
+            chunks = await _drain(client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="response_schema",
+                agent_id="agent-fixture",
+            ))
+            assert chunks
+            assert live_calls["n"] == 1
+            assert mem.set_calls == 0
+        finally:
+            reset_context(token)
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("probe", ["1", None])
+def test_demo_cache_probe_compatibility_wrapper_fences_non_demo_miss(mem, monkeypatch, probe):
+    """Legacy callers must not bypass the opted-in task guard through _complete_impl."""
+    from providers.fast_cache.rose_cache import FastCacheLookupError
+    from providers.rose.client import RoseClient
+
+    if probe is None:
+        monkeypatch.delenv("BENCHMARK_DEMO_CACHE_READ_ONLY", raising=False)
+    else:
+        monkeypatch.setenv("BENCHMARK_DEMO_CACHE_READ_ONLY", probe)
+    monkeypatch.setenv("BENCHMARK_ISOLATED_RUN", "true")
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+
+    async def body():
+        token = set_context(FastCacheContext(enabled=True, goal="ordinary goal", base_step=1))
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def live_boundary(**_kwargs):
+            live_calls["n"] += 1
+            for chunk in _full_stream():
+                yield chunk
+
+        monkeypatch.setattr(client, "_complete_impl", live_boundary)
+        try:
+            stream = rose_cache.cached_complete(
+                client,
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="response_schema",
+                agent_id="agent-fixture",
+            )
+            if probe is not None:
+                with pytest.raises(FastCacheLookupError, match="DEMO replay probe.*live"):
+                    await _drain(stream)
+                assert live_calls["n"] == 0
+            else:
+                assert await _drain(stream)
+                assert live_calls["n"] == 1
+            assert mem.set_calls == 0
+        finally:
+            reset_context(token)
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize(
+    "replay_control",
+    [
+        test_july_gp_execute_first_step_retries_and_replays_web_search,
+        test_rose_client_july_gp_execute_retry_replays_not_stub,
+    ],
+    ids=["compatibility-wrapper", "central-client"],
+)
+def test_demo_cache_probe_preserves_existing_recorded_replay_hits(mem, monkeypatch, replay_control):
+    """Reuse the owning July replay controls under the exact CLI guard flags."""
+    monkeypatch.setenv("BENCHMARK_DEMO_CACHE_READ_ONLY", "1")
+    monkeypatch.setenv("BENCHMARK_ISOLATED_RUN", "true")
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+    replay_control(mem, monkeypatch)
+    assert mem.set_calls == 0

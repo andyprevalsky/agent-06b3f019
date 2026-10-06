@@ -22,6 +22,17 @@ export const FOCUS_RECONNECT_DELAY_MS = 500;
  */
 export const DISCONNECTED_BACKFILL_POLL_MS = 2000;
 
+/**
+ * The channel join right after selecting an agent is when broadcasts are most
+ * often lost, and a fast first answer lands within ~0.5s. Poll on this faster
+ * cadence for the first DISCONNECTED_BACKFILL_FAST_WINDOW_MS so that answer
+ * surfaces without waiting for the first 2s tick.
+ */
+export const DISCONNECTED_BACKFILL_FAST_POLL_MS = 300;
+
+/** Duration (ms) of the fast disconnected-backfill cadence after an agent is selected. */
+export const DISCONNECTED_BACKFILL_FAST_WINDOW_MS = 3000;
+
 /** Bound a disconnected reconcile so one hung request cannot disable all later polls. */
 export const DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS = 10000;
 

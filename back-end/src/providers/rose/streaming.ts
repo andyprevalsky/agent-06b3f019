@@ -8,14 +8,8 @@
  */
 
 import { createLogger } from '../logger';
-import {
-  RoseAuthError,
-  RoseInvalidRequest,
-  RoseRateLimitError,
-  RoseRefusalError,
-  RoseServerError,
-  RoseStallError,
-} from './errors';
+import { RoseRefusalError, RoseStallError } from './errors';
+import { responsesErrorToException } from './responsesErrors';
 import { responsesOutputProvenance, type ResponsesOutputProvenance } from './streamProvenance';
 import type { RoseStreamChunk } from './types';
 
@@ -27,35 +21,11 @@ interface ParseOptions {
   requestId: string;
   /** Maximum ms between SSE lines before stalling. */
   idleTimeoutMs?: number;
+  /** Called once with OpenRouter's top-level `provider` (the serving host). */
+  onUpstreamProvider?: (provider: string) => void;
 }
 
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
-
-function responsesErrorToException(errorPayload: unknown, requestId: string): Error {
-  const payload =
-    typeof errorPayload === 'object' && errorPayload !== null
-      ? (errorPayload as Record<string, unknown>)
-      : {};
-  const code = String(payload.code ?? payload.type ?? '').toLowerCase();
-  const message =
-    typeof payload.message === 'string' ? payload.message : JSON.stringify(errorPayload ?? {});
-  const details = `Responses stream failed (request_id=${requestId}, code=${code || 'unknown'}): ${message.substring(0, 1000)}`;
-  if (['invalid_request_error', 'context_length_exceeded', 'bad_request'].includes(code)) {
-    return new RoseInvalidRequest(details);
-  }
-  if (
-    ['refusal', 'safety_refusal', 'content_policy_violation', 'policy_violation'].includes(code)
-  ) {
-    return new RoseRefusalError(details);
-  }
-  if (['rate_limit_exceeded', 'rate_limit_error', 'too_many_requests'].includes(code)) {
-    return new RoseRateLimitError(details);
-  }
-  if (['authentication_error', 'permission_error', 'unauthorized', 'forbidden'].includes(code)) {
-    return new RoseAuthError(details);
-  }
-  return new RoseServerError(details);
-}
 
 /**
  * Anthropic native SSE → normalized chunks.
@@ -272,6 +242,7 @@ export async function* parseOpenAISSE(
   let finishReason = '';
   let emittedContentOrTool = false;
   let sawDone = false;
+  let reportedUpstreamProvider = false;
   const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
   const flushedToolIndices = new Set<number>();
 
@@ -306,6 +277,10 @@ export async function* parseOpenAISSE(
     }
 
     if (event.usage) usage = event.usage;
+    if (typeof event.provider === 'string' && !reportedUpstreamProvider) {
+      reportedUpstreamProvider = true;
+      options.onUpstreamProvider?.(event.provider);
+    }
 
     const choices = event.choices ?? [];
     if (choices.length === 0) continue;

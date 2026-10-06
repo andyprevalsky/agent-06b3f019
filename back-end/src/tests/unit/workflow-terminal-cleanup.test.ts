@@ -193,12 +193,28 @@ async function main(): Promise<void> {
     const workflowA = `workflow-${agentId}`;
     const workflowB = `workflow-b-${agentId}`;
     try {
-      await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: {
+          status: 'COMPLETED',
+          progress: 1,
+          statusMessage: 'Task completed',
+          responseSchema: { fields: [{ name: 'order_confirmation_id', type: 'str' }] },
+          structuredResponse: { order_confirmation_id: 'dff187de' },
+          toolsInUse: ['spawn_browser_agent'],
+        },
+      });
       assert.strictEqual(
         (await clearWorkflowForTerminalAgent(agentId, 'COMPLETED', workflowA, `first-${agentId}`))
           .count,
         1
       );
+      const cleared = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(cleared.responseSchema, null);
+      assert.strictEqual(cleared.structuredResponse, null);
+      assert.strictEqual(cleared.progress, 0);
+      assert.deepStrictEqual(cleared.toolsInUse, []);
+      assert.strictEqual(cleared.statusMessage, null);
       await prisma.agent.update({
         where: { id: agentId },
         data: {

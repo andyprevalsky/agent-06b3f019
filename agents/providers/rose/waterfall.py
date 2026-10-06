@@ -34,7 +34,7 @@ from providers.rose.errors import (
 from providers.rose.pools import PoolSpec
 from providers.rose.streaming import parse_openai_sse
 from providers.rose.transforms import is_anthropic_model, transform_messages_for_openai
-from providers.rose.transport import get_error_body, post_openrouter_stream
+from providers.rose.transport import post_openrouter_stream
 from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger()
@@ -120,6 +120,7 @@ def _normalize_reasoning_effort(effort: Optional[str]) -> str:
 def build_openrouter_body(
     *,
     model: str,
+    pool_name: Optional[str] = None,
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]],
     tool_choice: Any,
@@ -177,6 +178,12 @@ def build_openrouter_body(
         # stable, sibling-isolated sequence ID; reuse it so the first successful
         # turn pins later turns to the endpoint holding the warm provider cache.
         body["session_id"] = cache_namespace
+    if pool_name == "rose-1-browser-use" and model == "qwen/qwen3.8-27b":
+        # The default router sometimes chooses Qwen endpoints that report no
+        # prompt-cache reads across an append-only browser task. Novita returned
+        # repeated 7,424-token cache reads in a live three-turn browser-style
+        # probe. Keep OpenRouter's normal provider fallback for availability.
+        body["provider"] = {"order": ["novita"], "allow_fallbacks": True}
     return body
 
 
@@ -259,6 +266,7 @@ async def waterfall_complete(
         wire_effort = pool_spec.waterfall_reasoning_effort or effort
         body = build_openrouter_body(
             model=model,
+            pool_name=pool_spec.name,
             messages=messages,
             tools=tools,
             tool_choice=tool_choice,
@@ -359,9 +367,8 @@ async def _stream_one_step(
         ) as response:
             status = response.status_code
             if status >= 400:
-                error_body = get_error_body(response)
                 raise RoseError(
-                    f"OpenRouter {model} returned {status}: {error_body[:2000]}",
+                    f"OpenRouter {model} returned {status}",
                     status=status,
                 )
             async for chunk in parse_openai_sse(

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import aclosing
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict
 
@@ -24,12 +25,16 @@ import structlog
 from providers.fast_cache import client as cache_client
 from providers.fast_cache.context import cache_writes_disabled, current_context
 from providers.fast_cache.normalize import (
-    is_oai_demo_bound_child_goal,
-    is_oai_demo_goal_text,
+    GOOGLE_OAUTH_DEMO_PROMPT_PREFIX,
+    google_oauth_demo_goal_hash,
     rewrite_oai_demo_display_names,
+)
+from providers.fast_cache.normalize import (
+    goal_hash as normalize_goal_hash,
 )
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import get_pool
+from utils.oai_demo import is_oai_demo_bound_child_goal, is_oai_demo_goal
 
 if TYPE_CHECKING:
     from providers.rose.types import StreamChunk
@@ -204,7 +209,7 @@ async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     stored = coerce_cached_llm_payload(stored)
     ctx = current_context()
     if ctx is not None and (
-        is_oai_demo_goal_text(ctx.goal or "") or is_oai_demo_goal_text(ctx.root_goal or "")
+        is_oai_demo_goal(ctx.goal or "") or is_oai_demo_goal(ctx.root_goal or "")
     ):
         stored = rewrite_oai_demo_display_names(stored)
     yield SimpleNamespace(
@@ -252,6 +257,88 @@ async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     usage = _cache_replay_usage(stored.get("usage") or {})
     yield SimpleNamespace(kind="usage", data=usage)
     yield SimpleNamespace(kind="done", data={"timing": {"round_trip_s": 0.0}, "from_fast_cache": True})
+
+
+async def replay_with_context(
+    stored: Dict[str, Any],
+    *,
+    call_site: str,
+    complete_kwargs: Dict[str, Any],
+    cache_key: str,
+    hit_key: str,
+    reason: str = "cache_hit",
+) -> AsyncIterator["StreamChunk"]:
+    """Capture the current request and actual replay, never a claimed live call.
+
+    Both cache entry points use this path, including synthetic passthroughs.
+    Observability is best-effort and cannot change the stream or cache writes.
+    """
+    dump_path = None
+    output = _empty_response()
+    completed = False
+    if complete_kwargs.get("dump_context", True) and complete_kwargs.get("messages") is not None:
+        try:
+            from helpers.observability import dump_llm_context
+            from providers.rose.client import _messages_without_internal_system_boundaries
+
+            response_model = complete_kwargs.get("response_model")
+            dump_path = dump_llm_context(
+                call_site=call_site,
+                agent_id=complete_kwargs.get("agent_id"),
+                messages=_messages_without_internal_system_boundaries(complete_kwargs["messages"]),
+                model="fast-cache",
+                tools=complete_kwargs.get("tools"),
+                config={
+                    "pool": complete_kwargs.get("pool"),
+                    "requested_params": {
+                        name: complete_kwargs[name]
+                        for name in (
+                            "temperature",
+                            "max_tokens",
+                            "seed",
+                            "tool_choice",
+                            "thinking",
+                            "effort",
+                            "provider_fast_mode",
+                            "deadline_s",
+                            "ttft_timeout_s",
+                            "idle_timeout_s",
+                        )
+                        if name in complete_kwargs
+                    },
+                    "response_model": response_model.__name__ if response_model else None,
+                    "response_schema": response_model.model_json_schema() if response_model else None,
+                },
+                extra={
+                    **(complete_kwargs.get("dump_extra") or {}),
+                    "completion_source": "fast_cache",
+                    "cache_key": cache_key,
+                    "cache_hit_key": hit_key,
+                    "replay_reason": reason,
+                    "recorded_model": stored.get("actual_model"),
+                },
+            )
+        except Exception:
+            logger.debug("llm.cache.dump_start_failed", call_site=call_site, exc_info=True)
+    try:
+        async for chunk in _replay(stored):
+            if dump_path:
+                try:
+                    _accumulate(output, chunk)
+                    if chunk.kind == "done":
+                        completed = True
+                        output["timing"] = chunk.data.get("timing", {})
+                except Exception:
+                    logger.debug("llm.cache.dump_chunk_failed", call_site=call_site, exc_info=True)
+            yield chunk
+    finally:
+        if dump_path:
+            try:
+                from helpers.observability import update_llm_dump
+
+                update_llm_dump(dump_path, output={**output, "replay_complete": completed})
+            except Exception:
+                logger.debug("llm.cache.dump_finish_failed", call_site=call_site, exc_info=True)
 
 
 def _accumulate(acc: Dict[str, Any], chunk: "StreamChunk") -> None:
@@ -557,7 +644,7 @@ def is_july_explore_site(ctx: Any, call_site: str) -> bool:
     """
     if (call_site or "").strip() != "explore_agent":
         return False
-    from domains.spawn_agent.oai_demo_july import (
+    from utils.oai_demo_july import (
         extract_oai_demo_creator_name,
         july_explore_goal_hash_for_goal,
     )
@@ -575,7 +662,7 @@ def is_july_gp_execute_site(ctx: Any, call_site: str) -> bool:
     """
     if (call_site or "").strip() not in {"execute_loop", "plan_loop"}:
         return False
-    from domains.spawn_agent.oai_demo_july import july_gp_goal_hash_for_goal
+    from utils.oai_demo_july import july_gp_goal_hash_for_goal
 
     goal = getattr(ctx, "goal", None) or ""
     return is_oai_demo_bound_child_goal(goal) and bool(july_gp_goal_hash_for_goal(goal))
@@ -779,7 +866,7 @@ async def july_explore_resolve(
     """
     if (call_site or "").strip() != "explore_agent":
         return stored, hit_key
-    from domains.spawn_agent.oai_demo_july import july_explore_goal_hash_for_goal
+    from utils.oai_demo_july import july_explore_goal_hash_for_goal
 
     hashes = [ctx.goal_hash]
     alt = july_explore_goal_hash_for_goal(getattr(ctx, "goal", None) or "")
@@ -896,6 +983,16 @@ async def cached_complete(
         complete_kwargs = {**complete_kwargs, "provider_fast_mode": bool(ctx.provider_fast_mode)}
 
     key = ctx.llm_key(call_site, request_key_material(complete_kwargs))
+    seed_google_oauth_demo = False
+    if ctx.should_write and (
+        ctx.goal.startswith(GOOGLE_OAUTH_DEMO_PROMPT_PREFIX)
+        or (ctx.root_goal or "").startswith(GOOGLE_OAUTH_DEMO_PROMPT_PREFIX)
+    ):
+        demo_goal_hash = google_oauth_demo_goal_hash()
+        seed_google_oauth_demo = ctx.goal_hash == demo_goal_hash or (
+            ctx.root_goal is not None
+            and normalize_goal_hash(ctx.root_goal) == demo_goal_hash
+        )
     if ctx.read_enabled:
         lookup_failed = False
         try:
@@ -922,8 +1019,16 @@ async def cached_complete(
                 except Exception as exc:
                     logger.warning("fast_cache.set_error", key=key, error=str(exc))
             logger.info("llm.cache.replay", call_site=call_site, key=key, hit_key=hit_key or key)
-            async for chunk in _replay(stored):
-                yield chunk
+            async with aclosing(replay_with_context(
+                stored,
+                call_site=call_site,
+                complete_kwargs=complete_kwargs,
+                cache_key=key,
+                hit_key=hit_key or key,
+                reason="cache_hit",
+            )) as replay_stream:
+                async for chunk in replay_stream:
+                    yield chunk
             return
         # Soft-complete only on a clean miss at true end-of-trajectory (a prior
         # durable slot exists). Cold namespaces must not fake hits. SWF misses
@@ -944,10 +1049,18 @@ async def cached_complete(
                         hit_key="scrape_passthrough",
                         reason="swf_scrape_passthrough",
                     )
-                    async for chunk in _replay(derived):
-                        yield chunk
+                    async with aclosing(replay_with_context(
+                        derived,
+                        call_site=call_site,
+                        complete_kwargs=complete_kwargs,
+                        cache_key=key,
+                        hit_key="scrape_passthrough",
+                        reason="swf_scrape_passthrough",
+                    )) as replay_stream:
+                        async for chunk in replay_stream:
+                            yield chunk
                     return
-            if site in {"completion_summary", "context_compression"}:
+            if site in {"completion_summary", "context_compression"} and not seed_google_oauth_demo:
                 terminal = soft_complete_on_miss(site)
                 if terminal is not None and ctx.soft_complete_allowed:
                     logger.info(
@@ -957,13 +1070,22 @@ async def cached_complete(
                         hit_key="terminal_passthrough",
                         reason="fm_terminal_passthrough",
                     )
-                    async for chunk in _replay(terminal):
-                        yield chunk
+                    async with aclosing(replay_with_context(
+                        terminal,
+                        call_site=call_site,
+                        complete_kwargs=complete_kwargs,
+                        cache_key=key,
+                        hit_key="terminal_passthrough",
+                        reason="fm_terminal_passthrough",
+                    )) as replay_stream:
+                        async for chunk in replay_stream:
+                            yield chunk
                     return
             soft = soft_complete_on_miss(call_site)
             if (
                 soft is not None
                 and ctx.soft_complete_allowed
+                and not seed_google_oauth_demo
                 and await cache_client.trajectory_prior_exists(ctx.goal_hash, call_site, ctx.base_step)
             ):
                 # True warm end-of-trajectory: July namespace has no p:N+1.
@@ -978,8 +1100,16 @@ async def cached_complete(
                     hit_key="trajectory_end_passthrough",
                     reason="fm_trajectory_end_passthrough",
                 )
-                async for chunk in _replay(soft):
-                    yield chunk
+                async with aclosing(replay_with_context(
+                    soft,
+                    call_site=call_site,
+                    complete_kwargs=complete_kwargs,
+                    cache_key=key,
+                    hit_key="trajectory_end_passthrough",
+                    reason="fm_trajectory_end_passthrough",
+                )) as replay_stream:
+                    async for chunk in replay_stream:
+                        yield chunk
                 return
             # Cold allowlisted sites: never fall through to live LLM under Fast
             # Mode read (verify22 burned cents on cold execute/verifier/explore).
@@ -990,6 +1120,7 @@ async def cached_complete(
             if (
                 soft is not None
                 and ctx.soft_complete_allowed
+                and not seed_google_oauth_demo
                 and not is_july_gp_execute_site(ctx, call_site)
                 and not is_july_explore_site(ctx, call_site)
             ):
@@ -1000,8 +1131,16 @@ async def cached_complete(
                     hit_key="cold_namespace_passthrough",
                     reason="fm_cold_namespace_passthrough",
                 )
-                async for chunk in _replay(soft):
-                    yield chunk
+                async with aclosing(replay_with_context(
+                    soft,
+                    call_site=call_site,
+                    complete_kwargs=complete_kwargs,
+                    cache_key=key,
+                    hit_key="cold_namespace_passthrough",
+                    reason="fm_cold_namespace_passthrough",
+                )) as replay_stream:
+                    async for chunk in replay_stream:
+                        yield chunk
                 return
         logger.info("llm.cache.miss", call_site=call_site, key=key)
     else:
@@ -1012,6 +1151,11 @@ async def cached_complete(
         # (spawn-sub-agents smoke timeout).
         logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
+    if (
+        os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1"
+        and os.environ.get("BENCHMARK_ISOLATED_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
+    ):
+        raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
     if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled() and not ctx.should_write:
         raise FastCacheLookupError(
             f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"

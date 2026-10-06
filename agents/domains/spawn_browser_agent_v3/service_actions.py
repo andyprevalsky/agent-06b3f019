@@ -14,6 +14,7 @@ import json
 import re
 import socket
 import time as time_module
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from io import BytesIO
@@ -38,7 +39,7 @@ from domains.spawn_browser_agent_v3.service_crypto import (
     has_payment_card_secret_refs,
 )
 from utils.error_utils import extract_error_message
-from utils.purchase_approval import validate_product_url_for_pages
+from utils.purchase_approval import validate_image_url_for_page, validate_product_url_for_pages
 
 if TYPE_CHECKING:
     from browser_tools.dom_service import ActionHistory, DOMService
@@ -222,12 +223,7 @@ def get_domain_from_url(url: str) -> str:
             # Bare host / domain strings from notification payloads (e.g. "roselabs.ai").
             # Require a dot so junk like "not-a-url" stays empty.
             candidate = url.strip().lower()
-            if (
-                candidate
-                and "." in candidate
-                and " " not in candidate
-                and "/" not in candidate
-            ):
+            if candidate and "." in candidate and " " not in candidate and "/" not in candidate:
                 domain = candidate
         if "@" in domain:
             domain = domain.rsplit("@", 1)[-1]
@@ -462,9 +458,19 @@ async def wait_for_navigation_ready(
     return second
 
 
+# Generic second-level labels under two-letter country TLDs (co.uk, com.au,
+# co.jp, org.uk, …). Under these the registrable domain has three labels;
+# taking the last two would make every merchant on .co.uk one "site".
+_CCTLD_GENERIC_SECOND_LEVEL_LABELS = frozenset(
+    "co com net org edu gov ac or ne go gob govt mil nom ltd plc sch gen firm ind".split()
+)
+
+
 def _get_base_domain(domain: str) -> str:
-    """Get base domain (e.g., 'amazon.com' from 'auth.amazon.com')."""
+    """Get the registrable domain ('amazon.com' from 'auth.amazon.com', 'argos.co.uk' from 'www.argos.co.uk')."""
     parts = domain.split(".")
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _CCTLD_GENERIC_SECOND_LEVEL_LABELS:
+        return ".".join(parts[-3:])
     if len(parts) >= 2:
         return ".".join(parts[-2:])
     return domain
@@ -474,6 +480,11 @@ def _get_base_domain(domain: str) -> str:
 # session only. Never copied into a newly spawned browser agent.
 SITE_WRITE_LOCK_APPROVAL_KEY = "site"
 
+# The site unlock authorizes finishing a checkout on that merchant. A return or
+# refund is a separate irreversible transaction, so it always needs its own
+# typed approval even on a site the user already approved a purchase on.
+_SITE_UNLOCK_EXCLUDED_APPROVAL_TYPES = frozenset({"return"})
+
 # Browser live-view / provider hosts must not become the site-unlock domain —
 # Place order is checked against the real merchant page (e.g. roselabs.ai).
 # Kernel exposes both *.onkernel.com and *.kernel.sh live-view hosts.
@@ -481,6 +492,7 @@ _BROWSER_PROVIDER_DOMAIN_SUFFIXES = (
     "onkernel.com",
     "kernel.sh",
     "steel.dev",
+    "browser-use.com",
     "browserbase.com",
     "hyperbrowser.ai",
 )
@@ -583,14 +595,14 @@ def is_approval_valid(approvals: Optional[Dict], approval_type: str, current_url
     for the merchant's registrable domain and all of its subdomains / paths / queries
     for the rest of THIS browser activity. That unlock lives only in this browser
     activity's ``write_lock_approvals`` / resume state — a newly spawned browser
-    agent starts empty and does not inherit it.
+    agent starts empty and does not inherit it. It never covers ``return``.
     """
     if not approvals:
         return False
 
     current_domain = get_domain_from_url(current_url)
     # Site unlock from payment-card approval: base-domain wildcard, no 120s timeout.
-    if _approval_entry_still_valid(
+    if approval_type not in _SITE_UNLOCK_EXCLUDED_APPROVAL_TYPES and _approval_entry_still_valid(
         approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY),
         current_domain,
         enforce_timeout=False,
@@ -827,6 +839,44 @@ _TERMINAL_ACTIONS = {
 }
 
 
+_PAYMENT_APPROVAL_WAIT_MARKERS = (
+    "approval",
+    "approve",
+    "request_payment_card",
+    "payment card",
+    "payment_card",
+    "awaiting_payment",
+)
+
+
+def _is_redundant_payment_approval_wait(thinking: Any, params: Any) -> bool:
+    """True when a wait is asking for payment approval that already completed."""
+    parts: List[str] = []
+    if thinking is not None:
+        parts.append(str(thinking))
+    if isinstance(params, dict):
+        for value in params.values():
+            if isinstance(value, str):
+                parts.append(value)
+    haystack = " ".join(parts).lower()
+    return any(marker in haystack for marker in _PAYMENT_APPROVAL_WAIT_MARKERS)
+
+
+async def _receipt_image_url_errors(
+    context: _ActionContext, payment_request: RequestPaymentCardBrowserTool
+) -> List[str]:
+    if not any(item.image_url for item in payment_request.line_items):
+        return []
+    page_image_urls = await context.dom_service.get_page_image_urls()
+    errors: List[str] = []
+    for item_index, item in enumerate(payment_request.line_items):
+        try:
+            validate_image_url_for_page(item.image_url, page_image_urls, context.current_url)
+        except ValueError as error:
+            errors.append(f"line_items[{item_index}].image_url {item.image_url}: {error}")
+    return errors
+
+
 async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[str, Any]:
     if has_payment_card_secret_refs(context.secret_refs):
         return {
@@ -838,9 +888,7 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
             ),
         }
     try:
-        payment_request = RequestPaymentCardBrowserTool.model_validate(
-            {"tool": context.action_name, **context.params}
-        )
+        payment_request = RequestPaymentCardBrowserTool.model_validate({"tool": context.action_name, **context.params})
         for item in payment_request.line_items:
             validate_product_url_for_pages(
                 item.product_url,
@@ -856,6 +904,12 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
                 "for a rating that is not shown."
             )
         return {"success": False, "error": f"request_payment_card receipt is incomplete: {error}.{hint}"}
+    image_errors = await _receipt_image_url_errors(context, payment_request)
+    if image_errors:
+        return {
+            "success": False,
+            "error": f"request_payment_card receipt is incomplete: {'; '.join(image_errors)}.",
+        }
     return {
         "status": "awaiting_payment_card_approval",
         "payment_request": context.params,
@@ -866,11 +920,11 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
 async def _execute_read_browser_state(context: _ActionContext) -> Dict[str, Any]:
     from providers.rose.browser_use import format_browser_state_for_tool
 
-    # Reuse the loop's just-fetched observe_page_state when present — no browser
-    # action ran between that fetch and this tool, so a second full DOM walk is
-    # pure duplicate cost.
+    # Reuse the loop's just-fetched observe_page_state when it carries a DOM —
+    # no browser action ran between that fetch and this tool, so a second full
+    # DOM walk is pure duplicate cost. URL/title-only observes have no dom_tree.
     state = context.prefetched_browser_state
-    if not isinstance(state, dict) or not state:
+    if not isinstance(state, dict) or "dom_tree" not in state:
         state = await context.dom_service.get_browser_state(include_screenshot=False)
     formatted_state = format_browser_state_for_tool(state)
     result = {
@@ -1095,10 +1149,7 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
                     _kernel_computer_key(str(key)),
                 )
             except httpx.HTTPStatusError as error:
-                if (
-                    error.response.status_code
-                    not in _PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES
-                ):
+                if error.response.status_code not in _PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES:
                     raise
                 logger.info(
                     "Provider computer input rejected before execution; falling back",
@@ -1187,9 +1238,7 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         if not context.element:
             return {"success": False, "error": "Dropdown requires an element index"}
         value = context.params.get("value", "")
-        event = context.session.event_bus.dispatch(
-            SelectDropdownOptionEvent(node=context.element, text=value)
-        )
+        event = context.session.event_bus.dispatch(SelectDropdownOptionEvent(node=context.element, text=value))
         await event
         await event.event_result(raise_if_any=True, raise_if_none=False)
         await context.action_history.record_action(
@@ -1256,6 +1305,26 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
         )
         return {"success": True, "message": ""}
     if context.action_name == "wait":
+        # After payment approval+mint, secret refs are already available. Waiting
+        # specifically for another approval burns the one-time card's live window
+        # (AgentCard closes unused cards) and breaks same-last4 reuse. Ordinary
+        # waits (OTP / payment-widget settle) must still honor WaitEvent.
+        if has_payment_card_secret_refs(context.secret_refs) and _is_redundant_payment_approval_wait(
+            context.thinking, context.params
+        ):
+            ready_message = (
+                "Payment approval is already complete. Do not wait for another approval. "
+                "Type the existing secret refs card_number, card_name, card_expiry, and "
+                "card_cvv into the payment fields, then submit the checkout form."
+            )
+            await context.action_history.record_action(
+                dom_service=context.dom_service,
+                action="wait",
+                thinking=context.thinking,
+                params=dict(context.params or {}),
+                result={"success": True, "message": ready_message, "status": "payment_card_ready"},
+            )
+            return {"success": True, "message": ready_message, "status": "payment_card_ready"}
         try:
             time_ms = normalize_browser_wait_ms(context.params.get("time_ms"), default=1000)
         except ValueError as error:
@@ -1499,9 +1568,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         exception = result.get("exceptionDetails")
         if exception:
             error_text = (
-                exception.get("text")
-                or (exception.get("exception") or {}).get("description")
-                or "evaluate raised"
+                exception.get("text") or (exception.get("exception") or {}).get("description") or "evaluate raised"
             )
             logger.warning(
                 "Browser evaluate raised",
@@ -1603,9 +1670,7 @@ async def execute_action(
     system_name: str = "Rose",
     browser_network_recorder: Optional[Any] = None,
     current_auth_realm: str = "",
-    prepare_credentials_for_url: Optional[
-        Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
-    ] = None,
+    prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
@@ -1644,7 +1709,15 @@ async def execute_action(
         if index is not None:
             element = dom_service.selector_map.get(index)
             if not element:
-                return {"success": False, "error": f"Element with index {index} not found"}
+                # Payment inputs inside open shadow roots can be visible in the
+                # browser state without a selector-map entry. Let the approved
+                # card-ref path locate the field semantically across roots and
+                # frames instead of rejecting its stale index up front.
+                payment_ref = params.get("text") if action_name == "input_text" else None
+                if payment_ref in PAYMENT_CARD_SECRET_REFS and has_payment_card_secret_refs(secret_refs):
+                    index = None
+                else:
+                    return {"success": False, "error": f"Element with index {index} not found"}
 
         context = _ActionContext(
             dom_service=dom_service,
@@ -1739,24 +1812,39 @@ def _element_write_lock_signal(element: Any) -> str:
     # input while rendering the accessible action label as a sibling. The DOM
     # tree preserves that relationship through parent_node, so take only the
     # first short ancestor label instead of absorbing a whole checkout page.
+    #
+    # Always keep walking for ancestor id/name markers even after a label is
+    # found. Amazon SPR mid-wizard Continues put the exclusion id on a parent
+    # span (`resolutions-section-continue-button`) while the click target is a
+    # shadow `<input type=submit>` — agent cf4935f5 (2026-09-29
+    # browser-amazon-return) locked before drop-off because the signal was only
+    # `submit\nContinue` without that id.
     has_local_label = bool(local_text) or any(
         attrs.get(attr_name) for attr_name in ("value", "aria-label", "title", "alt")
     )
-    if not has_local_label:
-        current = getattr(element, "parent_node", None)
-        depth = 1
-        while current is not None and depth < 4:
-            node_name = str(getattr(current, "node_name", "") or "").lower()
-            if node_name in {"html", "body", "main"}:
-                break
+    collected_text = has_local_label
+    current = getattr(element, "parent_node", None)
+    depth = 1
+    while current is not None and depth < 6:
+        node_name = str(getattr(current, "node_name", "") or "").lower()
+        if node_name in {"html", "body", "main"}:
+            break
 
+        ancestor_attrs = getattr(current, "attributes", None) or {}
+        if isinstance(ancestor_attrs, dict):
+            for attr_name in ("id", "name"):
+                value = ancestor_attrs.get(attr_name)
+                if value:
+                    parts.append(str(value))
+
+        if not collected_text:
             ancestor_text = node_text(current)
             if ancestor_text and len(ancestor_text) <= 500:
                 parts.append(ancestor_text)
-                break
+                collected_text = True
 
-            current = getattr(current, "parent_node", None)
-            depth += 1
+        current = getattr(current, "parent_node", None)
+        depth += 1
 
     return "\n".join(part for part in parts if part)[:20000]
 
@@ -2109,7 +2197,6 @@ _PAYMENT_REF_FILL_JS = f"""
 """
 
 
-
 def _explicit_session_callable(session: Any, *names: str) -> Optional[Callable[..., Any]]:
     """Return a callable explicitly present on the session (skip MagicMock auto-attrs)."""
     if session is None:
@@ -2389,9 +2476,7 @@ async def _resolve_password_field_coordinates(
         return None
     hint_payload = field_hint if isinstance(field_hint, dict) and field_hint else None
     for label, target in await _iter_payment_fill_targets(session, input_page):
-        result = await _evaluate_on_payment_fill_target(
-            target, _PASSWORD_FIELD_LOCATE_JS, hint_payload
-        )
+        result = await _evaluate_on_payment_fill_target(target, _PASSWORD_FIELD_LOCATE_JS, hint_payload)
         if not result:
             continue
         if isinstance(result.get("x"), (int, float)) and isinstance(result.get("y"), (int, float)):
@@ -2733,126 +2818,6 @@ async def _fill_payment_ref_directly(
     return None
 
 
-async def _browser_click_write_lock_signal(session: Any, coords: Optional[Dict[str, Any]]) -> str:
-    """Collect text/attributes from the element hit by a click and its composed ancestor path."""
-    if not session or not coords:
-        return ""
-
-    try:
-        get_page = getattr(session, "get_page", None)
-        if not callable(get_page):
-            return ""
-
-        page = await _maybe_await(get_page())
-        if not page or not hasattr(page, "evaluate"):
-            return ""
-
-        signal = await _maybe_await(
-            page.evaluate(
-                """
-                    ({ x, y }) => {
-                        const parts = [];
-                        const seen = new Set();
-                        const maxDepth = 4;
-                        const maxTextLength = 500;
-                        const attrNames = [
-                            'value',
-                            'aria-label',
-                            'title',
-                            'alt',
-                            'name',
-                            'id',
-                            'role',
-                            'type',
-                        ];
-
-                        const add = (value) => {
-                            if (typeof value !== 'string') return;
-                            const trimmed = value.trim();
-                            if (trimmed) parts.push(trimmed);
-                        };
-
-                        const addText = (value) => {
-                            if (typeof value !== 'string') return;
-                            const trimmed = value.trim();
-                            if (!trimmed || trimmed.length > maxTextLength) return;
-                            parts.push(trimmed);
-                        };
-
-                        const isPageContainer = (el) => {
-                            if (!el || !el.tagName) return false;
-                            const tag = el.tagName.toLowerCase();
-                            return tag === 'html' || tag === 'body' || tag === 'main';
-                        };
-
-                        const addElement = (el, includeText) => {
-                            if (!el || seen.has(el)) return false;
-                            seen.add(el);
-                            let addedText = false;
-
-                            if (includeText && !isPageContainer(el)) {
-                                const before = parts.length;
-                                addText(el.innerText);
-                                if (el.textContent !== el.innerText) addText(el.textContent);
-                                addedText = parts.length > before;
-                            }
-
-                            for (const attrName of attrNames) {
-                                if (el.getAttribute) add(el.getAttribute(attrName));
-                            }
-
-                            if (el.labels) {
-                                for (const label of el.labels) {
-                                    const before = parts.length;
-                                    add(label.innerText);
-                                    add(label.textContent);
-                                    addedText = addedText || parts.length > before;
-                                }
-                            }
-                            return addedText;
-                        };
-
-                        const walkAncestors = (start, includeStartText) => {
-                            let current = start;
-                            let depth = 0;
-                            let seekNearestText = includeStartText;
-                            while (current && depth < maxDepth) {
-                                const addedText = addElement(current, seekNearestText);
-                                if (addedText) seekNearestText = false;
-                                if (isPageContainer(current)) break;
-                                if (current.assignedSlot) {
-                                    current = current.assignedSlot;
-                                } else if (current.parentElement) {
-                                    current = current.parentElement;
-                                } else {
-                                    const root = current.getRootNode && current.getRootNode();
-                                    current = root && root.host ? root.host : null;
-                                }
-                                depth += 1;
-                            }
-                        };
-
-                        const hit = document.elementFromPoint(Number(x), Number(y));
-                        const interactive = hit && hit.closest && hit.closest(
-                            'button,input,select,textarea,a,[role="button"],[role="link"],[onclick]'
-                        );
-                        walkAncestors(interactive || hit, true);
-                        if (hit && hit !== interactive) {
-                            addElement(hit, true);
-                        }
-
-                        return parts.join('\\n').slice(0, 20000);
-                    }
-                """,
-                {"x": int(coords["x"]), "y": int(coords["y"])},
-            )
-        )
-        return signal if isinstance(signal, str) else ""
-    except Exception as e:
-        logger.debug("Unable to collect browser click write-lock signal", error=str(e))
-        return ""
-
-
 async def _click_write_lock_result(
     *,
     session: Any,
@@ -2879,37 +2844,38 @@ async def _click_write_lock_result(
         )
         return None
 
+    from browser_tools.write_lock_probe import element_click_target, probe_click_target
+
     coordinate_click = element is None
-    if coordinate_click:
-        element_text = "\n".join(
-            part
-            for part in (
-                await _maybe_await(dom_service.get_text_at_coordinates(int(coords["x"]), int(coords["y"]))),
-                await _browser_click_write_lock_signal(session, coords),
-            )
-            if part
-        )
+    target = await probe_click_target(session, coords) if coordinate_click else element_click_target(element)
+    if target is not None and not target.commits:
         logger.info(
-            "Write lock coord click check",
-            element_text=element_text[:100] if element_text else "(empty)",
-            coords=coords,
-            url=current_url[:80] if current_url else None,
-        )
-    else:
-        element_text = "\n".join(
-            part
-            for part in (
-                _element_write_lock_signal(element),
-                await _browser_click_write_lock_signal(session, coords),
-            )
-            if part
-        )
-        logger.info(
-            "Write lock click check",
-            element_text=element_text[:100] if element_text else "(empty)",
+            "Write lock skipped: click target cannot commit",
+            reason=target.reason,
             index=index,
             url=current_url[:80] if current_url else None,
         )
+        return None
+
+    return_text = None
+    if target is not None:
+        element_text = target.label
+        return_text = target.return_signal
+    elif coordinate_click:
+        stack_text = await _maybe_await(dom_service.get_text_at_coordinates(int(coords["x"]), int(coords["y"])))
+        element_text = stack_text if isinstance(stack_text, str) else ""
+    else:
+        element_text = _element_write_lock_signal(element)
+    navigates = target is not None and target.navigates
+    logger.info(
+        "Write lock coord click check" if coordinate_click else "Write lock click check",
+        element_text=element_text[:100] if element_text else "(empty)",
+        resolved=target is not None,
+        navigates=navigates,
+        coords=coords if coordinate_click else None,
+        index=index,
+        url=current_url[:80] if current_url else None,
+    )
 
     return _evaluate_element_text_write_lock(
         element_text=element_text,
@@ -2920,6 +2886,8 @@ async def _click_write_lock_result(
         action_label="coordinate click" if coordinate_click else "click",
         element_text_for_question=element_text[:100],
         coords=coords if coordinate_click else None,
+        return_text=return_text,
+        navigates=navigates,
     )
 
 
@@ -2992,10 +2960,17 @@ async def _press_key_write_lock_result(
     system_name: str,
     secret_refs: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
-    element_text = await _active_element_write_lock_signal(session)
+    from browser_tools.write_lock_probe import probe_enter_target
+
+    target = await probe_enter_target(session)
+    if target is not None and not target.commits:
+        logger.info("Write lock skipped: submit key cannot commit", reason=target.reason, url=current_url[:80])
+        return None
+    element_text = target.label if target is not None else await _active_element_write_lock_signal(session)
     logger.info(
         "Write lock submit-key check",
         element_text=element_text[:100] if element_text else "(empty)",
+        resolved=target is not None,
         url=current_url[:80] if current_url else None,
     )
     return _evaluate_element_text_write_lock(
@@ -3006,6 +2981,49 @@ async def _press_key_write_lock_result(
         secret_refs=secret_refs,
         action_label="submit key",
         element_text_for_question=element_text[:100],
+        return_text=target.return_signal if target is not None else None,
+    )
+
+
+def _types_submit_key(text: Any) -> bool:
+    return isinstance(text, str) and ("\n" in text or "\r" in text)
+
+
+async def _typed_enter_write_lock_result(
+    *,
+    session: Any,
+    element: Any,
+    coords: Any,
+    write_lock_approvals: Optional[Dict],
+    current_url: str,
+    system_name: str,
+    secret_refs: Optional[Dict[str, str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Gate the Enter keypress a typed newline sends into a field (implicit form submit)."""
+    from browser_tools.write_lock_probe import probe_enter_target
+
+    target = await probe_enter_target(session, element=element, coords=coords, typed_newline=True)
+    if target is None or not target.commits:
+        logger.info(
+            "Write lock typed-newline check passed",
+            reason=target.reason if target is not None else "target unresolved",
+            url=current_url[:80] if current_url else None,
+        )
+        return None
+    logger.info(
+        "Write lock typed-newline check",
+        element_text=target.label[:100] if target.label else "(empty)",
+        url=current_url[:80] if current_url else None,
+    )
+    return _evaluate_element_text_write_lock(
+        element_text=target.label,
+        write_lock_approvals=write_lock_approvals,
+        current_url=current_url,
+        system_name=system_name,
+        secret_refs=secret_refs,
+        action_label="typed Enter",
+        element_text_for_question=target.label[:100],
+        return_text=target.return_signal,
     )
 
 
@@ -3019,7 +3037,10 @@ def _evaluate_element_text_write_lock(
     action_label: str,
     element_text_for_question: str,
     coords: Any = None,
+    return_text: Optional[str] = None,
+    navigates: bool = False,
 ) -> Optional[Dict[str, Any]]:
+    """``navigates``: the target is a hyperlink, whose "Post"/"Send" names a composer, not a submit."""
     from browser_tools.write_lock import (
         get_write_lock_approval_question,
         is_email_send_button,
@@ -3030,9 +3051,17 @@ def _evaluate_element_text_write_lock(
     )
 
     checks = (
-        ("social_post", is_social_domain(current_url) and is_submit_button(element_text), "social posting"),
-        ("email_send", is_email_send_button(element_text, current_url), "email send"),
-        ("return", is_return_button(element_text), "return confirmation"),
+        (
+            "social_post",
+            not navigates and is_social_domain(current_url) and is_submit_button(element_text),
+            "social posting",
+        ),
+        ("email_send", not navigates and is_email_send_button(element_text, current_url), "email send"),
+        (
+            "return",
+            is_return_button(element_text if return_text is None else return_text, current_url),
+            "return confirmation",
+        ),
         ("purchase", is_purchase_button(element_text), "purchase button"),
     )
     suffix = f" ({action_label})"
@@ -3072,6 +3101,70 @@ def _evaluate_element_text_write_lock(
             "url": current_url,
         }
     return None
+
+
+_ARM_CLICK_RECEIPT_JS = """
+({ token, x, y }) => {
+    const hit = document.elementFromPoint(x, y);
+    // Click events inside a child document do not bubble into this document.
+    if (hit?.tagName === 'IFRAME') return false;
+    const target = hit?.closest('button, [role="button"], a, input, select, textarea') || hit;
+    if (!target) return false;
+    const receipts = window.__roseBrowserClickReceipts ||= {};
+    const receipt = { seen: false, listener: null };
+    receipt.listener = (event) => {
+        if (event.target === target || target.contains(event.target)) {
+            receipt.seen = true;
+        }
+    };
+    receipts[token] = receipt;
+    document.addEventListener('click', receipt.listener, true);
+    return true;
+}
+"""
+
+_READ_CLICK_RECEIPT_JS = """
+(token) => {
+    const receipts = window.__roseBrowserClickReceipts;
+    const receipt = receipts?.[token];
+    if (!receipt) return null; // A navigation may have replaced the document.
+    document.removeEventListener('click', receipt.listener, true);
+    delete receipts[token];
+    return receipt.seen;
+}
+"""
+
+
+async def _arm_click_receipt(session: Any, coords: Dict[str, int]) -> Optional[tuple[Any, str]]:
+    """Observe DOM delivery on the authoritative browser-use page, not the input transport."""
+    get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
+    if not callable(get_page):
+        return None
+    try:
+        page = await _maybe_await(get_page())
+        if page is None:
+            return None
+        token = uuid.uuid4().hex
+        armed = await page.evaluate(
+            _ARM_CLICK_RECEIPT_JS, {"token": token, "x": int(coords["x"]), "y": int(coords["y"])}
+        )
+        return (page, token) if armed is True else None
+    except Exception as error:
+        logger.debug("Unable to arm browser click receipt", error=str(error))
+        return None
+
+
+async def _read_click_receipt(receipt: Optional[tuple[Any, str]]) -> Optional[bool]:
+    if receipt is None:
+        return None
+    page, token = receipt
+    try:
+        delivered = await page.evaluate(_READ_CLICK_RECEIPT_JS, token)
+        return delivered if isinstance(delivered, bool) else None
+    except Exception as error:
+        # A navigation can destroy the old document immediately after a valid click.
+        logger.debug("Browser click receipt unavailable after navigation", error=str(error))
+        return None
 
 
 async def _execute_click(
@@ -3116,10 +3209,30 @@ async def _execute_click(
             return write_lock_result
 
     if element:
+        # The click can re-render the target immediately (for example a form
+        # Submit button), removing it from selector_map before record_action.
+        clicked_element_description = get_element_description(element)
         asyncio.create_task(session.highlight_interaction_element(element))
 
         if humanizer and element_coords:
+            receipt = await _arm_click_receipt(session, element_coords)
             await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
+            if await _read_click_receipt(receipt) is False:
+                logger.warning(
+                    "Humanized click did not reach target DOM control; retrying through browser session",
+                    index=index,
+                    coordinates=element_coords,
+                    url=current_url[:120],
+                )
+                retry_receipt = await _arm_click_receipt(session, element_coords)
+                event = session.event_bus.dispatch(ClickElementEvent(node=element))
+                await event
+                await event.event_result(raise_if_any=True, raise_if_none=False)
+                if await _read_click_receipt(retry_receipt) is False:
+                    return {
+                        "success": False,
+                        "error": "Click did not reach the target control; refresh browser state and try again",
+                    }
         else:
             if humanizer:
                 logger.error(
@@ -3144,6 +3257,7 @@ async def _execute_click(
             thinking=thinking,
             index=index,
             coordinates=element_coords,
+            element_description_override=clicked_element_description,
             result={"success": True},
         )
         return {"success": True, "message": ""}
@@ -3400,9 +3514,7 @@ def should_skip_input_text_refocus(
     last_coords = last.get("coordinates")
     if isinstance(coords, dict) and isinstance(last_coords, dict):
         try:
-            return int(last_coords["x"]) == int(coords["x"]) and int(last_coords["y"]) == int(
-                coords["y"]
-            )
+            return int(last_coords["x"]) == int(coords["x"]) and int(last_coords["y"]) == int(coords["y"])
         except (TypeError, ValueError, KeyError):
             return False
     return False
@@ -3435,16 +3547,10 @@ async def _execute_indexed_input_text(
             secret_ref_name or "",
             input_page=_humanizer_input_page(humanizer),
         )
-    is_password_credential = bool(
-        credential_ref and str(credential_ref.get("kind") or "") == "password"
-    )
+    is_password_credential = bool(credential_ref and str(credential_ref.get("kind") or "") == "password")
     if humanizer and not coord_tuple and is_password_credential:
         attrs = getattr(element, "attributes", None) or {}
-        field_hint = {
-            key: str(attrs[key])
-            for key in ("id", "name", "autocomplete")
-            if attrs.get(key)
-        }
+        field_hint = {key: str(attrs[key]) for key in ("id", "name", "autocomplete") if attrs.get(key)}
         coord_tuple = await _resolve_password_field_coordinates(
             session,
             input_page=_humanizer_input_page(humanizer),
@@ -3645,6 +3751,19 @@ async def _execute_input_text(
     if write_lock_error:
         return write_lock_error
 
+    if write_lock_enabled and _types_submit_key(text):
+        typed_enter_lock = await _typed_enter_write_lock_result(
+            session=session,
+            element=element,
+            coords=coords,
+            write_lock_approvals=write_lock_approvals,
+            current_url=current_url,
+            system_name=system_name,
+            secret_refs=secret_refs,
+        )
+        if typed_enter_lock:
+            return typed_enter_lock
+
     if is_payment_card_secret_ref and has_payment_card_secret_refs(secret_refs):
         direct_fill_result = await _try_direct_payment_ref_fill(
             session=session,
@@ -3726,9 +3845,7 @@ async def _execute_goto(
     session_id: Optional[str],
     config: Any,
     current_auth_realm: str = "",
-    prepare_credentials_for_url: Optional[
-        Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
-    ] = None,
+    prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
     """Prepare a target realm's credentials, then execute navigation."""
@@ -3828,9 +3945,7 @@ async def _execute_goto(
         # internally. Only its deliberately non-sensitive summary may enter
         # action history or the model-visible tool result.
         result["credentials_prepared"] = credential_summary
-        result["auth_realm"] = str(
-            credential_summary.get("auth_realm") or target_auth_realm
-        )
+        result["auth_realm"] = str(credential_summary.get("auth_realm") or target_auth_realm)
     await action_history.record_action(
         dom_service=dom_service,
         action="goto",
@@ -4016,8 +4131,13 @@ async def _execute_screenshot(
 
     saved_path = None
     if config:
+        upload_name = (
+            f"screenshot-{uuid.uuid4().hex}.png"
+            if screenshot_result.get("provider") == "browser-use"
+            else "screenshot.png"
+        )
         upload_result = await upload_file_to_session(
-            config, session_id, "screenshot.png", screenshot_bytes, "image/png"
+            config, session_id, upload_name, screenshot_bytes, "image/png"
         )
         if upload_result:
             saved_path = upload_result.get("path", "/tmp/screenshot.png")

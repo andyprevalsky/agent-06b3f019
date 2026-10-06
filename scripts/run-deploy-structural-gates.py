@@ -18,6 +18,7 @@ from typing import BinaryIO, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 SIGNAL_GRACE_SECONDS = 1.0
+DEFAULT_MAX_WORKERS = 8
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class RunningGate:
 
 
 GATES = (
+    Gate("cloudbench-controller-linux", ("python3", "scripts/tests/cloudbench-controller-linux.test.py")),
     Gate("workspace-env", ("bash", "scripts/tests/workspace-env.test.sh")),
     Gate("kill-services", ("bash", "scripts/tests/kill-services.test.sh")),
     Gate(
@@ -50,6 +52,21 @@ GATES = (
     Gate(
         "benchmark-sms-transport-mock",
         ("bash", "scripts/tests/benchmark-sms-transport-mock.test.sh"),
+    ),
+    Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
+    Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
+    Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
+    Gate(
+        "benchmark-successful-llm-evidence",
+        ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
+    ),
+    Gate(
+        "cloudbench-composite-root-cleanup",
+        ("python3", "scripts/tests/cloudbench-exact-session-multi-root.test.py"),
+    ),
+    Gate(
+        "cloudbench-quiesced-forensic-retirement",
+        ("python3", "scripts/tests/cloudbench-forensic-quiesced.test.py"),
     ),
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
@@ -71,6 +88,10 @@ GATES = (
         ("bash", "scripts/tests/publish_evidence_links_browser_validation.test.sh"),
     ),
     Gate(
+        "publish-evidence-composite-projection",
+        ("bash", "scripts/tests/publish_evidence_links_composite.test.sh"),
+    ),
+    Gate(
         "workflow-deployment-migration",
         ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),
     ),
@@ -78,11 +99,28 @@ GATES = (
         "cooperative-cutover-monitor",
         ("bash", "scripts/tests/cooperative-cutover-monitor.test.sh"),
     ),
+    Gate("agents-structural", ("bash", "scripts/tests/agents-structural.test.sh")),
+    Gate(
+        "deploy-agent-clone-recovery",
+        ("bash", "scripts/tests/deploy-agent-clone-recovery.test.sh"),
+    ),
     Gate(
         "agent-surface-hash",
         ("bash", "scripts/tests/agent-surface-hash.test.sh"),
     ),
     Gate("factory-review", ("python3", "scripts/tests/factory-review.test.py")),
+    Gate(
+        "cloudbench-rejected-start-recovery",
+        ("python3", "scripts/tests/cloudbench-rejected-start-recovery.test.py"),
+    ),
+    Gate(
+        "cloudbench-prestack-recovery",
+        ("python3", "scripts/tests/cloudbench-prestack-recovery.test.py"),
+    ),
+    Gate(
+        "cloudbench-bootstrap-recovery",
+        ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"),
+    ),
     Gate("wait-for-code-review", ("python3", "scripts/tests/wait-for-code-review.test.py")),
     Gate("deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")),
     Gate("deploy-stage", ("bash", "scripts/tests/run-deploy-stage.test.sh")),
@@ -116,6 +154,17 @@ GATES = (
     Gate(
         "run-cloud-benchmark-workers",
         ("bash", "scripts/tests/run-cloud-benchmark-workers.test.sh"),
+    ),
+    Gate(
+        "blackbox-archive-env",
+        ("bash", "scripts/tests/blackbox-archive-env.test.sh"),
+    ),
+    # Agents blackbox files are not auto-discovered: an unregistered test_* never
+    # runs while its domain still reports green, and no other /deploy lane runs
+    # the agents structural suites.
+    Gate(
+        "agents-blackbox-registration",
+        ("python3", "agents/tests/structural/structural_test_registration.py"),
     ),
 )
 
@@ -231,7 +280,7 @@ def main() -> int:
             print(gate.name)
         return 0
     if args.max_workers is None:
-        return run_gates(GATES, max_workers=len(GATES))
+        return run_gates(GATES, max_workers=DEFAULT_MAX_WORKERS)
     return run_gates(GATES, max_workers=args.max_workers)
 
 

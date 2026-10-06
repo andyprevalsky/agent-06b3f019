@@ -10,6 +10,7 @@ Usage:
     python scripts/run_blackbox_tests.py web-search         # run one domain
     python scripts/run_blackbox_tests.py --list             # list available domains
     python scripts/run_blackbox_tests.py --concurrency 5    # limit parallel domains
+    python scripts/run_blackbox_tests.py --help             # show this help
 
 Modeled after back-end/scripts/run-blackbox-tests.sh.
 """
@@ -22,8 +23,10 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import NoReturn
 
 import structlog.contextvars
+from dotenv import load_dotenv
 
 AGENTS_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = AGENTS_ROOT / "tests" / "blackbox"
@@ -34,12 +37,6 @@ ARTIFACT_ROOT = ROOT_DIR / ".context" / "test-runs"
 sys.path.insert(0, str(AGENTS_ROOT))
 # Add tests/blackbox to path so test files can import _test_utils
 sys.path.insert(0, str(TESTS_DIR))
-
-# Single source of truth, shared with agents/conftest.py so the pytest suites
-# and the blackbox runner start from the same deterministic environment.
-from dotenv import load_dotenv  # noqa: E402
-
-from tests.env_defaults import apply_test_env_defaults  # noqa: E402
 
 # Real credentials from agents/.env must win over test placeholders. Cloud deploy
 # shells often omit injected secrets, so load dotenv before setdefault defaults.
@@ -56,10 +53,7 @@ def discover_domains() -> list[str]:
     """Discover all blackbox test domains from test files."""
     if not TESTS_DIR.exists():
         return []
-    return sorted(
-        f.stem.replace(".blackbox", "").replace("_", "-")
-        for f in TESTS_DIR.glob("*.blackbox.py")
-    )
+    return sorted(f.stem.replace(".blackbox", "").replace("_", "-") for f in TESTS_DIR.glob("*.blackbox.py"))
 
 
 def domain_to_test_file(domain: str) -> Path | None:
@@ -85,15 +79,61 @@ def list_domains() -> None:
         print(f"  {d}")
 
 
+# Imported modules stay cached across domains, so an env default a module sets
+# while it is being imported (spawn_browser_agent_v3.config's browser-use event
+# timeouts) must survive the per-domain restore, as it would in a fresh process
+# that imported the same module. Writes made by test code are still reverted,
+# and so are a domain file's own module-scope writes: the runner executes it
+# without caching it, so a later domain never re-imports it.
+_IMPORT_TIME_ENV: dict[str, list[tuple[str, str]]] = {}
+
+
+def _record_import_time_env(event: str, args: tuple) -> None:
+    if event != "os.putenv":
+        return
+    frame = sys._getframe(1)
+    while frame is not None and frame.f_code.co_name != "<module>":
+        frame = frame.f_back
+    if frame is None or frame.f_back is None:
+        return
+    if not frame.f_back.f_code.co_filename.startswith("<frozen importlib"):
+        return
+    module_name = frame.f_globals.get("__name__", "")
+    if module_name not in sys.modules:
+        return
+    key, value = (os.fsdecode(arg) for arg in args)
+    _IMPORT_TIME_ENV.setdefault(key, []).append((module_name, value))
+
+
+sys.addaudithook(_record_import_time_env)
+
+
+def _restore_environ(snapshot: dict[str, str]) -> None:
+    target = dict(snapshot)
+    # The newest write from a module that is still cached wins; one whose import
+    # later failed has left sys.modules and falls back to the earlier writer.
+    for key, records in _IMPORT_TIME_ENV.items():
+        for module_name, value in reversed(records):
+            if module_name in sys.modules:
+                target[key] = value
+                break
+    for key in set(os.environ) - target.keys():
+        del os.environ[key]
+    for key, value in target.items():
+        if os.environ.get(key) != value:
+            os.environ[key] = value
+
+
 async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, str]:
     """Run a single domain's blackbox test. Returns (domain, passed, message)."""
-    # Sequential coverage shards share an interpreter, but each domain must
-    # begin with the same request/logging context as an isolated process.
+    # Domains run sequentially in one interpreter, but each domain must begin
+    # with the same request/logging context and os.environ as an isolated
+    # process: a flag one suite exports (e.g. a benchmark-only kill switch)
+    # must not silently change the code paths a later suite exercises.
     structlog.contextvars.clear_contextvars()
+    env_snapshot = dict(os.environ)
     try:
-        spec = importlib.util.spec_from_file_location(
-            f"blackbox_{domain.replace('-', '_')}", test_file
-        )
+        spec = importlib.util.spec_from_file_location(f"blackbox_{domain.replace('-', '_')}", test_file)
         if spec is None or spec.loader is None:
             return (domain, False, "Could not load test file")
 
@@ -119,15 +159,12 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
         return (domain, False, f"ERROR: {e}")
     finally:
         structlog.contextvars.clear_contextvars()
+        _restore_environ(env_snapshot)
 
 
-async def run_tests(
-    domain_filters: list[str] | None = None, concurrency: int = 30
-) -> int:
+async def run_tests(domain_filters: list[str] | None = None, concurrency: int = 30) -> int:
     run_id = os.environ.get("BLACKBOX_TEST_RUN_ID", generate_run_id())
-    artifact_dir = Path(
-        os.environ.get("BLACKBOX_TEST_ARTIFACT_DIR", str(ARTIFACT_ROOT / run_id))
-    )
+    artifact_dir = Path(os.environ.get("BLACKBOX_TEST_ARTIFACT_DIR", str(ARTIFACT_ROOT / run_id)))
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     # Write manifest
@@ -148,7 +185,11 @@ async def run_tests(
     # Blackbox requests are captured and replayed, but importing a domain may
     # still construct AppConfig before its test installs a narrower fixture.
     # Keep the standalone runner deterministic in clean CI without overriding
-    # any explicitly supplied credential or endpoint.
+    # any explicitly supplied credential or endpoint. Single source of truth,
+    # shared with agents/conftest.py so the pytest suites and the blackbox
+    # runner start from the same deterministic environment.
+    from tests.env_defaults import apply_test_env_defaults
+
     apply_test_env_defaults()
 
     # Install capture harness
@@ -213,40 +254,59 @@ async def run_tests(
         "failed": failed,
         "total": passed + failed,
         "elapsed_seconds": round(elapsed, 1),
-        "details": [
-            {"domain": d, "passed": s, "message": m} for d, s, m in results
-        ],
+        "details": [{"domain": d, "passed": s, "message": m} for d, s, m in results],
     }
     (artifact_dir / "results.json").write_text(json.dumps(result_data, indent=2))
 
     return 0 if failed == 0 else 1
 
 
-def main() -> None:
-    args = sys.argv[1:]
+def _usage_error(message: str) -> NoReturn:
+    print(f"Error: {message}\n{__doc__}", file=sys.stderr)
+    sys.exit(2)
 
-    if "--list" in args:
-        list_domains()
-        return
 
+def parse_args(args: list[str]) -> tuple[list[str], int]:
+    """Return (domain filters, concurrency).
+
+    An unrecognized option must fail fast: with no domain filter the runner
+    starts every domain, so an ignored typo would launch the full suite.
+    """
     domain_filters: list[str] = []
     concurrency = 30
 
     i = 0
     while i < len(args):
-        if args[i] == "--concurrency" and i + 1 < len(args):
+        arg = args[i]
+        if arg == "--concurrency":
+            if i + 1 >= len(args):
+                _usage_error("--concurrency requires an integer value")
             try:
                 concurrency = int(args[i + 1])
             except ValueError:
-                print(f"Error: --concurrency requires an integer value, got '{args[i + 1]}'")
-                sys.exit(1)
+                _usage_error(f"--concurrency requires an integer value, got '{args[i + 1]}'")
             i += 2
-        elif not args[i].startswith("-"):
-            domain_filters.append(args[i])
-            i += 1
+        elif arg.startswith("-"):
+            _usage_error(f"unknown option '{arg}'")
         else:
+            domain_filters.append(arg)
             i += 1
 
+    return domain_filters, concurrency
+
+
+def main() -> None:
+    args = sys.argv[1:]
+
+    if "-h" in args or "--help" in args:
+        print(__doc__)
+        return
+
+    if "--list" in args:
+        list_domains()
+        return
+
+    domain_filters, concurrency = parse_args(args)
     exit_code = asyncio.run(run_tests(domain_filters or None, concurrency))
     sys.exit(exit_code)
 

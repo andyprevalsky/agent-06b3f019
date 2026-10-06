@@ -17,9 +17,10 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
-from domains.grep.repo import fetch_local_data_summary
 from domains.spawn_agent.config import (
+    EXPLORE_CANCEL_GRACE,
     EXPLORE_DEFAULT_MODEL,
     EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_HEARTBEAT_TIMEOUT,
@@ -32,26 +33,35 @@ from domains.spawn_agent.config import (
     resolve_explore_depth,
     should_skip_oai_demo_browser_spawn,
 )
-from domains.spawn_agent.oai_demo_july import apply_oai_demo_july_for_each
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     build_for_each_goal,
     coerce_for_each_items,
+    compile_explore_grep_evidence,
     compile_explore_wrap_up,
+    fetch_explore_tool_evidence,
     resolve_start_phase,
     spawn_explore_agent_activity,
     validate_spawn_params,
 )
 from helpers.attachments import extract_attachments_from_context, fetch_parent_attachments_activity
+from helpers.child_results import fetch_child_terminal_result_activity
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
+from helpers.source_connect_gates import raise_source_connect_gates
 from helpers.tracing import span
 from helpers.world_model_runtime import world_model_specialized_agent_activity
+from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
+from tools.grep import fetch_local_data_summary
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
 from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
 from utils.simulated_clock import simulated_timestamp_ms
-from utils.source_connect_gates import raise_source_connect_gates
+from utils.oai_demo_july import apply_oai_demo_july_for_each
 from utils.tool_call_ids import spawn_group_id
 
 _FAST_MODE_USER_COPY = (
@@ -61,6 +71,7 @@ _FAST_MODE_USER_COPY = (
     "cached trajectory",
     "from_fast_cache",
 )
+_EXPLORE_NO_EVIDENCE = "Explore stopped before completion with no tool evidence."
 
 _WORLD_MODEL_SPECIALIZED_AGENT_TOOLS = {
     "explore": "spawn_explore_agent",
@@ -206,6 +217,8 @@ def user_facing_explore_result(text: Any) -> str:
     if not raw or raw.lower() in {"research started.", "research started"}:
         return ""
     lowered = raw.lower()
+    if lowered.startswith("starting explore agent:"):
+        return ""
     if any(marker in lowered for marker in _FAST_MODE_USER_COPY) and len(raw) < 400:
         return ""
     return raw
@@ -219,11 +232,14 @@ def wrap_up_payload_from_failure(exc: BaseException) -> Dict[str, Any]:
         seen.add(id(cur))
         details = getattr(cur, "last_heartbeat_details", None)
         if details:
-            payload = details[0] if isinstance(details, tuple) and details else details
-            if isinstance(payload, dict):
-                return payload
-            if isinstance(payload, str) and payload.strip():
-                return {"result": payload}
+            # Temporal decodes heartbeat details into a list; the evidence dict
+            # follows the message when an LLM helper sent the last beat.
+            payloads = list(details) if isinstance(details, (list, tuple)) else [details]
+            for payload in payloads:
+                if isinstance(payload, dict):
+                    return payload
+            if isinstance(payloads[0], str) and payloads[0].strip():
+                return {"result": payloads[0]}
         cur = getattr(cur, "cause", None) or getattr(cur, "__cause__", None)
     return {}
 
@@ -235,6 +251,109 @@ def _explore_chip_text(result: Dict[str, Any]) -> str:
             result.get("tool_call_results") or [],
         )
     )
+
+
+_EXPLORE_SYNTHESIS_CHECKPOINT = (
+    "Research checkpoint for the parent agent: you have sourced findings from "
+    "multiple explore rounds. Compare them with the original user's requested "
+    "facts and synthesize if those facts are covered. Continue researching a "
+    "specific missing requested fact if needed; state uncertainty instead of "
+    "chasing optional precision. This checkpoint is guidance, not evidence."
+)
+
+
+def _source_linked_explore_text(text: str) -> bool:
+    return len(text.strip()) >= 200 and any(
+        marker in text for marker in ("https://", "http://", "@ref:", "grep:")
+    )
+
+
+def _grounded_explore_text(text: str, tool_results: List[str]) -> bool:
+    """A substantive, source-linked result rather than a sparse/failed chip."""
+    return bool(tool_results) and _source_linked_explore_text(text)
+
+
+def _has_prior_grounded_explore_batch(context: Any, current_tool_call_id: str) -> bool:
+    """Find a prior parent turn with at least two grounded explore results."""
+    if not isinstance(context, list):
+        return False
+    grounded_ids: set[str] = set()
+    for message in context:
+        if not isinstance(message, dict) or str(message.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = message.get("metadata") or {}
+        if (
+            metadata.get("toolName") == "spawn_agent"
+            and _EXPLORE_SYNTHESIS_CHECKPOINT in str(message.get("text") or "")
+        ):
+            return False  # Persist the one-time choice through continue-as-new.
+        if (
+            metadata.get("toolName") != "spawn_agent"
+            or metadata.get("agentType") != "explore"
+            or metadata.get("toolStatus") != "FINISHED"
+        ):
+            continue
+        call_id = str(metadata.get("toolCallId") or "")
+        if call_id and call_id != current_tool_call_id:
+            data = metadata.get("data")
+            payload = data.get("result") if isinstance(data, dict) else None
+            text = str(payload or message.get("text") or "")
+            if _source_linked_explore_text(text):
+                grounded_ids.add(call_id)
+    if len(grounded_ids) < 2:
+        return False
+    for message in context:
+        if not isinstance(message, dict) or str(message.get("role") or "").upper() != "ASSISTANT":
+            continue
+        calls = (message.get("metadata") or {}).get("tool_calls") or []
+        batch_ids = {
+            str(call.get("tool_call_id") or "")
+            for call in calls
+            if isinstance(call, dict) and call.get("tool") == "spawn_agent" and call.get("type") == "explore"
+        }
+        if current_tool_call_id not in batch_ids and len(batch_ids & grounded_ids) >= 2:
+            return True
+    return False
+
+
+def _explore_result_after_activity_failure(
+    exc: BaseException, *, user_paused: bool
+) -> tuple[Dict[str, Any], bool]:
+    """Map an explore activity failure to (result, was_cancelled).
+
+    Timeout / wait-budget cancel with heartbeat evidence FINISHES so the
+    parent can synthesize. An empty cancellation is an error. Unexpected
+    ActivityError without wrap-up is re-raised for the outer ERROR path.
+    """
+    recovered = wrap_up_payload_from_failure(exc)
+    cancel_cause = not isinstance(exc, ActivityError) or isinstance(
+        exc.cause, (asyncio.CancelledError, TemporalCancelledError)
+    )
+    if user_paused and cancel_cause:
+        return {}, True
+    recovered_text = _explore_chip_text(recovered) if recovered else ""
+    if recovered.get("tool_call_results") and recovered_text:
+        return {
+            "status": "completed",
+            "result": recovered_text,
+            "tool_call_results": recovered.get("tool_call_results") or [],
+            "accumulated_usage": recovered.get("accumulated_usage") or [],
+            "llm_iteration_usage": recovered.get("llm_iteration_usage") or [],
+        }, False
+    timed_out = isinstance(exc, ActivityError) and isinstance(exc.cause, (TimeoutError, TemporalTimeoutError))
+    if isinstance(exc, ActivityError) and not (cancel_cause or timed_out):
+        raise exc
+    if (cancel_cause or timed_out) and not user_paused:
+        return {
+            "status": "error",
+            "result": "",
+            "error_reason": _EXPLORE_NO_EVIDENCE,
+            "tool_call_results": [],
+            "accumulated_usage": [],
+            "llm_iteration_usage": [],
+        }, False
+    return {}, True
+
 
 logger = structlog.get_logger()
 
@@ -272,7 +391,7 @@ async def wait_for_fast_mode_explore_slot(
 
     if _has_slot():
         return
-    await workflow.wait_condition(_has_slot)
+    await wait_condition_or_generation_handoff(_has_slot, workflow_instance, workflow_mod=workflow)
 
 
 def track_fast_mode_explore(
@@ -355,74 +474,6 @@ async def drain_fast_mode_explores(workflow_instance) -> None:
         )
 
 
-def _combined_goal_text(workflow_instance, tool_call: Dict[str, Any]) -> str:
-    return " ".join(
-        str(part or "")
-        for part in (
-            getattr(workflow_instance, "goal", ""),
-            tool_call.get("goal", ""),
-        )
-    ).lower()
-
-
-def _current_tool_goal_text(tool_call: Dict[str, Any]) -> str:
-    return str(tool_call.get("goal") or "").lower()
-
-
-def _explicit_general_purpose_requested(goal_text: str) -> bool:
-    return (
-        "spawn_general_purpose_agent" in goal_text
-        or "general-purpose agent" in goal_text
-        or "general purpose agent" in goal_text
-    )
-
-
-def _explore_only_research_instruction(workflow_instance, tool_call: Dict[str, Any]) -> bool:
-    """Detect explicit instructions that this task should research via explore only."""
-    goal_text = _combined_goal_text(workflow_instance, tool_call)
-    current_goal_text = _current_tool_goal_text(tool_call)
-    explicit_general_purpose_request = _explicit_general_purpose_requested(current_goal_text) or (
-        getattr(workflow_instance, "depth", 0) == 0 and _explicit_general_purpose_requested(goal_text)
-    )
-
-    asks_for_explore = (
-        "explore-agent" in goal_text
-        or "explore agent" in goal_text
-        or "explore sub-agent" in goal_text
-        or "explore subagent" in goal_text
-        or "explore sub-agents" in goal_text
-        or "explore subagents" in goal_text
-        or "explore/web-search" in goal_text
-        or "web-search/explore" in goal_text
-    )
-    forbids_heavy_agents = (
-        "must not use browser" in goal_text
-        or "must not use a browser" in goal_text
-        or "must not use browser agent" in goal_text
-        or "must not use a browser agent" in goal_text
-        or "must not use claude code" in goal_text
-        or "must not use code sandbox" in goal_text
-        or "do not use browser" in goal_text
-        or "do not use a browser" in goal_text
-        or "do not use browser agent" in goal_text
-        or "do not use a browser agent" in goal_text
-        or "do not use claude code" in goal_text
-        or "do not use code sandbox" in goal_text
-        or "no browser/code/sandbox" in goal_text
-        or "no browser agent" in goal_text
-        or "no code sandbox" in goal_text
-    )
-    return asks_for_explore and forbids_heavy_agents and not explicit_general_purpose_request
-
-
-def _expected_explore_agents_for_city_task(goal_text: str) -> int | None:
-    if "one explore sub-agent per city" not in goal_text and "spawn one explore sub-agent per city" not in goal_text:
-        return None
-    if "three cities" in goal_text or "3 cities" in goal_text:
-        return 3
-    return None
-
-
 def _is_oai_demo_for_each_tool(metadata: dict) -> bool:
     tool_name = str(metadata.get("toolName") or "")
     if tool_name == "spawn_general_purpose_agent_for_each":
@@ -475,6 +526,38 @@ def _oai_demo_child_result_failed(child_result: Dict[str, Any]) -> bool:
     return status in {"failed", "error", "max_iterations"} or child_result.get("success") is False
 
 
+async def _reconcile_for_each_child_result(workflow_instance, child_agent_id: Any) -> bool:
+    """Reload a durably terminal child when the completion signal was missed or consumed."""
+    results = getattr(workflow_instance, "child_results", None)
+    if isinstance(results, dict) and child_agent_id in results:
+        pending = getattr(workflow_instance, "pending_children", None)
+        if isinstance(pending, set):
+            pending.discard(child_agent_id)
+        return True
+
+    try:
+        recovered = await workflow.execute_activity(
+            fetch_child_terminal_result_activity,
+            args=[child_agent_id],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+    except Exception as exc:
+        logger.warning("Child terminal reconciliation failed", child_agent_id=child_agent_id, error=str(exc))
+        return False
+    if not isinstance(recovered, dict):
+        return False
+
+    if not isinstance(getattr(workflow_instance, "child_results", None), dict):
+        workflow_instance.child_results = {}
+    workflow_instance.child_results[child_agent_id] = recovered
+    pending = getattr(workflow_instance, "pending_children", None)
+    if isinstance(pending, set):
+        pending.discard(child_agent_id)
+    logger.info("Recovered terminal child result from durable state", child_agent_id=child_agent_id)
+    return True
+
+
 async def _recover_oai_demo_for_each_timeout(
     workflow_instance, child_agent_id: Any, exc: BaseException
 ) -> Dict[str, Any] | None:
@@ -484,6 +567,11 @@ async def _recover_oai_demo_for_each_timeout(
     timeouts around 100s, then for_each ERRORed (T10) while the GPs were
     still replaying. On this task, keep waiting for the child signal instead
     of treating the activity timeout as a child failure.
+
+    The wait must also reconcile from durable child state. finalize_child pops
+    ``child_results`` before the FINISHED event is handled, and the completion
+    signal is not re-delivered — parking only on the in-memory map hangs
+    ``asyncio.gather`` and the parent never yields ``for_each complete``.
     """
     if not child_agent_id:
         return None
@@ -499,11 +587,17 @@ async def _recover_oai_demo_for_each_timeout(
     if child_agent_id in results:
         return results.get(child_agent_id)
     while child_agent_id not in workflow_instance.child_results:
+        if await _reconcile_for_each_child_result(workflow_instance, child_agent_id):
+            break
         try:
-            await workflow.wait_condition(
+            await wait_condition_or_generation_handoff(
                 lambda cid=child_agent_id: cid in workflow_instance.child_results,
+                workflow_instance,
                 timeout=timedelta(seconds=30),
+                workflow_mod=workflow,
             )
+        except GenerationHandoffRequested:
+            raise
         except (asyncio.TimeoutError, TimeoutError):
             continue
     return workflow_instance.child_results.get(child_agent_id)
@@ -536,105 +630,6 @@ def _oai_demo_first_level_gp_count(workflow_instance) -> int:
             seen_tool_calls.add(tool_call_id)
         count += 1
     return count
-
-
-def _prior_explore_agent_count(workflow_instance) -> int:
-    context = getattr(workflow_instance, "context", [])
-    if not isinstance(context, list):
-        return 0
-
-    count = 0
-    seen_tool_calls: set[str] = set()
-    for msg in context:
-        if not isinstance(msg, dict) or (msg.get("role") or "").upper() != "TOOL":
-            continue
-        metadata = msg.get("metadata") or {}
-        if metadata.get("toolName") != "spawn_agent":
-            continue
-        if metadata.get("agentType") != "explore":
-            continue
-        # Only successful children satisfy a one-per-city instruction. Counting
-        # IN_PROGRESS here also counted calls that later ended in ERROR, which
-        # prevented the parent from replacing an evidence-free explore child.
-        if metadata.get("toolStatus") != "FINISHED":
-            continue
-        tool_call_id = metadata.get("toolCallId")
-        if tool_call_id:
-            if tool_call_id in seen_tool_calls:
-                continue
-            seen_tool_calls.add(tool_call_id)
-        count += 1
-    return count
-
-
-def _explore_slot_reservations(workflow_instance) -> set[str]:
-    """Return per-workflow reservations for same-turn explore calls.
-
-    Regular tool calls execute concurrently. Without a synchronous reservation,
-    several calls can all observe the same number of finished children and each
-    claim the final city slot before any IN_PROGRESS event reaches context.
-    """
-    reservations = getattr(workflow_instance, "_explore_slot_reservations", None)
-    if not isinstance(reservations, set):
-        reservations = set()
-        setattr(workflow_instance, "_explore_slot_reservations", reservations)
-    return reservations
-
-
-def _explore_limit_error(expected_explore_agents: int) -> str:
-    return (
-        f"This task asked for one explore sub-agent per city and already has {expected_explore_agents} "
-        "explore agents. Use the gathered research and finish the answer instead of spawning more."
-    )
-
-
-def _has_failed_completion_feedback(workflow_instance) -> bool:
-    """Return whether a verifier asked the parent for corrective work."""
-    context = getattr(workflow_instance, "context", [])
-    if not isinstance(context, list):
-        return False
-    for msg in context:
-        if not isinstance(msg, dict) or (msg.get("role") or "").upper() != "TOOL":
-            continue
-        metadata = msg.get("metadata") or {}
-        if (
-            metadata.get("toolName") not in ("attempt_completion", "attempt_completion_with_result")
-            or metadata.get("toolStatus") != "FINISHED"
-            or not metadata.get("verifierMessage")
-        ):
-            continue
-        feedback = " ".join(
-            str(value or "") for value in (metadata.get("title"), metadata.get("message"), msg.get("text"))
-        ).lower()
-        if "verifier rejected" in feedback or ("progress:" in feedback and "100%" not in feedback):
-            return True
-    return False
-
-
-def _explore_agent_capacity(workflow_instance, expected_explore_agents: int) -> int:
-    """Allow one bounded corrective explore after explicit verifier feedback."""
-    return expected_explore_agents + int(_has_failed_completion_feedback(workflow_instance))
-
-
-def _blocked_research_only_agent_type(workflow_instance, tool_call: Dict[str, Any]) -> str | None:
-    """Return an explanatory error when an explore-only task tries to delegate incorrectly."""
-    if not _explore_only_research_instruction(workflow_instance, tool_call):
-        return None
-
-    agent_type = tool_call.get("type")
-    if agent_type in {"browser", "code", "general_purpose", "for_each"}:
-        return (
-            "This task requires explore-agent web research only; do not spawn "
-            f"a {agent_type} agent here. Use spawn_agent(type='explore') or answer "
-            "from the research already gathered."
-        )
-    goal_text = _combined_goal_text(workflow_instance, tool_call)
-    expected_explore_agents = _expected_explore_agents_for_city_task(goal_text)
-    if agent_type == "explore" and expected_explore_agents is not None:
-        explore_capacity = _explore_agent_capacity(workflow_instance, expected_explore_agents)
-        if _prior_explore_agent_count(workflow_instance) >= explore_capacity:
-            return _explore_limit_error(explore_capacity)
-    return None
 
 
 class SpawnAgentManager(ToolManager):
@@ -690,10 +685,7 @@ class SpawnAgentManager(ToolManager):
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="spawn_agent complete",
-                    message=(
-                        "Research already gathered; skipping nested spawn so the "
-                        "main sub-agent handles it."
-                    ),
+                message=("Research already gathered; skipping nested spawn so the main sub-agent handles it."),
                 status=MessageStatus.FINISHED,
                 metadata={"agentType": agent_type, "skippedNestedSpawn": True},
             )
@@ -707,76 +699,29 @@ class SpawnAgentManager(ToolManager):
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="spawn_agent complete",
-                message=(
-                    "Research already gathered; skipping browser spawn so the "
-                    "explore tree handles it."
-                ),
+                message=("Research already gathered; skipping browser spawn so the explore tree handles it."),
                 status=MessageStatus.FINISHED,
                 metadata={"skippedBrowserSpawn": True},
             )
             return
 
-        blocked_reason = _blocked_research_only_agent_type(workflow_instance, tool_call)
-        if blocked_reason:
-            # Fast Mode must still spawn general_purpose / for_each so each child
-            # Agent row exists and can replay execute_loop cache.
-            skip_without_spawn = not (fm and agent_type in {"general_purpose", "for_each"})
-            if skip_without_spawn:
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title="spawn_agent complete" if fm else "spawn_agent failed",
-                    message=(
-                        "Research already gathered; skipping further spawn."
-                        if fm
-                        else blocked_reason
-                    ),
-                    status=MessageStatus.FINISHED if fm else MessageStatus.ERROR,
-                    metadata={"agentType": agent_type},
-                )
-                return
+        if agent_type == "explore":
+            async for event in self._spawn_explore(workflow_instance, tool_call, tool_call_id):
+                yield event
+        elif agent_type == "browser":
+            async for event in self._spawn_browser(workflow_instance, tool_call, tool_call_id):
+                yield event
+        elif agent_type == "code":
+            async for event in self._spawn_code(workflow_instance, tool_call, tool_call_id):
+                yield event
+        elif agent_type == "general_purpose":
+            async for event in self._spawn_sub_agent(workflow_instance, tool_call, tool_call_id):
+                yield event
+        elif agent_type == "for_each":
+            async for event in self._spawn_for_each(workflow_instance, tool_call, tool_call_id):
+                yield event
 
-        reserved_explore_slot = False
-        if agent_type == "explore" and _explore_only_research_instruction(workflow_instance, tool_call):
-            expected_explore_agents = _expected_explore_agents_for_city_task(
-                _combined_goal_text(workflow_instance, tool_call)
-            )
-            if expected_explore_agents is not None:
-                explore_capacity = _explore_agent_capacity(workflow_instance, expected_explore_agents)
-                reservations = _explore_slot_reservations(workflow_instance)
-                occupied_slots = _prior_explore_agent_count(workflow_instance) + len(reservations)
-                if occupied_slots >= explore_capacity:
-                    yield ToolEvent(
-                        type=EventType.POST_MESSAGE,
-                        title="spawn_agent failed",
-                        message=_explore_limit_error(explore_capacity),
-                        status=MessageStatus.ERROR,
-                        metadata={"agentType": agent_type},
-                    )
-                    return
-                reservations.add(tool_call_id)
-                reserved_explore_slot = True
-
-        try:
-            if agent_type == "explore":
-                async for event in self._spawn_explore(workflow_instance, tool_call, tool_call_id):
-                    yield event
-            elif agent_type == "browser":
-                async for event in self._spawn_browser(workflow_instance, tool_call, tool_call_id):
-                    yield event
-            elif agent_type == "code":
-                async for event in self._spawn_code(workflow_instance, tool_call, tool_call_id):
-                    yield event
-            elif agent_type == "general_purpose":
-                async for event in self._spawn_sub_agent(workflow_instance, tool_call, tool_call_id):
-                    yield event
-            elif agent_type == "for_each":
-                async for event in self._spawn_for_each(workflow_instance, tool_call, tool_call_id):
-                    yield event
-        finally:
-            if reserved_explore_slot:
-                _explore_slot_reservations(workflow_instance).discard(tool_call_id)
-
-    async def _spawn_explore(  # noqa: C901
+    async def _spawn_explore(
         self,
         workflow_instance,
         tool_call: Dict[str, Any],
@@ -804,7 +749,7 @@ class SpawnAgentManager(ToolManager):
         """
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
-        task_id = task_id or str(uuid_module.uuid4())
+        task_id = task_id or str(workflow.uuid4())
         if getattr(workflow_instance, "world_model_mode", "real") == "simulate":
             async for event in self._spawn_world_model_specialized(
                 workflow_instance,
@@ -826,9 +771,7 @@ class SpawnAgentManager(ToolManager):
         # reach attempt_completion (~14 turns avg; quick aborts at 5).
         depth = resolve_explore_depth(
             tool_call.get("depth"),
-            fast_mode_cache_enabled=bool(
-                getattr(workflow_instance, "fast_mode_cache_enabled", False)
-            ),
+            fast_mode_cache_enabled=bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)),
             oai_demo=oai_demo,
         )
         explore_max_iterations, explore_activity_timeout = explore_limits_for_depth(depth)
@@ -969,6 +912,9 @@ class SpawnAgentManager(ToolManager):
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
+            # Every tree waits the depth's full activity timeout (quick/medium
+            # 600s, deep 1800s); there is no shorter live cap.
+            parent_wait = explore_activity_timeout
 
             async with span(
                 "explore_activity_wait",
@@ -979,24 +925,84 @@ class SpawnAgentManager(ToolManager):
                 span_source="agents.domains.spawn_agent.handler.SpawnAgentManager._spawn_explore",
                 span_key="agents.domains.spawn_agent.handler.SpawnAgentManager._spawn_explore",
             ):
-                # Wait for activity completion or pause signal
+                # Wait for activity completion or pause signal. If the handle is
+                # still open at the activity timeout, cancel + grace instead of
+                # awaiting it unbounded.
                 was_cancelled = False
-                await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
+                try:
+                    # cutover-class: activity-bound
+                    await workflow.wait_condition(
+                        lambda: activity_handle.done() or workflow_instance.is_paused,
+                        timeout=parent_wait,
+                    )
+                except TimeoutError:
+                    if not activity_handle.done():
+                        logger.info(
+                            "Cancelling explore agent after parent wait budget",
+                            goal=goal[:100],
+                            wait_s=parent_wait.total_seconds(),
+                        )
+                        activity_handle.cancel()
+                        try:
+                            # cutover-class: bounded
+                            await workflow.wait_condition(
+                                lambda: activity_handle.done(),
+                                timeout=EXPLORE_CANCEL_GRACE,
+                            )
+                        except TimeoutError:
+                            logger.info(
+                                "Explore activity still running after cancel grace; wrapping up",
+                                goal=goal[:100],
+                            )
                 if workflow_instance.is_paused and not activity_handle.done():
                     logger.info("Cancelling explore agent due to pause", goal=goal[:100])
                     activity_handle.cancel()
                     was_cancelled = True
 
-                # Get result
+                # Get result. Live trees never await a still-running handle
+                # unbounded (53831ac9). Demo / Fast Mode July replays must
+                # await so capture_tool_results / wait_for see the cached result.
                 try:
-                    result = await activity_handle
+                    if activity_handle.done() or oai_demo:
+                        result = await activity_handle
+                    else:
+                        result = {
+                            "status": "error",
+                            "result": "",
+                            "error_reason": _EXPLORE_NO_EVIDENCE,
+                            "tool_call_results": [],
+                            "accumulated_usage": [],
+                            "llm_iteration_usage": [],
+                        }
                 except (asyncio.CancelledError, ActivityError) as e:
-                    if isinstance(e, ActivityError) and not isinstance(
-                        e.cause, (asyncio.CancelledError, TemporalCancelledError)
-                    ):
-                        raise  # Re-raise non-cancellation errors
-                    was_cancelled = True
-                    result = {}
+                    result, was_cancelled = _explore_result_after_activity_failure(
+                        e, user_paused=bool(getattr(workflow_instance, "is_paused", False))
+                    )
+
+            if not was_cancelled and result.get("error_reason") == _EXPLORE_NO_EVIDENCE:
+                # TRY_CANCEL can resolve before the child worker's last heartbeat.
+                # Recover only completed tool text already saved under this task.
+                try:
+                    persisted_results = await workflow.execute_activity(
+                        fetch_explore_tool_evidence,
+                        args=[workflow_instance.agent_id, workflow_instance.user_id, task_id],
+                        start_to_close_timeout=SUB_ACTIVITY_TIMEOUT,
+                        retry_policy=RetryPolicy(maximum_attempts=SUB_ACTIVITY_MAX_ATTEMPTS),
+                    )
+                except Exception as recovery_error:
+                    logger.warning("Explore evidence recovery failed", task_id=task_id, error=str(recovery_error))
+                    persisted_results = []
+                # The backend excerpts are already bounded. Keep the saved
+                # tool label, URL, and original result text together.
+                recovered_text = "\n\n".join(persisted_results)
+                if recovered_text:
+                    result = {
+                        "status": "completed",
+                        "result": recovered_text,
+                        "tool_call_results": persisted_results,
+                        "accumulated_usage": [],
+                        "llm_iteration_usage": [],
+                    }
 
             if was_cancelled:
                 logger.info("Explore agent cancelled", goal=goal[:100])
@@ -1009,7 +1015,7 @@ class SpawnAgentManager(ToolManager):
                 )
                 return
 
-            explore_result = result.get("result", "No results found.")
+            explore_result = _explore_chip_text(result)
             explore_tool_call_results = result.get("tool_call_results") or []
             accumulated_usage = result.get("accumulated_usage", [])
             llm_iteration_usage = result.get("llm_iteration_usage", [])
@@ -1020,16 +1026,20 @@ class SpawnAgentManager(ToolManager):
             unavailable_sources = result.get("unavailable_sources") or []
             explore_failed = result.get("status") not in {None, "completed"}
             explore_error_reason = result.get("error_reason")
-            # Fast Mode: a truncated/malformed cached explore turn (e.g. the
-            # identify-50 attempt_completion JSON) used to ERROR the spawn after
-            # 3 parse retries of the same row. Finish with gathered evidence.
-            if explore_failed and bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)):
-                explore_failed = False
-                if not explore_result or explore_result == "No results found.":
-                    explore_result = (
-                        explore_error_reason
-                        or "Research finished with the evidence gathered so far."
-                    )
+            fast_mode = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+            # An empty live completion is not usable research. In Fast Mode the
+            # chip filter also strips replay-end stub copy, so a completed
+            # activity (which already applied its evidence gate) stays FINISHED.
+            if not explore_result and not (fast_mode and not explore_failed):
+                explore_failed = True
+                explore_error_reason = explore_error_reason or _EXPLORE_NO_EVIDENCE
+            # Fast Mode may soft-complete a malformed cached LLM turn only
+            # when prior tool calls produced evidence to pass to the parent.
+            if explore_failed and fast_mode:
+                cached_evidence = compile_explore_wrap_up("", explore_tool_call_results)
+                if cached_evidence and explore_error_reason != _EXPLORE_NO_EVIDENCE:
+                    explore_result = cached_evidence
+                    explore_failed = False
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted
@@ -1064,6 +1074,22 @@ class SpawnAgentManager(ToolManager):
             # not-connected notice). Only genuine explore failures swap in
             # error_reason / ERROR status.
             event_message = explore_error_reason if explore_failed and explore_error_reason else explore_result
+            grep_evidence = compile_explore_grep_evidence(explore_tool_call_results)
+            if not explore_failed and grep_evidence and grep_evidence not in explore_result:
+                event_message = f"{event_message}\n\nOriginal grep results:\n{grep_evidence}"
+            if (
+                not oai_demo
+                and not explore_failed
+                and _grounded_explore_text(explore_result, explore_tool_call_results)
+                and not getattr(workflow_instance, "_explore_synthesis_checkpoint_sent", False)
+                and _has_prior_grounded_explore_batch(
+                    getattr(workflow_instance, "context", None), tool_call_id
+                )
+            ):
+                # One advisory after a grounded follow-up round. It must not
+                # replace evidence or prevent another necessary targeted search.
+                workflow_instance._explore_synthesis_checkpoint_sent = True
+                event_message = f"{event_message}\n\n{_EXPLORE_SYNTHESIS_CHECKPOINT}"
 
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
@@ -1167,7 +1193,7 @@ class SpawnAgentManager(ToolManager):
         boundary_tool = _WORLD_MODEL_SPECIALIZED_AGENT_TOOLS[agent_type]
         goal = str(tool_call.get("goal") or "")
         ui_goal = str(display_goal or goal)
-        task_id = task_id or str(uuid_module.uuid4())
+        task_id = task_id or str(workflow.uuid4())
         progress_title = {
             "explore": "Exploring",
             "browser": "Browser agent",
@@ -1301,7 +1327,7 @@ class SpawnAgentManager(ToolManager):
         ):
             yield event
 
-    async def _spawn_for_each(  # noqa: C901
+    async def _spawn_for_each(
         self,
         workflow_instance,
         tool_call: Dict[str, Any],
@@ -1370,7 +1396,11 @@ class SpawnAgentManager(ToolManager):
             agent_cfgs.append(cfg)
 
         # Wait for un-pause before spawning (parents pause cascades to children).
-        await workflow.wait_condition(lambda: not workflow_instance.is_paused)
+        await wait_condition_or_generation_handoff(
+            lambda: not workflow_instance.is_paused,
+            workflow_instance,
+            workflow_mod=workflow,
+        )
 
         parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-flash")
         parent_source = getattr(workflow_instance, "agent_source", "WEB")
@@ -1439,7 +1469,12 @@ class SpawnAgentManager(ToolManager):
             saw_error = False
             try:
                 async for event in sub_manager.finalize_child(
-                    workflow_instance, child_info, sub_agent_for_finalize, tcid, parent_bus_id
+                    workflow_instance,
+                    child_info,
+                    sub_agent_for_finalize,
+                    tcid,
+                    parent_bus_id,
+                    for_each_child=True,
                 ):
                     await workflow_instance._handle_tool_event(event, tcid, "spawn_agent")
                     if isinstance(event, ToolEvent) and event.status == MessageStatus.ERROR:
@@ -1476,10 +1511,10 @@ class SpawnAgentManager(ToolManager):
                                 "structured_response": event_metadata.get("structured_response"),
                             }
                         )
+            except GenerationHandoffRequested:
+                raise
             except Exception as exc:
-                recovered = await _recover_oai_demo_for_each_timeout(
-                    workflow_instance, child_info.get("agent_id"), exc
-                )
+                recovered = await _recover_oai_demo_for_each_timeout(workflow_instance, child_info.get("agent_id"), exc)
                 if recovered is not None and not _oai_demo_child_result_failed(recovered):
                     logger.warning(
                         "for_each child finalize timed out; recovered completed child",
@@ -1584,22 +1619,37 @@ async def spawn_agent(workflow_instance, tool_call: Dict, tool_call_id: str):
     last_result = ""
     unavailable_sources: List[Dict] = []
     event_count = 0
-    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        event_count += 1
-        await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_agent")
-        if isinstance(event, ToolEvent) and event.status:
-            last_status = event.status
-        # Capture the result from the FINISHED event
-        if isinstance(event, ToolEvent) and event.data and event.data.get("result"):
-            last_result = event.data["result"]
-        # Capture data sources the explore couldn't reach (connector not connected)
-        if isinstance(event, ToolEvent) and event.data and event.data.get("unavailable_sources"):
-            unavailable_sources = event.data["unavailable_sources"]
-        # Track usage from events
-        if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
-            await workflow_instance._track_usage(
-                event.data["usage"], tool_name="spawn_agent", call_site="explore_agent"
+    try:
+        async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
+            event_count += 1
+            await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_agent")
+            if isinstance(event, ToolEvent) and event.status:
+                last_status = event.status
+            # Capture the result from the FINISHED event
+            if isinstance(event, ToolEvent) and event.data and event.data.get("result"):
+                last_result = event.data["result"]
+            # Capture data sources the explore couldn't reach (connector not connected)
+            if isinstance(event, ToolEvent) and event.data and event.data.get("unavailable_sources"):
+                unavailable_sources = event.data["unavailable_sources"]
+            # Track usage from events
+            if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
+                await workflow_instance._track_usage(
+                    event.data["usage"], tool_name="spawn_agent", call_site="explore_agent"
+                )
+    except GenerationHandoffRequested as exc:
+        # A parked tool keeps its chip open for the next generation to finish.
+        if not exc.parked and last_status != MessageStatus.FINISHED:
+            await workflow_instance._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="spawn_agent interrupted",
+                    message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    status=MessageStatus.FINISHED,
+                ),
+                tool_call_id,
+                "spawn_agent",
             )
+        raise
 
     # A required data source wasn't connected: raise one blocking source_connect
     # gate per source (dedup/fan-in collapses duplicates across sub-agents). Each

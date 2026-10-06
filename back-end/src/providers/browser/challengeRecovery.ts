@@ -15,14 +15,17 @@ import {
   type NetworkSummaryEntry,
 } from './challengeClassifierNetwork';
 import { createKernelRecoverySession, releaseKernelRemoteSession } from './kernel';
+import { createBrowserUseRecoverySession, releaseBrowserUseRemoteSession } from './browserUse';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
 import { raceProbeAbort, sameSiteNavigationUrl } from './challengeRecoveryShared';
+import { restoredTunnelCandidate } from './challengeRecoveryTransport';
 import type { BrowserProviderName } from './types';
 
 export { recoveryConfigKeyForSession, sameSiteNavigationUrl } from './challengeRecoveryShared';
 
 export {
   bestSpecificity,
+  availableBrowserRecoveryCandidates,
   browserRecoveryCandidates,
   paymentCdnFocusedCandidates,
   recoverySearchPlan,
@@ -31,7 +34,7 @@ export {
 } from './challengeRecoveryCandidates';
 import {
   bestSpecificity,
-  browserRecoveryCandidates,
+  availableBrowserRecoveryCandidates,
   shouldPreferSteelForChallengeTarget,
   type BrowserRecoveryConfig,
 } from './challengeRecoveryCandidates';
@@ -131,14 +134,36 @@ export interface SuccessfulRecoveryCandidate {
 export interface BrowserConfigSearchRuntimeDependencies {
   createKernel: typeof createKernelRecoverySession;
   createSteel: typeof createSteelRecoverySession;
+  createBrowserUse: typeof createBrowserUseRecoverySession;
   releaseKernel: typeof releaseKernelRemoteSession;
   releaseSteel: typeof releaseSteelRemoteSession;
+  releaseBrowserUse: typeof releaseBrowserUseRemoteSession;
   probe: typeof probeCandidateBrowser;
 }
 
 export interface RecoveryStorageLane {
   key: string;
   storageState: Record<string, unknown>;
+}
+
+/** A response can emit headers and then never finish its body on a broken proxy.
+ * Network previews are advisory; they must not hold the candidate probe open.
+ */
+export async function boundedRecoveryResponseText(
+  response: { text: () => Promise<string> },
+  timeoutMs = 2_000
+): Promise<string | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      response.text(),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export async function probeCandidateBrowser(
@@ -208,6 +233,10 @@ export async function probeCandidateBrowser(
     // Tool-parity classifier inputs: accumulate network like BrowserNetworkRecorder
     // / read_network_requests (status + truncated bodies), not perf timings alone.
     const networkEntries: NetworkSummaryEntry[] = [];
+    const failedRequestUrls: string[] = [];
+    const onRequestFailed = (request: import('playwright').Request) => {
+      failedRequestUrls.push(request.url());
+    };
     const pendingResponses = new Set<Promise<void>>();
     const onResponse = async (res: import('playwright').Response) => {
       const task = (async () => {
@@ -220,7 +249,7 @@ export async function probeCandidateBrowser(
           try {
             const resourceType = req.resourceType();
             if (['xhr', 'fetch', 'document', 'script'].includes(resourceType)) {
-              const raw = await res.text();
+              const raw = await boundedRecoveryResponseText(res);
               if (raw) {
                 body = raw.slice(0, 200);
                 truncated = raw.length > 200;
@@ -250,6 +279,7 @@ export async function probeCandidateBrowser(
     };
     if (typeof (page as { on?: unknown }).on === 'function') {
       page.on('response', onResponse);
+      page.on('requestfailed', onRequestFailed);
     }
     const response = await raceProbeAbort(
       page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => null),
@@ -317,11 +347,38 @@ export async function probeCandidateBrowser(
     );
     if (typeof (page as { off?: unknown }).off === 'function') {
       page.off('response', onResponse);
+      page.off('requestfailed', onRequestFailed);
     }
     if (attempt.usage) classifierLlmUsage.push(attempt.usage);
-    classifierChallenged = !attempt.clean;
-    classifierReason = attempt.reason ?? undefined;
-    if (!attempt.clean) {
+    const transportRestored =
+      !attempt.clean &&
+      restoredTunnelCandidate({
+        recoveryReason,
+        classifierReason: attempt.reason ?? '',
+        targetUrl,
+        blockedResourceUrl: logContext.blockedResourceUrl,
+        pageUrl: page.url(),
+        documentUrl: response?.url() ?? '',
+        documentStatus: response?.status() ?? null,
+        documentMethod: response?.request().method() ?? '',
+        cleanedDom: agentDomTree,
+        networkEntries,
+        failedRequestUrls,
+      });
+    if (transportRestored) {
+      log.info('Challenge recovery candidate restored same-origin proxy tunnel', {
+        ...logContext,
+        targetUrl,
+        documentStatus: response?.status(),
+        classifierReason: attempt.reason,
+      });
+    }
+    const clean = attempt.clean || transportRestored;
+    classifierChallenged = !clean;
+    classifierReason = transportRestored
+      ? 'Same-origin proxy tunnel restored'
+      : (attempt.reason ?? undefined);
+    if (!clean) {
       log.info('Challenge recovery candidate probe attempt still challenged', {
         ...logContext,
         attempt: 1,
@@ -375,8 +432,10 @@ export async function probeCandidateBrowser(
 export const browserConfigSearchRuntimeDependencies: BrowserConfigSearchRuntimeDependencies = {
   createKernel: createKernelRecoverySession,
   createSteel: createSteelRecoverySession,
+  createBrowserUse: createBrowserUseRecoverySession,
   releaseKernel: releaseKernelRemoteSession,
   releaseSteel: releaseSteelRemoteSession,
+  releaseBrowserUse: releaseBrowserUseRemoteSession,
   probe: probeCandidateBrowser,
 };
 
@@ -446,7 +505,7 @@ export async function probeCookieVariant(
             mod.getFingerprintInjectionData(billing.userId!)
           )
         : null;
-  const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
+  const configs = availableBrowserRecoveryCandidates(proxyLocation, { preferSteel });
   const cookieBlacklist = applyConfigBlacklist(configs, input.blockedConfigKeys);
   const config = cookieBlacklist.configs[0];
   if (!config) {
@@ -465,6 +524,11 @@ export async function probeCookieVariant(
             specificity: config.kernelSpecificity ?? bestSpecificity(proxyLocation),
           });
       session = { provider: 'kernel', ...created };
+    } else if (config.provider === 'browser-use') {
+      session = {
+        provider: 'browser-use',
+        ...(await dependencies.createBrowserUse(proxyLocation)),
+      };
     } else {
       const created = await dependencies.createSteel({
         proxyLocation,
@@ -503,6 +567,8 @@ export async function probeCookieVariant(
     if (session) {
       if (session.provider === 'kernel') {
         await dependencies.releaseKernel(session.sessionId).catch(() => {});
+      } else if (session.provider === 'browser-use') {
+        await dependencies.releaseBrowserUse(session.sessionId).catch(() => {});
       } else {
         await dependencies.releaseSteel(session.sessionId).catch(() => {});
       }

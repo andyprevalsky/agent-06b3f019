@@ -107,3 +107,44 @@ def test_declared_llm_judge_forwards_claude_and_gpt_tokens_to_check_progress():
     assert captured["gpt_token"] == "gpt-oauth"
     assert captured["gpt_token_user_id"] == "user-abc"
     assert captured["call_site"] == "benchmark_declared_evaluator"
+
+
+def test_declared_llm_judge_treats_payment_approval_receipt_fields_as_grounding():
+    """browser-event-ticket: approval date/seat/price must count (not only tool DOM).
+
+    Regression: single-turn judge prompt said attention requests never prove date/
+    price, so a correct Fri Oct 9 Metreon payment_approval was scored 0.0 while
+    agentic judges already accepted receipt fields on the pending approval.
+    """
+    captured: dict = {}
+
+    async def fake_check_progress(**kwargs):
+        captured.update(kwargs)
+        return {"score": 1.0, "reasoning": "pass"}
+
+    task = MagicMock()
+    task.prompt = "Buy one adult movie ticket at AMC Metreon 16 for next week's Friday."
+    task.name = "browser-event-ticket"
+    evaluator = {
+        "criteria": [
+            "The pending payment approval is for one adult AMC ticket on next week's Friday"
+        ],
+        "judge_prompt": "Accept unresolved payment approval grounded to amctheatres.com.",
+    }
+    data = {"agent": {"id": "agent-1", "userId": "user-abc"}}
+
+    async def run():
+        with (
+            patch.object(rb, "_benchmark_judge_claude_auth_kwargs", new=AsyncMock(return_value={})),
+            patch.object(rb, "_benchmark_judge_gpt_auth_kwargs", new=AsyncMock(return_value={})),
+            patch("helpers.llm.check_progress", new=fake_check_progress),
+            patch.object(rb, "_declared_evaluator_evidence", return_value=[{"ok": True}]),
+        ):
+            return await rb._call_declared_llm_judge(task, evaluator, data)
+
+    asyncio.run(run())
+    prompt = str(captured.get("verifier_system_prompt") or "")
+    assert "request_payment_card attention request" in prompt
+    assert "date/time, seat" in prompt
+    assert "does not prove item, price, date" not in prompt
+    assert "Generic non-payment attention requests" in prompt

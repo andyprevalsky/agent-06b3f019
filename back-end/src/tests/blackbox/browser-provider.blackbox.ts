@@ -1,37 +1,48 @@
 #!/usr/bin/env tsx
 
-import { randomUUID } from 'node:crypto';
-import Kernel from '@onkernel/sdk';
-import jwt from 'jsonwebtoken';
-import { chromium } from 'playwright';
-import { prisma } from '../../providers/database';
+import nodeAssert from 'node:assert/strict';
+import { createSessionWithContextUsingDependencies } from '../../providers/browser';
+import { computeGrantBrowserProvider } from '../../domains/compute-grants/config';
 import { selectedBrowserProvider } from '../../providers/browser/config';
 import {
-  isKernelProxyAvailabilityError,
   kernelProxyCandidates,
+  kernelRecreateProxySelection,
+  managedKernelProxyFromSource,
   resolveKernelProxyMode,
 } from '../../providers/browser/kernelProxy';
-import { retryWithBackoff } from '../../providers/retry';
-import { steel, steelCdpConnectionUrl } from '../../providers/steel/session';
+import { steel } from '../../providers/steel/session';
 import {
   assert,
-  type BrowserApiResponse,
+  assertBrowserUseDownloadFetchIsBounded,
+  assertBrowserUseRolloutOptIn,
+  assertKernelCityInventoryFallback,
+  assertStoredProviderFallback,
+  assertKernelTimeoutFallback,
   isRetryableKernelNavigationError,
-  isTransientKernelConnectionError,
-  navigateKernelPage,
-  retryBackendFetch,
   withProvider,
 } from './browser-provider.helpers';
 import {
   assertFixedRotationLadder,
-  deleteKernelResource,
   isSteelCapacityRateLimit,
-  runCrossProviderRotationLadderOrSkipOnSteelOutage,
+  isSteelProvisioningOutage,
+  isSteelSessionValidationFailure,
 } from './browser-provider-rotation.support';
+import { runLiveProviderParity } from './browser-provider.live.support';
+import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
+import {
+  createBrowserUseRecoverySession,
+  browserUseProxyCountry,
+  getBrowserUseSessionHealth,
+  listBrowserUseSessionFiles,
+  readBrowserUseSessionFile,
+  releaseBrowserUseRemoteSession,
+} from '../../providers/browser/browserUse';
 
 const steelUrl = (steel as unknown as { baseURL: string }).baseURL;
+const browserUseFlagBeforeContractTests = process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
+process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
-const tests: Array<[string, () => void]> = [
+const tests: Array<[string, () => void | Promise<void>]> = [
   [
     'Kernel is the default provider',
     () =>
@@ -88,7 +99,154 @@ const tests: Array<[string, () => void]> = [
     () => assert(steelUrl === 'https://api.steel.dev', `stale Steel API: ${steelUrl}`),
   ],
   [
-    'rotate_ip uses the fixed Kernel residential, Kernel mobile, Steel, Steel ladder',
+    'Browser Use selection requires a configured API key',
+    () => {
+      const previous = process.env.BROWSER_USE_API_KEY;
+      delete process.env.BROWSER_USE_API_KEY;
+      try {
+        withProvider('browser-use', () => {
+          let message = '';
+          try {
+            selectedBrowserProvider();
+          } catch (error) {
+            message = error instanceof Error ? error.message : String(error);
+          }
+          assert(
+            message.includes('BROWSER_USE_API_KEY is required'),
+            'expected a Browser Use key error'
+          );
+        });
+      } finally {
+        if (previous === undefined) delete process.env.BROWSER_USE_API_KEY;
+        else process.env.BROWSER_USE_API_KEY = previous;
+      }
+    },
+  ],
+  [
+    'Browser Use rollout flag returns default browser selection to Kernel',
+    () => {
+      process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'false';
+      const previousKey = process.env.BROWSER_USE_API_KEY;
+      process.env.BROWSER_USE_API_KEY = 'test-key';
+      try {
+        withProvider('browser-use', () =>
+          assert(
+            selectedBrowserProvider() === 'kernel',
+            'disabled Browser Use must fall back to Kernel'
+          )
+        );
+      } finally {
+        process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
+        if (previousKey === undefined) delete process.env.BROWSER_USE_API_KEY;
+        else process.env.BROWSER_USE_API_KEY = previousKey;
+      }
+    },
+  ],
+  ['Browser Use requires an explicit enabled rollout value', assertBrowserUseRolloutOptIn],
+  [
+    'unknown legacy stored browser providers retain the Steel fallback',
+    assertStoredProviderFallback,
+  ],
+  [
+    'Browser Use signed download fetch is aborted by a bounded deadline',
+    assertBrowserUseDownloadFetchIsBounded,
+  ],
+  [
+    'Browser Use provisioning is blocked before any provider request when disabled',
+    async () => {
+      process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'false';
+      try {
+        await nodeAssert.rejects(
+          createBrowserUseRecoverySession({ country: 'US' }),
+          /BROWSER_AGENT_BROWSER_USE_ENABLED/
+        );
+      } finally {
+        process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
+      }
+    },
+  ],
+  [
+    'Browser Use default dispatch creates a Browser Use session',
+    async () => {
+      let calls = 0;
+      const session = await createSessionWithContextUsingDependencies(
+        'context-1',
+        'agent-1',
+        { country: 'US' },
+        'https://example.com',
+        { taskId: 'task-1' },
+        {
+          readPreferredConfig: async () => null,
+          defaultProvider: () => 'browser-use',
+          createKernel: async () => {
+            throw new Error('Kernel must not be selected');
+          },
+          createSteel: async () => {
+            throw new Error('Steel must not be selected');
+          },
+          createBrowserUse: async (contextId, agentId, location, url, options) => {
+            calls++;
+            assert(contextId === 'context-1' && agentId === 'agent-1', 'wrong Browser Use owner');
+            if (location === undefined) throw new Error('Browser Use proxy location was lost');
+            assert(
+              location.country === 'US' && url === 'https://example.com',
+              'wrong session input'
+            );
+            assert(options?.taskId === 'task-1', 'preallocated task ID was lost');
+            return {
+              provider: 'browser-use',
+              sessionId: 'browser-use-session',
+              debugUrl: 'https://browser-use.example/live',
+              taskId: 'task-1',
+              wsUrl: 'wss://browser-use.example/cdp',
+              proxySource: 'browser_use_residential_country',
+              proxyLocation: location,
+              profileId: null,
+              profileSource: 'test',
+              validationBrowser: null,
+            };
+          },
+        }
+      );
+      assert(calls === 1 && session.provider === 'browser-use', 'Browser Use was not dispatched');
+    },
+  ],
+  [
+    'compute-grant browser selection accepts Browser Use',
+    () => {
+      const previous = process.env.COMPUTE_GRANT_BROWSER_PROVIDER;
+      process.env.COMPUTE_GRANT_BROWSER_PROVIDER = 'browser-use';
+      try {
+        assert(
+          computeGrantBrowserProvider() === 'browser-use',
+          'compute grant rejected Browser Use'
+        );
+      } finally {
+        if (previous === undefined) delete process.env.COMPUTE_GRANT_BROWSER_PROVIDER;
+        else process.env.COMPUTE_GRANT_BROWSER_PROVIDER = previous;
+      }
+    },
+  ],
+  [
+    'compute-grant browser selection returns to Kernel when Browser Use is disabled',
+    () => {
+      const previous = process.env.COMPUTE_GRANT_BROWSER_PROVIDER;
+      process.env.COMPUTE_GRANT_BROWSER_PROVIDER = 'browser-use';
+      process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'false';
+      try {
+        assert(
+          computeGrantBrowserProvider() === 'kernel',
+          'disabled Browser Use must not block compute grants'
+        );
+      } finally {
+        process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
+        if (previous === undefined) delete process.env.COMPUTE_GRANT_BROWSER_PROVIDER;
+        else process.env.COMPUTE_GRANT_BROWSER_PROVIDER = previous;
+      }
+    },
+  ],
+  [
+    'rotate_ip uses the Kernel residential, Kernel mobile, Steel, Browser Use ladder',
     assertFixedRotationLadder,
   ],
   [
@@ -113,6 +271,38 @@ const tests: Array<[string, () => void]> = [
       assert(
         !isSteelCapacityRateLimit(new Error('/rotate-proxy 403: Steel authentication rejected')),
         'Steel authentication failures must fail closed'
+      );
+    },
+  ],
+  [
+    'live ladder checks a control session before classifying Steel validation failures',
+    () => {
+      const cdpTimeout = new Error(
+        '/rotate-proxy 500: {"error":"Failed to create Steel replacement after 5 attempts: Session validation failed on attempt 5: Connection timeout"}'
+      );
+      assert(
+        isSteelSessionValidationFailure(cdpTimeout),
+        'CDP connection timeout should require a Steel control-session check'
+      );
+      assert(
+        !isSteelProvisioningOutage(cdpTimeout),
+        'CDP validation failure must not bypass the control-session check'
+      );
+      assert(
+        !isSteelProvisioningOutage(
+          new Error(
+            '/rotate-proxy 500: {"error":"Failed to create Steel replacement after 5 attempts: Session validation failed on attempt 5"}'
+          )
+        ),
+        'unexplained validation failure must remain blocking'
+      );
+      assert(
+        !isSteelProvisioningOutage(
+          new Error(
+            '/rotate-proxy 403: {"error":"Failed to create Steel replacement: Authentication rejected"}'
+          )
+        ),
+        'Steel auth rejection must remain blocking'
       );
     },
   ],
@@ -145,22 +335,53 @@ const tests: Array<[string, () => void]> = [
     },
   ],
   [
-    'explicit Kernel proxy ID bypasses managed location proxies',
+    'Kernel resume keeps the resolved proxy tier and fallback location',
     () => {
-      const mode = resolveKernelProxyMode('proxy-123');
-      assert(mode.kind === 'explicit', 'expected explicit proxy mode');
-      assert(mode.proxyId === 'proxy-123', 'expected configured proxy ID');
+      const resolved = managedKernelProxyFromSource('kernel_mobile_state');
+      assert(
+        resolved?.type === 'mobile' && resolved.specificity === 'state',
+        'lost mobile state fallback'
+      );
+      assert(
+        managedKernelProxyFromSource('kernel_configured') === undefined,
+        'configured proxy must keep its configured selection'
+      );
+      const resume = kernelRecreateProxySelection('kernel_mobile_state', 'mobile');
+      assert(
+        resume.exactManagedProxy?.type === 'mobile' &&
+          resume.exactManagedProxy.specificity === 'state',
+        'resume must select the recorded mobile state proxy'
+      );
+      assert(
+        kernelRecreateProxySelection(null, 'mobile').forceManagedProxyType === 'mobile',
+        'legacy rotated sessions must stay on mobile'
+      );
+      assert(
+        kernelRecreateProxySelection(null, 'residential').forceManagedProxyType === 'residential',
+        'legacy rotated sessions must stay on residential'
+      );
+      assert(
+        kernelRecreateProxySelection('kernel_configured', 'mobile').forceManagedProxyType ===
+          undefined,
+        'configured proxy must not switch to managed mobile'
+      );
+      assert(
+        kernelRecreateProxySelection('kernel_mobile_state', 'mobile', 'residential')
+          .forceManagedProxyType === 'residential',
+        'a new rotation must override the recorded proxy choice'
+      );
     },
   ],
   [
-    'Kernel city inventory errors trigger location fallback',
+    'explicit Kernel proxy ID bypasses managed location proxies',
     () => {
-      const error = new Error(
-        "400 proxy configuration validation failed: city 'sanfrancisco' is not available for subdivision 'us-ca'"
-      );
-      assert(isKernelProxyAvailabilityError(error), 'expected proxy availability error');
+      const mode = resolveKernelProxyMode('proxy-123');
+      if (mode.kind !== 'explicit') throw new Error('expected explicit proxy mode');
+      assert(mode.proxyId === 'proxy-123', 'expected configured proxy ID');
     },
   ],
+  ['Kernel city inventory errors trigger location fallback', assertKernelCityInventoryFallback],
+  ['Kernel SDK request timeouts trigger location fallback', assertKernelTimeoutFallback],
   [
     'Kernel navigation retries only transient proxy failures',
     () => {
@@ -176,474 +397,11 @@ const tests: Array<[string, () => void]> = [
   ],
 ];
 
-async function runLiveProviderParity(): Promise<void> {
-  const baseUrl = process.env.TEST_BASE_URL?.replace(/\/$/, '');
-  if (!baseUrl) return;
-  const apiKey = process.env.BACKEND_API_KEY?.trim();
-  const kernelApiKey = process.env.KERNEL_API_KEY?.trim();
-  const steelApiKey = process.env.STEEL_API_KEY?.trim();
-  if (!apiKey || !kernelApiKey || !steelApiKey) {
-    throw new Error(
-      'BACKEND_API_KEY, KERNEL_API_KEY, and STEEL_API_KEY are required for live provider parity'
-    );
-  }
-
-  const userId = `kernel-provider-${randomUUID()}`;
-  const agentId = randomUUID();
-  let liveSessionId: string | undefined;
-  // Every provider session the cross-provider ladder allocates, so `finally` can
-  // release the ones this scope never learned about (see its loop below).
-  const allocatedSessionIds: string[] = [];
-  let profileId: string | undefined;
-  let proxyId: string | undefined;
-  const headers = { 'content-type': 'application/json', 'x-api-key': apiKey };
-
-  const invalidRotation = await retryBackendFetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({}),
-  });
-  assert(invalidRotation.status === 400, 'invalid rotate-proxy payload was not rejected');
-
-  const post = async (path: string, body?: unknown): Promise<BrowserApiResponse> => {
-    const response = await retryBackendFetch(`${baseUrl}/api/browser-session${path}`, {
-      method: 'POST',
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const json = (await response.json()) as BrowserApiResponse;
-    if (!response.ok) throw new Error(`${path} ${response.status}: ${JSON.stringify(json)}`);
-    return json;
-  };
-  const postWithKernelConnectionRetry = async (
-    path: string,
-    body?: unknown
-  ): Promise<BrowserApiResponse> =>
-    retryWithBackoff(() => post(path, body), {
-      maxRetries: 3,
-      fixedDelays: [750, 1_500],
-      isRetryable: isTransientKernelConnectionError,
-      component: `browser-provider:${path}`,
-    });
-
-  await prisma.user.create({ data: { userId, name: 'Kernel Provider Blackbox' } });
-  await prisma.agent.create({
-    data: {
-      id: agentId,
-      userId,
-      goal: 'Validate Kernel browser provider parity',
-      proxyCountry: 'US',
-      proxyState: 'CA',
-      proxyCity: 'San Francisco',
-    },
-  });
-
-  try {
-    const init = await postWithKernelConnectionRetry('/init', {
-      user_id: userId,
-      agent_id: agentId,
-      start_url: 'https://example.com',
-    });
-    liveSessionId = String(init.session_id);
-    const metadata = init.browser_session_metadata ?? {};
-    assert(metadata.provider === 'kernel', 'live init did not select Kernel');
-    assert(
-      [
-        'kernel_residential_city',
-        'kernel_residential_state',
-        'kernel_residential_country',
-      ].includes(String(metadata.proxy_source)),
-      `managed residential proxy was not selected: ${String(metadata.proxy_source)}`
-    );
-    assert(metadata.proxy_location?.country === 'US', 'US proxy location was not resolved');
-    profileId = metadata.profile_id;
-    assert(profileId !== undefined && profileId !== '', 'Kernel profile was not persisted');
-
-    const liveViewUrl = init.debug_url;
-    assert(
-      liveViewUrl !== undefined && liveViewUrl !== '',
-      'Kernel live-view URL was not returned'
-    );
-    const liveViewResponse = await fetch(liveViewUrl, {
-      signal: AbortSignal.timeout(15_000),
-    });
-    const liveViewBody = await liveViewResponse.text();
-    assert(
-      liveViewResponse.ok && !/session not found/i.test(liveViewBody),
-      `Kernel live view was not ready: HTTP ${liveViewResponse.status} ${liveViewBody.slice(0, 200)}`
-    );
-
-    const browser = await chromium.connectOverCDP(String(init.ws_url));
-    try {
-      const context = browser.contexts()[0];
-      const page = context.pages()[0] ?? (await context.newPage());
-      await navigateKernelPage(page, 'https://example.com');
-      assert((await page.title()) === 'Example Domain', 'Kernel CDP navigation failed');
-    } finally {
-      await browser.close();
-    }
-
-    const kernel = new Kernel({ apiKey: kernelApiKey });
-    const firstRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
-    proxyId = firstRemote.proxy_id ?? undefined;
-    assert(proxyId !== undefined, 'Kernel browser did not use the managed proxy');
-
-    // ----- rotate_ip: real IP rotation on the same profile (residential tier) -----
-    const readExitIp = async (wsUrl: string): Promise<string> => {
-      // Production workers add the Steel key only at this process-local CDP
-      // boundary. The live parity harness must exercise that same contract;
-      // persisted/API ws_url values are deliberately secret-free.
-      const b = await chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
-      try {
-        const ctx = b.contexts()[0];
-        const p = ctx.pages()[0] ?? (await ctx.newPage());
-        await navigateKernelPage(
-          p,
-          `https://api.ipify.org?format=json&nonce=${encodeURIComponent(randomUUID())}`
-        );
-        const raw = await p.evaluate(() => document.body.innerText);
-        // A rented exit node that is not serving yet answers with its own error page
-        // (observed: a body starting "egress-pro…") instead of ipify's JSON. Report
-        // that as a named transient carrying the real body: a bare JSON.parse throw
-        // surfaces `Unexpected token 'e'`, which names neither the proxy nor the
-        // response and is undiagnosable from a CI log.
-        try {
-          return String((JSON.parse(raw) as { ip?: string }).ip ?? '');
-        } catch (error) {
-          throw new Error(
-            `exit-IP probe returned non-JSON body: ${raw
-              .slice(0, 120)
-              .replace(/\s+/g, ' ')} (${error instanceof Error ? error.message : String(error)})`
-          );
-        }
-      } finally {
-        await b.close();
-      }
-    };
-    // Same transient tolerance as the post-rotation reads below. This baseline read
-    // was the one unprotected call site, so a single not-ready exit node failed the
-    // whole live-parity domain (seen twice under BLACKBOX_TEST_CONCURRENCY=4 while
-    // the domain passed standalone).
-    const readExitIpWithRetry = (wsUrl: string): Promise<string> =>
-      retryWithBackoff(
-        async () => {
-          const ip = await readExitIp(wsUrl);
-          if (ip === '') throw new Error('proxy returned an empty exit IP');
-          return ip;
-        },
-        {
-          maxRetries: 3,
-          fixedDelays: [500, 1_000, 1_500],
-          isRetryable: () => true,
-          component: 'browser-provider:exit-ip-baseline',
-        }
-      );
-    const readDifferentExitIp = (wsUrl: string, previousIp: string): Promise<string> =>
-      retryWithBackoff(
-        async () => {
-          const ip = await readExitIp(wsUrl);
-          if (ip === '' || ip === previousIp) {
-            throw new Error(`proxy returned unchanged exit IP ${ip || '<empty>'}`);
-          }
-          return ip;
-        },
-        {
-          maxRetries: 3,
-          fixedDelays: [500, 1_000, 1_500],
-          // Kernel's residential/mobile proxy contract rotates exit nodes between
-          // requests, so tolerate a provider returning the prior node once while
-          // still requiring this session to demonstrate a genuinely different IP.
-          isRetryable: () => true,
-          component: 'browser-provider:exit-ip-change',
-        }
-      );
-
-    const ipBefore = await readExitIpWithRetry(String(init.ws_url));
-
-    const rotated = await postWithKernelConnectionRetry('/rotate-proxy', { task_id: init.task_id });
-    assert(
-      rotated.provider === 'kernel' && rotated.proxy_tier === 'residential',
-      'first rotation must be Kernel residential'
-    );
-    assert(
-      rotated.previous_provider === 'kernel' && rotated.recovery_action === 'ip_rotated',
-      'first rotation returned incorrect recovery metadata'
-    );
-    assert(
-      rotated.next_recovery === 'rotate_kernel_mobile_ip',
-      'first rotation did not advertise mandatory Kernel mobile next'
-    );
-    assert(
-      rotated.rotations_used === 1,
-      `rotations_used should be 1, got ${rotated.rotations_used}`
-    );
-    assert(
-      rotated.rotations_remaining === 3,
-      'rotations_remaining should be 3 after first rotation'
-    );
-    assert(
-      rotated.ws_url !== undefined && rotated.ws_url !== init.ws_url,
-      'rotation must return a new ws_url'
-    );
-    assert(
-      rotated.session_id !== undefined && rotated.session_id !== liveSessionId,
-      'rotation must create a new Kernel session'
-    );
-    // Old browser must have been evicted (no paid-session leak).
-    const evicted = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
-    assert(Boolean(evicted.deleted_at), 'superseded Kernel session was not evicted after rotation');
-    liveSessionId = String(rotated.session_id);
-
-    const ipAfter = await readDifferentExitIp(String(rotated.ws_url), ipBefore);
-    // Residential exits vary per session; a rotation should land a different IP.
-    assert(
-      ipAfter !== '' && ipAfter !== ipBefore,
-      `rotation did not change the exit IP (before=${ipBefore}, after=${ipAfter})`
-    );
-
-    // ----- call 2: mandatory Kernel mobile. No feature flag and no counter seeding:
-    // this proves the real server-owned sequence that production will execute. -----
-    const residentialIp = ipAfter;
-    const mobileRotated = await postWithKernelConnectionRetry('/rotate-proxy', {
-      task_id: init.task_id,
-    });
-    assert(
-      mobileRotated.provider === 'kernel' && mobileRotated.proxy_tier === 'mobile',
-      `call 2 expected Kernel mobile, got ${mobileRotated.provider}/${mobileRotated.proxy_tier}`
-    );
-    assert(
-      mobileRotated.rotations_used === 2 && mobileRotated.rotations_remaining === 2,
-      'call 2 returned the wrong rotation counters'
-    );
-    assert(
-      mobileRotated.recovery_action === 'ip_rotated' &&
-        mobileRotated.next_recovery === 'switch_provider_to_steel',
-      'call 2 did not advertise the Kernel-to-Steel next recovery'
-    );
-    assert(
-      mobileRotated.ws_url !== undefined && mobileRotated.ws_url !== rotated.ws_url,
-      'mobile-band rotation must return a new ws_url'
-    );
-    assert(
-      mobileRotated.session_id !== undefined && mobileRotated.session_id !== liveSessionId,
-      'mobile-band rotation must create a new Kernel session'
-    );
-    const evictedResidential = await kernel.browsers.retrieve(liveSessionId, {
-      include_deleted: true,
-    });
-    assert(
-      Boolean(evictedResidential.deleted_at),
-      'residential session was not evicted before the mobile-band rotation'
-    );
-    liveSessionId = String(mobileRotated.session_id);
-    const mobileIp = await readDifferentExitIp(String(mobileRotated.ws_url), residentialIp);
-    // Ground truth comes from ipify, not from response metadata alone.
-    assert(
-      mobileIp !== '' && mobileIp !== residentialIp,
-      `mobile rotation did not change the exit IP (residential=${residentialIp}, mobile=${mobileIp})`
-    );
-    // Print the ground-truth IP ladder so the run is a self-documenting repro of
-    // the exit IP actually changing across tiers (baseline -> residential -> mobile).
-    console.log(
-      `[rotate_ip repro] exit IP ladder: baseline(res)=${ipBefore} ` +
-        `-> rotation1(residential)=${ipAfter} ` +
-        `-> rotation2(${mobileRotated.proxy_tier})=${mobileIp}`
-    );
-
-    // ----- unknown task → 404 -----
-    const notFoundResponse = await retryBackendFetch(
-      `${baseUrl}/api/browser-session/rotate-proxy`,
-      {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ task_id: randomUUID() }),
-      }
-    );
-    assert(
-      notFoundResponse.status === 404,
-      `expected 404 for an unknown task, got ${notFoundResponse.status}`
-    );
-
-    const taskResponse = await retryBackendFetch(
-      `${baseUrl}/api/browser-session/task/${String(init.task_id)}?validateLive=true`,
-      { headers: { 'x-api-key': apiKey } }
-    );
-    const task = (await taskResponse.json()) as BrowserApiResponse;
-    assert(
-      taskResponse.ok &&
-        task.browser_session_metadata?.provider === 'kernel' &&
-        task.same_session_available === true,
-      'Kernel health validation failed'
-    );
-
-    const viewport = await post(`/task/${String(init.task_id)}/viewport`, {
-      width: 1440,
-      height: 900,
-    });
-    assert(viewport.resized === true, 'Kernel viewport resize was not acknowledged');
-    assert(
-      viewport.viewport?.width === 1440 && viewport.viewport.height === 900,
-      'Kernel viewport resize response did not preserve the requested dimensions'
-    );
-    const resizedRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
-    assert(
-      resizedRemote.viewport?.width === 1440 && resizedRemote.viewport.height === 900,
-      'Kernel remote viewport did not resize'
-    );
-
-    const expectedContent = 'kernel-provider-file-parity';
-    const form = new FormData();
-    form.append('file', new Blob([expectedContent], { type: 'text/plain' }), 'kernel-parity.txt');
-    const uploadResponse = await retryBackendFetch(
-      `${baseUrl}/api/browser-session/${liveSessionId}/files`,
-      {
-        method: 'POST',
-        headers: { 'x-api-key': apiKey },
-        body: form,
-      }
-    );
-    const upload = (await uploadResponse.json()) as BrowserApiResponse;
-    assert(uploadResponse.ok && typeof upload.path === 'string', 'Kernel file upload failed');
-
-    const listResponse = await retryBackendFetch(
-      `${baseUrl}/api/browser-session/${liveSessionId}/files/list`,
-      { headers: { 'x-api-key': apiKey } }
-    );
-    const listing = (await listResponse.json()) as { files?: Array<{ path: string }> };
-    assert(
-      listResponse.ok && listing.files?.some((file) => file.path === upload.path),
-      'Kernel uploaded file was not listed'
-    );
-
-    const downloadResponse = await retryBackendFetch(
-      `${baseUrl}/api/browser-session/${liveSessionId}/files/content?path=${encodeURIComponent(String(upload.path))}`,
-      { headers: { 'x-api-key': apiKey } }
-    );
-    assert(
-      downloadResponse.ok && (await downloadResponse.text()) === expectedContent,
-      'Kernel file download did not round-trip'
-    );
-
-    const traversalResponse = await retryBackendFetch(
-      `${baseUrl}/api/browser-session/${liveSessionId}/files/content?path=../etc/passwd`,
-      { headers: { 'x-api-key': apiKey } }
-    );
-    assert(traversalResponse.status === 400, 'session file traversal was not rejected');
-
-    const jwtSecret = process.env.SUPABASE_JWT_SECRET;
-    const supabaseUrl = process.env.SUPABASE_URL;
-    assert(jwtSecret !== undefined && supabaseUrl !== undefined, 'JWT test config is missing');
-    const attackerToken = jwt.sign({}, jwtSecret, {
-      algorithm: 'HS256',
-      issuer: `${supabaseUrl}/auth/v1`,
-      subject: `kernel-attacker-${randomUUID()}`,
-      expiresIn: '5m',
-    });
-    const crossTenantFile = await retryBackendFetch(
-      `${baseUrl}/api/browser-session/${liveSessionId}/files/content?path=${encodeURIComponent(String(upload.path))}`,
-      { headers: { Authorization: `Bearer ${attackerToken}` } }
-    );
-    assert(crossTenantFile.status === 404, 'cross-tenant session file read was not rejected');
-    const crossTenantScreenshot = await retryBackendFetch(
-      `${baseUrl}/api/browser-session/${liveSessionId}/screenshot`,
-      { method: 'POST', headers: { Authorization: `Bearer ${attackerToken}` } }
-    );
-    assert(crossTenantScreenshot.status === 404, 'cross-tenant screenshot was not rejected');
-    const crossTenantRotation = await retryBackendFetch(
-      `${baseUrl}/api/browser-session/rotate-proxy`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${attackerToken}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ task_id: init.task_id }),
-      }
-    );
-    assert(crossTenantRotation.status === 404, 'cross-tenant proxy rotation was not rejected');
-
-    const screenshot = await post(`/${liveSessionId}/screenshot`);
-    assert(screenshot.provider === 'kernel', 'Kernel screenshot reported the wrong provider');
-    assert(
-      Buffer.from(String(screenshot.base64_image), 'base64').length > 1_000,
-      'Kernel screenshot was empty'
-    );
-
-    await post('/close', {
-      session_id: liveSessionId,
-      pause: true,
-      current_url: 'https://example.com/resume-check',
-    });
-    liveSessionId = undefined;
-
-    const resumed = await postWithKernelConnectionRetry('/resume', { task_id: init.task_id });
-    liveSessionId = String(resumed.session_id);
-    const resumedMetadata = resumed.browser_session_metadata ?? {};
-    assert(resumed.task_id === init.task_id, 'resume changed the stable task ID');
-    assert(resumed.saved_url === 'https://example.com/resume-check', 'resume lost the saved URL');
-    assert(resumedMetadata.provider === 'kernel', 'resume changed providers');
-    assert(resumedMetadata.profile_id === profileId, 'resume did not reuse the Kernel profile');
-    assert(
-      resumedMetadata.proxy_source === metadata.proxy_source &&
-        JSON.stringify(resumedMetadata.proxy_location) === JSON.stringify(metadata.proxy_location),
-      'resume lost resolved proxy fallback metadata'
-    );
-
-    const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
-    assert(secondRemote.proxy_id === proxyId, 'resume did not reuse the managed proxy ID');
-
-    // A Steel infra outage returns null (skips the Steel legs) while Kernel is
-    // healthy; real rotation defects still throw. See the wrapper's doc comment.
-    const crossProvider = await runCrossProviderRotationLadderOrSkipOnSteelOutage({
-      baseUrl,
-      headers,
-      taskId: String(init.task_id),
-      currentKernelSessionId: liveSessionId,
-      mobileIp,
-      post,
-      readDifferentExitIp,
-      retrieveKernelBrowser: (sessionId) =>
-        kernel.browsers.retrieve(sessionId, { include_deleted: true }),
-      retrieveSteelBrowser: (sessionId) => steel.sessions.retrieve(sessionId),
-      allocatedSessionIds,
-    });
-    if (crossProvider === null) return;
-    liveSessionId = crossProvider.finalSessionId;
-
-    console.log(
-      `[rotate_ip repro] complete ladder: kernel baseline=${ipBefore} residential=${ipAfter} mobile=${mobileIp}; steel=${crossProvider.firstSteelIp}/${crossProvider.secondSteelIp}`
-    );
-
-    await post('/close', { session_id: liveSessionId, pause: false });
-    liveSessionId = undefined;
-  } finally {
-    if (liveSessionId) {
-      await post('/close', { session_id: liveSessionId, pause: false }).catch(() => {});
-    }
-    // Release every session the ladder allocated, not just the one this scope
-    // happens to hold. `liveSessionId` is only advanced to the ladder's final id on
-    // the SUCCESS path, so a mid-ladder throw (Steel 429 on call 4) otherwise leaves
-    // a live, billing Steel session behind with its DB row already deleted below.
-    // Closing an already-closed session is a no-op, so this is safe to repeat.
-    for (const sessionId of allocatedSessionIds) {
-      if (sessionId === liveSessionId) continue;
-      await post('/close', { session_id: sessionId, pause: false }).catch(() => {});
-    }
-    if (profileId) await deleteKernelResource(`/profiles/${profileId}`).catch(() => {});
-    if (proxyId) await deleteKernelResource(`/proxies/${proxyId}`).catch(() => {});
-    await prisma.browserSession.deleteMany({ where: { agentId } });
-    if (proxyId) await prisma.browserProviderProxy.deleteMany({ where: { proxyId } });
-    await prisma.browserContext.deleteMany({ where: { userId } });
-    await prisma.agent.deleteMany({ where: { id: agentId } });
-    await prisma.user.deleteMany({ where: { userId } });
-  }
-}
-
 async function main(): Promise<void> {
   let failed = 0;
   for (const [name, test] of tests) {
     try {
-      test();
+      await test();
       console.log(`PASS ${name}`);
     } catch (error) {
       failed++;
@@ -651,6 +409,126 @@ async function main(): Promise<void> {
     }
   }
 
+  try {
+    const previousFetch = globalThis.fetch;
+    const previousKey = process.env.BROWSER_USE_API_KEY;
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    process.env.BROWSER_USE_API_KEY = 'test-browser-use-key';
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(String(input));
+      calls.push({
+        method: init?.method ?? 'GET',
+        path: `${url.pathname}${url.search}`,
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      if (url.hostname === 'download.example') return new Response('file contents');
+      if (init?.method === 'POST') {
+        return Response.json(
+          {
+            id: '00000000-0000-4000-8000-000000000002',
+            cdpUrl: 'ws://127.0.0.1:9/unreachable',
+            liveUrl: 'https://live.browser-use.com/test',
+            status: 'active',
+            startedAt: '2026-10-01T00:00:00Z',
+            timeoutAt: '2026-10-01T04:00:00Z',
+          },
+          { status: 201 }
+        );
+      }
+      if (init?.method === 'PATCH') return Response.json({ status: 'stopped' });
+      if (url.pathname.endsWith('/downloads')) {
+        return Response.json({
+          files: [
+            {
+              path: 'report.pdf',
+              size: 13,
+              lastModified: '2026-10-01T00:00:00Z',
+              url: 'https://download.example/report.pdf',
+            },
+          ],
+          hasMore: false,
+          nextCursor: null,
+        });
+      }
+      return Response.json({
+        id: '00000000-0000-4000-8000-000000000002',
+        status: 'active',
+        startedAt: '2026-10-01T00:00:00Z',
+        timeoutAt: '2026-10-01T04:00:00Z',
+      });
+    }) as typeof fetch;
+    try {
+      await nodeAssert.rejects(
+        () => createBrowserUseRecoverySession({ country: 'US' }),
+        /Browser Use CDP validation failed/
+      );
+      assert(
+        calls[0]?.method === 'POST' && calls[0]?.path === '/api/v4/browsers',
+        'Browser Use create must use V4'
+      );
+      assert(
+        (calls[0]?.body as { proxyCountryCode?: string })?.proxyCountryCode === 'us',
+        'Browser Use proxy country was not sent'
+      );
+      assert(
+        browserUseProxyCountry({ country: 'GB', city: 'LONDON' }) === 'uk',
+        'Browser Use must map ISO GB to provider UK'
+      );
+      assert(
+        calls.some(
+          (call) => call.method === 'PATCH' && (call.body as { action?: string })?.action === 'stop'
+        ),
+        'failed Browser Use CDP validation leaked a paid session'
+      );
+      const health = await getBrowserUseSessionHealth('00000000-0000-4000-8000-000000000002');
+      assert(
+        health.provider === 'browser-use' && health.status === 'active',
+        'Browser Use health was not mapped'
+      );
+      const files = await listBrowserUseSessionFiles('00000000-0000-4000-8000-000000000002');
+      assert(
+        files.length === 1 && files[0]?.path === 'report.pdf',
+        'Browser Use downloads were not listed'
+      );
+      const data = await readBrowserUseSessionFile(
+        '00000000-0000-4000-8000-000000000002',
+        'report.pdf'
+      );
+      assert(data.toString() === 'file contents', 'Browser Use download URL was not fetched');
+      await releaseBrowserUseRemoteSession('00000000-0000-4000-8000-000000000002');
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (previousKey === undefined) delete process.env.BROWSER_USE_API_KEY;
+      else process.env.BROWSER_USE_API_KEY = previousKey;
+    }
+    console.log('PASS Browser Use V4 session, proxy, cleanup, health, and download contract');
+  } catch (error) {
+    failed++;
+    console.error(
+      `FAIL Browser Use V4 contract: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  failed += await runOptionalLiveBrowserUseProvider();
+
+  if (process.env.RUN_BROWSER_USE_HANDOFF_LIVE === '1') {
+    try {
+      const { runLiveBrowserUseHandoff } =
+        await import('./browser-provider.browser-use-handoff.live');
+      await runLiveBrowserUseHandoff();
+    } catch (error) {
+      failed++;
+      console.error(
+        `FAIL live Browser Use handoff: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  // Contract cases enable Browser Use inside this process. The live ladder must
+  // use the backend's original rollout setting or its expected next step drifts.
+  if (browserUseFlagBeforeContractTests === undefined)
+    delete process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
+  else process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = browserUseFlagBeforeContractTests;
   try {
     await runLiveProviderParity();
     if (process.env.TEST_BASE_URL) console.log('PASS live Kernel provider parity');

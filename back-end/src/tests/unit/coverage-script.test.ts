@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,6 +24,10 @@ const blackboxScript = readFileSync(
 );
 const blackboxRunner = readFileSync(
   join(process.cwd(), 'src', 'tests', 'blackbox', 'run.ts'),
+  'utf8'
+);
+const agentCardLockWrapper = readFileSync(
+  join(process.cwd(), 'scripts', 'with-agentcard-lock.py'),
   'utf8'
 );
 const gateResolutionProvider = readFileSync(
@@ -59,11 +72,12 @@ for (const variable of [
   'WHATSAPP_ACCESS_TOKEN',
   'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
   'BLACKBOX_TEST_FAKE_WHATSAPP',
+  'BENCHMARK_SHARE_SECRET',
 ]) {
-  assert.match(
-    autoRcaEnv,
-    new RegExp(`export ${variable}=`),
-    `shared auto-RCA environment is missing ${variable}`
+  assert.equal(
+    autoRcaEnv.match(new RegExp(`^export ${variable}=`, 'gm'))?.length ?? 0,
+    1,
+    `shared auto-RCA environment must export ${variable} exactly once`
   );
 }
 assert.match(
@@ -76,10 +90,23 @@ for (const [name, harness] of [
   ['blackbox', blackboxScript],
 ] as const) {
   assert.ok(
-    harness.indexOf('npx prisma generate') < harness.indexOf('npx prisma db push'),
-    `${name} launcher must regenerate Prisma before syncing or starting test children`
+    harness.indexOf('node "$SCRIPT_DIR/assert-prisma-client-current.mjs"') > 0 &&
+      harness.indexOf('node "$SCRIPT_DIR/assert-prisma-client-current.mjs"') <
+        harness.indexOf('npx prisma db push'),
+    `${name} launcher must verify Prisma freshness before syncing or starting test children`
   );
+  assert.ok(
+    !harness.includes('npx prisma generate'),
+    `${name} launcher must not regenerate a fresh Prisma client under concurrent lint/type checks`
+  );
+  assert.doesNotMatch(harness, /prisma generate/, `${name} must not rewrite shared dependencies`);
 }
+
+execFileSync('python3', ['../scripts/tests/prisma-test-launcher-readonly.test.py'], {
+  cwd: process.cwd(),
+  stdio: 'inherit',
+  timeout: 90000,
+});
 
 assert.match(
   coverageScript,
@@ -169,7 +196,10 @@ const listener = spawn(
       'sock.listen()',
       "with open(sys.argv[1], 'w', encoding='utf-8') as handle:",
       '    handle.write(str(sock.getsockname()[1]))',
-      'time.sleep(30)',
+      // Hold the port until the finally block kills the fixture; a fixed
+      // lifetime freed it mid-test on a loaded host.
+      'while True:',
+      '    time.sleep(3600)',
     ].join('\n'),
     occupiedPortFile,
   ],
@@ -177,7 +207,12 @@ const listener = spawn(
 );
 try {
   waitForPath(occupiedPortFile, true);
-  const occupiedPort = Number(readFileSync(occupiedPortFile, 'utf8'));
+  let occupiedPort = 0;
+  for (let attempt = 0; attempt < 100 && occupiedPort === 0; attempt++) {
+    occupiedPort = Number(readFileSync(occupiedPortFile, 'utf8'));
+    if (occupiedPort === 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  assert.ok(occupiedPort > 0, 'fixture listener must publish a port before selection');
   const lockRoot = join(portFixtureRoot, 'locks');
   const endPort = occupiedPort + 20;
   const selectedPort = Number(
@@ -274,8 +309,18 @@ assert.match(
 );
 assert.match(
   blackboxRunner,
-  /spawn\(process\.execPath, \['--import', 'tsx', file\]/,
-  'blackbox domains must avoid npm and tsx wrapper processes under V8 coverage'
+  /const paymentDomain = domain === 'treasury-rails';[\s\S]*const command = paymentDomain \? 'python3' : process\.execPath;[\s\S]*: \['--import', 'tsx', file\];[\s\S]*spawn\(command, args/,
+  'ordinary blackbox domains must avoid npm wrappers; only the treasury rail takes the Python lock'
+);
+assert.match(
+  blackboxRunner,
+  /AGENTCARD_LOCK_ACQUIRED[\s\S]*timeout = armTimeout\(timeoutMs, 'Domain'\)/,
+  'treasury rail test timeout must begin after acquiring the sandbox payment lock'
+);
+assert.match(
+  agentCardLockWrapper,
+  /fcntl\.flock\(fd, fcntl\.LOCK_EX\)[\s\S]*AGENTCARD_LOCK_ACQUIRED[\s\S]*os\.set_inheritable\(fd, True\)[\s\S]*os\.execvp/,
+  'the treasury rail must keep the benchmark lock through the test process'
 );
 assert.match(
   unitRunner,
@@ -365,6 +410,11 @@ assert.ok(
   'coverage must install migration-owned database triggers after Prisma schema sync'
 );
 assert.match(
+  localRuntimeSqlHooks,
+  /pg_advisory_xact_lock\(hashtext\('rose-local-runtime-sql-hooks'\)\)[\s\S]*psql "\$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction/,
+  'concurrent runners sharing one local database must apply the trigger hooks in one advisory-locked transaction'
+);
+assert.match(
   coverageScript,
   /DATABASE_URL="\$LOCAL_PSQL_URL" DIRECT_URL="\$LOCAL_PSQL_URL"[\s\\]+bash "\$SCRIPT_DIR\/apply-local-runtime-sql-hooks\.sh"/,
   'the psql-backed runtime hook installer must receive the plain libpq URL'
@@ -384,6 +434,107 @@ assert.match(
   /20260723000000_add_workflow_iteration_offset[\s\S]*20260724002500_temporal_cleanup_utc_grace/,
   'the shared SQL-hook installer must retain both migration-owned trigger sources'
 );
+
+const START_MARKER = '-- Protect the rolling-deploy window';
+const END_MARKER = '-- Prefer explicit logical-iteration checkpoints';
+function runSqlHooks(workflowMigration: string): {
+  status: number | null;
+  psqlInput: string;
+  stderr: string;
+} {
+  const root = mkdtempSync(join(tmpdir(), 'runtime-sql-hooks-'));
+  try {
+    const backend = join(root, 'back-end');
+    const migrations = join(backend, 'prisma', 'migrations');
+    mkdirSync(join(backend, 'scripts'), { recursive: true });
+    mkdirSync(join(migrations, '20260723000000_add_workflow_iteration_offset'), {
+      recursive: true,
+    });
+    mkdirSync(join(migrations, '20260724002500_temporal_cleanup_utc_grace'), { recursive: true });
+    mkdirSync(join(migrations, '20260929120000_agent_trajectory_search'), { recursive: true });
+    copyFileSync(
+      join(process.cwd(), 'scripts', 'apply-local-runtime-sql-hooks.sh'),
+      join(backend, 'scripts', 'apply-local-runtime-sql-hooks.sh')
+    );
+    writeFileSync(
+      join(migrations, '20260723000000_add_workflow_iteration_offset', 'migration.sql'),
+      workflowMigration
+    );
+    writeFileSync(
+      join(migrations, '20260724002500_temporal_cleanup_utc_grace', 'migration.sql'),
+      'SELECT utc_cleanup;\n'
+    );
+    writeFileSync(
+      join(migrations, '20260929120000_agent_trajectory_search', 'migration.sql'),
+      'SELECT trajectory_search;\n'
+    );
+    const fakeBin = join(root, 'bin');
+    const psqlInput = join(root, 'psql-input.sql');
+    mkdirSync(fakeBin);
+    writeFileSync(join(fakeBin, 'psql'), `#!/bin/sh\ncat > '${psqlInput}'\n`);
+    chmodSync(join(fakeBin, 'psql'), 0o755);
+    const result = spawnSync(
+      'bash',
+      [join(backend, 'scripts', 'apply-local-runtime-sql-hooks.sh')],
+      {
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+          DATABASE_URL: 'postgresql://postgres:postgres@localhost:5432/victoria',
+        },
+        encoding: 'utf8',
+      }
+    );
+    return {
+      status: result.status,
+      psqlInput: existsSync(psqlInput) ? readFileSync(psqlInput, 'utf8') : '',
+      stderr: result.stderr,
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const appliedHooks = runSqlHooks(
+  `SELECT before;\n${START_MARKER}\nCREATE TRIGGER workflow_guard;\n${END_MARKER}\nSELECT after;\n`
+);
+assert.equal(appliedHooks.status, 0, 'a well-formed workflow migration must apply');
+assert.match(
+  appliedHooks.psqlInput,
+  /pg_advisory_xact_lock[\s\S]*CREATE TRIGGER workflow_guard;[\s\S]*SELECT utc_cleanup;[\s\S]*SELECT trajectory_search;/,
+  'the advisory lock, the marked workflow block, the UTC cleanup, and the trajectory search projection must reach psql in order'
+);
+assert.doesNotMatch(
+  appliedHooks.psqlInput,
+  /SELECT (before|after);/,
+  'only the marked workflow block may be applied from the iteration-offset migration'
+);
+const MARKER_REASON = /workflow markers must each appear exactly once, in order/;
+const EMPTY_REASON = /no workflow SQL between the markers/;
+for (const [label, migration, reason] of [
+  ['a missing end marker', `${START_MARKER}\nCREATE TRIGGER workflow_guard;\n`, MARKER_REASON],
+  [
+    'a duplicated start marker',
+    `${START_MARKER}\nCREATE TRIGGER a;\n${START_MARKER}\nCREATE TRIGGER b;\n${END_MARKER}\n`,
+    MARKER_REASON,
+  ],
+  [
+    'markers in the wrong order',
+    `${END_MARKER}\nCREATE TRIGGER a;\n${START_MARKER}\nCREATE TRIGGER b;\n`,
+    MARKER_REASON,
+  ],
+  ['an empty marked block', `${START_MARKER}\n\n${END_MARKER}\n`, EMPTY_REASON],
+  [
+    'a comment-only marked block',
+    `${START_MARKER}\n  -- nothing to apply\n${END_MARKER}\n`,
+    EMPTY_REASON,
+  ],
+] as const) {
+  const rejected = runSqlHooks(migration);
+  assert.equal(rejected.status, 2, `${label} must be rejected before psql runs`);
+  assert.equal(rejected.psqlInput, '', `${label} must not apply any SQL`);
+  assert.match(rejected.stderr, reason, `${label} must report why it was rejected`);
+}
 assert.doesNotMatch(
   coverageScript,
   /ENV_DATABASE_URL=.*DATABASE_URL/,

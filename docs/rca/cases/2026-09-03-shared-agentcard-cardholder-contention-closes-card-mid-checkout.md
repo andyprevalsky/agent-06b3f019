@@ -21,7 +21,7 @@ tags:
 sources:
   - agent d12b582c-f7ec-419e-9633-8e1d7b882900
   - agent a4a282c5-697c-49b0-b553-9d0e0c6fbbf7
-repro: none
+repro: back-end/src/tests/blackbox/treasury-rails-card-cleanup.blackbox.ts
 status: open
 ---
 
@@ -109,3 +109,232 @@ inside an unrelated change.
    instead of burning the task's whole timeout budget.
 3. Do not run the AgentCard gate concurrently from more than one machine while
    the shared cardholder remains first preference.
+
+## 2026-09-30 recurrence: treasury test closed foreign cards
+
+The local AgentCard lifecycle gate failed `agent-payment-idempotent-abandonment`
+for agent `6baad852-3cad-4d0a-89cd-2623e585b101`. Its two sequential browser
+tasks sent the same purchase fingerprint (`ed2c4449…b8177`) for the same
+agent. The first request minted a card at 01:19:29Z and left checkout
+unsubmitted. At 01:21:14Z, the second request's liveness check got AgentCard
+`card_closed` for that card; Rose marked the first purchase `CLEARED` and minted
+a second card at 01:21:19Z. The differing last four prevented checkout, and
+the task timed out at its 900-second cap. This local backend issued no
+`close_card` call for the first card. The provider response proves closure but
+does not identify the external caller that closed this particular card.
+
+The current sandbox org differs from the earlier case: live read-only
+`list_cardholders` returned `agentcard-benchmark@roselabs.ai` as verified,
+and its ID matches the configured fixture cardholder (`…gfto`). The old
+`andy@roselabs.ai` candidate was absent. All four lifecycle tasks in this
+isolated stack minted against `…gfto`; other workspaces using the same sandbox
+org credentials can also target it. Selecting the dedicated email again would
+therefore select the same ID and would not isolate the run.
+
+The owned cross-workspace hazard is in
+`back-end/src/tests/blackbox/treasury-rails.blackbox.ts`: its final cleanup
+listed every OPEN card on this shared cardholder and closed each one, including
+cards minted by other active workspaces. The safe cleanup now filters to card
+IDs returned by this test's own `create_card`. A permanent owning-boundary
+blackbox supplies one owned OPEN card and one foreign OPEN card. Before the fix,
+`npx tsx src/tests/blackbox/treasury-rails-card-cleanup.blackbox.ts` failed
+with `2 !== 1` because both cards were closed. After the fix, the identical
+command passed, leaving the foreign card OPEN. The backend blackbox runner
+discovers and passes this test. This removes a proven mechanism, while the
+specific external caller in the failed run remains unattributed.
+
+The exact unchanged `agent-payment-idempotent-abandonment` benchmark still
+needs a passing local run after this fix before this RCA can be marked fixed.
+
+A second isolated run on September 30 (`3f47fcda-ca99-4313-91f6-e684a05cb333`)
+finished its checkout after the first card closed during the sequential reuse
+check. The agent minted a replacement, so the lifecycle contained two purchases,
+two wallet fundings, and two cards. The benchmark initially reported a pass
+because its expected lifecycle did not assert those counts. The task contract
+now requires exactly one of each, and a regression test confirms that this
+archived run fails validation. That earlier green result does not close this
+case; the stricter exact benchmark needs a new pass.
+
+The next strict rerun (`88706c44-eb1a-4258-8714-6ad8a930facc`) failed for a
+separate, fully attributed fingerprint difference. Its first browser sent the
+three bare product titles; its second browser sent the same titles with a
+redundant ` - x1` suffix while also setting `quantity: 1`. All other receipt
+fields matched. The two purchase fingerprints differed, so the backend minted
+another card. Both the agents-side fingerprint builder and the backend's
+stored-receipt backfill now ignore that exact matching quantity echo. A replay
+of the two archived request payloads produces one canonical fingerprint, and
+the tests keep a mismatched quantity distinct. The next exact live run
+(`49095574-4a49-4d4b-ad21-ee8b0b2da186`) passed in 289 seconds: both browser
+requests used fingerprint `d54a9df1…`, the second lookup returned `reusable:
+true`, and both payment-card responses returned the same provider card ID
+`card_b4d522c1e7d8eca7f9af1aa9`. The terminal lifecycle had one purchase,
+one wallet funding, one Stripe payment intent, and one local card. This proves
+the idempotency path in that run; the shared cardholder still needs provider
+isolation to prevent unrelated workspaces from affecting future runs.
+
+The full four-task AgentCard gate then exposed two more browser-rendering
+variants (`20260930_025123_agent-payment-test-shop,agent-payment-setup-resume,agent-payment-idempotent-abandonment,agent-payment-abandonment.json`):
+setup/resume sent `http://placehold.co/...` for the three image URLs expected
+with `https://` in the checkout fixture, and the idempotency task's second
+browser appended `x1 (Rose Labs Test Payment)` to each product title. Its two
+fingerprints differed, giving two purchases. The payment payload now upgrades
+only the known placeholder image host to HTTPS; both fingerprint builders
+strip a quantity-plus-merchant suffix only when it matches the separate
+quantity and merchant fields. Replaying the archived requests now produces
+secure receipt image URLs and one fingerprint.
+
+The focused live rerun (`1c4ebfa8-63db-4e4a-a468-e4749d69e6dc`) passed both
+affected tasks. Setup/resume completed onboarding and checkout; idempotency's
+second browser returned `reusable: true` for fingerprint `9b7392f8…` and the
+same card ID `card_3f56552739e49626483f0248`. Its terminal lifecycle had one
+purchase, one funding, and one card. The four-task deploy gate remains pending.
+
+## 2026-10-01 recurrence: verified cart-summary text changed the purchase key
+
+The four-task local deploy gate failed `agent-payment-idempotent-abandonment`
+for agent `847cc7c7-ffe9-4ced-aecd-44bfe6d49998` at the 900-second cap.
+Its first browser submitted item names such as
+`Aurora Notebook - x1 - $12.00 (Rose Labs Test Payment checkout)`, while its
+second browser submitted the bare product titles. Product URLs, structured
+quantities, unit prices, fees, merchant, and total were unchanged. The agents
+fingerprinted these as `8fb86c27…` and `8bd7b485…`; the second lookup returned
+`reusable: false` and minted purchase `5d2cbd4b…` after the first had minted
+`b9bdc4f5…`. The second browser then called `request_payment_card` four more
+times, each rejected with `Payment approval is already complete. Do not call
+request_payment_card again`, and spent 622 seconds in that browser activity.
+
+The first bad boundary was both sides of purchase fingerprint canonicalization:
+they recognized some repeated quantity/price display forms but not the combined
+cart-summary form above. The new blackboxes
+`agents/tests/blackbox/request_payment_card.blackbox.py` and
+`back-end/src/tests/blackbox/purchases-fingerprint.blackbox.ts` capture the
+form and assert reuse only when the echoed quantity, price, and merchant match
+the structured receipt. Before the fix,
+`agents/venv/bin/python agents/tests/blackbox/request_payment_card.blackbox.py`
+failed with `the same product URL, quantity, price, and merchant must reuse its
+card`; `cd back-end && npx tsx
+src/tests/blackbox/purchases-fingerprint.blackbox.ts` failed with `the captured
+first-browser name must resolve to the same held card as the bare title`. After
+the Python and TypeScript canonicalizers were updated, those identical commands
+passed; conflicting quantity, price, and merchant annotations remain distinct.
+The exact unchanged paid benchmark still requires a post-fix local pass before
+this recurrence can be called fixed.
+
+Archive searches: `Timeout after 900s browser_activity_wait payment AgentCard`
+and `browser agent spent long time repeated navigation payments idempotent
+abandonment`. This is a recurrence of the receipt fingerprint drift already
+recorded above, not another sandbox cardholder closure. Human feedback for this
+recurrence: the operator directed the agent to fix the runtime issue without
+raising timeouts, weakening tests, or touching the separate Explore issue.
+
+## 2026-10-02 recurrence: pool-funded fixture not established
+
+The required backend coverage run on `aa76b7bf` failed treasury-rails in
+161.308 seconds. Its exact unused 1,300-cent card transfer ended `reclaimed`
+with 1,300 cents released but zero cents transferred from the pool. The strict
+pool-funding assertion correctly rejected that run; release alone does not
+prove the pool-to-card leg. The original issuance transfer was not captured.
+
+The pre-mint sweep did not exhaust its 60-second limit: the first and last logged
+post-close recoveries span about 151 seconds, leaving at most about 10.2 seconds
+for setup, sweeping, issuance, and closure. Two idle recovery rounds prove
+zero returned recovery yield, not zero cardholder headroom. AgentCard's
+[current recovery contract](https://docs.agentcard.sh/tools/mcp/org/recover_funds)
+explicitly permits closed-card balances to fund later cards through netting.
+This is consistent with the observed transfer, but the uncaptured issuance
+state prevents attributing the original zero to a particular external actor.
+
+One instrumented execution kept the original assertions and limits and ran
+all funding, closure, and recovery checks in 150.259 seconds. On the same
+shared cardholder, its own transfer showed 1,300 cents transferred before
+closure and still 1,300 after reclaim, with 1,300 released. This rules out
+claiming that reclaim necessarily resets the transferred field. It does not
+establish fixture isolation or close the original cause. An earlier 3.218-second
+diagnostic skipped before issuance because its environment did not reproduce
+the canonical credentials; it provides no funding proof.
+
+Retain the exact pool-funding and release assertions and owned-card-only
+cleanup. The fixture now captures the newly issued card's numeric transfer before
+closure, including explicit not-found or unavailable observations. It does not
+assert immediate visibility: the provider contract makes no such guarantee.
+The original post-reclaim 1,300-cent assertion still decides the result. Do not invent a
+force-funding flag, close foreign cards, raise the mint amount or deadlines,
+or retry mints until one passes. The original failed coverage remains failed;
+the next canonical backend gate must execute the complete real flow.
+
+A private offline replay executes the actual fixture body against netted,
+partial, initially absent then visible, and fully funded own-card responses,
+with a separate foreign transfer present. The original source lacks the
+pre-close observation; the same replay passes with the capture added. Netted
+and partial transfers still fail the original pool assertion; delayed visibility
+and fully funded transfers pass only with the original final funding and
+release checks. This is an observability correction, not a causal fix for the
+original provider state. Independent review and final canonical coverage are
+required before reporting this candidate gate as passed.
+
+### Separate initial-wallet-read observability gap
+
+The next canonical backend run on `15fef86b` failed in 203.784 seconds:
+231/231 units and 174/175 blackboxes passed, but treasury-rails failed after
+1.119 seconds at its initial wallet read. The returned value lacked a structured
+wallet; no card was minted and the issuance observation never ran. This is a
+separate failure boundary, not evidence of another netted mint or shared-holder
+actor. Searches for the missing-wallet error and MCP structured-response behavior
+found no archived diagnosis of this exact response. The actual failed provider
+response was not retained, so its cause remains open.
+
+One authorized read-only call with the canonical environment returned the expected
+structured wallet in 0.398 seconds. No parser or retry change follows from that
+restoration alone. One unchanged owning treasury execution then passed in
+149.456 seconds: its card showed 1,300 cents transferred at issuance, closed
+unused, and passed the original full pool-funding and 1,300-cent reclaim checks.
+It skipped only the existing optional, unconfigured Brex leg; the AgentCard flow
+did not skip. All four observed native process identities retired.
+
+That replay's private response observer captured nothing: the `tsx` CLI did not
+propagate its parent-only preload to the actual test child. Do not cite it as
+raw-response evidence. A corrected private observer uses inherited `NODE_OPTIONS`,
+retains all prior options, and guards the actual treasury script. An offline
+child-process control verified one capture, zero pending/failed captures, and
+the exact original fetch Promise, without provider requests. The original
+canonical aggregate remains failed. A fresh canonical aggregate with the
+correctly bound observer is still required; neither restored execution nor
+observation wiring proves the original provider cause fixed.
+
+## 2026-10-03 recurrence: treasury-rails unused card never released under foreign load
+
+The PR #1401 deploy backend coverage lane failed `treasury-rails` with
+`transfer for card_d9109871658de3d93171a63b ended in "consumed" — an unused
+card must reclaim/release, not stay consumed`. The test minted $13.00 at
+03:47:34Z, closed it unused at 03:47:37Z, and swept `recover_funds` every
+~10 seconds for 240 seconds. The sweeps recovered $14.48, $37.21, and $37.21,
+which match the spent-card residuals of three foreign cards on the same
+cardholder (`card_2585635f…`, `card_09f75bf8…`, `card_cf353deb…`). No sweep
+returned this card's $13.00, and its transfer stayed `consumed` with
+`released_cents: 0`.
+
+A read-only provider check at about 04:00Z found the card `CLOSED` with $0.00
+remaining. The transfer was still `consumed` with `released_cents: 0`. Between
+03:44Z and 03:58Z, the provider listed nine other cards on the one
+mint-capable cardholder. They came from $43.96 and $21.23 payment checkouts and
+another workspace's identical $13.00 treasury mint. At 03:57:25Z, a foreign
+$43.96 mint (`card_0ecf64c3…`) netted entirely against idle residual
+(`transferred_cents: 0`). This proves that unrecovered residual was on the
+cardholder even though this test's sweeps could not recover it during its
+window.
+
+This machine did not originate any of that activity. The coverage run issued
+exactly one `create_card` and one `close_card`, both for this test's card. The
+long-running local stack issued none in the window. Branch code did not touch
+the path: every org MCP call succeeded on attempt 1, so the branch's
+throttle-retry change never engaged. The same test passed in the four earlier
+backend coverage runs of this deploy (164–196 seconds each).
+
+Classification: third-party / shared-fixture contention, the same class as this
+case. How the provider attributes residual to transfers while foreign cards are
+open is not visible through the MCP, so the exact mechanism remains an open
+visibility gap. Relaxing the assertion to accept pool or residual movement
+would reopen the foreign-residual false pass fixed in `13fb3fa48`. Prevention
+item 1 still applies: the gate needs its own mint-capable cardholder. Setting
+one up is a provider fixture change (a new verified sandbox cardholder) that
+requires an operator.

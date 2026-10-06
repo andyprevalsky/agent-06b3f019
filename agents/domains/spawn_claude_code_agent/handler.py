@@ -15,13 +15,24 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
+from domains.spawn_claude_code_agent.config import (
+    CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S,
+    CODE_AGENT_DRAIN_YIELD_STATUS,
+    CODE_SESSION_HEARTBEAT_KEY,
+)
 from domains.spawn_claude_code_agent.service import (
+    close_detached_code_session_activity,
+    code_session_record,
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
 )
+from helpers.activity_generation_drain import GENERATION_SUPERSEDED
 from helpers.attachments import extract_attachments_from_context
+from helpers.generation_handoff import GenerationHandoffRequested, park_pending_tool, take_tool_resume
 from helpers.tracing import span
+from helpers.wait_condition_or_handoff import live_handoff_queue
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 
@@ -189,6 +200,39 @@ def _maybe_soft_fail_session_create_result(
     return None
 
 
+def _drained_code_session(
+    result: Dict[str, Any], prior_session: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Session that reattaches the next activity to the drained sandbox."""
+    prior = prior_session or {}
+    session = dict(result.get("code_session") or prior)
+    session.pop("generation_yield", None)
+    # A superseded generation that cannot park finishes here; yielding again
+    # would only restart the activity on the same superseded queue.
+    if prior.get("generation_yield") is False or result.get("yield_reason") == GENERATION_SUPERSEDED:
+        session["generation_yield"] = False
+    return session
+
+
+def _timed_out_code_session(
+    error: ActivityError, scheduled_session: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Sandbox left running by a run whose last attempt timed out, if any.
+
+    The retries are exhausted, so nothing will reattach to it, and an attempt
+    on a dead worker never ran its own cleanup.
+    """
+    cause = error.cause
+    if not isinstance(cause, TemporalTimeoutError):
+        return None
+    for detail in cause.last_heartbeat_details or ():
+        if isinstance(detail, dict):
+            session = code_session_record(detail.get(CODE_SESSION_HEARTBEAT_KEY))
+            if session is not None:
+                return session
+    return code_session_record(scheduled_session)
+
+
 class SpawnClaudeCodeAgentManager(ToolManager):
     """Manager for spawn_claude_code_agent tool."""
 
@@ -211,6 +255,14 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         # Resolve requested attachments from workflow context
         attachments = _resolve_attachments(workflow_instance, requested_attachments, agent_id)
 
+        # A previous generation parked this exact tool call across a deploy
+        # (continue_as_new) while its sandbox kept running. The chip is still
+        # open; reattach to that sandbox instead of starting a new one.
+        resume_hint = take_tool_resume(workflow_instance, tool_call_id) or {}
+        code_session = resume_hint.get("code_session")
+        if not isinstance(code_session, dict):
+            code_session = None
+
         logger.info(
             "[ClaudeCode] Tool starting",
             agent_id=agent_id,
@@ -218,15 +270,17 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             has_output_schema=output_schema is not None,
             num_attachments=len(attachments),
             github_repo_url=github_repo_url,
+            resumed_task_id=(code_session or {}).get("task_id"),
         )
 
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="Starting Claude Code sandbox",
-            message="",
-            status=MessageStatus.IN_PROGRESS,
-            metadata={"toolName": "spawn_claude_code_agent"},
-        )
+        if code_session is None:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Starting Claude Code sandbox",
+                message="",
+                status=MessageStatus.IN_PROGRESS,
+                metadata={"toolName": "spawn_claude_code_agent"},
+            )
 
         code_provider = "unknown"
         try:
@@ -256,13 +310,16 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 else getattr(workflow_instance, "gpt_code_token_pool_id", None)
             )
             fast_mode_cache_enabled = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
-            default_code_provider = _select_code_provider(workflow_instance, gpt_token)
-            code_provider = await workflow.execute_activity(
-                resolve_code_agent_provider_activity,
-                args=[default_code_provider],
-                start_to_close_timeout=timedelta(seconds=20),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
+            if code_session is not None and code_session.get("code_provider"):
+                code_provider = code_session["code_provider"]
+            else:
+                default_code_provider = _select_code_provider(workflow_instance, gpt_token)
+                code_provider = await workflow.execute_activity(
+                    resolve_code_agent_provider_activity,
+                    args=[default_code_provider],
+                    start_to_close_timeout=timedelta(seconds=20),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
             logger.info(
                 "[ClaudeCode] Selected code sandbox provider",
                 agent_id=agent_id,
@@ -279,80 +336,155 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 span_source="agents.domains.spawn_claude_code_agent.handler.SpawnClaudeCodeAgentManager.execute",
                 span_key="agents.domains.spawn_claude_code_agent.handler.SpawnClaudeCodeAgentManager.execute",
             ):
-                activity_handle = workflow.start_activity(
-                    spawn_claude_code_activity,
-                    args=[
-                        user_id,
-                        agent_id,
-                        goal,
-                        tool_call_id,
-                        output_schema,
-                        attachments if attachments else None,
-                        model,
-                        github_repo_url,
-                        None,  # Reserved legacy credential slot; secrets are resolved inside the activity.
-                        code_provider,
-                        gpt_token,
-                        gpt_account_id,
-                        gpt_token_source,
-                        gpt_token_pool_id,
-                        fast_mode_cache_enabled,
-                    ],
-                    start_to_close_timeout=timedelta(minutes=50),
-                    heartbeat_timeout=timedelta(minutes=5),
-                    # WAIT so pause cancel receives the activity's cancelled
-                    # result (includes task_id). TRY_CANCEL races the workflow
-                    # ahead of cleanup and posts task_complete without task_id,
-                    # leaving ClaudeCodeChip stuck on "Spinning up..." on the
-                    # durable hub FE (agent 094f1085 / task 1d92a4db).
-                    cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-                    # Capacity flakes (redis pool / 503 no healthy upstream) often
-                    # clear within a minute. Prefer in-activity Temporal retries
-                    # over soft-failing the tool early — soft-fail lets the DAG
-                    # advance into attempt_completion with incomplete CC work
-                    # (cuda-kernel k=3 r10 agent1: soft-fail @~30m → verifier
-                    # 50% → redo CC → 4200s task timeout). Keep soft-fail as the
-                    # post-exhaustion path for no_tool_failures.
-                    retry_policy=RetryPolicy(maximum_attempts=5),
-                )
+                while True:
+                    activity_handle = workflow.start_activity(
+                        spawn_claude_code_activity,
+                        args=[
+                            user_id,
+                            agent_id,
+                            goal,
+                            tool_call_id,
+                            output_schema,
+                            attachments if attachments else None,
+                            model,
+                            github_repo_url,
+                            None,  # Reserved legacy credential slot; secrets are resolved inside the activity.
+                            code_provider,
+                            gpt_token,
+                            gpt_account_id,
+                            gpt_token_source,
+                            gpt_token_pool_id,
+                            fast_mode_cache_enabled,
+                            code_session,
+                        ],
+                        start_to_close_timeout=timedelta(minutes=50),
+                        heartbeat_timeout=timedelta(seconds=CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S),
+                        # WAIT so pause cancel receives the activity's cancelled
+                        # result (includes task_id). TRY_CANCEL races the workflow
+                        # ahead of cleanup and posts task_complete without task_id,
+                        # leaving ClaudeCodeChip stuck on "Spinning up..." on the
+                        # durable hub FE (agent 094f1085 / task 1d92a4db).
+                        cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+                        # Capacity flakes (redis pool / 503 no healthy upstream) often
+                        # clear within a minute. Prefer in-activity Temporal retries
+                        # over soft-failing the tool early — soft-fail lets the DAG
+                        # advance into attempt_completion with incomplete CC work
+                        # (cuda-kernel k=3 r10 agent1: soft-fail @~30m → verifier
+                        # 50% → redo CC → 4200s task timeout). Keep soft-fail as the
+                        # post-exhaustion path for no_tool_failures.
+                        retry_policy=RetryPolicy(maximum_attempts=5),
+                    )
 
-                # Wait for activity completion or pause signal
-                was_cancelled = False
-                await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
-                if workflow_instance.is_paused and not activity_handle.done():
-                    logger.info("[ClaudeCode] Cancelling due to pause", agent_id=agent_id)
-                    activity_handle.cancel()
-                    was_cancelled = True
+                    # Wait for activity completion or pause signal
+                    was_cancelled = False
+                    # cutover-class: activity-bound — the activity detaches at a deploy drain and returns its session
+                    await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
+                    if workflow_instance.is_paused and not activity_handle.done():
+                        logger.info("[ClaudeCode] Cancelling due to pause", agent_id=agent_id)
+                        activity_handle.cancel()
+                        was_cancelled = True
 
-                result = None
-                try:
-                    result = await activity_handle
-                except (asyncio.CancelledError, ActivityError) as e:
-                    if isinstance(e, ActivityError) and not isinstance(
-                        e.cause, (asyncio.CancelledError, TemporalCancelledError)
-                    ):
-                        soft = _maybe_soft_fail_session_create_result(
-                            code_provider=code_provider, error=e
-                        )
-                        if soft is not None:
-                            logger.warning(
-                                "[ClaudeCode] Recoverable session-create failure; soft-failing tool",
-                                agent_id=agent_id,
-                                code_provider=code_provider,
-                                error=extract_error_message(e),
+                    result = None
+                    try:
+                        result = await activity_handle
+                    except (asyncio.CancelledError, ActivityError) as e:
+                        if isinstance(e, ActivityError) and not isinstance(
+                            e.cause, (asyncio.CancelledError, TemporalCancelledError)
+                        ):
+                            abandoned = _timed_out_code_session(e, code_session)
+                            if abandoned is not None:
+                                try:
+                                    await workflow.execute_activity(
+                                        close_detached_code_session_activity,
+                                        args=[agent_id, abandoned],
+                                        start_to_close_timeout=timedelta(seconds=60),
+                                        retry_policy=RetryPolicy(maximum_attempts=3),
+                                    )
+                                except ActivityError as close_error:
+                                    logger.warning(
+                                        "[ClaudeCode] Closing the timed-out run's sandbox failed",
+                                        agent_id=agent_id,
+                                        task_id=abandoned.get("task_id"),
+                                        error=extract_error_message(close_error),
+                                    )
+                            soft = _maybe_soft_fail_session_create_result(
+                                code_provider=code_provider, error=e
                             )
-                            result = soft
+                            if soft is not None:
+                                logger.warning(
+                                    "[ClaudeCode] Recoverable session-create failure; soft-failing tool",
+                                    agent_id=agent_id,
+                                    code_provider=code_provider,
+                                    error=extract_error_message(e),
+                                )
+                                result = soft
+                            else:
+                                raise
                         else:
-                            raise
-                    else:
+                            was_cancelled = True
+                            result = {
+                                "status": "cancelled",
+                                "message": "Claude Code agent cancelled by user",
+                            }
+
+                    if was_cancelled or not result or result.get("status") != CODE_AGENT_DRAIN_YIELD_STATUS:
+                        break
+
+                    # The worker is draining (rolling deploy) or its generation was
+                    # superseded; the sandbox keeps running. Reattach from a live
+                    # worker of this queue, or from the live generation after
+                    # continue_as_new carries this tool call.
+                    code_session = _drained_code_session(result, code_session)
+                    if workflow_instance.is_paused:
+                        # Paused while detached: no attempt will reattach, so the
+                        # cancel path below closes the sandbox.
                         was_cancelled = True
                         result = {
                             "status": "cancelled",
                             "message": "Claude Code agent cancelled by user",
+                            "code_provider": code_session.get("code_provider"),
                         }
+                        break
+                    handoff_queue = await live_handoff_queue(workflow_instance)
+                    if handoff_queue:
+                        parked_session = {k: v for k, v in code_session.items() if k != "generation_yield"}
+                        if park_pending_tool(workflow_instance, tool_call_id, {"code_session": parked_session}):
+                            logger.info(
+                                "[ClaudeCode] Code session parked for generation handoff",
+                                agent_id=agent_id,
+                                task_id=code_session.get("task_id"),
+                                yield_reason=result.get("yield_reason"),
+                                handoff_task_queue=handoff_queue,
+                            )
+                            raise GenerationHandoffRequested(handoff_queue, parked=True)
+                        # Parking is unavailable here (DAG turn or payload budget):
+                        # finish on this generation instead of yielding every second.
+                        code_session["generation_yield"] = False
+                    logger.info(
+                        "[ClaudeCode] Code session drained; reattaching to the same sandbox",
+                        agent_id=agent_id,
+                        task_id=code_session.get("task_id"),
+                        yield_reason=result.get("yield_reason"),
+                        generation_yield=code_session.get("generation_yield", True),
+                    )
 
             if was_cancelled or (result and result.get("status") == "cancelled"):
                 logger.info("[ClaudeCode] Agent cancelled", agent_id=agent_id)
+                if code_session is not None and not (result or {}).get("task_id"):
+                    # An activity that held the sandbox returns its task_id after
+                    # closing it. Without one, the cancel landed before a
+                    # reattaching attempt took over, so the sandbox is still open.
+                    await workflow.execute_activity(
+                        close_detached_code_session_activity,
+                        args=[agent_id, code_session],
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                    result = {
+                        **(result or {}),
+                        "task_id": code_session.get("task_id"),
+                        "code_provider": (result or {}).get("code_provider") or code_session.get("code_provider"),
+                    }
                 # Chip terminality requires action_type=task_complete + task_id.
                 # session_cancelled without task_id leaves ClaudeCodeChip stuck on
                 # "Spinning up..." after pause (hub agent 182cf2ab / task 45ce853d).
@@ -436,6 +568,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 for fp in output_files:
                     yield AssistantEvent(message="", file_pointer=fp)
 
+        except GenerationHandoffRequested:
+            raise
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):
                 raise
@@ -566,7 +700,7 @@ _manager: Optional[SpawnClaudeCodeAgentManager] = None
 
 
 def get_manager() -> SpawnClaudeCodeAgentManager:
-    global _manager  # noqa: PLW0603
+    global _manager
     if _manager is None:
         _manager = SpawnClaudeCodeAgentManager()
     return _manager

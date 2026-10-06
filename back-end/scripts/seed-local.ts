@@ -496,13 +496,32 @@ async function findProdSubscription(userId: string): Promise<ProdSubscriptionRow
   return { ...row, stripeLivemode: false };
 }
 
-async function syncIntegrations(): Promise<number> {
+type SyncIntegrationsOptions = {
+  /**
+   * Compute-token refresh must only touch `claude_code` / `gpt_code`.
+   * Syncing every Integration row (historical default) restored production
+   * `agentcard` CONNECTED state over the local `agentcard-setup` reset fixture,
+   * so `agent-payment-setup-resume` skipped onboarding and mint 409'd with
+   * `Cardholder not found` after a sibling task's compute-token overlay.
+   */
+  computeTokensOnly?: boolean;
+};
+
+async function syncIntegrations(options: SyncIntegrationsOptions = {}): Promise<number> {
+  // Compute overlays omit agentcard so local agentcard-setup reset/complete fixtures hold.
   activeRemotePoolIntegrationIds.clear();
-  // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
-  const userIntegrations = await findProdIntegrations({ userId: SEED_USER_ID });
+  const computeTokensOnly = options.computeTokensOnly === true;
+  // Full seed imports every Integration for the user. Compute-token overlays
+  // must stay scoped to claude_code/gpt_code (+ the shared compute pool).
+  const userIntegrations = await findProdIntegrations(
+    computeTokensOnly
+      ? { userId: SEED_USER_ID, name: { in: [...COMPUTE_INTEGRATION_NAMES] } }
+      : { userId: SEED_USER_ID }
+  );
   const poolIntegrations = await findProdIntegrations({
     poolingEnabled: true,
     userId: { not: SEED_USER_ID },
+    ...(computeTokensOnly ? { name: { in: [...COMPUTE_INTEGRATION_NAMES] } } : {}),
   });
   const previouslyPooledLocalIntegrations = await local.integration.findMany({
     where: {
@@ -964,7 +983,7 @@ async function syncComputeTokensWithRetries(): Promise<void> {
 
   for (let attempt = 1; attempt <= COMPUTE_TOKEN_SYNC_ATTEMPTS; attempt++) {
     try {
-      const count = await syncIntegrations();
+      const count = await syncIntegrations({ computeTokensOnly: true });
       await poolRequiredDevComputeTokensForSyntheticUsers();
       const { usable: usableClaudeCodeCount, rateLimited: rateLimitedClaudeCodeCount } =
         await inspectClaudeCodeIntegrations();
@@ -1398,6 +1417,20 @@ async function sync() {
         orderBy: { timestamp: 'desc' },
         skip,
         take: Math.min(MESSAGE_PAGE_SIZE, MESSAGE_LIMIT - skip),
+        // Production may still be on the previous schema during a deploy.
+        // Selecting only the shared columns lets the seed run before the
+        // googleAccountEmail migration has been applied there.
+        select: {
+          id: true,
+          personId: true,
+          channel: true,
+          from: true,
+          to: true,
+          timestamp: true,
+          message: true,
+          externalId: true,
+          createdAt: true,
+        },
       });
       if (page.length === 0) break;
       // The local benchmark DB runs beside the entire agent stack. Launching 500

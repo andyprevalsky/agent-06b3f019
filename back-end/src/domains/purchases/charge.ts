@@ -69,13 +69,10 @@ async function persistMintedCard(
   // Card + transfer are one durable fact. If the process dies before this transaction, replaying
   // create_card with the same purchase idempotency key recovers them; after it commits, cleanup
   // always has both identifiers required to close and release the card.
-  await recordIssuedPurchaseCardFunding(
-    purchase,
-    'usd',
-    minted.cardId,
-    transferId,
-    minted.metadata
-  );
+  await recordIssuedPurchaseCardFunding(purchase, 'usd', minted.cardId, transferId, {
+    ...(minted.metadata ?? {}),
+    last4: minted.last4,
+  });
   state.issuedCardId = minted.cardId;
   state.issuedStaticCard = false;
   state.walletWasFunded = true;
@@ -278,7 +275,8 @@ export async function chargeAndIssueCard(
   input: MintPurchaseInput,
   stripeCustomerId: string,
   cardProvider?: CardProvider,
-  walletFundingProvider?: WalletFundingProvider
+  walletFundingProvider?: WalletFundingProvider,
+  stripeSubscriptionId?: string
 ): Promise<MintPurchaseResult> {
   const fundingRetryClaimed = purchase.cardId === null && purchase.stripePaymentIntentId !== null;
   const state: ChargeState = {
@@ -300,7 +298,13 @@ export async function chargeAndIssueCard(
     state.walletWasFunded =
       preparedFunding.status === PurchaseWalletFundingStatus.FUNDED ||
       preparedFunding.status === PurchaseWalletFundingStatus.CONSUMED;
-    const paymentIntent = await authorizeStripeHold(state, purchase, input, stripeCustomerId);
+    const paymentIntent = await authorizeStripeHold(
+      state,
+      purchase,
+      input,
+      stripeCustomerId,
+      stripeSubscriptionId
+    );
     return await mintCaptureAndIssue(
       state,
       purchase,

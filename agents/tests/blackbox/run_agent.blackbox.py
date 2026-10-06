@@ -704,6 +704,37 @@ async def test_status_needs_user_help_returned_from_tool():
     assert result["message"] == "Please log in"
 
 
+async def test_generation_handoff_from_tool_result_returns_immediately():
+    """An in-tool cutover must yield generation_handoff this turn, not wait for 1.6."""
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+    tool_calls = [{"tool": "web_fetch", "url": "x"}]
+    detected_tools = [("web_fetch", "tc-handoff-1", 1.0)]
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {
+            "success": True,
+            "message": DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+            "generation_handoff": True,
+            "handoff_task_queue": "navi-agent-tasks@new",
+        }
+
+    result, _, _ = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        skip_verification=True,
+        execute_tool_override=mock_execute_tool,
+        max_iterations=3,
+    )
+
+    assert result["status"] == "generation_handoff"
+    assert result["handoff_task_queue"] == "navi-agent-tasks@new"
+    assert any(
+        row.get("role") == "TOOL" and DEPLOY_INTERRUPTED_TOOL_MESSAGE in str(row.get("text", ""))
+        for row in result.get("context", [])
+    )
+
+
 async def test_failed_llm_call_does_not_consume_iteration_budget():
     """A failed LLM call is a retry of the turn, not a turn.
 
@@ -835,16 +866,8 @@ async def test_verifier_score_1_returns_completed():
     assert finished_for_tc, "Expected FINISHED tool_result for attempt_completion in returned context"
 
 
-async def test_verifier_infra_soft_fail_accepts_attempt_completion():
-    """Execute-loop Rose deadline soft-fail must accept attempt_completion.
-
-    Repro: cuda-kernel-github-top100-code-agent k=3 r26 — ranking already in
-    context, attempt_completion verifier RoseDeadlineError'd / hit the 420s
-    fence, soft-failed at score=0.5 ("Progress check failed: ..."), and the
-    agent bounced into another multi-minute verify loop until the 4200s task
-    budget died. Infrastructure failure is not a missing-deliverable judgment
-    when the structured response already covers the schema.
-    """
+async def test_verifier_infra_soft_fail_does_not_accept_attempt_completion():
+    """A schema-shaped response cannot turn a verifier outage into success."""
     tool_calls = [{"tool": "attempt_completion"}]
     detected_tools = [("attempt_completion", "tc-ac-infra-1", 1.0)]
     schema = {
@@ -884,22 +907,18 @@ async def test_verifier_infra_soft_fail_accepts_attempt_completion():
         tool_calls,
         detected_tools,
         skip_verification=False,
-        max_iterations=3,
+        max_iterations=1,
         execute_tool_override=mock_execute_tool,
         verifier_score=0.5,
-        verifier_reasoning=(
-            "Progress check failed: Verifier exceeded 420s total deadline"
-        ),
+        verifier_reasoning=("Progress check failed: Verifier exceeded 420s total deadline"),
         verifier_structured_response=structured,
         response_schema=schema,
     )
 
-    assert result["status"] == "completed"
-    assert result["score"] == 1.0
-    assert "infrastructure failed" in (result.get("message") or "").lower()
-    assert completion_calls == [
-        ("attempt_completion", {"_verification_pending": True}, "tc-ac-infra-1")
-    ]
+    assert result["status"] == "max_iterations"
+    assert result.get("score") != 1.0
+    assert result.get("verifier_progress") == 0.5
+    assert completion_calls == [("attempt_completion", {"_verification_pending": True}, "tc-ac-infra-1")]
 
 
 async def test_verifier_infra_soft_fail_rejects_malformed_structured_response():
@@ -923,12 +942,8 @@ async def test_verifier_infra_soft_fail_rejects_malformed_structured_response():
         max_iterations=1,
         execute_tool_override=mock_execute_tool,
         verifier_score=0.5,
-        verifier_reasoning=(
-            "Progress check failed: Verifier exceeded 420s total deadline"
-        ),
-        verifier_structured_response={
-            "repos": "- [cupy/cupy](https://github.com/cupy/cupy): NumPy for GPU\n..."
-        },
+        verifier_reasoning=("Progress check failed: Verifier exceeded 420s total deadline"),
+        verifier_structured_response={"repos": "- [cupy/cupy](https://github.com/cupy/cupy): NumPy for GPU\n..."},
         response_schema=schema,
     )
 
@@ -958,17 +973,13 @@ async def test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema():
         max_iterations=5,
         execute_tool_override=mock_execute_tool,
         verifier_score=0.5,
-        verifier_reasoning=(
-            "Progress check failed: Verifier exceeded 420s total deadline"
-        ),
+        verifier_reasoning=("Progress check failed: Verifier exceeded 420s total deadline"),
         verifier_structured_response={"repos": ""},
         response_schema=schema,
     )
 
     assert result["status"] == "error"
-    assert "verifier unavailable after 3 consecutive failures" in (
-        result.get("message") or ""
-    ).lower()
+    assert "verifier unavailable after 3 consecutive failures" in (result.get("message") or "").lower()
 
 
 async def test_estimate_tokens():
@@ -1346,6 +1357,79 @@ async def test_run_agent_refusal_retry_excludes_anthropic_without_backoff():
     assert result["status"] in {"max_iterations", "error"}
 
 
+async def test_run_agent_refusal_reroute_crosses_the_temporal_activity_boundary():
+    """A refusal reroute must survive the workflow -> activity hop.
+
+    REGRESSION (2026-08-22): the reroute only ever worked in-process. Workflow context
+    dispatches through `call_llm_activity`, whose signature had no exclusion parameter, so
+    the flag was silently dropped at the boundary and every retry went back to the model
+    that had just refused. One transient refusal therefore became a guaranteed
+    3-consecutive-failure kill. The sibling test above passes `is_inside_temporal_activity=True`
+    and so covered only the path that already worked; this one covers the production path.
+
+    Asserted on the ACTIVITY ARGS rather than on a provider mock, because the defect was the
+    argument never being sent -- an assertion further downstream would have stayed green.
+    """
+    from loop.run_agent import run_agent
+    from providers.rose.errors import RoseRefusalError
+
+    activity_calls: list[list] = []
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def mock_execute_activity(activity, **kwargs):
+        args = kwargs.get("args") or []
+        name = getattr(activity, "__name__", str(activity))
+        if "call_llm" not in name:
+            return {}
+        activity_calls.append(args)
+        if len(activity_calls) == 1:
+            raise RoseRefusalError("Anthropic stream ended with refusal (request_id=r-boundary)")
+        return {"response": "", "tool_calls": [], "usage": {}, "detected_tools_ordered": []}
+
+    with (
+        patch("loop.run_agent.workflow.execute_activity", new=AsyncMock(side_effect=mock_execute_activity)),
+        patch("loop.run_agent.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_agent(
+            agent_id="agent-boundary",
+            user_id="user-boundary",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-lite",
+            tools=["attempt_completion"],
+            initial_context=[{"role": "USER", "text": "Go", "timestamp": "2024-01-01T00:00:00Z"}],
+            is_inside_temporal_activity=False,
+            post_message=AsyncMock(),
+            execute_tool=AsyncMock(),
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=2,
+            skip_verification=True,
+            skip_status_updates=True,
+        )
+
+    assert len(activity_calls) >= 2, "expected the refused call to be retried through the activity"
+    # Activity args are positional (new ones are appended so an older replayed Temporal history
+    # still resolves to the default), so read the flag at its signature position. Check the slot
+    # actually holds the flag before reading it, so the original defect (the argument never being
+    # sent at all) reports as itself rather than as a confusing value mismatch.
+    import inspect
+
+    from helpers.llm import call_llm_activity
+
+    exclude_index = list(inspect.signature(call_llm_activity).parameters).index("exclude_anthropic_family")
+    assert len(activity_calls[0]) > exclude_index and isinstance(activity_calls[0][exclude_index], bool), (
+        "call_llm_activity is not receiving the anthropic-exclusion flag at all; positional args were "
+        f"{activity_calls[0][exclude_index:]!r}. The reroute dies at the workflow->activity boundary."
+    )
+    assert activity_calls[0][exclude_index] is False, "first attempt must not pre-emptively exclude Anthropic"
+    assert activity_calls[1][exclude_index] is True, "the retry after a refusal must reroute off Anthropic"
+
+
 def test_is_refusal_error_detects_type_message_and_cause_chain():
     """_is_refusal_error matches by type, by message, and through the cause chain."""
     from loop.run_agent import _is_refusal_error
@@ -1406,6 +1490,85 @@ async def test_compress_context_activity_exception_preserves_original():
     result_ctx, success = await _compress_context(mock_execute_activity, original, "rose-flash")
     assert success is False
     assert result_ctx is original
+
+
+async def test_activity_tool_results_are_hard_capped_before_context_append():
+    """Explore/activity agents must not append unbounded tool dumps into context.
+
+    Prod a890a362 explore children failed with:
+      Context compression ineffective: compressed context estimate 210745
+      tokens still exceeds trigger 167000 (original estimate 228460)
+    after a single grep result ballooned tokens_in to ~140k. web_fetch already
+    routes through summarize_tool_result; grep did not. Cap at the shared
+    append boundary so every activity-mode tool shares the same floor.
+    """
+    from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
+
+    huge = "AMAZON_ORDER_CONFIRMATION " * 20_000  # well above the hard cap
+    assert len(huge) > TOOL_RESULT_HARD_CAP_CHARS
+
+    tool_calls = [{"tool": "grep", "pattern": "amazon"}]
+    detected_tools = [("grep", "tc-huge-grep", 1.0)]
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"success": True, "message": huge}
+
+    result, _, _ = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        skip_verification=True,
+        execute_tool_override=mock_execute_tool,
+        max_iterations=1,
+        is_inside_temporal_activity=True,
+        poll_messages_override=None,
+    )
+
+    tool_msgs = [m for m in result.get("context") or [] if m.get("role") == "TOOL"]
+    assert tool_msgs, "expected the grep tool result in context"
+    text = tool_msgs[-1].get("text") or ""
+    assert len(text) <= TOOL_RESULT_HARD_CAP_CHARS + 80, (
+        f"uncapped tool result entered context ({len(text)} chars); hard cap is {TOOL_RESULT_HARD_CAP_CHARS}"
+    )
+    assert "truncated, original_len=" in text
+
+
+async def test_activity_tool_result_cap_prevents_protected_tail_overflow():
+    """A batch of grep results must not trip the explore compaction check.
+
+    Prod a890a362 appended four grep results, then head/tail compaction
+    retained 182858 tokens against the 167k trigger. Model that protected
+    head and four-result tail at the loop boundary. The check still rejects
+    genuine overflows in the test below.
+    """
+    import loop.run_agent as run_mod
+
+    huge = "AMAZON_ORDER_CONFIRMATION " * 4_000
+    initial = [{"role": "USER", "text": "U" * 100_000, "timestamp": "2024-01-01T00:00:00Z"}]
+    initial.extend({"role": "ASSISTANT", "text": "M" * 400, "timestamp": "2024-01-01T00:00:00Z"} for _ in range(4))
+    tool_calls = [{"tool": "grep", "pattern": f"amazon-{i}"} for i in range(4)]
+    detected_tools = [("grep", f"tc-huge-grep-{i}", 1.0) for i in range(4)]
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"success": True, "message": huge}
+
+    async def protected_head_tail(**kwargs):
+        context = kwargs["context"]
+        return [context[0], *context[-4:]], True
+
+    with patch.object(run_mod, "_compress_context", side_effect=protected_head_tail) as compressor:
+        result, _, _ = await _run_single_iteration(
+            tool_calls,
+            detected_tools,
+            initial_context=initial,
+            skip_verification=True,
+            execute_tool_override=mock_execute_tool,
+            max_iterations=2,
+            is_inside_temporal_activity=True,
+            poll_messages_override=None,
+        )
+
+    assert result["status"] == "max_iterations", result.get("message")
+    compressor.assert_not_called()
 
 
 async def test_run_agent_errors_when_compaction_still_over_trigger():
@@ -1637,6 +1800,8 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
                 "toolCallId": "browser-one",
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "purchase_completed": True,
@@ -1766,6 +1931,8 @@ async def test_rejected_completed_child_handoff_returns_control_to_llm():
                 "toolCallId": "browser-one",
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "structured_response": child_result,
             },
         },
@@ -1892,6 +2059,8 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
                 "toolCallId": "browser-one",
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "structured_response": child_result,
             },
         },
@@ -2063,6 +2232,8 @@ async def test_pause_after_forced_completion_llm_still_dispatches_attempt_comple
                 "toolCallId": "browser-one",
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "structured_response": child_result,
             },
         },
@@ -2272,9 +2443,7 @@ async def test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context():
     )
 
     duplicate_chips = [
-        p
-        for p in posted
-        if p["role"] == "TOOL" and (p.get("metadata") or {}).get("toolStatus") == "ERROR"
+        p for p in posted if p["role"] == "TOOL" and (p.get("metadata") or {}).get("toolStatus") == "ERROR"
     ]
     assert not duplicate_chips, (
         "run_agent posted a duplicate ERROR chip for a failed tool; it collides "
@@ -2348,18 +2517,26 @@ async def run_all_tests():
         test_failed_llm_call_does_not_consume_iteration_budget,
     )
     await r.record_async("status_needs_user_help_returned_from_tool", test_status_needs_user_help_returned_from_tool)
+    await r.record_async(
+        "generation_handoff_from_tool_result",
+        test_generation_handoff_from_tool_result_returns_immediately,
+    )
     await r.record_async("status_completed_from_tool", test_status_completed_from_tool)
     await r.record_async(
         "verifier_below_threshold_adds_feedback_and_loops", test_verifier_below_threshold_adds_feedback_and_loops
     )
     await r.record_async("verifier_score_1_returns_completed", test_verifier_score_1_returns_completed)
     await r.record_async(
-        "verifier_infra_soft_fail_accepts_attempt_completion",
-        test_verifier_infra_soft_fail_accepts_attempt_completion,
+        "verifier_infra_soft_fail_does_not_accept_attempt_completion",
+        test_verifier_infra_soft_fail_does_not_accept_attempt_completion,
     )
     await r.record_async(
         "verifier_infra_soft_fail_rejects_malformed_structured_response",
         test_verifier_infra_soft_fail_rejects_malformed_structured_response,
+    )
+    await r.record_async(
+        "verifier_infra_soft_fail_trips_circuit_breaker_without_schema",
+        test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema,
     )
     await r.record_async("estimate_tokens", test_estimate_tokens)
     await r.record_async(
@@ -2383,6 +2560,10 @@ async def run_all_tests():
         "run_agent_refusal_retry_excludes_anthropic_without_backoff",
         test_run_agent_refusal_retry_excludes_anthropic_without_backoff,
     )
+    await r.record_async(
+        "run_agent_refusal_reroute_crosses_the_temporal_activity_boundary",
+        test_run_agent_refusal_reroute_crosses_the_temporal_activity_boundary,
+    )
     r.record("is_refusal_error_type_message_cause_chain", test_is_refusal_error_detects_type_message_and_cause_chain)
     r.record(
         "error_chain_has_type_temporal_application_error",
@@ -2394,6 +2575,14 @@ async def run_all_tests():
     await r.record_async(
         "compress_context_activity_exception_preserves_original",
         test_compress_context_activity_exception_preserves_original,
+    )
+    await r.record_async(
+        "activity_tool_results_are_hard_capped_before_context_append",
+        test_activity_tool_results_are_hard_capped_before_context_append,
+    )
+    await r.record_async(
+        "activity_tool_result_cap_prevents_protected_tail_overflow",
+        test_activity_tool_result_cap_prevents_protected_tail_overflow,
     )
     await r.record_async(
         "run_agent_errors_when_compaction_still_over_trigger",
@@ -2446,7 +2635,13 @@ async def run_all_tests():
         "failed_tool_posts_no_duplicate_chip",
         test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context,
     )
+    await r.record_async(
+        "verifier_infra_soft_fail_trips_circuit_breaker",
+        test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema,
+    )
     teardown_mock()
+    await r.record_async("verifier_infra_soft_fail_trips_circuit_breaker_without_schema", test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema)
+
     return r.summary()
 
 

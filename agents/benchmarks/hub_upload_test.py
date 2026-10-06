@@ -1,9 +1,15 @@
 """Tests for hub_upload — env-gated, best-effort run-bundle upload."""
 
+import gzip
+import io
 import json
 import socket
 import threading
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
 
 from benchmarks.hub_upload import (
     DEFAULT_HUB_URL,
@@ -21,16 +27,24 @@ from benchmarks.hub_upload import (
 )
 
 
-def _serve(record: list):
+def _serve(record: list, *, decoded_limit: int | None = None):
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):  # noqa: N802
+        def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length)
+            decoded = gzip.decompress(raw) if self.headers.get("Content-Encoding") == "gzip" else raw
+            if decoded_limit is not None and len(decoded) > decoded_limit:
+                self.send_response(413)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             record.append(
                 {
                     "path": self.path,
                     "api_key": self.headers.get("X-API-Key"),
                     "user_id": self.headers.get("X-User-Id"),
-                    "body": json.loads(self.rfile.read(length) or b"{}"),
+                    "content_encoding": self.headers.get("Content-Encoding"),
+                    "body": json.loads(decoded or b"{}"),
                 }
             )
             payload = b'{"run": {"run_id": "x"}}'
@@ -48,16 +62,107 @@ def _serve(record: list):
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 
 
+def test_hub_transport_keeps_complete_transcripts_without_diagnostic_blobs(monkeypatch):
+    """The same decoded-size boundary accepts full FE transcripts, not raw logs."""
+    import pytest
+
+    record = []
+    server, url = _serve(record, decoded_limit=4096)
+    task = {
+        "name": "fixture-fanout",
+        "agent_id": "root",
+        "passed": False,
+        "tree_agent_count": 2,
+        "lifecycle_stage": "released",
+        "logs": {
+            "messages": [{"role": "USER", "message": "fixture goal"}],
+            "tree": {
+                "child": {"parent_agent_id": "root", "status": "COMPLETED", "messages": [{"message": "child result"}]}
+            },
+            "worker_logs": ["x" * 8192],
+            "backend_logs": ["diagnostic"],
+            "realtime_logs": [{"event": "diagnostic"}],
+        },
+    }
+    bundle = {"run_id": "fixture-terminal", "tasks": [task]}
+    original = json.dumps(bundle, sort_keys=True)
+    try:
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", url)
+        monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+        request = urllib.request.Request(
+            url + "/api/benchmarks/runs",
+            data=gzip.compress(original.encode()),
+            headers={"Content-Encoding": "gzip", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=30)
+        assert exc.value.code == 413
+        exc.value.close()
+        assert upload_run_bundle(bundle, required=True)
+        stored = record[0]["body"]["tasks"][0]
+        assert stored["logs"] == {"messages": task["logs"]["messages"], "tree": task["logs"]["tree"]}
+        assert stored["passed"] is False and stored["lifecycle_stage"] == "released"
+        assert json.dumps(bundle, sort_keys=True) == original
+    finally:
+        server.shutdown()
+
+
 def test_upload_timeout_scales_with_payload_size():
     """Mass-agent bundles (~40MB+) must not keep a flat 30s Hub POST deadline."""
     assert upload_timeout_for_payload(0) == 30.0
-    assert upload_timeout_for_payload(1024) == 30.0
+    assert upload_timeout_for_payload(1024) == 30.0 + 1024 / (512 * 1024)
     # ~47MB mass-agent smoke bundle needs well above 30s.
     forty_seven_mb = 47 * 1024 * 1024
     timeout = upload_timeout_for_payload(forty_seven_mb)
     assert timeout >= 120.0
     assert timeout <= 300.0
     assert upload_timeout_for_payload(512 * 1024 * 1024) == 300.0
+
+
+def test_hub_requests_preserve_external_proxy_routing(monkeypatch):
+    """Both publication and visibility use the user's route outside loopback."""
+    from benchmarks.hub_upload import verify_run_visible
+
+    calls = []
+
+    class Response:
+        status = 201
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def read(self, *_args):
+            return b'{"run":{"run_id":"fixture-route"}}'
+
+    class Opener:
+        def open(self, request, **_kwargs):
+            calls[-1][1].append(request.get_method())
+            return Response()
+
+    def build_opener(*handlers):
+        calls.append((handlers, []))
+        return Opener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+    for base in ("https://hub.example", "http://localhost.example", "http://127.0.0.1.example"):
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", base)
+        assert upload_run_bundle({"run_id": "fixture-route"}, required=True)
+        verify_run_visible("fixture-route")
+        assert calls[-2:] == [((), ["POST"]), ((), ["GET"])]
+    for base in ("http://localhost:8767", "http://127.0.0.1:8767", "http://[::1]:8767"):
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", base)
+        assert upload_run_bundle({"run_id": "fixture-route"}, required=True)
+        verify_run_visible("fixture-route")
+        for handlers, methods in calls[-2:]:
+            assert len(handlers) == 1
+            assert isinstance(handlers[0], urllib.request.ProxyHandler)
+            assert handlers[0].proxies == {}
+            assert methods in (["POST"], ["GET"])
 
 
 def test_disabled_without_env(monkeypatch):
@@ -114,9 +219,7 @@ def test_mirror_dual_writes_ephemeral_hub_to_prod(monkeypatch):
             "benchmarks.hub_upload.DEFAULT_HUB_URL",
             url,
         )
-        assert mirror_run_bundle_to_durable_hub(
-            {"run_id": "run-durable", "tasks": [{"name": "t", "agent_id": "a1"}]}
-        )
+        assert mirror_run_bundle_to_durable_hub({"run_id": "run-durable", "tasks": [{"name": "t", "agent_id": "a1"}]})
         assert len(record) == 1
         assert record[0]["body"]["run_id"] == "run-durable"
     finally:
@@ -137,8 +240,25 @@ def test_uploads_bundle_with_auth_headers(monkeypatch):
         assert record[0]["path"] == "/api/benchmarks/runs"
         assert record[0]["api_key"] == "test-key"
         assert record[0]["user_id"] == "user-1"
+        assert record[0]["content_encoding"] == "gzip"
         assert record[0]["body"]["run_id"] == "run-42"
         assert record[0]["body"]["source"] == "manual-run"
+    finally:
+        server.shutdown()
+
+
+def test_large_bundle_uploads_with_gzip(monkeypatch):
+    record: list = []
+    server, url = _serve(record)
+    try:
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", url)
+        monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "test-key")
+        assert upload_run_bundle(
+            {"run_id": "large-run", "tasks": [], "padding": "x" * (8 * 1024 * 1024)}, required=True
+        )
+        assert len(record) == 1
+        assert record[0]["content_encoding"] == "gzip"
+        assert record[0]["body"]["padding"] == "x" * (8 * 1024 * 1024)
     finally:
         server.shutdown()
 
@@ -154,7 +274,7 @@ def test_required_upload_retries_transient_disconnect(monkeypatch):
     attempts: list[int] = []
 
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):  # noqa: N802
+        def do_POST(self):
             attempts.append(1)
             length = int(self.headers.get("Content-Length") or 0)
             self.rfile.read(length)
@@ -182,6 +302,28 @@ def test_required_upload_retries_transient_disconnect(monkeypatch):
         assert len(attempts) == 2
     finally:
         server.shutdown()
+
+
+def test_hub_transport_starting_upload_cannot_reconcile_a_programming_error_as_success(monkeypatch):
+    from benchmarks import hub_upload
+
+    methods = []
+
+    class Opener:
+        def open(self, request, timeout):
+            methods.append(request.get_method())
+            if request.get_method() == "POST":
+                raise ValueError("controlled invalid transport invocation")
+            return io.BytesIO(b'{"run":{"run_id":"fixture-programming-error"}}')
+
+    monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", "https://fixture.invalid")
+    monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+    monkeypatch.setattr(hub_upload, "_hub_opener", lambda base: Opener())
+    monkeypatch.setattr(hub_upload.time, "sleep", lambda seconds: None)
+    with pytest.raises(HubVisibilityError) as failure:
+        hub_upload.register_starting_run({"run_id": "fixture-programming-error", "tasks": []})
+    assert isinstance(failure.value.__cause__, ValueError)
+    assert methods == ["POST"], "programming errors must not be acknowledged by an unrelated visible row"
 
 
 def test_prepare_run_bundle_strips_tool_usage_tree_and_keeps_child_transcripts():
@@ -340,9 +482,7 @@ def test_hub_upload_copied_script_works_without_sibling_logs(tmp_path):
     src = Path(__file__).resolve().parent
     (bench / "hub_upload.py").write_text((src / "hub_upload.py").read_text())
     bundle = tmp_path / "bundle.json"
-    bundle.write_text(
-        '{"run_id": "copied-only", "tasks": [{"name": "t", "logs": {"tree": {"root_agent_id": "x"}}}]}'
-    )
+    bundle.write_text('{"run_id": "copied-only", "tasks": [{"name": "t", "logs": {"tree": {"root_agent_id": "x"}}}]}')
     proc = _run_hub_upload_script(bench / "hub_upload.py", bundle, cwd=repo)
     combined = f"{proc.stdout}\n{proc.stderr}"
     assert "ModuleNotFoundError" not in combined, combined
@@ -352,3 +492,21 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_live_response_preserves_phase_and_startup_label():
+    from benchmarks.hub_upload import live_response_matches
+
+    task = {
+        "name": "fixture",
+        "status": "starting",
+        "passed": None,
+        "agent_id": None,
+        "lifecycle_stage": "starting",
+        "startup_label": "Loading services",
+    }
+    bundle = {"run_id": "fixture-parent", "tasks": [task]}
+    stored = {**bundle, "live": True}
+    assert live_response_matches(bundle, stored)
+    for key in ("lifecycle_stage", "startup_label"):
+        assert not live_response_matches(bundle, {**stored, "tasks": [{k: v for k, v in task.items() if k != key}]})

@@ -4,12 +4,43 @@ import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional
 
+import httpx
 import structlog
 from temporalio import activity
 
+from config import load_config
+from helpers.workflow_generation import workflow_generation_headers
 from utils.utils import extract_goal_from_context
 
 logger = structlog.get_logger()
+
+
+async def _persist_output_derived_root_title(agent_id: str, structured_response: Dict) -> None:
+    """Name an untitled root from its verified output before terminal snapshotting."""
+    from providers.fast_cache.rose_cache import meaningful_response_schema_title
+
+    schema = {
+        "fields": [
+            {"name": name}
+            for name in structured_response
+            if isinstance(name, str) and name and not name.startswith("_")
+        ]
+    }
+    if not schema["fields"]:
+        return
+    title = meaningful_response_schema_title(schema)
+    config = load_config()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.patch(
+            f"{config.backend.api_url.rstrip('/')}/api/agents/{agent_id}",
+            json={"generated_title": title},
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
+        )
+        response.raise_for_status()
 
 
 @activity.defn
@@ -60,7 +91,13 @@ async def mark_finished(
 
         archive_root_agent_id = root_agent_id or agent_id
         try:
-            archive_settled = await asyncio.to_thread(flush_archive_writes, archive_root_agent_id, 15.0)
+            # mark_finished's workflow start_to_close is 30s. A 15s flush left
+            # no room for the COMPLETED PATCH under 50-child fan-out, so the
+            # activity timed out and a verified agent stayed ACTIVE until the
+            # smoke cap (ed9a3b6e, 2026-09-29). 5s settles local jobs and
+            # still leaves the status write inside the 30s budget; the
+            # backend durable fence reconciles any leftover PUTs.
+            archive_settled = await asyncio.to_thread(flush_archive_writes, archive_root_agent_id, 5.0)
         except Exception as exc:
             logger.warning(
                 "trace_archive.pre_terminal_flush_error",
@@ -75,6 +112,14 @@ async def mark_finished(
                     agent_id=agent_id,
                     root_agent_id=archive_root_agent_id,
                 )
+
+        if archive_root_agent_id == agent_id and isinstance(structured_response, dict):
+            try:
+                await _persist_output_derived_root_title(agent_id, structured_response)
+            except Exception as exc:
+                # The output and schema failure remain visible; a title write
+                # must not prevent a verified task from reaching COMPLETED.
+                logger.warning("Failed to save output-derived root title", agent_id=agent_id, error=str(exc)[:200])
 
         # Use the single update_agent_status helper (no activity wrapper - call directly)
         from helpers.update_status import _update_agent_status_impl

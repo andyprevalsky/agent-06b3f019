@@ -55,10 +55,8 @@ export async function createCardProviderForAgent(
 const LIVE_CARD_STATUSES = new Set(['OPEN', 'ACTIVE']);
 
 /**
- * Whether a minted card is still live and unspent — the source of truth for whether a single-use
- * AgentCard card has actually been consumed. It flips to `CLOSED` / `balanceCents 0` the moment a
- * merchant settles a charge (verified against `sk_test_`). Callers ask the card itself rather than
- * trusting that a `transaction.cleared` webhook was delivered.
+ * Whether a minted card can be reused. Closure or an empty balance also occurs without merchant
+ * settlement, so callers must use the financial ledger to establish spending or release.
  */
 export function isCardLive(
   details: Pick<CardProviderDetailsResult, 'status' | 'balanceCents'>

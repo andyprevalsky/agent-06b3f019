@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from datetime import timedelta
 from typing import Final
+
+from utils.kill_switches import ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV, general_purpose_agent_disabled
+from utils.oai_demo import is_oai_demo_goal, is_oai_demo_mass_agent_task
 
 # ── Explore agent ──
 EXPLORE_ACTIVITY_TIMEOUT = timedelta(seconds=600)  # 10 min max (medium default)
@@ -24,6 +26,10 @@ EXPLORE_DEPTH_LIMITS = {
     "deep": (50, timedelta(seconds=1800)),
 }
 EXPLORE_DEFAULT_DEPTH = "quick"
+# The parent waits the depth's full activity timeout. If the handle is still
+# open at that point, cancel and wait this long instead of awaiting it
+# unbounded (53831ac9: an unbounded await blocked past the activity timeout).
+EXPLORE_CANCEL_GRACE = timedelta(seconds=15)
 # Fast Mode replays July OAi-demo explore trajectories whose attempt_completion
 # typically lands around turn ~14 (many namespaces run to p:20–49). The live
 # default "quick" (5) aborts mid-replay before that turn → max-iter + loops.
@@ -61,6 +67,7 @@ def resolve_explore_depth(
         return requested_depth
     return EXPLORE_DEFAULT_DEPTH
 
+
 # ── Network metadata ──
 NETWORK_CACHE_TTL_MINUTES = 5
 NETWORK_FETCH_TIMEOUT = 30.0
@@ -79,56 +86,6 @@ FOR_EACH_MAX_INFLIGHT = 5
 # slot helpers that no spawn path calls.
 FM_EXPLORE_INFLIGHT_CAP = 16
 
-# test-mass-agent-run-0 / July OAi demo only. Nested GP skip and the Andy
-# name rewrite must not apply to other Fast Mode trees.
-OAI_DEMO_ROOT_GOAL_PREFIX = (
-    "I'm building a personal brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
-)
-OAI_DEMO_CHILD_WINDOW = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
-# First-level for_each children start with this even when Agent.goal is
-# truncated before the date window. Keep hashing on window/root only so a
-# truncated goal cannot alias all 50 children onto one namespace.
-OAI_DEMO_CHILD_GOAL_PREFIX = "You are analyzing ONE creator"
-OAI_DEMO_CACHE_SOURCE_NAME = "Aman Gottumukkala"
-OAI_DEMO_CACHE_DISPLAY_NAME = "Andy Prevalsky"
-
-
-def _is_oai_demo_bound_child_goal(blob: str) -> bool:
-    """Child prefix alone is not enough — require a DEMO identity binding.
-
-    Real for_each children always include Andy/Aman (or the date window / root
-    brand). Rejecting a bare prefix stops unrelated goals that merely contain
-    "You are analyzing ONE creator" from entering demo cache replay.
-    """
-    if OAI_DEMO_CHILD_GOAL_PREFIX not in blob:
-        return False
-    return (
-        OAI_DEMO_CACHE_DISPLAY_NAME in blob
-        or OAI_DEMO_CACHE_SOURCE_NAME in blob
-        or OAI_DEMO_CHILD_WINDOW in blob
-        or OAI_DEMO_ROOT_GOAL_PREFIX in blob
-    )
-
-
-def is_oai_demo_goal(text: str | None) -> bool:
-    """True only for test-mass-agent-run-0 root, child-window, or bound child."""
-    blob = str(text or "")
-    return (
-        OAI_DEMO_ROOT_GOAL_PREFIX in blob
-        or OAI_DEMO_CHILD_WINDOW in blob
-        or _is_oai_demo_bound_child_goal(blob)
-    )
-
-
-def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
-    """True only for the mass-agent-0 root or its per-creator for_each children."""
-    chunks = (
-        getattr(workflow_instance, "fast_cache_goal", None) or "",
-        getattr(workflow_instance, "goal", None) or "",
-    )
-    return is_oai_demo_goal("\n".join(str(chunk) for chunk in chunks))
-
-
 # Small fleet-concurrency DEMO probes (demo-fleet-alpha|beta|gamma). Prefix is
 # workflow-sandbox safe (no catalog I/O). Keep in sync with tasks.json prompts.
 DEMO_FLEET_CONCURRENCY_GOAL_PREFIX = "DEMO fleet concurrency probe"
@@ -141,6 +98,8 @@ _demo_cache_goal_hash = None
 try:
     from providers.fast_cache.normalize import (
         demo_cache_goal_hashes as _load_demo_cache_goal_hashes,
+    )
+    from providers.fast_cache.normalize import (
         goal_hash as _load_demo_cache_goal_hash,
     )
 
@@ -162,15 +121,15 @@ def is_demo_cache_task(workflow_instance) -> bool:
     if is_oai_demo_mass_agent_task(workflow_instance):
         return True
     goal = str(getattr(workflow_instance, "goal", None) or "")
-    root = str(getattr(workflow_instance, "fast_cache_goal", None) or "")
-    if DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in goal or DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in root:
+    cached = str(getattr(workflow_instance, "fast_cache_goal", None) or "")
+    root_goal = str(getattr(workflow_instance, "root_goal", None) or "")
+    if any(DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in blob for blob in (goal, cached, root_goal)):
         return True
     if _demo_cache_goal_hash is None or not _DEMO_CACHE_GOAL_HASHES:
         return False
-    if goal and _demo_cache_goal_hash(goal) in _DEMO_CACHE_GOAL_HASHES:
-        return True
-    if root and _demo_cache_goal_hash(root) in _DEMO_CACHE_GOAL_HASHES:
-        return True
+    for blob in (goal, cached, root_goal):
+        if blob and _demo_cache_goal_hash(blob) in _DEMO_CACHE_GOAL_HASHES:
+            return True
     return False
 
 
@@ -191,18 +150,14 @@ def resolve_explore_oai_demo(goal: str | None, *, oai_demo: bool | None = None) 
         return bool(oai_demo)
     return is_oai_demo_goal(goal)
 
+
 # ── Explore message save ──
 SAVE_MESSAGE_TIMEOUT = 5.0
 
 
 # =============================================================================
-# Temporary GPA kill-switch
+# Temporary GPA kill-switch (utils.kill_switches)
 # =============================================================================
-# Drop general_purpose / for_each spawn routes so coding-agent GitHub ranking
-# benches cannot burn budget (or trip forbidden_tools) on recursive GP fan-out.
-# Prefer spawn_agent(type=code). Values: 1 / true / yes / on
-ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV: Final[str] = "ROSE_DISABLE_GENERAL_PURPOSE_AGENT"
-
 _DISABLED_TYPES: Final[frozenset[str]] = frozenset({"general_purpose", "for_each"})
 _DISABLED_PLANNER_TOOLS: Final[frozenset[str]] = frozenset(
     {
@@ -210,12 +165,6 @@ _DISABLED_PLANNER_TOOLS: Final[frozenset[str]] = frozenset(
         "spawn_general_purpose_agent_for_each",
     }
 )
-
-
-def general_purpose_agent_disabled() -> bool:
-    """Return True when general_purpose / for_each spawn routes must be blocked."""
-    raw = os.getenv(ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV, "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
 
 
 def is_disabled_general_purpose_type(agent_type: str | None) -> bool:
@@ -228,9 +177,7 @@ def is_disabled_general_purpose_planner_tool(tool_name: str | None) -> bool:
     return general_purpose_agent_disabled() and str(tool_name or "").strip() in _DISABLED_PLANNER_TOOLS
 
 
-def disabled_general_purpose_rejection_message(
-    *, agent_type: str | None = None, tool_name: str | None = None
-) -> str:
+def disabled_general_purpose_rejection_message(*, agent_type: str | None = None, tool_name: str | None = None) -> str:
     """User-facing rejection for a blocked general_purpose / for_each spawn."""
     label = agent_type or tool_name or "general_purpose"
     return (

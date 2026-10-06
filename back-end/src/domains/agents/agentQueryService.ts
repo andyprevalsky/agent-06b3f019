@@ -176,11 +176,26 @@ async function getInspectionContext(agentUserId: string, viewerUserId?: string) 
   };
 }
 
+export function tombstoneSkipsBenchmarkHub(tombstone: { isBenchmark: boolean } | null): boolean {
+  return tombstone !== null && tombstone.isBenchmark !== true;
+}
+
+async function getMissingAgentDetail(agentId: string, options: AgentDetailOptions) {
+  if (options.allowBenchmarkArchive !== true) return null;
+  // Soft-delete is a local tombstone. GET must 404 it instead of consulting
+  // a warming Benchmark Hub index (503). In-flight hub UUIDs have no Agent row.
+  // Benchmark tombstones still consult hub so Open-agent of a locally archived
+  // bench run keeps working.
+  const tombstone = await repo.findArchivedAgent(agentId, options.userId);
+  if (tombstoneSkipsBenchmarkHub(tombstone)) return null;
+  return getBenchmarkArchivedDetail(agentId);
+}
+
 export async function getAgentDetail(agentId: string, options: AgentDetailOptions = {}) {
   const agent = await repo.findAgentWithRelations(agentId, options.userId);
 
   if (!agent) {
-    return options.allowBenchmarkArchive === true ? getBenchmarkArchivedDetail(agentId) : null;
+    return getMissingAgentDetail(agentId, options);
   }
 
   const [messages, parentGoal, toolUsages, inspectionContext] = await Promise.all([

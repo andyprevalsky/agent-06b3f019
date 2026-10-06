@@ -78,6 +78,7 @@ import { grep as userDataGrep } from './domains/data/service';
 import { registerUserDataGrep } from './providers/userDataSearch';
 import { registerCronJobs } from './serverCron';
 import { cleanupBenchmarkKernelProfiles } from './providers/browser/kernel';
+import { cleanupBenchmarkBrowserUseProfiles } from './providers/browser/browserUse';
 // x402 payment middleware
 import { paymentMiddleware } from 'x402-express';
 import { facilitator } from '@coinbase/x402';
@@ -194,10 +195,6 @@ const UUID_RE =
 app.use((req, res, next) => {
   const start = Date.now();
   const { method, path: urlPath } = req;
-  const body =
-    req.body && Object.keys(req.body).length > 0
-      ? JSON.stringify(req.body).substring(0, 200)
-      : undefined;
 
   res.on('finish', () => {
     const duration_ms = Date.now() - start;
@@ -208,7 +205,6 @@ app.use((req, res, next) => {
       status: res.statusCode,
       duration_ms,
     };
-    if (body) extra.body = body;
     if (uuidMatch) extra.agent_id = uuidMatch[1];
     httpLog.info(`${method} ${urlPath} -> ${res.statusCode}`, extra);
   });
@@ -650,7 +646,16 @@ const shutdown = async (signal: string) => {
       error: err instanceof Error ? err.message : String(err),
     });
   });
-  await cleanupBenchmarkKernelProfiles();
+  await cleanupBenchmarkKernelProfiles().catch((err: unknown) => {
+    log.warn('kernel_profile_cleanup_failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+  await cleanupBenchmarkBrowserUseProfiles().catch((err: unknown) => {
+    log.warn('browser_use_profile_cleanup_failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
   await prisma.$disconnect();
   process.exit(0);
 };

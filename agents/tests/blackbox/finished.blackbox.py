@@ -102,12 +102,45 @@ async def test_mark_finished_with_structured_response():
             structured_response={"name": "Alice", "email": "alice@example.com"},
         )
 
-    call = assert_captured_call(
-        url_contains="/api/agents/agent-fin-3/status",
-        method="PATCH",
+    call = next(
+        request
+        for request in get_captured_requests()
+        if request["url"].endswith("/api/agents/agent-fin-3/status") and request["method"] == "PATCH"
     )
     body = json.loads(call["requestBody"])
     assert body["structuredResponse"] == {"name": "Alice", "email": "alice@example.com"}
+
+
+async def test_mark_finished_untitled_root_uses_verified_output_for_title():
+    """A missing startup schema cannot leave a completed root without its output-derived title."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.finished import mark_finished
+
+        await mark_finished(
+            agent_id="agent-title-root",
+            root_agent_id="agent-title-root",
+            steps_taken=[{"role": "USER", "text": "Analyze creators and build my brand strategy"}],
+            structured_response={
+                "top_creators_analysis": [{"creator_name": "Example"}],
+                "positioning_statement": "A research-backed founder voice",
+            },
+        )
+
+    requests = [
+        request
+        for request in get_captured_requests()
+        if "/api/agents/agent-title-root" in request["url"] and request["method"] == "PATCH"
+    ]
+    title_request = next(
+        (request for request in requests if json.loads(request["requestBody"]).get("generated_title")),
+        None,
+    )
+    assert title_request is not None
+    assert json.loads(title_request["requestBody"])["generated_title"] == "Creator Brand Strategy"
+    status_request = next(request for request in requests if request["url"].endswith("/status"))
+    assert requests.index(title_request) < requests.index(status_request)
+    assert json.loads(status_request["requestBody"])["status"] == "COMPLETED"
 
 
 async def test_mark_finished_flushes_archive_before_terminal_status():
@@ -134,7 +167,7 @@ async def test_mark_finished_flushes_archive_before_terminal_status():
         )
 
     assert events == [
-        ("flush", "agent-fin-flush", 15.0),
+        ("flush", "agent-fin-flush", 5.0),
         ("status", "agent-fin-flush", "COMPLETED"),
     ]
 
@@ -159,7 +192,7 @@ async def test_mark_finished_flushes_root_archive_for_subagent():
             root_agent_id="agent-fin-root",
         )
 
-    assert flushed == [("agent-fin-root", 15.0)]
+    assert flushed == [("agent-fin-root", 5.0)]
 
 
 async def test_mark_finished_continues_when_archive_flush_raises():
@@ -184,12 +217,42 @@ async def test_mark_finished_continues_when_archive_flush_raises():
     assert statuses == ["COMPLETED"]
 
 
+async def test_mark_finished_flush_budget_fits_activity_timeout():
+    """Flush wait must leave room for the COMPLETED PATCH inside 30s start_to_close."""
+    flush_timeouts = []
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch(
+            "helpers.trace_archive.flush_archive_writes",
+            side_effect=lambda agent_id, timeout_s: flush_timeouts.append(timeout_s) or True,
+        ),
+        patch("helpers.update_status._update_agent_status_impl"),
+    ):
+        from helpers.finished import mark_finished
+
+        await mark_finished(
+            agent_id="agent-fin-budget",
+            steps_taken=[{"role": "USER", "text": "Finish inside activity budget"}],
+        )
+
+    assert flush_timeouts == [5.0]
+    assert flush_timeouts[0] <= 10.0, (
+        "flush wait must stay well under mark_finished's 30s start_to_close "
+        "so a 50-child fan-out cannot leave a verified agent ACTIVE"
+    )
+
+
 async def run_all_tests():
     print("finished blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_mark_finished_happy_path)
     await r.record_async("boundary", test_mark_finished_boundary)
     await r.record_async("structured_response", test_mark_finished_with_structured_response)
+    await r.record_async(
+        "root_title_from_verified_output",
+        test_mark_finished_untitled_root_uses_verified_output_for_title,
+    )
     await r.record_async(
         "archive_flush_before_terminal_status",
         test_mark_finished_flushes_archive_before_terminal_status,
@@ -201,6 +264,10 @@ async def run_all_tests():
     await r.record_async(
         "archive_flush_error_does_not_block_terminal_status",
         test_mark_finished_continues_when_archive_flush_raises,
+    )
+    await r.record_async(
+        "archive_flush_budget_fits_activity_timeout",
+        test_mark_finished_flush_budget_fits_activity_timeout,
     )
     teardown_mock()
     return r.all_passed

@@ -23,6 +23,16 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from providers.rose.schema import build_anthropic_tools_from_response_model
+from tools.prompts import attempt_completion_prompt
+
+# Single source of truth for verifier rules. The browser prompt embeds the
+# same grading block as the main agent so attempt_completion semantics do not
+# drift between agent types.
+from utils.prompts import VERIFICATION_RULES
+
+logger = structlog.get_logger()
+
 
 def recover_from_challenge_enabled() -> bool:
     """Temp kill-switch for challenge recovery (bench A/B).
@@ -32,17 +42,6 @@ def recover_from_challenge_enabled() -> bool:
     """
     raw = (os.environ.get("BROWSER_DISABLE_RECOVER_FROM_CHALLENGE") or "").strip().lower()
     return raw not in {"1", "true", "yes", "on"}
-
-from providers.rose.schema import build_anthropic_tools_from_response_model
-from tools.prompts import attempt_completion_prompt
-
-# Single source of truth for verifier rules. The browser prompt embeds the
-# same grading block as the main agent so attempt_completion semantics do not
-# drift between agent types.
-from utils.prompts import VERIFICATION_RULES
-from utils.user_facing_writing_prompt import user_facing_text_description
-
-logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------
@@ -176,9 +175,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "Execute JavaScript in the live browser page context. Use for ACTIONS or LIVE DOM STATE QUERIES "
             "that page markdown cannot answer: hover, drag, custom selectors, shadow DOM traversal, reading "
             "computed styles, dispatching events, querying iframe contents, or reading visible product/cart "
-            "facts before navigating away. Wrap in IIFE with try-catch. Every successful evaluate also "
-            "retains a bounded browser-extracted DOM snapshot for the verifier (no flag); the JS return "
-            "value is not trusted as proof. Prefer evaluate over inventing page content."
+            "facts before navigating away. Wrap in IIFE with try-catch. Prefer evaluate over inventing "
+            "page content."
         ),
         "params": {"code": {"type": "string", "description": "JavaScript code to execute", "required": True}},
     },
@@ -219,6 +217,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "available, the minted agent account when it has an email, and guest/anonymous completion when the "
             "page offers it (for example Continue as guest, Checkout as guest, or I'll reserve). Cookie and "
             "Steel-session auth are applied automatically before you start. "
+            "Before calling, leave the site's sign-in form (username/password or code entry) open and "
+            "visible, so the user can sign in without navigating. "
             "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
             "unusual-traffic pages - those are not authentication blockers. Use recover_from_challenge for "
             "those instead of trying to solve them yourself."
@@ -733,6 +733,8 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
                 "account when it has an email, and guest/anonymous completion when the page "
                 "offers it (for example Continue as guest, Checkout as guest, or I'll reserve). "
                 "Cookie and Steel-session auth are applied automatically before you start. "
+                "Before calling, leave the site's sign-in form (username/password or code entry) "
+                "open and visible, so the user can sign in without navigating. "
                 "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, "
                 "access-denied interstitials, or unusual-traffic pages - those are not "
                 "authentication blockers. Wait briefly or try an alternate URL/path instead "
@@ -827,15 +829,20 @@ action envelope in text; use the provided tool call.
 
 # Evidence Retention
 
-- Completion verification retains action results, the final DOM, bounded pre-write DOM checkpoints, and DOM snapshots captured after each successful `evaluate`, not arbitrary historical DOM.
-- Before navigating away from a page with load-bearing facts required by the goal (product name, size, price, quantity, wattage, model, etc.), call `evaluate` while those facts are still visible. The runtime always snapshots the live browser-extracted DOM after a successful evaluate; you do not pass a preserve flag.
+- Completion verification retains action results, the final DOM, and bounded pre-write DOM checkpoints, not arbitrary historical DOM.
 
 # Safety Rules
 
 - NEVER delete or close any user account
 - NEVER sign legal agreements on the user's behalf (accepting Terms of Service checkboxes is acceptable)
-- When making payments or posting to social media, you may be asked to confirm with the user first
+- Write lock: clicking a final commit control (Place order, Pay, Buy now, Send, Post, Confirm return) does not run it right away. The runtime intercepts the click, shows the user what the action will do, and asks for approval. If the user approves, the click runs; if they reject, the browser session ends. If approval was already granted earlier in this session, the click runs immediately. Clicking the commit control is how approval is requested; no tool requests it.
+- When the goal asks for approval before a purchase, send, or post (including wording like "do not place the order without approval"), finish every earlier step, then click the commit control. Do not stop before it, and do not call attempt_completion, request_payment_card, or generate_write_lock_notification to ask for approval.
 - Once a requested purchase is visibly placed or an order confirmation is shown, do not open cancellation, return, edit, or modification flows. The pre-write checkout state and prior actions are retained for verification; call attempt_completion promptly from the confirmation or order-details page instead of reopening product or checkout pages solely to reconstruct evidence.
+
+# Returns
+
+- When the goal excludes groceries (or food), treat food, beverages, snacks, protein bars, candy, water, soft drinks, and grocery-marketplace packs as groceries even if Amazon shows a Return items button for a packaged SKU. Prefer the most recently delivered eligible non-excluded physical item.
+- If Amazon shows that a return request needs to be reviewed or to contact customer service, that item's self-service return path is blocked. Do not open Contact Us. Leave that item, pick the next eligible non-excluded item, or report the exact visible blocker if none remain.
 
 # Authentication
 
@@ -857,6 +864,7 @@ action envelope in text; use the provided tool call.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
 - Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 7 first.
 - When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
+- Before calling request_user_assistance_for_authentication, leave the site's sign-in form (username/password or code entry) open and visible, so the user can sign in without navigating.
 {challenge_rule}
 - Do not open webmail or inbox websites to retrieve OTP codes."""
 
@@ -892,6 +900,8 @@ def format_browser_state_for_tool(browser_state: Dict[str, Any]) -> str:
 
 
 def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
+    from browser_tools.write_lock import detect_amazon_return_self_service_block
+
     bs = browser_state
     timestamp = bs.get("timestamp") or bs.get("current_timestamp") or bs.get("current_time")
     if not timestamp:
@@ -933,14 +943,18 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
 
     viewport = bs.get("viewport") or {}
     title_part = f" - {bs['title']}" if bs.get("title") else ""
+    url = str(bs.get("url") or "")
+    dom_tree = str(bs.get("dom_tree") or "")
+    block_note = detect_amazon_return_self_service_block(url, f"{bs.get('title') or ''}\n{dom_tree}")
+    block_text = f"\nPage Signal: {block_note}\n" if block_note else ""
 
     return (
         f"# Current Browser State\n\n"
         f"Timestamp: {timestamp}\n"
-        f"{stats_text}Current URL: {bs.get('url', '')}{title_part}\n"
+        f"{stats_text}Current URL: {url}{title_part}\n"
         f"Viewport: {viewport.get('width', 0)}x{viewport.get('height', 0)}\n"
-        f"{scroll_text}{tabs_text}{events_text}{popups_text}"
-        f"Interactive elements:\n{bs.get('dom_tree', '')}"
+        f"{scroll_text}{tabs_text}{events_text}{popups_text}{block_text}"
+        f"Interactive elements:\n{dom_tree}"
     )
 
 

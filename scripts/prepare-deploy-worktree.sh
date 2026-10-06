@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/local-pg-image.sh
+. "$SCRIPT_DIR/lib/local-pg-image.sh"
 DEFAULT_REGISTRY="${TMPDIR:-/tmp}/rose-deploy-worktree-ports-${UID}"
 ORIGINAL_ARGS=("$@")
 WORKTREE=""
@@ -214,6 +216,8 @@ ensure_dependencies() {
       "$source_python" -m venv agents/venv
       agents/venv/bin/python -m pip install --upgrade pip
       agents/venv/bin/python -m pip install -r agents/requirements.txt
+    elif ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
+      agents/venv/bin/python -m pip install -r agents/requirements.txt
     fi
     agents/venv/bin/python -c 'import browser_use, pytest, temporalio' >/dev/null
   )
@@ -312,6 +316,11 @@ provision_database() {
       echo "   Refusing to adopt or delete a foreign container." >&2
       return 1
     fi
+    # Owned by this worktree: a pre-pgvector image is replaced (fresh volume).
+    recreate_if_stale_pg_image "$container" "$volume"
+  fi
+
+  if docker ps -a --filter "name=^${container}$" --format '{{.Names}}' | grep -qx "$container"; then
     actual_port="$(docker inspect "$container" \
       --format='{{(index (index .HostConfig.PortBindings "5432/tcp") 0).HostPort}}' \
       2>/dev/null || true)"
@@ -329,7 +338,7 @@ provision_database() {
       -e POSTGRES_DB=victoria \
       -p "$expected_port:5432" \
       -v "$volume:/var/lib/postgresql/data" \
-      postgres:16-alpine >/dev/null; then
+      "$LOCAL_PG_IMAGE" >/dev/null; then
       docker_rc=$?
       # Cloud VMs often cannot overlay-mount images; fall back like setup-db.sh.
       echo "⚠️  Docker Postgres unavailable for deploy worktree (exit $docker_rc) — falling back to system Postgres."

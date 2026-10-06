@@ -17,6 +17,7 @@ import { Link } from 'react-router-dom';
 import ContactModal from './ContactModal';
 import { isEarlyAccessEnabled } from '@/lib/utils';
 import { useAuth } from '@/features/auth';
+import { ROSE_APP_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 const ROSE_SITE_ORIGIN = 'https://roselabs.ai';
 
@@ -180,6 +181,9 @@ const NaviFooter = () => {
               </a>
             </div>
           </div>
+          <p className="mt-5 text-sm leading-relaxed text-primary-foreground/70 max-w-5xl">
+            {ROSE_APP_DESCRIPTION}
+          </p>
         </div>
       </div>
 

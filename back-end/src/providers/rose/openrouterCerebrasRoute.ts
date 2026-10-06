@@ -6,10 +6,10 @@
  * fallbacks are both disabled on the exclusive path; any pre-content failure
  * is surfaced to the caller.
  *
- * Model note (2026-09): Align with direct Cerebras chat (`gpt-oss-120b`).
- * OpenRouter serves `openai/gpt-oss-120b` on Cerebras (~3k t/s) and Groq
- * (~500 t/s). Prefer Cerebras; on org rate-cap fallover, prefer Cerebras then
- * Groq before any other host of the same model.
+ * Model note (2026-09-29): Align with direct Cerebras chat (`qwen-3.8-27b` /
+ * rose-fast). OpenRouter id `qwen/qwen3.8-27b` matches the rose-1-flash
+ * waterfall first hop. On org rate-cap fallover the same model may spill to
+ * whichever host OpenRouter currently measures fastest.
  */
 
 import {
@@ -20,12 +20,14 @@ import {
   RoseServerError,
   RoseStallError,
 } from './errors';
+import { OPENROUTER_CHAT_LATENCY_PROVIDER } from './openrouterFastRoute';
 import { parseOpenAISSE } from './streaming';
 import { postOpenRouterStream } from './transport';
-import { normalizeOpenAiToolCalls } from './transforms';
+import { coerceLeadingOnlySystemMessages, normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
 
-export const OPENROUTER_CEREBRAS_MODEL = 'openai/gpt-oss-120b';
+/** Must match rose-1-flash waterfall[0] / direct Cerebras chat inventory. */
+export const OPENROUTER_CEREBRAS_MODEL = 'qwen/qwen3.8-27b';
 export const OPENROUTER_CEREBRAS_POOL = 'openrouter-cerebras';
 
 export function buildOpenRouterCerebrasBody(
@@ -34,19 +36,17 @@ export function buildOpenRouterCerebrasBody(
 ): Record<string, unknown> {
   return {
     model: OPENROUTER_CEREBRAS_MODEL,
-    messages: normalizeOpenAiToolCalls(options.messages),
+    messages: coerceLeadingOnlySystemMessages(normalizeOpenAiToolCalls(options.messages)),
     stream: true,
     stream_options: { include_usage: true },
-    // gpt-oss-120b rejects reasoning effort `none` (only low/medium/high).
+    // Keep effort low so OpenRouter spill matches the direct-chat stall budget.
     reasoning: { effort: 'low', exclude: true },
     // Default (exclusive route): pin to Cerebras — OpenRouter must not silently
     // serve the chat model from another host. Fallback mode
-    // (`allowProviderFallback`): prefer Cerebras then Groq (`order`), but let
-    // OpenRouter spill to another host of the same model when both hit their
-    // org rate cap. Same model, just not stuck on the capped provider —
-    // never a generic waterfall model.
+    // (`allowProviderFallback`): same model, ranked by live latency across its
+    // hosts — never a generic waterfall model.
     provider: opts.allowProviderFallback
-      ? { order: ['cerebras', 'groq'], allow_fallbacks: true, require_parameters: true }
+      ? OPENROUTER_CHAT_LATENCY_PROVIDER
       : { only: ['cerebras'], allow_fallbacks: false, require_parameters: true },
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),
@@ -56,8 +56,8 @@ export function buildOpenRouterCerebrasBody(
   };
 }
 
-function openRouterCerebrasHttpError(status: number, body: string, requestId: string): Error {
-  const message = `OpenRouter Cerebras ${status} (request_id=${requestId}): ${body.substring(0, 500)}`;
+function openRouterCerebrasHttpError(status: number, requestId: string): Error {
+  const message = `OpenRouter Cerebras ${status} (request_id=${requestId})`;
   if (status === 400 || status === 404 || status === 422) return new RoseInvalidRequest(message);
   if (status === 401 || status === 403) return new RoseAuthError(message);
   if (status === 402) return new RosePaymentRequiredError(message);
@@ -83,7 +83,7 @@ export async function* exclusiveOpenRouterCerebrasCompletion(params: {
   });
 
   if (!response.ok) {
-    throw openRouterCerebrasHttpError(response.status, response.errorBody ?? '', params.requestId);
+    throw openRouterCerebrasHttpError(response.status, params.requestId);
   }
   if (!response.body) {
     throw new RoseStallError(

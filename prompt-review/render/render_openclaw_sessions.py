@@ -1,23 +1,83 @@
 #!/usr/bin/env python3
-"""Render selected OpenClaw session/planning tool prompts as normalized JSON specs."""
+"""Render selected OpenClaw session/planning tool prompts from live source.
+
+sessions_spawn + subagent system prompt are extracted via bun (TypeScript).
+update_plan stays a normalized JSON spec transcribed from the planning tool.
+"""
 
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 OUT_DIR = ROOT / "prompt-review" / "rendered" / "openclaw"
+OPENCLAW = ROOT / "openclaw"
 
 
 def write(stem: str, payload: dict) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    (OUT_DIR / f"{stem}.txt").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    (OUT_DIR / f"{stem}.txt").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def write_text(stem: str, text: str) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUT_DIR / f"{stem}.txt").write_text(text.rstrip() + "\n", encoding="utf-8")
+
+
+def _bun_extract_sessions() -> dict:
+    """Import OpenClaw spawn/prompt modules and dump runtime strings."""
+    script = r"""
+import { resolve } from "node:path";
+const root = resolve(import.meta.dir, "../../openclaw/src");
+const spawn = await import(`${root}/agents/tools/sessions-spawn-tool.ts`);
+const placement = await import(`${root}/agents/tools/sessions-placement-tool-contract.ts`);
+const sub = await import(`${root}/agents/subagents/spawn/subagent-system-prompt.ts`);
+
+const tool = spawn.createSessionsSpawnTool({
+  // Representative parent messaging session: ACP available, no worker placement.
+});
+const envelope = sub.buildSubagentSpawnEnvelope({
+  completionMode: "announce",
+  spawnMode: "run",
+  task: "{{TASK_DESCRIPTION}}",
+  requesterSessionKey: "agent:main:telegram:demo",
+  requesterOrigin: { channel: "telegram" },
+  childSessionKey: "agent:main:subagent:demo-child",
+  label: "demo-child",
+  acpEnabled: true,
+  childDepth: 1,
+  maxSpawnDepth: 2,
+});
+
+const out = {
+  sessions_spawn: {
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+  },
+  placed_sessions_spawn_description: placement.PLACED_SESSIONS_SPAWN_DESCRIPTION,
+  subagent_system_prompt: envelope.systemPrompt,
+  subagent_task_message: envelope.message,
+};
+process.stdout.write(JSON.stringify(out, null, 2));
+"""
+    result = subprocess.run(
+        ["bun", "-e", script],
+        cwd=str(ROOT / "prompt-review" / "render"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"bun sessions extract failed:\n{result.stderr or result.stdout}"
+        )
+    return json.loads(result.stdout)
 
 
 def main() -> int:
@@ -41,11 +101,11 @@ def main() -> int:
                     "items": {
                         "type": "object",
                         "properties": {
-                            "step": {"type": "string", "description": "Short plan step."},
+                            "step": {"type": "string", "description": "Short step description."},
                             "status": {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed"],
-                                "description": "One of pending, in_progress, or completed.",
+                                "description": "Current status for this step.",
                             },
                         },
                         "required": ["step", "status"],
@@ -56,102 +116,20 @@ def main() -> int:
             "required": ["plan"],
         },
     }
-
-    sessions_spawn = {
-        "name": "sessions_spawn",
-        "description": (
-            "Spawn a clean isolated session by default with runtime=subagent or runtime=acp. "
-            "mode=run is one-shot and mode=session is persistent/thread-bound where supported. "
-            "Subagents inherit the parent workspace directory automatically. "
-            "Use this when the work should happen in a fresh child session instead of the current one."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task": {"type": "string", "description": "Task prompt for the child session."},
-                "label": {"type": "string", "description": "Optional session label."},
-                "runtime": {"type": "string", "enum": ["subagent", "acp"], "description": "Spawn runtime."},
-                "mode": {"type": "string", "enum": ["run", "session"], "description": "Run once or persistent session."},
-                "thread": {"type": "boolean", "description": "Bind spawned session to a thread where supported."},
-                "context": {"type": "string", "enum": ["isolated", "fork"], "description": "Context inheritance mode (subagent runtime)."},
-                "lightContext": {"type": "boolean", "description": "Use lightweight bootstrap context for subagent runtime."},
-                "model": {"type": "string", "description": "Optional model override."},
-                "thinking": {"type": "string", "description": "Optional thinking/reasoning effort override."},
-                "cwd": {"type": "string", "description": "Optional working directory override."},
-                "runTimeoutSeconds": {"type": "number", "description": "Optional run timeout in seconds."},
-                "attachments": {
-                    "type": "array",
-                    "description": "Optional inline attachment payloads for child context.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "content": {"type": "string"},
-                            "encoding": {"type": "string", "enum": ["utf8", "base64"]},
-                            "mimeType": {"type": "string"},
-                        },
-                        "required": ["name", "content"],
-                    },
-                },
-            },
-            "required": ["task"],
-        },
-    }
-
     write("openclaw_update_plan", update_plan)
-    write("openclaw_sessions_spawn", sessions_spawn)
+
+    live = _bun_extract_sessions()
+    write("openclaw_sessions_spawn", live["sessions_spawn"])
+    # Combine system prompt + representative task message so the golden matches
+    # what the child LLM sees after spawn (system + first user message).
     write_text(
         "openclaw_subagent_system_prompt",
-        """# Subagent Context
-
-You are a **subagent** spawned by the main agent for a specific task.
-
-## Your Role
-- You were created to handle: {{TASK_DESCRIPTION}}
-- Complete this task. That's your entire purpose.
-- You are NOT the main agent. Don't try to be.
-
-## Rules
-1. **Stay focused** - Do your assigned task, nothing else
-2. **Complete the task** - Your final message will be automatically reported to the main agent
-3. **Don't initiate** - No heartbeats, no proactive actions, no side quests
-4. **Be ephemeral** - You may be terminated after task completion. That's fine.
-5. **Trust push-based completion** - Descendant results are auto-announced back to you; do not busy-poll for status.
-6. **Recover from truncated tool output** - If you see a notice like `[... N more characters truncated]`, assume prior output was reduced. Re-read only what you need using smaller chunks (`read` with offset/limit, or targeted `rg`/`head`/`tail`) instead of full-file `cat`.
-
-## Output Format
-When complete, your final response should include:
-- What you accomplished or found
-- Any relevant details the main agent should know
-- Keep it concise but informative
-
-## What You DON'T Do
-- NO user conversations (that's main agent's job)
-- NO external messages (email, tweets, etc.) unless explicitly tasked with a specific recipient/channel
-- NO cron jobs or persistent state
-- NO pretending to be the main agent
-- Only use the `message` tool when explicitly instructed to contact a specific external recipient; otherwise return plain text and let the main agent deliver it
-
-## Sub-Agent Spawning
-You CAN spawn your own sub-agents for parallel or complex work using `sessions_spawn`.
-Use the `subagents` tool to steer, kill, or do an on-demand status check for your spawned sub-agents.
-Your sub-agents will announce their results back to you automatically (not to the main agent).
-Default workflow: spawn work, continue orchestrating, and wait for auto-announced completions.
-Auto-announce is push-based. After spawning children, do NOT call sessions_list, sessions_history, exec sleep, or any polling tool.
-Wait for completion events to arrive as user messages.
-Track expected child session keys and only send your final answer after completion events for ALL expected children arrive.
-If a child completion event arrives AFTER you already sent your final answer, reply ONLY with NO_REPLY.
-Do NOT repeatedly poll `subagents list` in a loop unless you are actively debugging or intervening.
-Coordinate their work and synthesize results before reporting back.
-
-## Leaf Variant
-When childDepth reaches maxSpawnDepth, OpenClaw replaces the spawning section with:
-
-You are a leaf worker and CANNOT spawn further sub-agents. Focus on your assigned task.
-
-## Session Context
-- Your session: {{CHILD_SESSION_KEY}}.""",
+        live["subagent_system_prompt"].rstrip()
+        + "\n\n---\n\n"
+        + live["subagent_task_message"].rstrip()
+        + "\n",
     )
+
     print("  openclaw_update_plan")
     print("  openclaw_sessions_spawn")
     print("  openclaw_subagent_system_prompt")
@@ -160,4 +138,8 @@ You are a leaf worker and CANNOT spawn further sub-agents. Focus on your assigne
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"[render_openclaw_sessions] FAILED: {exc}", file=sys.stderr)
+        raise SystemExit(1)

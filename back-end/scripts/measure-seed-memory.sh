@@ -32,7 +32,7 @@ fi
 # Cloud VMs often have a Docker daemon that cannot overlay-mount images.
 # Fall back to the same system Postgres path setup-db.sh / run.sh already use.
 if ! $USE_SYSTEM_PG; then
-    if ! docker run --rm --entrypoint true postgres:16-alpine >/dev/null 2>&1; then
+    if ! docker run --rm --entrypoint true pgvector/pgvector:pg16 >/dev/null 2>&1; then
         echo "⚠️  Docker Postgres unavailable — falling back to system Postgres (set ROSE_USE_SYSTEM_PG=true to skip Docker)."
         USE_SYSTEM_PG=true
     fi
@@ -77,6 +77,9 @@ cleanup() {
     fi
 }
 cleanup_all() {
+    # A failed pipeline expansion can inherit EXIT; only the creating shell owns
+    # these databases. $$ and BASH_SUBSHELL can still name the parent in that trap.
+    /bin/sh -c '[ "$PPID" = "$1" ]' cleanup-owner "$$" || return 0
     cleanup
     if $USE_SYSTEM_PG; then
         PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$SRC_DB" >/dev/null 2>&1 || true
@@ -86,15 +89,21 @@ cleanup_all() {
 }
 trap cleanup_all EXIT INT TERM
 
-# macOS distraction-blockers (e.g. Freedom) install a system HTTP(S) proxy that
-# silently intercepts Node/Prisma outbound and breaks the prod read — it
-# surfaces as a phantom "Can't reach database server" even though raw TCP to the
-# same host succeeds. benchmarks/local.py neutralises it the same way for every
-# isolated run; do it here too or every measurement is a proxy failure, not a
-# footprint. Never disables the app itself.
-export NO_PROXY="*" no_proxy="*"
-unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+# Preserve inherited proxy settings, including Freedom's blocking configuration.
 
+# A deploy box that has not run a benchmark yet has no cached dump. Measure the
+# same reviewed canonical base an isolated benchmark restores. System Postgres
+# can only restore archives written by its own pg_dump major; the Docker path
+# picks its image from the archive header, so the pinned pg16 publication works.
+if [ -z "$DUMP" ]; then
+    CANONICAL_PG_MAJOR=16
+    if $USE_SYSTEM_PG; then
+        CANONICAL_PG_MAJOR="$(pg_dump --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/')"
+    fi
+    echo "   no cached dump; pulling the canonical base fixture (pg${CANONICAL_PG_MAJOR})…" | tee -a "$SUMMARY"
+    DUMP="$(bash "../scripts/benchmark-seed-cache" pull-canonical prisma/schema.prisma \
+        ../.context/benchmarks/seed-cache "$CANONICAL_PG_MAJOR")" || DUMP=""
+fi
 [ -n "$DUMP" ] || { echo "❌ no cached prod dump in .context/benchmarks/seed-cache" | tee -a "$SUMMARY"; exit 1; }
 echo "🧪 seed memory measurement: $RUNS run(s), target :$PORT_REQUESTED, source :$SRC_PORT_REQUESTED" | tee -a "$SUMMARY"
 echo "   source dump: $(basename "$DUMP")" | tee -a "$SUMMARY"
@@ -112,6 +121,18 @@ psql_db() {
     PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d "$database" "$@"
 }
 
+wait_for_seed_memory_host_postgres() {
+    local port="$1" database="$2" diagnostic="$3" attempt
+    for attempt in $(seq 1 30); do
+        if PGCONNECT_TIMEOUT=2 PGPASSWORD=postgres psql -h localhost -p "$port" -U postgres -d "$database" \
+            -tAc 'SELECT 1' >"$diagnostic" 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 # ── Source db: restored ONCE and reused across runs (it is read-only here) ──
 if $USE_SYSTEM_PG; then
     if ! pg_isready -h localhost -p 5432 -U postgres -q 2>/dev/null; then
@@ -124,7 +145,7 @@ if $USE_SYSTEM_PG; then
     PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$SRC_DB" >/dev/null 2>&1 || true
     PGPASSWORD=postgres createdb -h localhost -p 5432 -U postgres "$SRC_DB" || {
         echo "❌ could not create system source database $SRC_DB" | tee -a "$SUMMARY"; exit 1; }
-    echo "   restoring source into $SRC_DB…" | tee -a "$SUMMARY"
+    printf '   restoring source into %s…\n' "$SRC_DB" | tee -a "$SUMMARY"
     PGPASSWORD=postgres pg_restore -h localhost -p 5432 -U postgres -d "$SRC_DB" \
         --no-owner --no-acl "$DUMP" >/dev/null 2>&1 || true
     SRC_ROWS="$(psql_db "$SRC_DB" -tAc \
@@ -145,12 +166,13 @@ else
     # older image silently produced an EMPTY source db, and the gate then failed
     # with the misleading "no Cookie rows" message instead of naming the cause.
     # Pick the image from the dump header so a newer publisher just works.
-    SRC_PG_IMAGE=postgres:16-alpine
+    # pgvector images: prod dumps carry CREATE EXTENSION vector (planner memory).
+    SRC_PG_IMAGE=pgvector/pgvector:pg16
     DUMP_FORMAT_VERSION="$(
         head -c 8 "$DUMP" | od -An -tu1 -j5 -N2 | awk 'NF{printf "%d.%d", $1, $2; exit}'
     )"
     case "$DUMP_FORMAT_VERSION" in
-        1.1[6-9]|1.[2-9][0-9]) SRC_PG_IMAGE=postgres:18-alpine ;;
+        1.1[6-9]|1.[2-9][0-9]) SRC_PG_IMAGE=pgvector/pgvector:pg18 ;;
     esac
     echo "   dump archive format $DUMP_FORMAT_VERSION -> $SRC_PG_IMAGE" | tee -a "$SUMMARY"
     docker run -d --name "$SRC_CONTAINER" \
@@ -161,7 +183,9 @@ else
     [ -n "$SRC_PORT" ] || { echo "❌ could not resolve source postgres port" | tee -a "$SUMMARY"; exit 1; }
     SRC_READY=0
     for _ in $(seq 1 60); do
-        docker exec "$SRC_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && { SRC_READY=1; break; }
+        # The image's temporary init server accepts Unix sockets before it
+        # stops for the final launch. TCP is ready only for the final server.
+        docker exec "$SRC_CONTAINER" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && { SRC_READY=1; break; }
         sleep 1
     done
     # Falling through the timeout used to continue into pg_restore against a
@@ -330,7 +354,7 @@ for i in $(seq 1 "$RUNS"); do
         fi
         docker run -d --name "$CONTAINER" \
             -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=victoria \
-            -p "$PORT_MAPPING" postgres:16-alpine >/dev/null || {
+            -p "$PORT_MAPPING" pgvector/pgvector:pg16 >/dev/null || {
                 echo "❌ could not start throwaway postgres" | tee -a "$SUMMARY"; exit 1; }
         PORT="$(docker port "$CONTAINER" 5432/tcp | tail -1 | sed 's/.*://')"
         [ -n "$PORT" ] || {
@@ -338,15 +362,26 @@ for i in $(seq 1 "$RUNS"); do
 
         # Wait for readiness rather than sleeping a guess.
         for _ in $(seq 1 60); do
-            docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
+            docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break
             sleep 1
         done
+
+        HOST_PROBE_LOG="$OUT_DIR/host-postgres-$i.log"
+        if ! wait_for_seed_memory_host_postgres "$PORT" victoria "$HOST_PROBE_LOG"; then
+            echo "❌ run $i: host Postgres probe failed on port $PORT (diagnostic: $HOST_PROBE_LOG)" | tee -a "$SUMMARY"
+            tail -n 12 "$HOST_PROBE_LOG" | tee -a "$SUMMARY"
+            continue
+        fi
 
         export DATABASE_URL="postgresql://postgres:postgres@localhost:$PORT/victoria"
         export DIRECT_URL="$DATABASE_URL"
     fi
-    npx prisma db push --accept-data-loss --skip-generate >/dev/null 2>&1 || {
-        echo "❌ run $i: schema push failed" | tee -a "$SUMMARY"; continue; }
+    SCHEMA_PUSH_LOG="$OUT_DIR/schema-push-$i.log"
+    if ! npx prisma db push --accept-data-loss --skip-generate >"$SCHEMA_PUSH_LOG" 2>&1; then
+        echo "❌ run $i: schema push failed (diagnostic: $SCHEMA_PUSH_LOG)" | tee -a "$SUMMARY"
+        tail -n 12 "$SCHEMA_PUSH_LOG" | tee -a "$SUMMARY"
+        continue
+    fi
 
     report="$OUT_DIR/run-$i.json"
     log="$OUT_DIR/run-$i.log"
@@ -366,11 +401,13 @@ for i in $(seq 1 "$RUNS"); do
     fi
     if [ "$(uname -s)" = "Darwin" ]; then
         SEED_PEAK_RSS_REPORT="$report" \
+            NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
             "$TIME_BIN" -l npx tsx scripts/seed-local.ts > "$log" 2>&1
         rc=$?
         os_peak_bytes="$(grep -oE '[0-9]+ +maximum resident set size' "$log" | grep -oE '^[0-9]+' | tail -1)"
     else
         SEED_PEAK_RSS_REPORT="$report" \
+            NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
             "$TIME_BIN" -v npx tsx scripts/seed-local.ts > "$log" 2>&1
         rc=$?
         os_peak_kb="$(grep -oE 'Maximum resident set size \(kbytes\):[[:space:]]*[0-9]+' "$log" | grep -oE '[0-9]+$' | tail -1)"

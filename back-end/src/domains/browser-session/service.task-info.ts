@@ -5,7 +5,9 @@ import {
 } from '../../providers/browser';
 import { createLogger } from '../../providers/logger';
 import { canonicalAuthRealm } from '../../providers/authRealm';
+import { BROWSER_SESSION_MIN_REMAINING_MS } from '../../providers/steel/sessionLifetime';
 import { steelPublicCdpUrl } from '../../providers/steel/urls';
+import { storedBrowserProvider } from '../../providers/browser/types';
 import * as repo from './repo';
 import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
 
@@ -38,6 +40,31 @@ type TaskInfoResponse = {
 function isLiveBrowserStatus(status: string | null): boolean {
   if (status === null) return false;
   return ['live', 'active', 'running'].includes(status.toLowerCase());
+}
+
+/**
+ * Whether a resumed browser task may reattach this live session. Providers
+ * release a session at its absolute lifetime even with CDP attached, so one
+ * that cannot outlive another step plus teardown is replaced instead.
+ */
+export function sameSessionAvailability(
+  health: Pick<BrowserSessionHealth, 'status' | 'ttlMs'>,
+  legacySteelResponse: boolean
+): { available: true } | { available: false; reason: string } {
+  const prefix = legacySteelResponse ? 'steel' : 'browser';
+  if (health.ttlMs !== null && health.ttlMs <= 0) {
+    return { available: false, reason: `${prefix}_session_expired` };
+  }
+  if (!isLiveBrowserStatus(health.status)) {
+    return {
+      available: false,
+      reason: `${prefix}_status_${String(health.status ?? 'unknown').toLowerCase()}`,
+    };
+  }
+  if (health.ttlMs !== null && health.ttlMs < BROWSER_SESSION_MIN_REMAINING_MS) {
+    return { available: false, reason: `${prefix}_session_expiring` };
+  }
+  return { available: true };
 }
 
 export async function getTaskOwnerUserId(taskId: string): Promise<string | undefined> {
@@ -98,7 +125,7 @@ function buildTaskInfoResponse(
   authRealm: string,
   injection: Awaited<ReturnType<typeof collectUserInjectionData>>
 ): TaskInfoResponse {
-  const provider = session.provider === 'kernel' ? 'kernel' : 'steel';
+  const provider = storedBrowserProvider(session.provider);
   const profileId = resolveTaskInfoProfileId(session);
   return {
     task_id: session.id,
@@ -139,7 +166,7 @@ export function resolveTaskInfoProfileId(session: {
   if (session.providerProfileSource !== null || session.providerProfileId !== null) {
     return session.providerProfileId;
   }
-  const provider = session.provider === 'kernel' ? 'kernel' : 'steel';
+  const provider = storedBrowserProvider(session.provider);
   const providerProfile = session.context.providerProfiles.find(
     (profile) => profile.provider === provider
   );
@@ -150,7 +177,7 @@ async function applyLiveSessionAvailability(
   response: TaskInfoResponse,
   session: NonNullable<Awaited<ReturnType<typeof repo.findSessionByTaskId>>>
 ) {
-  const legacySteelResponse = session.provider !== 'kernel';
+  const legacySteelResponse = session.provider === 'steel';
   if (session.status !== 'ACTIVE') {
     response.same_session_available = false;
     response.same_session_unavailable_reason = `db_status_${session.status.toLowerCase()}`;
@@ -178,18 +205,9 @@ async function applyLiveSessionAvailability(
   }
   response.browser_session_health = health;
   if (health.provider === 'steel') response.steel_session_health = health;
-  const hasTtl = health.ttlMs === null || health.ttlMs > 0;
-  response.same_session_available = isLiveBrowserStatus(health.status) && hasTtl;
-  if (!response.same_session_available) {
-    response.same_session_unavailable_reason =
-      health.ttlMs !== null && health.ttlMs <= 0
-        ? legacySteelResponse
-          ? 'steel_session_expired'
-          : 'browser_session_expired'
-        : `${legacySteelResponse ? 'steel' : 'browser'}_status_${String(
-            health.status ?? 'unknown'
-          ).toLowerCase()}`;
-  }
+  const availability = sameSessionAvailability(health, legacySteelResponse);
+  response.same_session_available = availability.available;
+  if (!availability.available) response.same_session_unavailable_reason = availability.reason;
 
   return response;
 }

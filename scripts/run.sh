@@ -47,6 +47,7 @@ normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-service-readiness.sh"
 . "$SCRIPT_DIR/lib/seed-cache.sh"
 . "$SCRIPT_DIR/lib/fast-mode-cache-schema.sh"
+. "$SCRIPT_DIR/lib/local-pg-image.sh"
 
 RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
@@ -435,10 +436,13 @@ is_current_process_family() {
 
 process_cwd_in_this_worktree() {
     local pid=$1
-    local cwd
+    local cwd physical_worktree
     cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
+    # macOS reports /var as /private/var in lsof, while $PWD keeps the logical
+    # path used to start the process. Compare both spellings before reaping it.
+    physical_worktree=$(pwd -P)
     case "$cwd" in
-        "$PWD"|"$PWD"/*) return 0 ;;
+        "$PWD"|"$PWD"/*|"$physical_worktree"|"$physical_worktree"/*) return 0 ;;
     esac
     return 1
 }
@@ -575,7 +579,7 @@ kill_stale_same_worktree_benchmark_stack() {
     $BENCHMARK_MODE || return 0
 
     local killed_any=false
-    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http|cloudflared tunnel|localtunnel --port'
+    local pattern="$RUN_STALE_BENCHMARK_STACK_PATTERN"
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
         [ "$pid" = "$$" ] && continue
         is_current_process_family "$pid" && continue
@@ -658,7 +662,7 @@ if $IS_CLOUD; then
     # Without this guard, a Step 5 semantic run.sh murders in-flight smoke
     # workers that kill_stale_same_worktree_benchmark_stack just preserved.
     if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
-        for pattern in "worker\.py" "tsx.*server\.ts" "npx vite" "run_local_worker"; do
+        for pattern in "${RUN_CLOUD_SERVICE_KILL_PATTERNS[@]}"; do
             for pid in $(pgrep -f "$pattern" 2>/dev/null); do
                 if pid_belongs_to_active_isolated_benchmark "$pid"; then
                     echo "⏭️  Preserving ACTIVE isolated benchmark $pattern (PID $pid)"
@@ -745,6 +749,26 @@ if $DOCKER_OK && ! docker_can_create_container; then
     DOCKER_OK=false
 fi
 
+# A local benchmark must keep its own Postgres server. Under parallel deploy
+# load Docker Desktop can miss the short probe budget even while healthy; two
+# such fallbacks exhaust the shared system Postgres connection limit and make
+# independent benchmark agents fail. Cloud/Linux may explicitly choose system
+# Postgres, but on macOS retry Docker and fail clearly if it stays unavailable.
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ "$(uname -s)" = "Darwin" ] && \
+   [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && ! $DOCKER_OK; then
+    for attempt in 1 2 3 4 5 6; do
+        if docker_available_for_workspace_db "$DB_CONTAINER" true && docker_can_create_container; then
+            DOCKER_OK=true
+            break
+        fi
+        [ "$attempt" -eq 6 ] || sleep 1
+    done
+    if ! $DOCKER_OK; then
+        echo "❌ Isolated macOS benchmark requires Docker Postgres; Docker did not recover" >&2
+        exit 1
+    fi
+fi
+
 DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
 DB_OWNED_CONTAINER_ID=""
 USE_SYSTEM_PG=false
@@ -808,8 +832,10 @@ elif $DOCKER_OK && ! $USE_SYSTEM_PG; then
             -e POSTGRES_DB=victoria \
             -p "$LOCAL_DB_PORT:5432" \
             -v "$DB_VOLUME:/var/lib/postgresql/data" \
-            postgres:16-alpine >/dev/null
+            "$LOCAL_PG_IMAGE" >/dev/null
     }
+
+    recreate_if_stale_pg_image "$DB_CONTAINER" "$DB_VOLUME"
 
     if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
         ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | grep -o '[0-9]*$' || true)
@@ -965,11 +991,24 @@ if ! ensure_fast_mode_cache_schema bash -c \
     exit 1
 fi
 
-# Larger Prisma pool: Fast Mode adds cache get/set on every LLM call, which under
-# sub-agent fan-out competes with the agent's own writes for the connection pool
-# (the known P2024 timeout signature). A bigger local pool absorbs the burst.
-export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=50&pool_timeout=30"
-export DIRECT_URL="$LOCAL_DB_URL"
+# Local macOS system Postgres is shared by all workspaces and defaults to 100
+# connections. Keep each local stack small so other stacks can connect. Cloud
+# benchmark stacks retain their larger pool for 50-child Fast Mode fan-out;
+# dedicated Docker benchmark databases can use that pool as well.
+configure_local_db_url() {
+    local supplied_limit="${LOCAL_DB_CONNECTION_LIMIT:-}"
+    if $BENCHMARK_MODE; then
+        export LOCAL_DB_CONNECTION_LIMIT="${LOCAL_DB_CONNECTION_LIMIT:-80}"
+    else
+        export LOCAL_DB_CONNECTION_LIMIT="${LOCAL_DB_CONNECTION_LIMIT:-50}"
+    fi
+    if $USE_SYSTEM_PG && ! $IS_CLOUD && [ -z "$supplied_limit" ]; then
+        export LOCAL_DB_CONNECTION_LIMIT=12
+    fi
+    export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=${LOCAL_DB_CONNECTION_LIMIT}&pool_timeout=30"
+    export DIRECT_URL="$LOCAL_DB_URL"
+}
+configure_local_db_url
 
 # Fast DB warm-start (cloud pool): the schema push + 10k-people seed cost ~50s and
 # run on EVERY boot because the box DB lives on ephemeral rootfs (resets on Fly
@@ -998,17 +1037,7 @@ _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum ba
 # of which then fails its restore and, under BENCHMARK_REQUIRE_SEED_DUMP=1,
 # refuses to boot at all. Keying by major lets mismatched clients coexist rather
 # than clobber each other.
-_SEED_DUMP_CLIENT_MAJOR="$(
-    if [ "${USE_SYSTEM_PG:-false}" = "true" ]; then
-        # Anchor at the first X.Y in the string. The Ubuntu package suffix
-        # (e.g. "16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)") contains a later
-        # "24.04" that a greedy "last X.Y" sed mistakenly treats as the major.
-        pg_dump --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/'
-    else
-        echo 16 # the pinned postgres:16-alpine container below writes the archive
-    fi
-)"
-[ -n "$_SEED_DUMP_CLIENT_MAJOR" ] || _SEED_DUMP_CLIENT_MAJOR=unknown
+_SEED_DUMP_CLIENT_MAJOR="$(benchmark_seed_client_major "${USE_SYSTEM_PG:-false}")"
 _SEED_CACHE_TOKEN="$(benchmark_base_cache_token back-end/prisma/schema.prisma "$_SEED_DUMP_CLIENT_MAJOR")"
 # R2 creds live in back-end/.env (run.sh does not export them to its shell), so
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
@@ -1144,7 +1173,10 @@ if [ "$USER_EXISTS" = "0" ]; then
     _seed_ok=0
     for _seed_try in 1 2 3; do
         _seed_rc=0
-        (cd back-end && npx tsx scripts/seed-local.ts) || _seed_rc=$?
+        # Bound V8 old space so a delayed GC cannot retain COPY-stream buffers through
+        # LocalStorage/IndexedDB and spike the cold seed above its RSS ratchet.
+        (cd back-end && NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
+            npx tsx scripts/seed-local.ts) || _seed_rc=$?
         if [ "$_seed_rc" = 0 ]; then _seed_ok=1; break; fi
         _seed_signal=""
         case "$_seed_rc" in
@@ -1221,8 +1253,13 @@ fi   # end: if $DB_RESTORED / else (push + seed + dump)
 
 # Restored dumps and schema pushes must both carry the hand-written production
 # functions/triggers that Prisma cannot represent.
-(cd back-end && DB_CONTAINER="$DB_CONTAINER" LOCAL_DB_NAME="$LOCAL_DB_NAME" \
-    bash scripts/apply-local-workflow-ddl.sh)
+if $USE_SYSTEM_PG; then
+    (cd back-end && unset DB_CONTAINER && LOCAL_DB_NAME="$LOCAL_DB_NAME" \
+        ROSE_USE_SYSTEM_PG=true bash scripts/apply-local-workflow-ddl.sh)
+else
+    (cd back-end && DB_CONTAINER="$DB_CONTAINER" LOCAL_DB_NAME="$LOCAL_DB_NAME" \
+        bash scripts/apply-local-workflow-ddl.sh)
+fi
 
 # ── Pre-flight: ensure node_modules exist for all JS services ──
 JS_SVC_DIRS=(back-end front-end)
@@ -1232,11 +1269,16 @@ fi
 bash "$SCRIPT_DIR/ensure-workspace-dependencies.sh" "${JS_SVC_DIRS[@]}"
 
 # ── Pre-flight: ensure agents venv exists with deps installed ──
-if [ ! -f agents/venv/bin/activate ] || ! agents/venv/bin/python -c "import temporalio" 2>/dev/null; then
+if [ ! -f agents/venv/bin/activate ] \
+    || ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
     echo "🐍 Setting up agents virtualenv..."
     PYTHON_VERSION=$(cat agents/.python-version 2>/dev/null || echo "3.11")
-    # Try asdf python first, then system python3
-    PYTHON_BIN="$(asdf where python "$PYTHON_VERSION" 2>/dev/null)/bin/python3" || true
+    # Try asdf python first, then PATH's python3. A failed lookup must not leave
+    # "/bin/python3" (the system interpreter) as the candidate.
+    PYTHON_BIN=""
+    if ASDF_PYTHON_ROOT="$(asdf where python "$PYTHON_VERSION" 2>/dev/null)" && [ -n "$ASDF_PYTHON_ROOT" ]; then
+        PYTHON_BIN="$ASDF_PYTHON_ROOT/bin/python3"
+    fi
     if [ ! -x "$PYTHON_BIN" ]; then
         PYTHON_BIN=$(command -v python3)
     fi
@@ -1430,7 +1472,7 @@ PY
         echo "$create_output"
         # Reservation is advisory. ERR_NGROK_415 (account at the 100 reserved-
         # domain cap) and other create rejections must not tear down the stack —
-        # the agent bind (or ephemeral/cloudflare/localtunnel fallback) is the
+        # the agent bind (or ephemeral/cloudflare fallback) is the
         # authoritative path. Soft callers still see return 1 so they can skip
         # a reserved-domain bind that was never created.
         echo "⚠️  Could not reserve $domain. Continuing — tunnel start / fallback is authoritative."
@@ -1457,11 +1499,6 @@ CLOUDFLARE_TUNNEL_MAX_ATTEMPTS="${CLOUDFLARE_TUNNEL_MAX_ATTEMPTS:-3}"
 # Linear backoff base; attempt N waits N × this before re-requesting.
 CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS="${CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS:-20}"
 
-# True when the tunnel hostname has at least one A/AAAA record. trycloudflare
-# quick tunnels sometimes print a hostname that never gets DNS (NXDOMAIN from
-# 1.1.1.1 / 8.8.8.8 / local resolver) even after "Registered tunnel connection".
-# Curl then reports 000 forever; fail that case early instead of burning the
-# full edge timeout × retry budget.
 # One Cloudflare-edge status probe, supervised from the parent shell.
 #
 # Prints the HTTP status ('' or 000 when unreachable). Extra args are passed to
@@ -1473,11 +1510,24 @@ CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS="${CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECON
 supervised_edge_probe() {
     local url="$1"
     shift
+    local provider=cloudflare expected_origin_port="" local_body_target=""
+    case "${1:-}" in
+        --ngrok-provider)
+            provider=ngrok; expected_origin_port="${2:-}"; shift 2
+            [[ "$expected_origin_port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$expected_origin_port" -le 65535 ] || { printf '000'; return; }
+            ;;
+        --ngrok-local-origin)
+            provider=local-origin; local_body_target="${2:-}"; shift 2
+            [[ "$url" == http://127.0.0.1:*/ ]] && [ -f "$local_body_target" ] && [ ! -L "$local_body_target" ] || { printf '000'; return; }
+            ;;
+    esac
     local curl_timeout="${CLOUDFLARE_TUNNEL_CURL_TIMEOUT_SECONDS:-5}"
     [[ "$curl_timeout" =~ ^[1-9][0-9]*$ ]] || curl_timeout=5
-    local status_file probe_pid probe_deadline status
+    local status_file headers_file probe_body_file probe_pid probe_deadline status
     status_file="$(mktemp "${TMPDIR:-/tmp}/rose-cloudflare-edge.XXXXXX")"
-    curl "$@" -s -o /dev/null -w '%{http_code}' --noproxy '*' \
+    headers_file="$(mktemp "${TMPDIR:-/tmp}/rose-cloudflare-edge-headers.XXXXXX")"
+    probe_body_file="$(mktemp "${TMPDIR:-/tmp}/rose-public-edge-body.XXXXXX")"
+    curl "$@" -s -o "$probe_body_file" -D "$headers_file" -w '%{http_code}' \
         --connect-timeout "$curl_timeout" --max-time "$curl_timeout" "$url" \
         >"$status_file" 2>/dev/null &
     probe_pid=$!
@@ -1493,51 +1543,68 @@ supervised_edge_probe() {
     done
     wait "$probe_pid" 2>/dev/null || true
     status="$(cat "$status_file" 2>/dev/null || true)"
-    rm -f "$status_file"
+    # A configured proxy can answer with its own block page. Only the final
+    # HTTP response identifies the edge; a proxy CONNECT response is earlier.
+    if [ "$provider" = ngrok ]; then
+        if [ "$status" = "400" ] && awk '
+            {
+                line = tolower($0); sub(/\r$/, "", line)
+                if (line ~ /^http\/[0-9.]+[ \t]+[0-9][0-9][0-9]([ \t]|$)/) {
+                    split(line, fields, /[ \t]+/); response_status = fields[2]; code = server = ""; in_headers = 1
+                } else if (line == "") { in_headers = 0 }
+                else if (in_headers && line ~ /^ngrok-error-code:[ \t]*err_ngrok_8012[ \t]*$/) { code = "err_ngrok_8012" }
+                else if (in_headers && line ~ /^server:/) { server = line; sub(/^server:[ \t]*/, "", server) }
+            }
+            END { exit !(response_status == "400" && code == "err_ngrok_8012" && (server == "" || server == "ngrok")) }
+        ' "$headers_file"; then
+            : # Actual provider response: this owned agent received traffic before its origin starts.
+        elif [ "$status" = "200" ] && grep -qF '<div id="root">' "$probe_body_file"; then
+            local origin_body_file origin_status
+            origin_body_file="$(mktemp "${TMPDIR:-/tmp}/rose-local-origin-body.XXXXXX")"
+            origin_status="$(supervised_edge_probe "http://127.0.0.1:$expected_origin_port/" --ngrok-local-origin "$origin_body_file" -4)"
+            if [ "$origin_status" != "200" ] || ! cmp -s "$probe_body_file" "$origin_body_file"; then
+                status=000
+            fi
+            rm -f "$origin_body_file"
+        else
+            status=000
+        fi
+    elif [ "$provider" = local-origin ]; then
+        if [ "$status" = "200" ] && grep -qF '<div id="root">' "$probe_body_file"; then
+            cp "$probe_body_file" "$local_body_target"
+        else
+            status=000
+        fi
+    elif [ -n "$status" ] && [ "$status" != "000" ] && ! awk -v expected_status="$status" '
+        {
+            line = tolower($0)
+            sub(/\r$/, "", line)
+            if (line ~ /^http\/[0-9.]+[ \t]+[0-9][0-9][0-9]([ \t]|$)/) {
+                split(line, fields, /[ \t]+/)
+                response_status = fields[2]
+                server = ray = 0
+                in_headers = 1
+            } else if (line == "") {
+                in_headers = 0
+            } else if (in_headers && line ~ /^server:[ \t]*cloudflare[ \t]*$/) {
+                server = 1
+            } else if (in_headers && line ~ /^cf-ray:[ \t]*[^ \t]+/) {
+                ray = 1
+            }
+        }
+        END { exit !(response_status == expected_status && server && ray) }
+    ' "$headers_file"; then
+        status=000
+    fi
+    rm -f "$status_file" "$headers_file" "$probe_body_file"
     printf '%s' "$status"
-}
-
-public_tunnel_hostname_resolves() {
-    local url="$1" host
-    host="${url#https://}"
-    host="${host%%/*}"
-    [ -n "$host" ] || return 1
-    if command -v getent >/dev/null 2>&1 && getent ahosts "$host" >/dev/null 2>&1; then
-        return 0
-    fi
-    if command -v dig >/dev/null 2>&1; then
-        dig +short A "$host" 2>/dev/null | grep -Eq '^[0-9.]+$' && return 0
-        dig +short AAAA "$host" 2>/dev/null | grep -Eq ':' && return 0
-    fi
-    return 1
 }
 
 cloudflare_tunnel_edge_is_routing() {
     local url="$1" deadline=$((SECONDS + CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS)) status
     local retry_seconds="${CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS:-2}"
-    local started=$SECONDS
-    local dns_grace_seconds="${CLOUDFLARE_TUNNEL_DNS_GRACE_SECONDS:-15}"
     while [ "$SECONDS" -lt "$deadline" ]; do
-        # NXDOMAIN fast-fail is trycloudflare-specific: account-less quick tunnels
-        # can print a hostname that never gets public DNS. Other providers
-        # (ngrok/loca.lt) resolve normally; skip this gate for them so unit tests
-        # with stub hostnames and non-CF providers keep exercising the HTTP path.
-        if [ "${CLOUDFLARE_TUNNEL_SKIP_DNS_CHECK:-0}" != "1" ] &&
-            [[ "$url" == *".trycloudflare.com" || "$url" == *".trycloudflare.com/"* ]] &&
-            ! public_tunnel_hostname_resolves "$url"; then
-            # Hostname never entered DNS — no amount of curling will help.
-            if [ $((SECONDS - started)) -ge "$dns_grace_seconds" ]; then
-                return 1
-            fi
-            sleep "$retry_seconds"
-            continue
-        fi
-        # --noproxy '*': this probe must measure the Cloudflare edge itself, not
-        # an inherited HTTP(S)_PROXY/ALL_PROXY. A proxy corrupts the result in
-        # BOTH directions — it can answer 407/5xx and fake a healthy tunnel, or
-        # (as on a macOS host with a content blocker configured system-wide)
-        # refuse trycloudflare.com outright and report a healthy tunnel as dead.
-        #
+        # Preserve inherited proxy settings, including content-blocker routing.
         # Prefer IPv4 (-4): some Cloud/Linux VMs resolve trycloudflare.com to
         # AAAA first and curl Happy Eyeballs reports http_code 000 on broken
         # IPv6 while the same hostname answers 200/502 over IPv4. Without -4 the
@@ -1554,6 +1621,60 @@ cloudflare_tunnel_edge_is_routing() {
             status="$(supervised_edge_probe "$url")"
         fi
         if [ -n "$status" ] && [ "$status" != "000" ] && [ "$status" != "530" ]; then
+            return 0
+        fi
+        sleep "$retry_seconds"
+    done
+    return 1
+}
+
+ngrok_reported_owned_origin() {
+    local log_file="$1" expected_url="$2" expected_port="$3"
+    python3 - "$log_file" "$expected_url" "$expected_port" <<'PY'
+import json
+import sys
+from pathlib import Path
+from urllib.parse import urlsplit
+
+path, expected_url, expected_port = sys.argv[1:]
+try:
+    port = int(expected_port)
+    parsed = urlsplit(expected_url)
+    if not 1 <= port <= 65535 or parsed.scheme != "https" or not parsed.hostname or parsed.netloc != parsed.hostname or parsed.path or parsed.query or parsed.fragment:
+        raise ValueError("invalid requested endpoint")
+    data = Path(path).read_text()
+    events = []
+    for line in data.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("msg") == "started tunnel":
+            events.append(event)
+    if not events:
+        raise SystemExit(1)
+    if len(events) != 1:
+        raise ValueError("ambiguous emitted endpoints")
+    event = events[0]
+    if event.get("obj") != "tunnels" or event.get("name") != "command_line" or event.get("url") != expected_url or event.get("addr") != f"http://localhost:{port}":
+        raise ValueError("emitted endpoint does not belong to requested upstream")
+except FileNotFoundError:
+    raise SystemExit(1)
+except (OSError, ValueError):
+    raise SystemExit(2)
+print(expected_url)
+PY
+}
+
+ngrok_tunnel_edge_is_routing() {
+    local url="$1" expected_port="$2" deadline=$((SECONDS + CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS)) status
+    local retry_seconds="${CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS:-2}"
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        status="$(supervised_edge_probe "$url" --ngrok-provider "$expected_port" -4)"
+        if [ -z "$status" ] || [ "$status" = "000" ]; then
+            status="$(supervised_edge_probe "$url" --ngrok-provider "$expected_port")"
+        fi
+        if [ "$status" = "400" ] || [ "$status" = "200" ]; then
             return 0
         fi
         sleep "$retry_seconds"
@@ -1603,19 +1724,6 @@ start_cloudflare_quick_tunnel() {
                 return 0
             fi
             echo "⚠️  $PUBLIC_BASE_URL never routed within ${CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS}s; recycling the quick tunnel."
-            # NXDOMAIN across public resolvers means more quick-tunnel attempts
-            # from this IP will almost certainly fail the same way — fall through
-            # to ngrok/localtunnel instead of burning ~minutes of backoff.
-            if ! public_tunnel_hostname_resolves "$PUBLIC_BASE_URL"; then
-                echo "⚠️  $PUBLIC_BASE_URL has no DNS (NXDOMAIN); skipping remaining quick-tunnel attempts."
-                kill "$NGROK_PID" 2>/dev/null || true
-                wait "$NGROK_PID" 2>/dev/null || true
-                unset 'PIDS[${#PIDS[@]}-1]' 'NAMES[${#NAMES[@]}-1]'
-                NGROK_PID=""
-                echo "⚠️  cloudflared could not obtain a routable quick tunnel for :$FRONTEND_PORT (DNS never provisioned)."
-                echo "   trycloudflare.com is account-less and best-effort."
-                return 1
-            fi
         fi
 
         # Retire this hostname before asking Cloudflare for a new one, so the dead
@@ -1638,66 +1746,6 @@ start_cloudflare_quick_tunnel() {
     echo "⚠️  cloudflared could not obtain a routable quick tunnel for :$FRONTEND_PORT after $CLOUDFLARE_TUNNEL_MAX_ATTEMPTS attempts."
     echo "   trycloudflare.com is account-less and best-effort."
     return 1
-}
-
-# Last-resort public tunnel when trycloudflare DNS is dead AND ngrok has no
-# authtoken (common on Cursor Cloud VMs: NGROK_API_KEY present but invalid,
-# NGROK_AUTHTOKEN unset). loca.lt is already allowlisted in authRealm + browser
-# agent crypto; no account required.
-start_localtunnel_public_tunnel() {
-    if ! command -v npx >/dev/null 2>&1; then
-        echo "   localtunnel fallback unavailable: npx is not installed."
-        return 1
-    fi
-
-    mkdir -p "$RUN_CONTEXT_DIR"
-    local lt_log="$RUN_CONTEXT_DIR/localtunnel.log"
-    echo "🌐 Falling back to localtunnel (loca.lt) → localhost:$FRONTEND_PORT"
-    # --yes: non-interactive install of the CLI if missing from the cache.
-    npx --yes localtunnel --port "$FRONTEND_PORT" > "$lt_log" 2>&1 &
-    NGROK_PID=$!
-    PUBLIC_TUNNEL_SERVICE_NAME="localtunnel"
-    PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
-
-    local lt_url=""
-    for attempt in $(seq 1 45); do
-        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
-            echo "❌ localtunnel exited before publishing a tunnel."
-            tail -20 "$lt_log" || true
-            return 1
-        fi
-        lt_url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.loca\.lt' "$lt_log" 2>/dev/null | head -1 || true)"
-        [ -n "$lt_url" ] && break
-        sleep 1
-    done
-    [ -n "$lt_url" ] || {
-        echo "❌ localtunnel did not publish an HTTPS endpoint."
-        tail -20 "$lt_log" || true
-        return 1
-    }
-
-    public_tunnel_publish_environment "$lt_url" "$ALLOWED_ORIGINS" || {
-        echo "❌ localtunnel published an unusable origin: $lt_url"
-        return 1
-    }
-
-    # loca.lt does NOT return 502 when the origin is down — the request hangs
-    # until the client times out (curl http_code 000). The Cloudflare-style
-    # edge probe therefore falsely fails here because the frontend is started
-    # AFTER the public tunnel. Verify DNS + process liveness now; HTTP proof
-    # is deferred to scripts/test-public-tunnel.sh once vite is up.
-    echo "🔎 Verifying localtunnel DNS + process: $PUBLIC_BASE_URL"
-    if ! public_tunnel_hostname_resolves "$PUBLIC_BASE_URL"; then
-        echo "❌ $PUBLIC_BASE_URL has no DNS."
-        return 1
-    fi
-    if ! kill -0 "$NGROK_PID" 2>/dev/null; then
-        echo "❌ localtunnel process exited after publishing $PUBLIC_BASE_URL."
-        tail -20 "$lt_log" || true
-        return 1
-    fi
-    echo "🌐 Public tunnel ready (localtunnel; HTTP verify deferred until frontend up): $PUBLIC_BASE_URL"
-    return 0
 }
 
 # Fallback provider when trycloudflare is unavailable.
@@ -1740,10 +1788,16 @@ start_ngrok_ephemeral_tunnel() {
     # relies on exactly that. Gating the domain on the API key would silently
     # drop every fallback back onto the shared free endpoint, which is the
     # collision this is here to prevent.
+    #
+    # An isolated benchmark run is named "<worktree>-bench-<run id>", so its
+    # fallback domain is unique per run. Reserving it would leave one permanent
+    # reservation per run until the account's reserved-domain cap is full and
+    # every new worktree loses its primary domain. Run-scoped names are bound
+    # without a reservation; only the per-worktree name is reserved.
     local fallback_label fallback_domain
     fallback_label="$(dns_label_from_workspace)" || return 1
     fallback_domain="rose-${fallback_label}-bench.${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
-    if [ -n "${NGROK_API_KEY:-}" ]; then
+    if [ -n "${NGROK_API_KEY:-}" ] && [[ "${CONDUCTOR_WORKSPACE_NAME:-}" != *-bench-* ]]; then
         ensure_ngrok_domain_reserved "$fallback_domain" soft ||
             echo "   Proceeding without pre-reservation of $fallback_domain."
     fi
@@ -1769,8 +1823,12 @@ start_ngrok_ephemeral_tunnel() {
             tail -20 "$ngrok_log" || true
             return 1
         fi
-        ngrok_url="$(grep -oE '"url":"https://[^"]+"' "$ngrok_log" 2>/dev/null |
-            head -1 | sed 's/"url":"//; s/"$//')"
+        local reported_status=0
+        ngrok_url="$(ngrok_reported_owned_origin "$ngrok_log" "https://$fallback_domain" "$FRONTEND_PORT")" || reported_status=$?
+        if [ "$reported_status" = "2" ]; then
+            echo "❌ ngrok emitted an endpoint that does not match this run's requested origin/upstream."
+            return 1
+        fi
         [ -n "$ngrok_url" ] && break
         sleep 1
     done
@@ -1786,7 +1844,7 @@ start_ngrok_ephemeral_tunnel() {
     }
 
     echo "🔎 Verifying the ngrok edge routes: $PUBLIC_BASE_URL"
-    cloudflare_tunnel_edge_is_routing "$PUBLIC_BASE_URL" || {
+    ngrok_tunnel_edge_is_routing "$PUBLIC_BASE_URL" "$FRONTEND_PORT" || {
         echo "❌ $PUBLIC_BASE_URL never routed."
         return 1
     }
@@ -1829,8 +1887,8 @@ reap_failed_ngrok_tunnel() {
 start_ngrok_public_tunnel() {
     if ! command -v ngrok >/dev/null 2>&1; then
         # Must use ngrok_public_tunnel_fail: in cloudflare/ephemeral mode this
-        # function is a non-fatal fallback and a bare `exit 1` would skip
-        # localtunnel and tear down the whole stack.
+        # function is a non-fatal fallback and a bare `exit 1` would tear down
+        # the whole stack before the caller can report what it tried.
         ngrok_public_tunnel_fail "❌ ngrok is required for scripts/run.sh. Install it and configure an authtoken." || return 1
     fi
     if [ -z "${NGROK_AUTHTOKEN:-}" ]; then
@@ -1928,14 +1986,10 @@ start_public_tunnel() {
             # run when trycloudflare will not route.
             start_cloudflare_quick_tunnel && return 0
             start_ngrok_ephemeral_tunnel && return 0
-            # No ngrok credentials at all → skip the reserved-domain path (it
-            # cannot succeed) and go straight to account-less localtunnel.
-            # Previously start_ngrok_public_tunnel used bare `exit 1` here, which
-            # tore down the stack before localtunnel could run (Cloud AgentCard).
+            # No ngrok credentials at all → the reserved-domain path cannot
+            # succeed either.
             if [ -z "${NGROK_AUTHTOKEN:-}" ] && ! ngrok config check >/dev/null 2>&1; then
-                echo "⚠️  cloudflare unavailable and ngrok has no authtoken; trying localtunnel." >&2
-                start_localtunnel_public_tunnel && return 0
-                echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, then localtunnel; ngrok unconfigured)." >&2
+                echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare; ngrok has no authtoken)." >&2
                 echo "   Set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin." >&2
                 echo "   Or set NGROK_AUTHTOKEN for the ngrok fallback." >&2
                 exit 1
@@ -1987,16 +2041,35 @@ start_public_tunnel() {
             fi
             NGROK_PUBLIC_TUNNEL_NONFATAL=0
             [ -n "$saved_ngrok_api_key" ] && export NGROK_API_KEY="$saved_ngrok_api_key"
-            # Cursor Cloud / Linux VMs often have trycloudflare NXDOMAIN + no
-            # ngrok authtoken. localtunnel (loca.lt) needs neither.
-            reap_failed_ngrok_tunnel
-            start_localtunnel_public_tunnel && return 0
-            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, ephemeral ngrok, worktree domain, localtunnel)." >&2
+            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, ephemeral ngrok, worktree domain)." >&2
             echo "   Set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin." >&2
             echo "   Or set NGROK_AUTHTOKEN for the ngrok fallback." >&2
             exit 1
             ;;
-        ngrok) start_ngrok_public_tunnel ;;
+        ngrok)
+            # The worktree domain is account-wide, and cloud VMs booted from one
+            # environment snapshot share the same .cloud-env workspace name, so
+            # a sibling can already hold it. Take an account-less origin for
+            # this stack instead of dying; every other ngrok failure stays fatal.
+            local origins_before_ngrok="$ALLOWED_ORIGINS"
+            NGROK_PUBLIC_TUNNEL_NONFATAL=1
+            if start_ngrok_public_tunnel; then
+                NGROK_PUBLIC_TUNNEL_NONFATAL=0
+                return 0
+            fi
+            NGROK_PUBLIC_TUNNEL_NONFATAL=0
+            ngrok_log_reports_endpoint_online_elsewhere "$RUN_CONTEXT_DIR/ngrok.log" || exit 1
+            echo "⚠️  ${WORKTREE_DOMAIN:-The reserved ngrok domain} is online in another ngrok session; using an account-less tunnel for this stack." >&2
+            reap_failed_ngrok_tunnel
+            unset PUBLIC_BASE_URL WORKTREE_DOMAIN VITE_ALLOWED_HOSTS 2>/dev/null || true
+            export ALLOWED_ORIGINS="$origins_before_ngrok"
+            if command -v cloudflared >/dev/null 2>&1; then
+                start_cloudflare_quick_tunnel && return 0
+                export ALLOWED_ORIGINS="$origins_before_ngrok"
+            fi
+            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (reserved ngrok domain held elsewhere; tried cloudflare)." >&2
+            exit 1
+            ;;
         *) echo "❌ Invalid public tunnel mode." >&2; exit 2 ;;
     esac
 }
@@ -2039,6 +2112,7 @@ for index, name in enumerate(names):
 
 root = os.getcwd()
 context_dir = os.environ.get("RUN_CONTEXT_DIR") or ".context"
+use_system_postgres = os.environ.get("USE_SYSTEM_PG", "false").lower() == "true"
 data = {
     "schema_version": 1,
     "status": os.environ.get("SERVICE_STATUS", "unknown"),
@@ -2070,14 +2144,18 @@ data = {
     "temporal_task_queue": os.environ.get("TEMPORAL_TASK_QUEUE", ""),
     "wmh_model_name": os.environ.get("WMH_MANIFEST_MODEL_NAME", ""),
         "database": {
-            "container": os.environ.get("DB_CONTAINER", ""),
-            "volume": os.environ.get("DB_VOLUME", ""),
+            "container": ""
+            if use_system_postgres
+            else os.environ.get("DB_CONTAINER", ""),
+            "volume": ""
+            if use_system_postgres
+            else os.environ.get("DB_VOLUME", ""),
             "owned_by_run_sh": os.environ.get("DB_OWNED_BY_US", "false").lower() == "true",
-            "use_system_postgres": os.environ.get("USE_SYSTEM_PG", "false").lower() == "true",
+            "use_system_postgres": use_system_postgres,
             "name": os.environ.get("LOCAL_DB_NAME", "victoria"),
             "port": env_int("LOCAL_DB_ACTUAL_PORT"),
             "runtime_port": 5432
-            if os.environ.get("USE_SYSTEM_PG", "false").lower() == "true"
+            if use_system_postgres
             else env_int("LOCAL_DB_PORT"),
         },
     "env": {
@@ -2322,12 +2400,46 @@ kill_tree_hard() {
     done
 }
 
+# Each isolated benchmark run bundles its own ~220MB frontend keyed by run id and
+# nothing reads it after the run; 36 leaked bundles filled the host disk. Shared
+# (port-keyed) bundles are reused across restarts and stay.
+remove_isolated_frontend_build() {
+    [ "$BENCHMARK_ISOLATED_RUN" = "true" ] || return 0
+    [ -n "${FRONTEND_DIST_DIR:-}" ] || return 0
+    case "$(basename "$FRONTEND_DIST_DIR")" in
+        shared_*) return 0 ;;
+    esac
+    case "$FRONTEND_DIST_DIR" in
+        */.context/frontend-builds/*) rm -rf "$FRONTEND_DIST_DIR" ;;
+    esac
+}
+
 cleanup() {
     if $SHUTTING_DOWN; then return; fi
     SHUTTING_DOWN=true
+    local cleanup_failed=false
     echo "🛑 Stopping all services... (triggered by: $(caller 0 2>/dev/null || echo 'EXIT trap'), DB_OWNED_BY_US=$DB_OWNED_BY_US)"
+    if ! run_publish_stack_cleanup_status pending; then
+        echo "❌ could not publish pending stack cleanup status; continuing teardown" >&2
+        cleanup_failed=true
+    fi
+    # Workers finalize recordings and close providers through this backend.
+    # Drain their single signal owner while the backend/database remain alive.
+    if ! run_drain_owned_agents; then
+        cleanup_failed=true
+        run_publish_stack_cleanup_status failed || true
+        # A nonzero exit is a failed cleanup receipt, but a reaped worker must
+        # not orphan the rest of the owned stack. Keep services for recovery
+        # only when the supervisor's terminal state remains unproven.
+        if [ "${AGENTS_DRAINED:-false}" != true ]; then
+            SERVICE_STATUS=failed
+            write_services_manifest || true
+            return 1
+        fi
+    fi
     # Kill only the process trees we spawned (SIGTERM then SIGKILL)
     for pid in "${PIDS[@]}"; do
+        [ "$pid" != "${AGENTS_PID:-}" ] || continue
         if [ -n "${BACKEND_PID:-}" ] && [ "$pid" = "$BACKEND_PID" ] \
             && [ -n "${BACKEND_PGID:-}" ]; then
             terminate_backend_group || true
@@ -2353,7 +2465,13 @@ cleanup() {
     write_services_manifest || true
     [ -n "$NGROK_CONFIG_FILE" ] && rm -f "$NGROK_CONFIG_FILE"
     [ -n "$FAIL_DIR" ] && rm -rf "$FAIL_DIR"
+    remove_isolated_frontend_build
     wait 2>/dev/null
+    if $cleanup_failed; then
+        run_publish_stack_cleanup_status failed
+        return 1
+    fi
+    run_publish_stack_cleanup_status clean
 }
 trap 'release_seed_lock_if_held; cleanup' EXIT
 
@@ -2470,7 +2588,17 @@ launch_backend_service() {
                     set +e
                     cd back-end || exit 1
                     rm -f "$BACKEND_LOG_FILE"
-                    PORT="$BACKEND_PORT" npx tsx src/bootstrap.ts > "$BACKEND_LOG_FILE" 2>&1
+                    # Launch the server process directly. `npx tsx` adds npm and
+                    # tsx CLI parents; losing either parent ends this stack even
+                    # while the actual backend is still serving requests.
+                    # The tsx --import hook needs module.register (Node 18.19+
+                    # or 20.6+). Older supported Node versions use --loader.
+                    # Node 18.18 has --import but cannot load tsx through it.
+                    if node -e "process.exit(typeof require(\"node:module\").register === \"function\" ? 0 : 1)"; then
+                        PORT="$BACKEND_PORT" node --import tsx src/bootstrap.ts > "$BACKEND_LOG_FILE" 2>&1
+                    else
+                        PORT="$BACKEND_PORT" node --loader tsx src/bootstrap.ts > "$BACKEND_LOG_FILE" 2>&1
+                    fi
                     code=$?
                     if [ "$code" -ne 0 ]; then
                         printf "%s\n" back-end > "$FAIL_DIR/failed"
@@ -2502,7 +2630,10 @@ terminate_backend_group() {
         sleep 1
     done
     [ "$still_alive" = 0 ] || kill -KILL -- "-$pgid" 2>/dev/null || true
-    for _ in 1 2 3 4 5; do
+    # A TERM-ignoring descendant may take another scheduler turn to disappear
+    # after group KILL on a loaded cloud host. Keep the exact group fence until
+    # it is gone; never start a replacement against a still-live backend.
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         kill -0 -- "-$pgid" 2>/dev/null || { still_alive=0; break; }
         still_alive=1
         sleep 0.2
@@ -2600,8 +2731,11 @@ if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
             FRONTEND_BUILD_NODE_OPTIONS="${FRONTEND_BUILD_NODE_OPTIONS:+$FRONTEND_BUILD_NODE_OPTIONS }--max-old-space-size=${BENCHMARK_FRONTEND_BUILD_OLD_SPACE_MB:-3584}"
             ;;
     esac
+    # The preview server proxies /api to the backend, so the bundle calls the
+    # origin that served it. Baking the public tunnel in would route every local
+    # browser request through the tunnel and break the stack when it drops.
     (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
-        NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" \
+        NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_SAME_ORIGIN=true \
         VITE_ENABLE_REACT_GRAB=false VITE_REALTIME_PRIVATE=false \
         npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir > "$FRONTEND_LOG_FILE" 2>&1)
 fi
@@ -2619,18 +2753,30 @@ fi
 FRONTEND_PID=$!
 PIDS+=("$FRONTEND_PID"); NAMES+=("front-end")
 
+# On isolated cloud benches, eight workers and the backend otherwise import at
+# once on a shared-CPU guest. The workers can starve the backend past its
+# readiness bound even though both services are healthy in isolation. Let the
+# backend finish booting before starting workers; the task barrier still waits
+# for the full worker/autoscaler readiness contract below.
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+    wait_for_isolated_backend_ready || {
+        echo "❌ isolated backend failed both supervised startup attempts" >&2
+        exit 1
+    }
+fi
+
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
 if ! $BENCHMARK_MODE && $IS_MAC; then
     run_service "mac-app" bash -c 'set -eo pipefail; cd mac-app && source ~/.nvm/nvm.sh && nvm use 20.10.0 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log' &
     PIDS+=($!); NAMES+=("mac-app")
 fi
 
-if $BENCHMARK_MODE; then
-    run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && ENABLE_BENCHMARK_MEMORY_BASELINE=1 HEALTH_CHECK_PORT=$HEALTH_PORT SDK_METRICS_PORT=$SDK_METRICS_PORT ./scripts/run_local_worker.sh' &
-else
-    run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && HEALTH_CHECK_PORT=$HEALTH_PORT SDK_METRICS_PORT=$SDK_METRICS_PORT ./scripts/run_local_worker.sh' &
-fi
-PIDS+=($!); NAMES+=("agents")
+if $BENCHMARK_MODE; then export ENABLE_BENCHMARK_MEMORY_BASELINE=1; fi
+python3 "$SCRIPT_DIR/run-in-new-session.py" bash -c \
+    'set -eo pipefail; cd agents; source venv/bin/activate; export HEALTH_CHECK_PORT=$HEALTH_PORT; exec ./scripts/run_local_worker.sh' &
+AGENTS_PID=$!
+AGENTS_BIRTH="$(ps -p "$AGENTS_PID" -o lstart= | sed 's/^ *//;s/ *$//')"
+PIDS+=("$AGENTS_PID"); NAMES+=("agents")
 
 # Benchmark Hub poller: claims runs dispatched from the in-app Benchmarks tab
 # and executes them on this machine. Without it a dispatched run sits queued
@@ -2645,13 +2791,6 @@ fi
 # trace corpus and serves on WMH_PORT; sets WMH_BASE_URL/WMH_MODEL_NAME + manifest
 # fields when it comes up. A no-op on plain (non-benchmark) run.sh.
 start_world_model_harness
-
-if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
-    wait_for_isolated_backend_ready || {
-        echo "❌ isolated backend failed both supervised startup attempts" >&2
-        exit 1
-    }
-fi
 
 wait_for_frontend_ready "$FRONTEND_PID" "$FRONTEND_PORT" "$FRONTEND_LOG_FILE" || exit 1
 
@@ -2707,6 +2846,7 @@ while true; do
     # Check if any process has died
     for i in "${!PIDS[@]}"; do
         pid="${PIDS[$i]}"
+        if [ "$pid" = "${AGENTS_PID:-}" ] && [ "${AGENTS_DRAINED:-false}" = true ]; then continue; fi
         if ! kill -0 "$pid" 2>/dev/null; then
             # Process is gone — get its exit code
             # `run.sh` uses `set -e`; a bare non-zero `wait` would trigger the
@@ -2717,8 +2857,7 @@ while true; do
                 code=$?
             fi
             name="${NAMES[$i]}"
-            if [ "$name" = "ngrok" ] && \
-                ! public_tunnel_process_is_required "$name" "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}"; then
+            if public_tunnel_process_is_optional "$name" "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}"; then
                 echo "⚠️  local public tunnel $name (PID $pid) exited with code $code; keeping local services running."
                 unset "PIDS[$i]"
                 unset "NAMES[$i]"

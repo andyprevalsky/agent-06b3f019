@@ -3,15 +3,15 @@
 
 Unlike fcaptcha_probe.py (which uses crude Playwright clicks), this connects the
 production `BrowserHumanizer` (synthesize_mouse_path + overshoot + keycap timing)
-to a Steel session and exercises the exact webdecoy task flow: click the FCaptcha
-checkbox, then fill + submit the invisible-mode contact form. It injects the same
-`_ANTI_DETECTION_SCRIPT` the agent uses and captures the raw `/api/verify` request
+to a Steel or Browser Use session and exercises the exact webdecoy task flow:
+click the FCaptcha checkbox, then fill + submit the invisible-mode contact form.
+It injects the same `_ANTI_DETECTION_SCRIPT` the agent uses and captures the raw `/api/verify` request
 signals (overshootCorrections, mouseEventRate, coalescedSamples, approachDirectness)
 plus the response detections for EVERY verification, so we can tune the humanizer
 against FCaptcha's exact Go-server thresholds in ~60s instead of a full agent run.
 
 Usage:
-  python tests/e2e/fcaptcha_humanizer_probe.py [--label NAME] [--no-proxy]
+  python tests/e2e/fcaptcha_humanizer_probe.py [--provider steel|browser-use] [--label NAME] [--no-proxy]
 """
 from __future__ import annotations
 
@@ -45,7 +45,22 @@ def steel_key() -> str:
     return k
 
 
-def create_session(use_proxy: bool, solve_captcha: bool = True) -> dict:
+def create_session(use_proxy: bool, solve_captcha: bool = True, provider: str = "steel") -> dict:
+    if provider == "browser-use":
+        body = {
+            "solveCaptchas": solve_captcha,
+            "timeout": 5,
+            "proxyCountryCode": "us" if use_proxy else None,
+        }
+        r = requests.post(
+            "https://api.browser-use.com/api/v4/browsers",
+            headers={"X-Browser-Use-API-Key": os.environ["BROWSER_USE_API_KEY"]},
+            json=body,
+            timeout=45,
+        )
+        if r.status_code >= 400:
+            raise SystemExit(f"Browser Use session create failed {r.status_code}: {r.text[:400]}")
+        return r.json()
     body = {
         "useProxy": use_proxy,
         "solveCaptcha": solve_captcha,
@@ -69,14 +84,22 @@ def create_session(use_proxy: bool, solve_captcha: bool = True) -> dict:
     return r.json()
 
 
-def release(session_id: str) -> None:
+def release(session_id: str, provider: str = "steel") -> None:
     try:
-        requests.post(
-            f"https://api.steel.dev/v1/sessions/{session_id}/release",
-            headers={"steel-api-key": steel_key()},
-            json={},
-            timeout=20,
-        )
+        if provider == "browser-use":
+            requests.patch(
+                f"https://api.browser-use.com/api/v4/browsers/{session_id}",
+                headers={"X-Browser-Use-API-Key": os.environ["BROWSER_USE_API_KEY"]},
+                json={"action": "stop"},
+                timeout=20,
+            ).raise_for_status()
+        else:
+            requests.post(
+                f"https://api.steel.dev/v1/sessions/{session_id}/release",
+                headers={"steel-api-key": steel_key()},
+                json={},
+                timeout=20,
+            ).raise_for_status()
     except Exception:
         pass
 
@@ -154,10 +177,18 @@ async def _center(page, selector):
 async def run(args) -> None:
     from playwright.async_api import async_playwright
 
-    session = create_session(use_proxy=not args.no_proxy, solve_captcha=not args.no_captcha_solver)
+    session = create_session(
+        use_proxy=not args.no_proxy,
+        solve_captcha=not args.no_captcha_solver,
+        provider=args.provider,
+    )
     sid = session["id"]
-    ws = f"wss://connect.steel.dev?apiKey={steel_key()}&sessionId={sid}"
-    print(f"[{args.label}] session={sid} proxy={not args.no_proxy} (real BrowserHumanizer)")
+    ws = (
+        session["cdpUrl"]
+        if args.provider == "browser-use"
+        else f"wss://connect.steel.dev?apiKey={steel_key()}&sessionId={sid}"
+    )
+    print(f"[{args.label}] provider={args.provider} proxy={not args.no_proxy} (real BrowserHumanizer)")
 
     verifications: list[tuple[str, dict, dict]] = []
     pending = {"sig": None, "request": None}
@@ -234,6 +265,9 @@ async def run(args) -> None:
             await page.wait_for_timeout(600)
 
             # 1) Checkbox-mode verification.
+            checkbox = await page.wait_for_selector(".fcaptcha-checkbox", timeout=15000)
+            await checkbox.scroll_into_view_if_needed(timeout=4000)
+            await page.wait_for_timeout(250)
             cx, cy = await _center(page, ".fcaptcha-checkbox")
             if cx is not None:
                 await humanizer.click_at_coords(int(cx), int(cy), overshoot=True)
@@ -286,11 +320,19 @@ async def run(args) -> None:
             await humanizer.close()
             await browser.close()
     finally:
-        release(sid)
+        release(sid, args.provider)
 
-    if not verifications:
-        print(f"[{args.label}] NO verifications captured")
-        return
+    endpoints = {endpoint for endpoint, _, _ in verifications}
+    if not {"verify", "score"}.issubset(endpoints):
+        raise RuntimeError(
+            f"{args.label}: expected both checkbox /api/verify and form /api/score, got {sorted(endpoints)}"
+        )
+    rejected = [
+        endpoint for endpoint, _, response in verifications
+        if response.get("success") is not True or response.get("recommendation") != "allow"
+    ]
+    if rejected:
+        raise RuntimeError(f"{args.label}: FCaptcha rejected {rejected}")
     tags = ["checkbox", "form", "extra3", "extra4"]
     for i, (endpoint, sig, resp) in enumerate(verifications):
         tag = tags[i] if i < len(tags) else f"v{i}"
@@ -300,7 +342,8 @@ async def run(args) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-proxy", action="store_true")
-    ap.add_argument("--no-captcha-solver", action="store_true", help="solveCaptcha=false (frees Steel CPU otherwise spent auto-solving)")
+    ap.add_argument("--provider", choices=("steel", "browser-use"), default="steel")
+    ap.add_argument("--no-captcha-solver", action="store_true", help="disable the provider's automatic CAPTCHA solver")
     ap.add_argument("--label", default="HUMZ")
     asyncio.run(run(ap.parse_args()))
 

@@ -7,22 +7,25 @@ drivers) land in the in-app hub without the dispatch poller:
     BENCHMARK_HUB_API_KEY      internal backend key (falls back to BACKEND_API_KEY)
     BENCHMARK_HUB_USER_ID      attribution (defaults to the benchmark runner user)
 
-Actual benchmark entrypoints register fail-closed before execution. Completed
-bundle uploads remain best-effort only for library callers that did not opt in
-to the required runner contract.
+Cloud fleets retain their publication owner before attempting an early status
+write; transient transport delays warn while execution can continue. Other
+entrypoints retain fail-closed registration. Required terminal uploads and
+their durable verification remain part of the runner contract.
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
-from pathlib import Path
+import re
 import sys
 import time
-from urllib.parse import quote
 import urllib.error
 import urllib.request
+from pathlib import Path
+from urllib.parse import parse_qs, quote, urlparse
 
 # Script-mode (`python agents/benchmarks/hub_upload.py`) puts this file's
 # directory on sys.path, not `agents/`. Cloudbench copies run that way.
@@ -40,6 +43,33 @@ DURABLE_OPEN_AGENT_ORIGIN = "https://www.roselabs.ai"
 
 class HubVisibilityError(RuntimeError):
     """A benchmark could not prove its run is visible in the in-app Hub."""
+
+
+def _safe_http_error_metadata(error: urllib.error.HTTPError) -> dict:
+    """Keep upstream correlation without reading bodies or reflecting arbitrary headers."""
+    result = {"status": error.code}
+    headers = error.headers or {}
+    for name, pattern in (
+        ("CF-Ray", r"[0-9a-fA-F]{16,32}-[A-Z]{3}"),
+        ("Rndr-Id", r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"),
+        ("X-Request-Id", r"[0-9a-fA-F]{12}"),
+        ("X-Span-Id", r"[0-9a-fA-F]{12}"),
+    ):
+        value = headers.get(name, "")
+        if re.fullmatch(pattern, value):
+            result[name.lower().replace("-", "_")] = value
+    content_type = headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if content_type in {"application/json", "text/html", "text/plain", "application/octet-stream"}:
+        result["content_type"] = content_type
+    server = headers.get("Server", "").lower()
+    if server in {"cloudflare", "render", "nginx"}:
+        result["server"] = server
+    if headers.get("CF-Mitigated") == "challenge":
+        result["cf_mitigated"] = "challenge"
+    length = headers.get("Content-Length", "")
+    if re.fullmatch(r"[0-9]{1,10}", length):
+        result["content_length"] = int(length)
+    return result
 
 
 def upload_timeout_for_payload(payload_bytes: int, *, base_timeout: float = 30.0) -> float:
@@ -61,9 +91,7 @@ def hub_upload_enabled() -> bool:
 def is_ephemeral_hub_url(url: str | None) -> bool:
     """True when a Hub URL dies with the local/isolated stack that hosts it."""
     candidate = (url or "").rstrip("/")
-    return candidate.startswith("http://localhost") or candidate.startswith(
-        "http://127.0.0.1"
-    )
+    return candidate.startswith("http://localhost") or candidate.startswith("http://127.0.0.1")
 
 
 def durable_open_agent_url(agent_id: str) -> str:
@@ -103,6 +131,7 @@ def _hub_url(*, required: bool) -> str:
     configured = (os.getenv("BENCHMARK_HUB_UPLOAD_URL") or "").rstrip("/")
     return configured or (DEFAULT_HUB_URL if required else "")
 
+
 def _auth_headers(*, required: bool) -> dict[str, str] | None:
     key = os.getenv("BENCHMARK_HUB_API_KEY") or os.getenv("BACKEND_API_KEY") or ""
     if not key:
@@ -116,6 +145,13 @@ def _auth_headers(*, required: bool) -> dict[str, str] | None:
         "X-User-Id": user_id,
         "Content-Type": "application/json",
     }
+
+
+def _hub_opener(url: str):
+    """Keep loopback local and preserve configured routing for external Hubs."""
+    if urlparse(url).hostname in {"localhost", "127.0.0.1", "::1"}:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener()
 
 
 _TOOL_USAGE_TREE_KEYS = frozenset(
@@ -199,6 +235,11 @@ def prepare_run_bundle_for_upload(bundle: dict, *, live: bool = False, required:
             continue
         task = dict(task)
         logs = dict(task.get("logs") or {})
+        # The Hub renders messages/tree. Diagnostic process/event logs remain
+        # in the unchanged local bundle and forensic archive; sending those
+        # duplicated blobs with every task can exceed the decoded HTTP limit.
+        for diagnostic in ("worker_logs", "backend_logs", "realtime_logs"):
+            logs.pop(diagnostic, None)
         raw_tree = logs.get("tree")
         tree = canonicalize_agent_tree(raw_tree)
         if raw_tree and not tree:
@@ -231,6 +272,8 @@ def _post_run_bundle(
     live: bool,
     required: bool,
     label: str,
+    verify_live_response: bool = False,
+    max_attempts: int | None = None,
 ) -> bool:
     headers = _auth_headers(required=required)
     if headers is None:
@@ -239,6 +282,8 @@ def _post_run_bundle(
     body.setdefault("source", "manual-run")
     payload = json.dumps(body, default=str).encode("utf-8")
     effective_timeout = upload_timeout_for_payload(len(payload), base_timeout=timeout)
+    payload = gzip.compress(payload, mtime=0)
+    headers = {**headers, "Content-Encoding": "gzip"}
     suffix = "?live=1" if live else ""
     request = urllib.request.Request(
         f"{base.rstrip('/')}/api/benchmarks/runs{suffix}",
@@ -246,34 +291,59 @@ def _post_run_bundle(
         headers=headers,
         method="POST",
     )
-    # Localhost hub URLs must never route through an ambient HTTP proxy
-    # (e.g. the fast-mode proxy) — same trap as archive_api's _direct_opener.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    max_attempts = 4 if required else 1
+    opener = _hub_opener(base)
+    max_attempts = max_attempts if max_attempts is not None else (4 if required else 1)
+    if max_attempts < 1:
+        raise ValueError("Hub upload attempts must be positive")
     for attempt in range(1, max_attempts + 1):
         try:
             with opener.open(request, timeout=effective_timeout) as response:
                 ok = 200 <= response.status < 300
+                if ok and verify_live_response:
+                    stored = json.loads(response.read(1024 * 1024)).get("run") or {}
+                    ok = live_response_matches(body, stored)
                 if ok:
                     print(f"📤 uploaded run bundle to {label}: {body.get('run_id')}")
                 return ok
         except Exception as exc:
-            retryable = not isinstance(exc, urllib.error.HTTPError) or exc.code in {
-                408,
-                425,
-                429,
-            } or exc.code >= 500
+            if isinstance(exc, urllib.error.HTTPError):
+                try:
+                    metadata = json.dumps(_safe_http_error_metadata(exc), sort_keys=True)
+                    failure = f"HTTP Error {exc.code}; response_metadata={metadata}"
+                finally:
+                    exc.close()
+            else:
+                failure = str(exc)
+            retryable = (
+                exc.code in {408, 425, 429} or exc.code >= 500
+                if isinstance(exc, urllib.error.HTTPError)
+                else isinstance(exc, (urllib.error.URLError, TimeoutError, OSError))
+            )
+            recovered_visible_run = False
+            run_id = str(body.get("run_id") or "")
+            if required and live and retryable and run_id:
+                try:
+                    verify_run_visible(run_id, timeout=min(timeout, 5.0))
+                    recovered_visible_run = True
+                except HubVisibilityError:
+                    pass
+            if recovered_visible_run:
+                print(
+                    f"✅ benchmark Hub upload attempt {attempt} committed before "
+                    "its response timed out; continuing from verified visibility"
+                )
+                return True
             if required and retryable and attempt < max_attempts:
                 delay = min(2 ** (attempt - 1), 4)
                 print(
                     f"⚠️  benchmark Hub upload attempt {attempt}/{max_attempts} "
-                    f"failed transiently; retrying in {delay}s: {exc}"
+                    f"failed transiently; retrying in {delay}s: {failure}"
                 )
                 time.sleep(delay)
                 continue
             if required:
-                raise HubVisibilityError(f"benchmark Hub upload failed: {exc}") from exc
-            print(f"⚠️  hub upload failed (non-fatal): {exc}")
+                raise HubVisibilityError(f"benchmark Hub upload failed: {failure}") from exc
+            print(f"⚠️  hub upload failed (non-fatal): {failure}")
             return False
     raise AssertionError("unreachable")
 
@@ -284,6 +354,8 @@ def upload_run_bundle(
     timeout: float = 30.0,
     live: bool = False,
     required: bool = False,
+    verify_live_response: bool = False,
+    max_attempts: int | None = None,
 ) -> bool:
     """POST the bundle to the hub. Returns True on success, False otherwise."""
     base = _hub_url(required=required)
@@ -296,7 +368,123 @@ def upload_run_bundle(
         live=live,
         required=required,
         label="hub",
+        verify_live_response=verify_live_response,
+        max_attempts=max_attempts,
     )
+
+
+def live_response_matches(bundle: dict, stored: dict) -> bool:
+    """A terminal-to-live fenced no-op cannot acknowledge a new outcome."""
+
+    def identity(task):
+        passed = task.get("passed")
+        status = "passed" if passed is True else "failed" if passed is False else task.get("status")
+        return (
+            task.get("name"),
+            status,
+            passed,
+            task.get("agent_id"),
+            task.get("lifecycle_stage"),
+            task.get("startup_label"),
+        )
+
+    return (
+        stored.get("live") is True
+        and stored.get("run_id") == bundle.get("run_id")
+        and [identity(t) for t in stored.get("tasks") or []] == [identity(t) for t in bundle["tasks"]]
+    )
+
+
+def live_bundle_from_report_card(card: dict, *, run_id: str, source: str) -> dict:
+    """Project metadata from the same evaluated rows the fleet dashboard renders."""
+    tasks = []
+    for row in card.get("per_task") or []:
+        status = row.get("status") or "running"
+        agent_ids = parse_qs(urlparse(row.get("agent_url") or "").query).get("agent-id") or []
+        cost = row.get("cost_usd")
+        tasks.append(
+            {
+                "name": row["name"],
+                "status": status,
+                "passed": True if status == "passed" else False if status in ("failed", "error") else None,
+                "agent_id": agent_ids[0] if agent_ids else None,
+                "outcome_sha256": row.get("outcome_sha256"),
+                "lifecycle_stage": row.get("lifecycle_stage"),
+                "startup_label": (row.get("startup") or {}).get("label"),
+                "duration_seconds": row.get("duration_s"),
+                "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
+                "world_model_mode": row.get("world_model_mode"),
+                "fast_mode": bool(row.get("fast_mode")),
+                "llm_call_count": row.get("llm_call_count"),
+                "tree_agent_count": row.get("tree_agent_count"),
+                "tokens_in": row.get("tokens_in"),
+                "tokens_out": row.get("tokens_out"),
+            }
+        )
+    return {
+        "run_id": run_id,
+        "timestamp": card.get("timestamp") or "",
+        "source": source,
+        "suite": "cloud-fleet",
+        "tasks": tasks,
+        "code": card.get("code"),
+        "elapsed_s": card.get("elapsed_s"),
+        "cost": card.get("cost"),
+        "metadata": card.get("metadata"),
+    }
+
+
+def publish_live_report_card(card: dict, *, run_id: str, state_path: Path) -> bool:
+    """Publish outcome changes immediately; coalesce ongoing cost/token refreshes."""
+    bundle = live_bundle_from_report_card(card, run_id=run_id, source="direct-cloud-fleet")
+    signature = [
+        (
+            task["name"],
+            task["status"],
+            task["agent_id"],
+            task["outcome_sha256"],
+            task["lifecycle_stage"],
+            task["startup_label"],
+        )
+        for task in bundle["tasks"]
+    ]
+    now = time.time()
+    try:
+        previous = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        previous = {}
+    if not isinstance(previous, dict):
+        previous = {}
+    epoch = previous.get("epoch", 0)
+    if not isinstance(epoch, (int, float)):
+        epoch = 0
+    if previous.get("signature") == [list(row) for row in signature] and now - epoch < 15:
+        return True
+    began = time.monotonic()
+    verified = upload_run_bundle(bundle, live=True, verify_live_response=True)
+    # Only metadata: source-bound transport timing, without bodies, headers,
+    # credentials, request IDs, or free-form provider errors.
+    event = {
+        "epoch": now,
+        "elapsed_seconds": round(time.monotonic() - began, 3),
+        "verified": verified,
+        "task_counts": {
+            status: sum(t["status"] == status for t in bundle["tasks"])
+            for status in {t["status"] for t in bundle["tasks"]}
+        },
+    }
+    try:
+        with state_path.with_suffix(".events.jsonl").open("a") as stream:
+            os.chmod(stream.name, 0o600)
+            stream.write(json.dumps(event) + "\n")
+    except OSError:
+        pass
+    if verified:
+        temporary = state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"signature": signature, "epoch": now}))
+        temporary.replace(state_path)
+        return True
+    return False
 
 
 def mirror_run_bundle_to_durable_hub(
@@ -352,9 +540,7 @@ def print_durable_agent_links(bundle: dict) -> None:
         print(f"🔗 durable FE ({name}): {durable_open_agent_url(str(agent_id))}")
         printed = True
     if printed:
-        print(
-            "   (rehydrates from the in-app Benchmark Hub after the local stack is gone)"
-        )
+        print("   (rehydrates from the in-app Benchmark Hub after the local stack is gone)")
 
 
 def verify_run_visible(run_id: str, *, timeout: float = 30.0) -> None:
@@ -369,7 +555,7 @@ def verify_run_visible(run_id: str, *, timeout: float = 30.0) -> None:
         headers=headers,
         method="GET",
     )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = _hub_opener(base)
     try:
         with opener.open(request, timeout=timeout) as response:
             payload = json.loads(response.read() or b"{}")
@@ -377,9 +563,7 @@ def verify_run_visible(run_id: str, *, timeout: float = 30.0) -> None:
         raise HubVisibilityError(f"benchmark Hub visibility check failed: {exc}") from exc
     visible_id = ((payload.get("run") or {}).get("run_id")) if isinstance(payload, dict) else None
     if visible_id != run_id:
-        raise HubVisibilityError(
-            f"benchmark Hub returned the wrong run after registration: {visible_id!r}"
-        )
+        raise HubVisibilityError(f"benchmark Hub returned the wrong run after registration: {visible_id!r}")
     print(f"✅ in-app Benchmark Hub registration verified: run={run_id}")
 
 
@@ -392,11 +576,31 @@ def require_run_visible(bundle: dict, *, timeout: float = 30.0) -> None:
     verify_run_visible(run_id, timeout=timeout)
 
 
+def register_starting_run(bundle: dict, *, timeout: float = 120.0) -> bool:
+    """Attempt one early status write; transient delay does not abort work."""
+    if not str(bundle.get("run_id") or ""):
+        raise HubVisibilityError("benchmark run_id is required for Hub registration")
+    try:
+        return upload_run_bundle(bundle, timeout=timeout, live=True, required=True, max_attempts=1)
+    except HubVisibilityError as error:
+        cause = error.__cause__
+        if isinstance(cause, urllib.error.HTTPError):
+            retryable = cause.code in {408, 425, 429} or cause.code >= 500
+        else:
+            retryable = isinstance(cause, (urllib.error.URLError, TimeoutError, OSError))
+        if not retryable:
+            raise
+        print("⚠️ initial Hub publication is pending; continuing with owned progress and terminal publication")
+        return False
+
+
 def _main() -> int:
     parser = argparse.ArgumentParser()
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--require-visible", metavar="BUNDLE_JSON")
+    action.add_argument("--register-starting", metavar="BUNDLE_JSON")
     action.add_argument("--upload-final", metavar="BUNDLE_JSON")
+    action.add_argument("--upload-live", metavar="BUNDLE_JSON")
     action.add_argument("--verify-visible", metavar="RUN_ID")
     parser.add_argument("--run-id")
     parser.add_argument("--source", default="direct-benchmark")
@@ -404,15 +608,17 @@ def _main() -> int:
     if args.verify_visible:
         verify_run_visible(args.verify_visible)
         return 0
-    path = Path(args.require_visible or args.upload_final)
+    path = Path(args.require_visible or args.register_starting or args.upload_final or args.upload_live)
     bundle = json.loads(path.read_text())
     if args.run_id:
         bundle["run_id"] = args.run_id
     bundle.setdefault("source", args.source)
     if args.require_visible:
         require_run_visible(bundle)
+    elif args.register_starting:
+        register_starting_run(bundle)
     else:
-        upload_run_bundle(bundle, required=True)
+        upload_run_bundle(bundle, live=bool(args.upload_live), required=True)
     return 0
 
 

@@ -23,14 +23,14 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
 from types import SimpleNamespace
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 
 import httpx
 import structlog
 
-from helpers.trace_archive import archive_bytes, archive_enabled
+from helpers.trace_archive import archive_bytes, archive_enabled, archive_files
 from helpers.tracing import current_root_agent_id
 
 logger = structlog.get_logger()
@@ -43,6 +43,21 @@ _BACKGROUND_RECORDING_ARCHIVE_TASKS: set[asyncio.Task[Any]] = set()
 _BACKGROUND_RECORDING_ARCHIVE_SLOTS = threading.BoundedSemaphore(4)
 
 
+def _archive_recording_directory(output_dir: Path, root_agent_id: str, task_id: str) -> bool:
+    def artifacts():
+        for file_path in output_dir.rglob("*"):
+            if file_path.is_file():
+                content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+                yield (
+                    f"media/browser/{task_id}/{file_path.relative_to(output_dir).as_posix()}",
+                    file_path,
+                    content_type,
+                    False if content_type.startswith(("image/", "video/", "audio/")) else None,
+                )
+
+    return archive_files(root_agent_id=root_agent_id, artifacts=artifacts())
+
+
 def _schedule_background_recording_archive(recorder: Any, *, cleanup_after: bool) -> bool:
     """Bound recording archive work without queueing thousands of filesystem walks."""
     if not _BACKGROUND_RECORDING_ARCHIVE_SLOTS.acquire(blocking=False):
@@ -53,9 +68,9 @@ def _schedule_background_recording_archive(recorder: Any, *, cleanup_after: bool
         )
         return False
 
-    async def _run() -> None:
+    async def _run() -> bool:
         try:
-            await recorder._archive_recording_artifacts()
+            return await recorder._archive_recording_artifacts()
         finally:
             _BACKGROUND_RECORDING_ARCHIVE_SLOTS.release()
 
@@ -66,9 +81,11 @@ def _schedule_background_recording_archive(recorder: Any, *, cleanup_after: bool
         _BACKGROUND_RECORDING_ARCHIVE_TASKS.discard(completed)
         if completed.cancelled():
             return
-        with contextlib.suppress(Exception):
-            completed.result()
-        if cleanup_after:
+        try:
+            archived = completed.result()
+        except Exception:
+            return
+        if cleanup_after and archived:
             recorder.cleanup_local_artifacts(persisted=True)
 
     task.add_done_callback(_finished)
@@ -728,8 +745,8 @@ class SimulatedBrowserRecorder:
         frames_json = json.dumps(self.frames, ensure_ascii=False).replace("</", "<\\/")
         frame_csp_json = json.dumps(
             '<meta http-equiv="Content-Security-Policy" '
-            'content="default-src \'none\'; img-src data: blob:; '
-            'style-src \'unsafe-inline\'; font-src data:">'
+            "content=\"default-src 'none'; img-src data: blob:; "
+            "style-src 'unsafe-inline'; font-src data:\">"
         )
         title = html.escape(f"Simulated browser recording {self.task_id}")
         return f"""<!doctype html>
@@ -738,21 +755,14 @@ class SimulatedBrowserRecorder:
 <body><div id="app"><header><button id="play">Play</button><input id="timeline" type="range" min="0" value="0"><span id="meta"></span></header><div id="stage"></div></div>
 <script>const frames={frames_json};let index=0,timer=null;const stage=document.getElementById('stage'),range=document.getElementById('timeline'),meta=document.getElementById('meta'),play=document.getElementById('play'),frameCsp={frame_csp_json};range.max=Math.max(0,frames.length-1);function render(i){{index=Math.max(0,Math.min(frames.length-1,Number(i)||0));range.value=String(index);stage.replaceChildren();const frame=frames[index];if(!frame)return;if(frame.kind==='html'){{const el=document.createElement('iframe');el.sandbox='';el.srcdoc=frameCsp+(frame.html||'');stage.appendChild(el)}}else{{const el=document.createElement('img');el.src=frame.src||'';stage.appendChild(el)}}meta.textContent=`${{index+1}}/${{frames.length}} · ${{frame.label||frame.action||'step'}}`;}}range.oninput=()=>render(range.value);play.onclick=()=>{{if(timer){{clearInterval(timer);timer=null;play.textContent='Play';return}}play.textContent='Pause';timer=setInterval(()=>{{if(index>=frames.length-1){{clearInterval(timer);timer=null;play.textContent='Play';return}}render(index+1)}},500)}};render(0);</script></body></html>""".encode()
 
-    async def _archive_recording_artifacts(self) -> None:
+    async def _archive_recording_artifacts(self) -> bool:
         if not archive_enabled():
-            return
+            return True
         root_agent_id = current_root_agent_id() or self.agent_id
-        await asyncio.to_thread(self._archive_recording_artifacts_sync, root_agent_id)
+        return await asyncio.to_thread(self._archive_recording_artifacts_sync, root_agent_id)
 
-    def _archive_recording_artifacts_sync(self, root_agent_id: str) -> None:
-        for file_path in self.output_dir.rglob("*"):
-            if file_path.is_file():
-                archive_bytes(
-                    root_agent_id=root_agent_id,
-                    path=f"media/browser/{self.task_id}/{file_path.relative_to(self.output_dir).as_posix()}",
-                    body=file_path.read_bytes(),
-                    content_type=mimetypes.guess_type(file_path.name)[0] or "application/octet-stream",
-                )
+    def _archive_recording_artifacts_sync(self, root_agent_id: str) -> bool:
+        return _archive_recording_directory(self.output_dir, root_agent_id, self.task_id)
 
     def archive_recording_artifacts_in_background(self, *, cleanup_after: bool = False) -> bool:
         return _schedule_background_recording_archive(self, cleanup_after=cleanup_after)
@@ -811,6 +821,7 @@ class BrowserAgentRecorder:
         self._consecutive_failures = 0
         self._capture_lock = asyncio.Lock()
         self._loop_task: Optional[asyncio.Task] = None
+        self._mark_tasks: set[asyncio.Task] = set()
         self._cursor: Optional[Dict[str, int]] = None
         self._last_label = "idle"
         self._last_metadata: Dict[str, Any] = {}
@@ -1031,6 +1042,9 @@ class BrowserAgentRecorder:
             )
             return
 
+        # Queued marks carry the outgoing session's label/metadata; let them
+        # capture the outgoing page before it is replaced.
+        await self.flush_marks()
         self.page = page
         self.session_id = session_id
         self.browser_url = browser_url
@@ -1270,13 +1284,31 @@ class BrowserAgentRecorder:
         if self._cursor and "cursor" not in next_metadata:
             next_metadata["cursor"] = dict(self._cursor)
         self._last_metadata = next_metadata
-        # capture() already swallows screenshot/write failures; suppress any
-        # unexpected escape so a recording glitch cannot abort Place order.
+        if self.uses_kernel_replay or self._closed:
+            return
+        # Marks run twice per browser step. Awaiting even a bounded screenshot
+        # here added up to ~400ms to every step on screenshot-replay sessions,
+        # so the frame is captured alongside the action; the capture lock keeps
+        # frames in mark order and close() drains in-flight marks.
+        task = asyncio.create_task(self._bounded_mark_capture(label, action, next_metadata, force))
+        self._mark_tasks.add(task)
+        task.add_done_callback(self._mark_tasks.discard)
+
+    async def flush_marks(self) -> None:
+        if self._mark_tasks:
+            await asyncio.gather(*list(self._mark_tasks), return_exceptions=True)
+
+    async def _bounded_mark_capture(self, label: str, action: str, metadata: Dict[str, Any], force: bool) -> None:
+        # A slow diagnostic screenshot is dropped; the background loop and
+        # observations cover those gaps.
         with contextlib.suppress(Exception):
-            await self.capture(label, action=action, metadata=next_metadata, force=force)
+            await asyncio.wait_for(
+                self.capture(label, action=action, metadata=metadata, force=force),
+                timeout=0.2,
+            )
 
     async def _screenshot_bytes(self, *, allow_slow_fallback: bool) -> tuple[bytes, str]:
-        # Forced (action) frames get the full budget; best-effort idle frames use
+        # Forced lifecycle frames get the full budget; best-effort idle frames use
         # a short timeout so a slow page.screenshot (fonts/stability wait) can't
         # stall the capture loop and block a later forced frame behind the lock.
         timeout_ms = 2500 if allow_slow_fallback else 1200
@@ -1409,6 +1441,7 @@ class BrowserAgentRecorder:
         if self._closed:
             existing_path = self.output_dir / "index.html"
             return existing_path if existing_path.exists() else None
+        await self.flush_marks()
         if self._loop_task:
             self._loop_task.cancel()
             try:
@@ -1416,7 +1449,10 @@ class BrowserAgentRecorder:
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
         try:
-            await asyncio.wait_for(self.capture("recording stopped", action="stop", force=True), timeout=7)
+            # A short task may finish before the background loop samples its
+            # final action; keep that label on the terminal frame.
+            final_label = self._last_label if self._last_label != "idle" else "recording stopped"
+            await asyncio.wait_for(self.capture(final_label, action="stop", force=True), timeout=7)
         except asyncio.TimeoutError:
             logger.warning(
                 "Browser agent recording final frame capture timed out",
@@ -1426,14 +1462,14 @@ class BrowserAgentRecorder:
             )
         self._closed = True
         steel_media = await self._download_steel_hls_recording() if include_steel_media else None
-        if not self.frames and not steel_media:
+        if not self.frames and not steel_media and not self.replay_view_urls:
             return None
         source_frame_count = len(self.frames)
         playback_frames = self._build_playback_frames() if self.frames else []
         manifest_path = self.output_dir / "manifest.json"
         html_path = self.output_dir / "index.html"
         final_dom_path = await self._write_final_dom_artifact()
-        recording_source = "steel_hls" if steel_media else "screenshot_replay"
+        recording_source = "steel_hls" if steel_media else "screenshot_replay" if self.frames else "kernel_replay"
         manifest_path.write_text(
             json.dumps(
                 {
@@ -1496,27 +1532,15 @@ class BrowserAgentRecorder:
             )
             return None
 
-    async def _archive_recording_artifacts(self) -> None:
+    async def _archive_recording_artifacts(self) -> bool:
         if not archive_enabled():
-            return
+            return True
         archive_root_agent_id = current_root_agent_id() or self.agent_id
-        await asyncio.to_thread(self._archive_recording_artifacts_sync, archive_root_agent_id)
+        return await asyncio.to_thread(self._archive_recording_artifacts_sync, archive_root_agent_id)
 
-    def _archive_recording_artifacts_sync(self, archive_root_agent_id: str) -> None:
+    def _archive_recording_artifacts_sync(self, archive_root_agent_id: str) -> bool:
         try:
-            for file_path in self.output_dir.rglob("*"):
-                if not file_path.is_file():
-                    continue
-                relative = file_path.relative_to(self.output_dir).as_posix()
-                content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-                is_media = content_type.startswith(("image/", "video/", "audio/"))
-                archive_bytes(
-                    root_agent_id=archive_root_agent_id,
-                    path=f"media/browser/{self.task_id}/{relative}",
-                    body=file_path.read_bytes(),
-                    content_type=content_type,
-                    compress=False if is_media else None,
-                )
+            return _archive_recording_directory(self.output_dir, archive_root_agent_id, self.task_id)
         except Exception as exc:  # noqa: BLE001 - archive is best-effort
             logger.warning(
                 "Browser agent recording archive failed",
@@ -1524,6 +1548,7 @@ class BrowserAgentRecorder:
                 task_id=self.task_id,
                 error=str(exc)[:300],
             )
+            return False
 
     def archive_recording_artifacts_in_background(self, *, cleanup_after: bool = False) -> bool:
         """Copy trace artifacts only after the FE pointer is durable."""
@@ -1556,9 +1581,9 @@ class BrowserAgentRecorder:
     def export_inline_html_bytes(self) -> Optional[bytes]:
         """Build a SINGLE self-contained replay HTML with every frame inlined as a
         base64 data URI, so it can be uploaded to Supabase Storage and iframed by
-        the front-end without any sibling assets. Works for both recording modes
-        (we always have screenshot frames). Returns None when there are no frames."""
-        if not self.frames:
+        the front-end without any sibling assets. Retained Kernel replay URLs
+        also remain playable when a promoted session captures no frames."""
+        if not self.frames and not self.replay_view_urls:
             return None
         # Inline the REAL captured frames (self.frames), NOT _build_playback_frames()
         # — the latter collapses every entry to frame_00001, so inlining it produced
@@ -1730,12 +1755,10 @@ class BrowserAgentRecorder:
         if self.replay_view_urls and playback_frames:
             frame_offset_ms = min(int(frame.get("ts_ms") or 0) for frame in playback_frames)
             playback_frames = [
-                {**frame, "ts_ms": max(0, int(frame.get("ts_ms") or 0) - frame_offset_ms)}
-                for frame in playback_frames
+                {**frame, "ts_ms": max(0, int(frame.get("ts_ms") or 0) - frame_offset_ms)} for frame in playback_frames
             ]
             cursor_events = [
-                {**event, "ts_ms": max(0, int(event.get("ts_ms") or 0) - frame_offset_ms)}
-                for event in cursor_events
+                {**event, "ts_ms": max(0, int(event.get("ts_ms") or 0) - frame_offset_ms)} for event in cursor_events
             ]
         frames_json = json.dumps(playback_frames)
         cursor_events_json = json.dumps(cursor_events)
@@ -1857,6 +1880,7 @@ function drawCursor(c) {{
   ctx.restore();
 }}
 function renderAt(tsMs) {{
+  if (!frames.length) return;
   playheadMs = Math.max(0, Math.min(totalMs, tsMs));
   const idx = frameIndexAtTime(playheadMs);
   const img = images[idx], f = frames[idx];
@@ -1937,7 +1961,8 @@ prefixVideo.onplay = () => {{ if (showingPrefix) playBtn.textContent = 'Pause'; 
 prefixVideo.onpause = () => {{ if (showingPrefix && !prefixVideo.ended) playBtn.textContent = 'Play'; }};
 prefixVideo.onended = () => {{
   if (prefixIndex + 1 < prefixVideoUrls.length) startPrefix(prefixIndex + 1);
-  else beginFrameReplay(true);
+  else if (frames.length) beginFrameReplay(true);
+  else playBtn.textContent = 'Play';
 }};
 playBtn.onclick = () => {{
   if (showingPrefix) {{
@@ -2109,6 +2134,7 @@ _FINGERPRINT_POISON_REASON = "ip has used many different fingerprints"
 _PAYMENT_TUNNEL_FAILURE_REASON = "payment CDN blocked by proxy tunnel"
 _CRITICAL_RESOURCE_BLOCK_REASON = "critical third-party resource blocked"
 _API_CHALLENGE_HTML_REASON = "same-origin API returned Cloudflare challenge HTML"
+_FIRST_PARTY_TUNNEL_FAILURE_REASON = "first-party request blocked by proxy tunnel"
 # Network failures that mean "this exit cannot fetch the resource" — includes
 # ORB and classic proxy tunnel deaths.
 _RESOURCE_BLOCK_MARKERS = (
@@ -2157,6 +2183,14 @@ _MAX_CRITICAL_RESOURCE_PROVIDER_EXITS = 2
 # Backward-compat alias (tests + older call sites).
 _MAX_PAYMENT_CDN_PROVIDER_EXITS = _MAX_CRITICAL_RESOURCE_PROVIDER_EXITS
 _MAX_GENERIC_SCRIPT_PROVIDER_EXITS = 1
+# A repeat failure on the page itself is strong evidence that the browser exit
+# cannot reach it. Bound rotations independently of third-party script exits.
+_MAX_FIRST_PARTY_TUNNEL_PROVIDER_EXITS = 1
+_FIRST_PARTY_TUNNEL_FAILURE_MARKERS = (
+    "err_tunnel_connection_failed",
+    "err_proxy_connection_failed",
+    "err_proxy_connection_refused",
+)
 
 
 def _host_looks_like_script_cdn(url: str) -> bool:
@@ -2250,6 +2284,57 @@ def _url_looks_like_static_asset(url: str) -> bool:
     return any(path.endswith(suffix) for suffix in _STATIC_ASSET_SUFFIXES)
 
 
+def _resource_type_is_api_challenge_candidate(resource_type: str) -> bool:
+    resource = (resource_type or "").lower()
+    return not resource or resource in _API_CHALLENGE_RESOURCE_TYPES
+
+
+def _normalize_http_method(method: Any) -> str:
+    return str(method or "").strip().upper()
+
+
+def _api_challenge_locator(url: str) -> str:
+    """Scheme/host/path identity for matching a challenge to its superseding 2xx."""
+    return _redact_url_query(url or "")
+
+
+def _api_challenge_success_matches(
+    *,
+    challenge_url: str,
+    challenge_method: Any,
+    challenge_resource_type: Any,
+    success_url: str,
+    success_method: Any,
+    success_resource_type: Any,
+) -> bool:
+    """True when a 2xx is the same endpoint (locator + method) as the challenge.
+
+    Document navigations must not clear XHR/fetch challenges — pages routinely
+    emit same-origin document/config 2xx traffic between browser-loop steps.
+    """
+    if not challenge_url or not success_url:
+        return False
+    if _api_challenge_locator(challenge_url) != _api_challenge_locator(success_url):
+        return False
+    challenge_method_norm = _normalize_http_method(challenge_method)
+    success_method_norm = _normalize_http_method(success_method)
+    if challenge_method_norm and success_method_norm and challenge_method_norm != success_method_norm:
+        return False
+    challenge_resource = str(challenge_resource_type or "").lower()
+    success_resource = str(success_resource_type or "").lower()
+    if challenge_resource in {"xhr", "fetch"} and success_resource == "document":
+        return False
+    return True
+
+
+def _status_is_http_success(status: Any) -> bool:
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    return 200 <= code < 300
+
+
 def _is_api_challenge_html_response(
     *,
     status: Any,
@@ -2276,8 +2361,7 @@ def _is_api_challenge_html_response(
         return False
     if code != 403:
         return False
-    resource = (resource_type or "").lower()
-    if resource and resource not in _API_CHALLENGE_RESOURCE_TYPES:
+    if not _resource_type_is_api_challenge_candidate(resource_type):
         return False
     if not (url or "").startswith("http"):
         return False
@@ -2492,6 +2576,8 @@ class BrowserNetworkRecorder:
         self._payment_cdn_provider_exits = 0
         self._generic_script_provider_exits = 0
         self._api_challenge_provider_exits = 0
+        self._first_party_tunnel_provider_exits = 0
+        self._first_party_tunnel_failures: Dict[tuple[int, str, str, str], int] = {}
         self._cdp_client: Any = None
         self._network_cdp_session_id: str | None = None
         # CDP requestId values are scoped to one remote browser connection and
@@ -2594,27 +2680,18 @@ class BrowserNetworkRecorder:
         self._network_cdp_session_id = cdp_session.session_id
         self._network_generation += 1
         generation = self._network_generation
+        self._first_party_tunnel_failures.clear()
         cdp = cdp_client.register
         cdp.Network.requestWillBeSent(
-            lambda event, session_id: self._on_request_will_be_sent(
-                event, session_id, generation
-            )
+            lambda event, session_id: self._on_request_will_be_sent(event, session_id, generation)
         )
         cdp.Network.responseReceived(
-            lambda event, session_id: self._on_response_received(
-                event, session_id, generation
-            )
+            lambda event, session_id: self._on_response_received(event, session_id, generation)
         )
         cdp.Network.loadingFinished(
-            lambda event, session_id: self._on_loading_finished(
-                event, session_id, generation, cdp_client
-            )
+            lambda event, session_id: self._on_loading_finished(event, session_id, generation, cdp_client)
         )
-        cdp.Network.loadingFailed(
-            lambda event, session_id: self._on_loading_failed(
-                event, session_id, generation
-            )
-        )
+        cdp.Network.loadingFailed(lambda event, session_id: self._on_loading_failed(event, session_id, generation))
 
         await cdp_client.send.Network.enable(session_id=cdp_session.session_id)
         await self._start_console_capture(cdp_client, cdp_session.session_id, generation)
@@ -2643,14 +2720,10 @@ class BrowserNetworkRecorder:
         try:
             if runtime_register is not None and runtime_send is not None:
                 runtime_register.consoleAPICalled(
-                    lambda event, event_session_id: self._on_console_api_called(
-                        event, event_session_id, generation
-                    )
+                    lambda event, event_session_id: self._on_console_api_called(event, event_session_id, generation)
                 )
                 runtime_register.exceptionThrown(
-                    lambda event, event_session_id: self._on_exception_thrown(
-                        event, event_session_id, generation
-                    )
+                    lambda event, event_session_id: self._on_exception_thrown(event, event_session_id, generation)
                 )
                 await runtime_send.enable(session_id=session_id)
         except Exception as exc:
@@ -2664,9 +2737,7 @@ class BrowserNetworkRecorder:
         try:
             if log_register is not None and log_send is not None:
                 log_register.entryAdded(
-                    lambda event, event_session_id: self._on_log_entry_added(
-                        event, event_session_id, generation
-                    )
+                    lambda event, event_session_id: self._on_log_entry_added(event, event_session_id, generation)
                 )
                 await log_send.enable(session_id=session_id)
         except Exception as exc:
@@ -2787,9 +2858,7 @@ class BrowserNetworkRecorder:
             if not request_id:
                 continue
             generation = int(entry.get("browser_generation") or 0)
-            request_key = (
-                request_id if generation == 0 else f"{generation}:{request_id}"
-            )
+            request_key = request_id if generation == 0 else f"{generation}:{request_id}"
             recorder.entries[request_key] = dict(entry)
         recorder.console_entries = [
             dict(item) for item in (console_payload.get("entries") or []) if isinstance(item, dict)
@@ -2890,14 +2959,10 @@ class BrowserNetworkRecorder:
                     "backup_eligibility": credential.get("backupEligibility"),
                     "backup_state": credential.get("backupState"),
                     "credential_id_sha256": (
-                        hashlib.sha256(credential_id.encode("utf-8")).hexdigest()
-                        if credential_id
-                        else None
+                        hashlib.sha256(credential_id.encode("utf-8")).hexdigest() if credential_id else None
                     ),
                     "authenticator_id_sha256": (
-                        hashlib.sha256(authenticator_id.encode("utf-8")).hexdigest()
-                        if authenticator_id
-                        else None
+                        hashlib.sha256(authenticator_id.encode("utf-8")).hexdigest() if authenticator_id else None
                     ),
                     "session_id": session_id,
                     "browser_generation": generation,
@@ -2970,6 +3035,7 @@ class BrowserNetworkRecorder:
         url: str,
         document_url: str = "",
         resource_type: str = "",
+        method: str = "",
         browser_generation: int | None = None,
     ) -> None:
         """Retain classification fields for an in-flight request outside ``entries``."""
@@ -2981,6 +3047,7 @@ class BrowserNetworkRecorder:
             "url": url,
             "document_url": document_url or "",
             "resource_type": resource_type or "",
+            "method": method or "",
             "browser_generation": browser_generation,
         }
         self._prune_active_request_meta()
@@ -3042,11 +3109,7 @@ class BrowserNetworkRecorder:
             "body_file",
             "failed",
         )
-        redacted = {
-            field: entry.get(field)
-            for field in scalar_fields
-            if entry.get(field) is not None
-        }
+        redacted = {field: entry.get(field) for field in scalar_fields if entry.get(field) is not None}
         redacted["url"] = _redact_url_query(str(entry.get("url") or ""))
         redacted["request_headers"] = _diagnostic_headers(entry.get("request_headers"))
         redacted["response_headers"] = _diagnostic_headers(entry.get("response_headers"))
@@ -3105,11 +3168,7 @@ class BrowserNetworkRecorder:
             self._discard_body(oldest_key)
 
     def _request_key(self, request_id: str, generation: int | None = None) -> str:
-        effective_generation = (
-            generation
-            if generation is not None
-            else getattr(self, "_network_generation", 0)
-        )
+        effective_generation = generation if generation is not None else getattr(self, "_network_generation", 0)
         # Keep direct, unstarted unit fixtures readable while production
         # connections always use a generation-prefixed key.
         return request_id if effective_generation == 0 else f"{effective_generation}:{request_id}"
@@ -3180,6 +3239,7 @@ class BrowserNetworkRecorder:
                 url=url,
                 document_url=str(event.get("documentURL") or ""),
                 resource_type=resource_type,
+                method=str(request.get("method") or ""),
                 browser_generation=generation,
             )
             self._evict_overflow_entries()
@@ -3240,8 +3300,11 @@ class BrowserNetworkRecorder:
                 url=str(entry.get("url") or url),
                 document_url=str(entry.get("document_url") or ""),
                 resource_type=str(entry.get("resource_type") or resource_type or ""),
+                method=str(entry.get("method") or ""),
                 browser_generation=entry.get("browser_generation", generation),
             )
+            if _status_is_http_success(entry.get("status")):
+                self._clear_first_party_tunnel_failure(entry)
             self._evict_overflow_entries()
         except Exception as exc:
             logger.warning("Browser network response capture failed", error=str(exc))
@@ -3351,10 +3414,7 @@ class BrowserNetworkRecorder:
                         url=_redact_url_query(blocked_url),
                         cap=_MAX_PAYMENT_CDN_PROVIDER_EXITS,
                     )
-                elif (
-                    not blocked_url_is_script_cdn
-                    and generic_exits >= _MAX_GENERIC_SCRIPT_PROVIDER_EXITS
-                ):
+                elif not blocked_url_is_script_cdn and generic_exits >= _MAX_GENERIC_SCRIPT_PROVIDER_EXITS:
                     logger.warning(
                         "Critical resource block ignored: generic-script exit cap reached",
                         agent_id=self.agent_id,
@@ -3390,6 +3450,102 @@ class BrowserNetworkRecorder:
                         url=_redact_url_query(str(source.get("url") or "")),
                         error=event.get("errorText"),
                     )
+        self._record_first_party_tunnel_failure(
+            source,
+            error_text=str(event.get("errorText") or ""),
+            generation=entry_generation,
+        )
+
+    def _record_first_party_tunnel_failure(
+        self,
+        source: Mapping[str, Any],
+        *,
+        error_text: str,
+        generation: int,
+    ) -> None:
+        """Rotate after repeated transport failures on one page or its own API."""
+        if not hasattr(self, "_first_party_tunnel_failures"):
+            return
+        if not any(marker in error_text.lower() for marker in _FIRST_PARTY_TUNNEL_FAILURE_MARKERS):
+            return
+        if generation != self._network_generation or generation in self._rejected_network_generations:
+            return
+        resource_type = str(source.get("resource_type") or "").lower()
+        url = str(source.get("url") or "")
+        document_url = str(source.get("document_url") or "")
+        if resource_type == "document":
+            # A cross-origin frame is not evidence that the page's exit failed.
+            if document_url and not _same_origin(url, document_url):
+                return
+        elif resource_type not in {"fetch", "xhr"} or not _same_origin(url, document_url):
+            return
+        locator = _api_challenge_locator(url)
+        if not locator:
+            return
+        method = _normalize_http_method(source.get("method"))
+        kind = "document" if resource_type == "document" else "api"
+        key = (generation, locator, method, kind)
+        failures = self._first_party_tunnel_failures.get(key, 0) + 1
+        self._first_party_tunnel_failures[key] = failures
+        if failures < 2 or self._first_party_tunnel_provider_exits >= _MAX_FIRST_PARTY_TUNNEL_PROVIDER_EXITS:
+            return
+        self._first_party_tunnel_provider_exits += 1
+        self._rejected_network_generations.add(generation)
+        self._provider_exit_rejections.append(
+            {
+                "reason": _FIRST_PARTY_TUNNEL_FAILURE_REASON,
+                "url": _redact_url_query(url),
+                "browser_generation": generation,
+                "method": method,
+                "resource_type": resource_type,
+                "failure_ts_ms": int((time.monotonic() - self._started_at) * 1000),
+            }
+        )
+        logger.warning(
+            "Browser provider exit rejected: repeated first-party tunnel failure",
+            agent_id=self.agent_id,
+            task_id=self.task_id,
+            browser_generation=generation,
+            url=_redact_url_query(url),
+            resource_type=resource_type,
+            failures=failures,
+        )
+
+    def _clear_first_party_tunnel_failure(self, entry: Mapping[str, Any]) -> None:
+        """A later 2xx on the same endpoint makes a queued exit obsolete."""
+        if not hasattr(self, "_first_party_tunnel_failures"):
+            return
+        if not self._first_party_tunnel_failures:
+            return
+        generation = int(entry.get("browser_generation") or self._network_generation)
+        resource_type = str(entry.get("resource_type") or "").lower()
+        if resource_type not in {"document", "fetch", "xhr"}:
+            return
+        url = str(entry.get("url") or "")
+        kind = "document" if resource_type == "document" else "api"
+        key = (generation, _api_challenge_locator(url), _normalize_http_method(entry.get("method")), kind)
+        self._first_party_tunnel_failures.pop(key, None)
+        success_ts_ms = entry.get("response_ts_ms")
+        kept = []
+        for rejection in self._provider_exit_rejections:
+            superseded = (
+                rejection.get("reason") == _FIRST_PARTY_TUNNEL_FAILURE_REASON
+                and rejection.get("browser_generation") == generation
+                and _api_challenge_locator(str(rejection.get("url") or "")) == key[1]
+                and _normalize_http_method(rejection.get("method")) == key[2]
+                and ("document" if rejection.get("resource_type") == "document" else "api") == kind
+            )
+            if superseded:
+                try:
+                    superseded = int(success_ts_ms) > int(rejection.get("failure_ts_ms"))
+                except (TypeError, ValueError):
+                    superseded = False
+            if superseded:
+                self._first_party_tunnel_provider_exits = max(0, self._first_party_tunnel_provider_exits - 1)
+                self._rejected_network_generations.discard(generation)
+            else:
+                kept.append(rejection)
+        self._provider_exit_rejections = kept
 
     async def _fetch_response_body(
         self,
@@ -3444,50 +3600,94 @@ class BrowserNetworkRecorder:
                             task_id=self.task_id,
                             browser_generation=generation,
                         )
+            entry_url = str(entry.get("url") or "")
+            entry_resource_type = str(entry.get("resource_type") or "")
+            entry_mime_type = str(entry.get("mime_type") or "")
             if (
                 generation == current_generation
                 and generation not in rejected_generations
                 and _is_api_challenge_html_response(
                     status=entry.get("status"),
-                    url=str(entry.get("url") or ""),
-                    resource_type=str(entry.get("resource_type") or ""),
-                    mime_type=str(entry.get("mime_type") or ""),
+                    url=entry_url,
+                    resource_type=entry_resource_type,
+                    mime_type=entry_mime_type,
                     body_bytes=body_bytes,
                     document_url=entry.get("document_url"),
                 )
             ):
-                api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))
-                if api_exits >= _MAX_API_CHALLENGE_PROVIDER_EXITS:
-                    logger.warning(
-                        "API challenge HTML provider-exit ignored: cap reached",
+                if self._same_origin_api_succeeded_after(
+                    entry_url,
+                    entry.get("response_ts_ms"),
+                    generation=generation,
+                    method=entry.get("method"),
+                    resource_type=entry_resource_type,
+                ):
+                    # Delayed body capture of an earlier soft-block must not
+                    # rotate the browser after the same endpoint already
+                    # succeeded (AMC createOrder retry → live checkout).
+                    logger.info(
+                        "API challenge HTML provider-exit ignored: superseded by later same-endpoint success",
                         agent_id=self.agent_id,
                         task_id=self.task_id,
                         browser_generation=generation,
-                        url=_redact_url_query(str(entry.get("url") or "")),
-                        cap=_MAX_API_CHALLENGE_PROVIDER_EXITS,
-                    )
-                else:
-                    rejected_generations.add(generation)
-                    self._rejected_network_generations = rejected_generations
-                    self._api_challenge_provider_exits = api_exits + 1
-                    rejections = getattr(self, "_provider_exit_rejections", [])
-                    rejections.append(
-                        {
-                            "reason": _API_CHALLENGE_HTML_REASON,
-                            "url": _redact_url_query(str(entry.get("url") or "")),
-                            "browser_generation": generation,
-                            "status": entry.get("status"),
-                        }
-                    )
-                    self._provider_exit_rejections = rejections
-                    logger.warning(
-                        "Browser provider exit rejected: API returned challenge HTML",
-                        agent_id=self.agent_id,
-                        task_id=self.task_id,
-                        browser_generation=generation,
-                        url=_redact_url_query(str(entry.get("url") or "")),
+                        url=_redact_url_query(entry_url),
                         status=entry.get("status"),
                     )
+                else:
+                    api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))
+                    if api_exits >= _MAX_API_CHALLENGE_PROVIDER_EXITS:
+                        logger.warning(
+                            "API challenge HTML provider-exit ignored: cap reached",
+                            agent_id=self.agent_id,
+                            task_id=self.task_id,
+                            browser_generation=generation,
+                            url=_redact_url_query(entry_url),
+                            cap=_MAX_API_CHALLENGE_PROVIDER_EXITS,
+                        )
+                    else:
+                        rejected_generations.add(generation)
+                        self._rejected_network_generations = rejected_generations
+                        self._api_challenge_provider_exits = api_exits + 1
+                        rejections = getattr(self, "_provider_exit_rejections", [])
+                        rejections.append(
+                            {
+                                "reason": _API_CHALLENGE_HTML_REASON,
+                                "url": _redact_url_query(entry_url),
+                                "method": _normalize_http_method(entry.get("method")) or None,
+                                "resource_type": entry_resource_type or None,
+                                "browser_generation": generation,
+                                "status": entry.get("status"),
+                                "response_ts_ms": entry.get("response_ts_ms"),
+                            }
+                        )
+                        self._provider_exit_rejections = rejections
+                        logger.warning(
+                            "Browser provider exit rejected: API returned challenge HTML",
+                            agent_id=self.agent_id,
+                            task_id=self.task_id,
+                            browser_generation=generation,
+                            url=_redact_url_query(entry_url),
+                            status=entry.get("status"),
+                        )
+            elif (
+                _status_is_http_success(entry.get("status"))
+                and _resource_type_is_api_challenge_candidate(entry_resource_type)
+                and not _is_api_challenge_html_response(
+                    status=entry.get("status"),
+                    url=entry_url,
+                    resource_type=entry_resource_type,
+                    mime_type=entry_mime_type,
+                    body_bytes=body_bytes,
+                    document_url=entry.get("document_url"),
+                )
+            ):
+                self._clear_api_challenge_rejections_for_origin(
+                    entry_url,
+                    success_ts_ms=entry.get("response_ts_ms"),
+                    success_generation=generation,
+                    success_method=entry.get("method"),
+                    success_resource_type=entry_resource_type,
+                )
 
             entry.update(
                 {
@@ -3532,12 +3732,159 @@ class BrowserNetworkRecorder:
                 error=str(exc),
             )
 
-    def pop_provider_exit_rejection(self) -> Optional[Dict[str, Any]]:
-        """Consume one explicit rejection verdict for the active browser exit."""
-        rejections = getattr(self, "_provider_exit_rejections", [])
+    def _same_origin_api_succeeded_after(
+        self,
+        url: str,
+        challenge_response_ts_ms: Any,
+        generation: int | None = None,
+        method: Any = None,
+        resource_type: Any = None,
+    ) -> bool:
+        """True when a later same-endpoint XHR/fetch/document already returned 2xx."""
+        try:
+            challenge_ts = int(challenge_response_ts_ms) if challenge_response_ts_ms is not None else None
+        except (TypeError, ValueError):
+            challenge_ts = None
+        for other in (getattr(self, "entries", None) or {}).values():
+            if not isinstance(other, Mapping):
+                continue
+            if generation is not None and int(other.get("browser_generation") or 0) != generation:
+                continue
+            other_url = str(other.get("url") or "")
+            if not other_url or not _same_origin(other_url, url):
+                continue
+            if not _resource_type_is_api_challenge_candidate(str(other.get("resource_type") or "")):
+                continue
+            if not _status_is_http_success(other.get("status")):
+                continue
+            if not _api_challenge_success_matches(
+                challenge_url=url,
+                challenge_method=method,
+                challenge_resource_type=resource_type,
+                success_url=other_url,
+                success_method=other.get("method"),
+                success_resource_type=other.get("resource_type"),
+            ):
+                continue
+            other_ts = other.get("response_ts_ms")
+            # Require both timestamps (same contract as
+            # _clear_api_challenge_rejections_for_origin). A console-derived
+            # 403 without response_ts_ms must not be suppressed by any 2xx.
+            if challenge_ts is None or other_ts is None:
+                continue
+            try:
+                if int(other_ts) <= challenge_ts:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            return True
+        return False
+
+    def _clear_api_challenge_rejections_for_origin(
+        self,
+        url: str,
+        *,
+        success_ts_ms: Any = None,
+        success_generation: int | None = None,
+        success_method: Any = None,
+        success_resource_type: Any = None,
+    ) -> None:
+        """Drop API-challenge exits only when a later same-endpoint 2xx supersedes them."""
+        rejections = list(getattr(self, "_provider_exit_rejections", []) or [])
         if not rejections:
-            return None
-        return rejections.pop(0)
+            return
+        kept: List[Dict[str, Any]] = []
+        cleared_generations: set[int] = set()
+        for rejection in rejections:
+            if not isinstance(rejection, Mapping):
+                continue
+            if str(rejection.get("reason") or "") != _API_CHALLENGE_HTML_REASON:
+                kept.append(dict(rejection))
+                continue
+            rejection_url = str(rejection.get("url") or "")
+            superseded = _api_challenge_success_matches(
+                challenge_url=rejection_url,
+                challenge_method=rejection.get("method"),
+                challenge_resource_type=rejection.get("resource_type"),
+                success_url=url,
+                success_method=success_method,
+                success_resource_type=success_resource_type,
+            )
+            if superseded and success_generation is not None:
+                superseded = rejection.get("browser_generation") == success_generation
+            if superseded:
+                try:
+                    superseded = int(success_ts_ms) > int(rejection.get("response_ts_ms"))
+                except (TypeError, ValueError):
+                    superseded = False
+            if superseded:
+                with contextlib.suppress(TypeError, ValueError):
+                    cleared_generations.add(int(rejection.get("browser_generation")))
+                continue
+            kept.append(dict(rejection))
+        cleared = len(rejections) - len(kept)
+        if cleared <= 0:
+            return
+        self._provider_exit_rejections = kept
+        # Discarded challenges never became provider exits — free the cap slots.
+        api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))
+        self._api_challenge_provider_exits = max(0, api_exits - cleared)
+        if cleared_generations:
+            rejected_generations = set(getattr(self, "_rejected_network_generations", set()) or set())
+            self._rejected_network_generations = rejected_generations - cleared_generations
+        logger.info(
+            "Cleared superseded API challenge HTML provider-exit rejection(s)",
+            agent_id=getattr(self, "agent_id", None),
+            task_id=getattr(self, "task_id", None),
+            url=_redact_url_query(url),
+            cleared=cleared,
+        )
+
+    def pop_provider_exit_rejection(self) -> Optional[Dict[str, Any]]:
+        """Consume one explicit rejection verdict for the active browser exit.
+
+        API-challenge HTML exits that were already superseded by a later
+        same-endpoint 2xx are dropped here too — the success clear can race the
+        next browser-loop ``pop`` after a soft-block retries cleanly.
+        """
+        rejections = getattr(self, "_provider_exit_rejections", [])
+        while rejections:
+            rejection = rejections.pop(0)
+            rejection_generation: int | None = None
+            if isinstance(rejection, Mapping):
+                with contextlib.suppress(TypeError, ValueError):
+                    rejection_generation = int(rejection.get("browser_generation"))
+            if (
+                isinstance(rejection, Mapping)
+                and str(rejection.get("reason") or "") == _API_CHALLENGE_HTML_REASON
+                and self._same_origin_api_succeeded_after(
+                    str(rejection.get("url") or ""),
+                    rejection.get("response_ts_ms"),
+                    generation=rejection_generation,
+                    method=rejection.get("method"),
+                    resource_type=rejection.get("resource_type"),
+                )
+            ):
+                api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))
+                self._api_challenge_provider_exits = max(0, api_exits - 1)
+                with contextlib.suppress(TypeError, ValueError):
+                    generation = int(rejection.get("browser_generation"))
+                    rejected_generations = set(
+                        getattr(self, "_rejected_network_generations", set()) or set()
+                    )
+                    rejected_generations.discard(generation)
+                    self._rejected_network_generations = rejected_generations
+                logger.info(
+                    "Dropped superseded API challenge HTML provider-exit on pop",
+                    agent_id=getattr(self, "agent_id", None),
+                    task_id=getattr(self, "task_id", None),
+                    url=_redact_url_query(str(rejection.get("url") or "")),
+                )
+                continue
+            self._provider_exit_rejections = rejections
+            return rejection
+        self._provider_exit_rejections = rejections
+        return None
 
     def query_requests(  # noqa: C901
         self,
@@ -3693,7 +4040,11 @@ class BrowserNetworkRecorder:
                 if not isinstance(entry, dict):
                     continue
                 entry_level = str(entry.get("level") or entry.get("kind") or "log").lower()
-                if level_filter and entry_level != level_filter and str(entry.get("kind") or "").lower() != level_filter:
+                if (
+                    level_filter
+                    and entry_level != level_filter
+                    and str(entry.get("kind") or "").lower() != level_filter
+                ):
                     continue
                 text = str(entry.get("text") or "")
                 url = str(entry.get("url") or "")
@@ -3728,9 +4079,9 @@ class BrowserNetworkRecorder:
                 row = {
                     "source": "network",
                     "timestamp_ms": entry.get("response_ts_ms") or entry.get("request_ts_ms"),
-                    "level": "error" if entry.get("failed") or (
-                        isinstance(entry.get("status"), int) and entry.get("status") >= 400
-                    ) else "info",
+                    "level": "error"
+                    if entry.get("failed") or (isinstance(entry.get("status"), int) and entry.get("status") >= 400)
+                    else "info",
                     "text": summary,
                     "url": entry.get("url"),
                     "status": entry.get("status"),
@@ -3777,9 +4128,9 @@ class BrowserNetworkRecorder:
         include_response_body_metadata: bool = True,
     ) -> tuple[Dict[str, Any], Dict[str, Any]]:
         current_entries = [self._redacted_network_entry(entry) for entry in self.entries.values()]
-        durable_entries = (
-            list(getattr(self, "_diagnostic_entries", [])) + current_entries
-        )[-getattr(self, "_max_entries", 600) :]
+        durable_entries = (list(getattr(self, "_diagnostic_entries", [])) + current_entries)[
+            -getattr(self, "_max_entries", 600) :
+        ]
         if not include_response_body_metadata:
             body_metadata_fields = {
                 "body_size",
@@ -3790,11 +4141,7 @@ class BrowserNetworkRecorder:
                 "body_error",
             }
             durable_entries = [
-                {
-                    key: value
-                    for key, value in entry.items()
-                    if key not in body_metadata_fields
-                }
+                {key: value for key, value in entry.items() if key not in body_metadata_fields}
                 for entry in durable_entries
             ]
         network_payload = {
@@ -3837,9 +4184,7 @@ class BrowserNetworkRecorder:
         """
         if not self.network_index_path.exists() or not self.console_index_path.exists():
             return None
-        network_payload, console_payload = self._diagnostics_payloads(
-            include_response_body_metadata=False
-        )
+        network_payload, console_payload = self._diagnostics_payloads(include_response_body_metadata=False)
         output = io.BytesIO()
         with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr(
@@ -3858,9 +4203,7 @@ class BrowserNetworkRecorder:
             return {}
         root_agent_id = current_root_agent_id() or self.agent_id
         refs: Dict[str, str] = {}
-        network_payload, console_payload = self._diagnostics_payloads(
-            include_response_body_metadata=False
-        )
+        network_payload, console_payload = self._diagnostics_payloads(include_response_body_metadata=False)
         for kind, path, payload in (
             ("network", self.network_index_path, network_payload),
             ("console", self.console_index_path, console_payload),
@@ -3937,4 +4280,3 @@ def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> st
         return None
     url = str(rejection.get("url") or "").strip()
     return url or None
-

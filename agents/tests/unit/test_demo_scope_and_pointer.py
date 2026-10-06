@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from domains.spawn_agent.config import (
-    OAI_DEMO_CHILD_GOAL_PREFIX,
-    OAI_DEMO_CHILD_WINDOW,
-    OAI_DEMO_ROOT_GOAL_PREFIX,
-    is_oai_demo_goal,
-    is_oai_demo_mass_agent_task,
+    EXPLORE_DEPTH_LIMITS,
+    explore_limits_for_depth,
     resolve_explore_depth,
     resolve_explore_oai_demo,
     should_skip_oai_demo_browser_spawn,
@@ -39,7 +37,23 @@ from domains.spawn_browser_agent_v3.config import (
     skip_browser_network_recording,
 )
 from helpers.fetch_queue_pointer import fetch_agent_queue_pointer
-from utils.source_connect_gates import raise_source_connect_gates
+from helpers.source_connect_gates import raise_source_connect_gates
+from utils.oai_demo import (
+    OAI_DEMO_CHILD_GOAL_PREFIX,
+    OAI_DEMO_CHILD_WINDOW,
+    OAI_DEMO_ROOT_GOAL_PREFIX,
+    is_oai_demo_goal,
+    is_oai_demo_mass_agent_task,
+)
+
+
+def test_explore_depth_timeouts():
+    assert EXPLORE_DEPTH_LIMITS == {
+        "quick": (5, timedelta(seconds=600)),
+        "medium": (20, timedelta(seconds=600)),
+        "deep": (50, timedelta(seconds=1800)),
+    }
+    assert explore_limits_for_depth(None) == EXPLORE_DEPTH_LIMITS["quick"]
 
 
 def test_is_oai_demo_goal_matches_all_three_prefixes():
@@ -54,8 +68,26 @@ def test_is_oai_demo_goal_matches_all_three_prefixes():
 
 def test_is_oai_demo_mass_agent_task_reads_goal_or_fast_cache_goal():
     assert is_oai_demo_mass_agent_task(SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_cache_goal=""))
-    assert is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky"))
+    assert is_oai_demo_mass_agent_task(
+        SimpleNamespace(goal="Buy socks", fast_cache_goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky")
+    )
     assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=None))
+
+
+def test_is_oai_demo_mass_agent_task_inherits_tree_root_goal():
+    leftover = (
+        "Produce fresh tool-grounded evidence for the remaining strategic "
+        "deliverables for Andy Prevalsky's [REDACTED] brand task."
+    )
+    assert not is_oai_demo_goal(leftover)
+    assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal=leftover, fast_cache_goal=leftover, root_goal=None))
+    assert is_oai_demo_mass_agent_task(
+        SimpleNamespace(
+            goal=leftover,
+            fast_cache_goal=leftover,
+            root_goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+        )
+    )
 
 
 def test_browser_timeout_and_recording_are_demo_only():
@@ -77,7 +109,9 @@ def test_browser_timeout_and_recording_are_demo_only():
         browser_start_to_close_timeout_minutes(fast_mode=False, goal=OAI_DEMO_ROOT_GOAL_PREFIX)
         == ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
     )
-    assert skip_browser_network_recording(fast_mode=True, goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky") is True
+    assert (
+        skip_browser_network_recording(fast_mode=True, goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky") is True
+    )
     assert skip_browser_network_recording(fast_mode=True, goal="Buy socks") is False
     assert skip_browser_network_recording(fast_mode=False, goal=OAI_DEMO_ROOT_GOAL_PREFIX) is False
 
@@ -307,8 +341,8 @@ def test_raise_source_connect_gates_dedups_and_swallows_reject():
 
     async def _run():
         with (
-            patch("utils.source_connect_gates.raise_gate_direct", new=fake_raise),
-            patch("utils.source_connect_gates.workflow.logger.info"),
+            patch("helpers.source_connect_gates.raise_gate_direct", new=fake_raise),
+            patch("helpers.source_connect_gates.workflow.logger.info"),
         ):
             await raise_source_connect_gates(
                 wf,
@@ -590,16 +624,11 @@ def test_realtime_message_helpers_cover_coalesce_and_order_keys():
 def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
     from domains.spawn_agent.handler import (
         _activity_handle_done,
-        _explore_agent_capacity,
-        _explore_limit_error,
-        _explore_slot_reservations,
         _fm_explore_handles,
-        _has_failed_completion_feedback,
         _is_for_each_finalize_timeout,
         _is_oai_demo_for_each_tool,
         _oai_demo_child_result_failed,
         _oai_demo_first_level_gp_count,
-        _prior_explore_agent_count,
         _prior_oai_demo_for_each_count,
         _recover_oai_demo_for_each_timeout,
         prune_fast_mode_explores,
@@ -607,7 +636,7 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
         wait_for_fast_mode_explore_slot,
         wrap_up_payload_from_failure,
     )
-    from domains.spawn_agent.oai_demo_july import (
+    from utils.oai_demo_july import (
         apply_oai_demo_july_for_each,
         extract_oai_demo_creator_name,
         july_explore_goal_hash_for_goal,
@@ -728,73 +757,6 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
         == 2
     )
 
-    assert _prior_explore_agent_count(SimpleNamespace(context="x")) == 0
-    assert (
-        _prior_explore_agent_count(
-            SimpleNamespace(
-                context=[
-                    {
-                        "role": "TOOL",
-                        "metadata": {
-                            "toolName": "spawn_agent",
-                            "agentType": "explore",
-                            "toolStatus": "IN_PROGRESS",
-                            "toolCallId": "e0",
-                        },
-                    },
-                    {
-                        "role": "TOOL",
-                        "metadata": {
-                            "toolName": "spawn_agent",
-                            "agentType": "explore",
-                            "toolStatus": "FINISHED",
-                            "toolCallId": "e1",
-                        },
-                    },
-                    {
-                        "role": "TOOL",
-                        "metadata": {
-                            "toolName": "spawn_agent",
-                            "agentType": "explore",
-                            "toolStatus": "FINISHED",
-                            "toolCallId": "e1",
-                        },
-                    },
-                    {"role": "TOOL", "metadata": {"toolName": "web_search"}},
-                ]
-            )
-        )
-        == 1
-    )
-
-    slots = _explore_slot_reservations(SimpleNamespace())
-    assert "x" not in slots
-    slots.add("x")
-    assert "x" in _explore_slot_reservations(SimpleNamespace(_explore_slot_reservations=slots))
-    assert "one explore" in _explore_limit_error(3)
-
-    assert _has_failed_completion_feedback(SimpleNamespace(context="nope")) is False
-    assert (
-        _has_failed_completion_feedback(
-            SimpleNamespace(
-                context=[
-                    {
-                        "role": "TOOL",
-                        "text": "verifier rejected the answer",
-                        "metadata": {
-                            "toolName": "attempt_completion",
-                            "toolStatus": "FINISHED",
-                            "verifierMessage": "no",
-                            "title": "Verifier rejected",
-                        },
-                    }
-                ]
-            )
-        )
-        is True
-    )
-    assert _explore_agent_capacity(SimpleNamespace(context=[]), 2) == 2
-
     demo_wf = SimpleNamespace(
         goal=OAI_DEMO_ROOT_GOAL_PREFIX,
         fast_cache_goal="",
@@ -832,6 +794,29 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
             "status": "completed"
         }
 
+        demo_empty = SimpleNamespace(
+            goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+            fast_cache_goal="",
+            fast_mode_cache_enabled=True,
+            child_results={},
+            pending_children={"cid"},
+        )
+
+        async def _durable_completed(fn, args=None, **kwargs):
+            assert args == ["cid"]
+            return {"status": "completed", "summary": "from-db"}
+
+        import domains.spawn_agent.handler as spawn_handler
+
+        with patch.object(spawn_handler.workflow, "execute_activity", _durable_completed):
+            recovered = await asyncio.wait_for(
+                _recover_oai_demo_for_each_timeout(demo_empty, "cid", TimeoutError("Activity task timed out")),
+                timeout=1.0,
+            )
+        assert recovered == {"status": "completed", "summary": "from-db"}
+        assert demo_empty.child_results["cid"]["summary"] == "from-db"
+        assert "cid" not in demo_empty.pending_children
+
     asyncio.run(_recover())
 
     assert normalize_oai_demo_creator_key("Dr. Andrew Huberman") == "andrew huberman"
@@ -847,7 +832,8 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
     assert compile_explore_wrap_up("real summary") == "real summary"
     assert "excerpt" in compile_explore_wrap_up("", ["prefix **Result:** excerpt"])
     assert compile_explore_wrap_up("", ["  raw-tool  "]) == "raw-tool"
-    assert "[truncated]" in compile_explore_wrap_up("", ["x" * 200], budget=20)
+    assert compile_explore_wrap_up("", ["x" * 200], budget=20) == "x" * 20
+    assert "[...truncated...]" in compile_explore_wrap_up("", ["x" * 200], budget=40)
     assert _has_usable_tool_evidence(None) is False
     assert _has_usable_tool_evidence("error: nope") is False
     assert _has_usable_tool_evidence("Huberman notes") is True
@@ -973,3 +959,28 @@ def test_materialize_persists_rewritten_schema_for_passthrough_only_response():
     result = asyncio.run(materialize_oai_demo_report_files_activity("user-1", response, schema, "agent-1"))
     # No uploads were planned, but the schema must still describe a file.
     assert result["output_schema"]["fields"][0]["type"] != "string"
+
+
+def test_for_each_timeout_recovers_terminal_child_without_completion_signal(monkeypatch):
+    from domains.spawn_agent import handler
+
+    child_id = "completed-without-signal"
+    workflow_instance = SimpleNamespace(
+        goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+        fast_cache_goal="",
+        fast_mode_cache_enabled=True,
+        child_results={},
+        pending_children={child_id},
+    )
+
+    async def fetch_terminal_result(activity, *, args, **_kwargs):
+        assert activity is handler.fetch_child_terminal_result_activity
+        assert args == [child_id]
+        return {"status": "completed", "summary": "saved result"}
+
+    monkeypatch.setattr(handler.workflow, "execute_activity", fetch_terminal_result)
+    recovered = asyncio.run(
+        handler._recover_oai_demo_for_each_timeout(workflow_instance, child_id, TimeoutError("activity timed out"))
+    )
+    assert recovered == {"status": "completed", "summary": "saved result"}
+    assert child_id not in workflow_instance.pending_children

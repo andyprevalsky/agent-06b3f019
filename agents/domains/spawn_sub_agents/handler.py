@@ -15,21 +15,33 @@ import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from domains.spawn_agent.config import is_oai_demo_mass_agent_task
 from domains.spawn_sub_agents.config import MAX_DEPTH
 from domains.spawn_sub_agents.service import (
     extract_file_pointers_from_structured_response,
     spawn_sub_agent_activity,
 )
 from helpers.child_results import fetch_child_terminal_result_activity
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
+from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
+from utils.oai_demo import is_oai_demo_mass_agent_task
 from utils.tool_call_ids import spawn_group_id
 
 logger = structlog.get_logger()
 
 USER_FACING_TOOL_NAME = "spawn_general_purpose_agent"
 CHILD_FAILURE_STATUSES = {"failed", "error", "max_iterations"}
+def _with_for_each_child_marker(
+    metadata: Dict[str, Any], *, for_each_child: bool
+) -> Dict[str, Any]:
+    """Stamp ``forEachChild`` from the known spawn origin (never infer from toolCallId)."""
+    if for_each_child:
+        metadata["forEachChild"] = True
+    return metadata
 
 
 def _child_result_is_failure(child_result: Dict[str, Any]) -> bool:
@@ -225,6 +237,15 @@ class SpawnSubAgentManager(ToolManager):
             ):
                 yield event
 
+        except GenerationHandoffRequested:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Spawning sub-agent",
+                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                status=MessageStatus.FINISHED,
+                metadata={"toolName": USER_FACING_TOOL_NAME},
+            )
+            raise
         except Exception as e:
             error_msg = extract_error_message(e)
             logger.error("Failed to spawn sub-agent", error=error_msg)
@@ -243,6 +264,8 @@ class SpawnSubAgentManager(ToolManager):
         sub_agent: Dict[str, Any],
         child_tool_id: str,
         bus_id: str,
+        *,
+        for_each_child: bool = False,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Set up tracking, post IN_PROGRESS, wait for completion, post FINISHED.
 
@@ -254,6 +277,9 @@ class SpawnSubAgentManager(ToolManager):
         If ``child_info["status"] == "FAILED"`` (spawn-time failure surfaced by
         the batch endpoint), emits a failure event immediately and skips the
         wait_condition.
+
+        ``for_each_child`` must be True only for the for_each batch caller so
+        context-scope can drop child UI rows without guessing from toolCallId.
         """
         group_id = spawn_group_id(child_tool_id, sub_agent.get("_spawn_group_id"))
         if str(child_info.get("status", "")).upper() == "FAILED":
@@ -261,7 +287,14 @@ class SpawnSubAgentManager(ToolManager):
             child_agent_id = child_info.get("agent_id", "")
             if child_agent_id:
                 workflow_instance.pending_children.discard(child_agent_id)
-            for event in self._build_failure_events(child_agent_id, {"error_reason": err}, bus_id, child_tool_id, group_id):
+            for event in self._build_failure_events(
+                child_agent_id,
+                {"error_reason": err},
+                bus_id,
+                child_tool_id,
+                group_id,
+                for_each_child=for_each_child,
+            ):
                 yield event
             return
 
@@ -294,12 +327,15 @@ class SpawnSubAgentManager(ToolManager):
             title="Spawning sub-agent",
             message="",
             status=MessageStatus.IN_PROGRESS,
-            metadata={
-                "toolName": USER_FACING_TOOL_NAME,
-                "subAgentIds": [child_agent_id],
-                "busId": bus_id,
-                "spawnGroupId": group_id,
-            },
+            metadata=_with_for_each_child_marker(
+                {
+                    "toolName": USER_FACING_TOOL_NAME,
+                    "subAgentIds": [child_agent_id],
+                    "busId": bus_id,
+                    "spawnGroupId": group_id,
+                },
+                for_each_child=for_each_child,
+            ),
         )
 
         logger.info(f"⏳ Waiting for sub-agent {child_agent_id} to complete...")
@@ -307,16 +343,27 @@ class SpawnSubAgentManager(ToolManager):
             if await self._reconcile_terminal_child_result(workflow_instance, child_agent_id):
                 break
             try:
-                await workflow.wait_condition(
+                await wait_condition_or_generation_handoff(
                     lambda cid=child_agent_id: cid in workflow_instance.child_results,
+                    workflow_instance,
                     timeout=timedelta(seconds=30),
+                    workflow_mod=workflow,
                 )
+            except GenerationHandoffRequested:
+                raise
             except (asyncio.TimeoutError, TimeoutError):
                 continue
 
         child_result = workflow_instance.child_results.get(child_agent_id, {})
         if _child_result_is_failure(child_result):
-            for event in self._build_failure_events(child_agent_id, child_result, bus_id, child_tool_id, group_id):
+            for event in self._build_failure_events(
+                child_agent_id,
+                child_result,
+                bus_id,
+                child_tool_id,
+                group_id,
+                for_each_child=for_each_child,
+            ):
                 yield event
             return
 
@@ -327,22 +374,27 @@ class SpawnSubAgentManager(ToolManager):
         file_pointers = extract_file_pointers_from_structured_response(structured_response, output_schema)
 
         child_summary = child_result.get("summary", "") or f"Completed: {child_info.get('goal', '')}"
-        workflow_instance.child_results.pop(child_agent_id, None)
 
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
             title="Spawning sub-agent",
             message=child_summary,
             status=MessageStatus.FINISHED,
-            metadata={
-                "toolName": USER_FACING_TOOL_NAME,
-                "subAgentIds": [child_agent_id],
-                "busId": bus_id,
-                "spawnGroupId": group_id,
-                "structured_response": structured_response,
-                "childToolCounts": child_tool_counts,
-            },
+            metadata=_with_for_each_child_marker(
+                {
+                    "toolName": USER_FACING_TOOL_NAME,
+                    "subAgentIds": [child_agent_id],
+                    "busId": bus_id,
+                    "spawnGroupId": group_id,
+                    "structured_response": structured_response,
+                    "childToolCounts": child_tool_counts,
+                },
+                for_each_child=for_each_child,
+            ),
         )
+        # Pop after the FINISHED event is consumed. Popping first left timeout
+        # recovery waiting forever for a signal that will never be re-sent.
+        workflow_instance.child_results.pop(child_agent_id, None)
         if file_pointers:
             for fp in file_pointers:
                 yield AssistantEvent(message="", file_pointer=fp)
@@ -354,6 +406,8 @@ class SpawnSubAgentManager(ToolManager):
         bus_id: str,
         child_tool_id: str,
         group_id: str | None = None,
+        *,
+        for_each_child: bool = False,
     ) -> list[ToolEvent]:
         """Build ToolEvent list for a failed child agent."""
         status = str(child_result.get("status") or "").strip()
@@ -406,14 +460,17 @@ class SpawnSubAgentManager(ToolManager):
 
         error_message = "\n".join(error_parts)
 
-        metadata = {
-            "toolName": USER_FACING_TOOL_NAME,
-            "subAgentIds": [child_agent_id],
-            "busId": bus_id,
-            "spawnGroupId": group_id or spawn_group_id(child_tool_id),
-            "error_reason": error_reason,
-            "failure_context": failure_context,
-        }
+        metadata = _with_for_each_child_marker(
+            {
+                "toolName": USER_FACING_TOOL_NAME,
+                "subAgentIds": [child_agent_id],
+                "busId": bus_id,
+                "spawnGroupId": group_id or spawn_group_id(child_tool_id),
+                "error_reason": error_reason,
+                "failure_context": failure_context,
+            },
+            for_each_child=for_each_child,
+        )
         if best_effort_response:
             metadata["best_effort_response"] = best_effort_response
         if partial_structured_response is not None:

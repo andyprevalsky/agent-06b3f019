@@ -6,7 +6,7 @@
  * computer window, so the iframe is translated to hide toolbar/borders.
  */
 
-import type { MouseEvent } from 'react';
+import { useLayoutEffect, useRef, type MouseEvent } from 'react';
 import { Maximize2 } from 'lucide-react';
 import {
   computeCroppedLiveViewIframe,
@@ -14,7 +14,7 @@ import {
   resolveLiveViewChromeCrop,
   resolveLiveViewDisplaySize,
   resolveLiveViewWindowSize,
-} from './liveViewFrame';
+} from './liveViewDisplay';
 
 export interface BrowserThumbnailProps {
   browserUrl: string;
@@ -35,6 +35,10 @@ export function BrowserThumbnail({
   onClick,
   disabled = false,
 }: BrowserThumbnailProps) {
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  useLayoutEffect(() => {
+    iframeRef.current?.setAttribute('inert', '');
+  }, []);
   const display = resolveLiveViewDisplaySize(browserUrl);
   const windowSize = resolveLiveViewWindowSize(browserUrl);
   const crop = resolveLiveViewChromeCrop(browserUrl);
@@ -55,8 +59,10 @@ export function BrowserThumbnail({
       style={{ width: `${width}px`, height: `${height}px`, marginBottom: '8px' }}
     >
       <iframe
+        ref={iframeRef}
         src={browserUrl}
         className="border-0 pointer-events-none"
+        tabIndex={-1}
         style={{
           width: `${iframe.width}px`,
           height: `${iframe.height}px`,

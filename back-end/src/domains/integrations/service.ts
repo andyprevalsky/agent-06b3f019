@@ -10,6 +10,7 @@ import {
   getAdminPhone,
   isAnthropicApiKeyConfigured,
   isEmailProviderSlug,
+  isGptApiKeyConfigured,
   isOpenRouterApiKeyConfigured,
 } from './config';
 import {
@@ -21,9 +22,13 @@ import {
 } from '../../providers/claudeCredentials';
 import {
   fetchComputeTokenForUser,
+  getCerebrasApiKeyCooldown,
   heartbeatComputeTokenLineage,
   isAnthropicApiKeyOnCooldown,
+  isGptApiKeyOnCooldown,
   markAnthropicApiKeyOnCooldown,
+  markCerebrasApiKeyOnCooldown,
+  markGptApiKeyOnCooldown,
   releaseComputeTokenLineage,
 } from '../../providers/computeCredentials';
 import {
@@ -255,7 +260,6 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
         if (accessToken === null || accessToken === undefined || accessToken === '') {
           log.warn('Failed to get access token', {
             credentialId: credential.id,
-            email: credential.email,
           });
           return [];
         }
@@ -265,10 +269,9 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
           credentialId: credential.id,
           credentialEmail: credential.email,
         }));
-      } catch (err: unknown) {
+      } catch {
         log.warn('Failed to fetch from Gmail', {
-          email: credential.email,
-          error: err instanceof Error ? err.message : String(err),
+          credentialId: credential.id,
         });
         return [];
       }
@@ -342,10 +345,9 @@ export async function sendEmail(
       success: false,
       context: archiveContext,
     });
-    log.error('Send email failed', { error: JSON.stringify(gmailResult.data) });
+    log.error('Send email failed', { status: gmailResult.status });
     if (gmailResult.status === 401) throw new GmailAuthFailedError();
-    const errMsg = (gmailResult.data.error as Record<string, unknown> | undefined)?.message;
-    throw new Error(typeof errMsg === 'string' ? errMsg : 'Unknown Gmail API error');
+    throw new Error(`Gmail API error: ${gmailResult.status}`);
   }
 
   const result = gmailResult.data as { id: string; threadId: string };
@@ -365,7 +367,7 @@ export async function sendEmail(
       thread_id: result.threadId,
     },
   });
-  log.info('Email sent', { userId, messageId: result.id });
+  log.info('Email sent', { userId });
   return result;
 }
 /* c8 ignore stop */
@@ -441,10 +443,9 @@ async function archiveEmailBoundary(rootAgentId: string, value: unknown): Promis
       objectPath: `provider/email/gmail/${suffix}.json.gz.enc`,
       value,
     });
-  } catch (error) {
+  } catch {
     log.warn('Email provider archive failed', {
       rootAgentId,
-      error: error instanceof Error ? error.message : String(error),
     });
   }
 }
@@ -764,6 +765,8 @@ export async function markComputeTokenRateLimited(
     userId?: string;
     rateLimitedUntil?: string;
     failureReason?: string;
+    credentialId?: string;
+    model?: string;
   }
 ) {
   if (type === 'claude') {
@@ -779,8 +782,31 @@ export async function markComputeTokenRateLimited(
     await markAnthropicApiKeyOnCooldown(params.failureReason ?? 'rate_limit');
     return { ok: true, type, rateLimitedUntil: null };
   }
-  throw new Error('Invalid type. Must be "claude", "gpt", or "anthropic".');
+  if (type === 'cerebras') {
+    await markCerebrasApiKeyOnCooldown(
+      params.credentialId ?? '',
+      params.model ?? '',
+      params.rateLimitedUntil ?? ''
+    );
+    return { ok: true, type, rateLimitedUntil: params.rateLimitedUntil };
+  }
+  if (type === 'gpt_api_key') {
+    await markGptApiKeyOnCooldown(params.failureReason ?? 'out_of_credits');
+    return { ok: true, type, rateLimitedUntil: null };
+  }
+  throw new Error(
+    'Invalid type. Must be "claude", "gpt", "anthropic", "cerebras", or "gpt_api_key".'
+  );
 }
+
+export async function getGptApiKeyCooldown() {
+  return {
+    configured: isGptApiKeyConfigured(),
+    onCooldown: await isGptApiKeyOnCooldown(),
+  };
+}
+
+export { getCerebrasApiKeyCooldown };
 
 /** Read the running backend's shared ANTHROPIC_API_KEY availability.
  *  Consumers must require both configured=true and onCooldown=false before

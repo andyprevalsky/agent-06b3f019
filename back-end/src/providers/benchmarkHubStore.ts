@@ -43,6 +43,7 @@ import {
   __resetHubResolutionCachesForTest,
 } from './benchmarkHubLookup';
 import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
+import { coalesceHubRunPuts } from './benchmarkHubInFlight';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -78,7 +79,23 @@ export { canonicalAgentTree, getRunAgent, subtreeAgentsForBus } from './benchmar
 const log = createLogger('BenchmarkHubStore');
 
 const KEY_PREFIX = 'benchmark-hub';
-const LOCAL_DIR = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
+const LOCAL_HUB_ROOT = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
+const isolatedRunId =
+  process.env.BENCHMARK_ISOLATED_RUN === 'true' ? process.env.BENCHMARK_RUN_ID : undefined;
+if (
+  process.env.BENCHMARK_ISOLATED_RUN === 'true' &&
+  (isolatedRunId === '.' ||
+    isolatedRunId === '..' ||
+    !/^[A-Za-z0-9._-]+$/.test(isolatedRunId ?? ''))
+) {
+  throw new Error('BENCHMARK_RUN_ID must be a safe, nonempty ID for an isolated Benchmark Hub');
+}
+// Each isolated stack has its own database. Keep its local Hub index in the
+// same isolation boundary so parallel stacks cannot overwrite one another's
+// run registrations before the terminal bundles are mirrored to the durable Hub.
+const LOCAL_DIR = isolatedRunId
+  ? path.join(LOCAL_HUB_ROOT, 'isolated-runs', isolatedRunId)
+  : LOCAL_HUB_ROOT;
 const AGENT_RUN_INDEX_KEY = 'agent-run-index.json';
 const AGENT_RUN_INDEX_REVISION_KEY = 'agent-run-index-revision.json';
 
@@ -107,6 +124,8 @@ export interface HubRunTaskSummary {
   fast_mode: boolean;
   tree_agent_count: number | null;
   failure_reason: string | null;
+  lifecycle_stage?: string;
+  startup_label?: string;
 }
 
 export interface HubRunSummary {
@@ -326,9 +345,9 @@ async function readAgentRunIndexForMutation(
   }
 }
 
-/** Load the compact lookup without touching any full run bundle. */
+/** Read one committed compact snapshot, sharing the multi-object writer boundary. */
 export async function loadHubAgentRunIndex(): Promise<HubAgentRunIndexSnapshot | null> {
-  return readAgentRunIndexStrict();
+  return withIndexLock(readAgentRunIndexStrict);
 }
 
 /** A small exact-key tombstone keeps stale per-process maps from serving deleted runs. */
@@ -347,6 +366,7 @@ export async function isHubRunVisible(runId: string): Promise<boolean | null> {
 }
 
 const INDEX_LOCK_KEY = 'benchmark-hub:index';
+let indexAdmissionTail: Promise<void> = Promise.resolve();
 
 /**
  * Serialize the shared index read-modify-write across every backend process.
@@ -356,21 +376,28 @@ const INDEX_LOCK_KEY = 'benchmark-hub:index';
  * when an R2 operation throws.
  */
 async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
-  return prisma.$transaction(
-    async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${INDEX_LOCK_KEY}))`;
-      return operation();
-    },
-    // A corruption-only repair may cooperatively read the entire archive while
-    // holding this cross-process lock. Normal writes remain small, but the rare
-    // repair must finish atomically rather than timing out at the old 30s limit.
-    { maxWait: 30_000, timeout: 5 * 60_000 }
+  // Wait before borrowing a connection. Otherwise concurrent uploads occupy
+  // the SQL pool while waiting for the same cross-process advisory lock.
+  const pending = indexAdmissionTail.then(() =>
+    prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${INDEX_LOCK_KEY}))`;
+        return operation();
+      },
+      // A corruption-only repair may cooperatively read the entire archive while
+      // holding this cross-process lock. Normal writes remain small, but the rare
+      // repair must finish atomically rather than timing out at the old 30s limit.
+      { maxWait: 30_000, timeout: 5 * 60_000 }
+    )
   );
+  // A rejected mutation remains rejected for its caller and releases the next
+  // admission, just as PostgreSQL releases the transaction-scoped lock.
+  indexAdmissionTail = pending.then(() => undefined).catch(() => undefined);
+  return pending;
 }
 
 function normalizeAgentId(value: unknown): string | null {
-  const trimmed = typeof value === 'string' ? value.trim() : '';
-  return trimmed || null;
+  return (typeof value === 'string' ? value.trim() : '') || null;
 }
 
 function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
@@ -396,13 +423,17 @@ function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
     fast_mode: task.fast_mode_cache_enabled === true || task.fast_mode === true,
     tree_agent_count: typeof task.tree_agent_count === 'number' ? task.tree_agent_count : null,
     failure_reason: typeof task.failure_reason === 'string' ? task.failure_reason : null,
+    ...(typeof task.lifecycle_stage === 'string' ? { lifecycle_stage: task.lifecycle_stage } : {}),
+    ...(typeof task.startup_label === 'string' ? { startup_label: task.startup_label } : {}),
   };
 }
 
 /**
  * Upsert a run bundle (live snapshot or final). Returns the stored summary.
  */
-export async function putRun(
+export const putRun = coalesceHubRunPuts(storeRun);
+
+async function storeRun(
   bundle: Record<string, unknown>,
   options: { live?: boolean; source?: string } = {}
 ): Promise<HubRunSummary> {

@@ -59,6 +59,8 @@ import {
   replyIntentBlackboxCase,
 } from './sms-supervisor.intent.behavior';
 import { smsTimezoneBehaviorCases } from './sms-supervisor.timezone.behavior';
+import { smsPausedReplyBehaviorCases } from './sms-supervisor.paused-reply.behavior';
+import { smsStartPhaseBehaviorCases } from './sms-supervisor.start-phase.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
 const prisma = new PrismaClient();
@@ -345,7 +347,7 @@ async function testWriteCommit_startNewAgentCommitsBeforeUserSend() {
   const token = captureToken('sms-supervisor-write-commit');
   const goal = `WS-write-commit-goal-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const replyText = `Started agent for: ${goal.substring(0, 30)}`;
-  const fixture = buildStartNewAgentFixture(goal, replyText, 0.5);
+  const fixture = buildStartNewAgentFixture(goal, replyText, 0.5, 0, 'execute');
 
   try {
     await setFixtureOverride(userId, fixture);
@@ -380,6 +382,11 @@ async function testWriteCommit_startNewAgentCommitsBeforeUserSend() {
     }
     if (agent.source !== 'SMS') {
       throw new Error(`Expected source=SMS for agent spawned by supervisor, got ${agent.source}`);
+    }
+    if (agent.workflowStartPhase !== 'execute') {
+      throw new Error(
+        `Expected workflowStartPhase=execute (from start_phase), got ${agent.workflowStartPhase}`
+      );
     }
 
     // Session shape: only inbound user message + assistant reply persisted —
@@ -623,6 +630,8 @@ async function runAll() {
     },
     replyIntentBlackboxCase(prisma),
     bareRejectionBlackboxCase(prisma),
+    ...smsPausedReplyBehaviorCases(prisma),
+    ...smsStartPhaseBehaviorCases(prisma),
     {
       name: 'prompt -- supervisor never exposes routing identifiers',
       fn: () => testPrompt_neverExposeRoutingIds(prisma),

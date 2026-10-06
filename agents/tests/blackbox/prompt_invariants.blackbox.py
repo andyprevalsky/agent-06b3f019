@@ -266,7 +266,11 @@ def test_every_tool_model_appears_in_at_least_one_phase_list():
         | set(PLANNER_ASSIGNABLE_TOOLS)
     )
 
-    orphans = set(TOOL_MODELS.keys()) - union
+    # This exact-goal benchmark tool is injected into the root workflow's
+    # execute list only for the Google OAuth video task. Adding it to a shared
+    # phase list would expose the fixture to unrelated agents.
+    exact_goal_tools = {"google_workspace_run"}
+    orphans = set(TOOL_MODELS.keys()) - union - exact_goal_tools
     assert not orphans, (
         f"Tool model(s) {sorted(orphans)} are registered in TOOL_MODELS but "
         f"do not appear in any phase list (PLAN_PHASE_TOOLS, "
@@ -354,6 +358,33 @@ def test_spawn_agent_prompt_defines_param_wording_taxonomy():
     assert "Required when type='X'" in PROMPT
     assert "Optional when type='X'" in PROMPT
     assert "Ignored for type='X'" in PROMPT
+
+
+def test_general_purpose_faulty_tool_retry_warns_recursion():
+    """GP may retry faulty tools, but prompts must warn against GP→GP recursion."""
+    from tools.prompts.spawn_agent import PROMPT
+    from utils.prompts import MAIN_SYSTEM_PROMPT
+    from utils.tool_schemas import SpawnAgentTool
+
+    retry_rule = (
+        "When using one as an intelligent retry for a faulty tool, instruct it not "
+        "to spawn more general_purpose sub-agents"
+    )
+    recursion_rule = "Be wary of infinite recursion"
+    doc = SpawnAgentTool.__doc__ or ""
+    type_desc = SpawnAgentTool.model_fields["type"].description or ""
+    assert recursion_rule in " ".join(doc.split())
+    assert retry_rule in " ".join(doc.split())
+    assert recursion_rule in type_desc
+    assert retry_rule in type_desc
+    assert recursion_rule in PROMPT
+    assert "intelligent retry for a faulty tool" in PROMPT
+    assert "not to spawn more general_purpose sub-agents" in PROMPT
+    assert "intelligent retry for a faulty tool" not in MAIN_SYSTEM_PROMPT
+    assert "circumvent faulty tools" not in doc
+    assert "circumvent faulty tools" not in type_desc
+    assert "circumvent faulty tools" not in PROMPT
+    assert "circumvent faulty tools" not in MAIN_SYSTEM_PROMPT
 
 
 def test_planner_spawn_aliases_documented_in_prompt():
@@ -1729,15 +1760,16 @@ def test_tool_prompts_open_with_declarative_sentence():
 # session-isolation contract on every call without a cross-reference. The
 # prompt also defines the canonical Required/Optional/Ignored subtype-field
 # wording, so the local cap is intentionally higher than ordinary tool prompts.
-# The recursive same-goal GP rule (distinct goal + <½ complexity + no
-# faulty-tool workaround) is load-bearing anti-recursion text on the wire.
+# The recursive same-goal GP rule (distinct goal + <½ complexity) plus the
+# faulty-tool intelligent-retry recursion warning are load-bearing
+# anti-recursion text on the wire.
 #
 # grep carries load-bearing source/filter guidance for documents and
 # transactions so local-data benchmarks use the scoped DB search path instead
 # of public web tools or generic unfiltered searches.
 _TOOL_PROMPT_CHAR_CAP_OVERRIDES = {
     "grep": 1600,
-    "spawn_agent": 3300,
+    "spawn_agent": 3600,
 }
 _TOOL_PROMPT_CHAR_CAP_DEFAULT = 1500
 _TOOL_PROMPT_CHAR_FLOOR = 100
@@ -1822,6 +1854,61 @@ def test_output_schema_states_attempt_completion_takes_no_arguments():
     )
 
 
+# ============================================================================
+# 21. Write-lock approval is requested by the commit click
+# ----------------------------------------------------------------------------
+# WHY: The browser write lock intercepts the final commit click (Place order,
+# Pay, Send, Post) and asks the user before replaying it. No tool requests
+# approval. Prod agent 5c8b0ca4 stalled at the Amazon review page because its
+# parent wrote "do not click Place order without approval" and the browser
+# agent, told only that it "may be asked to confirm", stopped there or called
+# generate_write_lock_notification / request_payment_card / attempt_completion
+# as if they were the approval tool. Live replay of that decision point
+# (benchmarks/run_write_lock_approval_scenarios.py, pre and post run
+# concurrently, 10 trials x 5 scenarios): 7/50 trials passed before these
+# prompts, 39/50 after.
+# ============================================================================
+
+
+def test_browser_prompt_says_commit_click_requests_approval():
+    """The browser prompt states that the commit click is the approval request."""
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    from providers.rose.browser_use import build_browser_use_system_prompt
+
+    prompt = build_browser_use_system_prompt(AVAILABLE_ACTIONS)
+    assert "Clicking the commit control is how approval is requested; no tool requests it." in prompt, (
+        "The browser prompt no longer says the commit click is the approval request. Without it the "
+        "model stops at the review page or calls a non-approval tool when the goal asks for approval."
+    )
+    assert "The runtime intercepts the click, shows the user what the action will do, and asks for approval." in prompt
+    assert "finish every earlier step, then click the commit control" in prompt
+    assert "you may be asked to confirm with the user first" not in prompt, (
+        "The vague pre-fix wording is back; it does not tell the model how approval is requested."
+    )
+
+
+def test_parent_prompts_route_browser_approval_through_commit_click():
+    """Main-loop and planner prompts tell parents not to forbid the commit click."""
+    from tools.prompts.spawn_agent import PROMPT as SPAWN_AGENT_PROMPT
+    from utils.prompts import build_planner_system_prompt, build_system_prompt
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS
+
+    sentence = (
+        "In browser sessions the approval prompt fires when the browser agent clicks the final commit "
+        "control itself (Place order, Pay, Send, Post, etc.), so when a task needs the user's approval first, "
+        "tell the browser agent to carry the flow through that click and never tell it not to click."
+    )
+    prompts = {
+        "EXECUTE": build_system_prompt("EXECUTE", list(EXECUTE_PHASE_TOOLS)),
+        "planner": build_planner_system_prompt(SPAWN_AGENT_PROMPT),
+    }
+    for name, prompt in prompts.items():
+        assert sentence in prompt, (
+            f"The {name} prompt no longer tells parents that browser approval fires on the commit "
+            "click. Parents then write 'do not click Place order' and the approval prompt never fires."
+        )
+
+
 async def run_all_tests():
     print("prompt-invariants blackbox tests:")
     r = BlackboxResult()
@@ -1880,6 +1967,10 @@ async def run_all_tests():
     r.record(
         "spawn_agent_prompt_param_wording_taxonomy",
         test_spawn_agent_prompt_defines_param_wording_taxonomy,
+    )
+    r.record(
+        "general_purpose_faulty_tool_retry_warns_recursion",
+        test_general_purpose_faulty_tool_retry_warns_recursion,
     )
     r.record(
         "planner_spawn_aliases_documented_in_prompt",
@@ -2043,6 +2134,15 @@ async def run_all_tests():
         test_output_schema_states_attempt_completion_takes_no_arguments,
     )
 
+    # 21. Write-lock approval is requested by the commit click
+    r.record(
+        "browser_prompt_says_commit_click_requests_approval",
+        test_browser_prompt_says_commit_click_requests_approval,
+    )
+    r.record(
+        "parent_prompts_route_browser_approval_through_commit_click",
+        test_parent_prompts_route_browser_approval_through_commit_click,
+    )
     teardown_mock()
     return r.all_passed
 

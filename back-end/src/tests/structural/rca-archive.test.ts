@@ -23,7 +23,7 @@
  * What this test does NOT catch: whether a case's diagnosis is correct, or
  * whether an agent actually ran the search. Only that the mechanism is intact.
  */
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -135,6 +135,31 @@ if (fs.existsSync(VALIDATOR)) {
         `rca_archive.py new did not scaffold the requested case.\n` +
           `    Command output:\n${result.trim()}`
       );
+    } else {
+      const scaffold = fs.readFileSync(probeCase, 'utf8');
+      fs.writeFileSync(
+        probeCase,
+        scaffold
+          .replace(/^classification: .*$/m, 'classification: unresolved')
+          .replace(/^status: open$/m, 'status: fixed')
+      );
+      try {
+        execFileSync('python3', [probeValidator, 'validate'], {
+          cwd: probeRoot,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        failures.push('RCA archive accepted an unresolved case marked fixed.');
+      } catch (error) {
+        const err = error as { stdout?: string; stderr?: string };
+        if (
+          !`${err.stdout ?? ''}\n${err.stderr ?? ''}`.includes(
+            '`unresolved` classification requires `status: open`'
+          )
+        ) {
+          failures.push('RCA archive did not report the unresolved/fixed classification error.');
+        }
+      }
     }
   } catch (error) {
     const err = error as { stdout?: string; stderr?: string };
@@ -146,7 +171,99 @@ if (fs.existsSync(VALIDATOR)) {
   }
 }
 
-// 5. The instructions must keep pointing at the archive in both directions:
+// 5. An investigation may leave classification undetermined only while open.
+//    Exercise the CLI with valid case documents and a fresh index so enum and
+//    lifecycle failures cannot be confused with malformed fixture metadata.
+if (fs.existsSync(VALIDATOR)) {
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rca-archive-classification-'));
+  const probeValidator = path.join(probeRoot, 'scripts/rca_archive.py');
+  const probeCase = path.join(probeRoot, 'docs/rca/cases/2099-01-02-classification-probe.md');
+  const scenarios = [
+    { classification: 'undetermined', status: 'open', accepted: true },
+    ...['fixed', 'mitigated', 'wontfix', 'superseded', 'resolved'].map((status) => ({
+      classification: 'undetermined',
+      status,
+      accepted: false,
+    })),
+    { classification: 'our-bug', status: 'fixed', accepted: true },
+    { classification: 'invented-class', status: 'open', accepted: false },
+    { classification: 'our-bug', status: 'invented-status', accepted: false },
+  ];
+
+  try {
+    fs.mkdirSync(path.dirname(probeValidator), { recursive: true });
+    fs.mkdirSync(path.dirname(probeCase), { recursive: true });
+    fs.copyFileSync(VALIDATOR, probeValidator);
+    for (const scenario of scenarios) {
+      fs.writeFileSync(
+        probeCase,
+        `---
+id: 2099-01-02-classification-probe
+date: 2099-01-02
+title: Classification lifecycle probe
+surface: harness
+component: rca-archive
+classification: ${scenario.classification}
+problem_class: other
+first_bad_boundary: Captured result awaiting causal classification
+symptoms:
+  - A completed task did not terminate
+  - Causal classification remains unresolved
+tags:
+  - classification
+sources:
+  - PR #1299
+repro: none-recorded
+status: ${scenario.status}
+---
+
+## Problem
+The recorded outcome requires investigation.
+
+## Diagnosis
+Causal classification remains unresolved in this probe.
+
+## Solution
+Record the lifecycle without inventing a cause.
+
+## Human feedback
+None recorded.
+
+## Reusable lesson
+Keep unresolved classifications open.
+`
+      );
+      execFileSync('python3', [probeValidator, 'reindex'], {
+        cwd: probeRoot,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const result = spawnSync('python3', [probeValidator, 'validate'], {
+        cwd: probeRoot,
+        encoding: 'utf8',
+      });
+      if (result.error || result.signal || result.status === null) {
+        failures.push(
+          `Classification probe did not execute: ${String(result.error ?? result.signal)}`
+        );
+      } else if ((result.status === 0) !== scenario.accepted) {
+        failures.push(
+          `Classification ${scenario.classification} / ${scenario.status}: expected ` +
+            `${scenario.accepted ? 'acceptance' : 'rejection'}, got exit ${result.status}.\n` +
+            `${result.stdout}${result.stderr}`
+        );
+      }
+    }
+  } catch (error) {
+    const err = error as { stdout?: string; stderr?: string; message?: string };
+    failures.push(
+      `RCA classification probe failed: ${err.message}\n${err.stdout ?? ''}${err.stderr ?? ''}`
+    );
+  } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true });
+  }
+}
+
+// 6. The instructions must keep pointing at the archive in both directions:
 //    read it before diagnosing, write to it after.
 const INSTRUCTION_REQUIREMENTS: Array<{ file: string; needles: string[]; why: string }> = [
   {

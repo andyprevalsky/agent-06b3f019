@@ -52,6 +52,206 @@ def test_generated_agent_title_normalization():
     assert _normalize_generated_agent_title("x" * 100) == "x" * 80
 
 
+def test_generated_response_schema_preserves_constraints():
+    from helpers.llm import _GeneratedResponseSchema, _schema_from_generated_model
+
+    generated = _GeneratedResponseSchema.model_validate({
+        "reasoning": "Two entries and an optional note.",
+        "fields": [
+            {
+                "name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
+                "properties": [
+                    {"name": "label", "type": "str", "minLength": 3, "maxLength": 30},
+                    {"name": "note", "type": "str", "required": False},
+                ],
+            },
+        ],
+    })
+    field = _schema_from_generated_model(generated)["fields"][0]
+    assert field["minItems"] == field["maxItems"] == 2
+    assert field["properties"][0]["minLength"] == 3
+    assert field["properties"][0]["maxLength"] == 30
+    assert field["properties"][1]["required"] is False
+
+
+def test_optional_output_keys_can_be_omitted_but_present_values_are_typed():
+    from pydantic import ValidationError
+    from helpers.llm import (
+        _GeneratedResponseSchema, _schema_from_generated_model,
+        _build_verifier_json_schema, _build_verifier_response_model,
+        _structured_response_satisfies_schema,
+    )
+    from providers.rose.schema import build_openai_response_format
+    from utils.prompts import build_verifier_prompt
+
+    generated = _GeneratedResponseSchema.model_validate({
+        "reasoning": "A count and optional extra details.",
+        "fields": [
+            {"name": "total", "type": "int", "required": True},
+            {"name": "estimate", "type": "int", "required": False},
+            {"name": "rows", "type": "list[object]", "required": False,
+             "properties": [
+                 {"name": "name", "type": "str", "required": True},
+                 {"name": "rank", "type": "int", "required": False},
+             ]},
+        ],
+    })
+    schema = _schema_from_generated_model(generated)
+    assert schema["fields"][1]["required"] is False
+    assert schema["fields"][2]["properties"][1]["required"] is False
+    json_envelope = _build_verifier_json_schema(schema)["json_schema"]
+    output = json_envelope["schema"]["properties"]["output"]
+    assert output["required"] == ["total"]
+    assert output["properties"]["estimate"]["type"] == "integer"
+    assert output["properties"]["rows"]["items"]["required"] == ["name"]
+    assert json_envelope["strict"] is False
+    prompt = build_verifier_prompt(schema)
+    assert "including 1 required field(s)" in prompt
+    assert "estimate (int, optional)" in prompt
+
+    model = _build_verifier_response_model(schema)
+    assert build_openai_response_format(model)["json_schema"]["strict"] is False
+    valid = {"output": {"total": 2}, "reasoning": "Grounded", "score": 1}
+    assert model.model_validate(valid).model_dump(exclude_unset=True)["output"] == {"total": 2}
+    assert _structured_response_satisfies_schema({"total": 2}, schema)
+    assert _structured_response_satisfies_schema({"total": 2, "rows": [{"name": "A"}]}, schema)
+    for invalid in (
+        {"total": 2, "estimate": None},
+        {"total": 2, "estimate": "two"},
+        {"total": 2, "rows": [{"name": "A", "rank": None}]},
+    ):
+        assert not _structured_response_satisfies_schema(invalid, schema)
+    for invalid in (
+        {**valid, "output": {"total": 2, "estimate": None}},
+        {**valid, "output": {"total": 2, "rows": [{"name": "A", "rank": None}]}},
+    ):
+        try:
+            model.model_validate(invalid)
+            raise AssertionError("optional field present as null should be invalid")
+        except ValidationError:
+            pass
+    try:
+        _GeneratedResponseSchema.model_validate({
+            "reasoning": "No required output", "fields": [{"name": "estimate", "type": "int", "required": False}],
+        })
+        raise AssertionError("generated schema must retain one required signal")
+    except ValidationError:
+        pass
+
+
+def test_verifier_enforces_size_bounds_and_nullable_nested_fields():
+    from pydantic import ValidationError
+    from helpers.llm import _build_verifier_json_schema, _build_verifier_response_model
+
+    schema = {"fields": [
+        {
+            "name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
+            "properties": [
+                {"name": "label", "type": "str", "minLength": 3, "maxLength": 8},
+                {"name": "note", "type": "str", "nullable": True},
+            ],
+        },
+        {"name": "summary", "type": "str", "nullable": True},
+    ]}
+    output = _build_verifier_json_schema(schema)["json_schema"]["schema"]["properties"]["output"]
+    items = output["properties"]["items"]
+    assert (items["minItems"], items["maxItems"]) == (2, 2)
+    assert items["items"]["properties"]["label"]["minLength"] == 3
+    assert items["items"]["properties"]["label"]["maxLength"] == 8
+    assert "null" in items["items"]["properties"]["note"]["type"]
+    assert "null" in output["properties"]["summary"]["type"]
+
+    model = _build_verifier_response_model(schema)
+    valid = {"output": {"items": [
+        {"label": "Desk", "note": None},
+        {"label": "Lamp", "note": "Used"},
+    ], "summary": None}, "reasoning": "Grounded", "score": 1}
+    model.model_validate(valid)
+    for missing_or_unmarked_null in (
+        {**valid, "output": {"items": valid["output"]["items"]}},
+        {**valid, "output": {**valid["output"], "items": None}},
+    ):
+        try:
+            model.model_validate(missing_or_unmarked_null)
+            raise AssertionError("expected ValidationError for missing field or unmarked null")
+        except ValidationError:
+            pass
+    for invalid in (
+        {**valid, "output": {**valid["output"], "items": valid["output"]["items"][:1]}},
+        {**valid, "output": {**valid["output"], "items": valid["output"]["items"] * 2}},
+        {**valid, "output": {**valid["output"], "items": [
+            {"label": "No", "note": None}, valid["output"]["items"][1],
+        ]}},
+    ):
+        try:
+            model.model_validate(invalid)
+            raise AssertionError("expected ValidationError")
+        except ValidationError:
+            pass
+
+
+def test_structured_output_schema_respects_constraints():
+    from helpers.llm import _structured_response_satisfies_schema
+
+    schema = {"fields": [
+        {"name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
+         "properties": [{"name": "title", "type": "str", "minLength": 3}]},
+        {"name": "note", "type": "str", "nullable": True},
+    ]}
+    assert _structured_response_satisfies_schema({
+        "items": [{"title": "Desk"}, {"title": "Lamp"}], "note": None,
+    }, schema)
+    assert not _structured_response_satisfies_schema({"items": [{"title": "Desk"}], "note": None}, schema)
+    assert not _structured_response_satisfies_schema({
+        "items": [{"title": "No"}, {"title": "Lamp"}], "note": None,
+    }, schema)
+    assert not _structured_response_satisfies_schema({
+        "items": [{"title": "Desk"}, {"title": "Lamp"}],
+    }, schema)
+    zero_schema = {"fields": [
+        {"name": "items", "type": "list[str]", "maxItems": 0},
+        {"name": "summary", "type": "str", "maxLength": 0},
+    ]}
+    assert _structured_response_satisfies_schema({"items": [], "summary": ""}, zero_schema)
+    # Optional fields may be omitted or present-and-empty, but a present value
+    # must still have the declared shape.
+    optional_pointer = {"fields": [
+        {"name": "total", "type": "int"},
+        {"name": "report", "type": "file_pointer", "required": False},
+        {"name": "tags", "type": "list[str]", "required": False},
+    ]}
+    assert _structured_response_satisfies_schema({"total": 1}, optional_pointer)
+    assert _structured_response_satisfies_schema({"total": 1, "tags": []}, optional_pointer)
+    assert _structured_response_satisfies_schema({"total": 1, "report": {"path": "/out/r.md"}}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": "/out/r.md"}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": {"note": "x"}}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": ""}, optional_pointer)
+    assert not _structured_response_satisfies_schema({"total": 1, "report": {}}, optional_pointer)
+    optional_pointer_list = {"fields": [
+        {"name": "total", "type": "int"},
+        {"name": "reports", "type": "list[file_pointer]", "required": False},
+    ]}
+    assert _structured_response_satisfies_schema({"total": 1}, optional_pointer_list)
+    assert not _structured_response_satisfies_schema({"total": 1, "reports": []}, optional_pointer_list)
+
+
+async def test_live_schema_generation_chooses_file_for_large_goal():
+    """Opt-in live proof through the production schema generator for a captured goal."""
+    goal_path = os.environ["SCHEMA_GEN_LIVE_GOAL_FILE"]
+    from helpers.llm import _generate_response_schema_with_rose
+
+    goal = Path(goal_path).read_text(encoding="utf-8").strip()
+    schema, title, usage = await _generate_response_schema_with_rose(
+        goal, agent_id="schema-gen-live-proof", include_title=True,
+    )
+    proof_path = os.getenv("SCHEMA_GEN_LIVE_PROOF_FILE")
+    if proof_path:
+        Path(proof_path).write_text(json.dumps({"schema": schema, "title": title, "usage": usage}, indent=2))
+    assert any(field["type"] in ("file_pointer", "list[file_pointer]") for field in schema["fields"]), schema
+    assert not any(field["type"] == "list[object]" for field in schema["fields"]), schema
+    assert all("properties" not in field for field in schema["fields"] if field["type"] == "file_pointer"), schema
+
+
 def test_prepare_schema_for_openai_nested_and_array():
     """Schema preparation handles nested models, arrays, and union types recursively."""
     from typing import List, Optional, Union
@@ -453,6 +653,7 @@ def test_convert_context_to_messages_includes_structured_values_not_schema():
                 "toolCallId": "browser-1",
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "output_schema": output_schema,
                 "structured_response": {"selected_url": "https://amazon.com/item"},
@@ -841,7 +1042,13 @@ def test_convert_context_to_messages_skip_subagent_and_inprogress():
             "role": "TOOL",
             "text": "hidden fanout tree row",
             "timestamp": "2024-01-01T00:00:00Z",
-            "metadata": {"subAgentIds": ["sub-1"], "busId": "bus-1", "toolCallId": "tc:0", "toolStatus": "FINISHED"},
+            "metadata": {
+                "subAgentIds": ["sub-1"],
+                "busId": "bus-1",
+                "toolCallId": "tc:0",
+                "toolStatus": "FINISHED",
+                "forEachChild": True,
+            },
         },
         {
             "role": "TOOL",
@@ -1268,35 +1475,98 @@ def test_build_verifier_response_model_requires_nested_object_properties():
 
 
 
-def test_normalize_response_schema_preserves_explicit_confirmation_identifier_request():
-    """An identifier remains required when the user explicitly requests it."""
-    from helpers.llm import _normalize_response_schema_for_goal
+_OFFER_MESSAGE_GOAL = (
+    "1. Quantity: 1\n"
+    "Item Name: RECCI AirFrame California King bed frame, beige chenille\n"
+    "Photo Url: https://m.media-amazon.com/images/I/81t-SHWNBGL._SS284_.jpg\n"
+    "Amazon Url: https://www.amazon.com/dp/B0FR8VJXW5\n"
+    "Price Basis: provided purchase price; tax treatment unspecified\n"
+    "Source Order Id: 114-1660202-2405000\n"
+    "Quote Source Url\n"
+    "Purchase Price Usd: 399.99\n"
+    "General Price Quote Usd\n"
+    "->\n"
+    "Send Aman all items over 10$, the speaker combo just tell him 1k all in, "
+    "for the other items tell him I offer 80% of amazon price (include the links)\n"
+)
 
-    result = _normalize_response_schema_for_goal(
-        "Purchase the selected cable and return the order confirmation ID.",
-        {"fields": [{"name": "purchased_cable", "type": "str", "required": True}]},
+
+async def _schema_activity_result(goal: str, model_fields: list[dict]) -> dict:
+    setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
+    activity_time = datetime.now(timezone.utc)
+    activity_info = SimpleNamespace(
+        workflow_id="agent-schema:generation-1",
+        workflow_run_id="run-1",
+        activity_id="set-response-schema",
+        activity_type="set_response_schema_activity",
+        attempt=1,
+        task_queue="agents",
+        current_attempt_scheduled_time=activity_time,
+        scheduled_time=activity_time,
+        started_time=activity_time,
     )
 
-    assert [field["name"] for field in result["fields"]] == [
-        "purchased_cable",
-        "order_confirmation_id",
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "reasoning": "Fields from the model.",
+                        "title": "Aman Offer Message",
+                        "fields": model_fields,
+                    }
+                ),
+                tool_calls=[],
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            )
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("temporalio.activity.info", return_value=activity_info),
+        patch("helpers.llm.RoseClient", FakeRoseClient),
+    ):
+        from helpers.llm import set_response_schema_activity
+
+        return await set_response_schema_activity("agent-schema", [goal], include_title=True)
+
+
+async def test_set_response_schema_activity_persists_model_fields_for_offer_goal():
+    """Model schema is the source of truth — no post-hoc confirmation injection.
+
+    Reproduces agent 2929bc93-8a53-45fb-a4af-30c482b03bbe. The user asked to
+    send Aman an 80% offer. The model returned recipient + message_body. A
+    purchase-intent classifier then injected required order_confirmation_id
+    because the attached catalog contained "Purchase Price Usd" / "Source Order
+    Id". The verifier rejected the successful iMessage at 50%.
+    """
+    import helpers.llm as llm_mod
+
+    assert not hasattr(llm_mod, "_normalize_response_schema_for_goal")
+    assert not hasattr(llm_mod, "_is_purchase_goal")
+
+    result = await _schema_activity_result(
+        _OFFER_MESSAGE_GOAL,
+        [{"name": "recipient", "type": "str"}, {"name": "message_body", "type": "str"}],
+    )
+    assert [field["name"] for field in result["schema"]["fields"]] == [
+        "recipient",
+        "message_body",
     ]
 
 
-def test_normalize_response_schema_skips_confirmation_for_payment_boundary_goal():
-    """Payment-boundary harness goals must not auto-inject purchase confirmation ids."""
-    from helpers.llm import _normalize_response_schema_for_goal
-    from utils.payment_boundary_goal import payment_boundary_operational_suffix
-
-    goal = (
-        "Book Hotel Kabuki on hotels.com guest checkout."
-        + payment_boundary_operational_suffix()
+async def test_set_response_schema_activity_does_not_inject_confirmation_on_buy_me_goal():
+    """Buy-me goals also persist exactly the fields the model emitted."""
+    result = await _schema_activity_result(
+        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made.",
+        [
+            {"name": "selected_beanie_url", "type": "str"},
+            {"name": "selected_beanie_price_usd", "type": "float"},
+        ],
     )
-    result = _normalize_response_schema_for_goal(
-        goal,
-        {"fields": [{"name": "hotel_name", "type": "str", "required": True}]},
-    )
-    assert [field["name"] for field in result["fields"]] == ["hotel_name"]
+    assert [field["name"] for field in result["schema"]["fields"]] == [
+        "selected_beanie_url",
+        "selected_beanie_price_usd",
+    ]
 
 
 def test_fill_missing_verifier_output_accepts_matching_idempotent_card_last4():
@@ -1983,8 +2253,13 @@ async def test_set_response_schema_activity_replaces_cached_task_output_title():
             AsyncMock(return_value=(True, "goal", False, "agent-cached-title", "goal", True)),
         ),
         patch(
-            "providers.fast_cache.client.cache_get",
-            AsyncMock(return_value={"schema": schema, "title": "Task Output", "usage": {}}),
+            "providers.fast_cache.client.cache_get_first",
+            AsyncMock(
+                return_value=(
+                    {"schema": schema, "title": "Task Output", "usage": {}},
+                    "fastmode:v42:llm:hit:response_schema",
+                )
+            ),
         ),
         patch("helpers.llm.RoseClient") as rose_client,
     ):
@@ -2006,6 +2281,181 @@ async def test_set_response_schema_activity_replaces_cached_task_output_title():
         if "/api/agents/agent-cached-title" in request["url"]
     )
     assert json.loads(schema_save["requestBody"])["generated_title"] == "Creator Brand Strategy"
+
+
+async def test_set_response_schema_activity_dual_reads_lite_pool_alias():
+    """After rose-1-lite→flash rename, warm schema rows under the lite key still apply title."""
+    setup_mock(
+        {
+            "/api/agents/": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
+    schema = {
+        "fields": [
+            {"name": "top_creators_analysis", "type": "list[object]", "required": True},
+            {"name": "positioning_statement", "type": "str", "required": True},
+        ]
+    }
+    activity_time = datetime.now(timezone.utc)
+    activity_info = SimpleNamespace(
+        workflow_id="agent-lite-alias:generation-1",
+        workflow_run_id="run-lite-alias",
+        activity_id="set-response-schema-lite-alias",
+        activity_type="set_response_schema_activity",
+        attempt=1,
+        task_queue="agents",
+        current_attempt_scheduled_time=activity_time,
+        scheduled_time=activity_time,
+        started_time=activity_time,
+    )
+    lookup_keys_seen: list[list[str]] = []
+
+    async def _cache_get_first(keys):
+        lookup_keys_seen.append(list(keys))
+        # Simulate flash miss + lite hit (exact failure mode from FLOOR smoke).
+        assert len(keys) >= 2
+        return {"schema": schema, "title": "Task Output", "usage": {}}, keys[1]
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("temporalio.activity.info", return_value=activity_info),
+        patch(
+            "providers.fast_cache.client.resolve_agent_fast_mode",
+            AsyncMock(return_value=(True, "goal", False, "agent-lite-alias", "goal", True)),
+        ),
+        patch("providers.fast_cache.client.cache_get_first", AsyncMock(side_effect=_cache_get_first)),
+        patch("helpers.llm.RoseClient") as rose_client,
+    ):
+        from helpers.llm import set_response_schema_activity
+
+        result = await set_response_schema_activity(
+            "agent-lite-alias",
+            ["goal"],
+            fast_mode_cache_enabled=True,
+            include_title=True,
+        )
+
+    rose_client.assert_not_called()
+    assert result is not None
+    assert result["title"] == "Creator Brand Strategy"
+    assert lookup_keys_seen and len(lookup_keys_seen[0]) >= 2
+    schema_save = next(
+        request
+        for request in get_captured_requests()
+        if "/api/agents/agent-lite-alias" in request["url"]
+    )
+    assert json.loads(schema_save["requestBody"])["generated_title"] == "Creator Brand Strategy"
+
+
+async def test_set_response_schema_activity_cache_lookup_error_falls_through_to_live():
+    """cache_get_first transport failure must not abort schema generation."""
+    setup_mock(
+        {
+            "/api/agents/": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
+    activity_time = datetime.now(timezone.utc)
+    activity_info = SimpleNamespace(
+        workflow_id="agent-cache-fail:generation-1",
+        workflow_run_id="run-cache-fail",
+        activity_id="set-response-schema-cache-fail",
+        activity_type="set_response_schema_activity",
+        attempt=1,
+        task_queue="agents",
+        current_attempt_scheduled_time=activity_time,
+        scheduled_time=activity_time,
+        started_time=activity_time,
+    )
+    rose_calls = []
+
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            rose_calls.append(kwargs)
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "reasoning": "Need a concise summary.",
+                        "fields": [{"name": "summary", "type": "str"}],
+                    }
+                ),
+                tool_calls=[],
+                usage={"prompt_tokens": 10, "completion_tokens": 5},
+            )
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("temporalio.activity.info", return_value=activity_info),
+        patch(
+            "providers.fast_cache.client.resolve_agent_fast_mode",
+            AsyncMock(return_value=(True, "goal", False, "agent-cache-fail", "goal", True)),
+        ),
+        patch(
+            "providers.fast_cache.client.cache_get_first",
+            AsyncMock(side_effect=RuntimeError("fast-cache get-first failed: backend down")),
+        ),
+        patch("helpers.llm.RoseClient", FakeRoseClient),
+    ):
+        from helpers.llm import set_response_schema_activity
+
+        result = await set_response_schema_activity(
+            "agent-cache-fail",
+            ["goal"],
+            fast_mode_cache_enabled=True,
+            include_title=False,
+        )
+
+    assert result is not None
+    assert rose_calls, "lookup failure must fall through to live Rose generation"
+    assert result["schema"]["fields"][0]["name"] == "summary"
+
+
+async def test_set_response_schema_activity_mass_agent_title_when_generation_fails():
+    """Mass-agent root still PATCHes Creator Brand Strategy if schema generation throws."""
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX, OAI_DEMO_ROOT_TITLE
+
+    setup_mock(
+        {
+            "/api/agents/": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
+    goal = f"{OAI_DEMO_ROOT_GOAL_PREFIX} analyze the top 50 creators"
+
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            raise RuntimeError(
+                "Strict read-only benchmark cache miss for response_schema; live fallback is disabled"
+            )
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm.RoseClient", FakeRoseClient),
+    ):
+        from helpers.llm import set_response_schema_activity
+
+        result = await set_response_schema_activity(
+            "agent-mass-title-fail",
+            [goal],
+            include_title=True,
+        )
+
+    assert result is None
+    schema_save = next(
+        request
+        for request in get_captured_requests()
+        if "/api/agents/agent-mass-title-fail" in request["url"]
+    )
+    body = json.loads(schema_save["requestBody"])
+    assert body["generated_title"] == OAI_DEMO_ROOT_TITLE
+    assert "response_schema" not in body
 
 
 async def test_set_response_schema_activity_uses_internal_auth_only():
@@ -3085,6 +3535,94 @@ async def test_call_llm_structured_streaming_retries_malformed_output():
     assert response.response == "recovered"
 
 
+async def test_structured_escalation_keeps_anthropic_exclusion():
+    """A truncated refusal reroute must not return to the excluded provider family."""
+    from helpers.llm import call_llm_structured_streaming
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    calls = []
+
+    async def fake_cached_complete(*_args, **kwargs):
+        calls.append(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "qwen/qwen3.8-27b", "pool_name": "rose-1-flash"})
+        yield StreamChunk(kind="content", data={"text": '{"response":"ok","tool_calls":[]}'})
+        yield StreamChunk(
+            kind="usage",
+            data={"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": "length" if len(calls) == 1 else "stop"},
+        )
+        yield StreamChunk(kind="done", data={})
+
+    async def on_chunk(_text: str, _tokens: int):
+        pass
+
+    with patch("providers.fast_cache.rose_cache.cached_complete", new=fake_cached_complete):
+        response, _usage, _detected = await call_llm_structured_streaming(
+            messages=[{"role": "user", "content": "finish this"}],
+            model="rose-labs/rose-1-flash",
+            temperature=0.7,
+            max_tokens=512,
+            response_model=create_agent_action_model([]),
+            on_chunk=on_chunk,
+            call_site="test_escalation_exclusion",
+            _exclude_anthropic_family=True,
+        )
+
+    assert response.response == "ok"
+    assert [call["max_tokens"] for call in calls] == [512, 32768]
+    assert [call["_exclude_anthropic_family"] for call in calls] == [True, True]
+
+
+async def test_structured_deferred_cache_key_matches_excluded_read():
+    """A rerouted response must be stored under the same excluded-policy key it read."""
+    from helpers.llm import call_llm_structured_streaming
+    from providers.fast_cache.context import FastCacheContext, reset_context, set_context
+    from providers.fast_cache.rose_cache import request_key_material
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    ctx = FastCacheContext(enabled=True, goal="excluded-policy-key-parity")
+    captured = []
+
+    async def fake_cached_complete(*_args, **kwargs):
+        captured.append(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "qwen/qwen3.8-27b", "pool_name": "rose-1-flash"})
+        yield StreamChunk(kind="content", data={"text": '{"response":"ok","tool_calls":[]}'})
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": "stop"})
+        yield StreamChunk(kind="done", data={})
+
+    async def on_chunk(_text: str, _tokens: int):
+        pass
+
+    token = set_context(ctx)
+    cache_set = AsyncMock(return_value=True)
+    try:
+        with (
+            patch("providers.fast_cache.rose_cache.cached_complete", new=fake_cached_complete),
+            patch("helpers.llm.fast_cache_client.cache_set", new=cache_set),
+        ):
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "same request"}],
+                model="rose-labs/rose-1-flash",
+                temperature=0.7,
+                max_tokens=512,
+                response_model=create_agent_action_model([]),
+                on_chunk=on_chunk,
+                call_site="test_excluded_cache_parity",
+                _exclude_anthropic_family=True,
+            )
+    finally:
+        reset_context(token)
+
+    assert len(captured) == 1
+    assert cache_set.await_count == 1
+    read_key = ctx.llm_key(
+        "test_excluded_cache_parity",
+        request_key_material({**captured[0], "provider_fast_mode": ctx.provider_fast_mode}),
+    )
+    assert cache_set.await_args.args[0] == read_key
+
+
 async def test_structured_parse_retry_rewinds_streamed_text_for_delta_consumers():
     """A parse retry must not strand delta consumers on the rejected attempt's text.
 
@@ -3999,6 +4537,7 @@ async def test_check_progress_browser_success_uses_fast_cache_write_only():
             "metadata": {
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "fcaptcha_risk_score_display": "0.16",
@@ -4296,6 +4835,8 @@ def test_rejected_completed_child_handoff_is_scoped_to_source_child():
                 "toolCallId": tool_call_id,
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "structured_response": {"answer": answer},
             },
         }
@@ -4361,6 +4902,14 @@ def test_rejected_completed_child_handoff_is_scoped_to_source_child():
         "browser-older",
     )
 
+    for legacy_success in (False, None):
+        old_result = completed_child("browser-unverified", "looks complete")
+        if legacy_success is None:
+            old_result["metadata"].pop("success")
+        else:
+            old_result["metadata"]["success"] = legacy_success
+        assert _completed_child_task_structured_handoff([old_result], schema) is None
+
 
 async def test_check_progress_accepts_completed_browser_task_structured_response():
     """Parent execute verifier accepts a finished browser child structured response without an LLM call."""
@@ -4383,6 +4932,8 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
             "metadata": {
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": structured_response,
             },
@@ -4412,6 +4963,7 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
 async def test_call_planner_llm_activity_happy_path():
     """call_planner_llm_activity builds system prompt, streams a plan, returns result+usage."""
     import httpx
+    from datetime import datetime, timezone
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_planner_llm_activity
 
@@ -4448,17 +5000,19 @@ async def test_call_planner_llm_activity_happy_path():
 
     set_mock_handler(handler)
 
+    date_before = datetime.now(timezone.utc).date().isoformat()
     with patch("temporalio.activity.heartbeat"):
         result = await call_planner_llm_activity(
             messages=[{"role": "user", "content": f"plan me this @ref:message:{pointer_id}"}],
             model="rose",
             tools_description="web_search: search the web",
-            user_context="user is testing",
+            user_context="Recent Communications: [WHATSAPP] 2026-07-29 | From: me",
             claude_max_token="ct-planner-123",
             agent_id="agent-planner",
             tool_call_id="tc-planner",
             claude_token_user_id="planner-user",
         )
+    date_after = datetime.now(timezone.utc).date().isoformat()
 
     assert result["result"]["title"] == "Test Plan"
     assert len(result["result"]["tasks"]) == 1
@@ -4467,6 +5021,9 @@ async def test_call_planner_llm_activity_happy_path():
     anthropic_calls = [c for c in captured["calls"] if "api.anthropic.com" in c["url"] and c["body"]]
     assert len(anthropic_calls) >= 1, f"No Anthropic call captured; got {[c['url'] for c in captured['calls']]}"
     planner_body = anthropic_calls[0]["body"]
+    planner_system_text = "\n".join(block["text"] for block in planner_body["system"])
+    assert any(f"Current UTC date: {day}." in planner_system_text for day in {date_before, date_after})
+    assert "Recent Communications: [WHATSAPP] 2026-07-29" in planner_system_text
     # Planner uses skip_cache_write → system blocks KEEP cache_control for reads.
     user_system_blocks = [b for b in planner_body.get("system", []) if "cache_control" in b]
     assert len(user_system_blocks) > 0, "skip_cache_write should keep system cache markers for reads"
@@ -4877,6 +5434,190 @@ async def test_call_llm_activity_force_backend_ignores_and_preserves_shared_cont
         assert _pending_llm_context[agent_id_key] is stale_pending
     finally:
         _pending_llm_context.pop(agent_id_key, None)
+
+
+async def test_call_llm_activity_ignores_pending_context_left_by_an_evicted_workflow():
+    """An LLM activity must build the conversation of ITS turn, never a stale same-agent slot.
+
+    REGRESSION (2026-10-02, test-mass-agent-run-0 GP e268b1db): under host load the GP
+    workflow's task timed out on worker W and resumed on worker Y. W kept the
+    `_pending_llm_context[agent_id]` slot its workflow had written for an earlier turn
+    (that activity had run on another worker, so nothing consumed it). The turn-4 LLM
+    activity later landed on W, read that slot, and sent the model a conversation missing
+    the newest explore spawns -- so the July GP replay saw too few prior explores and
+    replayed a 4th one past the 3-per-GP cap.
+
+    Drives the real writer (run_agent, workflow scope) and the real reader
+    (call_llm_activity) across a simulated worker migration.
+    """
+    from helpers import llm as llm_mod
+    from loop import run_agent as run_mod
+    from providers.fast_cache.rose_cache import _prior_explore_spawn_tool_call_ids
+
+    agent_id = "agent-evicted-pending-ctx"
+    worker_w_slots = llm_mod._pending_llm_context  # the process the turn-4 activity lands on
+    worker_y_slots: dict = {}
+    worker_w_slots.pop(agent_id, None)
+    scheduled: list[list] = []
+    turn4_canonical_context: list = []
+
+    async def mock_execute_activity(fn, args=None, **_kwargs):
+        if fn is not llm_mod.call_llm_activity:
+            return {}
+        scheduled.append(list(args or []))
+        turn = len(scheduled)
+        if turn == 3:
+            # W stalls with this turn's activity in flight; the workflow task times out and
+            # the workflow resumes on Y. W keeps the slot it just wrote for turn 3, frozen:
+            # the evicted workflow instance on W never mutates its context again (this test
+            # keeps running the same coroutine as "Y", so detach W's copy explicitly).
+            stale = worker_w_slots[agent_id]
+            worker_w_slots[agent_id] = (list(stale[0]), *stale[1:])
+            run_mod._pending_llm_context = worker_y_slots
+        if turn == 4:
+            turn4_canonical_context.extend(worker_y_slots[agent_id][0])
+        return {
+            "response": "",
+            "tool_calls": [{"tool": "spawn_agent", "type": "explore", "goal": f"Explore angle {turn}"}],
+            "usage": {},
+            "detected_tools_ordered": [("spawn_agent", f"tc-explore-{turn}", float(turn))],
+        }
+
+    async def execute_tool(_tool_name, _tool_args, tool_call_id):
+        return {"message": f"EXPLORE-RESULT-{tool_call_id}"}
+
+    async def prompt():
+        return "System prompt"
+
+    try:
+        with (
+            patch.object(run_mod, "_pending_llm_context", worker_w_slots),
+            patch.object(run_mod.workflow, "execute_activity", new=AsyncMock(side_effect=mock_execute_activity)),
+            patch.object(run_mod.asyncio, "sleep", new=AsyncMock()),
+        ):
+            await run_mod.run_agent(
+                agent_id=agent_id,
+                user_id="user-evicted",
+                system_prompt=prompt,
+                verifier_prompt_generator=prompt,
+                model="rose-labs/rose-1-ultra",
+                tools=["spawn_agent", "attempt_completion"],
+                initial_context=[{"role": "USER", "text": "Analyze one creator", "timestamp": "2026-10-02T00:00:00Z"}],
+                is_inside_temporal_activity=False,
+                post_message=AsyncMock(),
+                execute_tool=execute_tool,
+                max_iterations=4,
+                skip_verification=True,
+                skip_status_updates=True,
+            )
+
+        assert len(scheduled) == 4, f"expected four LLM turns, got {len(scheduled)}"
+        assert agent_id in worker_w_slots, "worker W must still hold the slot written before eviction"
+        assert "EXPLORE-RESULT-tc-explore-3" in json.dumps(turn4_canonical_context)
+
+        sent: list = []
+
+        async def capture_llm(**kwargs):
+            sent.append(kwargs["messages"])
+            return (
+                SimpleNamespace(response="", tool_calls=[]),
+                {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                [],
+            )
+
+        with (
+            patch("helpers.llm.call_llm_structured_streaming", new=AsyncMock(side_effect=capture_llm)),
+            patch(
+                "helpers.fetch_config._fetch_agent_data_impl",
+                new=AsyncMock(return_value={"agent": {"id": agent_id}, "messages": turn4_canonical_context}),
+            ),
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm.activity.in_activity", return_value=False),
+        ):
+            # Turn 4's activity, with the exact args the workflow scheduled, runs on W.
+            await llm_mod.call_llm_activity(*scheduled[3])
+
+        assert len(sent) == 1
+        sent_text = json.dumps(sent[0])
+        assert "EXPLORE-RESULT-tc-explore-3" in sent_text, (
+            "turn-4 LLM call was built from worker W's stale turn-3 slot: the newest tool result "
+            "is missing from the conversation sent to the model"
+        )
+        prior_explores = _prior_explore_spawn_tool_call_ids({"messages": sent[0]})
+        assert prior_explores == {"tc-explore-1", "tc-explore-2", "tc-explore-3"}, (
+            f"July GP explore cap would count {sorted(prior_explores)} prior explores, not all three"
+        )
+    finally:
+        worker_w_slots.pop(agent_id, None)
+        worker_y_slots.pop(agent_id, None)
+
+
+async def test_call_llm_activity_consumes_only_its_own_tagged_pending_slot():
+    """Same-worker handoff still skips the backend; a foreign tagged slot is neither used nor popped."""
+    from helpers.llm import _pending_llm_context, call_llm_activity
+
+    agent_id = "agent-tagged-pending-slot"
+    own_context = [{"role": "USER", "text": "OWN-TURN-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}]
+    foreign_slot = (
+        [{"role": "USER", "text": "FOREIGN-TURN-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}],
+        "System prompt",
+        None,
+        "user-tagged",
+        "stream-other:7",
+    )
+    sent: list = []
+    backend = AsyncMock(
+        return_value={
+            "agent": {"id": agent_id},
+            "messages": [{"role": "USER", "text": "BACKEND-CONTEXT", "timestamp": "2026-10-02T00:00:00Z"}],
+        }
+    )
+
+    async def capture_llm(**kwargs):
+        sent.append(json.dumps(kwargs["messages"]))
+        return (
+            SimpleNamespace(response="", tool_calls=[]),
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            [],
+        )
+
+    async def call(token):
+        await call_llm_activity(
+            agent_id,
+            "rose-labs/rose-1-ultra",
+            [],
+            0,
+            agent_id,
+            system_prompt="System prompt",
+            pending_context_token=token,
+        )
+
+    try:
+        with (
+            patch("helpers.llm.call_llm_structured_streaming", new=AsyncMock(side_effect=capture_llm)),
+            patch("helpers.fetch_config._fetch_agent_data_impl", new=backend),
+            patch("helpers.llm.asyncio.sleep", new=AsyncMock()),
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm.activity.in_activity", return_value=False),
+        ):
+            _pending_llm_context[agent_id] = (own_context, "System prompt", None, "user-tagged", "stream-a:3")
+            await call("stream-a:3")
+            assert "OWN-TURN-CONTEXT" in sent[-1]
+            assert backend.await_count == 0, "a matching same-worker slot must not refetch from the backend"
+            assert agent_id not in _pending_llm_context, "the call must consume its own slot"
+
+            _pending_llm_context[agent_id] = foreign_slot
+            await call("stream-a:4")
+            assert "BACKEND-CONTEXT" in sent[-1] and "FOREIGN-TURN-CONTEXT" not in sent[-1]
+            assert backend.await_count == 1
+
+            # A token-less caller (DAG param populator) never adopts a tagged run_agent slot.
+            _pending_llm_context[agent_id] = foreign_slot
+            await call(None)
+            assert "FOREIGN-TURN-CONTEXT" not in sent[-1]
+            assert backend.await_count == 2
+    finally:
+        _pending_llm_context.pop(agent_id, None)
 
 
 async def test_call_planner_llm_activity_failure_raises():
@@ -5637,6 +6378,9 @@ def test_build_verifier_context_messages_filters_subagent_tree_rows():
                 "toolStatus": "FINISHED",
                 "subAgentIds": ["child-1"],
                 "busId": "bus-1",
+                # Historical for_each children share spawnGroupId with the parent
+                # toolCallId prefix (see spawn_group_id / for_each batch path).
+                "spawnGroupId": "tc-1",
             },
         },
         {
@@ -5697,6 +6441,7 @@ def test_build_verifier_context_messages_prunes_superseded_browser_protocol_fail
                 "toolName": "spawn_browser_agent",
                 "toolCallId": "tc-browser-1",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "fcaptcha_risk_score_display": "0.16",
@@ -5745,6 +6490,7 @@ async def test_build_llm_messages_prunes_superseded_browser_protocol_failure():
                 "toolName": "spawn_browser_agent",
                 "toolCallId": "tc-browser-1",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "fcaptcha_risk_score_display": "0.16",
@@ -6707,6 +7453,77 @@ async def test_call_llm_structured_streaming_rose_cancelled_error_propagates():
             raised = True
 
     assert raised
+
+
+async def test_structured_stream_profile_accounts_for_terminal_waits():
+    """A failing next-chunk wait is accounted for, including after 256 chunks."""
+    from helpers.llm import call_llm_structured_streaming
+    from providers.rose.errors import RoseDeadlineError
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    for ending in ("deadline", "error", "cancelled", "eof"):
+        clock = [0.0]
+        closed = []
+        profiles = []
+        terminal_wait = 8.0 if ending == "eof" else 120.0
+
+        class FakeRoseClient:
+            async def complete(self, **kwargs):
+                try:
+                    clock[0] += 0.04
+                    yield StreamChunk(kind="metadata", data={"actual_model": "qwen/qwen3.8-27b"})
+                    for _ in range(254 if ending == "eof" else 255):
+                        clock[0] += 0.04
+                        yield StreamChunk(kind="reasoning", data={"text": "thinking "})
+                    if ending == "eof":
+                        clock[0] += 0.04
+                        yield StreamChunk(kind="content", data={"text": '{"response":"ok","tool_calls":[]}'})
+                    clock[0] += terminal_wait
+                    if ending == "deadline":
+                        raise RoseDeadlineError("rose.complete idle for 120.0s (deadline 590.0s)")
+                    if ending == "error":
+                        raise RuntimeError("provider read failed")
+                    if ending == "cancelled":
+                        raise asyncio.CancelledError()
+                finally:
+                    closed.append(True)
+
+        async def on_chunk(text, tokens):
+            clock[0] += 0.01
+
+        def capture(event, **fields):
+            if event == "stream.profile":
+                profiles.append(fields)
+
+        expected_error = {"deadline": ValueError, "error": RuntimeError, "cancelled": asyncio.CancelledError}.get(ending)
+        with (
+            patch("helpers.llm._safe_time", side_effect=lambda: clock[0]),
+            patch("helpers.llm.RoseClient", FakeRoseClient),
+            patch("helpers.llm.logger.info", side_effect=capture),
+            patch("temporalio.activity.heartbeat"),
+        ):
+            try:
+                response, _, _ = await call_llm_structured_streaming(
+                    messages=[{"role": "user", "content": "q"}],
+                    model="rose-labs/rose-1-flash",
+                    temperature=1,
+                    max_tokens=8192,
+                    response_model=create_agent_action_model([]),
+                    on_chunk=on_chunk,
+                    call_site="profile-terminal-wait",
+                )
+            except (ValueError, RuntimeError, asyncio.CancelledError) as error:
+                assert expected_error is not None and isinstance(error, expected_error)
+            else:
+                assert expected_error is None
+                assert response.response == ("thinking " * 254).strip() + "\n\nok"
+        assert closed == [True]
+        assert len(profiles) == 1
+        profile = profiles[0]
+        assert profile["chunk_count"] == 256
+        assert profile["await_s"] == round(256 * 0.04 + terminal_wait, 2), profile
+        assert profile["parse_s"] < 0.02, profile
 
 
 async def test_call_llm_structured_streaming_openrouter_cancelled_error_propagates():
@@ -8013,6 +8830,12 @@ async def run_all_tests():
     r.record("extract_nested_agent_json_blob_braces_embedded", test_extract_nested_agent_json_blob_braces_embedded)
     r.record("build_verifier_json_schema", test_build_verifier_json_schema)
     r.record("generated_agent_title_normalization", test_generated_agent_title_normalization)
+    r.record("generated_response_schema_preserves_constraints", test_generated_response_schema_preserves_constraints)
+    r.record("optional_output_keys_can_be_omitted_but_present_values_are_typed", test_optional_output_keys_can_be_omitted_but_present_values_are_typed)
+    r.record("verifier_enforces_size_bounds_and_nullable_nested_fields", test_verifier_enforces_size_bounds_and_nullable_nested_fields)
+    r.record("structured_output_schema_respects_constraints", test_structured_output_schema_respects_constraints)
+    if os.getenv("SCHEMA_GEN_LIVE_GOAL_FILE"):
+        await r.record_async("live_schema_generation_chooses_file", test_live_schema_generation_chooses_file_for_large_goal)
     r.record("verifier_score_schema_no_numeric_bounds", test_verifier_score_schema_has_no_numeric_bounds)
     r.record("build_verifier_json_schema_with_response_schema", test_build_verifier_json_schema_with_response_schema)
     r.record("build_verifier_json_schema_all_types", test_build_verifier_json_schema_all_types)
@@ -8075,6 +8898,14 @@ async def run_all_tests():
     await r.record_async(
         "set_response_schema_activity_replaces_cached_task_output_title",
         test_set_response_schema_activity_replaces_cached_task_output_title,
+    )
+    await r.record_async(
+        "set_response_schema_activity_dual_reads_lite_pool_alias",
+        test_set_response_schema_activity_dual_reads_lite_pool_alias,
+    )
+    await r.record_async(
+        "set_response_schema_activity_mass_agent_title_when_generation_fails",
+        test_set_response_schema_activity_mass_agent_title_when_generation_fails,
     )
     await r.record_async(
         "set_response_schema_activity_uses_internal_auth_only",
@@ -8175,6 +9006,14 @@ async def run_all_tests():
         test_call_llm_structured_streaming_retries_malformed_output,
     )
     await r.record_async(
+        "structured_escalation_keeps_anthropic_exclusion",
+        test_structured_escalation_keeps_anthropic_exclusion,
+    )
+    await r.record_async(
+        "structured_deferred_cache_key_matches_excluded_read",
+        test_structured_deferred_cache_key_matches_excluded_read,
+    )
+    await r.record_async(
         "structured_parse_retry_rewinds_streamed_text_for_delta_consumers",
         test_structured_parse_retry_rewinds_streamed_text_for_delta_consumers,
     )
@@ -8261,6 +9100,14 @@ async def run_all_tests():
     await r.record_async(
         "call_llm_activity_force_backend",
         test_call_llm_activity_force_backend_ignores_and_preserves_shared_context,
+    )
+    await r.record_async(
+        "call_llm_activity_ignores_evicted_workflow_pending_ctx",
+        test_call_llm_activity_ignores_pending_context_left_by_an_evicted_workflow,
+    )
+    await r.record_async(
+        "call_llm_activity_consumes_only_own_tagged_pending_slot",
+        test_call_llm_activity_consumes_only_its_own_tagged_pending_slot,
     )
     await r.record_async("call_planner_llm_activity_failure", test_call_planner_llm_activity_failure_raises)
     await r.record_async("verifier_schema_file_pointer", test_build_verifier_json_schema_file_pointer_type)
@@ -8375,6 +9222,10 @@ async def run_all_tests():
         test_call_llm_structured_streaming_rose_cancelled_error_propagates,
     )
     await r.record_async(
+        "structured_stream_profile_accounts_for_terminal_waits",
+        test_structured_stream_profile_accounts_for_terminal_waits,
+    )
+    await r.record_async(
         "stream_openrouter_cancelled_propagates",
         test_call_llm_structured_streaming_openrouter_cancelled_error_propagates,
     )
@@ -8403,13 +9254,13 @@ async def run_all_tests():
         "stream_fast_cache_writes_only_after_validation",
         test_call_llm_structured_streaming_fast_cache_writes_only_after_validation,
     )
-    r.record(
-        "normalize_response_schema_explicit_confirmation_identifier",
-        test_normalize_response_schema_preserves_explicit_confirmation_identifier_request,
+    await r.record_async(
+        "set_response_schema_persists_model_fields_for_offer_goal",
+        test_set_response_schema_activity_persists_model_fields_for_offer_goal,
     )
-    r.record(
-        "normalize_response_schema_payment_boundary_skip_confirmation",
-        test_normalize_response_schema_skips_confirmation_for_payment_boundary_goal,
+    await r.record_async(
+        "set_response_schema_does_not_inject_confirmation_on_buy_me",
+        test_set_response_schema_activity_does_not_inject_confirmation_on_buy_me_goal,
     )
     r.record(
         "fill_missing_verifier_output_matching_idempotent_card_last4",
@@ -8508,6 +9359,11 @@ async def run_all_tests():
         "heartbeat_compute_token_lineage_activity_posts_lineage_key",
         test_heartbeat_compute_token_lineage_activity_posts_lineage_key,
     )
+    await r.record_async("set_response_schema_activity_cache_lookup_error_falls_through_to_live", test_set_response_schema_activity_cache_lookup_error_falls_through_to_live)
+    r.record("verifier_file_evidence_caps_nondeliverable_shortlist_small", test_verifier_file_evidence_caps_nondeliverable_shortlist_small)
+    r.record("verifier_file_evidence_keeps_full_top100_deliverable_json", test_verifier_file_evidence_keeps_full_top100_deliverable_json)
+    r.record("build_verifier_context_messages_skips_budget_for_declared_evaluator", test_build_verifier_context_messages_skips_budget_for_declared_evaluator)
+
     return r.summary()
 
 

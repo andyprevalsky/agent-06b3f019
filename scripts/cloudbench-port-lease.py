@@ -19,7 +19,7 @@ import tempfile
 import time
 
 
-def _process_start_identity(pid: int) -> str | None:
+def _legacy_lstart_identity(pid: int) -> str | None:
     result = subprocess.run(
         ["ps", "-o", "lstart=", "-p", str(pid)],
         text=True,
@@ -28,6 +28,37 @@ def _process_start_identity(pid: int) -> str | None:
     )
     identity = " ".join(result.stdout.split())
     return identity or None
+
+
+def _process_start_identity(pid: int) -> str | None:
+    """Birth identity shared with cloudbench_pid_start_time in cloudbench-env.sh.
+
+    Linux ``ps -o lstart`` is re-derived from the current boot-time estimate and
+    shifts with wall-clock steps, so Linux uses the boot-relative /proc tick.
+    """
+    if not os.path.exists("/proc/self/stat"):
+        return _legacy_lstart_identity(pid)
+    try:
+        boot_id = (
+            Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        )
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    fields = stat[stat.rfind(")") + 2 :].split()
+    if not boot_id or len(fields) <= 19 or not fields[19].isdigit():
+        return None
+    return f"proc-start:{boot_id}:{fields[19]}"
+
+
+def _process_start_matches(pid: int, recorded_start: object) -> bool:
+    if not isinstance(recorded_start, str) or not recorded_start:
+        return False
+    if recorded_start.startswith("proc-start:"):
+        actual = _process_start_identity(pid)
+    else:
+        actual = _legacy_lstart_identity(pid)
+    return actual is not None and actual == recorded_start
 
 
 def _read_record(path: Path) -> dict[str, object] | None:
@@ -45,7 +76,7 @@ def _record_is_live(record: dict[str, object]) -> bool:
         token = str(record["token"])
     except (KeyError, TypeError, ValueError):
         return False
-    return bool(token) and _process_start_identity(pid) == recorded_start
+    return bool(token) and _process_start_matches(pid, recorded_start)
 
 
 def _port_is_bindable(port: int) -> bool:
@@ -108,6 +139,31 @@ class Registry:
                 except FileNotFoundError:
                     pass
 
+    def _publish(self, lease: Path, record: dict[str, object]) -> None:
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".claim-", suffix=".tmp", dir=self.root
+        )
+        temp = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(record, handle, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            pause = float(
+                os.environ.get(
+                    "CLOUDBENCH_PORT_LEASE_TEST_PAUSE_BEFORE_PUBLISH", "0"
+                )
+            )
+            if pause > 0:
+                time.sleep(pause)
+            os.replace(temp, lease)
+        finally:
+            try:
+                temp.unlink()
+            except FileNotFoundError:
+                pass
+
     def claim(self, *, owner_pid: int, token: str, start: int) -> int:
         process_start = _process_start_identity(owner_pid)
         if process_start is None:
@@ -122,40 +178,53 @@ class Registry:
             lease = self.root / str(port)
             if lease.exists() or not _port_is_bindable(port):
                 continue
-            fd, temp_name = tempfile.mkstemp(
-                prefix=".claim-", suffix=".tmp", dir=self.root
-            )
-            temp = Path(temp_name)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    json.dump(record, handle, sort_keys=True)
-                    handle.write("\n")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                pause = float(
-                    os.environ.get(
-                        "CLOUDBENCH_PORT_LEASE_TEST_PAUSE_BEFORE_PUBLISH", "0"
-                    )
-                )
-                if pause > 0:
-                    time.sleep(pause)
-                os.replace(temp, lease)
-                return port
-            finally:
-                try:
-                    temp.unlink()
-                except FileNotFoundError:
-                    pass
+            self._publish(lease, record)
+            return port
         raise RuntimeError("could not claim a free local port")
+
+    def claim_batch(
+        self, *, owner_pid: int, token: str, start: int, count: int
+    ) -> list[int]:
+        if count <= 0 or count > 64_512:
+            raise ValueError("batch port count must be between 1 and 64512")
+        process_start = _process_start_identity(owner_pid)
+        if process_start is None:
+            raise RuntimeError(f"owner process {owner_pid} is not alive")
+        self._reap_stale()
+        record = {
+            "pid": owner_pid,
+            "process_start": process_start,
+            "token": token,
+        }
+        claimed: list[int] = []
+        scan_start = start or 10_240
+        try:
+            for port in _candidate_ports(scan_start):
+                lease = self.root / str(port)
+                if lease.exists() or not _port_is_bindable(port):
+                    continue
+                self._publish(lease, record)
+                claimed.append(port)
+                if len(claimed) == count:
+                    return claimed
+        finally:
+            if len(claimed) != count:
+                for port in claimed:
+                    lease = self.root / str(port)
+                    if _read_record(lease) == record:
+                        try:
+                            lease.unlink()
+                        except FileNotFoundError:
+                            pass
+        raise RuntimeError(f"could not claim {count} free local ports")
 
     def release(self, *, port: int, owner_pid: int, token: str) -> None:
         lease = self.root / str(port)
         record = _read_record(lease)
-        current_start = _process_start_identity(owner_pid)
         if (
             record is not None
             and record.get("pid") == owner_pid
-            and record.get("process_start") == current_start
+            and _process_start_matches(owner_pid, record.get("process_start"))
             and record.get("token") == token
         ):
             try:
@@ -164,7 +233,6 @@ class Registry:
                 pass
 
     def release_owner(self, *, owner_pid: int, token: str) -> None:
-        current_start = _process_start_identity(owner_pid)
         for lease in self.root.iterdir():
             if not lease.name.isdigit() or not lease.is_file():
                 continue
@@ -172,7 +240,7 @@ class Registry:
             if (
                 record is not None
                 and record.get("pid") == owner_pid
-                and record.get("process_start") == current_start
+                and _process_start_matches(owner_pid, record.get("process_start"))
                 and record.get("token") == token
             ):
                 try:
@@ -181,7 +249,6 @@ class Registry:
                     pass
 
     def release_prefix(self, *, owner_pid: int, token_prefix: str) -> None:
-        current_start = _process_start_identity(owner_pid)
         for lease in self.root.iterdir():
             if not lease.name.isdigit() or not lease.is_file():
                 continue
@@ -189,7 +256,7 @@ class Registry:
             if (
                 record is not None
                 and record.get("pid") == owner_pid
-                and record.get("process_start") == current_start
+                and _process_start_matches(owner_pid, record.get("process_start"))
                 and str(record.get("token", "")).startswith(token_prefix)
             ):
                 try:
@@ -201,12 +268,14 @@ class Registry:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "action", choices=("claim", "release", "release-owner", "release-prefix")
+        "action",
+        choices=("claim", "claim-batch", "release", "release-owner", "release-prefix"),
     )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--owner-pid", type=int, required=True)
     parser.add_argument("--token", required=True)
     parser.add_argument("--port", type=int)
+    parser.add_argument("--count", type=int)
     parser.add_argument("--start", type=int, default=0)
     args = parser.parse_args()
 
@@ -217,12 +286,22 @@ def main() -> int:
                     owner_pid=args.owner_pid, token=args.token, start=args.start
                 )
             )
+        elif args.action == "claim-batch":
+            if args.count is None:
+                parser.error("claim-batch requires --count")
+            print(
+                *registry.claim_batch(
+                    owner_pid=args.owner_pid,
+                    token=args.token,
+                    start=args.start,
+                    count=args.count,
+                ),
+                sep="\n",
+            )
         elif args.action == "release":
             if args.port is None:
                 parser.error("release requires --port")
-            registry.release(
-                port=args.port, owner_pid=args.owner_pid, token=args.token
-            )
+            registry.release(port=args.port, owner_pid=args.owner_pid, token=args.token)
         elif args.action == "release-owner":
             registry.release_owner(owner_pid=args.owner_pid, token=args.token)
         else:

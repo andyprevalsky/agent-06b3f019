@@ -54,9 +54,10 @@ set -uo pipefail
 # create sibling bytecode while consuming that immutable bundle on the guest.
 export PYTHONDONTWRITEBYTECODE=1
 
-REPO_DIR="${CLOUDBENCH_REPO_DIR:-/data/repo}"
+DATA_DIR="${CLOUDBENCH_DATA_DIR:-/data}"
+REPO_DIR="${CLOUDBENCH_REPO_DIR:-$DATA_DIR/repo}"
 DEPS_DIR="${CLOUDBENCH_DEPS_DIR:-/app}"           # baked dependency donor image.
-WMH_DIR="${CLOUDBENCH_WMH_DIR:-/data/world-model}"
+WMH_DIR="${CLOUDBENCH_WMH_DIR:-$DATA_DIR/world-model}"
 APP_USER=rose
 CONTEXT_DIR="$REPO_DIR/.context/cloudbench"
 RUN_OUTPUT_MARKER="/tmp/cloudbench-run-start.$$"
@@ -69,6 +70,7 @@ CONTROL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$CONTROL_DIR/cloudbench-fetch-ref.sh}"
 SYNC_DEPS_SCRIPT="${CLOUDBENCH_SYNC_DEPS_SCRIPT:-$CONTROL_DIR/cloudbench-sync-deps.sh}"
 SYNC_PRISMA_SCRIPT="${CLOUDBENCH_SYNC_PRISMA_SCRIPT:-$CONTROL_DIR/cloudbench-sync-prisma-client.sh}"
+NGROK_INSTALL_SCRIPT="${CLOUDBENCH_NGROK_INSTALL_SCRIPT:-$CONTROL_DIR/cloudbench-install-ngrok.sh}"
 CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$CONTROL_DIR/cloudbench-current-run-artifact.py}"
 PREPARE_PATCH_SCRIPT="${CLOUDBENCH_PREPARE_PATCH_SCRIPT:-$CONTROL_DIR/cloudbench-prepare-patch.sh}"
 STATUS_SERVER_SCRIPT="${CLOUDBENCH_STATUS_SERVER_SCRIPT:-$CONTROL_DIR/cloudbench-status-server.py}"
@@ -90,6 +92,15 @@ BENCH_MAX_CONCURRENCY="${BENCH_MAX_CONCURRENCY:-5}"
 BENCH_SIMULATE="${BENCH_SIMULATE:-1}"
 BENCH_DASHPORT="${BENCH_DASHPORT:-8009}"
 BENCHMARK_FAST_MODE_CACHE="${BENCHMARK_FAST_MODE_CACHE:-}"
+if [ "${CLOUDBENCH_FAST_CACHE_READ_ONLY:-}" = 1 ]; then
+    export FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1
+    export BENCHMARK_DEMO_CACHE_READ_ONLY=1
+fi
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS-7200}"
+case "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in
+    ''|*[!0-9]*|0) echo "FATAL: BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
+[ "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" -gt 0 ] || exit 2
 BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY="${BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY:-}"
 BENCHMARK_PEAK_FLY_MACHINES="${BENCHMARK_PEAK_FLY_MACHINES:-}"
 BENCHMARK_VM_USD_PER_HOUR="${BENCHMARK_VM_USD_PER_HOUR:-}"
@@ -100,7 +111,7 @@ CLOUDBENCH_START_BARRIER="${CLOUDBENCH_START_BARRIER:-}"
 CLOUDBENCH_BARRIER_TOKEN="${CLOUDBENCH_BARRIER_TOKEN:-}"
 CLOUDBENCH_STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
 CLOUDBENCH_RUN_TOKEN="${CLOUDBENCH_RUN_TOKEN:-}"
-STACK_SEED_DUMP="${CLOUDBENCH_SEED_DUMP_PATH:-/data/cloudbench-cache/victoria-seed.dump}"
+STACK_SEED_DUMP="${CLOUDBENCH_SEED_DUMP_PATH:-$DATA_DIR/cloudbench-cache/victoria-seed.dump}"
 
 if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
     [ -s "$EXECUTION_PROVENANCE_SCRIPT" ] \
@@ -137,32 +148,60 @@ log() { echo "[cloudbench $(date -u +%H:%M:%S)] $*"; }
 # scripts/cloudbench-bring-up-report.py — isolate each bring-up step's cost.
 step() { log "STEP $*"; }
 
-CLEANUP_ACK_FILE="/data/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot}.ack"
-SHUTDOWN_REQUEST_FILE="/data/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
-INTERRUPT_CLEANUP_STATUS_FILE="/data/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
+CLEANUP_ACK_FILE="$DATA_DIR/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot}.ack"
+SHUTDOWN_REQUEST_FILE="$DATA_DIR/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
+INTERRUPT_CLEANUP_STATUS_FILE="$DATA_DIR/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
+RUNNER_INTERRUPT_CLEANUP_STATUS_FILE="$CONTEXT_DIR/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
+STACK_CLEANUP_STATUS_FILE="$CONTEXT_DIR/cloudbench-stack-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
 ACTIVE_COMMAND_PID=""
 ACTIVE_COMMAND_SIGNALLED=0
 ACTIVE_COMMAND_STARTING=0
+ACTIVE_COMMAND_SHUTDOWN_PENDING=0
+CODEX_AUTH_ADMISSION_TOKEN=""
+CODEX_AUTH_HELPER="${CLOUDBENCH_CODEX_AUTH_HELPER:-$CONTROL_DIR/cloudbench-codex-auth.py}"
 HEARTBEAT_SLEEP_PID=""
 STACK_PID=""
 TAIL_PID=""
 
 publish_cleanup_ack() {
-    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token
+    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token cleanup_status_temporary cleanup_stack_pid cleanup_stack_birth token_matches=0
     # Library/contract probes intentionally invoke the driver without a guest
     # run token and without /data. They do not own a status service to ack.
     [ -n "$CLOUDBENCH_RUN_TOKEN" ] || return 0
-    if [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ]; then
+    mkdir -p "${CLEANUP_ACK_FILE%/*}" "${INTERRUPT_CLEANUP_STATUS_FILE%/*}" || return 1
+    if [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ] || [ -f "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" ]; then
         cleanup_state="$(awk -F= '$1 == "state" { print $2; exit }' \
-            "$INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+            "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
         cleanup_token="$(awk -F= '$1 == "token" { print $2; exit }' \
-            "$INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+            "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        [ "$cleanup_token" = "$CLOUDBENCH_RUN_TOKEN" ] && token_matches=1
+        log "benchmark root cleanup evidence: state=${cleanup_state:-missing} token_match=$token_matches"
+        case "$cleanup_state:$token_matches" in
+            pending:1|clean:1|failed:1)
+                cleanup_status_temporary="${INTERRUPT_CLEANUP_STATUS_FILE}.tmp.$$"
+                if ! cp "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" "$cleanup_status_temporary" \
+                    || ! mv -f "$cleanup_status_temporary" "$INTERRUPT_CLEANUP_STATUS_FILE"; then
+                    rm -f "$cleanup_status_temporary"
+                    log "FATAL: could not persist benchmark root cleanup evidence"
+                    return 1
+                fi
+                ;;
+        esac
         if [ "$cleanup_state" != "clean" ] || [ "$cleanup_token" != "$CLOUDBENCH_RUN_TOKEN" ]; then
             log "FATAL: benchmark root cleanup was not confirmed; refusing guest cleanup acknowledgement"
             return 1
         fi
     fi
-    mkdir -p "${CLEANUP_ACK_FILE%/*}" || return 1
+    if [ -n "${STACK_PID:-}" ]; then
+        cleanup_state="$(awk -F= '$1 == "state" { print $2; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_token="$(awk -F= '$1 == "token" { print $2; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_stack_pid="$(awk -F= '$1 == "stack_pid" { print $2; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_stack_birth="$(awk -F= '$1 == "stack_birth" { print $2; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        if [ -z "${STACK_BIRTH:-}" ] || [ "$cleanup_stack_birth" != "$STACK_BIRTH" ] || [ "$cleanup_state" != clean ] || [ "$cleanup_token" != "$CLOUDBENCH_RUN_TOKEN" ] || [ "$cleanup_stack_pid" != "$STACK_PID" ]; then
+            log "FATAL: stack worker cleanup was not confirmed; refusing guest cleanup acknowledgement"
+            return 1
+        fi
+    fi
     printf '%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$temporary" \
         && mv -f "$temporary" "$CLEANUP_ACK_FILE"
 }
@@ -183,6 +222,15 @@ cleanup_stack() {
     elif [ -n "$STACK_PID" ]; then
         wait "$STACK_PID" 2>/dev/null || true
     fi
+    if [ -n "${CODEX_AUTH_ADMISSION_TOKEN:-}" ]; then
+        if ! python3 "$CODEX_AUTH_HELPER" retire --run-token "$CLOUDBENCH_RUN_TOKEN" \
+            --machine-id "${CLOUDBENCH_CODEX_AUTH_MACHINE_ID:-}" --sha256 "$CLOUDBENCH_CODEX_AUTH_SHA256" --user "$APP_USER" \
+            --admission-token "$CODEX_AUTH_ADMISSION_TOKEN"; then
+            log "FATAL: exact credential retirement was not confirmed"
+            [ "$original_rc" -ne 0 ] || original_rc=1
+            exit "$original_rc"
+        fi
+    fi
     if ! publish_cleanup_ack; then
         log "FATAL: could not publish guest cleanup acknowledgement"
         [ "$original_rc" -ne 0 ] || original_rc=1
@@ -192,6 +240,8 @@ cleanup_stack() {
 trap cleanup_stack EXIT
 
 request_graceful_shutdown() {
+    local signal_rc=0 signal_ignored_mask="unreadable" signal_caught_mask="unreadable" signal_process_group="unreadable"
+    ACTIVE_COMMAND_SHUTDOWN_PENDING=1
     log "guest shutdown requested; draining benchmark root before stack teardown"
     if [ -n "$ACTIVE_COMMAND_PID" ] && kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; then
         if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
@@ -204,7 +254,14 @@ request_graceful_shutdown() {
             # asyncio.run translates SIGINT into task cancellation. The benchmark
             # cancellation path can then archive and DELETE the exact root agent,
             # which closes browser sessions and finalizes replays canonically.
-            kill -INT "$ACTIVE_COMMAND_PID" 2>/dev/null || true
+            if [ -r "/proc/$ACTIVE_COMMAND_PID/status" ]; then
+                signal_ignored_mask="$(awk '$1 == "SigIgn:" { print $2; exit }' "/proc/$ACTIVE_COMMAND_PID/status")"
+                signal_caught_mask="$(awk '$1 == "SigCgt:" { print $2; exit }' "/proc/$ACTIVE_COMMAND_PID/status")"
+                signal_process_group="$(awk '$1 == "NSpgid:" { print $2; exit }' "/proc/$ACTIVE_COMMAND_PID/status")"
+            fi
+            log "benchmark signal target evidence: pid=$ACTIVE_COMMAND_PID pgid=$signal_process_group ignored=$signal_ignored_mask caught=$signal_caught_mask"
+            kill -INT "$ACTIVE_COMMAND_PID" 2>/dev/null || signal_rc=$?
+            log "benchmark cancellation signal dispatched: pid=$ACTIVE_COMMAND_PID signal=INT status=$signal_rc"
         fi
         return
     fi
@@ -249,15 +306,15 @@ run_with_heartbeat() {
     # ignored, and that disposition survives exec into Python. Briefly enabling
     # monitor mode gives the benchmark the normal asyncio SIGINT cancellation
     # path while keeping heartbeat supervision in this shell.
+    ACTIVE_COMMAND_SIGNALLED=0
     ACTIVE_COMMAND_STARTING=1
     set -m
     "$@" &
     command_pid=$!
     set +m
     ACTIVE_COMMAND_PID="$command_pid"
-    ACTIVE_COMMAND_SIGNALLED=0
     ACTIVE_COMMAND_STARTING=0
-    if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
+    if [ -e "$SHUTDOWN_REQUEST_FILE" ] || [ "$ACTIVE_COMMAND_SHUTDOWN_PENDING" = 1 ]; then
         request_graceful_shutdown
     fi
     while kill -0 "$command_pid" 2>/dev/null; do
@@ -278,7 +335,12 @@ run_with_heartbeat() {
     if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
         wait "$command_pid" 2>/dev/null || command_rc=$?
     fi
-    ACTIVE_COMMAND_PID=""
+    if [ "$label" = benchmark ]; then
+        ACTIVE_COMMAND_PID=""
+    else
+        ACTIVE_COMMAND_PID="" ACTIVE_COMMAND_SIGNALLED=0
+        [ "$ACTIVE_COMMAND_SHUTDOWN_PENDING" != 1 ] || command_rc=143
+    fi
     return "$command_rc"
 }
 
@@ -313,12 +375,28 @@ wait_for_benchmark_frontend_url() {
         return 0
     fi
 
-    local public_url
+    local public_url probe_dir
+    local -a probe_args=(
+        --fail --silent --show-error --location --max-time 5
+        --user-agent 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+    )
+    probe_dir="$(mktemp -d "$CONTEXT_DIR/frontend-probe.XXXXXXXX")" || return 1
     public_url=""
     log "waiting for public frontend URL required by bundled browser/payment benchmark prompts..."
     for _ in $(seq 1 180); do
         public_url="$(manifest_public_frontend_url || true)"
-        if [ -n "$public_url" ] && curl -fsS --max-time 5 "$public_url/test_payment" >/dev/null 2>&1; then
+        # A successful status can still be a tunnel interstitial or redirect.
+        # Compare the browser-visible bytes to this stack's own frontend.
+        # Both requests share the existing five-second request ceiling.
+        if [ -n "$public_url" ] \
+            && curl --parallel --parallel-immediate --fail-early \
+                "${probe_args[@]}" --output "$probe_dir/origin" \
+                "http://127.0.0.1:$((BASE_PORT + 1))/test_payment" \
+                --next "${probe_args[@]}" --output "$probe_dir/public" \
+                "$public_url/test_payment" >/dev/null 2>&1 \
+            && [ -s "$probe_dir/origin" ] \
+            && cmp -s "$probe_dir/origin" "$probe_dir/public"; then
+            rm -rf "$probe_dir"
             BENCHMARK_FRONTEND_URL="$public_url"
             export BENCHMARK_FRONTEND_URL
             log "public benchmark frontend ready: $BENCHMARK_FRONTEND_URL"
@@ -327,7 +405,8 @@ wait_for_benchmark_frontend_url() {
         sleep 1
     done
 
-    log "FATAL: bundled browser/payment benchmark requires a public frontend URL, but $MANIFEST did not publish a reachable https urls.public"
+    rm -rf "$probe_dir"
+    log "FATAL: bundled browser/payment benchmark requires a public frontend URL serving this stack's frontend, but $MANIFEST did not publish a verified https urls.public"
     return 1
 }
 
@@ -338,6 +417,7 @@ TASK_WORKER_ENV=()
 BENCH_NEEDS_BUNDLED_FRONTEND=0
 BENCH_NEEDS_AGENTCARD_ONBOARDING=0
 BENCH_NEEDS_PAYMENT_FIXTURE=0
+BENCH_NEEDS_NEW_USER_CHECKOUT=0
 resolve_task_gate() {
     local task_gate_python task_gate_status
     task_gate_python="${CLOUDBENCH_TASK_GATE_PYTHON:-$(command -v python3 || true)}"
@@ -368,12 +448,29 @@ for task_name in "${BENCH_TASK_LIST[@]}"; do
             BENCH_NEEDS_AGENTCARD_ONBOARDING=1
             BENCH_NEEDS_PAYMENT_FIXTURE=1
             ;;
+        agent-payment-new-user-journey)
+            BENCH_NEEDS_BUNDLED_FRONTEND=1
+            BENCH_NEEDS_AGENTCARD_ONBOARDING=1
+            BENCH_NEEDS_NEW_USER_CHECKOUT=1
+            ;;
         gate-subscription-card-mint|gate-kyc-card-mint)
             BENCH_NEEDS_BUNDLED_FRONTEND=1
             BENCH_NEEDS_AGENTCARD_ONBOARDING=1
             ;;
     esac
 done
+if [ "$BENCH_NEEDS_NEW_USER_CHECKOUT" = "1" ] && [ "$BENCH_SIMULATE" = "1" ]; then
+    log "FATAL: new-user payment journey requires real mode for Stripe Checkout and settlement"
+    exit 2
+fi
+
+# An infra probe boots the isolated stack but never runs its sampled task.
+# Payment task names otherwise request a production frontend build that needs
+# the real task's 8 GB primary; the probe deliberately borrows a 4 GB pool
+# primary. Keep bundled frontend builds for real payment runs only.
+if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
+    BENCH_NEEDS_BUNDLED_FRONTEND=0
+fi
 
 render_task_worker_exports() {
     local entry
@@ -478,7 +575,33 @@ if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
     esac
 fi
 
+# A configured controller authority is installed atomically over exact-machine
+# SFTP. No envelope enters provider config, script payloads or runtime artifacts.
+unset CODEX_AUTH_PATH
+if [ -n "${CLOUDBENCH_CODEX_AUTH_SHA256:-}" ]; then
+    CODEX_AUTH_ADMISSION_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" || finish 1
+    if CLOUDBENCH_HEARTBEAT_SECONDS=1 run_with_heartbeat credential-handoff \
+        python3 "$CODEX_AUTH_HELPER" wait --run-token "$CLOUDBENCH_RUN_TOKEN" \
+        --machine-id "${CLOUDBENCH_CODEX_AUTH_MACHINE_ID:-}" \
+        --sha256 "$CLOUDBENCH_CODEX_AUTH_SHA256" --user "$APP_USER" \
+        --admission-token "$CODEX_AUTH_ADMISSION_TOKEN"; then
+        :
+    else
+        codex_auth_rc=$?
+        log "FATAL: explicit Codex auth handoff failed before benchmark setup"
+        finish "$codex_auth_rc"
+    fi
+    export CODEX_AUTH_PATH="/tmp/rose-cloudbench-codex/$CLOUDBENCH_RUN_TOKEN-$CLOUDBENCH_CODEX_AUTH_MACHINE_ID/auth.json"
+fi
+
 # ── 0. Sanity: the volume + repo checkout must exist (created at box setup) ──
+if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] && [ ! -d "$REPO_DIR/.git" ]; then
+    [ "$BENCH_SIMULATE" = 0 ] && [ -n "$REF" ] || { log "FATAL: fresh checkout requires an exact REAL task ref"; finish 1; }
+    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+        log "FATAL: could not bootstrap requested ref on fresh storage"
+        finish 1
+    fi
+fi
 if [ ! -d "$REPO_DIR/.git" ]; then
     log "FATAL: $REPO_DIR is not a git checkout (expected a pre-authed volume checkout)"
     finish 1
@@ -492,10 +615,10 @@ rm -rf "$CONTEXT_DIR"
 mkdir -p "$CONTEXT_DIR"
 chown -R "$APP_USER:$APP_USER" "$REPO_DIR/.context"
 touch "$RUN_OUTPUT_MARKER"
-printf '%s\n' "$$" > /data/cloudbench-driver.pid
+printf '%s\n' "$$" > "$DATA_DIR/cloudbench-driver.pid"
 if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
-    rm -f "/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.ready" \
-        "/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.release"
+    rm -f "$DATA_DIR/cloudbench-start-$CLOUDBENCH_START_BARRIER.ready" \
+        "$DATA_DIR/cloudbench-start-$CLOUDBENCH_START_BARRIER.release"
 fi
 
 # ── 1. git-sync the branch/sha under test ───────────────────────────────────
@@ -599,7 +722,7 @@ if [ ! -f "$STATUS_SERVER_SCRIPT" ]; then
     finish 1
 fi
 setsid python3 "$STATUS_SERVER_SCRIPT" \
-    --directory /data \
+    --directory "$DATA_DIR" \
     --port "$CLOUDBENCH_STATUS_PORT" \
     --barrier "$CLOUDBENCH_START_BARRIER" \
     --run-token "${CLOUDBENCH_RUN_TOKEN:-}" \
@@ -656,19 +779,42 @@ fi
 # Prisma's generated client is compiled from schema.prisma, not just the npm
 # manifests. A warm dependency tree can therefore be package-current but
 # schema-stale when a benchmark checks out another ref or applies a local patch.
+chown -R "$APP_USER:$APP_USER" "$REPO_DIR/node_modules" "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/venv" 2>/dev/null || true
 if ! bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"; then
     log "FATAL: Prisma client synchronization failed"
     finish 1
 fi
-chown -R "$APP_USER:$APP_USER" "$REPO_DIR/node_modules" "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/venv" 2>/dev/null || true
+
+# The warm image omits local Chromium because ordinary simulated benches use
+# remote/browser-model boundaries. Hosted Stripe Checkout in this daily task
+# needs a real browser on the box; keep its binary cache on the persistent volume.
+if [ "$BENCH_NEEDS_NEW_USER_CHECKOUT" = "1" ]; then
+    step checkout_browser
+    export PLAYWRIGHT_BROWSERS_PATH=/data/cloudbench-cache/playwright-browsers
+    mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
+    chown -R "$APP_USER:$APP_USER" "$PLAYWRIGHT_BROWSERS_PATH"
+    if [ ! -f /var/lib/rose-playwright-chromium-deps ]; then
+        if ! "$REPO_DIR/agents/venv/bin/python" -m playwright install-deps chromium; then
+            log "FATAL: could not install Chromium system dependencies"
+            finish 1
+        fi
+        touch /var/lib/rose-playwright-chromium-deps
+    fi
+    if ! gosu "$APP_USER" env -u PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD HOME="/home/$APP_USER" PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            "$REPO_DIR/agents/venv/bin/python" -m playwright install chromium; then
+        log "FATAL: could not install Playwright Chromium for subscription Checkout"
+        finish 1
+    fi
+fi
 
 # ── 4. Pin a stable single-tenant workspace + base port for this box ────────
 BASE_PORT="${CONDUCTOR_PORT:-3001}"
 WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME:-cloudbench}"
+WORKSPACE_NAME_SHELL=$(printf '%q' "$WORKSPACE_NAME")
 cat > "$REPO_DIR/.cloud-env" <<EOF
 # Generated by cloudbench-run.sh — single-tenant warm cloud bench box.
 export CONDUCTOR_PORT=${BASE_PORT}
-export CONDUCTOR_WORKSPACE_NAME=${WORKSPACE_NAME}
+export CONDUCTOR_WORKSPACE_NAME=${WORKSPACE_NAME_SHELL}
 export CONDUCTOR_ROOT_PATH=${REPO_DIR}
 EOF
 chown "$APP_USER:$APP_USER" "$REPO_DIR/.cloud-env"
@@ -788,6 +934,8 @@ STACK_ENV=(
     # state. Allocate a run-local provider profile; server shutdown deletes it.
     "BENCHMARK_ISOLATED_BROWSER_PROFILES=true"
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR"
+    "RUN_STACK_CLEANUP_STATUS_FILE=$STACK_CLEANUP_STATUS_FILE"
+    "RUN_STACK_CLEANUP_TOKEN=$CLOUDBENCH_RUN_TOKEN"
     "BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE=$CONTEXT_DIR/sms-web-search-fixture.json"
     "CONDUCTOR_PORT=$BASE_PORT"
     "CONDUCTOR_WORKSPACE_NAME=$WORKSPACE_NAME"
@@ -815,6 +963,10 @@ STACK_ENV=(
     "WMH_MODEL_NAME=$WMH_MODEL_NAME"
     "WMH_BUILD_DIR=$WMH_DIR"
     "BENCHMARK_SKIP_WMH_DELTA=1"
+    # One isolated guest runs one benchmark. A single worker still supports many
+    # workflow/activity slots; eight workers per guest at fleet width exhaust
+    # the shared Temporal namespace poll budget and delay stack health by minutes.
+    "BENCHMARK_AGENT_WORKERS=${BENCHMARK_AGENT_WORKERS:-1}"
     # The isolated stack is launched through `env` with this allow-list. Keep the
     # controller's provider exclusion inside that environment so the WMH Rose
     # provider cannot lease/use Claude after the outer runner explicitly disabled
@@ -823,6 +975,12 @@ STACK_ENV=(
 )
 if [ -n "$BENCHMARK_FAST_MODE_CACHE" ]; then
     STACK_ENV+=("BENCHMARK_FAST_MODE_CACHE=$BENCHMARK_FAST_MODE_CACHE")
+fi
+if [ -n "${FAST_MODE_CACHE_DISABLE_WRITE_THROUGH:-}" ]; then
+    STACK_ENV+=("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=$FAST_MODE_CACHE_DISABLE_WRITE_THROUGH")
+fi
+if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then
+    STACK_ENV+=("BENCHMARK_DEMO_CACHE_READ_ONLY=1")
 fi
 if [ -n "$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY" ]; then
     STACK_ENV+=("BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY")
@@ -835,6 +993,12 @@ if [ -n "$BENCHMARK_VM_USD_PER_HOUR" ]; then
 fi
 if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
     STACK_ENV+=("${TASK_WORKER_ENV[@]}")
+fi
+if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
+    # The probe executes no benchmark task. One Temporal worker proves stack
+    # readiness without starting eight idle Python processes on a 4 GB guest
+    # or spending the namespace's poll budget before the real fleet starts.
+    STACK_ENV+=("BENCHMARK_AGENT_WORKERS=1")
 fi
 if [ "$BENCH_NEEDS_BUNDLED_FRONTEND" = "1" ]; then
     STACK_ENV+=("BENCHMARK_BUNDLED_FRONTEND=true")
@@ -890,7 +1054,7 @@ fi
 BENCH_TARGET_MODE_FOR_STACK=""
 if BENCH_TARGET_PLAN_FOR_STACK="$(python3 "$BENCHMARK_TARGET_SCRIPT" \
     "$REPO_DIR/agents/benchmarks/tasks.json" "$BASE_PORT" "${BENCH_TASK_LIST[@]}" 2>/dev/null)"; then
-    BENCH_TARGET_MODE_FOR_STACK="$(printf '%s\n' "$BENCH_TARGET_PLAN_FOR_STACK" | head -1)"
+    BENCH_TARGET_MODE_FOR_STACK="${BENCH_TARGET_PLAN_FOR_STACK%%$'\n'*}"
 fi
 if [ "$BENCH_SIMULATE" = "1" ]; then
     STACK_ENV+=(
@@ -907,6 +1071,12 @@ elif [ "$BENCH_TARGET_MODE_FOR_STACK" = "prod" ]; then
         "BENCHMARK_SKIP_PUBLIC_TUNNEL=1"
     )
 else
+    # Older warm images baked cloudflared without its documented ngrok fallback.
+    # Materialize the same prerequisite as cloud-init before selecting a tunnel.
+    if ! bash "$NGROK_INSTALL_SCRIPT"; then
+        log "FATAL: could not install ngrok for isolated benchmark webhooks"
+        finish 1
+    fi
     STACK_ENV+=(
         "BENCHMARK_SKIP_WMH_BUILD=1"
         # Each isolated VM gets a random Quick Tunnel URL for this run. The URL
@@ -918,11 +1088,13 @@ fi
 # The DB warm-start dump lives on the /data volume (persists across stop/start +
 # fork) but must be writable by $APP_USER — /data itself is root-owned and
 # /data/repo gets `git reset --hard`'d, so use a dedicated cache dir we chown.
-mkdir -p /data/cloudbench-cache && chown "$APP_USER:$APP_USER" /data/cloudbench-cache 2>/dev/null || true
+mkdir -p "$DATA_DIR/cloudbench-cache" && chown "$APP_USER:$APP_USER" "$DATA_DIR/cloudbench-cache" 2>/dev/null || true
 
 log "launching stack (run.sh --benchmark) — base_port=$BASE_PORT wmh_port=$WMH_PORT workspace=$WORKSPACE_NAME simulate=$BENCH_SIMULATE"
+rm -f "$STACK_CLEANUP_STATUS_FILE"
 gosu "$APP_USER" env "${STACK_ENV[@]}" bash "$REPO_DIR/scripts/run.sh" --benchmark > "$STACK_LOG" 2>&1 &
 STACK_PID=$!
+STACK_BIRTH="$(ps -p "$STACK_PID" -o lstart= | sed 's/^ *//;s/ *$//')"
 log "stack pid=$STACK_PID (logs → $STACK_LOG)"
 
 tail -n +1 -F "$STACK_LOG" &
@@ -1029,8 +1201,8 @@ wait_for_benchmark_frontend_url || finish 1
 # The controller releases all machines together, so slow database/bootstrap
 # work cannot turn a nominally parallel batch into serial benchmark execution.
 if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
-    BARRIER_READY="/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.ready"
-    BARRIER_RELEASE="/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.release"
+    BARRIER_READY="$DATA_DIR/cloudbench-start-$CLOUDBENCH_START_BARRIER.ready"
+    BARRIER_RELEASE="$DATA_DIR/cloudbench-start-$CLOUDBENCH_START_BARRIER.release"
     touch "$BARRIER_READY"
     log "synchronized start barrier ready: $CLOUDBENCH_START_BARRIER"
     BARRIER_RELEASED=false
@@ -1142,7 +1314,8 @@ if ! BENCH_TARGET_PLAN="$(python3 "$BENCHMARK_TARGET_SCRIPT" \
     log "FATAL: could not resolve the catalog-mandated benchmark target"
     finish 1
 fi
-BENCH_TARGET_MODE="$(printf '%s\n' "$BENCH_TARGET_PLAN" | head -1)"
+# A pipe into `head -1` dies with SIGPIPE under pipefail when head exits first.
+BENCH_TARGET_MODE="${BENCH_TARGET_PLAN%%$'\n'*}"
 BENCH_TARGET_ARGS=()
 while IFS= read -r target_arg; do
     [ -n "$target_arg" ] && BENCH_TARGET_ARGS+=("$target_arg")
@@ -1159,27 +1332,42 @@ if [ "$BENCH_SIMULATE" = "1" ]; then
     BENCH_ARGS+=(--simulate --world-model-url "http://localhost:$WMH_PORT" --world-model-name "$WMH_MODEL_NAME")
 fi
 
+BENCH_HARNESS_ENV=()
+if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then
+    # The temporary replay guard belongs to task agents in STACK_ENV and the
+    # worker wrappers. Leave the harness's declared judges on their ordinary
+    # evaluation path, including real provider calls when its cache misses.
+    BENCH_HARNESS_ENV+=(
+        -u FAST_MODE_CACHE_DISABLE_WRITE_THROUGH
+        -u BENCHMARK_DEMO_CACHE_READ_ONLY
+        -u CLOUDBENCH_FAST_CACHE_READ_ONLY
+    )
+fi
+
 log "running benchmark: target=$BENCH_TARGET_MODE run_benchmark.py ${BENCH_ARGS[*]}"
 # Retouch after checkout/setup so files merely restored or rewritten during
 # clone initialization cannot qualify as output from this benchmark process.
 touch "$RUN_OUTPUT_MARKER"
-rm -f "$INTERRUPT_CLEANUP_STATUS_FILE"
+rm -f "$INTERRUPT_CLEANUP_STATUS_FILE" "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE"
 set +e
-# Export the workspace/queue env explicitly INSIDE the shell (not just an `env`
-# prefix) so run_benchmark's _verify_worker_queue_alignment() reliably sees
-# CONDUCTOR_WORKSPACE_NAME, and echo it so the log proves what the process got.
-run_with_heartbeat "benchmark" gosu "$APP_USER" bash -c "
+# Pass workspace identity as environment arguments so shell metacharacters in
+# the name cannot break the inner command. The inner shell forwards these values
+# to run_benchmark.py and logs them below.
+run_with_heartbeat "benchmark" gosu "$APP_USER" env "${BENCH_HARNESS_ENV[@]}" \
+    "CONDUCTOR_WORKSPACE_NAME=$WORKSPACE_NAME" \
+    "BENCHMARK_RUN_ID=$WORKSPACE_NAME" \
+    "TEMPORAL_TASK_QUEUE=navi-agent-tasks-$WORKSPACE_NAME" bash -c "
 export HOME='/home/$APP_USER'
 export BENCHMARK_CONTEXT_DIR='$CONTEXT_DIR'
+export BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS='$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS'
 export BENCHMARK_ISOLATED_RUN=true
 export BENCHMARK_ISOLATED_BROWSER_PROFILES=true
 export BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT=true
-export BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE='$INTERRUPT_CLEANUP_STATUS_FILE'
+export BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE='$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE'
 export BENCHMARK_INTERRUPT_CLEANUP_TOKEN='$CLOUDBENCH_RUN_TOKEN'
+if [ '$BENCH_TARGET_MODE' = local ]; then export BENCHMARK_CLOUD_BATCH_CLEANUP=true; fi
 export ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1
-export CONDUCTOR_WORKSPACE_NAME='$WORKSPACE_NAME'
 export CONDUCTOR_PORT='$BASE_PORT'
-export TEMPORAL_TASK_QUEUE='navi-agent-tasks-$WORKSPACE_NAME'
 export BENCHMARK_SEED_DUMP='$STACK_SEED_DUMP'
 # run.sh exports this path to the backend, but the benchmark runner is a
 # sibling process launched by this driver and cannot inherit that export.

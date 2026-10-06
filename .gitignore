@@ -111,6 +111,8 @@ browser-agent-recordings/
 # Read-only reference repos (cloned locally for prompt research; not committed to avoid repo bloat)
 /openclaw/
 /hermes-agent/
+/codex/
+/prime-agent/
 
 # Prompt review tool — generated artifacts (regenerable via `bash prompt-review/run.sh`)
 prompt-review/data.json

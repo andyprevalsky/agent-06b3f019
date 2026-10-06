@@ -48,7 +48,7 @@ export const ANTHROPIC_BETA_HEADER_API_KEY = [
 
 const ANTHROPIC_VERSION = '2023-06-01';
 const ANTHROPIC_X_APP = 'cli';
-const ANTHROPIC_USER_AGENT = 'claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)';
+const ANTHROPIC_USER_AGENT = 'claude-cli/2.1.251 (external, sdk-ts, agent-sdk/0.2.75)';
 
 export const DEFAULT_CONNECT_TIMEOUT_MS = 60_000;
 
@@ -253,7 +253,7 @@ export async function postOpenAIResponsesStream(
     log.warn('openai.error', {
       request_id: options.requestId,
       status: response.status,
-      body: errorBody.substring(0, 500),
+      error_body_len: errorBody.length,
     });
   }
 
@@ -268,6 +268,38 @@ export async function postOpenAIResponsesStream(
     body,
     errorBody,
   };
+}
+
+/** Microsoft Foundry's Responses endpoint uses the same SSE contract as OpenAI. */
+export async function postFoundryResponsesStream(
+  options: PostOptions & { endpoint: string; apiKey: string; abortSignal?: AbortSignal }
+): Promise<StreamResponse> {
+  const timeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+  const upstream = options.abortSignal ?? new AbortController().signal;
+  const root = options.endpoint.replace(/\/+$/, '').replace(/\/openai\/v1$/, '');
+  if (!root.startsWith('https://')) throw new Error('AZURE_FOUNDRY_ENDPOINT must be HTTPS');
+  const { response, cleanup } = await withStreamingConnectTimeout(upstream, timeoutMs, (signal) =>
+    fetch(`${root}/openai/v1/responses`, {
+      method: 'POST',
+      headers: { 'api-key': options.apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(options.body),
+      redirect: 'manual',
+      signal,
+    })
+  );
+  let errorBody: string | undefined;
+  if (!response.ok) {
+    try {
+      errorBody = await response.text();
+    } finally {
+      cleanup();
+    }
+    log.warn('foundry.error', { request_id: options.requestId, status: response.status });
+  }
+  const body =
+    response.ok && response.body ? keepAbortConnectedToBody(response.body, cleanup) : null;
+  if (!body) cleanup();
+  return { status: response.status, ok: response.ok, headers: response.headers, body, errorBody };
 }
 
 export async function postCerebrasStream(
@@ -299,7 +331,7 @@ export async function postCerebrasStream(
     log.warn('cerebras.error', {
       request_id: options.requestId,
       status: response.status,
-      body: errorBody.substring(0, 500),
+      error_body_len: errorBody.length,
     });
   }
 
@@ -341,7 +373,7 @@ export async function postAnthropicStream(
     log.warn('anthropic.error', {
       request_id: options.requestId,
       status: response.status,
-      body: errorBody.substring(0, 500),
+      error_body_len: errorBody.length,
     });
   }
 
@@ -379,7 +411,7 @@ export async function postAnthropicApiKeyStream(
     log.warn('anthropic_apikey.error', {
       request_id: options.requestId,
       status: response.status,
-      body: errorBody.substring(0, 500),
+      error_body_len: errorBody.length,
     });
   }
 
@@ -397,6 +429,7 @@ export async function postOpenRouterStream(
 ): Promise<StreamResponse> {
   const timeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const upstream = options.abortSignal ?? new AbortController().signal;
+  const startedAt = Date.now();
   log.info('openrouter.start', {
     request_id: options.requestId,
     call_site: options.callSite,
@@ -410,6 +443,13 @@ export async function postOpenRouterStream(
       signal,
     })
   );
+  log.info('openrouter.headers', {
+    request_id: options.requestId,
+    call_site: options.callSite,
+    model: options.body.model,
+    status: response.status,
+    headers_ms: Date.now() - startedAt,
+  });
 
   let errorBody: string | undefined;
   if (!response.ok) {
@@ -421,7 +461,7 @@ export async function postOpenRouterStream(
     log.warn('openrouter.error', {
       request_id: options.requestId,
       status: response.status,
-      body: errorBody.substring(0, 500),
+      error_body_len: errorBody.length,
     });
   }
 
@@ -470,7 +510,7 @@ export async function postCodexStream(
     log.warn('codex.error', {
       request_id: options.requestId,
       status: response.status,
-      body: errorBody.substring(0, 500),
+      error_body_len: errorBody.length,
     });
   }
 

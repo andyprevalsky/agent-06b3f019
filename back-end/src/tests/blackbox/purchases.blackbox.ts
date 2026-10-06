@@ -428,7 +428,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'lookup fails safe (re-prompt) when the held card is unreadable',
+    'lookup preserves a held purchase when its card cannot be read',
     async () => {
       const userId = await createUser('lookup-unreadable');
       const fingerprint = `lookup-unreadable-${randomUUID()}`;
@@ -443,12 +443,20 @@ const tests: Array<[string, () => Promise<void>]> = [
         async closeCard() {},
       };
 
-      const result = await purchasesService.lookupPurchase(userId, fingerprint, provider);
-      assert(result.reusable === false, 'an unverifiable card must fail safe to re-approval');
+      let lookupError: unknown;
+      try {
+        await purchasesService.lookupPurchase(userId, fingerprint, provider);
+      } catch (error) {
+        lookupError = error;
+      }
+      assert(
+        lookupError instanceof Error && lookupError.message === 'card not found',
+        'an unverifiable card must preserve the provider read failure'
+      );
       const updated = await prisma.purchaseSpend.findUnique({ where: { id: seeded.id } });
       assert(
-        updated?.status === PurchaseSpendStatus.CLEARED,
-        `unreadable card should be marked CLEARED, got ${updated?.status}`
+        updated?.status === PurchaseSpendStatus.HELD,
+        `unreadable card must remain unresolved, got ${updated?.status}`
       );
     },
   ],
