@@ -120,11 +120,7 @@ def meaningful_response_schema_title(schema: Dict[str, Any], title: Any = None) 
 
     raw_fields = schema.get("fields") if isinstance(schema, dict) else None
     fields = raw_fields if isinstance(raw_fields, list) else []
-    field_names = {
-        str(field.get("name") or "")
-        for field in fields
-        if isinstance(field, dict)
-    }
+    field_names = {str(field.get("name") or "") for field in fields if isinstance(field, dict)}
     if "creator_name" in field_names:
         return "Creator Analysis"
     if {
@@ -136,11 +132,7 @@ def meaningful_response_schema_title(schema: Dict[str, Any], title: Any = None) 
     }.issubset(field_names):
         return "Creator Brand Strategy"
     first_name = next(
-        (
-            str(field.get("name") or "")
-            for field in fields
-            if isinstance(field, dict) and field.get("name")
-        ),
+        (str(field.get("name") or "") for field in fields if isinstance(field, dict) and field.get("name")),
         "Task",
     )
     derived = first_name.replace("_", " ").strip().title()
@@ -208,9 +200,7 @@ async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     """Reconstruct the StreamChunk sequence from a stored response."""
     stored = coerce_cached_llm_payload(stored)
     ctx = current_context()
-    if ctx is not None and (
-        is_oai_demo_goal(ctx.goal or "") or is_oai_demo_goal(ctx.root_goal or "")
-    ):
+    if ctx is not None and (is_oai_demo_goal(ctx.goal or "") or is_oai_demo_goal(ctx.root_goal or "")):
         stored = rewrite_oai_demo_display_names(stored)
     yield SimpleNamespace(
         kind="metadata",
@@ -596,8 +586,7 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
         }
     if site in {"completion_summary", "context_compression"}:
         text = (
-            "Fast Mode cache trajectory ended; the task completed successfully "
-            "based on prior tool evidence."
+            "Fast Mode cache trajectory ended; the task completed successfully based on prior tool evidence."
             if site == "completion_summary"
             else "Fast Mode cache trajectory ended; retaining prior context."
         )
@@ -809,9 +798,7 @@ async def july_gp_resolve_execute(
         if stored is not None and current == start:
             cand, key = stored, hit_key
         else:
-            cand, key = await cache_client.cache_get_position_fallback(
-                ctx.goal_hash, call_site, current
-            )
+            cand, key = await cache_client.cache_get_position_fallback(ctx.goal_hash, call_site, current)
         if cand is None:
             continue
         cand = _limit_july_gp_explore_calls(cand, prior_explore_call_ids)
@@ -836,9 +823,7 @@ async def july_gp_position_retry(ctx: Any, call_site: str) -> tuple[Any, Any]:
 _JULY_EXPLORE_RESEARCH_TOOLS = frozenset({"web_search", "web_fetch", "grep", "people_search"})
 
 
-def _july_explore_accept_payload(
-    stored: Any, prior_tool: str, *, start_step: int = 1
-) -> bool:
+def _july_explore_accept_payload(stored: Any, prior_tool: str, *, start_step: int = 1) -> bool:
     if stored is None:
         return False
     name = _payload_tool_name(stored)
@@ -884,9 +869,7 @@ async def july_explore_resolve(
             if stored is not None and goal_hash == ctx.goal_hash and current == start:
                 cand, key = stored, hit_key
             else:
-                cand, key = await cache_client.cache_get_position_fallback(
-                    goal_hash, call_site, current
-                )
+                cand, key = await cache_client.cache_get_position_fallback(goal_hash, call_site, current)
             if cand is None:
                 continue
             if _july_explore_accept_payload(cand, prior_tool, start_step=start):
@@ -898,9 +881,7 @@ async def july_explore_resolve(
         recovered = None
         recovered_key = None
         for current in range(1, start + 16):
-            cand, key = await cache_client.cache_get_position_fallback(
-                goal_hash, call_site, current
-            )
+            cand, key = await cache_client.cache_get_position_fallback(goal_hash, call_site, current)
             if cand is None:
                 continue
             name = _payload_tool_name(cand)
@@ -994,15 +975,12 @@ async def cached_complete(
     ):
         demo_goal_hash = google_oauth_demo_goal_hash()
         seed_google_oauth_demo = ctx.goal_hash == demo_goal_hash or (
-            ctx.root_goal is not None
-            and normalize_goal_hash(ctx.root_goal) == demo_goal_hash
+            ctx.root_goal is not None and normalize_goal_hash(ctx.root_goal) == demo_goal_hash
         )
     if ctx.read_enabled:
         lookup_failed = False
         try:
-            stored, hit_key = await lookup_llm_cache(
-                ctx, call_site, request_key_material(complete_kwargs)
-            )
+            stored, hit_key = await lookup_llm_cache(ctx, call_site, request_key_material(complete_kwargs))
         except FastCacheLookupError as exc:
             logger.warning("fast_cache.get_error", key=key, error=f"{type(exc).__name__}: {exc}"[:300])
             if ctx.soft_complete_allowed:
@@ -1023,14 +1001,16 @@ async def cached_complete(
                 except Exception as exc:
                     logger.warning("fast_cache.set_error", key=key, error=str(exc))
             logger.info("llm.cache.replay", call_site=call_site, key=key, hit_key=hit_key or key)
-            async with aclosing(replay_with_context(
-                stored,
-                call_site=call_site,
-                complete_kwargs=complete_kwargs,
-                cache_key=key,
-                hit_key=hit_key or key,
-                reason="cache_hit",
-            )) as replay_stream:
+            async with aclosing(
+                replay_with_context(
+                    stored,
+                    call_site=call_site,
+                    complete_kwargs=complete_kwargs,
+                    cache_key=key,
+                    hit_key=hit_key or key,
+                    reason="cache_hit",
+                )
+            ) as replay_stream:
                 async for chunk in replay_stream:
                     yield chunk
             return
@@ -1053,14 +1033,16 @@ async def cached_complete(
                         hit_key="scrape_passthrough",
                         reason="swf_scrape_passthrough",
                     )
-                    async with aclosing(replay_with_context(
-                        derived,
-                        call_site=call_site,
-                        complete_kwargs=complete_kwargs,
-                        cache_key=key,
-                        hit_key="scrape_passthrough",
-                        reason="swf_scrape_passthrough",
-                    )) as replay_stream:
+                    async with aclosing(
+                        replay_with_context(
+                            derived,
+                            call_site=call_site,
+                            complete_kwargs=complete_kwargs,
+                            cache_key=key,
+                            hit_key="scrape_passthrough",
+                            reason="swf_scrape_passthrough",
+                        )
+                    ) as replay_stream:
                         async for chunk in replay_stream:
                             yield chunk
                     return
@@ -1074,14 +1056,16 @@ async def cached_complete(
                         hit_key="terminal_passthrough",
                         reason="fm_terminal_passthrough",
                     )
-                    async with aclosing(replay_with_context(
-                        terminal,
-                        call_site=call_site,
-                        complete_kwargs=complete_kwargs,
-                        cache_key=key,
-                        hit_key="terminal_passthrough",
-                        reason="fm_terminal_passthrough",
-                    )) as replay_stream:
+                    async with aclosing(
+                        replay_with_context(
+                            terminal,
+                            call_site=call_site,
+                            complete_kwargs=complete_kwargs,
+                            cache_key=key,
+                            hit_key="terminal_passthrough",
+                            reason="fm_terminal_passthrough",
+                        )
+                    ) as replay_stream:
                         async for chunk in replay_stream:
                             yield chunk
                     return
@@ -1104,14 +1088,16 @@ async def cached_complete(
                     hit_key="trajectory_end_passthrough",
                     reason="fm_trajectory_end_passthrough",
                 )
-                async with aclosing(replay_with_context(
-                    soft,
-                    call_site=call_site,
-                    complete_kwargs=complete_kwargs,
-                    cache_key=key,
-                    hit_key="trajectory_end_passthrough",
-                    reason="fm_trajectory_end_passthrough",
-                )) as replay_stream:
+                async with aclosing(
+                    replay_with_context(
+                        soft,
+                        call_site=call_site,
+                        complete_kwargs=complete_kwargs,
+                        cache_key=key,
+                        hit_key="trajectory_end_passthrough",
+                        reason="fm_trajectory_end_passthrough",
+                    )
+                ) as replay_stream:
                     async for chunk in replay_stream:
                         yield chunk
                 return
@@ -1135,14 +1121,16 @@ async def cached_complete(
                     hit_key="cold_namespace_passthrough",
                     reason="fm_cold_namespace_passthrough",
                 )
-                async with aclosing(replay_with_context(
-                    soft,
-                    call_site=call_site,
-                    complete_kwargs=complete_kwargs,
-                    cache_key=key,
-                    hit_key="cold_namespace_passthrough",
-                    reason="fm_cold_namespace_passthrough",
-                )) as replay_stream:
+                async with aclosing(
+                    replay_with_context(
+                        soft,
+                        call_site=call_site,
+                        complete_kwargs=complete_kwargs,
+                        cache_key=key,
+                        hit_key="cold_namespace_passthrough",
+                        reason="fm_cold_namespace_passthrough",
+                    )
+                ) as replay_stream:
                     async for chunk in replay_stream:
                         yield chunk
                 return
@@ -1155,10 +1143,9 @@ async def cached_complete(
         # (spawn-sub-agents smoke timeout).
         logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
-    if (
-        os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1"
-        and os.environ.get("BENCHMARK_ISOLATED_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
-    ):
+    if os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1" and os.environ.get(
+        "BENCHMARK_ISOLATED_RUN", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}:
         raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
     if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled():
         raise FastCacheLookupError(
@@ -1171,9 +1158,7 @@ async def cached_complete(
     acc = _empty_response()
     live_kwargs = {**complete_kwargs, "call_site": call_site}
     live_fn = getattr(rose_client, "_complete_impl", None)
-    live_stream = (
-        live_fn(**live_kwargs) if live_fn is not None else rose_client.complete(**live_kwargs)
-    )
+    live_stream = live_fn(**live_kwargs) if live_fn is not None else rose_client.complete(**live_kwargs)
     async for chunk in live_stream:
         _accumulate(acc, chunk)
         if chunk.kind == "done" and ctx.should_write and not structured_response_model:

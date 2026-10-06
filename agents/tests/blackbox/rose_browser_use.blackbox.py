@@ -193,9 +193,7 @@ def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     reason = BROWSER_USE_TOOLS["recover_from_challenge"]["params"]["reason"]["description"]
     assert "force-opened" in reason
     assert "alternate goal path" in reason
-    preserve_flag = BROWSER_USE_TOOLS["recover_from_challenge"]["params"][
-        "auth_cookies_are_preserved"
-    ]
+    preserve_flag = BROWSER_USE_TOOLS["recover_from_challenge"]["params"]["auth_cookies_are_preserved"]
     assert preserve_flag["type"] == "boolean"
     assert "authenticated state" in preserve_flag["description"]
     assert "fresh cookie state" in preserve_flag["description"]
@@ -230,7 +228,6 @@ def test_build_browser_use_system_prompt_does_not_advertise_extract():
     assert "use `extract`" not in prompt
     assert "restart_auth_with_cookie_bundle" not in prompt
     assert "tool call" in prompt
-
 
 
 def test_state_has_indexed_dom_targets_detects_interactive_indices():
@@ -314,12 +311,8 @@ def test_drag_tool_in_catalog_and_normalizes_coordinates():
 def test_drag_tool_schema_requires_start_and_end():
     from browser_tools.schemas import DragTool
 
-    DragTool.model_validate(
-        {"tool": "drag", "source_index": 1, "target_index": 2}
-    )
-    DragTool.model_validate(
-        {"tool": "drag", "start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4}
-    )
+    DragTool.model_validate({"tool": "drag", "source_index": 1, "target_index": 2})
+    DragTool.model_validate({"tool": "drag", "start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4})
     try:
         DragTool.model_validate({"tool": "drag", "start_x": 1, "start_y": 2})
         raise AssertionError("expected validation error")
@@ -343,7 +336,9 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "OTP codes from email or SMS are automatically injected" in prompt
     assert "call request_user_assistance_for_authentication" in prompt
     assert "Do not call attempt_completion, send_message_to_user, or report a status instead." in prompt
-    assert "CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication." in prompt
+    assert (
+        "CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication." in prompt
+    )
     assert "relatively expensive way to force-open a blocked page or service" in prompt
     assert "do not use it when an alternate path can complete the goal" in prompt
     assert "Do not drag sliders" in prompt
@@ -737,8 +732,7 @@ def test_write_lock_purchase_schema_accepts_current_page_as_product_link():
         )
     except ValidationError as error:  # pragma: no cover - documents the removed rule
         raise AssertionError(
-            "product_url is validated for well-formedness only; the current session URL "
-            f"must be accepted: {error}"
+            f"product_url is validated for well-formedness only; the current session URL must be accepted: {error}"
         ) from error
 
 
@@ -1354,10 +1348,7 @@ def test_normalize_input_text_remap():
 
 
 def test_normalize_provider_printable_key_batch_as_focused_input_text():
-    calls = [
-        {"name": "press_key", "arguments": json.dumps({"key": key})}
-        for key in "bench"
-    ]
+    calls = [{"name": "press_key", "arguments": json.dumps({"key": key})} for key in "bench"]
 
     out = normalize_browser_use_tool_calls(calls, thinking="type naturally")
 
@@ -2451,7 +2442,9 @@ async def run_all_tests():
         test_complete_browser_use_preserves_printable_native_tool_batch,
     )
     await r.record_async("complete_browser_use_cerebras_path", test_complete_browser_use_cerebras_path_succeeds)
-    await r.record_async("complete_browser_use_dumps_cerebras_context", test_complete_browser_use_dumps_cerebras_context)
+    await r.record_async(
+        "complete_browser_use_dumps_cerebras_context", test_complete_browser_use_dumps_cerebras_context
+    )
     await r.record_async(
         "complete_browser_use_bypasses_fast_cache", test_complete_browser_use_bypasses_fast_cache_context
     )
@@ -2459,9 +2452,7 @@ async def run_all_tests():
         "complete_browser_use_cerebras_failure_preserves_tools",
         test_complete_browser_use_cerebras_failure_preserves_tools_on_openrouter,
     )
-    await r.record_async(
-        "complete_browser_use_auth_tokens_ignored", test_complete_browser_use_auth_tokens_are_ignored
-    )
+    await r.record_async("complete_browser_use_auth_tokens_ignored", test_complete_browser_use_auth_tokens_are_ignored)
 
     await r.record_async("execute_read_browser_state", test_execute_read_browser_state_returns_formatted_snapshot)
 

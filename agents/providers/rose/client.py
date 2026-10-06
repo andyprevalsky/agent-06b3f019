@@ -71,6 +71,7 @@ from providers.rose.schema import (
 )
 from providers.rose.streaming import _stream_progress
 from providers.rose.structured_output import StructuredOutputAccumulator
+from providers.rose.truncation import model_key, recover_truncated
 from providers.rose.types import (
     ChunkKind,
     ClaudeAuthContext,
@@ -79,7 +80,6 @@ from providers.rose.types import (
     RoseResponse,
     StreamChunk,
 )
-from providers.rose.truncation import model_key, recover_truncated
 from providers.rose.waterfall import waterfall_complete
 
 logger = structlog.get_logger()

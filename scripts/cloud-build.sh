@@ -82,10 +82,9 @@ if ! $IS_MAC; then
         if ! command -v pg_isready >/dev/null 2>&1; then
             $SUDO apt-get update -qq && $SUDO apt-get install -y -qq postgresql postgresql-client
         fi
-        # pgvector for the installed major (planner-memory vector columns).
-        # The installer builds against headers pinned to the installed server.
-        # A reused VM snapshot can carry a server minor the archive no longer
-        # offers headers for; move that server to the archive candidate first.
+        # The pgvector installer builds against headers pinned to the installed
+        # server. A reused VM snapshot can carry a server minor the archive no
+        # longer offers headers for; move that server to the archive candidate first.
         PG_MAJOR=$(ls /usr/lib/postgresql 2>/dev/null | sort -n | tail -1)
         if [ -n "$PG_MAJOR" ] && [ ! -f "/usr/share/postgresql/$PG_MAJOR/extension/vector.control" ]; then
             PG_INSTALLED=$(dpkg-query -W -f='${Version}' "postgresql-$PG_MAJOR" 2>/dev/null || true)
@@ -97,9 +96,17 @@ if ! $IS_MAC; then
                     || echo "   ⚠️  Could not refresh postgresql-$PG_MAJOR; pgvector install may fail"
             fi
         fi
-        $SUDO bash "$ROOT/scripts/cloudbench-install-pgvector.sh"
-        # Start the cluster
         PG_VER=$(pg_lsclusters -h 2>/dev/null | head -1 | awk '{print $1}')
+        # pgvector for the installed major (planner-memory vector columns). If the
+        # pinned build still cannot find matching headers, that must never abort
+        # the npm/venv provisioning below.
+        PG_FALLBACK_ERROR=""
+        if ! $SUDO bash "$ROOT/scripts/cloudbench-install-pgvector.sh"; then
+            echo "⚠️  Pinned pgvector build failed — installing postgresql-$PG_VER-pgvector"
+            $SUDO apt-get install -y -qq "postgresql-$PG_VER-pgvector" \
+                || PG_FALLBACK_ERROR="pgvector unavailable — prisma db push needs the vector extension"
+        fi
+        # Start the cluster
         $SUDO pg_ctlcluster "$PG_VER" main start 2>/dev/null || $SUDO service postgresql start 2>/dev/null || true
         # Set password + create DB to match the Docker container convention
         $SUDO su - postgres -c "psql -c \"ALTER USER postgres PASSWORD 'postgres';\"" 2>/dev/null || true
@@ -124,7 +131,9 @@ if ! $IS_MAC; then
               || $SUDO service postgresql restart 2>/dev/null \
               || true
         fi
-        if pg_isready -U postgres -q 2>/dev/null; then
+        if [ -n "$PG_FALLBACK_ERROR" ]; then
+            echo "❌ System Postgres fallback unusable: $PG_FALLBACK_ERROR"
+        elif pg_isready -U postgres -q 2>/dev/null; then
             echo "✅ System Postgres running (fallback — no Docker)"
         else
             echo "❌ Failed to start system Postgres"
@@ -184,6 +193,7 @@ cat "$PY_LOG"
 
 [ $JS_RC -eq 0 ] || { echo "❌ JS setup failed"; exit $JS_RC; }
 [ $PY_RC -eq 0 ] || { echo "❌ Python setup failed"; exit $PY_RC; }
+[ -z "${PG_FALLBACK_ERROR:-}" ] || { echo "❌ Database setup failed: $PG_FALLBACK_ERROR"; exit 1; }
 
 echo ""
 echo "✅ Cloud build complete"

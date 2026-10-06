@@ -104,7 +104,7 @@ def test_claim_prefers_exact_performance_shape_over_earlier_candidates(tmp_path)
     script.write_text(
         "set -euo pipefail\n" + function
         + '\nUNAVAILABLE_POOL_IDS=(); POOL_INVENTORY_JSON="[]"\n'
-        + 'machine_volume_id_from_json() { printf "vol-fixture"; }\n'
+        + 'machine_volume_id_from_json() { cat >/dev/null; printf "vol-fixture"; }\n'
         + 'write_pool_claim() { printf "owned\\n" > "$1"; }\n'
         + 'cloudbench_env_sha256() { printf "%064d" 0; }\n'
         + 'fleet_audit_record_pool_machine() { return 0; }\n'
