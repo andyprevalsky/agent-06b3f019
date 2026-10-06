@@ -19,6 +19,7 @@ import { createLogger } from '../../providers/logger';
 import { retryWithBackoff } from '../../providers/retry';
 import { GOOGLE_OAUTH_SCOPES } from '../../domains/integrations/googleScopes';
 import { getValidAccessToken } from './gmailSync';
+import { type StoredRow, applyGoogleDocuments, storedRows } from './googleWorkspaceDocumentStore';
 import {
   LeaseLostError,
   STATUS_CONNECTED,
@@ -60,7 +61,6 @@ const log = createLogger('GoogleWorkspaceSync');
 /** A grep sees data at most this old; also the retry spacing after a failure. */
 export const GOOGLE_SOURCE_FRESHNESS_MS = 60_000;
 const CONTENT_CONCURRENCY = 5;
-const WRITE_CHUNK = 500;
 const ON_DEMAND_TEXT_LIMIT = 10;
 
 /**
@@ -79,6 +79,8 @@ export interface GoogleSyncOptions {
   force?: boolean;
   /** How often a running refresh renews its lease (tests shorten it). */
   leaseRenewMs?: number;
+  /** Most Drive files one refresh lists (tests shorten it). */
+  driveMaxFiles?: number;
 }
 
 interface AccountCredential {
@@ -90,26 +92,12 @@ interface AccountCredential {
   scopes: string[];
 }
 
-interface StoredRow {
-  id: string;
-  externalId: string;
-  contentHash: string;
-  metadata: Prisma.JsonValue | null;
-}
-
 type AccountCursors = Record<string, { pageToken?: string }>;
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
-}
-
-function chunks<T>(items: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let index = 0; index < items.length; index += size)
-    out.push(items.slice(index, index + size));
-  return out;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -186,89 +174,6 @@ async function connectedAccounts(userId: string): Promise<AccountCredential[]> {
   return rows.filter((row): row is AccountCredential => row.email !== null);
 }
 
-async function storedRows(
-  userId: string,
-  source: GoogleWorkspaceSource,
-  accountEmail: string
-): Promise<Map<string, StoredRow>> {
-  const rows = await prisma.userDataDocument.findMany({
-    where: { userId, source, googleAccountEmail: accountEmail },
-    select: { id: true, externalId: true, contentHash: true, metadata: true },
-  });
-  return new Map(rows.map((row) => [row.externalId, row]));
-}
-
-/**
- * Make the stored rows of one account equal `documents`: create what is new,
- * update what changed (by hash), delete what Google no longer returns.
- */
-export async function applyGoogleDocuments(params: {
-  userId: string;
-  source: GoogleWorkspaceSource;
-  accountEmail: string;
-  documents: GoogleWorkspaceDocument[];
-  stored?: Map<string, StoredRow>;
-  /** Runs after every write, so a large apply keeps its refresh lease alive. */
-  keepAlive?: () => Promise<void>;
-}): Promise<{ created: number; updated: number; removed: number }> {
-  const { userId, source, accountEmail, documents, keepAlive } = params;
-  const stored = params.stored ?? (await storedRows(userId, source, accountEmail));
-  const seen = new Set<string>();
-  const creates: Prisma.UserDataDocumentCreateManyInput[] = [];
-  let updated = 0;
-
-  for (const doc of documents) {
-    if (seen.has(doc.externalId)) continue;
-    seen.add(doc.externalId);
-    const metadata = doc.metadata as Prisma.InputJsonObject;
-    const row = stored.get(doc.externalId);
-    if (row === undefined) {
-      creates.push({
-        userId,
-        source,
-        googleAccountEmail: accountEmail,
-        externalId: doc.externalId,
-        title: doc.title,
-        content: doc.content,
-        url: doc.url,
-        metadata,
-        sourceUpdatedAt: doc.sourceUpdatedAt,
-        contentHash: doc.contentHash,
-      });
-      continue;
-    }
-    if (row.contentHash === doc.contentHash) continue;
-    await prisma.userDataDocument.update({
-      where: { id: row.id },
-      data: {
-        title: doc.title,
-        url: doc.url ?? null,
-        metadata,
-        sourceUpdatedAt: doc.sourceUpdatedAt ?? null,
-        contentHash: doc.contentHash,
-        lastSeenAt: new Date(),
-        deletedAt: null,
-        ...(doc.keepStoredContent === true ? {} : { content: doc.content }),
-      },
-    });
-    updated += 1;
-    await keepAlive?.();
-  }
-
-  for (const batch of chunks(creates, WRITE_CHUNK)) {
-    await prisma.userDataDocument.createMany({ data: batch, skipDuplicates: true });
-    await keepAlive?.();
-  }
-  const removedIds = [...stored.values()]
-    .filter((row) => !seen.has(row.externalId))
-    .map((row) => row.id);
-  for (const batch of chunks(removedIds, WRITE_CHUNK)) {
-    await prisma.userDataDocument.deleteMany({ where: { id: { in: batch } } });
-    await keepAlive?.();
-  }
-  return { created: creates.length, updated, removed: removedIds.length };
-}
-
 async function syncCalendarAccount(params: {
   userId: string;
   accountEmail: string;
@@ -296,6 +201,19 @@ async function syncCalendarAccount(params: {
   log.info('Calendar refreshed', { userId: params.userId, events: documents.length, ...counts });
 }
 
+/**
+ * How far back a listing cut off at the file cap reached (it is ordered newest
+ * first). With no usable timestamp it reached nowhere, so nothing is removed.
+ */
+function oldestModifiedTime(files: GoogleDriveFile[]): Date {
+  let oldest = Infinity;
+  for (const file of files) {
+    const modified = Date.parse(file.modifiedTime ?? '');
+    if (!Number.isNaN(modified) && modified < oldest) oldest = modified;
+  }
+  return new Date(Number.isFinite(oldest) ? oldest : 8.64e15);
+}
+
 /** What to do about one Drive file's text on this refresh. */
 function plannedDriveContent(
   file: GoogleDriveFile,
@@ -318,6 +236,7 @@ async function syncDriveAccount(params: {
   token: string;
   fetcher: Fetcher;
   pageToken?: string;
+  maxFiles: number;
   keepAlive: () => Promise<void>;
 }): Promise<{ pageToken: string }> {
   const { userId, accountEmail, token, fetcher, keepAlive } = params;
@@ -334,7 +253,7 @@ async function syncDriveAccount(params: {
 
   // Any change re-lists, because a folder rename moves every path below it.
   // Unchanged files keep their stored text, so only changed text is downloaded.
-  const { files, truncated } = await listDriveFiles(token, DRIVE_MAX_FILES, fetcher, keepAlive);
+  const { files, truncated } = await listDriveFiles(token, params.maxFiles, fetcher, keepAlive);
   const folderPaths = driveFolderPaths(files);
   const stored = await storedRows(userId, GOOGLE_DRIVE_SOURCE, accountEmail);
   let textBudget = DRIVE_INITIAL_CONTENT_FILES;
@@ -372,6 +291,7 @@ async function syncDriveAccount(params: {
     accountEmail,
     documents,
     stored,
+    listedSince: truncated ? oldestModifiedTime(files) : undefined,
     keepAlive,
   });
   log.info('Drive refreshed', { userId, files: files.length, truncated, ...counts });
@@ -399,6 +319,7 @@ async function syncAccount(params: {
   fetcher: Fetcher;
   now: Date;
   pageToken?: string;
+  driveMaxFiles: number;
   keepAlive: () => Promise<void>;
 }): Promise<{ pageToken?: string }> {
   const { userId, source, account, fetcher, now, keepAlive } = params;
@@ -422,6 +343,7 @@ async function syncAccount(params: {
     token,
     fetcher,
     pageToken: params.pageToken,
+    maxFiles: params.driveMaxFiles,
     keepAlive,
   });
 }
@@ -472,6 +394,7 @@ export async function ensureGoogleSourceFresh(
           fetcher,
           now,
           pageToken: previous[account.email]?.pageToken,
+          driveMaxFiles: options.driveMaxFiles ?? DRIVE_MAX_FILES,
           keepAlive: () => held.keepAlive(),
         });
       } catch (error) {
@@ -599,7 +522,14 @@ export async function ensureDriveText(
   if (documentIds.length === 0) return 0;
   const rows = await prisma.userDataDocument.findMany({
     where: { id: { in: documentIds }, userId, source: GOOGLE_DRIVE_SOURCE, deletedAt: null },
-    select: { id: true, title: true, url: true, metadata: true, googleAccountEmail: true },
+    select: {
+      id: true,
+      title: true,
+      url: true,
+      metadata: true,
+      contentHash: true,
+      googleAccountEmail: true,
+    },
   });
   const pending = rows
     .map((row) => {
@@ -643,8 +573,11 @@ export async function ensureDriveText(
         contentDigest,
         ...(text.truncated ? { contentTruncated: true } : {}),
       };
-      await prisma.userDataDocument.update({
-        where: { id: row.id },
+      // Written only if the row is still the one read above. A refresh that
+      // changed it in between owns the newer path and metadata, and this text
+      // is fetched again the next time the file is addressed.
+      const written = await prisma.userDataDocument.updateMany({
+        where: { id: row.id, contentHash: row.contentHash },
         data: {
           content: text.text,
           metadata: metadata as Prisma.InputJsonObject,
@@ -656,7 +589,7 @@ export async function ensureDriveText(
           }),
         },
       });
-      return true;
+      return written.count === 1;
     } catch (error) {
       log.warn('Drive text fetch failed', {
         userId,
@@ -704,3 +637,5 @@ export function startGoogleWorkspaceSync(userId: string): void {
     void ensureGoogleSourceFresh(userId, source, { force: true });
   }
 }
+
+export { applyGoogleDocuments };

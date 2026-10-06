@@ -20,40 +20,35 @@ import {
   DRIVE_INITIAL_CONTENT_FILES,
   GOOGLE_CALENDAR_SOURCE,
   GOOGLE_DRIVE_SOURCE,
-  type GoogleWorkspaceDocument,
 } from '../../services/integrations/googleWorkspaceDocuments';
 import {
   GOOGLE_SOURCE_FRESHNESS_MS,
-  applyGoogleDocuments,
   ensureDriveText,
   ensureDriveTextWithin,
   ensureGoogleSourceFresh,
   ensureGoogleSourceFreshWithin,
 } from '../../services/integrations/googleWorkspaceSync';
-import {
-  LeaseLostError,
-  claimSyncLease,
-} from '../../services/integrations/googleWorkspaceSyncLease';
 import { processGoogleDataPurge } from '../../services/integrations/googleDataPurge';
 import {
-  FakeGoogle,
-  LEASE,
-  LEGAL,
-  NOTES,
-  SCAN,
-  T0,
   addAccount,
   assert,
   equal,
   event,
+  FakeGoogle,
   later,
+  LEASE,
+  LEGAL,
+  NOTES,
   pathOf,
+  pause,
   rows,
+  runSuite,
+  SCAN,
+  T0,
+  type TestCase,
   withUser,
 } from './google-workspace-sync.blackbox.helpers';
 config();
-
-const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** The row's content once it equals `expected`, or its last value after 5 s. */
 async function contentOf(id: string, expected: string): Promise<string> {
@@ -66,9 +61,8 @@ async function contentOf(id: string, expected: string): Promise<string> {
   return content;
 }
 
-type TestFn = () => Promise<void>;
-const tests: Array<{ name: string; fn: TestFn }> = [];
-function test(name: string, fn: TestFn): void {
+const tests: TestCase[] = [];
+function test(name: string, fn: TestCase['fn']): void {
   tests.push({ name, fn });
 }
 
@@ -266,124 +260,6 @@ test('a rate-limited Drive download keeps the stored text and fails the refresh'
     assert(google.count('download') >= 3, 'the rate limit is retried before giving up');
     const [row] = await rows(userId, GOOGLE_DRIVE_SOURCE);
     equal(row.content, 'remember the lease', 'the stored text survives');
-  });
-});
-
-test('a refresh renews its lease as it works', async () => {
-  await withUser(async ({ userId }) => {
-    const google = new FakeGoogle();
-    google.files = [NOTES];
-    google.text.set('notes', 'remember the lease');
-    const options = { fetcher: google.fetcher, now: T0, leaseRenewMs: 0 };
-    equal(await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, options), 'refreshed', 'run');
-    const state = await prisma.userDataProviderSyncState.findUniqueOrThrow({
-      where: { userId_source: { userId, source: GOOGLE_DRIVE_SOURCE } },
-    });
-    assert(
-      (state.lastStartedAt?.getTime() ?? 0) > T0.getTime(),
-      'the lease moved past its claim while the refresh worked'
-    );
-  });
-});
-
-test('a refresh that lost its lease stops without overwriting the new owner', async () => {
-  await withUser(async ({ userId }) => {
-    const google = new FakeGoogle();
-    google.files = [NOTES];
-    google.text.set('notes', 'remember the lease');
-    google.delayMs = 300;
-    const options = { fetcher: google.fetcher, now: T0, leaseRenewMs: 0 };
-    const displaced = ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, options);
-    // A later refresh takes the lease over while the first one is listing files.
-    for (let attempt = 0; attempt < 50 && google.calls.length === 0; attempt += 1) await pause(10);
-    const takeover = new Date(T0.getTime() + 10 * 60_000);
-    await prisma.userDataProviderSyncState.update({
-      where: { userId_source: { userId, source: GOOGLE_DRIVE_SOURCE } },
-      data: { status: 'SYNCING', lastStartedAt: takeover },
-    });
-    equal(await displaced, 'in_progress', 'the displaced refresh defers to the new owner');
-    const state = await prisma.userDataProviderSyncState.findUniqueOrThrow({
-      where: { userId_source: { userId, source: GOOGLE_DRIVE_SOURCE } },
-    });
-    equal(state.status, 'SYNCING', 'the new owner still holds the lease');
-    equal(state.lastStartedAt?.toISOString(), takeover.toISOString(), 'its stamp is untouched');
-    equal(state.lastSuccessfulSyncAt, null, 'the displaced refresh did not claim success');
-    equal(google.count('download'), 0, 'the displaced refresh stopped before downloading');
-  });
-});
-
-test('a refresh that lost its lease stops paging through Drive', async () => {
-  await withUser(async ({ userId }) => {
-    const google = new FakeGoogle();
-    google.files = [LEGAL, LEASE, NOTES, SCAN];
-    google.pageSize = 1;
-    google.delayMs = 300;
-    const options = { fetcher: google.fetcher, now: T0, leaseRenewMs: 0 };
-    const displaced = ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, options);
-    for (let attempt = 0; attempt < 200 && google.count('list') === 0; attempt += 1)
-      await pause(10);
-    await prisma.userDataProviderSyncState.update({
-      where: { userId_source: { userId, source: GOOGLE_DRIVE_SOURCE } },
-      data: { status: 'SYNCING', lastStartedAt: later(10) },
-    });
-    equal(await displaced, 'in_progress', 'the displaced refresh defers to the new owner');
-    assert(
-      google.count('list') <= 2,
-      `it stopped paging, after ${google.count('list')} of 4 pages`
-    );
-  });
-});
-
-test('searches racing on a first refresh claim one lease and none fails', async () => {
-  await withUser(async ({ userId }) => {
-    const claims = await Promise.all(
-      Array.from({ length: 8 }, () => claimSyncLease(userId, GOOGLE_CALENDAR_SOURCE, T0))
-    );
-    equal(claims.filter((lease) => lease !== null).length, 1, 'exactly one caller refreshes');
-  });
-});
-
-test('parallel renewals keep a held lease, and work after the end is told to stop', async () => {
-  await withUser(async ({ userId }) => {
-    const lease = await claimSyncLease(userId, GOOGLE_DRIVE_SOURCE, T0, 0);
-    assert(lease !== null, 'the lease is free to claim');
-    await Promise.all(Array.from({ length: 8 }, () => lease.keepAlive()));
-    equal(await lease.finish({ status: 'CONNECTED' }), true, 'the refresh still held its lease');
-    const late = await lease.keepAlive().then(
-      () => 'renewed',
-      (error: unknown) => (error instanceof LeaseLostError ? 'stopped' : 'failed')
-    );
-    equal(late, 'stopped', 'a download still running after the refresh ended');
-  });
-});
-
-test('writing rows checks the lease after each one', async () => {
-  await withUser(async ({ userId, email }) => {
-    const doc = (id: string, revision: string): GoogleWorkspaceDocument => ({
-      source: GOOGLE_DRIVE_SOURCE,
-      googleAccountEmail: email,
-      externalId: `${email}:${id}`,
-      title: id,
-      content: revision,
-      metadata: {},
-      contentHash: `${id}:${revision}`,
-    });
-    const write = (revision: string, keepAlive: () => Promise<void>): Promise<unknown> =>
-      applyGoogleDocuments({
-        userId,
-        source: GOOGLE_DRIVE_SOURCE,
-        accountEmail: email,
-        documents: [doc('a', revision), doc('b', revision)],
-        keepAlive,
-      });
-    await write('one', () => Promise.resolve());
-    const second = await write('two', () => Promise.reject(new LeaseLostError())).then(
-      () => 'finished',
-      () => 'stopped'
-    );
-    equal(second, 'stopped', 'a lost lease stops the write');
-    const stored = (await rows(userId, GOOGLE_DRIVE_SOURCE)).map((row) => row.content);
-    equal(stored.sort().join(','), 'one,two', 'it stopped after the first row');
   });
 });
 
@@ -631,25 +507,6 @@ test('disconnect purge deletes calendar and drive rows for that account', async 
   });
 });
 
-async function main(): Promise<void> {
-  let passed = 0;
-  const failures: string[] = [];
-  console.log('\ngoogle workspace sync\n');
-  for (const t of tests) {
-    try {
-      await t.fn();
-      passed += 1;
-      console.log(`  PASS  ${t.name}`);
-    } catch (err) {
-      failures.push(`${t.name}: ${err instanceof Error ? err.message : String(err)}`);
-      console.log(`  FAIL  ${t.name}\n        ${err instanceof Error ? err.message : err}`);
-    }
-  }
-  console.log(`\nRESULTS: ${passed}/${tests.length} passed`);
-  await prisma.$disconnect();
-  if (failures.length > 0) process.exit(1);
-}
-
-if (process.argv[1]?.includes('google-workspace-sync')) {
-  void main();
+if (process.argv[1]?.includes('google-workspace-sync.blackbox')) {
+  void runSuite('google workspace sync', tests);
 }

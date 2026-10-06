@@ -73,6 +73,8 @@ export class FakeGoogle {
   delayMs = 0;
   /** Files per page of the Drive listing; 0 returns them all in one page. */
   pageSize = 0;
+  /** Runs while a text download is in flight, before Google answers it. */
+  onDownload: ((fileId: string) => Promise<void>) | null = null;
   calls: string[] = [];
   private token = 1;
 
@@ -129,6 +131,7 @@ export class FakeGoogle {
     const fileId = /\/files\/([^/]+)/.exec(path)?.[1];
     if (fileId !== undefined) {
       this.calls.push('download');
+      if (this.onDownload !== null) await this.onDownload(fileId);
       if (this.rateLimitDownloads) {
         return this.json(
           { error: { code: 403, errors: [{ reason: 'userRateLimitExceeded' }] } },
@@ -209,3 +212,31 @@ export function event(id: string, summary: string, start: string): GoogleCalenda
     end: { dateTime: start },
   };
 }
+
+export interface TestCase {
+  name: string;
+  fn: () => Promise<void>;
+}
+
+/** Run the cases in order, print one line each, and exit non-zero on any failure. */
+export async function runSuite(title: string, tests: TestCase[]): Promise<void> {
+  let passed = 0;
+  const failures: string[] = [];
+  console.log(`\n${title}\n`);
+  for (const t of tests) {
+    try {
+      await t.fn();
+      passed += 1;
+      console.log(`  PASS  ${t.name}`);
+    } catch (err) {
+      failures.push(`${t.name}: ${err instanceof Error ? err.message : String(err)}`);
+      console.log(`  FAIL  ${t.name}\n        ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  console.log(`\nRESULTS: ${passed}/${tests.length} passed`);
+  await prisma.$disconnect();
+  if (failures.length > 0) process.exit(1);
+}
+
+export const pause = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
