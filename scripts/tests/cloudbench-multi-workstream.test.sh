@@ -3967,7 +3967,11 @@ PIDS+=("$cancel_launcher_pid")
 
 cancel_target_registry=""
 cancel_recovery_ready=0
-for _ in $(seq 1 400); do
+# Startup includes real host-side packaging and readiness publication even in
+# this offline provider fixture. Bound that whole infrastructure phase by time
+# while preserving the exact identity checks required before cancellation.
+cancel_ready_deadline=$((SECONDS + 120))
+while [ "$SECONDS" -lt "$cancel_ready_deadline" ]; do
     for registry in "$SANDBOX/.git/cloudbench-fleet-ownership"/*; do
         [ -d "$registry" ] || continue
         [ "$registry" = "$neighbor_registry" ] && continue
