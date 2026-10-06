@@ -108,6 +108,55 @@ async def test_poll_boundary():
     assert poll["method"] == "GET"
 
 
+async def test_poll_read_timeout_retries_and_completes():
+    """A single Vapi poll ReadTimeout must not fail a live call."""
+    polls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/api/vapi/call" in url and request.method == "POST" and "/call/" not in url.split("/api/vapi/call")[1]:
+            return httpx.Response(200, json={"call_id": "call-test-123"})
+        if "/api/vapi/call/call-test-123" in url and request.method == "GET":
+            polls["n"] += 1
+            if polls["n"] == 1:
+                raise httpx.ReadTimeout("")
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ended",
+                    "analysis": {"summary": "Held then finished", "structuredData": {}},
+                    "transcript": "Please continue to hold.",
+                    "endedReason": "hangup",
+                    "startedAt": "2026-01-01T00:00:00Z",
+                    "endedAt": "2026-01-01T00:02:30Z",
+                },
+            )
+        if "/api/agents/" in url and "/messages" in url:
+            return httpx.Response(200, json={"id": "msg-1"})
+        return httpx.Response(404)
+
+    setup_mock_fn(handler)
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("tools.call_phone_number.save_phone_call_message", new_callable=AsyncMock),
+        patch("tools.call_phone_number.asyncio.sleep", side_effect=_noop_sleep),
+    ):
+        from tools.call_phone_number import call_phone_number_activity
+
+        result = await call_phone_number_activity(
+            to="+15559876543",
+            system_prompt="Stay on the line through the hold queue",
+            output_schema={},
+            agent_id="a-1",
+            tool_call_id="tc-1",
+        )
+
+    assert polls["n"] == 2
+    assert result["success"] is True
+    assert result["call_id"] == "call-test-123"
+
+
 async def test_finished_message_contains_call_evidence_for_verifier():
     """Verify the persisted FINISHED message includes evidence the verifier can read."""
     setup_mock_fn(_mock_handler)
@@ -412,6 +461,7 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("initiation_boundary", test_initiation_boundary)
     await r.record_async("poll_boundary", test_poll_boundary)
+    await r.record_async("poll_read_timeout_retries_and_completes", test_poll_read_timeout_retries_and_completes)
     await r.record_async(
         "finished_message_contains_call_evidence_for_verifier",
         test_finished_message_contains_call_evidence_for_verifier,

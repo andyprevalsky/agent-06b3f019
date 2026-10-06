@@ -337,113 +337,124 @@ async def _call_phone_number_activity_real(
         await asyncio.sleep(poll_interval)
         polls += 1
 
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_POLL) as client:
-            response = await client.get(
-                f"{config.backend.api_url}/api/vapi/call/{call_id}",
-                headers={"x-api-key": config.backend.api_key or ""},
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_POLL) as client:
+                response = await client.get(
+                    f"{config.backend.api_url}/api/vapi/call/{call_id}",
+                    headers={"x-api-key": config.backend.api_key or ""},
+                )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            # A 3-hour hold will see occasional Vapi/backend slowness. One
+            # timed-out poll must not fail the activity and abandon the call.
+            logger.warning(
+                "Poll request transport failed",
+                error=str(exc) or type(exc).__name__,
+                polls=polls,
+                call_id=call_id,
+            )
+            continue
+
+        if response.status_code != 200:
+            logger.warning("Poll request failed", status=response.status_code, text=response.text)
+            continue
+
+        poll_result = response.json()
+        status = poll_result.get("status", "")
+
+        logger.info("Vapi poll response", call_id=call_id, status=status, polls=polls)
+
+        # When call starts, send IN_PROGRESS message with live metadata
+        if status == "in-progress" and not call_started:
+            call_started = True
+            poll_interval = ACTIVE_POLL_INTERVAL_SECONDS
+
+            monitor = poll_result.get("monitor", {})
+            listen_url = monitor.get("listenUrl")
+            started_at = poll_result.get("startedAt")
+
+            await save_phone_call_message(
+                agent_id=agent_id,
+                title="\U0001f4de Call in progress",
+                message=f"**Calling:** {formatted_phone}",
+                status=MessageStatus.IN_PROGRESS,
+                tool_call_id=tool_call_id,
+                phone_metadata={
+                    "status": "in-progress",
+                    "to": formatted_phone,
+                    "callId": call_id,
+                    "listenUrl": listen_url,
+                    "startedAt": started_at,
+                },
             )
 
-            if response.status_code != 200:
-                logger.warning("Poll request failed", status=response.status_code, text=response.text)
-                continue
+        if status == "ended":
+            # Call completed - extract all results
+            transcript = poll_result.get("transcript", "") or ""
+            artifact = poll_result.get("artifact") or {}
+            messages = poll_result.get("messages")
+            if not messages and isinstance(artifact, dict):
+                messages = artifact.get("messages")
+            transcript = enrich_transcript_with_dtmf(
+                transcript,
+                messages if isinstance(messages, list) else None,
+            )
+            analysis = poll_result.get("analysis", {})
+            summary = poll_result.get("summary") or analysis.get("summary", "")
+            recording_url = poll_result.get("recordingUrl", "")
+            ended_reason = poll_result.get("endedReason", "unknown")
 
-            poll_result = response.json()
-            status = poll_result.get("status", "")
+            duration = calculate_duration_from_timestamps(
+                poll_result.get("startedAt"),
+                poll_result.get("endedAt"),
+            )
 
-            logger.info("Vapi poll response", call_id=call_id, status=status, polls=polls)
+            structured_data = analysis.get("structuredData", {})
+            completion_message = build_completion_message(
+                formatted_phone, duration, summary, structured_data, transcript
+            )
 
-            # When call starts, send IN_PROGRESS message with live metadata
-            if status == "in-progress" and not call_started:
-                call_started = True
-                poll_interval = ACTIVE_POLL_INTERVAL_SECONDS
+            logger.info(
+                "Call completed",
+                call_id=call_id,
+                duration=duration,
+                ended_reason=ended_reason,
+                has_transcript=bool(transcript),
+                has_summary=bool(summary),
+                has_recording=bool(recording_url),
+            )
 
-                monitor = poll_result.get("monitor", {})
-                listen_url = monitor.get("listenUrl")
-                started_at = poll_result.get("startedAt")
-
-                await save_phone_call_message(
-                    agent_id=agent_id,
-                    title="\U0001f4de Call in progress",
-                    message=f"**Calling:** {formatted_phone}",
-                    status=MessageStatus.IN_PROGRESS,
-                    tool_call_id=tool_call_id,
-                    phone_metadata={
-                        "status": "in-progress",
-                        "to": formatted_phone,
-                        "callId": call_id,
-                        "listenUrl": listen_url,
-                        "startedAt": started_at,
-                    },
-                )
-
-            if status == "ended":
-                # Call completed - extract all results
-                transcript = poll_result.get("transcript", "") or ""
-                artifact = poll_result.get("artifact") or {}
-                messages = poll_result.get("messages")
-                if not messages and isinstance(artifact, dict):
-                    messages = artifact.get("messages")
-                transcript = enrich_transcript_with_dtmf(
-                    transcript,
-                    messages if isinstance(messages, list) else None,
-                )
-                analysis = poll_result.get("analysis", {})
-                summary = poll_result.get("summary") or analysis.get("summary", "")
-                recording_url = poll_result.get("recordingUrl", "")
-                ended_reason = poll_result.get("endedReason", "unknown")
-
-                duration = calculate_duration_from_timestamps(
-                    poll_result.get("startedAt"),
-                    poll_result.get("endedAt"),
-                )
-
-                structured_data = analysis.get("structuredData", {})
-                completion_message = build_completion_message(
-                    formatted_phone, duration, summary, structured_data, transcript
-                )
-
-                logger.info(
-                    "Call completed",
-                    call_id=call_id,
-                    duration=duration,
-                    ended_reason=ended_reason,
-                    has_transcript=bool(transcript),
-                    has_summary=bool(summary),
-                    has_recording=bool(recording_url),
-                )
-
-                # Post FINISHED message with rich metadata
-                await save_phone_call_message(
-                    agent_id=agent_id,
-                    title="\u2705 Call completed",
-                    message=completion_message,
-                    status=MessageStatus.FINISHED,
-                    tool_call_id=tool_call_id,
-                    phone_metadata={
-                        "status": "ended",
-                        "to": formatted_phone,
-                        "callId": call_id,
-                        "duration": duration,
-                        "endedReason": ended_reason,
-                        "recordingUrl": recording_url,
-                        "transcript": transcript,
-                        "summary": summary,
-                        "structuredData": structured_data,
-                    },
-                )
-
-                return {
-                    "success": True,
-                    "message": completion_message,
-                    "call_id": call_id,
-                    "structured_data": structured_data,
+            # Post FINISHED message with rich metadata
+            await save_phone_call_message(
+                agent_id=agent_id,
+                title="\u2705 Call completed",
+                message=completion_message,
+                status=MessageStatus.FINISHED,
+                tool_call_id=tool_call_id,
+                phone_metadata={
+                    "status": "ended",
+                    "to": formatted_phone,
+                    "callId": call_id,
                     "duration": duration,
-                    "ended_reason": ended_reason,
+                    "endedReason": ended_reason,
+                    "recordingUrl": recording_url,
                     "transcript": transcript,
                     "summary": summary,
-                    "recording_url": recording_url,
-                    "to": to,
-                }
+                    "structuredData": structured_data,
+                },
+            )
+
+            return {
+                "success": True,
+                "message": completion_message,
+                "call_id": call_id,
+                "structured_data": structured_data,
+                "duration": duration,
+                "ended_reason": ended_reason,
+                "transcript": transcript,
+                "summary": summary,
+                "recording_url": recording_url,
+                "to": to,
+            }
 
     # Timeout
     msg = f"Call timed out after {MAX_POLL_ATTEMPTS * poll_interval} seconds"
