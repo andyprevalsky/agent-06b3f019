@@ -133,6 +133,22 @@ export async function progressAgentPhoneProvisioning(
   });
 }
 
+// A stored agent id makes the next claim a recovery, so an id whose provider
+// agent this lease confirmed absent must not outlive the lease.
+export async function forgetDeletedAgentPhoneAgent(
+  userId: string,
+  marker: string,
+  agentId: string
+): Promise<void> {
+  await runTransactionWithRetry(async (transaction) => {
+    await lockUser(transaction, userId);
+    await transaction.agentIdentity.updateMany({
+      where: { userId, phoneProvider: marker, phoneProviderAgentId: agentId },
+      data: { phoneProviderAgentId: null },
+    });
+  });
+}
+
 export async function completeAgentPhoneProvisioning(
   userId: string,
   marker: string,
