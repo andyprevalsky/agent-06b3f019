@@ -1499,12 +1499,16 @@ CLOUDFLARE_TUNNEL_MAX_ATTEMPTS="${CLOUDFLARE_TUNNEL_MAX_ATTEMPTS:-3}"
 # Linear backoff base; attempt N waits N × this before re-requesting.
 CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS="${CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS:-20}"
 
-# One Cloudflare-edge status probe, supervised from the parent shell.
+# One public-edge status probe, supervised from the parent shell.
 #
 # Prints the HTTP status ('' or 000 when unreachable). Extra args are passed to
-# curl so the caller can select an address family. curl's --max-time normally
-# bounds this, but under extreme host contention the process has been observed
-# to outlive the entire isolated harness watchdog; a wedged probe must never
+# curl so the caller can select an address family. With the default
+# EDGE_PROBE_IDENTITY=cloudflare the final response must carry Cloudflare's
+# identity; EDGE_PROBE_IDENTITY=ngrok-agent callers prove identity from their
+# agent's own request record, because ngrok relays origin headers unchanged.
+# curl's --max-time normally bounds this, but under extreme host contention the
+# process has been observed to outlive the entire isolated harness watchdog; a
+# wedged probe must never
 # block quick-tunnel recycling or the ngrok fallback, so the parent enforces its
 # own deadline and escalates TERM -> KILL.
 supervised_edge_probe() {
@@ -1533,7 +1537,8 @@ supervised_edge_probe() {
     status="$(cat "$status_file" 2>/dev/null || true)"
     # A configured proxy can answer with its own block page. Only the final
     # HTTP response identifies the edge; a proxy CONNECT response is earlier.
-    if [ -n "$status" ] && [ "$status" != "000" ] && ! awk -v expected_status="$status" '
+    if [ "${EDGE_PROBE_IDENTITY:-cloudflare}" != "ngrok-agent" ] \
+        && [ -n "$status" ] && [ "$status" != "000" ] && ! awk -v expected_status="$status" '
         {
             line = tolower($0)
             sub(/\r$/, "", line)
@@ -1583,6 +1588,35 @@ cloudflare_tunnel_edge_is_routing() {
         fi
         sleep "$retry_seconds"
     done
+    return 1
+}
+
+# The ngrok edge carries no identity header on a relayed origin response, and an
+# offline endpoint or a proxy block page also answers with an HTTP status. The
+# agent records every request that crossed the edge, so a probe counts only when
+# this agent's inspection API saw the probe's unique URI. Probes keep the
+# configured proxy route; only the agent's exact local address bypasses it.
+ngrok_tunnel_edge_is_routing() {
+    local url="$1" ngrok_log="$2"
+    local deadline=$((SECONDS + CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS)) status web_addr=""
+    local retry_seconds="${CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS:-2}"
+    local marker="rose-edge-probe=$$-${RANDOM}${RANDOM}" recorded
+    local probe_url="${url%/}/?$marker"
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        [ -n "$web_addr" ] || web_addr="$(grep -F '"msg":"starting web service"' "$ngrok_log" 2>/dev/null |
+            head -1 | grep -oE '"addr":"[^"]+"' | head -1 | sed 's/^"addr":"//; s/"$//' || true)"
+        status="$(EDGE_PROBE_IDENTITY=ngrok-agent supervised_edge_probe "$probe_url" -4)"
+        if [ -z "$status" ] || [ "$status" = "000" ]; then
+            status="$(EDGE_PROBE_IDENTITY=ngrok-agent supervised_edge_probe "$probe_url")"
+        fi
+        if [ -n "$status" ] && [ "$status" != "000" ] && [ -n "$web_addr" ]; then
+            recorded="$(curl -s --noproxy "${web_addr%:*}" --connect-timeout 2 --max-time 3 \
+                "http://$web_addr/api/requests/http" 2>/dev/null || true)"
+            [[ "$recorded" == *"$marker"* ]] && return 0
+        fi
+        sleep "$retry_seconds"
+    done
+    [ -n "$web_addr" ] || echo "   ngrok reported no local inspection address; the edge cannot be confirmed."
     return 1
 }
 
@@ -1744,7 +1778,7 @@ start_ngrok_ephemeral_tunnel() {
     }
 
     echo "🔎 Verifying the ngrok edge routes: $PUBLIC_BASE_URL"
-    cloudflare_tunnel_edge_is_routing "$PUBLIC_BASE_URL" || {
+    ngrok_tunnel_edge_is_routing "$PUBLIC_BASE_URL" "$ngrok_log" || {
         echo "❌ $PUBLIC_BASE_URL never routed."
         return 1
     }

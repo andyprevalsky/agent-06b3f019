@@ -30,6 +30,7 @@
 #   case 11 — a dropped fallback tunnel does not take the shared stack down
 #   case 12 — a record published after the host resolver cached NXDOMAIN routes
 #   case 13 — the public smoke certifies what a cloud browser sees
+#   case 14 — the ngrok fallback is certified by its own agent's request record
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -486,6 +487,107 @@ grep -q 'not the app' "$TMP/smoke/out" \
   || fail "case 13c: the failure must say the page is not the app: $(cat "$TMP/smoke/out")"
 echo "PASS: a 200 interstitial page fails the smoke"
 
+# --- case 14: the ngrok fallback is certified by its own agent ---------------
+# RCA cement (2026-10-06). The Cloudflare identity check (Server + CF-Ray) also
+# ran on the ngrok fallback's probe, so every live ngrok edge was rejected as
+# "never routed" and two concurrent smoke stacks then raced for the worktree's
+# single reserved domain (ERR_NGROK_334). ngrok relays the origin's headers
+# unchanged, so the fallback must prove identity from its agent's request
+# record. Drive the shipped fallback and probes with modeled ngrok edge states.
+{
+  awk '/^supervised_edge_probe\(\) \{$/,/^\}$/' "$RUN_SH"
+  awk '/^cloudflare_tunnel_edge_is_routing\(\) \{$/,/^\}$/' "$RUN_SH"
+  awk '/^ngrok_tunnel_edge_is_routing\(\) \{$/,/^\}$/' "$RUN_SH"
+  awk '/^dns_label_from_workspace\(\) \{$/,/^\}$/' "$RUN_SH"
+  awk '/^start_ngrok_ephemeral_tunnel\(\) \{$/,/^\}$/' "$RUN_SH"
+} > "$TMP/ngrok_edge.sh"
+grep -q '^start_ngrok_ephemeral_tunnel() {' "$TMP/ngrok_edge.sh" \
+  || fail "case 14: could not extract start_ngrok_ephemeral_tunnel from run.sh"
+mkdir -p "$TMP/ngrok-edge/bin"
+cat > "$TMP/ngrok-edge/bin/ngrok" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = config ] && exit 0
+[ "$1" = http ] || exit 96
+domain=""
+while [ "$#" -gt 0 ]; do [ "$1" = "--domain" ] && domain="$2"; shift; done
+[ "$EDGE_MODE" = no-web ] ||
+  printf '{"lvl":"info","msg":"starting web service","obj":"web","addr":"127.0.0.1:4799","allow_hosts":null}\n'
+printf '{"lvl":"info","msg":"started tunnel","obj":"tunnels","url":"https://%s"}\n' "$domain"
+exec sleep 30
+STUB
+cat > "$TMP/ngrok-edge/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+headers="" url="" bypass=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -D) headers="$2"; shift ;;
+    --noproxy) bypass="$2"; shift ;;
+    --resolve|--connect-to) exit 97 ;;
+    http://*|https://*) url="$1" ;;
+  esac
+  shift
+done
+for key in HTTPS_PROXY https_proxy; do
+  [ "${!key-}" = "route-sentinel" ] || exit 98
+done
+if [ "$url" = "http://127.0.0.1:4799/api/requests/http" ]; then
+  [ "$bypass" = 127.0.0.1 ] || exit 95
+  printf '{"uri":"/","requests":['
+  [ -f "$EDGE_STATE/agent_requests" ] && sed 's/.*/{"request":{"uri":"&"}},/' "$EDGE_STATE/agent_requests" | tr -d '\n'
+  printf '{}]}'
+  exit 0
+fi
+[ -z "$bypass" ] || exit 94
+case "$EDGE_MODE" in
+  agent-down|agent-up|no-web) printf '%s\n' "/${url#https://*/}" >> "$EDGE_STATE/agent_requests" ;;
+esac
+case "$EDGE_MODE" in
+  agent-down|no-web) status=502 response='ngrok-error-code: ERR_NGROK_8012' ;;
+  agent-up) status=200 response='content-type: text/html' ;;
+  offline) status=404 response='ngrok-error-code: ERR_NGROK_3200' ;;
+  proxy) status=200 response='server: fixture-blocker' ;;
+  dead) printf '000'; exit 0 ;;
+esac
+printf 'HTTP/2 %s\r\n%s\r\n\r\n' "$status" "$response" > "$headers"
+printf '%s' "$status"
+STUB
+chmod +x "$TMP/ngrok-edge/bin/"*
+run_ngrok_edge() { # run_ngrok_edge <edge mode> <edge timeout seconds>
+  rm -rf "$TMP/ngrok-edge/state"; mkdir -p "$TMP/ngrok-edge/state"
+  PATH="$TMP/ngrok-edge/bin:$PATH" EDGE_STATE="$TMP/ngrok-edge/state" EDGE_MODE="$1" \
+    HTTPS_PROXY=route-sentinel https_proxy=route-sentinel \
+    CONDUCTOR_WORKSPACE_NAME=krakow-bench-1790879218-96570-58551 NGROK_AUTHTOKEN=test-token \
+    RUN_CONTEXT_DIR="$TMP/ngrok-edge/state/ctx" FRONTEND_PORT=3002 \
+    CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS="$2" CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=0 \
+    bash -c '
+      PIDS=(); NAMES=()
+      public_tunnel_publish_environment() { PUBLIC_BASE_URL="$1"; }
+      source "$1"
+      start_ngrok_ephemeral_tunnel; rc=$?
+      kill "$NGROK_PID" 2>/dev/null
+      exit $rc
+    ' _ "$TMP/ngrok_edge.sh" > "$TMP/ngrok-edge/out" 2>&1
+}
+for mode in agent-down agent-up; do
+  run_ngrok_edge "$mode" 10 \
+    || fail "case 14: a live ngrok edge ($mode) must count as routing: $(cat "$TMP/ngrok-edge/out")"
+  grep -q 'Public tunnel ready (ngrok)' "$TMP/ngrok-edge/out" \
+    || fail "case 14: the routed fallback ($mode) must report readiness: $(cat "$TMP/ngrok-edge/out")"
+done
+echo "PASS: the ngrok fallback routes before and after its origin starts, via the configured proxy"
+for mode in offline proxy dead no-web; do
+  started=$SECONDS
+  if run_ngrok_edge "$mode" 3; then
+    fail "case 14: $mode must not certify the ngrok edge: $(cat "$TMP/ngrok-edge/out")"
+  fi
+  grep -q 'never routed' "$TMP/ngrok-edge/out" \
+    || fail "case 14: $mode must be reported as unrouted: $(cat "$TMP/ngrok-edge/out")"
+  [ $(( SECONDS - started )) -le 15 ] || fail "case 14: $mode exceeded its 3s routing budget"
+done
+grep -q 'no local inspection address' "$TMP/ngrok-edge/out" \
+  || fail "case 14: a missing inspection address must be named: $(cat "$TMP/ngrok-edge/out")"
+echo "PASS: offline endpoints, proxy pages, dead routes and unverifiable agents are rejected"
+
 # --- case 10: run-scoped ngrok fallback domains are bound, never reserved ----
 # Every isolated benchmark run has a unique "<worktree>-bench-<run id>" name.
 # Reserving its fallback domain left one permanent reservation per run until the
@@ -529,7 +631,7 @@ run_ngrok_fallback() { # run_ngrok_fallback <CONDUCTOR_WORKSPACE_NAME>
     bash -c "
       PIDS=(); NAMES=()
       public_tunnel_publish_environment() { PUBLIC_BASE_URL=\"\$1\"; }
-      cloudflare_tunnel_edge_is_routing() { return 0; }
+      ngrok_tunnel_edge_is_routing() { return 0; }
       source '$TMP/ngrok_fallback.sh'
       start_ngrok_ephemeral_tunnel
       rc=\$?
