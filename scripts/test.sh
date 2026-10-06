@@ -329,6 +329,7 @@ run_suite "Benchmark Live Results" python3 scripts/tests/benchmark-live-results.
 run_suite "Benchmark Successful LLM Evidence" python3 scripts/tests/verify-successful-llm-queries.test.py
 run_suite "Cloud Benchmark Composite Root Cleanup" python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
 run_suite "Cloud Benchmark Quiesced Forensic Retirement" python3 scripts/tests/cloudbench-forensic-quiesced.test.py
+run_suite "Cloud Benchmark Native Linux Runner" python3 scripts/tests/cloudbench-controller-linux.test.py
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
 run_suite "Blackbox Backend Teardown" bash scripts/tests/blackbox-backend-teardown.test.sh
 run_suite "Agent Workflow Surface Hash" bash scripts/tests/agent-surface-hash.test.sh

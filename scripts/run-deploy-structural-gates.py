@@ -37,6 +37,7 @@ class RunningGate:
 
 
 GATES = (
+    Gate("cloudbench-controller-linux", ("python3", "scripts/tests/cloudbench-controller-linux.test.py")),
     Gate("workspace-env", ("bash", "scripts/tests/workspace-env.test.sh")),
     Gate("kill-services", ("bash", "scripts/tests/kill-services.test.sh")),
     Gate(

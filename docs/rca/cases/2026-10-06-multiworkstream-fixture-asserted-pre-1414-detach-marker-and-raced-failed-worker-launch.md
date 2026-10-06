@@ -80,3 +80,40 @@ None recorded.
 
 When a controller starts gating on a native provider field, make the fake
 provider persist the flag that sets it, and assert exact per-run artifacts.
+
+## Readiness output binding after main integration
+
+The normal Linux suite on `71241f2ef38162553df25d81d2e56c848e265aab`
+passed its first 11 scenarios, then failed scenario 2e after 360.549 seconds.
+The new capture assertion searched for
+`*/autoscaler-worker-never-ready-<boundary>`, although both readiness boundaries
+launch the unchanged task name `autoscaler-worker-never-ready`. Only the
+controller log name has the boundary suffix. The failure occurred at the
+output-directory cardinality assertion before any worker receipt was read.
+This was a fixture binding error; it does not establish a runtime capture loss.
+
+Changing the glob alone would leave a second error: the successful first
+boundary's run directory remains when the second boundary starts. The fixture
+now records the existing matching relative output paths before each launch and
+requires exactly one new path afterward. It uses neither modification times nor
+a task rename. Every existing launch, queue-readiness, captured worker identity,
+quiescence, child-reaping, stream-closure, and provider-cleanup assertion remains.
+
+Executing the actual extracted Python blocks reproduced both original selector
+failures and passed the corrected selectors in 0.0082 seconds. The controls also
+prove that an invalid older receipt is ignored, while zero or two new output
+paths still fail. The complete normal Linux gate then passed all 32 scenarios
+in 1002.687 seconds on `ba8bebe78bb7c7b83251937da26e2a73e247b0e8`, including
+both readiness boundaries with every captured-worker assertion unchanged.
+Its exact container was verified absent, and all 232 captured execution inputs
+also match `9efb3dfa64ac71403e31d65612d21bdd74752f05`; the intervening packaging
+changes do not alter those inputs. Its 2,147 exported regular files have mode
+`0600`, and exported directories have mode `0700`. The terminal proof is retained
+privately under
+`.context/deploy-runs/20261006-024302-65153/main-integration-native32-readiness-binding-final/`.
+The original failed run is
+preserved privately under
+`.context/deploy-runs/20261006-024302-65153/main-integration-native32-final/`.
+Its exact native container was verified absent and all 232 captured source hashes
+still matched the executed checkout. Cleanup did not retain the readiness output
+directories, so their receipt contents were not independently reread afterward.

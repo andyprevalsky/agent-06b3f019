@@ -117,6 +117,51 @@ def test_upload_timeout_scales_with_payload_size():
     assert upload_timeout_for_payload(512 * 1024 * 1024) == 300.0
 
 
+def test_hub_requests_preserve_external_proxy_routing(monkeypatch):
+    """Both publication and visibility use the user's route outside loopback."""
+    from benchmarks.hub_upload import verify_run_visible
+
+    calls = []
+
+    class Response:
+        status = 201
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def read(self, *_args):
+            return b'{"run":{"run_id":"fixture-route"}}'
+
+    class Opener:
+        def open(self, request, **_kwargs):
+            calls[-1][1].append(request.get_method())
+            return Response()
+
+    def build_opener(*handlers):
+        calls.append((handlers, []))
+        return Opener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+    for base in ("https://hub.example", "http://localhost.example", "http://127.0.0.1.example"):
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", base)
+        assert upload_run_bundle({"run_id": "fixture-route"}, required=True)
+        verify_run_visible("fixture-route")
+        assert calls[-2:] == [((), ["POST"]), ((), ["GET"])]
+    for base in ("http://localhost:8767", "http://127.0.0.1:8767", "http://[::1]:8767"):
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", base)
+        assert upload_run_bundle({"run_id": "fixture-route"}, required=True)
+        verify_run_visible("fixture-route")
+        for handlers, methods in calls[-2:]:
+            assert len(handlers) == 1
+            assert isinstance(handlers[0], urllib.request.ProxyHandler)
+            assert handlers[0].proxies == {}
+            assert methods in (["POST"], ["GET"])
+
+
 def test_disabled_without_env(monkeypatch):
     monkeypatch.delenv("BENCHMARK_HUB_UPLOAD_URL", raising=False)
     assert hub_upload_enabled() is False

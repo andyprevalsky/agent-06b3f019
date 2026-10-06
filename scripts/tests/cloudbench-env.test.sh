@@ -654,7 +654,7 @@ fleet_production_function() {
     $0 ~ "^" function_name "\\(\\)" { capture = 1 }
     capture { print }
     capture && /^}$/ { exit }
-  ' "$ROOT_DIR/scripts/run-bench-fleet"
+  ' "$ROOT_DIR/scripts/run-bench-fleet" "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh"
 }
 for function_name in worker_ledger_lock_acquire worker_ledger_lock_release \
   inventory_index_healthy inventory_machine_record_path inventory_machine_field; do

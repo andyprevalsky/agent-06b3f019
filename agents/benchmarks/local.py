@@ -1662,28 +1662,9 @@ def apply_isolated_postgres_default(
         env.setdefault("ROSE_USE_SYSTEM_PG", "true")
 
 
-_HOST_PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
-
-
-def bypass_host_http_proxy(env: dict[str, str]) -> dict[str, str]:
-    """Keep a benchmark subprocess off the macOS system HTTP(S) proxy.
-
-    With no proxy variables set, Python's urllib/requests/httpx read the macOS
-    system proxy, and Freedom's proxy (127.0.0.1:7769) can hold their TLS
-    tunnels open forever: the runner stalls with live but idle proxy sockets
-    and never reaches its task timeout. Setting NO_PROXY makes every client use
-    the environment instead of the system settings.
-    """
-    env.setdefault("NO_PROXY", "*")
-    env.setdefault("no_proxy", "*")
-    for proxy_var in _HOST_PROXY_VARS:
-        env.pop(proxy_var, None)
-    return env
-
-
 def benchmark_runner_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """Environment for the run_benchmark.py process a local run launches."""
-    env = bypass_host_http_proxy({**(os.environ if base is None else base), "PYTHONUNBUFFERED": "1"})
+    env = {**(os.environ if base is None else base), "PYTHONUNBUFFERED": "1"}
     # Disable fast-cache for local benchmark runs so trajectories are actually executed
     # rather than replayed from cache. This is required for payment-lifecycle tasks (real
     # side effects must not be cache-replayed) and also ensures the world model is exercised
@@ -1733,12 +1714,6 @@ def start_services(
         # isolate each stack in Docker; forcing every stack onto the 100-client
         # host Postgres starves concurrent mass-agent benchmarks.
         apply_isolated_postgres_default(env, use_system_postgres=stack.use_system_postgres)
-        # macOS distraction-blockers (e.g. Freedom) install a system HTTP(S) proxy
-        # that silently intercepts Node/Prisma outbound and breaks the prod cold-sync
-        # + compute-token fetch — it surfaces as a phantom "Can't reach database
-        # server" even though raw psql/TCP to the same host succeeds. Neutralize the
-        # proxy for every isolated-run subprocess (never disable the app itself).
-        bypass_host_http_proxy(env)
         env["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
         env["BENCHMARK_RUN_ID"] = stack.run_id
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
@@ -2145,7 +2120,7 @@ def run_streamed_command(
     process = subprocess.Popen(
         list(command),
         cwd=cwd,
-        env=bypass_host_http_proxy(dict(os.environ if env is None else env)),
+        env=dict(os.environ if env is None else env),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

@@ -13,7 +13,9 @@ agents/venv
 
 # Generated / per-run state
 .context
+**/.context
 .llm-dumps
+**/.llm-dumps
 agents/benchmarks/runs
 # Archived span metrics are controller history, not image build inputs. Keep
 # current metrics and task selection history available in the baked source.
