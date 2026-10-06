@@ -486,3 +486,28 @@ def test_hold_success_watcher_sends_keepalive_without_ending_call(monkeypatch):
         assert session._hold_success_announced is False
 
     asyncio.run(run())
+
+
+def test_long_hold_uses_slower_watch_poll_and_longer_analysis_wait():
+    short = phone_callee.PhoneCalleeSession(
+        "phone-call-ivr-dtmf",
+        {
+            "system_prompt": "IVR",
+            "hold_success": {"hold_seconds": 20, "say": "Thanks for holding."},
+            "max_duration_seconds": 180,
+        },
+        api_key="test-key",
+    )
+    long = phone_callee.PhoneCalleeSession(
+        "phone-call-hold-queue",
+        {
+            "system_prompt": "Hold queue",
+            "hold_success": {"hold_seconds": 9900, "say": "This is Riley. How can I help you today?"},
+            "max_duration_seconds": 12600,
+        },
+        api_key="test-key",
+    )
+    assert short._hold_watch_poll_seconds() == phone_callee.HOLD_WATCH_POLL_SECONDS
+    assert short.analysis_timeout_seconds() == phone_callee.CALLEE_ANALYSIS_TIMEOUT_SECONDS
+    assert long._hold_watch_poll_seconds() == phone_callee.HOLD_WATCH_POLL_LONG_SECONDS
+    assert long.analysis_timeout_seconds() == phone_callee.CALLEE_ANALYSIS_TIMEOUT_LONG_SECONDS

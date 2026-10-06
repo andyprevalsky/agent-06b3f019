@@ -1904,7 +1904,9 @@ async def _evaluate_phone_call_task(
         return False, f"final output missing expected returned findings: {final_missing}"
     if task.callee_checks:
         try:
-            structured = await callee.fetch_callee_structured_data()
+            structured = await callee.fetch_callee_structured_data(
+                timeout_seconds=callee.analysis_timeout_seconds()
+            )
         except Exception as exc:
             return False, f"failed to fetch callee-side call analysis: {exc}"
         failures = callee_check_failures(task.callee_checks, structured)

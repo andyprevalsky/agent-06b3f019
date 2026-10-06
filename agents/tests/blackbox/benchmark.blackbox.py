@@ -16487,6 +16487,8 @@ def test_phone_call_hold_queue_task_waits_real_three_hours_for_flight_credit():
     assert session._hold_success_config()["hold_seconds"] == 9900.0
     assert session._hold_success_config()["keepalive_seconds"] == 1200.0
     assert session._live_control_enabled() is True
+    assert session._hold_watch_poll_seconds() == 15.0
+    assert session.analysis_timeout_seconds() == 900
     oversized = dict(hold.phone_persona)
     oversized["hold_success"] = {"hold_seconds": 20000, "say": persona["hold_success"]["say"]}
     try:

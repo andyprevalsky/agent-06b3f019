@@ -61,6 +61,12 @@ VAPI_PHONE_NUMBER_NAME_MAX_LENGTH = 40
 # holds; 2h45m (9900) is the intended phone-call-hold-queue representative time.
 HOLD_SUCCESS_MAX_SECONDS = 14400.0
 HOLD_KEEPALIVE_DEFAULT_SECONDS = 1200.0
+# Short holds can poll every second. Multi-hour holds would otherwise issue
+# tens of thousands of Vapi list/detail calls and miss keepalives on 429s.
+HOLD_WATCH_POLL_SECONDS = 1.0
+HOLD_WATCH_POLL_LONG_SECONDS = 15.0
+CALLEE_ANALYSIS_TIMEOUT_SECONDS = 180
+CALLEE_ANALYSIS_TIMEOUT_LONG_SECONDS = 900
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BACKEND_ENV = str(_REPO_ROOT / "back-end" / ".env")
@@ -397,6 +403,26 @@ class PhoneCalleeSession:
 
     def _live_control_enabled(self) -> bool:
         return self._keypad_success_config() is not None or self._hold_success_config() is not None
+
+    def analysis_timeout_seconds(self) -> int:
+        """How long to wait for Vapi structuredData after the inbound call ends.
+
+        Short IVR/payment calls finish analysis inside the default 180s window.
+        A multi-hour hold leaves a large artifact; give Vapi 15 minutes.
+        """
+        hold = self._hold_success_config() or {}
+        hold_seconds = float(hold.get("hold_seconds") or 0)
+        max_duration = self.persona.get("max_duration_seconds") or 0
+        if hold_seconds >= 3600 or (isinstance(max_duration, (int, float)) and max_duration >= 3600):
+            return CALLEE_ANALYSIS_TIMEOUT_LONG_SECONDS
+        return CALLEE_ANALYSIS_TIMEOUT_SECONDS
+
+    def _hold_watch_poll_seconds(self) -> float:
+        hold = self._hold_success_config() or {}
+        hold_seconds = float(hold.get("hold_seconds") or 0)
+        if hold_seconds >= 3600:
+            return HOLD_WATCH_POLL_LONG_SECONDS
+        return HOLD_WATCH_POLL_SECONDS
 
     def _hold_elapsed_seconds(self, call: dict) -> Optional[float]:
         """Seconds since this session's inbound call was created, or None if foreign/unknown."""
@@ -749,7 +775,7 @@ class PhoneCalleeSession:
                                     f"    ✓ Injected hold keepalive after "
                                     f"{elapsed:.0f}s on call {call_id[:8]}"
                                 )
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(self._hold_watch_poll_seconds())
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -787,12 +813,14 @@ class PhoneCalleeSession:
                 f"{resp.status_code} {resp.text}"
             )
 
-    async def fetch_callee_structured_data(self, timeout_seconds: int = 180) -> dict:
+    async def fetch_callee_structured_data(self, timeout_seconds: Optional[int] = None) -> dict:
         """Poll Vapi for the inbound call answered by this session's persona.
 
         Call analysis (summary + structuredData) is produced asynchronously after
         the call ends, so poll until it appears or the timeout elapses.
         """
+        if timeout_seconds is None:
+            timeout_seconds = self.analysis_timeout_seconds()
         deadline = asyncio.get_event_loop().time() + timeout_seconds
         last_state = "no inbound call observed"
         async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=30) as client:
