@@ -1546,7 +1546,9 @@ supervised_edge_probe() {
     # A configured proxy can answer with its own block page. Only the final
     # HTTP response identifies the edge; a proxy CONNECT response is earlier.
     if [ "$provider" = ngrok ]; then
-        if [ "$status" = "400" ] && awk '
+        # ngrok's edge has answered ERR_NGROK_8012 (agent reached, origin not
+        # listening yet) as 400 and, in current releases, as 502.
+        if { [ "$status" = "400" ] || [ "$status" = "502" ]; } && awk -v probe_status="$status" '
             {
                 line = tolower($0); sub(/\r$/, "", line)
                 if (line ~ /^http\/[0-9.]+[ \t]+[0-9][0-9][0-9]([ \t]|$)/) {
@@ -1555,7 +1557,7 @@ supervised_edge_probe() {
                 else if (in_headers && line ~ /^ngrok-error-code:[ \t]*err_ngrok_8012[ \t]*$/) { code = "err_ngrok_8012" }
                 else if (in_headers && line ~ /^server:/) { server = line; sub(/^server:[ \t]*/, "", server) }
             }
-            END { exit !(response_status == "400" && code == "err_ngrok_8012" && (server == "" || server == "ngrok")) }
+            END { exit !(response_status == probe_status && code == "err_ngrok_8012" && (server == "" || server == "ngrok")) }
         ' "$headers_file"; then
             : # Actual provider response: this owned agent received traffic before its origin starts.
         elif [ "$status" = "200" ] && grep -qF '<div id="root">' "$probe_body_file"; then
@@ -1686,7 +1688,7 @@ ngrok_tunnel_edge_is_routing() {
         if [ -z "$status" ] || [ "$status" = "000" ]; then
             status="$(supervised_edge_probe "$url" --ngrok-provider "$expected_port")"
         fi
-        if [ "$status" = "400" ] || [ "$status" = "200" ]; then
+        if [ "$status" = "400" ] || [ "$status" = "502" ] || [ "$status" = "200" ]; then
             return 0
         fi
         sleep "$retry_seconds"

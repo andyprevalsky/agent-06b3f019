@@ -557,6 +557,10 @@ while [ "$#" -gt 0 ]; do
 done
 case "${NGROK_RESPONSE_KIND:-pre-origin}" in
   pre-origin) status=400; printf 'HTTP/2 400\r\nNgrok-Error-Code: ERR_NGROK_8012\r\nContent-Type: text/html\r\n\r\n' > "$headers"; printf '<html>upstream not started</html>' > "$body" ;;
+  pre-origin-502) status=502; printf 'HTTP/2 502\r\nNgrok-Error-Code: ERR_NGROK_8012\r\nContent-Type: text/html\r\n\r\n' > "$headers"; printf '<html>upstream not started</html>' > "$body" ;;
+  unmarked-502) status=502; printf 'HTTP/2 502\r\nContent-Type: text/html\r\n\r\n' > "$headers" ;;
+  proxy-502) status=502; printf 'HTTP/2 502\r\nNgrok-Error-Code: ERR_NGROK_8012\r\nServer: fixture-blocker\r\n\r\n' > "$headers" ;;
+  mismatched-502) status=502; printf 'HTTP/2 400\r\nNgrok-Error-Code: ERR_NGROK_8012\r\n\r\n' > "$headers" ;;
   healthy|wrong-body)
     status=200; printf 'HTTP/2 200\r\nContent-Type: text/html\r\n\r\n' > "$headers"
     printf '<div id="root">own-app</div>' > "$body"
@@ -638,12 +642,18 @@ for form in struct struct-path; do
   [ ! -e "$TMP/ngrok-published" ] || fail "case 10: struct-form $form was published before ownership rejection"
 done
 echo "PASS: a struct-form ngrok upstream is accepted only for the owned local port"
-for response in offline unmarked proxy proxy-after-connect wrong-body; do
+# Current ngrok edges answer an unstarted origin with 502 ERR_NGROK_8012, not 400.
+NGROK_RESPONSE_KIND=pre-origin-502 run_ngrok_fallback krakow-bench-pre-origin-502 \
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: ngrok 502 ERR_NGROK_8012 must certify that the owned agent routes"; }
+[ "$(cat "$TMP/ngrok-published")" = "https://rose-krakow-bench-pre-origin-502-bench.ngrok.app" ] \
+  || fail "case 10: the 502 pre-origin proof must publish the run-scoped domain"
+echo "PASS: ngrok 502 ERR_NGROK_8012 before the origin starts certifies routing"
+for response in offline unmarked unmarked-502 proxy proxy-502 mismatched-502 proxy-after-connect wrong-body; do
   if NGROK_RESPONSE_KIND="$response" run_ngrok_fallback krakow-bench-route-negative; then
     fail "case 10: ngrok $response must not certify routing"
   fi
 done
-echo "PASS: ngrok offline/unmarked/proxy/CONNECT/wrong-origin responses are rejected"
+echo "PASS: ngrok offline/unmarked/proxy/CONNECT/wrong-origin/foreign-502 responses are rejected"
 NGROK_ASSERT_PROXY=1 HTTP_PROXY=fixture-proxy-setting HTTPS_PROXY=fixture-proxy-setting ALL_PROXY=fixture-proxy-setting \
   http_proxy=fixture-proxy-setting https_proxy=fixture-proxy-setting all_proxy=fixture-proxy-setting \
   NO_PROXY=fixture-proxy-setting no_proxy=fixture-proxy-setting run_ngrok_fallback krakow-bench-proxy-preservation \
