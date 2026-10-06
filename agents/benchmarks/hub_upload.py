@@ -264,6 +264,27 @@ def prepare_run_bundle_for_upload(bundle: dict, *, live: bool = False, required:
     return body
 
 
+def _with_run_group(bundle: dict) -> dict:
+    """Campaign membership never transfers a child's publication authority."""
+    group = os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID", "").strip()
+    if not group:
+        return bundle
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", group) or group == str(bundle.get("run_id") or ""):
+        raise ValueError("invalid benchmark Hub group identity")
+    member = os.environ.get("RUN_BENCH_CAMPAIGN_JOB_ID", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", member):
+        raise ValueError("benchmark Hub group member identity is required")
+    existing = bundle.get("group_run_id")
+    if existing is not None and existing != group:
+        raise ValueError("benchmark Hub group identity changed")
+    return {
+        **bundle, "group_run_id": group, "group_member_id": member,
+        "group_run_number": int(os.environ.get("RUN_BENCH_CAMPAIGN_RUN", "1")),
+        "group_timestamp": os.environ.get("RUN_BENCH_CAMPAIGN_STARTED_AT", ""),
+        "group_total": int(os.environ.get("RUN_BENCH_CAMPAIGN_TOTAL_JOBS", "0")),
+    }
+
+
 def _post_run_bundle(
     base: str,
     bundle: dict,
@@ -278,7 +299,7 @@ def _post_run_bundle(
     headers = _auth_headers(required=required)
     if headers is None:
         return False
-    body = prepare_run_bundle_for_upload(bundle, live=live, required=required)
+    body = prepare_run_bundle_for_upload(_with_run_group(bundle), live=live, required=required)
     body.setdefault("source", "manual-run")
     payload = json.dumps(body, default=str).encode("utf-8")
     effective_timeout = upload_timeout_for_payload(len(payload), base_timeout=timeout)

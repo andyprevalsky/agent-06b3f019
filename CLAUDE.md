@@ -677,7 +677,7 @@ machine-pinned status proxy before returning pool members; an interrupted local
 collector must never be mistaken for absent guest work.
 If a failed guest cannot seal runtime evidence, preserve its original bytes
 with `scripts/cloudbench-build-interrupted-pool-archive.py`, then run
-`scripts/run-bench-fleet --recover-stale-owner <exact-owner-token>`. A task
+`scripts/run-bench --recover-stale-owner <exact-owner-token>`. A task
 owner canceled before allocation can legitimately lack a pool directory and
 execution inputs; normal recovery proves empty ledgers and absence of allocation
 markers recursively. Never fabricate missing inputs or guest receipts.
@@ -692,6 +692,14 @@ terminal receipt after verifying process-group absence. Retry the original
 `--recover-stale-owner` command to seal the remaining claim. Preserve other
 Hubs, the progress dashboard, provider inventory and the user's network settings;
 never remove a claim merely because its resource observation timed out.
+For a fresh task-free canary interrupted before service startup, follow
+`agents/benchmarks/README.md`'s original-volume capture procedure. The validator
+binds the clean checkout, native injected controls and original archive to the
+exact source recipe, then requires independent review of its pre-service phase.
+Its separate bootstrap receipt always grants zero benchmark credit; it does
+not fabricate a provider manifest or guest cleanup acknowledgment. Current
+source recipes need no commit-specific validator edit. Incomplete older captures
+still fail closed, and normal recovery must verify exact native resource release.
 An interrupted task
 that allocated no browser session may carry a `provider-zero-manifest` plus
 its exact zero-allocation query receipt; the forensic verifier checks those
@@ -971,10 +979,15 @@ that is not a full cold-image timing. Fresh worktrees need no manual download.
 
 **Temporary cached startup diagnostic:** reuse an existing DEMO replay task;
 do not add cache tags, prompts or seed fixtures to make a performance run pass.
-The known recorded mass demo can be run with:
+The known recorded mass demo uses the documented dedicated-primary load-test
+profile below. Catalog memory stays unchanged; native capacity at width fifty
+still needs verification on each run:
 
 ```bash
 CLOUDBENCH_APP_MACHINE_CEILING=138 \
+CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=performance-1x \
+CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE=performance-1x \
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1 \
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
   scripts/run-bench test-mass-agent-run-0 --demo-cache \
   -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
@@ -1008,6 +1021,19 @@ printed monitor through terminal publication and resource release; a starting
 HTTP response or a task verdict alone does not establish final acceptance.
 
 Bootstrap preserves both hoisted and workspace-local baked dependencies and uses the installed Prisma CLI; do not repair a missing CLI by downloading a floating version. If a strict campaign's infrastructure canary fails, its waiting copies observe the same cohort failure instead of launching another canary each. A new CLI invocation creates a fresh cohort automatically. Genuine benchmark task failure is still a valid terminal outcome for an infrastructure/speed run; a preflight failure has no task execution credit. The compact deploy gate owns the dependency-layout, schema-cache and failed-cohort regressions.
+
+Concurrent controllers reserve cleanup disk under one host/filesystem lock. A
+sealed `--strict-barrier` cohort shares available capacity while preserving each
+pending copy's 32 MiB cleanup minimum and 256 MiB working headroom; 512 MiB
+remains the preferred reserve. Standalone controllers use the same atomic
+admission, without promising capacity to future unannounced callers. Linux and
+macOS use verified physical preallocation when supported, with the existing
+zero-fill fallback for a genuine allocation-capability gap. Storage errors still
+stop before provider mutation. No extra CLI flag is needed. On a reserve
+refusal, inspect the actual filesystem free space and sealed cohort; do not
+delete ownership claims or lower storage floors. The normal compact benchmark
+deploy gate covers the 50-owner admission race, physical allocation, capability
+fallback, exact release and process-identity interleavings.
 
 Image installation loads the actual Vite configuration and compiles a small entry with its installed SWC, Rollup and esbuild dependencies before readiness. A missing declared native binding is repaired at the requesting package's exact installed version, without changing manifests or locks; healthy compilers need no extra install. Broken binaries, incorrect versions and unrelated configuration errors fail the build. Use the normal image CLI instead of ad hoc package upgrades. Matching fresh Linux dependency trees use a private writable overlay with metadata copy-up; unsupported kernels or mount permissions use the existing copy path. Checkout source, generated Prisma clients and activated Python remain isolated from the image donor. `CLOUDBENCH_DEPENDENCY_OVERLAY=0` selects the original copy path for a scoped diagnostic. Exact-owner recovery handles an empty cleanup join without weakening ownership checks. Preserve original failure receipts and use `--recover-stale-owner`; do not delete claims manually or stop a pre-existing shared Hub. These regressions remain in the normal compact deploy gate.
 
@@ -1057,6 +1083,14 @@ exact audit/token; while live, capture `pid` and `pid_start` from
 `<git-common>/cloudbench-fleet-ownership/<token>/meta`. Normal cleanup removes
 that active claim, so retain the captured identity and verify native process
 birth before any exact-owner signal. Audit retention is separate from liveness.
+
+Each CLI campaign is shown as one group in the benchmark viewer. Every scheduled
+copy has a distinct member row and keeps its own run/agent links; PASS/FAIL
+appears as soon as that child publishes, before teardown. Controller exit
+without a task result remains an infrastructure/cancellation status, and never
+claims resource release. Group timings use the original campaign clock, not a
+later recovery upload. The ordinary deploy tests cover grouping, early verdicts,
+child acknowledgments, paging and complete task history.
 
 This requests 50 independent one-task fleet controllers. Each unchanged mass
 task spawns 50 first-level general-purpose children: 2,500 across the campaign;

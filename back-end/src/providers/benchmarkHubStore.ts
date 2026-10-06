@@ -126,6 +126,14 @@ export interface HubRunTaskSummary {
   failure_reason: string | null;
   lifecycle_stage?: string;
   startup_label?: string;
+  row_id?: string;
+  child_run_id?: string;
+  run_number?: number;
+  tokens_in?: number | null;
+  tokens_out?: number | null;
+  cache_hit_pct?: number | null;
+  llm_call_count?: number | null;
+  message_count?: number | null;
 }
 
 export interface HubRunSummary {
@@ -136,6 +144,30 @@ export interface HubRunSummary {
   live: boolean;
   uploaded_at: string;
   tasks: HubRunTaskSummary[];
+  group_run_id?: string;
+  group_member_id?: string;
+  group_run_number?: number;
+  group_timestamp?: string;
+  group_total?: number;
+  run_group?: {
+    members: Array<{ member_id: string; name: string; run_number: number }>;
+    status: string;
+    outcomes: Record<string, { status: string; controller_exit_code: number | null }>;
+    wall_clock_seconds: number | null;
+    finished_at: string | null;
+  };
+  is_group?: boolean;
+  task_total?: number;
+  task_counts?: {
+    passed: number;
+    failed: number;
+    queued: number;
+    infra_error?: number;
+    cancelled?: number;
+  };
+  code?: string | null;
+  elapsed_s?: number | null;
+  cost?: Record<string, unknown> | null;
 }
 
 export interface HubAgentView {
@@ -431,6 +463,272 @@ function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
 /**
  * Upsert a run bundle (live snapshot or final). Returns the stored summary.
  */
+const HUB_GROUP_FIELDS = [
+  'group_run_id',
+  'group_member_id',
+  'group_run_number',
+  'group_timestamp',
+  'group_total',
+] as const;
+const HUB_GROUP_PAGE_SIZE = 100;
+
+function finiteMetric(value: unknown): number | null {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= Number.MAX_SAFE_INTEGER
+    ? value
+    : null;
+}
+
+function runGroupFields(bundle: Record<string, unknown>): Partial<HubRunSummary> {
+  if (bundle.group_run_id === undefined) return {};
+  if (
+    typeof bundle.group_run_id !== 'string' ||
+    !/^[A-Za-z0-9._-]{1,128}$/.test(bundle.group_run_id) ||
+    bundle.group_run_id === bundle.run_id ||
+    typeof bundle.group_member_id !== 'string' ||
+    !/^[A-Za-z0-9._-]{1,64}$/.test(bundle.group_member_id) ||
+    typeof bundle.group_run_number !== 'number' ||
+    !Number.isInteger(bundle.group_run_number) ||
+    bundle.group_run_number < 1 ||
+    typeof bundle.group_total !== 'number' ||
+    !Number.isInteger(bundle.group_total) ||
+    bundle.group_total < 1 ||
+    bundle.group_total > 100000 ||
+    typeof bundle.group_timestamp !== 'string' ||
+    bundle.group_timestamp.length > 40 ||
+    !Number.isFinite(Date.parse(bundle.group_timestamp))
+  )
+    throw new Error('Invalid Benchmark Hub group membership');
+  return {
+    group_run_id: bundle.group_run_id,
+    group_member_id: bundle.group_member_id,
+    group_run_number: bundle.group_run_number,
+    group_timestamp: bundle.group_timestamp,
+    group_total: bundle.group_total,
+  };
+}
+
+function runGroupSchedule(bundle: Record<string, unknown>): HubRunSummary['run_group'] {
+  if (bundle.run_group === undefined) return undefined;
+  if (
+    bundle.group_run_id !== undefined ||
+    typeof bundle.run_group !== 'object' ||
+    bundle.run_group === null ||
+    Array.isArray(bundle.run_group)
+  ) {
+    throw new Error('Invalid Benchmark Hub group schedule');
+  }
+  const value = bundle.run_group as Record<string, unknown>;
+  if (
+    !Array.isArray(value.members) ||
+    value.members.length < 1 ||
+    value.members.length > 100000 ||
+    typeof value.status !== 'string' ||
+    !['running', 'passed', 'failed', 'cancelled'].includes(value.status)
+  ) {
+    throw new Error('Invalid Benchmark Hub group schedule');
+  }
+  const seen = new Set<string>();
+  const members = value.members.map((raw) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+      throw new Error('Invalid Benchmark Hub group member');
+    const member = raw as Record<string, unknown>;
+    if (
+      typeof member.member_id !== 'string' ||
+      !/^[A-Za-z0-9._-]{1,64}$/.test(member.member_id) ||
+      seen.has(member.member_id) ||
+      typeof member.name !== 'string' ||
+      !/^[A-Za-z0-9._-]{1,200}$/.test(member.name) ||
+      typeof member.run_number !== 'number' ||
+      !Number.isInteger(member.run_number) ||
+      member.run_number < 1
+    ) {
+      throw new Error('Invalid Benchmark Hub group member');
+    }
+    seen.add(member.member_id);
+    return { member_id: member.member_id, name: member.name, run_number: member.run_number };
+  });
+  if (JSON.stringify(members).length > 10 * 1024 * 1024)
+    throw new Error('Benchmark Hub group schedule is oversized');
+  const outcomes: NonNullable<HubRunSummary['run_group']>['outcomes'] = {};
+  if (value.outcomes !== undefined) {
+    if (!value.outcomes || typeof value.outcomes !== 'object' || Array.isArray(value.outcomes))
+      throw new Error('Invalid campaign controller outcomes');
+    for (const [id, raw] of Object.entries(value.outcomes as Record<string, unknown>)) {
+      if (!seen.has(id) || !raw || typeof raw !== 'object' || Array.isArray(raw))
+        throw new Error('Invalid campaign controller outcome');
+      const outcome = raw as Record<string, unknown>;
+      if (
+        typeof outcome.status !== 'string' ||
+        !['queued', 'running', 'passed', 'failed', 'cancelled'].includes(outcome.status) ||
+        (outcome.controller_exit_code !== null &&
+          (typeof outcome.controller_exit_code !== 'number' ||
+            !Number.isInteger(outcome.controller_exit_code) ||
+            Math.abs(outcome.controller_exit_code) > 65535))
+      ) {
+        throw new Error('Invalid campaign controller outcome');
+      }
+      outcomes[id] = {
+        status: outcome.status,
+        controller_exit_code: outcome.controller_exit_code as number | null,
+      };
+    }
+  }
+  const elapsed =
+    value.wall_clock_seconds === null || value.wall_clock_seconds === undefined
+      ? null
+      : finiteMetric(value.wall_clock_seconds);
+  if (
+    value.wall_clock_seconds !== null &&
+    value.wall_clock_seconds !== undefined &&
+    elapsed === null
+  )
+    throw new Error('Invalid campaign elapsed time');
+  const finished =
+    value.finished_at === null || value.finished_at === undefined ? null : value.finished_at;
+  if (
+    finished !== null &&
+    (typeof finished !== 'string' || finished.length > 40 || !Number.isFinite(Date.parse(finished)))
+  )
+    throw new Error('Invalid campaign finish time');
+  return {
+    members,
+    status: value.status,
+    outcomes,
+    wall_clock_seconds: elapsed,
+    finished_at: finished as string | null,
+  };
+}
+
+/** One immutable schedule and compact child summaries own the visible group. */
+function groupedRunCatalog(index: HubRunSummary[], preview = true): HubRunSummary[] {
+  const output: HubRunSummary[] = [];
+  const owners = new Map(index.filter((run) => run.run_group).map((run) => [run.run_id, run]));
+  const members = new Map<string, HubRunSummary[]>();
+  for (const run of index) {
+    if (run.group_run_id) {
+      const children = members.get(run.group_run_id) ?? [];
+      children.push(run);
+      members.set(run.group_run_id, children);
+    } else if (!run.run_group) output.push(run);
+  }
+  for (const id of new Set([...owners.keys(), ...members.keys()])) {
+    const owner = owners.get(id);
+    const children = (members.get(id) ?? []).sort((a, b) =>
+      (a.group_member_id ?? a.run_id).localeCompare(b.group_member_id ?? b.run_id)
+    );
+    const byMember = new Map(children.map((child) => [child.group_member_id!, child]));
+    const schedule =
+      owner?.run_group?.members ??
+      children.map((child) => ({
+        member_id: child.group_member_id!,
+        name: child.tasks[0]?.name ?? 'benchmark',
+        run_number: child.group_run_number ?? 1,
+      }));
+    const tasks: HubRunTaskSummary[] = schedule.flatMap((member) => {
+      const child = byMember.get(member.member_id);
+      const rows = child?.tasks ?? [
+        {
+          name: member.name,
+          passed: null,
+          status: 'queued',
+          agent_id: null,
+          duration_seconds: null,
+          cost_cents: null,
+          world_model_mode: null,
+          fast_mode: false,
+          tree_agent_count: null,
+          failure_reason: null,
+        },
+      ];
+      return rows.map((task, slot) => {
+        const outcome = owner?.run_group?.outcomes?.[member.member_id];
+        const terminalController =
+          outcome && ['passed', 'failed', 'cancelled'].includes(outcome.status);
+        const pendingTask =
+          task.passed === null && !['INFRA_ERROR', 'error', 'cancelled'].includes(task.status);
+        const lifecycle =
+          terminalController && pendingTask
+            ? {
+                status: outcome.status === 'cancelled' ? 'cancelled' : 'INFRA_ERROR',
+                passed: null,
+                lifecycle_stage:
+                  task.lifecycle_stage === 'released'
+                    ? 'released'
+                    : 'controller-terminal-cleanup-unknown',
+                failure_reason:
+                  outcome.status === 'cancelled'
+                    ? 'Campaign controller was cancelled before a benchmark result was published'
+                    : `Controller exited with code ${outcome.controller_exit_code ?? 'unknown'} before a benchmark result was published`,
+              }
+            : {};
+        return {
+          ...task,
+          ...lifecycle,
+          row_id: `${member.member_id}-${slot}`,
+          ...(child ? { child_run_id: child.run_id } : {}),
+          run_number: member.run_number,
+        };
+      });
+    });
+    const total = owner
+      ? tasks.length
+      : Math.max(tasks.length, ...children.map((child) => child.group_total ?? 0));
+    const counts = {
+      passed: tasks.filter((task) => task.passed === true).length,
+      failed: tasks.filter((task) => task.passed === false).length,
+      queued:
+        tasks.filter(
+          (task) =>
+            task.passed === null && !['INFRA_ERROR', 'error', 'cancelled'].includes(task.status)
+        ).length +
+        total -
+        tasks.length,
+      infra_error: tasks.filter(
+        (task) => task.passed === null && ['INFRA_ERROR', 'error'].includes(task.status)
+      ).length,
+      cancelled: tasks.filter((task) => task.passed === null && task.status === 'cancelled').length,
+    };
+    const timestamp =
+      owner?.timestamp || children[0]?.group_timestamp || children[0]?.timestamp || '';
+    const uploadedAt =
+      [owner?.uploaded_at ?? '', ...children.map((child) => child.uploaded_at)].sort().at(-1) ?? '';
+    const elapsed =
+      owner?.run_group?.wall_clock_seconds ??
+      (owner?.live ? (Date.now() - Date.parse(timestamp)) / 1000 : null);
+    const cost: Record<string, unknown> = {};
+    for (const field of ['agents_llm_usd', 'wmh_grounding_usd', 'infra_usd', 'total_usd']) {
+      const values = children
+        .map((child) => finiteMetric(child.cost?.[field]))
+        .filter((value): value is number => value !== null);
+      const sum = values.reduce((acc, value) => acc + value, 0);
+      cost[field] = values.length && Number.isFinite(sum) ? sum : null;
+    }
+    cost.fast_cache_hit_rate = null;
+    const codes = new Set(children.map((child) => child.code ?? null));
+    output.push({
+      run_id: id,
+      timestamp,
+      suite: owner?.suite ?? children[0]?.suite ?? null,
+      source: 'benchmark-campaign',
+      live: owner ? owner.live : true,
+      uploaded_at: uploadedAt,
+      tasks: preview ? tasks.slice(0, HUB_GROUP_PAGE_SIZE) : tasks,
+      task_counts: counts,
+      task_total: total,
+      is_group: true,
+      code: codes.size === 1 ? [...codes][0] : null,
+      elapsed_s: finiteMetric(elapsed),
+      cost,
+    });
+  }
+  // Match the physical catalog's newest-started-run ordering, independently of
+  // the time that any one member last published.
+  return output.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+}
+
 export const putRun = coalesceHubRunPuts(storeRun);
 
 async function storeRun(
@@ -450,6 +748,8 @@ async function storeRun(
     live: options.live === true,
     uploaded_at: new Date().toISOString(),
     tasks: tasks.map(taskSummary),
+    ...runGroupFields(bundle),
+    ...(bundle.run_group !== undefined ? { run_group: runGroupSchedule(bundle) } : {}),
   };
   const agentIds = agentIdsFromHubBundle(bundle);
 
@@ -458,6 +758,100 @@ async function storeRun(
   await withIndexLock(async () => {
     const index = await listRunsStrict();
     const existing = index.find((run) => run.run_id === runId);
+    if (existing?.run_group || summary.run_group) {
+      if ((existing && !existing.run_group) || (existing?.run_group && !summary.run_group)) {
+        throw new Error('Benchmark Hub group ID collides with a physical run');
+      }
+      if (
+        existing?.run_group &&
+        JSON.stringify(existing.run_group.members) !== JSON.stringify(summary.run_group!.members)
+      ) {
+        throw new Error('Benchmark Hub group schedule changed');
+      }
+      if (summary.run_group) {
+        const scheduled = new Map(
+          summary.run_group.members.map((member) => [member.member_id, member])
+        );
+        for (const child of index.filter((run) => run.group_run_id === runId)) {
+          const member = scheduled.get(child.group_member_id!);
+          if (
+            !member ||
+            member.run_number !== child.group_run_number ||
+            child.tasks.length !== 1 ||
+            child.tasks[0]?.name !== member.name ||
+            summary.run_group.members.length !== child.group_total
+          ) {
+            throw new Error('Existing Benchmark Hub child differs from its group schedule');
+          }
+        }
+      }
+    }
+    if (existing?.group_run_id) {
+      for (const field of HUB_GROUP_FIELDS) {
+        if (summary[field] !== undefined && summary[field] !== existing[field]) {
+          throw new Error('Benchmark Hub group membership changed');
+        }
+      }
+      Object.assign(summary, runGroupFields({ ...existing, run_id: runId }));
+    }
+    if (summary.group_run_id) {
+      const owner = index.find((run) => run.run_id === summary.group_run_id);
+      if (owner && !owner.run_group)
+        throw new Error('Benchmark Hub group ID collides with a physical run');
+      if (
+        index.some(
+          (run) =>
+            run.run_id !== runId &&
+            run.group_run_id === summary.group_run_id &&
+            run.group_member_id === summary.group_member_id
+        )
+      ) {
+        throw new Error('Benchmark Hub group member already belongs to another run');
+      }
+      if (owner?.run_group) {
+        const member = owner.run_group.members.find(
+          (item) => item.member_id === summary.group_member_id
+        );
+        if (
+          !member ||
+          member.run_number !== summary.group_run_number ||
+          tasks.length !== 1 ||
+          tasks[0]?.name !== member.name ||
+          owner.run_group.members.length !== summary.group_total
+        ) {
+          throw new Error('Benchmark Hub group member differs from its schedule');
+        }
+      }
+      summary.tasks = tasks.map((task) => ({
+        ...taskSummary(task),
+        cost_cents: finiteMetric(task.cost_cents),
+        duration_seconds: finiteMetric(task.duration_seconds),
+        tree_agent_count: finiteMetric(task.tree_agent_count),
+        tokens_in: finiteMetric(task.tokens_in),
+        tokens_out: finiteMetric(task.tokens_out),
+        cache_hit_pct: finiteMetric(task.cache_hit_pct),
+        llm_call_count: finiteMetric(task.llm_call_count),
+        message_count: finiteMetric(task.message_count),
+      }));
+      summary.code =
+        typeof bundle.code === 'string' && bundle.code.length <= 128 ? bundle.code : null;
+      summary.elapsed_s = finiteMetric(bundle.elapsed_s);
+      summary.cost =
+        typeof bundle.cost === 'object' && bundle.cost !== null
+          ? Object.fromEntries(
+              [
+                'agents_llm_usd',
+                'wmh_grounding_usd',
+                'infra_usd',
+                'total_usd',
+                'fast_cache_hit_rate',
+              ].map((field) => [
+                field,
+                finiteMetric((bundle.cost as Record<string, unknown>)[field]),
+              ])
+            )
+          : null;
+    }
     // Final is an absorbing state. A snapshot loop already in flight may
     // arrive after completion; it must not regress either the bundle or index
     // back to live/running.
@@ -467,7 +861,10 @@ async function storeRun(
     }
     const persisted = await readAgentRunIndexForMutation(index);
     const agentIndex = hubAgentIndexAfterPut(persisted, index.length === 0, runId, agentIds);
-    await putObject(`runs/${runId}.json`, JSON.stringify(bundle));
+    await putObject(
+      `runs/${runId}.json`,
+      JSON.stringify({ ...bundle, ...runGroupFields({ ...summary, run_id: runId }) })
+    );
     const next = [summary, ...index.filter((r) => r.run_id !== runId)];
     next.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
     await putObject('index.json', JSON.stringify(next));
@@ -504,14 +901,31 @@ export async function persistHubAgentRunBackfill(
   });
 }
 
-export async function listRuns(): Promise<HubRunSummary[]> {
+export async function listRuns(options: { grouped?: boolean } = {}): Promise<HubRunSummary[]> {
   const raw = await getObject('index.json');
   if (!raw) return [];
   try {
-    return parseRunCatalog(raw);
+    const runs = parseRunCatalog(raw);
+    return options.grouped === true ? groupedRunCatalog(runs) : runs;
   } catch {
     return [];
   }
+}
+
+export async function listRunPage(page: { offset?: number; limit?: number } = {}): Promise<{
+  runs: HubRunSummary[];
+  pagination: { offset: number; limit: number; total: number };
+}> {
+  const runs = await listRuns({ grouped: true });
+  const offset = Number.isInteger(page.offset) && page.offset! >= 0 ? page.offset! : 0;
+  const limit =
+    Number.isInteger(page.limit) && page.limit! > 0
+      ? Math.min(page.limit!, HUB_GROUP_PAGE_SIZE)
+      : HUB_GROUP_PAGE_SIZE;
+  return {
+    runs: runs.slice(offset, offset + limit),
+    pagination: { offset, limit, total: runs.length },
+  };
 }
 
 function parseRunCatalog(raw: string): HubRunSummary[] {
@@ -618,7 +1032,7 @@ export interface HubRunCost {
   fast_cache_hit_rate: number | null;
 }
 
-export interface HubRunDetail extends Omit<HubRunSummary, 'tasks'> {
+export interface HubRunDetail extends Omit<HubRunSummary, 'tasks' | 'cost'> {
   tasks: HubRunTaskDetail[];
   totals: {
     passed: number;
@@ -635,6 +1049,7 @@ export interface HubRunDetail extends Omit<HubRunSummary, 'tasks'> {
   elapsed_s: number | null;
   /** Report-card cost breakdown (LLM / WMH grounding / infra vCPU / total). */
   cost: HubRunCost | null;
+  pagination?: { offset: number; limit: number; total: number };
 }
 
 /**
@@ -643,11 +1058,16 @@ export interface HubRunDetail extends Omit<HubRunSummary, 'tasks'> {
  * dashboard showed) plus run-level totals. Falls back to summary-only fields
  * when the bundle is gone or live-thin.
  */
-export async function getRunDetail(runId: string): Promise<HubRunDetail | null> {
-  const index = await listRuns();
-  const summary = index.find((r) => r.run_id === runId);
+export async function getRunDetail(
+  runId: string,
+  page: { offset?: number; limit?: number } = {}
+): Promise<HubRunDetail | null> {
+  const index = await listRuns({ grouped: false });
+  const summary =
+    groupedRunCatalog(index, false).find((r) => r.run_id === runId) ??
+    index.find((r) => r.run_id === runId);
   if (!summary) return null;
-  const bundle = await getRunBundle(runId);
+  const bundle = summary.is_group ? null : await getRunBundle(runId);
   const bundleTasks = new Map<string, Record<string, unknown>>();
   if (bundle && Array.isArray(bundle.tasks)) {
     for (const task of bundle.tasks as Array<Record<string, unknown>>) {
@@ -656,7 +1076,7 @@ export async function getRunDetail(runId: string): Promise<HubRunDetail | null> 
   }
   const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
   const tasks: HubRunTaskDetail[] = summary.tasks.map((t) => {
-    const raw = bundleTasks.get(t.name) ?? {};
+    const raw = bundleTasks.get(t.name) ?? t;
     return {
       ...t,
       tokens_in: num(raw.tokens_in),
@@ -669,13 +1089,15 @@ export async function getRunDetail(runId: string): Promise<HubRunDetail | null> 
   const totals = {
     passed: tasks.filter((t) => t.passed === true).length,
     failed: tasks.filter((t) => t.passed === false).length,
-    running: tasks.filter((t) => t.passed === null).length,
+    running: tasks.filter(
+      (t) => t.passed === null && !['INFRA_ERROR', 'error', 'cancelled'].includes(t.status)
+    ).length,
     cost_cents: tasks.reduce((s, t) => s + (t.cost_cents ?? 0), 0),
     tokens_in: tasks.reduce((s, t) => s + (t.tokens_in ?? 0), 0),
     tokens_out: tasks.reduce((s, t) => s + (t.tokens_out ?? 0), 0),
     agents: tasks.reduce((s, t) => s + (t.tree_agent_count ?? 0), 0),
   };
-  const rawCost = (bundle?.cost ?? null) as Record<string, unknown> | null;
+  const rawCost = (bundle?.cost ?? summary.cost ?? null) as Record<string, unknown> | null;
   const cost: HubRunCost | null =
     rawCost === null
       ? null
@@ -686,12 +1108,19 @@ export async function getRunDetail(runId: string): Promise<HubRunDetail | null> 
           total_usd: num(rawCost.total_usd),
           fast_cache_hit_rate: num(rawCost.fast_cache_hit_rate),
         };
+  const offset = Number.isInteger(page.offset) && page.offset! >= 0 ? page.offset! : 0;
+  const limit =
+    Number.isInteger(page.limit) && page.limit! > 0
+      ? Math.min(page.limit!, HUB_GROUP_PAGE_SIZE)
+      : HUB_GROUP_PAGE_SIZE;
   return {
     ...summary,
-    tasks,
+    tasks: summary.is_group ? tasks.slice(offset, offset + limit) : tasks,
+    ...(summary.is_group ? { pagination: { offset, limit, total: tasks.length } } : {}),
     totals,
-    code: typeof bundle?.code === 'string' && bundle.code !== '' ? bundle.code : null,
-    elapsed_s: num(bundle?.elapsed_s),
+    code:
+      typeof bundle?.code === 'string' && bundle.code !== '' ? bundle.code : (summary.code ?? null),
+    elapsed_s: num(bundle?.elapsed_s ?? summary.elapsed_s),
     cost,
   };
 }
@@ -702,26 +1131,38 @@ export async function getRunDetail(runId: string): Promise<HubRunDetail | null> 
  * Returns false when the run id was not present.
  */
 export async function deleteRun(runId: string): Promise<boolean> {
-  let bundle: Record<string, unknown> | null = null;
+  const retired: Array<{ runId: string; bundle: Record<string, unknown> }> = [];
   const removed = await withIndexLock(async () => {
     const index = await listRunsStrict();
-    const next = index.filter((r) => r.run_id !== runId);
-    if (next.length === index.length) return false;
-    // Validate the authoritative bundle before publishing any visibility or
-    // index mutation; otherwise its DB ancestor skeletons cannot be cleaned.
-    bundle = await getRunBundleStrict(runId);
-    const agentIndex = await readAgentRunIndexForMutation(next);
-    await putObject(`visibility/${runId}.json`, 'false');
-    await putObject('index.json', JSON.stringify(next));
-    if (agentIndex !== null) {
-      await writeAgentRunIndex(hubAgentIndexAfterDelete(agentIndex, runId));
+    const targets = index.filter((run) => run.run_id === runId || run.group_run_id === runId);
+    if (!targets.length) return false;
+    // Validate every exact owned bundle before the catalog becomes invisible.
+    for (let start = 0; start < targets.length; start += 4) {
+      retired.push(
+        ...(await Promise.all(
+          targets.slice(start, start + 4).map(async (run) => ({
+            runId: run.run_id,
+            bundle: await getRunBundleStrict(run.run_id),
+          }))
+        ))
+      );
     }
+    const ids = new Set(targets.map((run) => run.run_id));
+    const next = index.filter((run) => !ids.has(run.run_id));
+    let agentIndex = await readAgentRunIndexForMutation(next);
+    for (const target of targets) {
+      await putObject(`visibility/${target.run_id}.json`, 'false');
+      if (agentIndex !== null) agentIndex = hubAgentIndexAfterDelete(agentIndex, target.run_id);
+    }
+    await putObject('index.json', JSON.stringify(next));
+    if (agentIndex !== null) await writeAgentRunIndex(agentIndex);
     return true;
   });
-  if (removed && bundle !== null) {
-    await deleteHubAncestorSkeletonsFromBundle(bundle);
-    forgetHubRunFromResolutionCaches(runId, agentIdsFromHubBundle(bundle));
-  }
+  if (removed)
+    for (const target of retired) {
+      await deleteHubAncestorSkeletonsFromBundle(target.bundle);
+      forgetHubRunFromResolutionCaches(target.runId, agentIdsFromHubBundle(target.bundle));
+    }
   return removed;
 }
 

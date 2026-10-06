@@ -5127,21 +5127,13 @@ acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-d
 }
 
 reserve_cleanup_disk_space() {
-    # The controller can run for hours while sibling workspaces generate coverage,
-    # dependencies, and trace archives. Keep one physically allocated local file
-    # that teardown releases before invoking asdf/flyctl, so a mid-run ENOSPC does
-    # not strand paid machines merely because those CLIs need shell temporaries.
-    #
-    # The reserve itself must not consume the controller's last usable space:
-    # snapshot verification, patch construction, Fly's config lock, and status
-    # publication all need small local writes before cleanup. Scale the requested
-    # reserve down on a constrained host while preserving both an unreserved
-    # operating headroom and a physically allocated cleanup floor. If both cannot
-    # fit, fail before the first provider mutation.
+    # One native filesystem transaction admits the pending cohort fairly before
+    # allocating real cleanup blocks. Defaults and explicit storage floors stay
+    # unchanged; exact owner files are still released by the existing finalizer.
     local reserve_mb="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-512}"
     local headroom_mb="${CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB:-256}"
     local minimum_mb="${CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB:-32}"
-    local available_kb available_mb maximum_reserve_mb allocated_mb remaining_kb remaining_mb
+    local allocated_mb
     case "$reserve_mb" in ''|*[!0-9]*) return 1 ;; esac
     case "$headroom_mb" in ''|*[!0-9]*) return 1 ;; esac
     case "$minimum_mb" in ''|*[!0-9]*|0) return 1 ;; esac
@@ -5149,89 +5141,352 @@ reserve_cleanup_disk_space() {
     [ "$headroom_mb" -le 16384 ] || return 1
     [ "$minimum_mb" -le 4096 ] || return 1
     [ "$minimum_mb" -le "$reserve_mb" ] || minimum_mb="$reserve_mb"
-
-    available_kb="$(df -Pk "$(dirname "$CLEANUP_DISK_RESERVE_FILE")" 2>/dev/null \
-        | awk 'END { print $4 }')" || return 1
-    case "$available_kb" in ''|*[!0-9]*) return 1 ;; esac
-    available_mb=$((available_kb / 1024))
-    maximum_reserve_mb=$((available_mb - headroom_mb))
-    [ "$maximum_reserve_mb" -ge "$minimum_mb" ] || return 1
-    allocated_mb="$reserve_mb"
-    [ "$allocated_mb" -le "$maximum_reserve_mb" ] \
-        || allocated_mb="$maximum_reserve_mb"
-
-    rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || return 1
-    # Linux can reserve real blocks without writing and flushing hundreds of
-    # megabytes of zeroes. Unsupported allocation uses the existing write path;
-    # storage/fsync errors must still fail before any provider mutation.
-    local allocation_status
-    if python3 - "$CLEANUP_DISK_RESERVE_FILE" "$allocated_mb" <<'PY'
+    allocated_mb="$(python3 - "$CLEANUP_DISK_RESERVE_FILE" "$reserve_mb" \
+        "$headroom_mb" "$minimum_mb" \
+        "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" \
+        "${RUN_BENCH_CAMPAIGN_JOB_ID:-}" \
+        "${RUN_BENCH_CAMPAIGN_COHORT:-}" "$$" <<'PY'
 import errno
+import fcntl
+import hashlib
+import json
 import os
+from pathlib import Path
+import re
 import stat
+import struct
+import subprocess
 import sys
+import tempfile
+
+path = Path(sys.argv[1]).absolute()
+preferred, headroom, minimum = map(int, sys.argv[2:5])
+cohort_path, job, cohort_id, owner_pid = sys.argv[5:]
+owner_pid = int(owner_pid)
+MB = 1048576
+opened_reserve = None
+reserve_identity = None
 
 
-def allocate():
-    if sys.platform != "linux" or not hasattr(os, "posix_fallocate"):
-        return 78
-    size = int(sys.argv[2]) * 1048576
-    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+def regular(path):
+    observed = path.lstat()
+    if not stat.S_ISREG(observed.st_mode) or observed.st_uid != os.getuid() or observed.st_nlink != 1:
+        raise ValueError("unsafe cleanup admission file")
+    return observed
+
+
+def directory(path):
+    observed = path.lstat()
+    if not stat.S_ISDIR(observed.st_mode) or observed.st_uid != os.getuid():
+        raise ValueError("unsafe cleanup admission directory")
+    return observed
+
+
+def free_mb():
+    # Keep the existing df tool contract, including the inherited pinned PATH.
+    output = subprocess.check_output(["bash", "-c", 'df -Pk "$1"', "reserve", str(path.parent)], text=True)
+    fields = output.splitlines()[-1].split()
+    return int(fields[3]) // 1024
+
+
+def capture_births():
+    result = subprocess.run(["ps", "-axo", "pid=,lstart="], env={**os.environ, "TZ": "UTC"}, capture_output=True, text=True, check=True)
+    births = {}
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 1)
+        if len(fields) == 2 and fields[0].isdigit():
+            births[int(fields[0])] = " ".join(fields[1].split())
+    return births
+
+
+def native_birth(pid):
+    return birth_snapshot.get(pid, "")
+
+
+def live_consumers(group):
+    return {member: owner for member, owner in group["consumed"].items()
+            if native_birth(owner["pid"]) == owner["birth"]}
+
+
+def parent_active(group):
+    if group["directory"] is None:
+        return False
+    parent_lock = Path(group["directory"]).parent / "parent.lock"
     try:
+        regular(parent_lock)
+    except FileNotFoundError:
+        return False
+    descriptor = os.open(parent_lock, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        actual = os.fstat(descriptor)
+        if [actual.st_dev, actual.st_ino] != group["parent_lock_identity"]:
+            raise ValueError("campaign parent lock identity changed")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def capture_cohort():
+    if not cohort_path:
+        if cohort_id:
+            raise ValueError("incomplete cleanup cohort identity")
+        identity = native_birth(owner_pid)
+        if not identity:
+            raise ValueError("cleanup reserve owner identity is unavailable")
+        member = "standalone-" + hashlib.sha256(str(path).encode()).hexdigest()
+        group = {"directory": None, "parent_lock_identity": None,
+                 "members": [member], "consumed": {}, "preferred": preferred,
+                 "headroom": headroom, "minimum": minimum}
+        return member[11:], group
+    target = Path(cohort_path).absolute()
+    directory(target)
+    manifest = target / "manifest.json"
+    regular(manifest)
+    if manifest.stat().st_size > 1048576:
+        raise ValueError("oversized cleanup cohort manifest")
+    value = json.loads(manifest.read_text())
+    if set(value) != {"cohort_id", "jobs"} or value["cohort_id"] != cohort_id:
+        raise ValueError("cleanup cohort identity mismatch")
+    members = value["jobs"]
+    if not isinstance(members, dict) or not members or job not in members:
+        raise ValueError("cleanup reserve member is absent from its sealed cohort")
+    for key, pid in members.items():
+        if not re.fullmatch(r"r[0-9]+-j[0-9]+", key) or (pid is not None and (type(pid) is not int or pid < 1)):
+            raise ValueError("malformed cleanup cohort member")
+    parent = regular(target.parent / "parent.lock")
+    group = {"directory": str(target), "parent_lock_identity": [parent.st_dev, parent.st_ino],
+             "members": sorted(members), "consumed": {},
+             "preferred": preferred, "headroom": headroom, "minimum": minimum}
+    if not parent_active(group):
+        raise ValueError("cleanup cohort parent is no longer active")
+    key = hashlib.sha256(json.dumps([str(target), group["parent_lock_identity"], group["members"]]).encode()).hexdigest()
+    return key, group
+
+
+def validate_group(identifier, group):
+    if set(group) != {"directory", "parent_lock_identity", "members", "consumed", "preferred", "headroom", "minimum"}:
+        raise ValueError("malformed cleanup cohort budget")
+    if not isinstance(group["directory"], (str, type(None))):
+        raise ValueError("invalid cleanup cohort directory")
+    if group["directory"] is not None:
+        if not Path(group["directory"]).is_absolute() or not isinstance(group["parent_lock_identity"], list) or len(group["parent_lock_identity"]) != 2 or any(type(value) is not int or value < 1 for value in group["parent_lock_identity"]):
+            raise ValueError("invalid cleanup cohort parent identity")
+    elif group["parent_lock_identity"] is not None:
+        raise ValueError("invalid standalone cleanup parent identity")
+    members, consumed = group["members"], group["consumed"]
+    if not isinstance(members, list) or len(members) != len(set(members)) or not members:
+        raise ValueError("invalid cleanup cohort members")
+    if any(not isinstance(member, str) or not re.fullmatch(r"(?:r[0-9]+-j[0-9]+|standalone-[0-9a-f]{64})", member) for member in members):
+        raise ValueError("invalid cleanup cohort member identity")
+    if not isinstance(consumed, dict) or not set(consumed).issubset(members):
+        raise ValueError("invalid cleanup cohort admission hint")
+    if group["directory"] is None:
+        if len(members) != 1 or members[0] != "standalone-" + identifier:
+            raise ValueError("standalone cleanup hint identity mismatch")
+    else:
+        expected = hashlib.sha256(json.dumps([group["directory"], group["parent_lock_identity"], members]).encode()).hexdigest()
+        if identifier != expected or members != sorted(members):
+            raise ValueError("cleanup cohort hint identity mismatch")
+    for owner in consumed.values():
+        if not isinstance(owner, dict) or set(owner) != {"pid", "birth"} or type(owner["pid"]) is not int or owner["pid"] < 1 or not isinstance(owner["birth"], str) or not owner["birth"]:
+            raise ValueError("invalid cleanup reserve owner hint")
+    if any(type(group[field]) is not int for field in ("preferred", "headroom", "minimum")):
+        raise ValueError("invalid cleanup cohort storage policy")
+    if not 1 <= group["minimum"] <= group["preferred"] <= 4096 or not 0 <= group["headroom"] <= 16384:
+        raise ValueError("invalid cleanup cohort storage floor")
+
+
+def persist(state_file, groups):
+    descriptor, temporary = tempfile.mkstemp(prefix=".state-", dir=state_file.parent)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump({"version": 1, "groups": groups}, stream)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, state_file)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+# Darwin SDK sys/fcntl.h: fstore_t = uint32, int32, off_t, off_t, off_t.
+_FSTORE = struct.Struct("@Iiqqq")
+_F_PREALLOCATE = 42
+_F_ALLOCATEALL = 0x00000004
+_F_PEOFPOSMODE = 3
+
+
+class CleanupReserveAllocationUnsupported(OSError):
+    """The native allocation operation lacks filesystem capability."""
+
+
+def allocate_cleanup_reserve(fd: int, size_bytes: int) -> None:
+    """Allocate and fsync real blocks; caller owns open, close and exact unlink.
+
+    The descriptor must refer to a new empty regular file opened exclusively
+    with O_NOFOLLOW. Capability gaps use a distinct exception so the caller can
+    preserve its existing write fallback; storage/fsync failures propagate.
+    """
+    if sys.platform != "darwin" or _FSTORE.size != 32:
+        raise OSError(errno.ENOTSUP, "Darwin reserve allocation is unavailable")
+    if size_bytes <= 0:
+        raise ValueError("cleanup reserve size must be positive")
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_size != 0 or before.st_ino <= 0:
+        raise OSError(errno.EINVAL, "cleanup reserve must be a new empty regular file")
+    request = _FSTORE.pack(_F_ALLOCATEALL, _F_PEOFPOSMODE, 0, size_bytes, 0)
+    try:
+        result = fcntl.fcntl(fd, _F_PREALLOCATE, request)
+    except OSError as exc:
+        if exc.errno in (errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOTSUP):
+            raise CleanupReserveAllocationUnsupported(exc.errno, "Darwin preallocation is unsupported") from exc
+        raise
+    allocated_bytes = _FSTORE.unpack(result)[4]
+    if allocated_bytes < size_bytes:
+        raise OSError(errno.EIO, "Darwin cleanup reserve allocation was incomplete")
+    os.ftruncate(fd, size_bytes)
+    os.fsync(fd)
+    observed = os.fstat(fd)
+    if (
+        (observed.st_dev, observed.st_ino) != (before.st_dev, before.st_ino)
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_size != size_bytes
+        or observed.st_blocks * 512 < size_bytes
+    ):
+        raise OSError(errno.EIO, "cleanup reserve physical allocation could not be verified")
+
+
+def allocate(fd, size):
+    if sys.platform == "darwin":
+        try:
+            allocate_cleanup_reserve(fd, size)
+        except CleanupReserveAllocationUnsupported:
+            subprocess.run(["bash", "-c", 'dd if=/dev/zero of="$1" bs=1048576 count="$2" conv=fsync', "reserve", str(path), str(size // MB)], check=True, stdout=subprocess.DEVNULL)
+    elif sys.platform == "linux" and hasattr(os, "posix_fallocate"):
         try:
             os.posix_fallocate(fd, 0, size)
         except OSError as exc:
-            if exc.errno in (errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOTSUP):
-                return 78
-            raise
-        os.fsync(fd)
-        observed = os.fstat(fd)
-        if not stat.S_ISREG(observed.st_mode) or observed.st_size != size or observed.st_blocks * 512 < size:
-            return 1
-        return 0
-    finally:
-        os.close(fd)
+            if exc.errno not in (errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOTSUP):
+                raise
+            subprocess.run(["bash", "-c", 'dd if=/dev/zero of="$1" bs=1048576 count="$2" conv=fsync', "reserve", str(path), str(size // MB)], check=True, stdout=subprocess.DEVNULL)
+    else:
+        subprocess.run(["bash", "-c", 'dd if=/dev/zero of="$1" bs=1048576 count="$2" conv=fsync', "reserve", str(path), str(size // MB)], check=True, stdout=subprocess.DEVNULL)
+    os.fsync(fd)
+    observed = os.fstat(fd)
+    if (observed.st_dev, observed.st_ino) != reserve_identity or not stat.S_ISREG(observed.st_mode) or observed.st_size != size or observed.st_blocks * 512 < size:
+        raise OSError(errno.EIO, "cleanup reserve physical allocation could not be verified")
 
 
 try:
-    sys.exit(allocate())
-except (OSError, ValueError):
-    sys.exit(1)
+    parent = directory(path.parent)
+    root = Path("/tmp") / ("rose-cloudbench-cleanup-admission-" + str(os.getuid())) / str(parent.st_dev)
+    root.parent.mkdir(mode=0o700, exist_ok=True)
+    directory(root.parent)
+    root.mkdir(mode=0o700, exist_ok=True)
+    directory(root)
+    lock = root / "admission.lock"
+    lock_fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        regular(lock)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        birth_snapshot = capture_births()
+        initial_owner_birth = native_birth(owner_pid)
+        if not initial_owner_birth:
+            raise ValueError("cleanup reserve initial owner identity is unavailable")
+        key, captured = capture_cohort()
+        state_file = root / "state.json"
+        if state_file.exists():
+            regular(state_file)
+            if state_file.stat().st_size > 1048576:
+                raise ValueError("oversized cleanup admission state")
+            state = json.loads(state_file.read_text())
+            if set(state) != {"version", "groups"} or state["version"] != 1 or not isinstance(state["groups"], dict):
+                raise ValueError("invalid cleanup admission state")
+            groups = state["groups"]
+        else:
+            groups = {}
+        live = {}
+        for identifier, group in groups.items():
+            if not re.fullmatch(r"[0-9a-f]{64}", identifier):
+                raise ValueError("invalid cleanup admission group identity")
+            validate_group(identifier, group)
+            if parent_active(group):
+                live[identifier] = group
+            else:
+                group["consumed"] = live_consumers(group)
+                if group["consumed"]:
+                    live[identifier] = group
+        if captured["directory"] is None:
+            job = captured["members"][0]
+        if captured is not None:
+            if key in live:
+                previous = live[key]
+                if any(previous[field] != captured[field] for field in ("directory", "parent_lock_identity", "members", "preferred", "headroom", "minimum")):
+                    raise ValueError("cleanup cohort policy changed")
+                captured = previous
+            if job in captured["consumed"]:
+                raise ValueError("cleanup cohort member already admitted")
+            live[key] = captured
+        floor = 0
+        pending = 0
+        needed = 0
+        for identifier, group in live.items():
+            active = parent_active(group) or (identifier == key and group["directory"] is None)
+            peers = (len(group["members"]) - len(group["consumed"]) if active else 0) + len(live_consumers(group))
+            remaining = len(group["members"]) - len(group["consumed"]) if active else 0
+            floor += peers * group["headroom"]
+            pending += remaining
+            needed += remaining * group["minimum"]
+        available = free_mb() - floor
+        if available < needed or pending < 1:
+            raise OSError(errno.ENOSPC, "insufficient physical cleanup floors for pending controllers")
+        amount = min(preferred, minimum + (available - needed) // pending)
+        # A previous exact owner file is released before its replacement, as in
+        # the original reserve function. Other controller paths are untouched.
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        opened_reserve = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        observed = os.fstat(opened_reserve)
+        reserve_identity = (observed.st_dev, observed.st_ino)
+        allocate(opened_reserve, amount * MB)
+        if free_mb() < floor:
+            raise OSError(errno.ENOSPC, "cleanup reserve consumed controller operating headroom")
+        if captured is not None:
+            if captured["directory"] is not None and not parent_active(captured):
+                raise ValueError("cleanup cohort parent retired during admission")
+            birth_snapshot = capture_births()
+            identity = native_birth(owner_pid)
+            if identity != initial_owner_birth:
+                raise ValueError("cleanup reserve owner identity changed during admission")
+            captured["consumed"][job] = {"pid": owner_pid, "birth": identity}
+        persist(state_file, live)
+        print(amount)
+    finally:
+        os.close(lock_fd)
+except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+    if opened_reserve is not None:
+        try:
+            observed = path.lstat()
+            if (observed.st_dev, observed.st_ino) == reserve_identity:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+    print("cleanup reserve admission failed: " + str(exc), file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    if opened_reserve is not None:
+        os.close(opened_reserve)
 PY
-    then
-        allocation_status=0
-    else
-        allocation_status=$?
-    fi
-    if [ "$allocation_status" != 0 ]; then
-        if [ "$allocation_status" != 78 ] \
-            || ! dd if=/dev/zero of="$CLEANUP_DISK_RESERVE_FILE" \
-                bs=1048576 count="$allocated_mb" conv=fsync >/dev/null 2>&1; then
-            rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || true
-            return 1
-        fi
-    fi
-    # A sibling controller or unrelated process can allocate between the
-    # inventory read and this fsync. Validate the actual post-allocation floor;
-    # on a race, release our exact file and fail before provider mutation.
-    remaining_kb="$(df -Pk "$(dirname "$CLEANUP_DISK_RESERVE_FILE")" 2>/dev/null \
-        | awk 'END { print $4 }')" || {
-        rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || true
-        return 1
-    }
-    case "$remaining_kb" in
-        ''|*[!0-9]*)
-            rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || true
-            return 1
-            ;;
-    esac
-    remaining_mb=$((remaining_kb / 1024))
-    if [ "$remaining_mb" -lt "$headroom_mb" ]; then
-        rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || true
-        return 1
-    fi
+)" || return 1
     if [ "$allocated_mb" -lt "$reserve_mb" ]; then
-        echo "⚠️  cleanup reserve scaled to ${allocated_mb}MB to preserve ${headroom_mb}MB controller headroom" >&2
+        echo "⚠️  cleanup reserve scaled to ${allocated_mb}MB to preserve ${headroom_mb}MB controller headroom and pending cohort floors" >&2
     fi
 }
 

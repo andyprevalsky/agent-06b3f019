@@ -12,6 +12,7 @@ import signal
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -38,6 +39,43 @@ def write_json_atomic(path: Path, value: dict[str, object]) -> None:
     temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
     temporary.write_text(json.dumps(public_value(value), indent=2) + "\n")
     temporary.replace(path)
+
+
+def publish_campaign_group(root: Path, campaign_dir: Path, state: dict[str, object], *, live: bool) -> None:
+    """The schedule is a real Hub resource; task results remain child-owned."""
+    record = {
+        "run_id": state["campaign_id"], "timestamp": state["started_at"],
+        "source": "benchmark-campaign", "suite": "cloud-fleet", "tasks": [],
+        "run_group": {"status": state["status"],
+            "finished_at": state.get("finished_at"), "wall_clock_seconds": state.get("wall_clock_seconds"),
+            "outcomes": {str(job["job_id"]): {"status": job["status"], "controller_exit_code": job["controller_exit_code"]}
+                         for job in state["jobs"]}, "members": [
+            {"member_id": job["job_id"], "name": job["task"], "run_number": job["run"]}
+            for job in state["jobs"]
+        ]},
+    }
+    target = campaign_dir / "hub-group.json"
+    write_json_atomic(target, record)
+    environment = os.environ.copy()
+    environment.pop("BENCHMARK_HUB_GROUP_RUN_ID", None)
+    if not environment.get("BENCHMARK_HUB_API_KEY") and not environment.get("BACKEND_API_KEY"):
+        try:
+            from dotenv import dotenv_values
+            key = dotenv_values(root / "back-end/.env").get("BACKEND_API_KEY")
+            if key:
+                environment["BACKEND_API_KEY"] = key
+        except ImportError:
+            pass
+    log = campaign_dir / "hub-group-publication.private.log"
+    with log.open("a") as stream:
+        os.chmod(log, 0o600)
+        result = subprocess.run([
+            sys.executable, str(root / "agents/benchmarks/hub_upload.py"),
+            "--register-starting" if live else "--upload-final", str(target),
+            "--source", "benchmark-campaign",
+        ], cwd=root, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False)
+    if result.returncode:
+        print("Warning: campaign Hub schedule publication is pending; child results and cleanup retain their owners")
 
 
 def parse_args() -> argparse.Namespace:
@@ -383,6 +421,8 @@ def main() -> int:
     inventory_directory = None
     inventory_failure_signalled = False
     try:
+        if not os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID") and not os.environ.get("BENCHMARK_HUB_PARENT_RUN_ID"):
+            publish_campaign_group(root, campaign_dir, state, live=True)
         if (
             args.concurrency > 1
             and not all_production_only
@@ -439,13 +479,14 @@ def main() -> int:
             ):
                 job = pending.popleft()
                 environment = os.environ.copy()
-                # The campaign is only a local scheduler and does not create an
-                # in-app Hub aggregate. Each fleet child must therefore register
-                # its own visible aggregate before it provisions machines. A
-                # genuinely visible parent supplied by an outer controller is
-                # preserved through the copied environment.
+                # Group membership is distinct from publication ownership. Each
+                # child still registers, publishes and acknowledges its own run;
+                # the Hub projects these durable members as one campaign.
                 environment.update(
                     {
+                        "BENCHMARK_HUB_GROUP_RUN_ID": environment.get("BENCHMARK_HUB_GROUP_RUN_ID") or safe_id,
+                        "RUN_BENCH_CAMPAIGN_STARTED_AT": str(state["started_at"]),
+                        "RUN_BENCH_CAMPAIGN_TOTAL_JOBS": str(len(jobs)),
                         "RUN_BENCH_CAMPAIGN_CHILD": "1",
                         "RUN_BENCH_CAMPAIGN_JOB_ID": str(job["job_id"]),
                         "RUN_BENCH_CAMPAIGN_RUN": str(job["run"]),
@@ -622,6 +663,8 @@ def main() -> int:
     state["finished_at"] = utc_now()
     state["wall_clock_seconds"] = round(time.monotonic() - started, 3)
     write_json_atomic(summary_path, state)
+    if not os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID") and not os.environ.get("BENCHMARK_HUB_PARENT_RUN_ID"):
+        publish_campaign_group(root, campaign_dir, state, live=False)
     print(
         f"{'✅' if result == 0 else '❌'} campaign {state['status']} "
         f"wall={state['wall_clock_seconds']}s summary={summary_path}"

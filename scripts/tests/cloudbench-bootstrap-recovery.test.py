@@ -2,51 +2,36 @@
 """Exact fresh infra bootstrap cancellation: no services or provider allocation."""
 
 import base64
+import copy
+import gzip
 import hashlib
 import importlib.util
 import io
 import json
 import os
-from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
-import sys
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER, MACHINE, VOLUME = "a" * 32, "b" * 14, "vol_bootstrap123"
 RUN, BENCH, APP = "20261006-bootstrap", "browser-event-ticket", "navi-whisper-lux-bench"
 TOKEN, CLONE = OWNER + "-0", "cloudbench-bootstrap123"
-REF = "e33e3c94e285c5665f77b198c25e7bca3f1ac9c6"
-# Frozen native source attestation; fresh/shallow clones need no historical Git object.
-SOURCE_HASHES = {
-    "back-end/package.json": "2b466d4362ccb48ae00a7d3f043ce49f3ed423a27c7bcbe6a207b7c3da72d2d1",
-    "back-end/scripts/apply-local-workflow-ddl.sh": "b349eb7350578aca283969360749e094b6f78b4b64b9707d74ac13ab47d96f36",
-    "back-end/scripts/ensure-agent-network-grep-indexes.ts": "653de4f229b9ea3bb71f8f6d2cc5de113d63e37e85899efb239f559d42edd709",
-    "back-end/scripts/ensure-fast-mode-cache-schema.ts": "085230371c95de56845ceb3bd4eef4948144cfab31231d4e06ac527320463f8f",
-    "front-end/package.json": "ac5d4c244d39877641ed9753cb18511ba958df94d0887d574ca189207c75a3c1",
-    "package.json": "fd89d0959d0217634caa3ea4757ff1bd5a040d602fd86b727574621663a2a219",
-    "scripts/cloudbench-guest-recovery.py": "d5c0a36d9eb903998fa156ee0d22fa78c8cdedba73d0798d28fc6613c890905b",
-    "scripts/cloudbench-run.sh": "65adbd867513b8490a000ac7de2c4609f8db19e87b248e2439a0217e5271d5de",
-    "scripts/cloudbench-status-server.py": "621c4e89cb2088ebe1665c13f08b7f0c60ea88fc0c8bf421e89ed8024a75815a",
-    "scripts/ensure-workspace-dependencies.sh": "c5c13af190c43ec8dc88f743ed481c8c1121ad390c68bdfa9e98b89eb3970cb1",
-    "scripts/lib/fast-mode-cache-schema.sh": "c1d581f0f2682894a8999d15a79953464f0c074a407bc013319ac71a3dd0412e",
-    "scripts/lib/local-pg-image.sh": "a5a3b3f57eaa4fc2fe1c2a32b65c830bd2a4d619bc2ec040608e2d02b23bb889",
-    "scripts/lib/ngrok-tunnel.sh": "d53a51a4e43e956ccd36f997fcfa15ffef2bcb9d33e3533e8c1673eda11e561e",
-    "scripts/lib/run-context.sh": "0be5db39d87319d11e3d2afc4ccea97581f46754021bee0f3020939788a0d22a",
-    "scripts/lib/run-process-cleanup.sh": "58cf9e3bd4fc1539f7193a9297936eb8be28e37a277b9fa5855e3758321e6bac",
-    "scripts/lib/run-service-readiness.sh": "3b8a264ea7a785219faea9fcd1cf2ab37a53060a37951f95d4c0a00688d819b6",
-    "scripts/lib/seed-cache.sh": "87a4b83a73c58f67513b2e3402eeb27005a7c9bf7ef78dae039aa4161244e65e",
-    "scripts/lib/workspace-env.sh": "ea649a1212dab724c16f3da995c796ff099caa5dabbcb106c6a359260b5bc9d2",
-    "scripts/run-bench-cloud": "4cbd3fd90c267a2669d1127b1d1eef5c3e858b5851739beb43584f04990d5cdc",
-    "scripts/run-bench-fleet": "a4e239d6b5b57dab87f15ef2a2aed07950f0b41115e64a75119b67eda9b2f0d6",
-    "scripts/run.sh": "32bd4e5d16c94e31e89ecc39e8da0fb04cf0d1d10d924bb7d0803828b743027e",
-}
+REPO = Path(os.environ.get("ROSE_BOOTSTRAP_TEST_REPO", str(ROOT.parent))).resolve()
+REF = subprocess.check_output(["git", "-C", str(REPO), "rev-parse", "HEAD"], text=True).strip()
 
-spec = importlib.util.spec_from_file_location(
-    "bootstrap_recovery", ROOT / "cloudbench-prestack-recovery.py"
-)
+
+def git_blob(path):
+    return subprocess.check_output(["git", "-C", str(REPO), "show", REF + ":" + path])
+
+
+SOURCE_HASHES = {}  # Populated from the immutable current execution source.
+
+spec = importlib.util.spec_from_file_location("bootstrap_recovery", ROOT / "cloudbench-prestack-recovery.py")
 assert spec and spec.loader
 recovery = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(recovery)
@@ -146,9 +131,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
                 BENCH_TASKS_B64=base64.b64encode(BENCH.encode()).decode(),
             ),
         )
-        self.native = [
-            dict(id=MACHINE, name=CLONE, state="stopped", config=self.config)
-        ]
+        self.native = [dict(id=MACHINE, name=CLONE, state="stopped", config=self.config)]
         write(self.machines, json.dumps(self.native))
         write(self.volumes, json.dumps([dict(id=VOLUME, attached_machine_id=MACHINE)]))
         write(
@@ -182,6 +165,168 @@ class BootstrapRecoveryTest(unittest.TestCase):
         ]
         self.source = dict(SOURCE_HASHES)
         self.make_capture()
+        self.configure_bound_source()
+        self.update_review()
+
+    def configure_bound_source(self):
+        self.config["env"]["REF"] = REF
+        self.source = {p: digest(git_blob(p)) for p in recovery.RECIPE_PATHS}
+        with (self.registry / "meta").open("a") as stream:
+            stream.write("workspace_root=" + str(REPO) + "\n")
+        owner_spec = importlib.util.spec_from_file_location(
+            "fixture_provenance_owner", ROOT / "cloudbench_execution_provenance.py"
+        )
+        owner = importlib.util.module_from_spec(owner_spec)
+        owner_spec.loader.exec_module(owner)
+        config = owner.build_config("cloudbench-fleet-config-v1", ["app=" + APP, "task_count=1"])
+        document = owner.build_provenance(
+            base_sha=REF,
+            workspace_patch_sha256="none",
+            snapshot_manifest=owner.build_snapshot_manifest(ROOT),
+            config=config,
+        )
+        write(self.run / "execution-provenance.json", json.dumps(document))
+        names = (
+            "cloudbench-benchmark-target.py",
+            "cloudbench-codex-auth.py",
+            "cloudbench-current-run-artifact.py",
+            "cloudbench-env.sh",
+            "cloudbench-exact-session-cleanup.py",
+            "cloudbench-execution-provenance.py",
+            "cloudbench-fetch-ref.sh",
+            "cloudbench-guest-recovery.py",
+            "cloudbench-install-ngrok.sh",
+            "cloudbench-prepare-patch.sh",
+            "cloudbench-run.sh",
+            "cloudbench-seed-budget.sh",
+            "cloudbench-sync-deps.sh",
+            "cloudbench-sync-prisma-client.sh",
+            "cloudbench_catalog.py",
+        )
+        packed = {}
+        for name in names:
+            path = (
+                "scripts/cloudbench_execution_provenance.py"
+                if name == "cloudbench-execution-provenance.py"
+                else "scripts/lib/" + name
+                if name in ("cloudbench-env.sh", "cloudbench-seed-budget.sh")
+                else "scripts/" + name
+            )
+            packed[name] = base64.b64encode(git_blob(path)).decode()
+        packed["cloudbench-execution-provenance.json"] = base64.b64encode(json.dumps(document).encode()).decode()
+        envelope = gzip.compress(json.dumps({"version": 1, "files": packed}, sort_keys=True).encode(), mtime=0)
+        self.config["env"].update(
+            CLOUDBENCH_BOOT_PAYLOAD_FILE="/cloudbench-boot-payload.json.gz",
+            CLOUDBENCH_BOOT_PAYLOAD_SHA256=digest(envelope),
+        )
+        self.config["files"] = [
+            {"guest_path": "/" + name, "raw_value": base64.b64encode(git_blob("scripts/" + name)).decode()}
+            for name in ("cloudbench-boot.sh", "cloudbench-boot-payload.py", "cloudbench-status-server.py")
+        ]
+        self.config["files"].append(
+            {"guest_path": "/cloudbench-boot-payload.json.gz", "raw_value": base64.b64encode(envelope).decode()}
+        )
+        write(self.machines, json.dumps(self.native))
+        write(
+            self.captures / (MACHINE + ".original-config.private.json"),
+            json.dumps(self.config, sort_keys=True, separators=(",", ":")) + "\n",
+        )
+        self.make_capture()
+
+    def update_review(self):
+        _, receipt = self.verify()
+        write(
+            self.captures / "source-boundary-reviewed.safe.json",
+            json.dumps(
+                {
+                    "reviewed": True,
+                    "reviewer": "offline fixture review",
+                    "source_ref": receipt["source_ref"],
+                    "source_recipe_sha256": receipt["source_recipe_sha256"],
+                    "pre_service_boundaries": [receipt["bootstrap_phase"]],
+                }
+            ),
+        )
+
+    def test_acknowledged_before_stack_has_a_separate_absence_boundary(self):
+        self.original["bench.log"] = (
+            f"RUNSTAMP-{TOKEN}\n[boot] guest shutdown requested\n"
+            "[boot] driver exited rc=143; holding for controller collection\n"
+        ).encode()
+        self.original.pop("repo/.context/cloudbench/stack.log")
+        self.original[f"cloudbench-driver-clean-{TOKEN}.ack"] = (TOKEN + "\n").encode()
+        self.missing.remove(f"cloudbench-driver-clean-{TOKEN}.ack")
+        self.missing.append("repo/.context/cloudbench/stack.log")
+        self.make_capture()
+        _, receipt = self.verify()
+        self.assertEqual(receipt["bootstrap_phase"], "before-stack-launch")
+        self.assertFalse(receipt["isolated_database_created"])
+        self.assertEqual(receipt["proof_credit"], 0)
+        self.original.pop(f"cloudbench-driver-clean-{TOKEN}.ack")
+        self.make_capture()
+        with self.assertRaises(ValueError):
+            self.verify()
+
+    def test_index_command_tail_does_not_erase_the_original_source_boundary(self):
+        self.original["repo/.context/cloudbench/stack.log"] += b"command interrupted; cleanup diagnostics\n"
+        self.make_capture()
+        _, receipt = self.verify()
+        self.assertEqual(receipt["bootstrap_phase"], "agent-network-index-bootstrap")
+        self.original["repo/.context/cloudbench/stack.log"] += (
+            "🗜️  Saving seed dump for fast future warm-starts\n".encode()
+        )
+        self.make_capture()
+        with self.assertRaises(ValueError):
+            self.verify()
+
+    def test_every_injected_executable_must_match_even_with_a_new_envelope_checksum(self):
+        original = copy.deepcopy(self.config)
+        file = next(f for f in original["files"] if f["guest_path"] == "/cloudbench-boot-payload.json.gz")
+        packed = json.loads(gzip.decompress(base64.b64decode(file["raw_value"])))
+        for name in packed["files"]:
+            if name.endswith(".json"):
+                continue
+            with self.subTest(control=name):
+                mutant = copy.deepcopy(original)
+                document = copy.deepcopy(packed)
+                document["files"][name] = base64.b64encode(
+                    base64.b64decode(document["files"][name]) + b"\n# mismatch\n"
+                ).decode()
+                envelope = gzip.compress(json.dumps(document, sort_keys=True).encode(), mtime=0)
+                next(f for f in mutant["files"] if f["guest_path"] == "/cloudbench-boot-payload.json.gz")[
+                    "raw_value"
+                ] = base64.b64encode(envelope).decode()
+                mutant["env"]["CLOUDBENCH_BOOT_PAYLOAD_SHA256"] = digest(envelope)
+                with self.assertRaises(ValueError):
+                    recovery.bound_recipe(recovery.fields(self.registry / "meta"), mutant, self.provenance)
+
+    def test_changed_recipe_never_skips_independent_review_for_a_named_ref(self):
+        _, receipt = self.verify()
+        (self.captures / "source-boundary-reviewed.safe.json").unlink()
+        with self.assertRaises(ValueError):
+            recovery.publish(self.out, receipt)
+        self.update_review()
+        review = json.loads((self.captures / "source-boundary-reviewed.safe.json").read_text())
+        review["source_recipe_sha256"] = "f" * 64
+        write(self.captures / "source-boundary-reviewed.safe.json", json.dumps(review))
+        with self.assertRaises(ValueError):
+            recovery.publish(self.out, receipt)
+
+    def test_missing_source_config_schema_and_module_spec_fail_clearly(self):
+        for field, value in (("env", None), ("files", {})):
+            mutant = copy.deepcopy(self.config)
+            mutant[field] = value
+            with self.assertRaisesRegex(ValueError, "source config schema"):
+                recovery.bound_recipe(recovery.fields(self.registry / "meta"), mutant, self.provenance)
+        with patch.object(recovery.importlib.util, "spec_from_file_location", return_value=None):
+            with self.assertRaisesRegex(ValueError, "owner module cannot be loaded"):
+                recovery.bound_recipe(recovery.fields(self.registry / "meta"), self.config, self.provenance)
+
+    def test_native_driver_path_cannot_redirect_to_another_bound_executable(self):
+        mutant = copy.deepcopy(self.config)
+        mutant["env"]["CLOUDBENCH_RUN_SCRIPT"] = "/cloudbench-guest-recovery.py"
+        with self.assertRaisesRegex(ValueError, "source control schema"):
+            recovery.bound_recipe(recovery.fields(self.registry / "meta"), mutant, self.provenance)
 
     def make_capture(self):
         archive = self.captures / (MACHINE + ".originals.private.tar.gz")
@@ -203,18 +348,12 @@ class BootstrapRecoveryTest(unittest.TestCase):
             tracked_change_exit_code=0,
             tracked_changed_paths=[],
             source_file_sha256=self.source,
-            files={
-                name: dict(bytes=len(data), sha256=digest(data))
-                for name, data in self.original.items()
-            },
+            files={name: dict(bytes=len(data), sha256=digest(data)) for name, data in self.original.items()},
             missing=self.missing,
             archive_sha256=digest(archive.read_bytes()),
             archive_bytes=archive.stat().st_size,
             native_original_config_sha256=digest(
-                (
-                    json.dumps(self.config, sort_keys=True, separators=(",", ":"))
-                    + "\n"
-                ).encode()
+                (json.dumps(self.config, sort_keys=True, separators=(",", ":")) + "\n").encode()
             ),
             proof_credit=0,
         )
@@ -227,9 +366,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
         )
 
     def verify(self):
-        return recovery.verify(
-            self.registry, BENCH, self.captures, self.machines, self.volumes
-        )
+        return recovery.verify(self.registry, BENCH, self.captures, self.machines, self.volumes)
 
     def test_exact_source_captured_bootstrap_is_zero_provider_not_zero_stack(self):
         out, receipt = self.verify()
@@ -288,6 +425,21 @@ class BootstrapRecoveryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.verify()
 
+    def test_public_verifier_rejects_invalid_native_config_schema_clearly(self):
+        original = copy.deepcopy(self.config)
+        for key, value in (("env", None), ("files", {})):
+            with self.subTest(key=key):
+                self.config.clear()
+                self.config.update(copy.deepcopy(original))
+                self.config[key] = value
+                write(self.machines, json.dumps(self.native))
+                write(
+                    self.captures / (MACHINE + ".original-config.private.json"),
+                    json.dumps(self.config, sort_keys=True, separators=(",", ":")) + "\n",
+                )
+                with self.assertRaisesRegex(ValueError, "config schema"):
+                    self.verify()
+
     def test_missing_absence_proof_is_rejected(self):
         self.provenance["missing"] = []
         self.write_provenance()
@@ -295,9 +447,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
             self.verify()
 
     def test_any_backend_or_service_launch_is_rejected(self):
-        self.original["repo/.context/cloudbench/logs/backend.log"] = (
-            b"[Server] Server started\n"
-        )
+        self.original["repo/.context/cloudbench/logs/backend.log"] = b"[Server] Server started\n"
         self.make_capture()
         with self.assertRaises(ValueError):
             self.verify()
@@ -349,9 +499,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
             if "cloudbench_validate_bootstrap_retirement()" in source
             else source.index("cloudbench_recover_guest_cleanup_receipts()")
         )
-        body = source[
-            start : source.index("\nfleet_recovery_reconnect_guest_shutdowns()", start)
-        ]
+        body = source[start : source.index("\nfleet_recovery_reconnect_guest_shutdowns()", start)]
         command = f"""set -eu
 {body}
 EXACT_SESSION_CLEANUP_HELPER={ROOT / "cloudbench-exact-session-cleanup.py"}
@@ -381,9 +529,7 @@ cloudbench_recover_guest_cleanup_receipts {self.registry}
             **os.environ,
             "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
         }
-        result = subprocess.run(
-            ["bash", "-c", command], env=env, capture_output=True, text=True
-        )
+        result = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((out / "guest-shutdown.confirmed").exists())
         self.assertFalse((out / "guest-cleanup.provider-manifest.json").exists())

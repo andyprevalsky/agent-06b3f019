@@ -92,6 +92,9 @@ The existing recorded mass-demo cache diagnostic uses:
 
 ```bash
 CLOUDBENCH_APP_MACHINE_CEILING=138 \
+CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=performance-1x \
+CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE=performance-1x \
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1 \
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
   scripts/run-bench test-mass-agent-run-0 --demo-cache \
   -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
@@ -109,10 +112,17 @@ An exact fresh infra canary canceled during database/dependency bootstrap may
 have no service PID ledger, backend log, or driver cleanup ACK. Preserve its
 stopped Machine and volume while capturing the original files through an inert
 boot and restoring its exact original config. This is a pre-service case:
-`run.sh` and an isolated database may already have run. The source-specific
-archival validator supports only the attested task-free infra recipe and checks
-the original owner/slot, complete original logs, missing service files, clean
-source hashes, and current stopped native Machine/attached-volume config:
+`run.sh` and an isolated database may already have run. The archival validator
+binds the original owner/slot, complete logs, missing service files, immutable
+clean checkout and every native injected executable to the captured source
+recipe. The exact source commit must be available in the owning workspace's
+Git objects. This recovery path supports clean committed recipes with no
+worktree patch; uncommitted or unsealed recipes fail closed. Its current stopped
+Machine/attached-volume config must still
+match. Before publication, an independent reviewer records the exact source
+ref, computed recipe hash and reviewed pre-service phases in
+`source-boundary-reviewed.safe.json` alongside the capture. This is causal
+source review, not permission to grant benchmark credit:
 
 ```bash
 python3 scripts/cloudbench-prestack-recovery.py \
@@ -120,7 +130,7 @@ python3 scripts/cloudbench-prestack-recovery.py \
   --capture-dir <absolute-private-original-capture-directory> \
   --machines-json <private-current-native-Machines-json> \
   --volumes-json <private-current-native-volumes-json> --publish
-scripts/run-bench-fleet --recover-stale-owner <exact-owner-token>
+scripts/run-bench --recover-stale-owner <exact-owner-token>
 ```
 
 The capture directory retains `<machine>.originals.private.tar.gz`,
@@ -129,8 +139,13 @@ The distinct `guest-bootstrap.confirmed` receipt reports isolated DB creation,
 zero provider allocation and zero benchmark credit. It creates no standard
 provider manifest or guest shutdown ACK. Exact recovery rechecks the original
 capture and fresh native inventory before its existing fresh-resource reaper;
-unknown source recipes, service launch, incomplete capture and foreign owners
-stay quarantined. Continue monitoring through exact Machine/volume release.
+unreviewed source recipes, service launch, incomplete capture and foreign owners
+stay quarantined. A genuine pre-stack cancellation also requires its original
+cleanup ACK and proven stack-log absence; index-bootstrap cancellation retains
+its own source/absence checks. Older captures without the full immutable input
+binding are not silently accepted. The quick bootstrap and existing prestack
+controls run in the ordinary deploy process. Continue monitoring through exact
+Machine/volume release.
 
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 

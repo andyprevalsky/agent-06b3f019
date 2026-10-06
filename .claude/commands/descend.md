@@ -178,6 +178,12 @@ Use `scripts/run-bench` for every suite, slice, task, bounded-concurrency
 campaign, and repeated isolated trial. Do not invoke `run-bench-fleet`,
 `run-bench-cloud`, or an ad hoc repetition loop directly.
 
+Use CLAUDE.md's current cloud startup and monitoring instructions for that
+command. Strict cohorts now coordinate their physical cleanup reserves on the
+controller filesystem; a reserve refusal requires actual disk/cohort evidence,
+not lowered storage floors or a replacement launcher. The owning quick
+regressions run in the normal benchmark deploy gate.
+
 The ordinary CLI automatically reuses verified completed dependency snapshots
 across fresh checkouts. Follow CLAUDE.md's "Cloud startup reuse" guidance and
 `scripts/run-bench --help`; source-only changes do not require dependency rebuilds.

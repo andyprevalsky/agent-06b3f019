@@ -80,6 +80,9 @@ export interface HubRunTask {
   failure_reason: string | null;
   lifecycle_stage?: string;
   startup_label?: string;
+  row_id?: string;
+  child_run_id?: string;
+  run_number?: number;
 }
 
 export interface HubRun {
@@ -96,6 +99,15 @@ export interface HubRun {
   live: boolean;
   uploaded_at: string;
   tasks: HubRunTask[];
+  is_group?: boolean;
+  task_total?: number;
+  task_counts?: {
+    passed: number;
+    failed: number;
+    queued: number;
+    infra_error?: number;
+    cancelled?: number;
+  };
 }
 
 export interface HubRunRequest {
@@ -152,6 +164,7 @@ export interface HubRunDetail extends Omit<HubRun, 'tasks'> {
   elapsed_s: number | null;
   cost: HubRunCost | null;
   dispatch: HubRunDispatch | null;
+  pagination?: { offset: number; limit: number; total: number };
 }
 
 export interface HubTreeNode {
@@ -208,6 +221,20 @@ export async function fetchHubRuns(): Promise<HubRun[]> {
   return data.runs;
 }
 
+export async function fetchHubRunPage(offset = 0): Promise<{
+  runs: HubRun[];
+  pagination: { offset: number; limit: number; total: number };
+}> {
+  const data = await hubFetch<{
+    runs: HubRun[];
+    pagination?: { offset: number; limit: number; total: number };
+  }>(`/benchmarks/runs?grouped=1${offset ? `&offset=${offset}` : ''}`);
+  return {
+    runs: data.runs,
+    pagination: data.pagination ?? { offset: 0, limit: 100, total: data.runs.length },
+  };
+}
+
 export async function fetchHubRunRequests(): Promise<HubRunRequest[]> {
   const data = await hubFetch<{ requests: HubRunRequest[] }>('/benchmarks/run-requests');
   return data.requests;
@@ -224,9 +251,9 @@ export async function createHubRunRequest(
   return data.request;
 }
 
-export async function fetchHubRun(runId: string): Promise<HubRunDetail> {
+export async function fetchHubRun(runId: string, offset = 0): Promise<HubRunDetail> {
   const data = await hubFetch<{ run: HubRunDetail }>(
-    `/benchmarks/runs/${encodeURIComponent(runId)}`,
+    `/benchmarks/runs/${encodeURIComponent(runId)}${offset ? `?offset=${offset}` : ''}`,
   );
   return data.run;
 }

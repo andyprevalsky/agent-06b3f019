@@ -22427,6 +22427,7 @@ df() {{
     'Filesystem 1024-blocks Used Available Capacity Mounted on' \
     'fake 10000 5904 4096 60% /fake'
 }}
+if declare -F df >/dev/null; then export -f df; fi
 {reserve}
 reserve_cleanup_disk_space
 test "$(wc -c < "$CLEANUP_DISK_RESERVE_FILE" | tr -d ' ')" = 2097152
@@ -22452,6 +22453,7 @@ df() {{
     'Filesystem 1024-blocks Used Available Capacity Mounted on' \
     'fake 10000 7952 2048 80% /fake'
 }}
+if declare -F df >/dev/null; then export -f df; fi
 {reserve}
 if reserve_cleanup_disk_space; then exit 42; fi
 test ! -e "$CLEANUP_DISK_RESERVE_FILE"
@@ -22468,7 +22470,7 @@ test ! -e "$CLEANUP_DISK_RESERVE_FILE"
     df_calls = tmp_path / "df-calls"
     raced_script = f"""set -uo pipefail
 CLEANUP_DISK_RESERVE_FILE="$1"
-DF_CALLS="$2"
+export DF_CALLS="$2"
 CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=4
 CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=2
 CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
@@ -22483,6 +22485,7 @@ df() {{
     printf '%s\n' 'fake 10000 8976 1024 90% /fake'
   fi
 }}
+if declare -F df >/dev/null; then export -f df; fi
 {reserve}
 if reserve_cleanup_disk_space; then exit 43; fi
 test ! -e "$CLEANUP_DISK_RESERVE_FILE"
@@ -22507,7 +22510,7 @@ import os
 import sys
 
 mode = os.environ['RESERVE_FAULT']
-sys.platform = 'darwin' if mode == 'nonlinux' else 'linux'
+sys.platform = 'freebsd' if mode == 'nonlinux' else 'linux'
 def allocate(fd, offset, size):
     with open(os.environ['ALLOCATOR_CALLS'], 'a') as log:
         log.write('allocate\\n')
@@ -22554,6 +22557,7 @@ dd() {{
   [ "$RESERVE_FAULT" != fallback_failure ] || return 7
   command dd "$@"
 }}
+export -f dd
 {reserve}
 reserve_cleanup_disk_space
 """
@@ -26997,3 +27001,278 @@ cloudbench_recover_guest_cleanup_receipts {shlex.quote(str(registry))}
         assert marker.read_bytes() == original
         assert not retained.exists()
         assert not calls.exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin physical allocation control")
+def test_fleet_cleanup_releases_emergency_disk_reserve_without_darwin_zero_writes(
+    tmp_path: Path,
+) -> None:
+    """Reserve real zero-readable blocks without streaming the reserve through dd."""
+    import stat
+
+    fleet = fleet_source_text()
+    reserve = _extract_fleet_function(fleet, "reserve_cleanup_disk_space() {")
+    release = _extract_fleet_function(fleet, "release_cleanup_disk_reserve() {")
+    exact = tmp_path / "native-reserve"
+    writes = tmp_path / "dd-calls"
+    neighbor = tmp_path / "neighbor"
+    neighbor.write_bytes(b"unrelated")
+    script = f"""set -uo pipefail
+CLEANUP_DISK_RESERVE_FILE="$1"
+CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=32
+CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=256
+CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=32
+dd() {{ printf 'dd\\n' >> "$DD_CALLS"; command dd "$@"; }}
+export -f dd
+{reserve}
+reserve_cleanup_disk_space
+"""
+    started = time.monotonic()
+    result = subprocess.run(
+        ["bash", "-c", script, "reserve", str(exact)],
+        env={**os.environ, "DD_CALLS": str(writes)},
+        text=True, capture_output=True, check=False, timeout=40,
+    )
+    elapsed = time.monotonic() - started
+    try:
+        assert result.returncode == 0, result.stderr
+        observed = exact.stat()
+        assert stat.S_ISREG(observed.st_mode)
+        assert observed.st_size == 32 * 1048576
+        assert observed.st_blocks * 512 >= observed.st_size
+        assert observed.st_ino > 0 and observed.st_nlink == 1
+        assert stat.S_IMODE(observed.st_mode) == 0o600
+        total = 0
+        with exact.open("rb") as stream:
+            while chunk := stream.read(131072):
+                assert chunk == bytes(len(chunk))
+                total += len(chunk)
+        assert total == observed.st_size
+    finally:
+        released = subprocess.run(
+            ["bash", "-c", f"{release}\nrelease_cleanup_disk_reserve \"$1\"", "release", str(exact)],
+            text=True, capture_output=True, check=False, timeout=40,
+        )
+    assert released.returncode == 0 and not exact.exists(), released.stderr
+    assert neighbor.read_bytes() == b"unrelated"
+    dd_count = len(writes.read_text().splitlines()) if writes.exists() else 0
+    receipt_dir = os.environ.get("CLOUDBENCH_RESERVE_TEST_RECEIPT_DIR")
+    if receipt_dir:
+        target = Path(receipt_dir)
+        target.mkdir(mode=0o700, parents=True, exist_ok=True)
+        (target / "physical.safe.json").write_text(json.dumps({
+            "allocation_elapsed_s": round(elapsed, 6), "size_bytes": observed.st_size,
+            "physical_bytes": observed.st_blocks * 512, "zero_read_bytes": total,
+            "inode_nonzero": observed.st_ino > 0, "link_count": observed.st_nlink,
+            "mode": oct(stat.S_IMODE(observed.st_mode)), "reserve_released": not exact.exists(),
+            "neighbor_unchanged": neighbor.read_bytes() == b"unrelated", "dd_call_count": dd_count,
+        }, sort_keys=True) + "\n")
+    assert dd_count == 0, "Darwin reserve still streamed zero bytes through dd"
+
+    fault_dir = tmp_path / "native-faults"
+    fault_dir.mkdir()
+    (fault_dir / "sitecustomize.py").write_text(r'''
+import errno
+import fcntl
+import os
+import struct
+import sys
+from types import SimpleNamespace
+
+mode = os.environ['NATIVE_RESERVE_FAULT']
+original_fcntl = fcntl.fcntl
+original_fstat = os.fstat
+fstat_calls = 0
+
+def controlled_fstat(fd):
+    global fstat_calls
+    observed = original_fstat(fd)
+    if sys._getframe(1).f_code.co_name != "allocate_cleanup_reserve":
+        return observed
+    fstat_calls += 1
+    if mode == 'zero_inode' or (mode == 'changed_inode' and fstat_calls > 1):
+        return SimpleNamespace(
+            st_mode=observed.st_mode, st_size=observed.st_size,
+            st_dev=observed.st_dev, st_blocks=observed.st_blocks,
+            st_ino=0 if mode == 'zero_inode' else observed.st_ino + 1,
+        )
+    return observed
+os.fstat = controlled_fstat
+
+def controlled_fcntl(fd, command, request):
+    if command != 42:
+        return original_fcntl(fd, command, request)
+    with open(os.environ['PREALLOCATE_CALLS'], 'a') as log:
+        log.write('preallocate\n')
+    if mode in ('unsupported', 'unsupported_enosys', 'unsupported_eopnotsupp', 'enospc', 'io_failure'):
+        code = {'unsupported': errno.ENOTSUP, 'unsupported_enosys': errno.ENOSYS, 'unsupported_eopnotsupp': errno.EOPNOTSUPP, 'enospc': errno.ENOSPC, 'io_failure': errno.EIO}[mode]
+        raise OSError(code, 'injected preallocation failure')
+    if mode == 'sparse':
+        fields = list(struct.unpack('@Iiqqq', request))
+        fields[4] = fields[3]
+        return struct.pack('@Iiqqq', *fields)
+    result = original_fcntl(fd, command, request)
+    if mode == 'short':
+        fields = list(struct.unpack('@Iiqqq', result))
+        fields[4] = fields[3] - 1
+        return struct.pack('@Iiqqq', *fields)
+    return result
+fcntl.fcntl = controlled_fcntl
+if mode in ('fsync_failure', 'fsync_unsupported'):
+    def failed_fsync(fd):
+        raise OSError(errno.ENOTSUP if mode == 'fsync_unsupported' else errno.EIO, 'injected fsync failure')
+    os.fsync = failed_fsync
+if mode == 'ftruncate_unsupported':
+    def failed_ftruncate(fd, size):
+        raise OSError(errno.ENOSYS, 'injected truncate failure')
+    os.ftruncate = failed_ftruncate
+''')
+    rows = []
+    for mode in ("unsupported", "unsupported_enosys", "unsupported_eopnotsupp", "enospc", "io_failure", "short", "sparse", "fsync_failure", "fsync_unsupported", "ftruncate_unsupported", "zero_inode", "changed_inode"):
+        fault_exact = tmp_path / f"reserve-{mode}"
+        calls = tmp_path / f"preallocate-{mode}"
+        fallback = tmp_path / f"dd-{mode}"
+        controlled = f"""set -uo pipefail
+CLEANUP_DISK_RESERVE_FILE="$1"
+CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=1
+CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=0
+CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
+dd() {{ printf 'dd\\n' >> "$DD_CALLS"; command dd "$@"; }}
+export -f dd
+{reserve}
+reserve_cleanup_disk_space
+"""
+        failed = subprocess.run(
+            ["bash", "-c", controlled, "reserve", str(fault_exact)],
+            env={**os.environ, "PYTHONPATH": str(fault_dir), "NATIVE_RESERVE_FAULT": mode,
+                 "PREALLOCATE_CALLS": str(calls), "DD_CALLS": str(fallback)},
+            text=True, capture_output=True, check=False, timeout=40,
+        )
+        capability_gap = mode.startswith("unsupported")
+        assert (failed.returncode == 0) is capability_gap, (mode, failed.stderr)
+        assert fallback.exists() is capability_gap, mode
+        if capability_gap:
+            observed_fallback = fault_exact.stat()
+            assert stat.S_ISREG(observed_fallback.st_mode) and observed_fallback.st_ino > 0
+            assert observed_fallback.st_size == 1048576 and observed_fallback.st_blocks * 512 >= observed_fallback.st_size
+            assert fault_exact.read_bytes() == bytes(1048576)
+            fault_exact.unlink()
+        assert not fault_exact.exists(), mode
+        assert neighbor.read_bytes() == b"unrelated", mode
+        assert calls.exists() is (mode != "zero_inode"), mode
+        rows.append({"fault": mode, "capability_fallback": capability_gap, "failed_closed": not capability_gap,
+                     "reserve_absent": True, "dd_call_count": 1 if capability_gap else 0})
+
+    # Exact release failure is reported; neither the owned directory nor neighbor
+    # is recursively removed as a workaround.
+    release_error = tmp_path / "release-directory"
+    release_error.mkdir()
+    failed_release = subprocess.run(
+        ["bash", "-c", f"{release}\nrelease_cleanup_disk_reserve \"$1\"", "release", str(release_error)],
+        text=True, capture_output=True, check=False, timeout=40,
+    )
+    assert failed_release.returncode != 0 and release_error.is_dir()
+    assert neighbor.read_bytes() == b"unrelated"
+    release_error.rmdir()
+    if receipt_dir:
+        (Path(receipt_dir) / "faults.safe.json").write_text(json.dumps({
+            "faults": rows, "release_error_reported": True, "neighbor_unchanged": True,
+        }, sort_keys=True) + "\n")
+
+
+def test_fleet_cleanup_releases_emergency_disk_reserve_for_cohort_budget(tmp_path: Path) -> None:
+    """Fifty default owners retain cleanup and per-owner working floors together."""
+    driver = ROOT / "agents/benchmarks/fixtures/cloudbench_cleanup_reserve_cohort.py"
+    result = subprocess.run(
+        [sys.executable, str(driver), str(FLEET_SCRIPT), str(tmp_path / "cohort")],
+        env=os.environ.copy(), text=True, capture_output=True, check=False, timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipt = json.loads((tmp_path / "cohort/receipt.safe.json").read_text())
+    assert receipt["admitted"] == 50 and receipt["failed"] == 0
+    assert receipt["provider_calls"] == 0 and receipt["task_executions"] == 0
+    assert all(receipt["assertions"].values())
+
+
+@pytest.mark.parametrize("interleaving", ["timezone", "reused-pid"])
+def test_fleet_cleanup_releases_emergency_disk_reserve_with_stable_owner_identity(
+    tmp_path: Path, interleaving: str,
+) -> None:
+    """Shared budget hints retain a live owner across TZ, and reject PID reuse."""
+    reserve = _extract_fleet_function(fleet_source_text(), "reserve_cleanup_disk_space() {")
+    neighbor = tmp_path / "neighbor"
+    neighbor.write_bytes(b"unrelated")
+    exact = tmp_path / "identity-reserve"
+    df = """df() { printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fake 10000 6928 3072 70% /fake'; }
+export -f df
+"""
+    if interleaving == "timezone":
+        ready, retire = tmp_path / "ready", tmp_path / "retire"
+        shell = f"""set -uo pipefail
+CLEANUP_DISK_RESERVE_FILE="$1"
+CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=1
+CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
+CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=2
+{df}
+{reserve}
+reserve_cleanup_disk_space || exit 70
+: > "$2"
+while [ ! -e "$3" ]; do sleep 0.01; done
+"""
+        owner = subprocess.Popen(
+            ["bash", "-c", shell, "reserve", str(exact), str(ready), str(retire)],
+            env={**os.environ, "TZ": "UTC"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 60
+            while not ready.exists() and owner.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert ready.exists(), "first exact owner did not admit"
+            # Same exact live PID must remain accounted for when the next reader
+            # inherits another timezone; its working floor is still occupied.
+            assert owner.poll() is None
+            second = subprocess.run(
+                ["bash", "-c", shell.split(': > "$2"')[0], "reserve", str(tmp_path / "second")],
+                env={**os.environ, "TZ": "America/Los_Angeles"}, text=True,
+                capture_output=True, timeout=60,
+            )
+            assert second.returncode != 0, "live owner's working floor was lost across TZ"
+            assert not (tmp_path / "second").exists()
+            assert exact.stat().st_size == 1048576
+        finally:
+            retire.touch()
+            owner.communicate(timeout=60)
+            exact.unlink(missing_ok=True)
+        assert owner.returncode == 0
+    else:
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        ps = tools / "ps"
+        ps.write_text("""#!/usr/bin/env python3
+import os
+from pathlib import Path
+p=Path(os.environ['RESERVE_BIRTH_COUNTER'])
+n=int(p.read_text()) if p.exists() else 0
+p.write_text(str(n+1))
+print(os.environ['RESERVE_NATIVE_OWNER_PID'], 'Tue Oct 6 18:32:23 2026' if n == 0 else 'Tue Oct 6 18:32:24 2026')
+""")
+        ps.chmod(0o700)
+        shell = f"""set -uo pipefail
+CLEANUP_DISK_RESERVE_FILE="$1"
+export RESERVE_NATIVE_OWNER_PID=$$
+CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=1
+CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
+CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=0
+{reserve}
+reserve_cleanup_disk_space
+"""
+        result = subprocess.run(
+            ["bash", "-c", shell, "reserve", str(exact)],
+            env={**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                 "RESERVE_BIRTH_COUNTER": str(tmp_path / "birth-count")},
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode != 0, "reserve adopted a reused owner PID"
+        assert not exact.exists()
+    assert neighbor.read_bytes() == b"unrelated"

@@ -70,8 +70,8 @@ export async function claimRunRequest(id: string, claimedBy: string) {
  * lifecycle (queued/claimed timestamps, claimer, error) so the view can render
  * the startup timeline the fleet dashboard had while a run is still spinning up.
  */
-export async function getRunView(runId: string) {
-  const detail = await hubStore.getRunDetail(runId);
+export async function getRunView(runId: string, page: { offset?: number; limit?: number } = {}) {
+  const detail = await hubStore.getRunDetail(runId, page);
   if (detail === null) return null;
   const request = await repo.findRunRequestByRunId(runId);
   return {

@@ -146,10 +146,37 @@ grep -Fq '`scripts/run-bench <task> -k K --concurrency N`' "$CLAUDE_RULES" \
 
 tmp="$(mktemp -d)"
 cleanup() {
+  if [ -n "${group_fixture_pid:-}" ]; then kill "$group_fixture_pid" 2>/dev/null || true; wait "$group_fixture_pid" 2>/dev/null || true; fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT
 mkdir -p "$tmp/captures"
+python3 - "$tmp" <<'GROUP_HTTP' &
+import gzip,json,sys
+from http.server import BaseHTTPRequestHandler,HTTPServer
+from pathlib import Path
+root=Path(sys.argv[1]); records={}
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self,*args): pass
+    def do_POST(self):
+        data=self.rfile.read(int(self.headers['Content-Length']))
+        if self.headers.get('Content-Encoding')=='gzip': data=gzip.decompress(data)
+        body=json.loads(data); records[body['run_id']]=body
+        self.send_response(201);self.send_header('Content-Type','application/json');self.end_headers()
+        self.wfile.write(json.dumps({'run':body}).encode())
+    def do_GET(self):
+        record=records.get(self.path.rsplit('/',1)[-1])
+        self.send_response(200 if record else 404);self.send_header('Content-Type','application/json');self.end_headers()
+        self.wfile.write(json.dumps({'run':record}).encode())
+server=HTTPServer(('127.0.0.1',0),Handler)
+(root/'group-http.port').write_text(str(server.server_port));server.serve_forever()
+GROUP_HTTP
+group_fixture_pid=$!
+for _ in {1..100}; do [ -f "$tmp/group-http.port" ] && break; sleep 0.02; done
+[ -f "$tmp/group-http.port" ] || fail "group metadata fixture did not start"
+export BENCHMARK_HUB_UPLOAD_URL="http://127.0.0.1:$(cat "$tmp/group-http.port")"
+export BENCHMARK_HUB_API_KEY="offline-group-fixture"
+
 cat >"$tmp/fake-fleet" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -178,6 +205,7 @@ run_campaign() {
   RUN_BENCH_CAMPAIGN_ROOT="$tmp/campaigns" \
   RUN_BENCH_FAKE_CAPTURE_ROOT="$tmp/captures" \
   RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/fake-fleet" \
+  CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY=0 \
     "$RUN_BENCH" "$@"
 }
 
@@ -483,6 +511,7 @@ esac
         with (
             patch.dict(os.environ, self.environment),
             patch.object(campaign, "parse_args", return_value=args),
+            patch.object(campaign, "publish_campaign_group", return_value=None),
             patch.object(campaign.subprocess, "Popen", DelayedReapProcess),
             patch.object(campaign.signal, "signal", side_effect=lambda signum, handler: handlers.update({signum: handler})),
             patch.object(campaign.os, "killpg", side_effect=killpg),

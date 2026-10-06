@@ -20,7 +20,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { HubRun, HubRunRequest, HubTask } from '@/lib/api/benchmarksHub';
-import { fetchHubRunRequests, fetchHubRuns, fetchHubTasks } from '@/lib/api/benchmarksHub';
+import { fetchHubRunRequests, fetchHubRunPage, fetchHubTasks } from '@/lib/api/benchmarksHub';
 import { BenchmarkRunView } from './BenchmarkRunView';
 import { RunsPane } from './RunsPane';
 import { TasksPane } from './TasksPane';
@@ -38,6 +38,10 @@ export function BenchmarksView({ onOpenAgent }: BenchmarksViewProps) {
   const [tasksError, setTasksError] = useState<string | null>(null);
 
   const [runs, setRuns] = useState<HubRun[]>([]);
+  const [runOffset, setRunOffset] = useState(0);
+  const [runPagination, setRunPagination] = useState<
+    { offset: number; limit: number; total: number } | undefined
+  >();
   const [requests, setRequests] = useState<HubRunRequest[]>([]);
   const [runsLoading, setRunsLoading] = useState(true);
   const [runsError, setRunsError] = useState<string | null>(null);
@@ -45,6 +49,8 @@ export function BenchmarksView({ onOpenAgent }: BenchmarksViewProps) {
   const [openRun, setOpenRun] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const runsInFlightRef = useRef(false);
+  const runOffsetRef = useRef(runOffset);
+  runOffsetRef.current = runOffset;
 
   const loadTasks = useCallback(async () => {
     setTasksLoading(true);
@@ -58,29 +64,42 @@ export function BenchmarksView({ onOpenAgent }: BenchmarksViewProps) {
     }
   }, []);
 
-  const loadRuns = useCallback(async (background = false) => {
-    if (background && runsInFlightRef.current) return;
-    runsInFlightRef.current = true;
-    if (!background) setRunsLoading(true);
-    try {
-      const [nextRuns, nextRequests] = await Promise.all([fetchHubRuns(), fetchHubRunRequests()]);
-      setRuns(nextRuns);
-      setRequests(nextRequests);
-      setRunsError(null);
-    } catch (err) {
-      // Background failures surface too — otherwise stale runs keep rendering
-      // with no signal that updates stopped (the success path clears this).
-      setRunsError(err instanceof Error ? err.message : String(err));
-    } finally {
-      runsInFlightRef.current = false;
-      if (!background) setRunsLoading(false);
-    }
-  }, []);
+  const loadRuns = useCallback(
+    async (background = false) => {
+      if (background && runsInFlightRef.current) return;
+      runsInFlightRef.current = true;
+      if (!background) setRunsLoading(true);
+      try {
+        const [nextRuns, nextRequests] = await Promise.all([
+          fetchHubRunPage(runOffset),
+          fetchHubRunRequests(),
+        ]);
+        if (runOffsetRef.current !== runOffset) return;
+        setRuns(nextRuns.runs);
+        setRunPagination(nextRuns.pagination);
+        setRequests(nextRequests);
+        setRunsError(null);
+      } catch (err) {
+        // Background failures surface too — otherwise stale runs keep rendering
+        // with no signal that updates stopped (the success path clears this).
+        if (runOffsetRef.current === runOffset)
+          setRunsError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (runOffsetRef.current === runOffset) {
+          runsInFlightRef.current = false;
+          if (!background) setRunsLoading(false);
+        }
+      }
+    },
+    [runOffset],
+  );
 
   useEffect(() => {
     void loadTasks();
+  }, [loadTasks]);
+  useEffect(() => {
     void loadRuns();
-  }, [loadTasks, loadRuns]);
+  }, [loadRuns]);
 
   // Poll runs + requests while the hub is visible so live runs move on their own.
   useEffect(() => {
@@ -122,6 +141,8 @@ export function BenchmarksView({ onOpenAgent }: BenchmarksViewProps) {
             loading={runsLoading}
             error={runsError}
             onOpenRun={(runId) => setOpenRun(runId)}
+            pagination={runPagination}
+            onPage={setRunOffset}
           />
         </div>
         <div className="flex-1 min-h-0 rounded-xl border border-border bg-background/85 backdrop-blur-sm p-4">

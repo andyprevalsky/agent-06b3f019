@@ -24,11 +24,14 @@ interface StatusCounts {
   passed: number;
   failed: number;
   queued: number;
+  infra_error?: number;
+  cancelled?: number;
 }
 
 // A run's per-task outcomes bucketed for the status bar: passed / failed and
 // everything still in flight (passed === null → queued or running) as "queued".
 function runCounts(run: HubRun): StatusCounts {
+  if (run.task_counts) return run.task_counts;
   let passed = 0;
   let failed = 0;
   let queued = 0;
@@ -51,18 +54,27 @@ function requestCounts(request: HubRunRequest): StatusCounts {
 // Segmented loading bar: green passed · red failed · blue queued, sized by
 // count. The queued segment pulses while the run is live so in-flight work
 // reads as "loading" at a glance.
-function RunStatusBar({ passed, failed, queued, live }: StatusCounts & { live?: boolean }) {
-  const total = passed + failed + queued;
+function RunStatusBar({
+  passed,
+  failed,
+  queued,
+  infra_error = 0,
+  cancelled = 0,
+  live,
+}: StatusCounts & { live?: boolean }) {
+  const total = passed + failed + queued + infra_error + cancelled;
   const segments = [
     { key: 'passed', count: passed, className: 'bg-emerald-500' },
     { key: 'failed', count: failed, className: 'bg-red-500' },
     { key: 'queued', count: queued, className: cn('bg-blue-500', live && 'animate-pulse') },
+    { key: 'infra_error', count: infra_error, className: 'bg-orange-500' },
+    { key: 'cancelled', count: cancelled, className: 'bg-slate-400' },
   ];
   return (
     <div
       className="flex h-2 w-24 shrink-0 overflow-hidden rounded-full bg-muted"
       role="img"
-      aria-label={`${passed} passed, ${failed} failed, ${queued} queued`}
+      aria-label={`${passed} passed, ${failed} failed, ${queued} queued${infra_error ? `, ${infra_error} infrastructure errors` : ''}${cancelled ? `, ${cancelled} cancelled` : ''}`}
       title={`${passed} passed · ${failed} failed · ${queued} queued`}
       data-testid="run-status-bar"
     >
@@ -82,12 +94,20 @@ function RunStatusBar({ passed, failed, queued, live }: StatusCounts & { live?: 
 }
 
 // Compact colored counts beside the bar — only non-zero buckets show.
-function StatusCountsLabel({ passed, failed, queued }: StatusCounts) {
+function StatusCountsLabel({
+  passed,
+  failed,
+  queued,
+  infra_error = 0,
+  cancelled = 0,
+}: StatusCounts) {
   return (
     <span className="flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums">
       {passed > 0 && <span className="text-emerald-600 dark:text-emerald-400">{passed}✓</span>}
       {failed > 0 && <span className="text-red-600 dark:text-red-400">{failed}✗</span>}
       {queued > 0 && <span className="text-blue-600 dark:text-blue-400">{queued}⋯</span>}
+      {infra_error > 0 && <span className="text-orange-600">{infra_error} infra</span>}
+      {cancelled > 0 && <span className="text-muted-foreground">{cancelled} cancelled</span>}
     </span>
   );
 }
@@ -98,9 +118,19 @@ interface RunsPaneProps {
   loading: boolean;
   error: string | null;
   onOpenRun: (runId: string) => void;
+  pagination?: { offset: number; limit: number; total: number };
+  onPage?: (offset: number) => void;
 }
 
-export function RunsPane({ runs, requests, loading, error, onOpenRun }: RunsPaneProps) {
+export function RunsPane({
+  runs,
+  requests,
+  loading,
+  error,
+  onOpenRun,
+  pagination,
+  onPage,
+}: RunsPaneProps) {
   const [expandedRequest, setExpandedRequest] = useState<string | null>(null);
   const liveRunIds = new Set(runs.map((r) => r.run_id));
   // Show in-flight requests AND failed dispatches (a failure with no uploaded
@@ -117,10 +147,26 @@ export function RunsPane({ runs, requests, loading, error, onOpenRun }: RunsPane
       <div className="flex items-center gap-2 pb-2">
         <h2 className="text-sm font-semibold tracking-wide text-foreground">Runs</h2>
         <span className="text-xs text-muted-foreground">
-          {runs.length + activeRequests.length} item
-          {runs.length + activeRequests.length === 1 ? '' : 's'}
+          {(pagination?.total ?? runs.length) + activeRequests.length} item
+          {(pagination?.total ?? runs.length) + activeRequests.length === 1 ? '' : 's'}
         </span>
         {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+        {pagination && onPage && pagination.total > pagination.limit && (
+          <div className="ml-auto flex gap-2 text-xs">
+            <button
+              disabled={pagination.offset === 0}
+              onClick={() => onPage(Math.max(0, pagination.offset - pagination.limit))}
+            >
+              Previous
+            </button>
+            <button
+              disabled={pagination.offset + runs.length >= pagination.total}
+              onClick={() => onPage(pagination.offset + pagination.limit)}
+            >
+              Next
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5">
