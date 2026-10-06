@@ -16407,6 +16407,7 @@ def test_phone_call_hold_queue_task_compresses_three_hour_wait():
     assert "exactly once" in hold.prompt
     assert "3 hours" in hold.prompt
     assert "do not use wait_for" in hold.prompt
+    assert "Preserve spelled letters in alphanumeric confirmation codes exactly" in hold.prompt
     assert hold.pinned_facts == {
         "confirmation_code": "HOLD-3300",
         "restoration_window": "tomorrow between 9 and 11 AM",
@@ -16418,8 +16419,10 @@ def test_phone_call_hold_queue_task_compresses_three_hour_wait():
     assert "stay on the line" in persona["first_message"].lower()
     assert persona["hold_success"]["hold_seconds"] == 20
     assert persona["hold_success"]["hold_seconds"] <= HOLD_SUCCESS_MAX_SECONDS
-    assert "HOLD-3300" in persona["hold_success"]["say"]
+    assert "letter H" in persona["hold_success"]["say"]
+    assert "digit 3" in persona["hold_success"]["say"]
     assert "9 and 11" in persona["hold_success"]["say"]
+    assert "HOLD-3300" in persona["system_prompt"]
     assert "remain completely silent" in persona["system_prompt"]
     assert hold.callee_checks["confirmation_code"] == "HOLD-3300"
     assert hold.callee_checks["confirmation_code_given"] is True
