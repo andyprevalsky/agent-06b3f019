@@ -1004,6 +1004,27 @@ def run_fake_driver(mdir):
         if not launched:
             log("FATAL: autoscaled worker never crossed launch boundary")
             exit_code = 1
+    # A failed launch is only evidence once the provisioner has exhausted its
+    # attempts and discarded the worker. The tiny fake benchmark can finish
+    # first, which fences staging and leaves the failure unrecorded, so hold
+    # the task until the discard is logged; the scenario then exercises the
+    # retry-while-running boundary it intends to, every time.
+    if exit_code == 0 and os.path.exists(os.path.join(FAKE_DIR, "fail-worker-launch")):
+        runs_root = Path(os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"], ".context", "fleet", "runs")
+        deadline = time.time() + 120
+        discarded = False
+        while time.time() < deadline and not discarded:
+            for autoscaler_log in runs_root.glob(f"*/{bench}/autoscaler.log"):
+                try:
+                    if "could not be staged and launched" in autoscaler_log.read_text(errors="replace"):
+                        discarded = True
+                        break
+                except OSError:
+                    continue
+            time.sleep(0.1)
+        if not discarded:
+            log("FATAL: the failed worker launch was never discarded while the task was running")
+            exit_code = 1
     # Keep the lower-target regression alive after the in-flight worker reaches
     # its own terminal cleanup boundary. Staging remains committed while it is
     # pending; its provisioner, rather than scale-down, owns any staging-failure
@@ -1348,8 +1369,16 @@ elif args[:2] == ["machine", "clone"]:
     cpu_match = re.search(r"(\d+)x$", vm_size)
     vm_cpus = int(cpu_match.group(1)) if cpu_match else 1
     cpu_kind = "performance" if vm_size.startswith("performance-") else "shared"
+    volume_id = "vol_" + uuid.uuid4().hex[:8]
+    clone_config = {"mounts": [{"volume": volume_id, "size_gb": 40}],
+                    "guest": {"cpu_kind": cpu_kind, "cpus": vm_cpus,
+                              "memory_mb": vm_memory}}
+    # Fly records `--override-cmd` as the clone's init cmd; the controller
+    # stages a worker only once the inventory shows that inert command.
+    override_cmd = flag_value("--override-cmd")
+    if override_cmd:
+        clone_config["init"] = {"cmd": shlex.split(override_cmd)}
     with locked_state() as state:
-        volume_id = "vol_" + uuid.uuid4().hex[:8]
         state["machines"].append({
             "id": machine_id, "name": name, "state": "stopped",
             "region": flag_value("--region") or "iad",
@@ -1358,9 +1387,7 @@ elif args[:2] == ["machine", "clone"]:
             "private_ip": str(ipaddress.IPv6Address(
                 (0xFDAA << 112) | (0xC10D << 64) | int(machine_id, 16)
             )),
-            "config": {"mounts": [{"volume": volume_id, "size_gb": 40}],
-                       "guest": {"cpu_kind": cpu_kind, "cpus": vm_cpus,
-                                 "memory_mb": vm_memory}},
+            "config": clone_config,
         })
         state["volumes"].append(
             {"id": volume_id, "name": "cloudbench_data_fork", "state": "created", "size_gb": 40})
@@ -3722,6 +3749,17 @@ if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/n
     fail "default-detached fleet left durable ownership records after cleanup"
 fi
 assert_no_controller_script_snapshots "default-detached terminal cleanup"
+# Nobody waits on a plain detached launch, so its exit marker is the only
+# durable record of how the controller ended; monitors poll it after the log
+# stops growing. It must survive cleanup and carry the controller's exact exit.
+detached_status_marker="$(sed -n 's/^    controller exit marker: //; s/ (check on every poll.*//p' "$detached_launcher_log" | tail -1)"
+[ -n "$detached_status_marker" ] ||
+    fail "default-detach launcher did not print its controller exit marker"
+[ -s "$detached_status_marker" ] ||
+    fail "default-detached fleet did not retain its controller exit marker: $detached_status_marker"
+[ "$(head -1 "$detached_status_marker")" = "0" ] ||
+    fail "default-detached exit marker recorded $(head -1 "$detached_status_marker"), not the controller's success"
+rm -f "$detached_status_marker"
 echo "PASS: scenario 2-detach — disposable launcher returned; detached fleet completed and cleaned every owned resource"
 
 # Hub/predeploy supervisors need the same session durability without giving up
@@ -3766,8 +3804,13 @@ PY
 if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/null | grep -q .; then
     fail "detached wait fleet left durable ownership records after cleanup"
 fi
-if find "$WS_A/.context/fleet/runs" -name 'detached-*.status' -type f -print -quit 2>/dev/null | grep -q .; then
-    fail "detached wait fleet left a consumed status rendezvous"
+# --wait is the one consumer of its own exit marker: the rendezvous reads it and
+# removes it, unlike a plain detached launch whose marker is retained for monitors.
+wait_status_marker="$(sed -n 's/^    controller exit marker: //; s/ (check on every poll.*//p' "$wait_launcher_log" | tail -1)"
+[ -n "$wait_status_marker" ] ||
+    fail "detached wait launcher did not print its controller exit marker"
+if [ -e "$wait_status_marker" ]; then
+    fail "detached wait fleet left a consumed status rendezvous: $wait_status_marker"
 fi
 assert_no_controller_script_snapshots "detached-wait terminal cleanup"
 echo "PASS: scenario 2-wait — detached controller preserved synchronous status and cleaned every owned resource"
@@ -4113,7 +4156,9 @@ echo "PASS: scenario 2c — a live proxy without valid metrics fails closed"
 # A metrics target of two is not satisfied merely because Fly allocated a
 # worker clone. The clone must actually launch the queue worker and reach its
 # operational marker; otherwise the fleet would run at primary-only capacity
-# while reporting autoscaling as healthy.
+# while reporting autoscaling as healthy. The fake benchmark holds its task
+# until the launch failure is recorded, so the failure is always exercised
+# while the task is live rather than fenced away by task completion.
 reset_fake_state
 : > "$FAKE_DIR/journal.log"
 : > "$FAKE_DIR/desired-two"
@@ -4129,12 +4174,14 @@ CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=2 \
 grep -Eq 'mandatory autoscaler.*(worker capacity (incomplete|below desired)|worker .* could not be staged and launched)' \
     "$TMP_ROOT/controller-autoscaler-worker-required.log" ||
     fail "an unready autoscaled worker must produce a stable explicit failure"
-stage_log="$(find "$WS_A/.context/fleet/runs" -path '*/autoscaler-worker-required/worker-*.stage.log' -type f -print -quit 2>/dev/null || true)"
-[ -n "$stage_log" ] ||
+# Every staged worker leaves a stage log; the failing launch must be
+# identified in at least one of them.
+stage_logs="$(find "$WS_A/.context/fleet/runs" -path '*/autoscaler-worker-required/worker-*.stage.log' -type f 2>/dev/null || true)"
+[ -n "$stage_logs" ] ||
     fail "failed autoscaled-worker launch must preserve a per-worker stage log"
-grep -qF "launch worker wrapper failed rc=1" "$stage_log" ||
+printf '%s\n' "$stage_logs" | xargs grep -lF "launch worker wrapper failed rc=1" 2>/dev/null | grep -q . ||
     fail "autoscaled-worker stage log must identify the failing launch command"
-grep -qF "injected autoscaled-worker launch failure" "$stage_log" ||
+printf '%s\n' "$stage_logs" | xargs grep -lF "injected autoscaled-worker launch failure" 2>/dev/null | grep -q . ||
     fail "autoscaled-worker stage log must preserve the provider command stderr"
 clone_count="$(grep -c '^machine clone ' "$FAKE_DIR/journal.log" 2>/dev/null || true)"
 [ "$clone_count" -ge 2 ] ||
