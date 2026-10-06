@@ -2152,6 +2152,19 @@ should_serve_world_model() {
     return 0
 }
 
+# Pre-export the WMH target for a benchmark stack BEFORE any service forks.
+# The agents workers start before start_world_model_harness finishes building
+# and serving (it runs after the "agents" service), and their WMH adapter
+# (agents/helpers/world_model_runtime.py:from_env) reads WMH_MODEL_NAME /
+# WMH_BASE_URL from the worker's process env at the FIRST simulated boundary.
+# Exporting only after /healthz (below) left every simulate worker without a
+# model name → "WMH simulation requires WMH_BASE_URL and WMH_MODEL_NAME".
+# The manifest still publishes the WMH only once it is confirmed healthy.
+if $BENCHMARK_MODE && should_serve_world_model; then
+    export WMH_MODEL_NAME
+    export WMH_BASE_URL="${WMH_BASE_URL:-http://localhost:$WMH_PORT}"
+fi
+
 start_world_model_harness() {
     should_serve_world_model || return 0
 
@@ -2268,22 +2281,45 @@ start_world_model_harness() {
 
 kill_tree() {
     local pid=$1
+    local child
     for child in $(pgrep -P "$pid" 2>/dev/null); do
         kill_tree "$child"
     done
     kill "$pid" 2>/dev/null || true
 }
 
-# SIGTERM the tree, wait briefly, then SIGKILL any survivors
+# All descendants of a pid (depth-first), snapshotted BEFORE any signal is
+# sent: once a parent dies its children reparent to init and `pgrep -P` can no
+# longer find them, which is exactly how a SIGTERM-surviving grandchild leaks.
+descendant_pids() {
+    local pid=$1
+    # `child` MUST be local: the recursion below reuses the loop variable, and a
+    # global one is clobbered by the inner loop before the outer echo runs.
+    local child
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        descendant_pids "$child"
+        echo "$child"
+    done
+}
+
+# SIGTERM the tree, wait briefly, then SIGKILL any survivors — at EVERY depth.
+# Previously only the tracked pid and its direct children were force-killed,
+# so the agents worker (`bash -c` → run_local_worker.sh → python worker.py)
+# outlived an isolated benchmark teardown whenever worker.py hung after its
+# graceful shutdown (observed 2026-09-08: worker logged "Worker stopped" and
+# stayed alive, polling a dead per-run Temporal queue). Isolated runs skip the
+# broad kill-services.sh sweep, so this tree kill is their only reaper.
 kill_tree_hard() {
     local pid=$1
+    local survivors
+    survivors="$(descendant_pids "$pid") $pid"
     kill_tree "$pid"
     sleep 1
-    # Kill any survivors that ignored SIGTERM
-    for child in $(pgrep -P "$pid" 2>/dev/null); do
-        kill -9 "$child" 2>/dev/null || true
+    for victim in $survivors; do
+        if kill -0 "$victim" 2>/dev/null; then
+            kill -9 "$victim" 2>/dev/null || true
+        fi
     done
-    kill -9 "$pid" 2>/dev/null || true
 }
 
 cleanup() {

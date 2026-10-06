@@ -65,6 +65,9 @@ export const KNOWN_TAGS = [
   'planner',
   'memory',
   'plan-only',
+  // Long-horizon capability slice — months-long goals run under world-model
+  // simulate with time skipping (see raise-5m-rose-labs-brex in tasks.json).
+  'long-horizon',
   // Ecommerce / real-world task category slices (see tasks.json).
   'ecommerce',
   'purchase',

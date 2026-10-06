@@ -66,6 +66,18 @@ def test_local_validate_task_names_preserves_intentional_repeats():
     assert args[args.index("--max-concurrency") + 1] == "5"
 
 
+def test_local_timeout_override_reaches_benchmark_runner():
+    options = local_runner.parse_args(
+        ["raise-5m-rose-labs-brex", "--timeout-seconds", "1800"]
+    )
+
+    assert options.timeout_seconds == 1800
+    args = local_runner.build_benchmark_args(
+        options.tasks, port=3201, timeout_seconds=options.timeout_seconds
+    )
+    assert args[args.index("--timeout-seconds") + 1] == "1800"
+
+
 def test_agent_payment_tasks_use_the_admin_account_with_forced_customer_path():
     expected_user_id = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 

@@ -53,7 +53,7 @@ resolved="$(cloudbench_resolve_controller_github_token "$ROOT_DIR")" \
   || fail "resolver must find the controller git credential despite a dead GITHUB_TOKEN"
 [ "$resolved" != "$GITHUB_TOKEN" ] || fail "resolver must not return the dead injected GITHUB_TOKEN"
 case "$resolved" in
-  ghs_*|gho_*|github_pat_*|ghp_*) ;;
+  ghs_*|gho_*|ghu_*|github_pat_*|ghp_*) ;;
   *) fail "resolver returned an unexpected token shape: ${resolved:0:8}…" ;;
 esac
 # Prove the resolved token authenticates to the private repo (the missing
@@ -67,40 +67,46 @@ http_code="$(curl -s -o /tmp/cloudbench-token-check.json -w '%{http_code}' \
 pass "resolver prefers live git credential over dead GITHUB_TOKEN (API 200)"
 
 # ── 5. refresh-deps / fleet source wiring (cemented in the consistently-run path)
+# The warm git-sync no longer embeds a base64 token in the remote snippet: the
+# controller resolves an auth header (fail-closed) and delivers it over ssh
+# stdin as AUTH_HDR, and the on-box snippet refuses to fetch without it.
 require_text() {
   local file="$1" needle="$2" msg="$3"
   grep -Fq "$needle" "$file" || fail "$msg"
 }
 
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'cloudbench_controller_github_token_b64' \
-  "run-bench-cloud must resolve a controller token for warm git-sync"
+  'cloudbench_export_controller_github_token' \
+  "run-bench-cloud must resolve the controller token through the shared resolver"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'CONTROLLER_B64=' \
-  "refresh-deps SYNC_CMD must embed CONTROLLER_B64 from the controller"
-require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'FATAL: controller GitHub token unavailable for warm git-sync' \
-  "warm git-sync must fail closed when no controller token is available"
+  'FATAL: missing controller git auth header' \
+  "warm git-sync must fail closed on the box when no controller auth header is delivered"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_controller_github_token_b64' \
+  'cloudbench_controller_github_token' \
   "fleet worker token resolution must use the shared controller resolver"
-# Stronger: the refresh-deps block must mention CONTROLLER_B64 before fetch.
-python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "refresh-deps must stage CONTROLLER_B64 before git fetch"
+# Stronger: the sync snippet must gate on the controller header before any
+# fetch, never embed the token itself, and refresh-deps must go through it.
+python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "warm git-sync must gate the controller auth header before git fetch"
 from pathlib import Path
 import sys
 text = Path(sys.argv[1]).read_text()
-start = text.find('if [ "$MODE" = "refresh-deps" ]')
-end = text.find('if [ "$MODE" = "refresh-wmh"', start)
-block = text[start:end]
-if "CONTROLLER_B64=" not in block:
-    raise SystemExit("missing CONTROLLER_B64 in refresh-deps")
-if "cloudbench_controller_github_token_b64" not in block:
-    raise SystemExit("missing controller token resolve in refresh-deps")
-fetch_at = block.find("git -c safe.directory")
-ctrl_at = block.find("CONTROLLER_B64=")
-if ctrl_at < 0 or fetch_at < 0 or ctrl_at > fetch_at:
-    raise SystemExit("CONTROLLER_B64 must be set before git fetch in refresh-deps")
+start = text.find("build_controller_authenticated_git_sync_cmd() {")
+if start < 0:
+    raise SystemExit("missing build_controller_authenticated_git_sync_cmd")
+block = text[start : text.find("\n}\n", start)]
+if "resolve_controller_git_auth_header" not in block:
+    raise SystemExit("git-sync snippet builder must fail closed via resolve_controller_git_auth_header")
+gate_at = block.find("FATAL: missing controller git auth header")
+fetch_at = block.find("fetch --quiet origin")
+if gate_at < 0 or fetch_at < 0 or gate_at > fetch_at:
+    raise SystemExit("AUTH_HDR gate must precede git fetch in the sync snippet")
+if "CONTROLLER_B64=" in block or "base64" in block:
+    raise SystemExit("sync snippet must not embed the controller token")
+refresh = text.find('if [ "$MODE" = "refresh-deps" ]')
+refresh_end = text.find('if [ "$MODE" = "refresh-wmh"', refresh)
+if "warm_source_fetch_ref" not in text[refresh:refresh_end]:
+    raise SystemExit("refresh-deps must sync through warm_source_fetch_ref")
 PY
-pass "refresh-deps and fleet source wiring pass the controller token into warm git-sync"
+pass "refresh-deps and fleet source wiring deliver the controller token into warm git-sync fail-closed"
 
 echo "ALL CHECKS PASSED"

@@ -36,6 +36,7 @@ if str(AGENTS_DIR) not in sys.path:
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     all_tasks,
+    get_task_by_name,
     selected_tasks_require_gate_type,
 )
 from benchmarks.polar_catalog import is_polar_bench_task
@@ -103,6 +104,11 @@ SERVICE_START_TIMEOUT_SECONDS = 600
 # manifest. Keep the normal bound for cached starts, but give that one-time
 # bootstrap enough room to finish cleanly.
 COLD_SEED_SERVICE_START_TIMEOUT_SECONDS = 1200
+# A simulate stack with NO prebuilt World Model must list the R2 trace archive
+# (~80k bundles) and export/build the capped corpus before run.sh publishes its
+# manifest. That first build is a one-time cost per machine; give it an honest
+# budget instead of killing a healthy build at the warm-start bound.
+WMH_FIRST_BUILD_SERVICE_START_TIMEOUT_SECONDS = 1800
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AGENT_PAYMENT_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
@@ -428,6 +434,8 @@ def build_benchmark_args(
     keep_failed_agents: bool = True,
     simulate: bool = False,
     world_model_name: str | None = None,
+    wmh_initial_state_file: str | None = None,
+    timeout_seconds: int | None = None,
 ) -> list[str]:
     args = [_benchmark_python(), "-u", "benchmarks/run_benchmark.py"]
     args.extend(build_task_selector_args(selected_tasks, known_task_names()))
@@ -445,6 +453,10 @@ def build_benchmark_args(
         args.append("--simulate")
         if world_model_name:
             args.extend(["--world-model-name", world_model_name])
+    if wmh_initial_state_file:
+        args.extend(["--wmh-initial-state-file", wmh_initial_state_file])
+    if timeout_seconds is not None:
+        args.extend(["--timeout-seconds", str(timeout_seconds)])
     if len(selected_tasks) > 1:
         args.extend(["--parallel", "--max-concurrency", str(max_concurrency)])
     return args
@@ -1424,8 +1436,9 @@ def start_services(
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
         # Default isolated stacks keep Fast Mode cache on the local Postgres so
         # Tokyo / other smokes cannot write through Andy into the shared pooler.
-        # fast_cache:on tasks (test-mass-agent-run-0) must read the July cache,
-        # so those batches keep FAST_MODE_CACHE_DATABASE_URL and disable writes.
+        # fast_cache:on tasks read the shared July cache. Ordinary agent
+        # write-through stays disabled; recognized DEMO WHM completions are
+        # allowed to populate their scoped keys via _WMHFastCacheContext.
         if selected_tasks_need_shared_fast_cache(tasks):
             shared_url = (env.get("FAST_MODE_CACHE_DATABASE_URL") or "").strip() or _dotenv_fast_mode_cache_database_url()
             if not shared_url:
@@ -1479,11 +1492,11 @@ def start_services(
             # Put the worker into simulate mode. run.sh forks the agents worker from this
             # env, so these must be set here (the worker's WMH adapter + fast-cache scope
             # read them from its process env). WMH_PORT mirrors run.sh's +6 offset.
-            env["BENCHMARK_WORLD_MODEL_MODE"] = "simulate"
-            env["WMH_BASE_URL"] = f"http://localhost:{stack.base_port + 6}"
-            resolved_model = world_model_name or os.environ.get("WMH_MODEL_NAME")
-            if resolved_model:
-                env["WMH_MODEL_NAME"] = resolved_model
+            apply_local_simulate_wmh_env(
+                env,
+                base_port=stack.base_port,
+                world_model_name=world_model_name,
+            )
     # The SMS benchmarks stub web_search through a file the backend re-reads per
     # call. The path has to be in the BACKEND's env at boot — it is already
     # running by the time a task selects its fixture — so publish it here.
@@ -1516,9 +1529,14 @@ def start_services(
                 start_new_session=True,
             )
         try:
-            service_start_timeout = SERVICE_START_TIMEOUT_SECONDS
-            if stack.isolated and env.get("BENCHMARK_REQUIRE_SEED_DUMP") == "0":
-                service_start_timeout = COLD_SEED_SERVICE_START_TIMEOUT_SECONDS
+            service_start_timeout = service_start_timeout_seconds(
+                isolated=stack.isolated, env=env, simulate=simulate
+            )
+            if service_start_timeout == WMH_FIRST_BUILD_SERVICE_START_TIMEOUT_SECONDS:
+                print(
+                    "🌍 First World Model build for this machine — extending the stack readiness "
+                    f"budget to {service_start_timeout}s"
+                )
             manifest = wait_for_services(
                 stack.manifest_path,
                 process=process,
@@ -2098,6 +2116,8 @@ def run_benchmark_invocation(
     max_concurrency: int,
     simulate: bool = False,
     world_model_name: str | None = None,
+    wmh_initial_state_file: str | None = None,
+    timeout_seconds: int | None = None,
 ) -> Path:
     started = time.time()
     command = build_benchmark_args(
@@ -2109,6 +2129,8 @@ def run_benchmark_invocation(
         keep_failed_agents=True,
         simulate=simulate,
         world_model_name=world_model_name,
+        wmh_initial_state_file=wmh_initial_state_file,
+        timeout_seconds=timeout_seconds,
     )
     print(f"\n== Running {invocation.label}: {', '.join(invocation.tasks)}")
     print("$ " + " ".join(command))
@@ -2150,6 +2172,72 @@ def run_benchmark_invocation(
             raise RuntimeError(f"Benchmark invocation failed with exit code {code}; result: {result_path}")
         print(f"Benchmark tasks failed with exit code {code}; collecting diagnostics from: {result_path}")
     return result_path
+
+
+def wmh_model_prebuilt(env: dict[str, str] | None = None) -> bool:
+    """True when run.sh will serve an existing World Model instead of cold-building one."""
+    env = env or os.environ
+    build_dir = Path(env.get("WMH_BUILD_DIR") or (REPO_ROOT / ".context" / "world-model"))
+    model_name = env.get("WMH_MODEL_NAME") or "rose-archive"
+    return (build_dir / "build.manifest.json").is_file() and (build_dir / "models" / model_name).is_dir()
+
+
+def service_start_timeout_seconds(*, isolated: bool, env: dict[str, str], simulate: bool) -> int:
+    """Readiness budget for an isolated stack, by the slowest step it must complete."""
+    if isolated and env.get("BENCHMARK_REQUIRE_SEED_DUMP") == "0":
+        return COLD_SEED_SERVICE_START_TIMEOUT_SECONDS
+    if simulate and env.get("BENCHMARK_SKIP_WMH_BUILD") != "1" and not wmh_model_prebuilt(env):
+        return WMH_FIRST_BUILD_SERVICE_START_TIMEOUT_SECONDS
+    return SERVICE_START_TIMEOUT_SECONDS
+
+
+def resolve_simulate_mode(simulate_flag: bool, task_names: Sequence[str]) -> bool:
+    """CLI --simulate or any catalog world_model_mode=simulate enables the WMH.
+
+    The fleet already honors the catalog mode; local must match so a bench that
+    declares simulate (wait-for-trigger, raise-5m-rose-labs-brex) never places
+    a real call / contacts a real person just because --simulate was omitted.
+    """
+    if simulate_flag:
+        return True
+    for name in task_names:
+        try:
+            task = get_task_by_name(name)
+        except Exception:
+            continue
+        mode = (getattr(task, "world_model_mode", None) or "").strip().lower()
+        if mode == "simulate":
+            return True
+    return False
+
+
+def apply_local_simulate_wmh_env(
+    env: dict[str, str],
+    *,
+    base_port: int,
+    world_model_name: str | None = None,
+) -> dict[str, str]:
+    """Env overrides so a local simulate stack serves the complete eligible WHM corpus.
+
+    run.sh forks the agents worker from this env, so the worker's WMH adapter and
+    fast-cache scope read these from its process env. WMH_PORT mirrors run.sh's
+    +6 offset.
+    """
+    env["BENCHMARK_WORLD_MODEL_MODE"] = "simulate"
+    env["WMH_BASE_URL"] = f"http://localhost:{base_port + 6}"
+    # The worker's WMH adapter (helpers/world_model_runtime.py:from_env) needs
+    # WMH_MODEL_NAME at fork time or the first simulated boundary tool raises
+    # "WMH simulation requires WMH_BASE_URL and WMH_MODEL_NAME". run.sh only
+    # exports the name after the WMH answers /healthz, which is after the
+    # workers fork, so pin the default here (matches run.sh + run_benchmark).
+    env["WMH_MODEL_NAME"] = world_model_name or os.environ.get("WMH_MODEL_NAME") or "rose-archive"
+    # No implicit bundle cap: every eligible archived trajectory participates.
+    # An operator can still set WMH_MAX_BUNDLES for a deliberately scoped run.
+    env.setdefault("WMH_MAX_BUNDLES", os.environ.get("WMH_MAX_BUNDLES") or "0")
+    # Skip GEPA for local simulate cold builds — serve a corpus-backed model
+    # without the multi-hour prompt-optimize pass (cloudbench does the same).
+    env.setdefault("WMH_GEPA_BUDGET", os.environ.get("WMH_GEPA_BUDGET") or "0")
+    return env
 
 
 def tasks_from_args(args: argparse.Namespace) -> list[str]:
@@ -2219,6 +2307,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Pass --bench through to run_eval_suite.py",
     )
     parser.add_argument("--bootstrap", action="store_true", help="Pass --bootstrap through to run_benchmark.py")
+    parser.add_argument("--timeout-seconds", type=int, help="Override the selected task timeout for this run")
     parser.add_argument(
         "--anon",
         action="store_true",
@@ -2228,11 +2317,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--simulate",
         action="store_true",
-        help="Run in world-model simulate mode (run.sh serves the WMH; env boundaries hit the world model)",
+        help="Run in world-model simulate mode (provider boundaries and specialized "
+        "explore/browser/code subagents hit WMH; general-purpose and for-each loops stay real)",
     )
     parser.add_argument(
         "--world-model-name",
         help="World model to simulate against (defaults to the model run.sh served, i.e. WMH_MODEL_NAME)",
+    )
+    parser.add_argument(
+        "--wmh-initial-state-file",
+        help="Override the WHM initial state for one simulate-mode benchmark task.",
     )
     parser.add_argument("--keep-services", action="store_true", help="Leave local services running after benchmarks")
     parser.add_argument("--use-existing", action="store_true", help="Use services from .context/services.json")
@@ -2337,6 +2431,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         parser.error("--bootstrap and --anon are task-runner options, not --eval-suite options")
     if args.max_concurrency < 1:
         parser.error("--max-concurrency must be >= 1")
+    if args.timeout_seconds is not None and args.timeout_seconds <= 0:
+        parser.error("--timeout-seconds must be positive")
     if args.use_existing and (args.shared_stack or args.run_id or args.base_port or args.no_clean):
         parser.error("--use-existing cannot be combined with --shared-stack, --run-id, --base-port, or --no-clean")
     if args.base_port is not None and args.base_port < 1024:
@@ -2375,9 +2471,15 @@ def run_eval_suite_invocation(*, port: int, args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     selected_tasks = tasks_from_args(args)
+    if args.wmh_initial_state_file and len(selected_tasks) != 1:
+        raise ValueError("--wmh-initial-state-file requires exactly one benchmark task")
     validate_agentcard_org_credentials(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")
+    # Catalog world_model_mode=simulate wins even without an explicit --simulate.
+    args.simulate = resolve_simulate_mode(bool(args.simulate), selected_tasks)
+    if args.simulate:
+        print("World-model simulate mode ON (CLI --simulate and/or catalog world_model_mode)")
     stack = build_service_stack(args)
     configure_task_environment(selected_tasks, isolated=stack.isolated)
     process: subprocess.Popen | None = None
@@ -2519,6 +2621,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_concurrency=args.max_concurrency,
                 simulate=args.simulate,
                 world_model_name=args.world_model_name,
+                wmh_initial_state_file=args.wmh_initial_state_file,
+                timeout_seconds=args.timeout_seconds,
             )
             result_paths.append(result_path)
             failures = failed_tasks_from_run(result_path)

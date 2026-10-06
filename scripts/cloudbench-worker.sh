@@ -48,6 +48,19 @@ fi
 # it flow into the benchmark worker or agent subprocess environments.
 unset CLOUDBENCH_GITHUB_TOKEN_B64
 rm -f /tmp/rbw.env 2>/dev/null || true
+# Autoscaled capacity is cloned from the active primary, whose tracked checkout
+# already contains the uploaded worktree patch.  The exact-ref fetch helper has
+# an intentional same-HEAD fast path, so it does not discard those tracked
+# changes.  Restore only tracked files to the pinned commit before cleaning and
+# applying the authoritative patch payload; otherwise a worker starts from a
+# half-clean checkout and the second git-apply fails across every changed file.
+if [ -n "${REF:-}" ]; then
+    if ! gosu "$APP_USER" git -C "$REPO_DIR" restore \
+        --source "$REF" --staged --worktree -- . 2>&1 | sed 's/^/   /'; then
+        log "FATAL: could not restore tracked worker checkout to $REF"
+        exit 1
+    fi
+fi
 if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -fd 2>&1 | sed 's/^/   /'; then
     log "FATAL: could not remove stale untracked worktree files"
     exit 1

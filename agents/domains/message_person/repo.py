@@ -37,6 +37,8 @@ async def queue_imessage_activity(
     phone_number: str,
     message: str,
     world_model_mode: str | None = None,
+    world_model_session_scope_id: str | None = None,
+    world_model_write_approved: bool = False,
 ) -> dict[str, Any]:
     async def real_executor(
         _tool_name: str,
@@ -47,6 +49,7 @@ async def queue_imessage_activity(
 
     return await WorldModelToolExecutionAdapter.from_env(
         agent_id=agent_id,
+        session_scope_id=world_model_session_scope_id,
         mode=world_model_mode,
     ).execute(
         "message_transport_send",
@@ -56,6 +59,7 @@ async def queue_imessage_activity(
             "agent_id": agent_id,
             "phone_number": phone_number,
             "message": message,
+            "approval_granted": world_model_write_approved,
         },
         tool_call_id,
         real_executor,
@@ -208,6 +212,8 @@ async def send_agent_sms_activity(
     phone_number: str,
     message: str,
     world_model_mode: str | None = None,
+    world_model_session_scope_id: str | None = None,
+    world_model_write_approved: bool = False,
 ) -> dict[str, Any]:
     async def real_executor(
         _tool_name: str,
@@ -218,6 +224,7 @@ async def send_agent_sms_activity(
 
     return await WorldModelToolExecutionAdapter.from_env(
         agent_id=agent_id,
+        session_scope_id=world_model_session_scope_id,
         mode=world_model_mode,
     ).execute(
         "message_transport_send",
@@ -227,6 +234,7 @@ async def send_agent_sms_activity(
             "agent_id": agent_id,
             "phone_number": phone_number,
             "message": message,
+            "approval_granted": world_model_write_approved,
         },
         tool_call_id,
         real_executor,
@@ -291,6 +299,8 @@ async def send_email_activity(
     subject: str,
     body: str,
     world_model_mode: str | None = None,
+    world_model_session_scope_id: str | None = None,
+    world_model_write_approved: bool = False,
 ) -> dict[str, Any]:
     """Send an approved email through the user's connected Gmail account."""
 
@@ -311,6 +321,7 @@ async def send_email_activity(
 
     return await WorldModelToolExecutionAdapter.from_env(
         agent_id=agent_id,
+        session_scope_id=world_model_session_scope_id,
         mode=world_model_mode,
     ).execute(
         "message_transport_send",
@@ -322,6 +333,7 @@ async def send_email_activity(
             "from_email": from_email,
             "subject": subject,
             "message": body,
+            "approval_granted": world_model_write_approved,
         },
         tool_call_id,
         real_executor,

@@ -1429,12 +1429,105 @@ def test_oversized_artifact_is_dropped_with_warning():
             restore()
 
 
+def test_read_archive_artifact_metadata_never_reads_ciphertext():
+    """Metadata-only reads share the artifact contract but skip the body.
+
+    Local: metadata from the sidecar; None when the artifact is absent;
+    ValueError when ciphertext exists without its sidecar. R2: only the
+    ``.meta.json`` object is fetched on the hit path, and the miss path probes
+    existence without reading a body.
+    """
+    from helpers.trace_archive import (
+        archive_json,
+        read_archive_artifact,
+        read_archive_artifact_metadata,
+    )
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        try:
+            root_agent_id = "root-meta-only"
+            archive_json(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc", payload={"steps": [1, 2, 3]})
+            full = read_archive_artifact(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc")
+            assert full is not None
+            _, full_metadata = full
+            metadata = read_archive_artifact_metadata(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc")
+            assert metadata == full_metadata
+            assert read_archive_artifact_metadata(root_agent_id=root_agent_id, path="missing.json.gz.enc") is None
+            target = Path(tmp) / root_agent_id / "trace" / "transitions.json.gz.enc"
+            (target.with_suffix(target.suffix + ".meta.json")).unlink()
+            try:
+                read_archive_artifact_metadata(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc")
+            except ValueError as exc:
+                assert "Archive metadata missing" in str(exc)
+            else:
+                raise AssertionError("ciphertext without metadata must fail closed")
+
+            objects: dict[str, bytes] = {}
+            for item in Path(tmp).rglob("*"):
+                if item.is_file():
+                    objects["trace-archive/" + item.relative_to(tmp).as_posix()] = item.read_bytes()
+        finally:
+            restore()
+
+    meta_key = f"trace-archive/{root_agent_id}/trace/transitions.json.gz.enc.meta.json"
+    objects[meta_key] = json.dumps(full_metadata).encode("utf-8")
+    fetched: list[str] = []
+
+    class _Body:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        def read(self) -> bytes:
+            return self._data
+
+    class _Client:
+        def get_object(self, *, Bucket: str, Key: str) -> dict:
+            fetched.append(Key)
+            if Key not in objects:
+                error = Exception(f"NoSuchKey: {Key}")
+                error.response = {"Error": {"Code": "NoSuchKey"}}  # type: ignore[attr-defined]
+                raise error
+            return {"Body": _Body(objects[Key])}
+
+    old_client = trace_archive._R2_CLIENT
+    old_env = {key: os.environ.get(key) for key in ["TRACE_ARCHIVE_BACKEND", "R2_BUCKET_TRACE_ARCHIVE"]}
+    trace_archive._R2_CLIENT = _Client()
+    os.environ["TRACE_ARCHIVE_BACKEND"] = "r2"
+    os.environ["R2_BUCKET_TRACE_ARCHIVE"] = "unit-bucket"
+    try:
+        assert read_archive_artifact_metadata(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc") == full_metadata
+        assert fetched == [meta_key]
+        fetched.clear()
+        assert read_archive_artifact_metadata(root_agent_id=root_agent_id, path="nope.json.gz.enc") is None
+        assert fetched == [
+            f"trace-archive/{root_agent_id}/nope.json.gz.enc.meta.json",
+            f"trace-archive/{root_agent_id}/nope.json.gz.enc",
+        ]
+        objects[f"trace-archive/{root_agent_id}/orphan.enc"] = b"ciphertext without sidecar"
+        try:
+            read_archive_artifact_metadata(root_agent_id=root_agent_id, path="orphan.enc")
+        except ValueError as exc:
+            assert "Archive metadata missing for orphan.enc" in str(exc)
+        else:
+            raise AssertionError("R2 ciphertext without metadata must fail closed")
+    finally:
+        trace_archive._R2_CLIENT = old_client
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 async def run_all_tests():
     print("trace archive blackbox tests:")
     r = BlackboxResult()
     r.record("encrypt_json_gzip_roundtrip", test_encrypt_json_gzip_roundtrip)
     r.record("encrypt_media_skips_gzip", test_encrypt_media_skips_gzip)
     r.record("local_store_writes_ciphertext_and_metadata", test_local_store_writes_ciphertext_and_metadata)
+    r.record("read_archive_artifact_metadata_never_reads_ciphertext", test_read_archive_artifact_metadata_never_reads_ciphertext)
     r.record("local_store_publishes_metadata_atomically", test_local_store_publishes_metadata_atomically)
     r.record(
         "artifact_transaction_recovers_crash_between_pair_replacements",

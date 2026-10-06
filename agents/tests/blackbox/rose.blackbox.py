@@ -237,11 +237,6 @@ def test_pool_registry_lookup():
     assert flash.cerebras_reasoning_effort == "high"
     assert flash.cerebras_reasoning_effort in {"none", "low", "medium", "high"}
     assert ultra.name == "rose-1-ultra"
-    from domains.param_populator.config import PARAM_POPULATOR_MODEL as DOMAIN_PARAM_POPULATOR_MODEL
-    from providers.rose.pools import PARAM_POPULATOR_MODEL
-
-    assert PARAM_POPULATOR_MODEL == "rose-labs/rose-1-ultra"
-    assert DOMAIN_PARAM_POPULATOR_MODEL == PARAM_POPULATOR_MODEL
     assert ultra.claude_auth_model == "claude-opus-5-5"
     assert ultra.gpt_auth_model == "gpt-6-sol"
     # Opus 5.5 is claudeAuth (index 58, $4/$20). Paid waterfall is gpt-6-sol

@@ -25,7 +25,6 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
-    from domains.param_populator.config import PARAM_POPULATOR_MODEL
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
         drain_fast_mode_explores,
@@ -46,6 +45,7 @@ with workflow.unsafe.imports_passed_through():
         mark_finished,
         poll_new_messages,
         post_agent_message,
+        resolve_fast_cache_context_activity,
         resolve_fast_cache_goal_activity,
         update_agent_status,
     )
@@ -627,6 +627,9 @@ class AgentWorkflow:
         # Independent of DEMO cache replay (self.fast_mode_cache_enabled).
         self.provider_fast_mode: bool = True
         self.world_model_mode: str = "real"
+        # Simulate-mode logical clock: seconds of wall-clock wait that wait_for /
+        # wait_seconds skipped (utils/simulated_clock.py). Always 0 in real mode.
+        self.simulated_clock_offset_seconds: int = 0
         self.model: str = "anthropic/claude-sonnet-4.6"
         self.reasoning_max_tokens: int = 256
         self.verifier: Optional[Dict] = None
@@ -1472,6 +1475,7 @@ class AgentWorkflow:
         self.user_id = user_id
         self.goal = goal
         self.fast_cache_goal = goal  # Overridden by the persisted row goal below
+        self.fast_cache_root_goal = goal
         self.model = model
         self.current_phase = "PLAN"
         self.reasoning_max_tokens = reasoning_max_tokens
@@ -1490,6 +1494,7 @@ class AgentWorkflow:
         self.fast_mode_cache_enabled = is_demo_cache_task(self)
         self.world_model_mode = world_model_mode if world_model_mode in {"simulate", "shadow"} else "real"
         self.memory_enabled = bool(memory_enabled)
+        self.simulated_clock_offset_seconds = 0
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.compute_token_lineage_key = f"agent:{agent_id}"
@@ -1659,11 +1664,45 @@ class AgentWorkflow:
         # DB-row goal once and thread it into all cache keying (the DAG path
         # already resolves it via ensure_position_context; this aligns the
         # explicitly-threaded plan/execute/verifier/summary paths with it).
-        if (
+        if workflow.patched("general-demo-fast-cache-context-v1"):
+            try:
+                cache_context = await workflow.execute_activity(
+                    resolve_fast_cache_context_activity,
+                    args=[agent_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                persisted_goal = cache_context.get("goal") if isinstance(cache_context, dict) else None
+                root_goal = cache_context.get("root_goal") if isinstance(cache_context, dict) else None
+                if persisted_goal:
+                    if persisted_goal != self.fast_cache_goal:
+                        workflow.logger.info(
+                            "Fast Mode cache goal resolved from agent row (differs from workflow input goal)"
+                        )
+                    self.fast_cache_goal = persisted_goal
+                if root_goal:
+                    self.fast_cache_root_goal = root_goal
+                if isinstance(cache_context, dict):
+                    self.fast_mode_cache_enabled = bool(cache_context.get("enabled"))
+                    self.provider_fast_mode = bool(
+                        cache_context.get("provider_fast_mode", self.provider_fast_mode)
+                    )
+                self.compute_token_fast_cache_affinity_key = (
+                    _fast_cache_compute_affinity_key(user_id, self.fast_cache_root_goal)
+                    if self.fast_mode_cache_enabled
+                    else None
+                )
+            except Exception as e:
+                workflow.logger.warning(
+                    f"Failed to resolve Fast Mode cache context, using workflow input goal: {e}"
+                )
+        elif (
             self.provider_fast_mode
             or self.fast_mode_cache_enabled
             or user_id in FAST_MODE_WRITE_THROUGH_USER_IDS
         ):
+            # Replay compatibility for workflow histories started before the
+            # generalized DEMO cache context activity was introduced.
             try:
                 persisted_goal = await workflow.execute_activity(
                     resolve_fast_cache_goal_activity,
@@ -1676,6 +1715,7 @@ class AgentWorkflow:
                         "Fast Mode cache goal resolved from agent row (differs from workflow input goal)"
                     )
                     self.fast_cache_goal = persisted_goal
+                    self.fast_cache_root_goal = persisted_goal
                     # Recompute DEMO cache gate after the durable goal is known.
                     self.fast_mode_cache_enabled = is_demo_cache_task(self)
                     # Compute-token cache affinity pins by goal too — keep it on
@@ -3404,7 +3444,7 @@ class AgentWorkflow:
             call_llm_activity,
             args=[
                 self.agent_id,
-                PARAM_POPULATOR_MODEL,
+                self.model,
                 self._current_tools,
                 256,
                 self.agent_id,

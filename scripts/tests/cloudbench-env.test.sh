@@ -1360,6 +1360,8 @@ for name, block in (("refresh-deps", deps), ("refresh-wmh", wmh)):
             raise SystemExit(f"{name} must not mask warm_source_fetch_ref failures")
     if "GITHUB_TOKEN:-" in block and "build_controller_authenticated_git_sync_cmd" in block:
         raise SystemExit(f"{name} must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
+if "WMH_CONFORMANCE_EXAMPLES=100" not in wmh or "WMH_REQUIRE_CONFORMANCE=1" not in wmh:
+    raise SystemExit("refresh-wmh must fail closed on the 100-example real-trajectory conformance suite")
 
 def extract_bash_function(source: str, name: str) -> str:
     marker = f"{name}() {{"

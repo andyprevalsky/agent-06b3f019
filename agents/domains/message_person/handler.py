@@ -207,6 +207,9 @@ class MessagePersonManager(ToolManager):
             generated_message=generated_message,
             person_display=person_display,
             world_model_mode=getattr(workflow_instance, "world_model_mode", "real"),
+            world_model_session_scope_id=(
+                getattr(workflow_instance, "root_agent_id", None) or agent_id
+            ),
         )
         if isinstance(delivery_result, ToolEvent):
             yield delivery_result
@@ -525,6 +528,16 @@ class MessagePersonManager(ToolManager):
         )
 
     @staticmethod
+    def _delivery_error(result: dict[str, Any], default: str) -> str:
+        """Return a provider failure safe for typed message activities."""
+
+        for key in ("error", "message"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return default
+
+    @staticmethod
     async def _deliver_message(
         channel: str,
         user_id: str,
@@ -535,6 +548,7 @@ class MessagePersonManager(ToolManager):
         generated_message: str,
         person_display: str,
         world_model_mode: str = "real",
+        world_model_session_scope_id: str | None = None,
         person_email: str | None = None,
         from_email: str = "",
         generated_subject: str | None = None,
@@ -566,7 +580,7 @@ class MessagePersonManager(ToolManager):
                     generated_message,
                 ]
                 if world_model_mode != "real":
-                    activity_args.append(world_model_mode)
+                    activity_args.extend([world_model_mode, world_model_session_scope_id, True])
                 result = await workflow.execute_activity(
                     send_email_activity,
                     args=activity_args,
@@ -589,7 +603,10 @@ class MessagePersonManager(ToolManager):
                 return ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title=f"Failed to send Email to {person_display}",
-                    message=result.get("error", "Gmail did not confirm that it accepted the message"),
+                    message=MessagePersonManager._delivery_error(
+                        result,
+                        "Gmail did not confirm that it accepted the message",
+                    ),
                     status=MessageStatus.ERROR,
                 )
             return {
@@ -619,7 +636,7 @@ class MessagePersonManager(ToolManager):
             try:
                 activity_args = [user_id, agent_id, idempotency_key, person_phone, generated_message]
                 if world_model_mode != "real":
-                    activity_args.append(world_model_mode)
+                    activity_args.extend([world_model_mode, world_model_session_scope_id, True])
                 result = await workflow.execute_activity(
                     send_agent_sms_activity,
                     args=activity_args,
@@ -643,7 +660,10 @@ class MessagePersonManager(ToolManager):
                     type=EventType.POST_MESSAGE,
                     title=f"Failed to send Agent SMS to {person_display}",
                     message=MessagePersonManager._agent_sms_terminal_failure(
-                        result.get("error", "AgentPhone did not confirm that it accepted the message")
+                        MessagePersonManager._delivery_error(
+                            result,
+                            "AgentPhone did not confirm that it accepted the message",
+                        )
                     ),
                     status=MessageStatus.ERROR,
                 )
@@ -661,7 +681,7 @@ class MessagePersonManager(ToolManager):
         try:
             activity_args = [user_id, agent_id, tool_call_id, person_phone, generated_message]
             if world_model_mode != "real":
-                activity_args.append(world_model_mode)
+                activity_args.extend([world_model_mode, world_model_session_scope_id, True])
             result = await workflow.execute_activity(
                 queue_imessage_activity,
                 args=activity_args,
@@ -688,7 +708,10 @@ class MessagePersonManager(ToolManager):
             return ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=f"Failed to send iMessage to {person_display}",
-                message=result.get("error", "The Mac app did not confirm the iMessage send"),
+                message=MessagePersonManager._delivery_error(
+                    result,
+                    "The Mac app did not confirm the iMessage send",
+                ),
                 status=MessageStatus.ERROR,
             )
         if delivery_status == "sent" and isinstance(sent_at, str) and sent_at:
@@ -702,7 +725,10 @@ class MessagePersonManager(ToolManager):
             return ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=f"Failed to send iMessage to {person_display}",
-                message=result.get("error", "The iMessage transport returned an invalid state"),
+                message=MessagePersonManager._delivery_error(
+                    result,
+                    "The iMessage transport returned an invalid state",
+                ),
                 status=MessageStatus.ERROR,
             )
         return {

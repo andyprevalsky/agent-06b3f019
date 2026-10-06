@@ -41,7 +41,6 @@ import {
   getPool,
   isRoseModel,
   markCacheable,
-  PARAM_POPULATOR_MODEL,
   POOL_REGISTRY,
   poolForModel,
   RoseAllFailed,
@@ -309,8 +308,6 @@ async function testPool_getPoolRegistryShape() {
     'flash OpenRouter waterfall'
   );
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
-  assertEqual(PARAM_POPULATOR_MODEL, 'rose-labs/rose-1-ultra', 'param populator model');
-  assertEqual(poolForModel(PARAM_POPULATOR_MODEL), 'rose-1-ultra', 'param populator pool');
   assertEqual(ultra.claudeAuthModel, 'claude-opus-5-5', 'ultra claudeAuthModel');
   assertEqual(ultra.gptAuthModel, 'gpt-6-sol', 'ultra.gptAuthModel');
   // Anthropic dropped from ultra: opus-4.8 was the priciest layer while scoring

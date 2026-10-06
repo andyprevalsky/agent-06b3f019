@@ -1012,7 +1012,7 @@ async def cached_complete(
         # (spawn-sub-agents smoke timeout).
         logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
-    if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled():
+    if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled() and not ctx.should_write:
         raise FastCacheLookupError(
             f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
         )

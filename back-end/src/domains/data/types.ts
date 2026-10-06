@@ -214,6 +214,10 @@ export interface GrepResult {
   returned: number;
   has_more: boolean;
   next_offset: number | null;
+  /** Per-page cap on summed match content chars (MAX_RESULT_CHARS). */
+  applied_char_limit: number;
+  /** True when trailing matches were dropped (or the first cut) to fit the cap. */
+  char_truncated?: boolean;
   display_order: 'oldest_first' | 'newest_first';
   context_unit: 'message_record' | 'logical_line' | 'mixed';
   summaries?: Partial<Record<ValidSource, unknown>>;

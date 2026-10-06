@@ -1178,6 +1178,186 @@ async def test_handler_condition_oai_demo_fast_mode_skips_inter_check_sleep():
     assert (finished[-1].data or {}).get("condition_met") is True
 
 
+async def test_handler_timestamp_simulate_mode_skips_wall_clock_and_advances_sim_clock():
+    """World-model simulate: a timestamp wait skips the sleep and advances the logical clock.
+
+    The WMH-served world does not change with wall-clock time, so sleeping is dead
+    time. The skip must be recorded on the FINISHED event and a follow-up wait must
+    be measured from the ADVANCED clock (1h after the first target = 1h more skip,
+    not 25h).
+    """
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    wf = _WFInstance(fast_mode_cache_enabled=False, goal="Raise me 5m dollars for my company Rose Labs")
+    wf.world_model_mode = "simulate"
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"until_timestamp": "2026-09-09T12:00:00+00:00"},
+                tool_call_id="tc-sim-1",
+            )
+        )
+        offset_after_first = wf.simulated_clock_offset_seconds
+        events_2 = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"until_timestamp": "2026-09-09T13:00:00+00:00"},
+                tool_call_id="tc-sim-2",
+            )
+        )
+    finally:
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.FINISHED in statuses
+    assert MessageStatus.ERROR not in statuses
+    assert fake.sleep_records == []
+    finished = [e for e in events if e.status == MessageStatus.FINISHED][-1]
+    assert finished.metadata["waitForMode"] == "timestamp"
+    assert finished.metadata["simulatedTimeSkip"] is True
+    assert finished.metadata["simulatedSkipSeconds"] == 86_400
+    assert finished.metadata["simulatedClockOffsetSeconds"] == 86_400
+    assert "simulated clock advanced" in finished.message
+    assert offset_after_first == 86_400
+
+    # Second wait: target is 1h past the already-skipped target → 1h skip, from the sim clock.
+    finished_2 = [e for e in events_2 if e.status == MessageStatus.FINISHED][-1]
+    assert MessageStatus.ERROR not in [e.status for e in events_2]
+    assert finished_2.metadata["simulatedSkipSeconds"] == 3_600
+    assert wf.simulated_clock_offset_seconds == 90_000
+    assert fake.sleep_records == []
+
+
+async def test_handler_timestamp_simulate_mode_past_target_on_sim_clock_still_errors():
+    """A target already behind the ADVANCED simulated clock is still "in the past"."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    wf = _WFInstance(goal="not the demo prompt")
+    wf.world_model_mode = "simulate"
+    wf.simulated_clock_offset_seconds = 2 * 86_400  # sim clock already at 2026-09-10T12:00Z
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"until_timestamp": "2026-09-09T12:00:00+00:00"},
+                tool_call_id="tc-sim-past",
+            )
+        )
+    finally:
+        restore()
+
+    assert events[-1].status == MessageStatus.ERROR
+    assert "in the past" in events[-1].message
+    assert fake.sleep_records == []
+    assert wf.simulated_clock_offset_seconds == 2 * 86_400
+
+
+async def test_handler_timestamp_real_mode_ignores_simulated_clock_helpers():
+    """Real mode is untouched: it sleeps the full delta and never advances a sim clock."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    wf = _WFInstance(goal="not the demo prompt")
+    wf.world_model_mode = "real"
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"until_timestamp": "2026-09-08T13:00:00+00:00"},
+                tool_call_id="tc-real",
+            )
+        )
+    finally:
+        restore()
+
+    assert fake.sleep_records == [3_600]
+    assert events[-1].status == MessageStatus.FINISHED
+    assert "simulatedTimeSkip" not in (events[-1].metadata or {})
+    assert getattr(wf, "simulated_clock_offset_seconds", 0) == 0
+
+
+async def test_handler_condition_simulate_mode_skips_inter_check_sleep_and_advances_sim_clock():
+    """World-model simulate: condition polling skips the inter-check wall-clock sleep.
+
+    Neither the Fast Mode button nor a DEMO prompt is involved — the world_model_mode
+    alone gates the skip, and each skipped interval advances the simulated clock.
+    """
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import EventType, MessageStatus, ToolEvent
+    from tools.spawn_agent import SpawnAgentManager
+
+    evals = {"n": 0}
+
+    async def fake_spawn_explore(
+        self,
+        wf,
+        tool_call,
+        explore_tool_call_id,
+        *,
+        task_id=None,
+        display_goal=None,
+        capture_tool_results=None,
+    ):
+        if capture_tool_results is not None:
+            capture_tool_results.append("[web_search] simulated investor reply thread")
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Explore done",
+            message="evidence",
+            status=MessageStatus.FINISHED,
+            metadata={"agentType": "explore", "taskId": task_id},
+            data={"usage": {"llm": [], "service": []}},
+        )
+
+    def _eval(*_a, **_k):
+        evals["n"] += 1
+        if evals["n"] < 3:
+            return {"satisfied": False, "reasoning": "no term sheet yet"}
+        return {"satisfied": True, "reasoning": "term sheet signed"}
+
+    fake = _FakeWFModule(activity_results={"evaluate_condition_activity": _eval})
+    restore = _patch_handler_workflow(fake)
+    orig_spawn = SpawnAgentManager._spawn_explore
+    SpawnAgentManager._spawn_explore = fake_spawn_explore
+    wf = _WFInstance(fast_mode_cache_enabled=False, goal="Raise me 5m dollars for my company Rose Labs")
+    wf.world_model_mode = "simulate"
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "description": "investor term sheet",
+                    "condition": "an investor has signed a term sheet",
+                    "check_interval_seconds": 3600,
+                    "max_checks": 5,
+                },
+                tool_call_id="tc-sim-cond",
+            )
+        )
+    finally:
+        SpawnAgentManager._spawn_explore = orig_spawn
+        restore()
+
+    assert evals["n"] == 3
+    assert fake.sleep_records == []
+    # Two inter-check intervals were skipped (before check 2 and check 3).
+    assert wf.simulated_clock_offset_seconds == 7_200
+    checking = [e for e in events if (e.metadata or {}).get("waitForMode") == "condition" and "checking" in e.title]
+    assert [e.metadata.get("simulatedSkipSeconds") for e in checking] == [None, 3600, 3600]
+    assert checking[-1].metadata["simulatedClockOffsetSeconds"] == 7_200
+    finished = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert (finished[-1].data or {}).get("condition_met") is True
+
+
 async def test_handler_condition_oai_demo_fast_mode_awaits_explore():
     """OAi-demo Fast Mode wait_for captures + evaluates like live."""
     from domains.wait_for.handler import WaitForManager
@@ -1332,6 +1512,22 @@ async def run_all_tests():
     await r.record_async(
         "handler_cond_oai_demo_fm_skips_interval",
         test_handler_condition_oai_demo_fast_mode_skips_inter_check_sleep,
+    )
+    await r.record_async(
+        "handler_ts_simulate_skips_wall_clock",
+        test_handler_timestamp_simulate_mode_skips_wall_clock_and_advances_sim_clock,
+    )
+    await r.record_async(
+        "handler_ts_simulate_past_on_sim_clock_errors",
+        test_handler_timestamp_simulate_mode_past_target_on_sim_clock_still_errors,
+    )
+    await r.record_async(
+        "handler_ts_real_mode_ignores_sim_clock",
+        test_handler_timestamp_real_mode_ignores_simulated_clock_helpers,
+    )
+    await r.record_async(
+        "handler_cond_simulate_skips_interval",
+        test_handler_condition_simulate_mode_skips_inter_check_sleep_and_advances_sim_clock,
     )
     teardown_mock()
     return r.all_passed

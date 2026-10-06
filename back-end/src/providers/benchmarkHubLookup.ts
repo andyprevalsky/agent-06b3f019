@@ -27,6 +27,7 @@ const LEGACY_BACKFILL_RETRY_MAX_MS = 5 * 60_000;
 const agentRunCache = new Map<string, string>();
 const agentRunMissCache = new Set<string>();
 let childIdToRun: Map<string, string> | null = null;
+let agentIndexComplete = false;
 let compactIndexLoadPromise: Promise<CompactIndexLoadResult> | null = null;
 let legacyBackfillPromise: Promise<void> | null = null;
 let legacyBackfillFailureCount = 0;
@@ -95,6 +96,7 @@ export async function backfillHubAgentRunIndexFromCatalog(
 export function installHubAgentRunIndex(index: HubAgentRunIndexSnapshot): boolean {
   if (index.revision < latestAppliedRevision) return false;
   childIdToRun = new Map(index.agents);
+  agentIndexComplete = index.complete;
   childIdIndexLoadedAt = Date.now();
   latestAppliedRevision = index.revision;
   agentRunCache.clear();
@@ -108,10 +110,11 @@ export async function loadCompactHubAgentIndex(
 ): Promise<CompactIndexLoadResult> {
   try {
     const persisted = await loadIndex();
-    if (persisted === null || !persisted.complete) {
-      return { kind: 'legacy', seed: persisted?.agents ?? new Map() };
-    }
-    return installHubAgentRunIndex(persisted) ? { kind: 'ready' } : { kind: 'stale' };
+    if (persisted === null) return { kind: 'legacy', seed: new Map() };
+    if (!installHubAgentRunIndex(persisted)) return { kind: 'stale' };
+    // An incomplete legacy index is still authoritative for the mappings it
+    // contains. Keep unknown IDs pending while the cooperative backfill runs.
+    return persisted.complete ? { kind: 'ready' } : { kind: 'legacy', seed: persisted.agents };
   } catch (error: unknown) {
     log.warn('Benchmark Hub compact agent index read failed', {
       error: error instanceof Error ? error.message : String(error),
@@ -212,6 +215,7 @@ export function __resetHubResolutionCachesForTest(): void {
   agentRunCache.clear();
   agentRunMissCache.clear();
   childIdToRun = null;
+  agentIndexComplete = false;
   compactIndexLoadPromise = null;
   legacyBackfillPromise = null;
   legacyBackfillFailureCount = 0;
@@ -271,7 +275,7 @@ export async function findAgentAcrossRuns(agentId: string): Promise<HubAgentView
   if (childIdToRun === null) {
     const load = await startCompactIndexLoad();
     if (load.kind === 'legacy') scheduleLegacyBackfill(load.seed);
-    if (load.kind !== 'ready') {
+    if (load.kind !== 'ready' && (load.kind !== 'legacy' || childIdToRun === null)) {
       throw new BenchmarkHubUnavailableError(
         load.kind === 'legacy'
           ? 'Benchmark Hub archive index is warming; retry shortly'
@@ -291,6 +295,9 @@ export async function findAgentAcrossRuns(agentId: string): Promise<HubAgentView
       return view;
     }
     forgetHubRunFromResolutionCaches(runId, [agentId]);
+  }
+  if (!agentIndexComplete) {
+    throw new BenchmarkHubUnavailableError('Benchmark Hub archive index is warming; retry shortly');
   }
   agentRunMissCache.add(agentId);
   return null;

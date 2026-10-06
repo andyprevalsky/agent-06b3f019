@@ -2,13 +2,31 @@
 
 /** Benchmark Hub background indexing must yield to live backend work. */
 
-import { buildHubAgentIdIndex } from '../../providers/benchmarkHubLookup';
+import {
+  __resetHubResolutionCachesForTest,
+  buildHubAgentIdIndex,
+  loadCompactHubAgentIndex,
+  peekHubResolutionForTest,
+} from '../../providers/benchmarkHubLookup';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
 async function main(): Promise<void> {
+  __resetHubResolutionCachesForTest();
+  const partial = await loadCompactHubAgentIndex(async () => ({
+    revision: 7,
+    complete: false,
+    agents: new Map([['known-agent', 'known-run']]),
+  }));
+  assert(partial.kind === 'legacy', 'incomplete index must keep backfill pending');
+  assert(
+    peekHubResolutionForTest('known-agent').childRunId === 'known-run',
+    'incomplete index must still serve its known agent mappings'
+  );
+  __resetHubResolutionCachesForTest();
+
   let previousLoaderYielded = true;
   let loaderCalls = 0;
   const runs = Array.from({ length: 8 }, (_, index) => ({

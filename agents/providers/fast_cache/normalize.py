@@ -1140,8 +1140,14 @@ def soft_complete_allowed(
     *,
     root_goal: str | None = None,
 ) -> bool:
-    """True when soft-complete stubs may fire (same gate as DEMO cache replay)."""
-    return demo_cache_allowed(goal, root_goal=root_goal)
+    """True when legacy DEMO soft-complete stubs may fire.
+
+    WHM simulation has an isolated cache namespace, but a cold namespace is
+    expected on its first run. Synthesizing ``attempt_completion`` on that miss
+    traps the agent in PLAN and prevents both live inference and cache seeding.
+    Exact DEMO cache hits still replay; misses run live and write through.
+    """
+    return not world_model_cache_scope() and demo_cache_allowed(goal, root_goal=root_goal)
 
 
 # Pre-Jul-21 / pre-Aug-22 position fingerprint shape used by the OAi demo warm

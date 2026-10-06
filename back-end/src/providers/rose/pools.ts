@@ -15,9 +15,6 @@
 
 export type PoolName = 'rose-1-mini' | 'rose-1-flash' | 'rose-1-ultra' | 'rose-1-browser-use';
 
-/** DAG / approval param-populator always uses ultra, even when the parent agent is flash. */
-export const PARAM_POPULATOR_MODEL = 'rose-labs/rose-1-ultra';
-
 export interface PoolSpec {
   name: PoolName;
   /** Anthropic model ID used when a Claude OAuth token is supplied. */

@@ -2504,6 +2504,37 @@ def test_resolve_fast_cache_goal_activity_none_on_unresolved(monkeypatch):
     asyncio.run(body())
 
 
+def test_resolve_fast_cache_context_activity_returns_general_demo_gate(monkeypatch):
+    """Any catalog DEMO tree, not only the legacy OAI demo, enables replay."""
+    import providers.fast_cache.client as cache_client_module
+    from helpers.fast_cache_goal import resolve_fast_cache_context_activity
+
+    async def fake_resolve(agent_id: str):
+        assert agent_id == "fundraise-root"
+        return (
+            True,
+            "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+            True,
+            "fundraise-root",
+            "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+            False,
+        )
+
+    monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
+
+    async def body():
+        assert await resolve_fast_cache_context_activity("fundraise-root") == {
+            "enabled": True,
+            "goal": "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+            "write_enabled": True,
+            "root_agent_id": "fundraise-root",
+            "root_goal": "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+            "provider_fast_mode": False,
+        }
+
+    asyncio.run(body())
+
+
 def test_goal_hash_collapses_run_local_message_refs():
     # Spawn paths append "Reference: @ref:message:<uuid>" to sub-agent goals with
     # a fresh message id per run. The namespace must survive reruns.
@@ -2530,8 +2561,8 @@ def test_write_through_disabled_by_isolated_shared_cache_flag(monkeypatch):
     assert FastCacheContext(enabled=True, goal="benchmark", write_enabled=True).should_write is False
 
 
-def test_shared_cache_disable_flag_blocks_all_cache_writes(mem, monkeypatch):
-    """Benchmark read-only mode wins over contexts that request writes."""
+def test_shared_cache_disable_flag_blocks_ordinary_cache_writes(mem, monkeypatch):
+    """Benchmark read-only mode wins over ordinary contexts that request writes."""
     monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
 
     async def body():
@@ -2540,6 +2571,43 @@ def test_shared_cache_disable_flag_blocks_all_cache_writes(mem, monkeypatch):
         await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
         assert rose.calls == 1
         assert mem.set_calls == 0
+
+    asyncio.run(body())
+
+
+def test_demo_wmh_cache_stores_and_replays_with_benchmark_read_only_flag(mem, monkeypatch):
+    """DEMO WHM predictions persist even when ordinary benchmark writes are disabled."""
+    from benchmarks.wmh_rose_provider import _WMHFastCacheContext
+    from providers.rose.client import RoseClient
+
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+
+    async def body():
+        goal = "DEMO fundraiser cache integration"
+        ctx = _WMHFastCacheContext(enabled=True, goal=goal, write_enabled=True, root_goal=goal)
+        set_context(ctx)
+        rose = RoseClient(openrouter_key="test-key")
+        live_calls = 0
+
+        async def fake_impl(**_kwargs):
+            nonlocal live_calls
+            live_calls += 1
+            for chunk in _full_stream():
+                yield chunk
+
+        monkeypatch.setattr(rose, "_complete_impl", fake_impl)
+        kwargs = {
+            "pool": "rose-1-ultra",
+            "messages": [{"role": "user", "content": "Predict this DEMO step"}],
+            "call_site": "wmh_world_model",
+        }
+        first = await _drain(rose.complete(**kwargs))
+        assert live_calls == 1
+        assert mem.set_calls == 1
+        second = await _drain(rose.complete(**kwargs))
+        assert live_calls == 1
+        assert mem.get_calls >= 2
+        assert [chunk.kind for chunk in second] == [chunk.kind for chunk in first]
 
     asyncio.run(body())
 
@@ -2870,6 +2938,54 @@ def test_soft_complete_allowed_only_for_fast_cache_on_bench_goals():
     assert ctx.soft_complete_allowed is True
     ctx_other = FastCacheContext(enabled=True, goal="Order coffee")
     assert ctx_other.soft_complete_allowed is False
+
+
+def test_wmh_demo_cache_miss_runs_live_and_writes_instead_of_soft_completing(mem, monkeypatch):
+    """Simulated DEMO runs replay exact hits but must seed cold trajectory slots."""
+    from providers.rose.client import RoseClient
+
+    bench = _soft_complete_bench_goal()
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
+    monkeypatch.setenv("WMH_MODEL_NAME", "rose-archive")
+    assert normalize.demo_cache_allowed(bench) is True
+    assert normalize.soft_complete_allowed(bench) is False
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal=bench, root_goal=bench, base_step=0))
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def fake_impl(**kwargs):
+            del kwargs
+            live_calls["n"] += 1
+            for chunk in _full_stream():
+                yield chunk
+
+        monkeypatch.setattr(client, "_complete_impl", fake_impl)
+        first = await _drain(
+            client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="plan_loop",
+                dump_context=False,
+            )
+        )
+        assert first[0].kind == "metadata"
+        assert live_calls["n"] == 1
+        assert mem.set_calls == 1
+        second = await _drain(
+            client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="plan_loop",
+                dump_context=False,
+            )
+        )
+        assert second[0].kind == "metadata"
+        assert live_calls["n"] == 1
+        assert mem.set_calls == 1
+
+    asyncio.run(body())
 
 
 def test_soft_complete_on_miss_for_explore_sites_only():

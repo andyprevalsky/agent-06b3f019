@@ -9,8 +9,10 @@ import structlog
 from temporalio import activity
 
 from config import load_config
+from domains.grep.bounds import bound_grep_result
 from domains.grep.config import (
     GREP_HTTP_TIMEOUT,
+    GREP_RESULT_MAX_CHARS,
     LOG_PATTERN_MAX_LENGTH,
     SUMMARY_CACHE_TTL_MINUTES,
     SUMMARY_HTTP_TIMEOUT,
@@ -160,6 +162,9 @@ async def grep_activity(
         else:
             data = response.json()
 
+        # Bound the page by match-content chars: this is the activity result
+        # (Temporal payload), the transcript message, and the LLM context entry.
+        data = bound_grep_result(data, max_chars=GREP_RESULT_MAX_CHARS)
         total_matches = data.get("total_matches", 0)
         truncated = data.get("truncated", False)
 
@@ -170,6 +175,7 @@ async def grep_activity(
             total_matches=total_matches,
             threads=len(data.get("matches", [])),
             truncated=truncated,
+            char_truncated=bool(data.get("char_truncated")),
         )
 
         return data

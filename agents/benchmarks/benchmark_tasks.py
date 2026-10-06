@@ -88,6 +88,7 @@ class BenchmarkTask:
     harness: str = "rose"  # "rose" = Temporal Rose workflow; "codex" = Codex E2B orchestrator via codex_runner.py
     bench: str = "pipeline-e2e"  # "pipeline-e2e" = harness plumbing works (write locks, cookie inject, tool pipes); "rose-bench" = harness-independent capability (fixture + prompt + eval portable to any harness)
     world_model_mode: Optional[str] = None  # "real" = sim off, "simulate" = WMH boundaries, "shadow" = live + WMH compare
+    wmh_initial_state: Optional[dict] = None  # WHM EnvState for this simulated scenario; never copied from the live fixture
     description: Optional[str] = None  # One-line summary served to the FE test-prompts picker (falls back to title)
     environment: Optional[dict] = None  # {mode, db_fixtures, base_images, services, secrets, live_targets, context_notes}
     context_gates: Optional[dict] = None  # Per-task user-context gates (helpers/get_user_context.py keys → bool), forwarded at agent creation

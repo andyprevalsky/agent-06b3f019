@@ -3374,3 +3374,5 @@
 {"task": "browser-smoke", "duration_seconds": 130.9, "cost_cents": 2.0, "timestamp": "2026-09-28T01:36:03.337887+00:00", "agent_id": "a1ce255c-faa2-4b5c-a3e4-532a8c0f9a4f"}
 {"task": "parallel-tool-calls", "duration_seconds": 177.9, "cost_cents": 18.0, "timestamp": "2026-09-28T01:36:03.337887+00:00", "agent_id": "79e93af5-a4ee-4211-ad23-3414fbc64bb8"}
 {"task": "spawn-sub-agents", "duration_seconds": 222.3, "cost_cents": 19.0, "timestamp": "2026-09-28T01:36:03.337887+00:00", "agent_id": "9cb412ab-c19d-4ebf-ab92-25bbbcf012d3"}
+{"task": "browser-smoke", "duration_seconds": 75.4, "cost_cents": 5.0, "timestamp": "2026-09-27T20:18:33.191609+00:00", "agent_id": "e10eee01-746a-484a-8e01-14db589cb43d"}
+{"task": "browser-smoke", "duration_seconds": 65.0, "cost_cents": 4.0, "timestamp": "2026-09-27T21:33:49.159220+00:00", "agent_id": "5d040c0a-fa4c-48ec-9b75-58c56d297f46"}

@@ -5,7 +5,7 @@ The vendored `wmh.providers.anthropic.AnthropicProvider` calls Anthropic directl
 drop-in replacement — `RoseWMHProvider` — that routes the WMH's per-step LLM call
 through the EXISTING agent-side Rose machinery instead:
 
-    WMH step  ->  RoseWMHProvider.complete()  ->  RoseClient.collect(pool="rose-1-flash")
+    WMH step  ->  RoseWMHProvider.complete()  ->  RoseClient.collect(pool="rose-1-ultra")
                      |                                    |
                      |                                    +-- claudeAuth / gptAuth direct
                      |                                        compute-token routing + rotation
@@ -20,25 +20,29 @@ callbacks baked into the `ComputeAuthContext` that `_build_compute_auth_context`
 
 Sync -> async bridge: WMH's `Provider.complete` is synchronous (the serve `/step` route
 runs in a FastAPI threadpool, so there is no running event loop), while `RoseClient` is
-async. We bridge with a plain `asyncio.run(...)` inside `complete()`.
+async. All serve threads submit to one process-wide event loop: Fast Cache batches
+asyncio futures and tasks that must stay on their owning loop.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
 import structlog
 
+from providers.fast_cache.context import FastCacheContext
 from providers.rose import (
     ClaudeAuthContext,
     GptAuthContext,
     RoseClient,
 )
 from providers.rose.pricing import get_model_pricing
+from providers.rose.types import StreamChunk
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from wmh.providers.base import Completion, Message
@@ -47,18 +51,185 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = structlog.get_logger(__name__)
 
+_WMH_ASYNC_LOOP: asyncio.AbstractEventLoop | None = None
+_WMH_ASYNC_LOOP_LOCK = threading.Lock()
+
+
+def _wmh_async_loop() -> asyncio.AbstractEventLoop:
+    """One event loop for all served WMH calls sharing Fast Cache async state."""
+    global _WMH_ASYNC_LOOP
+    with _WMH_ASYNC_LOOP_LOCK:
+        if _WMH_ASYNC_LOOP is None:
+            loop = asyncio.new_event_loop()
+            ready = threading.Event()
+
+            def run() -> None:
+                asyncio.set_event_loop(loop)
+                ready.set()
+                loop.run_forever()
+
+            threading.Thread(target=run, name="rose-wmh-async", daemon=True).start()
+            if not ready.wait(timeout=5):
+                raise RuntimeError("WMH async event loop failed to start")
+            _WMH_ASYNC_LOOP = loop
+        return _WMH_ASYNC_LOOP
+
 # The benchmark user whose pooled compute tokens back WMH inference by default.
 # Overridable via env so a different tenant's pool can be used.
 _DEFAULT_WMH_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
-# WMH step prompts are single-shot env simulations; give the model room to emit a full
-# observation JSON without truncating. Mirrors wmh.providers.base.DEFAULT_MAX_TOKENS.
-_WMH_MAX_TOKENS = 8192
+# WMH step prompts are single-shot env simulations. Reasoning-capable providers
+# count hidden reasoning against this ceiling: an 8k ceiling can leave only a
+# partial visible observation even when the requested manifest is compact. Give
+# the model enough room to finish the terminal JSON rather than accepting a
+# syntactically truncated environment result.
+_WMH_MAX_TOKENS = 16_384
+
+_TASK_MARKER = "TASK:\n"
+_HISTORY_MARKER = "\n\nINTERACTION HISTORY:\n"
+_ROOT_OBJECTIVE_MARKER = "ROOT OBJECTIVE:\n"
+_DELEGATION_MARKER = "\n\nCURRENT DELEGATION:\n"
+_ACTION_TIMESTAMP_RE = re.compile(r'("timestamp_ms"\s*:\s*)\d+')
+
+
+def _wmh_cache_key_material(request: object) -> object:
+    """Ignore action-envelope timestamps in cache keys, never in model input.
+
+    WMH renders canonical actions as single ``arguments:`` or ``tool_call``
+    lines. Their millisecond invocation timestamp changes on every DEMO run,
+    even when the root objective and action are otherwise identical. Restrict
+    this normalization to action lines so timestamps in observations and state
+    remain behavior-shaping cache material.
+    """
+    if not isinstance(request, dict) or not isinstance(request.get("messages"), list):
+        return request
+    messages = []
+    for message in request["messages"]:
+        if not isinstance(message, dict) or message.get("role") != "user" or not isinstance(message.get("content"), str):
+            messages.append(message)
+            continue
+        lines = []
+        for line in message["content"].splitlines(keepends=True):
+            if line.startswith("  arguments: ") or line.startswith("tool_call "):
+                line = _ACTION_TIMESTAMP_RE.sub(r"\g<1><timestamp_ms>", line)
+            lines.append(line)
+        messages.append({**message, "content": "".join(lines)})
+    return {**request, "messages": messages}
+
+
+class _WMHFastCacheContext(FastCacheContext):
+    """WMH-only cache fingerprint; the Rose completion still sees exact input."""
+
+    @property
+    def should_write(self) -> bool:
+        # This context is installed only for a recognized DEMO goal. Isolated
+        # benches keep ordinary agent write-through read-only against the shared
+        # cache, but WHM predictions must populate their own DEMO keys.
+        return bool(self.enabled and self.write_enabled)
+
+    def llm_key(self, call_site: str, messages: object = None) -> str:
+        if call_site == "wmh_world_model":
+            messages = _wmh_cache_key_material(messages)
+        return super().llm_key(call_site, messages)
+
+
+class _WMHInvalidPrediction(ValueError):
+    """An unusable completion, retaining metering without retaining credentials."""
+
+    def __init__(self, reason: str, usage: dict, actual_model: str) -> None:
+        super().__init__(f"WMH prediction rejected: {reason}")
+        self.usage = {
+            key: usage[key]
+            for key in ("prompt_tokens", "completion_tokens", "finish_reason")
+            if key in usage
+        }
+        self.actual_model = actual_model
+
+
+def _require_wmh_prediction(has_content: bool, usage: dict, actual_model: str) -> None:
+    reason = "empty visible content" if not has_content else None
+    if reason is None and usage.get("finish_reason") == "length":
+        reason = "completion token limit reached"
+    if reason is not None:
+        logger.warning("wmh.rose.invalid_prediction", reason=reason, actual_model=actual_model)
+        raise _WMHInvalidPrediction(reason, usage, actual_model)
+
+
+class _WMHCacheSafeRoseClient(RoseClient):
+    """Keep leased credentials out of WMH's persisted DEMO response stream."""
+
+    async def _complete_impl(self, **kwargs):
+        is_wmh = kwargs.get("call_site") == "wmh_world_model"
+        has_content = False
+        usage = {}
+        actual_model = ""
+        async for chunk in super()._complete_impl(**kwargs):
+            if is_wmh:
+                if chunk.kind == "content":
+                    has_content = has_content or bool(chunk.data.get("text", "").strip())
+                elif chunk.kind == "metadata":
+                    actual_model = chunk.data.get("actual_model", "")
+                elif chunk.kind == "usage":
+                    usage = chunk.data
+                elif chunk.kind == "done":
+                    # Rose writes the DEMO cache on done. Reject unusable output
+                    # before that marker, and before WMH can commit a step.
+                    _require_wmh_prediction(has_content, usage, actual_model)
+            if is_wmh and chunk.kind == "usage":
+                token = chunk.data.get("compute_token_used")
+                if isinstance(token, dict):
+                    # WMH only needs these two fields for usage reporting. The
+                    # underlying Rose call has already completed token rotation.
+                    safe_token = {key: token[key] for key in ("type", "source") if key in token}
+                    yield StreamChunk(
+                        kind="usage",
+                        data={**chunk.data, "compute_token_used": safe_token},
+                    )
+                    continue
+            yield chunk
 
 
 def _resolve_user_id(explicit: Optional[str]) -> str:
     """User id for the compute-token lease: explicit arg > env > benchmark default."""
     return explicit or os.environ.get("WMH_ROSE_USER_ID") or _DEFAULT_WMH_USER_ID
+
+
+def _wmh_task_from_messages(messages: List["Message"]) -> Optional[str]:
+    """Extract the task field from WMH's canonical environment prompt."""
+    for message in messages:
+        content = message.content
+        if message.role != "user" or not isinstance(content, str):
+            continue
+        _prefix, marker, tail = content.partition(_TASK_MARKER)
+        if not marker:
+            continue
+        task, history_marker, _history = tail.partition(_HISTORY_MARKER)
+        if history_marker and task.strip() and task.strip() != "(none)":
+            return task.strip()
+    return None
+
+
+def _demo_cache_goal_from_messages(messages: List["Message"]) -> Optional[str]:
+    """Return the exact DEMO root goal carried by a WMH step, if any.
+
+    Specialized-agent sessions retain the root objective plus the current
+    delegation in the WMH task slot. Cache entries use the root goal so agent
+    LLM calls and WMH prediction calls can be purged together after a bad demo
+    trajectory.
+    """
+    from providers.fast_cache.normalize import demo_cache_allowed
+
+    task = _wmh_task_from_messages(messages)
+    if not task:
+        return None
+    candidates = [task]
+    if task.startswith(_ROOT_OBJECTIVE_MARKER):
+        root_goal, marker, _delegation = task.removeprefix(_ROOT_OBJECTIVE_MARKER).partition(
+            _DELEGATION_MARKER
+        )
+        if marker and root_goal.strip():
+            candidates.insert(0, root_goal.strip())
+    return next((candidate for candidate in candidates if demo_cache_allowed(candidate)), None)
 
 
 @dataclass(frozen=True)
@@ -164,7 +335,7 @@ class RoseWMHProvider:
     def __init__(
         self,
         *,
-        pool: "PoolName" = "rose-1-flash",
+        pool: "PoolName" = "rose-1-ultra",
         user_id: Optional[str] = None,
         model_label: Optional[str] = None,
         client: Optional[RoseClient] = None,
@@ -174,9 +345,9 @@ class RoseWMHProvider:
         self._user_id = _resolve_user_id(user_id)
         # `config.model` is a metering label only (no model resolution happens here —
         # the pool decides the real model). Default to the pool name so the metered
-        # rows read e.g. "rose-1-flash".
+        # rows read e.g. "rose-1-ultra".
         self.config = _RoseProviderConfig(model_label or pool)
-        self._client = client or RoseClient()
+        self._client = client or _WMHCacheSafeRoseClient()
         # Cumulative Rose inference cost/tokens across every step this served WMH runs.
         # Defaults to the process-level accumulator the `/rose_usage` route reads; tests
         # inject their own to assert accumulation in isolation.
@@ -194,12 +365,23 @@ class RoseWMHProvider:
     ) -> "Completion":
         """Generate a completion for one WMH step through Rose.
 
-        Sync entrypoint (called from the FastAPI threadpool). Bridges to the async
-        Rose client with `asyncio.run`. `temperature` is accepted for protocol parity
-        but not forwarded: rose-1-flash's claudeAuth path (Anthropic) rejects sampling
+        Sync entrypoint (called from the FastAPI threadpool). Concurrent calls run
+        on a shared event loop so Fast Cache never passes futures between loops.
+        `temperature` is accepted for protocol parity
+        but not forwarded: rose-1-ultra's claudeAuth path (Anthropic) rejects sampling
         params, matching the vendored AnthropicProvider's behavior.
         """
-        return asyncio.run(self._complete_async(system, messages, max_tokens=max_tokens))
+        loop = _wmh_async_loop()
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            raise RuntimeError("WMH synchronous complete cannot run on its async bridge loop")
+        future = asyncio.run_coroutine_threadsafe(
+            self._complete_async(system, messages, max_tokens=max_tokens), loop
+        )
+        return future.result()
 
     def embed(self, texts: List[str]) -> List[List[float]]:  # pragma: no cover - not on serve path
         raise NotImplementedError(
@@ -225,32 +407,68 @@ class RoseWMHProvider:
         # the `wmh` package (e.g. for unit tests that monkeypatch the client).
         from wmh.providers.base import Completion, TokenUsage
 
-        rose_messages = _to_rose_messages(system, messages)
-        claude_auth, gpt_auth = await self._lease_auth()
-
-        response = await self._client.collect(
-            pool=self._pool,
-            messages=rose_messages,
-            max_tokens=max_tokens,
-            claude_auth=claude_auth,
-            gpt_auth=gpt_auth,
-            call_site="wmh_world_model",
-            dump_context=False,
+        from providers.fast_cache.context import (
+            current_context,
+            reset_context,
+            set_context,
         )
 
+        rose_messages = _to_rose_messages(system, messages)
+        demo_goal = _demo_cache_goal_from_messages(messages)
+        cache_token = None
+        existing_cache_context = current_context()
+        if demo_goal and (existing_cache_context is None or not existing_cache_context.active):
+            cache_token = set_context(
+                _WMHFastCacheContext(
+                    enabled=True,
+                    goal=demo_goal,
+                    write_enabled=True,
+                    root_goal=demo_goal,
+                    provider_fast_mode=True,
+                )
+            )
+        try:
+            claude_auth, gpt_auth = await self._lease_auth()
+            response = await self._client.collect(
+                pool=self._pool,
+                messages=rose_messages,
+                max_tokens=max_tokens,
+                claude_auth=claude_auth,
+                gpt_auth=gpt_auth,
+                call_site="wmh_world_model",
+                dump_context=False,
+            )
+        except _WMHInvalidPrediction as exc:
+            self._record_usage(exc.usage, exc.actual_model)
+            raise
+        finally:
+            if cache_token is not None:
+                reset_context(cache_token)
+
         usage = response.usage or {}
+        input_tokens, output_tokens = self._record_usage(usage, response.actual_model or "")
+        # Cached responses bypass _complete_impl; validate them at the provider
+        # boundary as well. A rejected prediction never reaches parse_observation.
+        _require_wmh_prediction(bool(response.content.strip()), usage, response.actual_model or "")
+
+        return Completion(
+            text=response.content,
+            usage=TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens),
+        )
+
+    def _record_usage(self, usage: dict, actual_model: str) -> tuple[int, int]:
         token_used = usage.get("compute_token_used")
         input_tokens = int(usage.get("prompt_tokens", 0) or 0)
         output_tokens = int(usage.get("completion_tokens", 0) or 0)
         # Rose returns no cost field, so derive it from tokens × the actual model's
         # pricing (claudeAuth/gptAuth direct = $0; waterfall = real pool price). This is
         # the only place WMH grounding cost is measured — surfaced via /rose_usage.
-        cost_usd = _cost_usd_for_call(response.actual_model or "", input_tokens, output_tokens)
+        cost_usd = _cost_usd_for_call(actual_model, input_tokens, output_tokens)
         self._usage.record(cost_usd=cost_usd, input_tokens=input_tokens, output_tokens=output_tokens)
         logger.info(
             "wmh.rose.complete",
             pool=self._pool,
-            actual_model=response.actual_model,
+            actual_model=actual_model,
             compute_token_used=bool(token_used),
             compute_token_type=(token_used or {}).get("type") if isinstance(token_used, dict) else None,
             compute_token_rotated=bool(usage.get("compute_token_rotated")),
@@ -259,13 +477,7 @@ class RoseWMHProvider:
             cost_usd=round(cost_usd, 6),
         )
 
-        return Completion(
-            text=response.content,
-            usage=TokenUsage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-            ),
-        )
+        return input_tokens, output_tokens
 
     async def _lease_auth(self):
         """Lease one compute token and build the rotation-capable auth context.

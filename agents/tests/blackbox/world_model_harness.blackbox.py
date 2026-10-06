@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -212,8 +213,13 @@ def _write_golden_bundle(root_agent_id: str, world_model_mode: str | None = None
         "schema_version": 1,
         "root_agent_id": root_agent_id,
         "benchmark_task_name": "golden-wmh",
+        # Mirrors the terminal lifecycle write (traceArchiveLifecycle.ts): a
+        # finalized manifest with the root's terminal status is what makes a
+        # bundle corpus-eligible.
+        "finalized": True,
         "run": {
             "root_goal": "Find the support phone number and verify browser checkout state",
+            "root_status": "COMPLETED",
             "user_id": "user-golden",
             "agent_ids": [root_agent_id, "child-agent"],
             "base_image": "base:victoria-prod-sync-v1",
@@ -281,7 +287,13 @@ class _FakeR2Client:
                 if "/" in rest:
                     prefixes.add(prefix + rest.split("/", 1)[0] + "/")
             return {"IsTruncated": False, "CommonPrefixes": [{"Prefix": item} for item in sorted(prefixes)]}
-        return {"IsTruncated": False, "Contents": [{"Key": key} for key in keys]}
+        return {
+            "IsTruncated": False,
+            "Contents": [
+                {"Key": key, "Size": len(self.objects[key]), "ETag": f'"{hashlib.md5(self.objects[key]).hexdigest()}"'}
+                for key in keys
+            ],
+        }
 
 
 def _local_bundle_to_fake_r2(tmp: str) -> dict[str, bytes]:
@@ -368,7 +380,7 @@ def test_exported_otel_jsonl_ingests_with_upstream_wmh_and_preserves_state_refs(
             restore()
 
 
-def test_bundle_signature_ignores_plaintext_public_manifest_but_rejects_untracked_ciphertext():
+def test_bundle_signature_ignores_plaintext_public_manifest_and_tracks_unrelated_orphan():
     from benchmarks.world_model_harness import _bundle_signature
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -385,18 +397,71 @@ def test_bundle_signature_ignores_plaintext_public_manifest_but_rejects_untracke
             encrypted_paths = [path for path in bundle_root.rglob("*.enc") if path.is_file()]
             assert signature["artifact_count"] == len(encrypted_paths)
 
+            old_sha = signature["sha256"]
             (bundle_root / "untracked.enc").write_bytes(b"missing archive metadata")
-            try:
-                _bundle_signature(root_agent_id)
-            except ValueError as exc:
-                assert "Archive metadata missing for untracked.enc" in str(exc)
-            else:
-                raise AssertionError("Encrypted artifacts without metadata must fail closed")
+            signature = _bundle_signature(root_agent_id)
+            assert signature["artifact_count"] == len(encrypted_paths) + 1
+            assert signature["sha256"] != old_sha
         finally:
             restore()
 
 
-def test_bundle_signature_r2_rejects_enumerated_ciphertext_without_metadata():
+def test_bundle_signature_and_refs_read_metadata_only_under_r2():
+    """Corpus signatures and artifact refs must never download ciphertext bodies.
+
+    A 20-bundle World Model build previously fetched every encrypted artifact
+    (screenshots, multi-MB DB fixtures) just to read its sidecar metadata, at
+    ~100ms per sequential R2 round trip, and the local stack's readiness budget
+    killed the build. Only ``.meta.json`` objects may be fetched here.
+    """
+    from benchmarks.world_model_harness import _artifact_meta_ref, _bundle_signature, _fixture_ref
+
+    with tempfile.TemporaryDirectory() as tmp:
+        local_restore = _with_archive_env(tmp)
+        try:
+            root_agent_id = "root-r2-metadata-only"
+            _write_golden_bundle(root_agent_id)
+            objects = _local_bundle_to_fake_r2(tmp)
+        finally:
+            local_restore()
+
+        fetched: list[str] = []
+        client = _FakeR2Client(objects)
+        original_get = client.get_object
+
+        def recording_get(*, Bucket: str, Key: str) -> dict:
+            fetched.append(Key)
+            return original_get(Bucket=Bucket, Key=Key)
+
+        client.get_object = recording_get  # type: ignore[method-assign]
+        import helpers.trace_archive as trace_archive
+
+        r2_restore = _with_fake_r2_archive(objects)
+        trace_archive._R2_CLIENT = client
+        try:
+            signature = _bundle_signature(root_agent_id)
+            # Under R2 the signature comes from the listing (size + ETag): no GETs at all.
+            assert fetched == [], fetched
+            fixture = _fixture_ref(root_agent_id, "db/start.fixture.json.gz.enc")
+            meta_ref = _artifact_meta_ref(root_agent_id, "db/start.fixture.json.gz.enc")
+            missing = _artifact_meta_ref(root_agent_id, "does/not/exist.json.gz.enc")
+        finally:
+            r2_restore()
+
+        encrypted_keys = [
+            key for key in objects if key.startswith(f"trace-archive/{root_agent_id}/") and key.endswith(".enc")
+        ]
+        assert signature["artifact_count"] == len(encrypted_keys)
+        assert signature["ciphertext_bytes"] > 0
+        assert fixture and fixture["plaintext_sha256"]
+        assert meta_ref and meta_ref["plaintext_sha256"] == fixture["plaintext_sha256"]
+        assert missing is None
+        bodies = [key for key in fetched if not key.endswith(".meta.json")]
+        # The only non-metadata GET allowed is the existence probe for a missing artifact.
+        assert bodies == [f"trace-archive/{root_agent_id}/does/not/exist.json.gz.enc"], bodies
+
+
+def test_bundle_signature_r2_tracks_enumerated_ciphertext_without_metadata():
     from benchmarks.world_model_harness import _bundle_signature
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -420,13 +485,11 @@ def test_bundle_signature_r2_rejects_enumerated_ciphertext_without_metadata():
             ]
             assert signature["artifact_count"] == len(encrypted_keys)
 
+            old_sha = signature["sha256"]
             objects[f"trace-archive/{root_agent_id}/untracked.enc"] = b"missing archive metadata"
-            try:
-                _bundle_signature(root_agent_id)
-            except ValueError as exc:
-                assert "Archive metadata missing for untracked.enc" in str(exc)
-            else:
-                raise AssertionError("R2 ciphertext listed without metadata must fail closed")
+            signature = _bundle_signature(root_agent_id)
+            assert signature["artifact_count"] == len(encrypted_keys) + 1
+            assert signature["sha256"] != old_sha
         finally:
             r2_restore()
 
@@ -462,6 +525,124 @@ def test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_
                     "rows": {
                         **start_fixture["rows"],
                         "Message": [
+                            {
+                                "id": "spawn-args",
+                                "agentId": root,
+                                "role": "ASSISTANT",
+                                "createdAt": "2026-07-20T00:00:00Z",
+                                "metadata": {
+                                    "tool_calls": [
+                                        {
+                                            "tool": "spawn_agent",
+                                            "type": "explore",
+                                            "goal": "Research the market",
+                                            "depth": "quick",
+                                            "tool_call_id": "explore-call",
+                                        },
+                                        {
+                                            "tool": "spawn_agent",
+                                            "type": "for_each",
+                                            "goal": "Contact each investor",
+                                            "items": [{"name": "A"}],
+                                            "tool_call_id": "for-each-call",
+                                        },
+                                        {
+                                            "tool": "spawn_browser_agent",
+                                            "goal": "Complete checkout",
+                                            "tool_call_id": "lifecycle-call",
+                                        },
+                                        {
+                                            "tool": "attempt_completion",
+                                            "tool_call_id": "phase-marker-call",
+                                        },
+                                    ]
+                                },
+                            },
+                            {
+                                "id": "explore-started",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "text": "Research started.",
+                                "createdAt": "2026-07-20T00:00:00.500Z",
+                                "metadata": {
+                                    "toolName": "spawn_agent",
+                                    "agentType": "explore",
+                                    "toolCallId": "explore-call",
+                                    "toolStatus": "FINISHED",
+                                    "title": "Market research",
+                                },
+                            },
+                            {
+                                "id": "explore-thinking",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "text": "",
+                                "createdAt": "2026-07-20T00:00:00.750Z",
+                                "metadata": {
+                                    "toolName": "spawn_agent",
+                                    "agentType": "explore",
+                                    "subAgentId": "child-explore",
+                                    "toolCallId": "explore-thinking-call",
+                                    "toolStatus": "FINISHED",
+                                    "title": "Explore agent thinking",
+                                },
+                            },
+                            {
+                                "id": "explore-finished",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "text": "Grounded terminal explore result from Message.text",
+                                "createdAt": "2026-07-20T00:00:01Z",
+                                "metadata": {
+                                    "toolName": "spawn_agent",
+                                    "agentType": "explore",
+                                    "toolCallId": "explore-call",
+                                    "toolStatus": "FINISHED",
+                                    "title": "Market research complete",
+                                },
+                            },
+                            {
+                                "id": "for-each-finished",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "text": "Real general-purpose batch result",
+                                "createdAt": "2026-07-20T00:00:01.500Z",
+                                "metadata": {
+                                    "toolName": "spawn_agent",
+                                    "agentType": "for_each",
+                                    "toolCallId": "for-each-call",
+                                    "toolStatus": "FINISHED",
+                                    "title": "Batch complete",
+                                },
+                            },
+                            {
+                                "id": "dag-explore-started",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "text": "Investigate the supplier",
+                                "createdAt": "2026-07-20T00:00:01.600Z",
+                                "metadata": {
+                                    "toolName": "spawn_agent",
+                                    "agentType": "explore",
+                                    "toolCallId": "dag-explore-call",
+                                    "toolStatus": "IN_PROGRESS",
+                                    "fullGoal": "Investigate the supplier",
+                                    "dagTaskIndex": 2,
+                                },
+                            },
+                            {
+                                "id": "dag-explore-finished",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "text": "Supplier has a verified public catalog",
+                                "createdAt": "2026-07-20T00:00:01.700Z",
+                                "metadata": {
+                                    "toolName": "spawn_agent",
+                                    "agentType": "explore",
+                                    "toolCallId": "dag-explore-call",
+                                    "toolStatus": "FINISHED",
+                                },
+                            },
                             {
                                 "id": "rich-finished",
                                 "agentId": root,
@@ -520,6 +701,19 @@ def test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_
                                 },
                             },
                             {
+                                "id": "lifecycle-started",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "text": "Browser agent started",
+                                "createdAt": "2026-07-20T00:00:05.500Z",
+                                "metadata": {
+                                    "toolName": "spawn_browser_agent",
+                                    "toolCallId": "lifecycle-call",
+                                    "toolStatus": "FINISHED",
+                                    "title": "Browser agent",
+                                },
+                            },
+                            {
                                 "id": "lifecycle-finished",
                                 "agentId": root,
                                 "role": "TOOL",
@@ -531,6 +725,59 @@ def test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_
                                     "action_type": "task_complete",
                                     "task_id": "task-legacy",
                                     "title": "Task complete",
+                                },
+                            },
+                            {
+                                "id": "excluded-lifecycle",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "text": "Browser session closed",
+                                "createdAt": "2026-07-20T00:00:07Z",
+                                "metadata": {
+                                    "toolName": "spawn_browser_agent",
+                                    "toolCallId": "lifecycle-call",
+                                    "toolStatus": "FINISHED",
+                                    "action_type": "task_complete",
+                                    "excludeFromModel": True,
+                                },
+                            },
+                            {
+                                "id": "agent-init",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "text": "Agent initialization complete.",
+                                "createdAt": "2026-07-20T00:00:08Z",
+                                "metadata": {
+                                    "toolName": "agent_init",
+                                    "toolCallId": "tc-agent-init",
+                                    "toolStatus": "FINISHED",
+                                    "title": "Initialized",
+                                },
+                            },
+                            {
+                                "id": "completion-summary",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "text": "Task Complete",
+                                "createdAt": "2026-07-20T00:00:09Z",
+                                "metadata": {
+                                    "toolName": "completion_summary",
+                                    "toolCallId": "summary-call",
+                                    "toolStatus": "FINISHED",
+                                    "title": "Task Complete",
+                                },
+                            },
+                            {
+                                "id": "unpaired-phase-marker",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "text": "",
+                                "createdAt": "2026-07-20T00:00:10Z",
+                                "metadata": {
+                                    "toolName": "attempt_completion",
+                                    "toolCallId": "phase-marker-call",
+                                    "toolStatus": "FINISHED",
+                                    "title": "Beginning Execute Phase",
                                 },
                             },
                         ],
@@ -596,16 +843,63 @@ def test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_
 
             assert load_transitions(root)[0].action.category == "llm_tool_call"
             grounded = load_grounded_transitions(root)
-            assert len(grounded) == 2
-            assert all(step.action.to_wmh_tool_name() == "rose.browser.browser_action" for step in grounded)
+            assert len(grounded) == 6
+            # The build corpus learns every grounded tool result even though
+            # runtime simulation deliberately leaves general-purpose work real.
+            for_each = next(
+                step for step in grounded if step.action.name == "spawn_general_purpose_agent_for_each"
+            )
+            assert for_each.action.arguments == {
+                "type": "for_each",
+                "goal": "Contact each investor",
+                "items": [{"name": "A"}],
+            }
+            assert for_each.observation.content == "Real general-purpose batch result"
+            specialized = next(step for step in grounded if step.action.name == "spawn_explore_agent")
+            assert specialized.action.arguments == {
+                "type": "explore",
+                "goal": "Research the market",
+                "depth": "quick",
+            }
+            assert specialized.observation.content == "Grounded terminal explore result from Message.text"
+            dag_specialized = next(
+                step
+                for step in grounded
+                if step.action.name == "spawn_explore_agent"
+                and step.action.tool_call_id == "dag-explore-call"
+            )
+            assert dag_specialized.action.arguments == {
+                "type": "explore",
+                "goal": "Investigate the supplier",
+            }
+            assert dag_specialized.observation.content == "Supplier has a verified public catalog"
             rich = next(step for step in grounded if step.observation.metadata["source"] == "browser_observation")
-            legacy = next(step for step in grounded if step.observation.metadata["source"] == "message_fixture")
+            legacy = next(
+                step
+                for step in grounded
+                if step.observation.metadata["source"] == "message_fixture"
+                and step.action.name == "browser_action"
+            )
+            browser_terminal = next(
+                step
+                for step in grounded
+                if step.observation.metadata["source"] == "message_fixture"
+                and step.action.name == "spawn_browser_agent"
+            )
             assert rich.action.arguments["action"] == "click"
             assert rich.action.arguments["params"]["index"] == 42
             assert "Thank you, your order has been placed" in rich.observation.content
             assert legacy.action.arguments["action"] == "goto"
             assert legacy.action.arguments["params"]["url"] == "https://amazon.com"
-            assert "synthetic result" not in json.dumps([step.observation.content for step in grounded])
+            assert browser_terminal.observation.content == "Task complete"
+            grounded_content = json.dumps([step.observation.content for step in grounded])
+            assert "synthetic result" not in grounded_content
+            assert "Research started" not in grounded_content
+            assert "Browser agent started" not in grounded_content
+            assert "Explore agent thinking" not in grounded_content
+            assert "Agent initialization complete" not in grounded_content
+            assert "Browser session closed" not in grounded_content
+            assert "Beginning Execute Phase" not in grounded_content
 
             trace_path = Path(out) / "traces.otel.jsonl"
             export_archive_to_otel_jsonl(root, trace_path)
@@ -622,6 +916,234 @@ def test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_
             assert all(output["metadata"]["result_unavailable"] is False for output in outputs)
         finally:
             restore()
+
+
+def test_grounded_export_and_conformance_suite_cover_100_real_terminal_tool_results():
+    """Every terminal tool shape is corpus data; the runtime allowlist is separate."""
+    from benchmarks.world_model_harness import (
+        export_archive_to_otel_jsonl,
+        is_world_model_environment_boundary,
+        load_grounded_transitions,
+        write_world_model_conformance_suite,
+    )
+    from helpers.trace_archive import archive_json
+
+    tool_names = [
+        "set_plan",
+        "attempt_completion",
+        "spawn_general_purpose_agent",
+        "spawn_general_purpose_agent_for_each",
+        "spawn_explore_agent",
+        "spawn_browser_agent",
+        "spawn_code_agent",
+        "message_person",
+        "request_payment_card",
+        "call_phone_number",
+        "grep",
+        "fast_cache_write",
+        "custom_provider_tool",
+    ]
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        try:
+            root = "root-100-real-tool-results"
+            start_fixture = {
+                "root_agent_id": root,
+                "user_id": "user",
+                "agent_ids": [root],
+                "rows": {"Agent": [{"id": root, "goal": "Exercise real tools"}]},
+            }
+            messages = []
+            for index in range(100):
+                call_id = f"call-{index:03d}"
+                tool_name = tool_names[index % len(tool_names)]
+                messages.extend(
+                    [
+                        {
+                            "id": f"assistant-{index:03d}",
+                            "agentId": root,
+                            "role": "ASSISTANT",
+                            "createdAt": f"2026-07-20T00:{index // 60:02d}:{index % 60:02d}.000Z",
+                            "metadata": {
+                                "tool_calls": [
+                                    {
+                                        "tool": tool_name,
+                                        "tool_call_id": call_id,
+                                        "arguments": {"example": index},
+                                    }
+                                ]
+                            },
+                        },
+                        {
+                            "id": f"tool-{index:03d}",
+                            "agentId": root,
+                            "role": "TOOL",
+                            "text": f"grounded result {index}",
+                            "createdAt": f"2026-07-20T01:{index // 60:02d}:{index % 60:02d}.000Z",
+                            "metadata": {
+                                "toolName": tool_name,
+                                "toolCallId": call_id,
+                                "toolStatus": "ERROR" if index % 17 == 0 else "FINISHED",
+                                "title": f"Terminal {tool_name} result",
+                            },
+                        },
+                    ]
+                )
+            archive_json(
+                root_agent_id=root,
+                path="db/start.fixture.json.gz.enc",
+                payload=start_fixture,
+            )
+            archive_json(
+                root_agent_id=root,
+                path="db/end.fixture.json.gz.enc",
+                payload={**start_fixture, "rows": {**start_fixture["rows"], "Message": messages}},
+            )
+            archive_json(
+                root_agent_id=root,
+                path="manifest.json.gz.enc",
+                payload={
+                    "root_agent_id": root,
+                    "world_model_mode": "real",
+                    "run": {"root_goal": "Exercise real tools", "agent_ids": [root]},
+                },
+            )
+            # An explicit provider transition must not cause the other 99 DB
+            # tool results to disappear, and its Message projection is deduped.
+            archive_json(
+                root_agent_id=root,
+                path="trace/transitions.json.gz.enc",
+                payload={
+                    "transitions": [
+                        {
+                            "state_before": {},
+                            "action": {
+                                "category": "tool",
+                                "name": "set_plan",
+                                "arguments": {"example": 0},
+                                "agent_id": root,
+                                "tool_call_id": "call-000",
+                                "timestamp_ms": 1784509200000,
+                            },
+                            "observation": {
+                                "category": "tool_result",
+                                "content": "grounded result 0",
+                                "is_error": True,
+                                "metadata": {"source": "provider", "result_unavailable": False},
+                                "timestamp_ms": 1784509200001,
+                            },
+                        }
+                    ]
+                },
+            )
+
+            grounded = load_grounded_transitions(root)
+            assert len(grounded) == 100
+            assert {step.action.name for step in grounded} == set(tool_names)
+            assert all(step.action.arguments == {"example": index} for index, step in enumerate(grounded))
+            assert sum(step.observation.is_error for step in grounded) == 6
+            assert not is_world_model_environment_boundary("spawn_general_purpose_agent")
+            assert not is_world_model_environment_boundary("spawn_general_purpose_agent_for_each")
+
+            trace_path = Path(out) / "traces.otel.jsonl"
+            export_archive_to_otel_jsonl(root, trace_path)
+            suite_path = Path(out) / "conformance.json"
+            report = write_world_model_conformance_suite(
+                trace_path,
+                suite_path,
+                example_count=100,
+                min_trajectories=1,
+            )
+            assert report["status"] == "passed"
+            assert report["requested_examples"] == 100
+            assert report["sampled_examples"] == 100
+            assert report["eligible_examples"] == 100
+            assert report["trajectory_count"] == 1
+            assert report["category_count"] >= 8
+            assert report["tool_name_count"] == len(tool_names)
+            assert report["sampled_category_count"] == report["category_count"]
+            assert report["invalid_examples"] == []
+            assert len(report["examples"]) == 100
+            assert json.loads(suite_path.read_text(encoding="utf-8")) == report
+        finally:
+            restore()
+
+
+async def test_prediction_conformance_replays_expected_observations_and_fails_on_low_fidelity():
+    from benchmarks.world_model_harness import evaluate_world_model_conformance_suite
+
+    examples = []
+    for index in range(3):
+        examples.append(
+            {
+                "fingerprint": f"fingerprint-{index}",
+                "root_agent_id": f"root-{index}",
+                "tool_name": "custom_tool",
+                "category": "tool",
+                "task": "Exercise prediction fidelity",
+                "state_before": {"root_agent_id": f"root-{index}", "step": index},
+                "scratchpad": "",
+                "action": {
+                    "schema": "rose.canonical_action.v1",
+                    "category": "tool",
+                    "name": "custom_tool",
+                    "arguments": {"example": index},
+                },
+                "observation": {
+                    "schema": "rose.canonical_observation.v1",
+                    "category": "tool_result",
+                    "content": f"grounded result {index}",
+                    "is_error": index == 2,
+                    "metadata": {"result_unavailable": False},
+                },
+            }
+        )
+
+    class PerfectClient:
+        async def start_session(self, _model, *, task, seed_state):
+            assert task == "Exercise prediction fidelity"
+            return str(seed_state["structured"]["step"])
+
+        async def step(self, _model, session_id, _action):
+            index = int(session_id)
+            return {"content": f"grounded result {index}", "is_error": index == 2, "metadata": {}}
+
+    class WrongClient(PerfectClient):
+        async def step(self, _model, session_id, _action):
+            return {"content": "unrelated prediction", "is_error": False, "metadata": {}}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        suite_path = Path(tmp) / "conformance.json"
+        output_path = Path(tmp) / "prediction.json"
+        suite_path.write_text(
+            json.dumps(
+                {
+                    "schema": "rose.wmh_conformance_suite.v1",
+                    "status": "passed",
+                    "requested_examples": 3,
+                    "examples": examples,
+                }
+            ),
+            encoding="utf-8",
+        )
+        passed = await evaluate_world_model_conformance_suite(
+            suite_path,
+            world_model_name="rose-test",
+            output_path=output_path,
+            client=PerfectClient(),
+        )
+        assert passed["status"] == "passed"
+        assert passed["mean_score"] == 1.0
+        assert passed["dimensions"]["content_accuracy"] == 1.0
+        assert json.loads(output_path.read_text(encoding="utf-8")) == passed
+
+        failed = await evaluate_world_model_conformance_suite(
+            suite_path,
+            world_model_name="rose-test",
+            client=WrongClient(),
+        )
+        assert failed["status"] == "failed"
+        assert failed["dimensions"]["content_accuracy"] == 0.0
 
 
 def test_refresh_world_model_index_persists_retriever_index_without_gepa():
@@ -677,7 +1199,8 @@ def test_refresh_world_model_index_streams_jsonl_in_bounded_batches():
             trace_file = Path(out) / "traces.otel.jsonl"
             export_archive_to_otel_jsonl("root-index-streaming", trace_file, redaction_mode="public")
 
-            os.environ.pop("WMH_INDEX_BATCH_SIZE", None)
+            os.environ["WMH_INDEX_BATCH_SIZE"] = "1"
+            os.environ["WMH_EMBED_WORKERS"] = "1"  # in-process so the patched embedder is observed
             original_embed = HashingEmbedder.embed
             embed_batch_sizes: list[int] = []
 
@@ -711,6 +1234,7 @@ def test_refresh_world_model_index_streams_jsonl_in_bounded_batches():
             assert embed_batch_sizes == [1, 1]
         finally:
             restore()
+            os.environ.pop("WMH_EMBED_WORKERS", None)
             if old_batch_size is None:
                 os.environ.pop("WMH_INDEX_BATCH_SIZE", None)
             else:
@@ -757,7 +1281,10 @@ def test_replay_corpus_split_and_initial_state_are_deterministic_and_public():
             assert state["row_counts"]["Agent"] == 2
             assert state["db_fixture_ref"]["path"] == "db/start.fixture.json.gz.enc"
             assert state["db_fixture"]["restore"]["strategy"] == "delete-scoped-rows-then-insert-in-table-order"
-            assert state["db_fixture"]["rows"]["Agent"][0]["id"] == "root-wmh-a"
+            # Rows stay in the archive: the state carries their reference, never the ~MBs of rows.
+            assert "rows" not in state["db_fixture"]
+            assert state["db_fixture"]["rows_ref"]["path"] == "db/start.fixture.json.gz.enc"
+            assert state["db_fixture"]["rows_ref"]["plaintext_sha256"] == state["db_fixture_ref"]["plaintext_sha256"]
             assert state["state_before_first_action"]["phone_call"]["provider_ref"].startswith("provider/vapi/create/")
             assert state["provider_artifacts"][0]["path"] == "provider/vapi/create/call-ext-1.json.gz.enc"
             media_by_type = {item["content_type"]: item for item in state["media_artifacts"]}
@@ -883,6 +1410,7 @@ def test_update_world_model_for_simulation_uses_delta_exports_and_progress_event
             )
             assert first["status"] == "ready"
             assert first["total_traces"] == 2
+            assert first["total_steps"] == 4
             assert first["updated_traces"] == 2
             assert first["build_ran"] is True
             assert first["index_refreshed"] is False
@@ -890,14 +1418,36 @@ def test_update_world_model_for_simulation_uses_delta_exports_and_progress_event
             assert calls["index_refreshes"] == 0
             assert [event["title"] for event in progress_events] == [
                 "World Model Updating",
+                "World Model Corpus Screening",
                 "World Model RAG Populating",
                 "World Model Trace Export",
+                "World Model Corpus Conformance",
                 "World Model Build",
                 "World Model Ready",
             ]
+            assert first["conformance"]["status"] == "failed"
+            assert first["conformance"]["eligible_examples"] == 4
             assert progress_events[-1]["status"] == "FINISHED"
+            assert progress_events[-1]["metadata"]["total_steps"] == 4
             assert "metadata" in progress_events[-1]
             assert "text" not in progress_events[-1]
+
+            try:
+                update_world_model_for_simulation(
+                    output_dir=out,
+                    root_agent_ids=["root-delta-a", "root-delta-b"],
+                    name="rose-delta",
+                    gepa_budget=0,
+                    conformance_examples=100,
+                    require_conformance=True,
+                    upstream_build=fake_upstream_build,
+                    config_factory=fake_config_factory,
+                    index_refresher=fake_index_refresher,
+                )
+            except RuntimeError as exc:
+                assert "requested=100, eligible=4" in str(exc)
+            else:
+                raise AssertionError("required conformance must fail closed on fewer than 100 examples")
 
             progress_events.clear()
             second = update_world_model_for_simulation(
@@ -990,6 +1540,7 @@ def test_update_world_model_for_simulation_uses_delta_exports_and_progress_event
 def test_update_world_model_excludes_simulated_bundles_from_corpus():
     from benchmarks.world_model_harness import (
         partition_real_world_bundles,
+        read_archive_json,
         update_world_model_for_simulation,
     )
 
@@ -999,10 +1550,29 @@ def test_update_world_model_excludes_simulated_bundles_from_corpus():
             _write_golden_bundle("root-real")
             _write_golden_bundle("root-shadow", world_model_mode="shadow")
             _write_golden_bundle("root-simulated", world_model_mode="simulate")
+            _write_golden_bundle("root-stale-manifest", world_model_mode="real")
 
-            real, excluded = partition_real_world_bundles(["root-real", "root-shadow", "root-simulated"])
+            # Historical manifests can disagree with the launch snapshot. The
+            # conservative preliminary gate must honor the explicit simulated
+            # mode before any transitions reach embedding.
+            from helpers.trace_archive import archive_json
+
+            stale_start = read_archive_json("root-stale-manifest", "db/start.fixture.json.gz.enc")
+            stale_start["rows"]["Agent"][0]["worldModelMode"] = "simulate"
+            archive_json(
+                root_agent_id="root-stale-manifest",
+                path="db/start.fixture.json.gz.enc",
+                payload=stale_start,
+            )
+
+            real, excluded = partition_real_world_bundles(
+                ["root-real", "root-shadow", "root-simulated", "root-stale-manifest"]
+            )
             assert real == ["root-real", "root-shadow"]
-            assert excluded == {"root-simulated": "simulate"}
+            assert excluded == {
+                "root-simulated": "simulate",
+                "root-stale-manifest": "simulate",
+            }
 
             progress_events: list[dict] = []
 
@@ -1019,7 +1589,7 @@ def test_update_world_model_excludes_simulated_bundles_from_corpus():
 
             result = update_world_model_for_simulation(
                 output_dir=out,
-                root_agent_ids=["root-real", "root-shadow", "root-simulated"],
+                root_agent_ids=["root-real", "root-shadow", "root-simulated", "root-stale-manifest"],
                 name="rose-no-sim",
                 gepa_budget=0,
                 progress=progress_events.append,
@@ -1033,9 +1603,591 @@ def test_update_world_model_excludes_simulated_bundles_from_corpus():
             assert set(index["bundles"]) == {"root-real", "root-shadow"}
             assert not (Path(out) / "otel" / "root-simulated.otel.jsonl").exists()
 
-            rag_event = next(e for e in progress_events if e["title"] == "World Model RAG Populating")
-            metadata = rag_event.get("metadata") or rag_event
-            assert metadata.get("traces_excluded_non_real") == 1
+            assert result["excluded_reasons"]["simulated-run"] == 2
+            export_event = [
+                event for event in progress_events if event["title"] == "World Model Trace Export"
+            ][-1]
+            assert export_event["metadata"]["filtered_before_export"] == 1
+        finally:
+            restore()
+
+
+def test_corpus_screening_admits_only_exportable_bundles_and_caches_verdicts():
+    """The corpus takes bundles the exporter can turn into steps; verdicts persist across refreshes.
+
+    Sampled 2026-09-08: ~94% of the ~80k R2 bundles are STARTING_UP shells from
+    test stacks. Terminal status and an end fixture are NOT required: a run
+    killed mid-flight still contributes every completed observation already
+    present in its incremental provider/browser/trace artifacts.
+    """
+    import benchmarks.world_model_harness as wmh
+    from benchmarks.world_model_harness import (
+        bundle_corpus_eligibility,
+        select_corpus_bundles,
+        update_world_model_for_simulation,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        try:
+            _write_golden_bundle("root-gold")
+            _write_golden_bundle("root-shell")  # will lose everything but manifest + start fixture
+            _write_golden_bundle("root-partial")  # will lose only its end fixture
+            _write_golden_bundle("root-missing-start")
+            _write_golden_bundle("root-active")  # non-terminal root status: still exportable
+            _write_golden_bundle("root-legacy")  # legacy migrated marker
+            _write_golden_bundle("root-benchmark-generated")  # real non-DEMO benchmark result
+            _write_golden_bundle("root-demo")  # catalog-tagged DEMO task: never a real-world result
+            _write_golden_bundle("root-noproviders")  # fixtures only; may contain sub-agent terminal rows
+            _write_golden_bundle("root-sim", world_model_mode="simulate")
+
+            shell = Path(tmp) / "root-shell"
+            for item in list(shell.rglob("*")):
+                if item.is_file() and not (
+                    item.name.startswith("manifest.json.gz.enc") or item.name.startswith("start.fixture.json.gz.enc")
+                ):
+                    item.unlink()
+            partial = Path(tmp) / "root-partial"
+            for item in list(partial.rglob("*")):
+                if item.is_file() and item.name.startswith("end.fixture.json.gz.enc"):
+                    item.unlink()
+            missing_start = Path(tmp) / "root-missing-start"
+            for item in list(missing_start.rglob("*")):
+                if item.is_file() and item.name.startswith("start.fixture.json.gz.enc"):
+                    item.unlink()
+            noproviders = Path(tmp) / "root-noproviders"
+            for item in list(noproviders.rglob("*")):
+                rel = item.relative_to(noproviders).as_posix()
+                if item.is_file() and rel.startswith(
+                    ("provider/", "media/", "browser/", "otel/", "transitions/", "wmh/")
+                ):
+                    item.unlink()
+
+            def rewrite_manifest(root_agent_id: str, **fields) -> None:
+                from helpers.trace_archive import archive_json
+
+                manifest = wmh.read_archive_json(root_agent_id, "manifest.json.gz.enc")
+                for key, value in fields.items():
+                    if key == "root_status":
+                        manifest["run"]["root_status"] = value
+                    else:
+                        manifest[key] = value
+                archive_json(root_agent_id=root_agent_id, path="manifest.json.gz.enc", payload=manifest)
+
+            rewrite_manifest("root-active", root_status="ACTIVE")
+            rewrite_manifest("root-legacy", legacy_migrated=True)
+            rewrite_manifest("root-benchmark-generated", source_kind="benchmark-task")
+            rewrite_manifest("root-demo", benchmark_task_name="test-mass-agent-run-0")
+
+            assert bundle_corpus_eligibility("root-gold") == (True, "eligible")
+            assert bundle_corpus_eligibility("root-shell") == (False, "no-result-artifacts")
+            assert bundle_corpus_eligibility("root-partial") == (True, "eligible")
+            assert bundle_corpus_eligibility("root-missing-start")[1].startswith("missing:")
+            assert bundle_corpus_eligibility("root-active") == (True, "eligible")
+            assert bundle_corpus_eligibility("root-legacy") == (False, "legacy-migrated")
+            assert bundle_corpus_eligibility("root-benchmark-generated") == (True, "eligible")
+            assert bundle_corpus_eligibility("root-demo") == (
+                False,
+                "demo-task:test-mass-agent-run-0",
+            )
+            assert bundle_corpus_eligibility("root-noproviders") == (True, "eligible")
+            assert bundle_corpus_eligibility("root-sim") == (False, "simulated-run:simulate")
+
+            class FakeMetrics:
+                def model_dump(self):
+                    return {"held_out_accuracy": 0.5}
+
+            class FakeResult:
+                metrics = FakeMetrics()
+
+            def fake_upstream_build(config, **kwargs):
+                Path(kwargs["root"]).mkdir(parents=True, exist_ok=True)
+                return FakeResult()
+
+            roots = [
+                "root-active",
+                "root-demo",
+                "root-gold",
+                "root-legacy",
+                "root-missing-start",
+                "root-noproviders",
+                "root-partial",
+                "root-shell",
+                "root-sim",
+            ]
+            first = update_world_model_for_simulation(
+                output_dir=out,
+                root_agent_ids=roots,
+                name="rose-gold-only",
+                gepa_budget=0,
+                upstream_build=fake_upstream_build,
+                config_factory=lambda **kwargs: {"config": kwargs},
+            )
+            assert first["total_traces"] == 4
+            assert first["excluded_bundles"] == 5
+            assert first["excluded_reasons"] == {
+                "demo-task": 1,
+                "legacy-migrated": 1,
+                "missing": 1,
+                "no-result-artifacts": 1,
+                "simulated-run": 1,
+            }
+            assert first["screening_cache_hits"] == 0
+            index = json.loads((Path(out) / "delta-index.json").read_text(encoding="utf-8"))
+            assert set(index["bundles"]) == {
+                "root-active",
+                "root-gold",
+                "root-noproviders",
+                "root-partial",
+            }
+            assert index["bundles"]["root-partial"]["steps"] == 2
+            assert index["screening"]["root-gold"]["eligible"] is True
+            assert index["screening"]["root-active"]["eligible"] is True
+            assert index["screening"]["root-demo"]["eligible"] is False
+            assert index["screening"]["root-demo"]["reason"] == "demo-task:test-mass-agent-run-0"
+            # Two spans per transition; the index records steps (transitions) for the caps.
+            gold_otel = (Path(out) / "otel" / "root-gold.otel.jsonl").read_text(encoding="utf-8")
+            assert sum(1 for line in gold_otel.splitlines() if line.strip()) == 4
+            assert index["bundles"]["root-gold"]["steps"] == 2
+
+            # Final verdicts replay from the cache; a bundle missing launch
+            # metadata is re-checked only after its recheck window.
+            calls: list[str] = []
+            original = wmh.bundle_corpus_eligibility
+
+            def counting(root_agent_id: str):
+                calls.append(root_agent_id)
+                return original(root_agent_id)
+
+            wmh.bundle_corpus_eligibility = counting
+            try:
+                second = update_world_model_for_simulation(
+                    output_dir=out,
+                    root_agent_ids=roots,
+                    name="rose-gold-only",
+                    gepa_budget=0,
+                    upstream_build=fake_upstream_build,
+                    config_factory=lambda **kwargs: {"config": kwargs},
+                )
+            finally:
+                wmh.bundle_corpus_eligibility = original
+            assert second["total_traces"] == 4
+            assert second["screening_cache_hits"] == 9, second["screening_cache_hits"]
+            assert calls == []
+
+            # A changed screening criterion invalidates every cached verdict: the
+            # old "gold" policy had rejected non-terminal runs for a day at a time.
+            index = json.loads((Path(out) / "delta-index.json").read_text(encoding="utf-8"))
+            assert index["screening_policy"] == wmh._SCREENING_POLICY_VERSION
+            index["screening_policy"] = "gold-v1"
+            (Path(out) / "delta-index.json").write_text(json.dumps(index), encoding="utf-8")
+            third = update_world_model_for_simulation(
+                output_dir=out,
+                root_agent_ids=roots,
+                name="rose-gold-only",
+                gepa_budget=0,
+                upstream_build=fake_upstream_build,
+                config_factory=lambda **kwargs: {"config": kwargs},
+            )
+            assert third["screening_cache_hits"] == 0
+            assert third["total_traces"] == 4
+
+            # One bundle export reads each fixture once: the memo serves the repeats.
+            reads: list[str] = []
+            original_read = wmh.read_archive_artifact
+
+            def counting_read(*, root_agent_id: str, path: str):
+                reads.append(f"{root_agent_id}/{path}")
+                return original_read(root_agent_id=root_agent_id, path=path)
+
+            wmh.read_archive_artifact = counting_read
+            try:
+                with wmh.archive_json_memo():
+                    wmh.export_archive_to_otel_jsonl("root-gold", Path(out) / "memo.otel.jsonl")
+                    wmh._build_replay_session("root-gold", "train")
+            finally:
+                wmh.read_archive_artifact = original_read
+            fixture_reads = [r for r in reads if r.endswith(".fixture.json.gz.enc")]
+            assert fixture_reads.count("root-gold/db/start.fixture.json.gz.enc") == 1, fixture_reads
+            assert len(fixture_reads) == len(set(fixture_reads)), fixture_reads
+
+            # A capped selection screens in cap-sized batches and still finds an exportable one.
+            cache: dict = {}
+            selected, excluded, _ = select_corpus_bundles(
+                ["root-missing-start", "root-gold", "root-active"],
+                {},
+                max_bundles=1,
+                cache=cache,
+                now_ms=0,
+                policy="gold",
+            )
+            assert selected == ["root-gold"]
+            assert set(excluded) == {"root-missing-start"}
+            assert "root-active" not in cache  # never screened: cap already satisfied
+
+            # The legacy loose policy may bypass artifact/legacy checks, but it
+            # must not bypass the real-results-only DEMO exclusion.
+            selected, excluded, _ = select_corpus_bundles(
+                ["root-demo", "root-gold"], {}, max_bundles=0, cache={}, now_ms=0, policy="any-real"
+            )
+            assert selected == ["root-gold"]
+            assert excluded == {"root-demo": "demo-task:test-mass-agent-run-0"}
+        finally:
+            restore()
+
+
+def test_corpus_screening_retries_transient_r2_throttles():
+    import benchmarks.world_model_harness as wmh
+
+    throttle = RuntimeError("Reduce your concurrent request rate for the same object")
+    throttle.response = {
+        "Error": {"Code": "ServiceUnavailable"},
+        "ResponseMetadata": {"HTTPStatusCode": 503},
+    }
+    paths = [
+        "manifest.json.gz.enc",
+        "db/start.fixture.json.gz.enc",
+        "trace/transitions.json.gz.enc",
+    ]
+    with (
+        patch.object(wmh, "archive_artifact_paths", side_effect=[throttle, paths]) as listing,
+        patch.object(wmh.time, "sleep") as sleep,
+    ):
+        assert wmh.prescreen_bundle_artifacts("root-throttled") == (True, "artifacts-present")
+    assert listing.call_count == 2
+    sleep.assert_called_once()
+
+
+def test_bundle_signature_retries_transient_r2_throttles():
+    import benchmarks.world_model_harness as wmh
+
+    throttle = RuntimeError("Reduce your concurrent request rate for the same object")
+    throttle.response = {
+        "Error": {"Code": "ServiceUnavailable"},
+        "ResponseMetadata": {"HTTPStatusCode": 503},
+    }
+    entries = [
+        {"path": "manifest.json.gz.enc", "etag": "manifest", "size": 10},
+        {"path": "manifest.json.gz.enc.meta.json", "etag": "metadata", "size": 20},
+    ]
+    with (
+        patch.object(wmh, "archive_backend_is_r2", return_value=True),
+        patch.object(wmh, "list_r2_artifact_entries", side_effect=[throttle, entries]) as listing,
+        patch.object(wmh.time, "sleep") as sleep,
+    ):
+        signature = wmh._bundle_signature("root-throttled")
+    assert signature["artifact_count"] == 1
+    assert listing.call_count == 2
+    sleep.assert_called_once()
+
+
+def test_export_worker_filters_bundles_without_completed_results():
+    import benchmarks.world_model_harness as wmh
+
+    with tempfile.TemporaryDirectory() as out:
+        otel = Path(out) / "empty.otel.jsonl"
+        session = Path(out) / "empty.session.json"
+        otel.write_text("stale", encoding="utf-8")
+        session.write_text("stale", encoding="utf-8")
+        with (
+            patch.object(wmh, "_prefetch_bundle_fixtures"),
+            patch.object(wmh, "bundle_world_model_mode", return_value="real"),
+            patch.object(wmh, "load_grounded_transitions", return_value=[]),
+        ):
+            result = wmh._export_bundle_worker(
+                ("root-empty", str(otel), str(session), "train", 0)
+            )
+        assert result == ("root-empty", 0, "filtered:no-completed-results")
+        assert not otel.exists()
+        assert not session.exists()
+
+
+def test_export_worker_retries_transient_r2_stream_failures():
+    import benchmarks.world_model_harness as wmh
+
+    stream_failure = RuntimeError(
+        "ResponseStreamingError: IncompleteRead(1048576 bytes read, 2097152 more expected)"
+    )
+
+    with tempfile.TemporaryDirectory() as out:
+        otel = Path(out) / "retry.otel.jsonl"
+        session = Path(out) / "retry.session.json"
+
+        def fake_export(_root_agent_id, output_path, **_kwargs):
+            Path(output_path).write_text(
+                json.dumps({"name": "execute_tool browser", "attributes": {}}) + "\n",
+                encoding="utf-8",
+            )
+
+        with (
+            patch.object(
+                wmh,
+                "_prefetch_bundle_fixtures",
+                side_effect=[stream_failure, None],
+            ) as prefetch,
+            patch.object(wmh, "bundle_world_model_mode", return_value="real"),
+            patch.object(wmh, "load_grounded_transitions", return_value=[object()]),
+            patch.object(wmh, "export_archive_to_otel_jsonl", side_effect=fake_export),
+            patch.object(wmh, "_build_replay_session", return_value={"transition_count": 1}),
+            patch.object(wmh.time, "sleep") as sleep,
+        ):
+            result = wmh._export_bundle_worker(
+                ("root-stream-retry", str(otel), str(session), "train", 0)
+            )
+
+        assert result == ("root-stream-retry", 1, None)
+        assert prefetch.call_count == 2
+        sleep.assert_called_once()
+        assert otel.exists()
+        assert json.loads(session.read_text(encoding="utf-8"))["transition_count"] == 1
+
+
+def test_index_refresh_parallel_embeddings_match_in_process():
+    """Forked embedding workers must reproduce the single-process index byte for byte.
+
+    The hashing embedder is pure Python (~4.6 ms/step), so a 132k-step corpus
+    spent 10 of its 11 index-refresh minutes embedding on one core.
+    """
+    import numpy as np
+
+    from benchmarks.world_model_harness import export_archive_to_otel_jsonl, refresh_world_model_index
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        try:
+            for root in ("root-par-a", "root-par-b", "root-par-c"):
+                _write_golden_bundle(root)
+            trace_file = Path(out) / "traces.otel.jsonl"
+            with trace_file.open("w", encoding="utf-8") as combined:
+                for root in ("root-par-a", "root-par-b", "root-par-c"):
+                    per_trace = Path(out) / f"{root}.otel.jsonl"
+                    export_archive_to_otel_jsonl(root, per_trace, redaction_mode="public")
+                    combined.write(per_trace.read_text(encoding="utf-8"))
+            results = {}
+            for workers in ("1", "3"):
+                os.environ["WMH_EMBED_WORKERS"] = workers
+                os.environ["WMH_INDEX_BATCH_SIZE"] = "2"
+                model_root = Path(out) / "models" / f"rose-par-{workers}"
+                results[workers] = refresh_world_model_index(trace_file, model_root, embed_dim=64)
+            assert results["1"]["indexed_steps"] == results["3"]["indexed_steps"] == 6
+            one = np.load(Path(out) / "models" / "rose-par-1" / "index" / "embeddings.npy")
+            three = np.load(Path(out) / "models" / "rose-par-3" / "index" / "embeddings.npy")
+            assert one.shape == three.shape == (6, 64)
+            assert np.array_equal(one, three)
+            assert (Path(out) / "models" / "rose-par-1" / "index" / "steps.jsonl").read_bytes() == (
+                Path(out) / "models" / "rose-par-3" / "index" / "steps.jsonl"
+            ).read_bytes()
+        finally:
+            os.environ.pop("WMH_EMBED_WORKERS", None)
+            os.environ.pop("WMH_INDEX_BATCH_SIZE", None)
+            restore()
+
+
+def test_partial_run_recovers_completed_tool_results_from_llm_contexts():
+    """Missing-end runs still export completed tool pairs captured by later LLM calls."""
+
+    from benchmarks.world_model_harness import load_grounded_transitions
+    from helpers.trace_archive import archive_json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        try:
+            root = "root-partial-llm"
+            _write_golden_bundle(root, world_model_mode="real")
+            bundle = Path(tmp) / root
+            for item in list(bundle.rglob("*")):
+                if item.is_file() and (
+                    item.name.startswith("end.fixture.json.gz.enc")
+                    or item.name.startswith("transitions.json.gz.enc")
+                ):
+                    item.unlink()
+
+            first_pair = [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-search",
+                            "type": "function",
+                            "function": {"name": "web_search", "arguments": '{"q":"Rose Labs"}'},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "name": "web_search",
+                    "tool_call_id": "call-search",
+                    "content": "real search result",
+                },
+            ]
+            archive_json(
+                root_agent_id=root,
+                path="llm/partial-a.json.gz.enc",
+                payload={
+                    "agent_id": root,
+                    "span_id": "span-a",
+                    "call_site": "execute_loop",
+                    "messages": first_pair,
+                },
+            )
+            archive_json(
+                root_agent_id=root,
+                path="llm/partial-b.json.gz.enc",
+                payload={
+                    "agent_id": root,
+                    "span_id": "span-b",
+                    "call_site": "execute_loop",
+                    "messages": [
+                        *first_pair,  # cumulative duplicate must not produce another step
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-explore",
+                                    "name": "spawn_agent",
+                                    "arguments": {"type": "explore", "prompt": "inspect evidence"},
+                                },
+                                {
+                                    "id": "call-pending",
+                                    "name": "web_fetch",
+                                    "arguments": {"url": "https://pending.test"},
+                                },
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "name": "spawn_agent",
+                            "tool_call_id": "call-explore",
+                            "content": "real explore result",
+                        },
+                    ],
+                },
+            )
+
+            transitions = load_grounded_transitions(root)
+            assert [transition.action.name for transition in transitions] == [
+                "web_search",
+                "spawn_explore_agent",
+            ]
+            assert transitions[0].action.arguments == {"q": "Rose Labs"}
+            assert transitions[1].action.arguments == {"type": "explore", "prompt": "inspect evidence"}
+            assert [transition.observation.content for transition in transitions] == [
+                "real search result",
+                "real explore result",
+            ]
+            assert all(
+                transition.observation.metadata["source"] == "llm_context_tool_result"
+                for transition in transitions
+            )
+        finally:
+            restore()
+
+
+def test_index_records_survive_unicode_line_breaks_in_observations():
+    """A U+2028 inside a scraped page must not split a JSONL record.
+
+    The upstream retriever loads ``steps.jsonl`` with ``read_text().splitlines()``,
+    which also breaks on U+2028/U+2029/U+0085. Four of the 132k steps in the
+    2026-09-09 corpus carried a raw U+2028 and the rebuilt model refused to
+    serve ("EOF while parsing a string"). Both JSONL writers escape them.
+    """
+    import dataclasses
+
+    from wmh.retrieval import EmbeddingRetriever, HashingEmbedder
+
+    from benchmarks.world_model_harness import (
+        export_archive_to_otel_jsonl,
+        load_grounded_transitions,
+        refresh_world_model_index,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        try:
+            _write_golden_bundle("root-u2028")
+            transitions = load_grounded_transitions("root-u2028", redaction_mode="public")
+            assert transitions
+            poisoned = "Trusted by\u2028everyone\u2029and\u0085more"
+            transitions[0] = dataclasses.replace(
+                transitions[0],
+                observation=dataclasses.replace(transitions[0].observation, content=poisoned),
+            )
+            trace_file = Path(out) / "traces.otel.jsonl"
+            export_archive_to_otel_jsonl("root-u2028", trace_file, redaction_mode="public", transitions=transitions)
+            otel_text = trace_file.read_text(encoding="utf-8")
+            assert len(otel_text.splitlines()) == otel_text.count("\n") == 2 * len(transitions)
+
+            result = refresh_world_model_index(trace_file, Path(out) / "models" / "rose-u2028", embed_dim=64)
+            assert result["indexed_steps"] == len(transitions)
+            steps_text = (Path(out) / "models" / "rose-u2028" / "index" / "steps.jsonl").read_text(encoding="utf-8")
+            assert len(steps_text.splitlines()) == steps_text.count("\n") == len(transitions)
+            assert poisoned not in steps_text and json.loads(steps_text.splitlines()[0])
+
+            retriever = EmbeddingRetriever(HashingEmbedder(dim=64))
+            retriever.load(Path(out) / "models" / "rose-u2028" / "index")
+            assert len(retriever._steps) == len(transitions)
+            assert any(poisoned in step.model_dump_json() for step in retriever._steps)
+        finally:
+            restore()
+
+
+def test_update_world_model_skips_bundles_that_fail_export():
+    """One malformed bundle must not abort the whole corpus refresh.
+
+    The R2 archive holds ~80k bundles of mixed provenance; a bundle with a
+    corrupt transition artifact must not kill the build for every bench.
+    """
+    from benchmarks.world_model_harness import update_world_model_for_simulation
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        try:
+            _write_golden_bundle("root-ok")
+            _write_golden_bundle("root-broken")
+            # Screening intentionally validates only launch metadata and mode;
+            # corrupt transition ciphertext fails later inside export.
+            broken_trace = Path(tmp) / "root-broken" / "trace" / "transitions.json.gz.enc"
+            broken_trace.write_bytes(b"not the archived ciphertext")
+
+            progress_events: list[dict] = []
+
+            class FakeMetrics:
+                def model_dump(self):
+                    return {"held_out_accuracy": 0.5}
+
+            class FakeResult:
+                metrics = FakeMetrics()
+
+            def fake_upstream_build(config, **kwargs):
+                Path(kwargs["root"]).mkdir(parents=True, exist_ok=True)
+                return FakeResult()
+
+            result = update_world_model_for_simulation(
+                output_dir=out,
+                root_agent_ids=["root-ok", "root-broken"],
+                name="rose-skip-broken",
+                gepa_budget=0,
+                progress=progress_events.append,
+                upstream_build=fake_upstream_build,
+                config_factory=lambda **kwargs: {"config": kwargs},
+            )
+            assert result["status"] == "ready"
+            assert result["total_traces"] == 1
+            assert list(result["export_failed"]) == ["root-broken"]
+            assert result["export_failed"]["root-broken"].startswith("export-failed:")
+
+            index = json.loads((Path(out) / "delta-index.json").read_text(encoding="utf-8"))
+            assert set(index["bundles"]) == {"root-ok"}
+            assert not (Path(out) / "otel" / "root-broken.otel.jsonl").exists()
+            assert not (Path(out) / "sessions" / "root-broken.session.json").exists()
+            assert (Path(out) / "sessions" / "root-ok.session.json").exists()
+
+            export_event = next(e for e in progress_events if e["title"] == "World Model Trace Export")
+            metadata = export_event.get("metadata") or export_event
+            assert metadata.get("export_failed") == 1
+            assert metadata.get("exported_sessions") == 1
         finally:
             restore()
 
@@ -1096,7 +2248,10 @@ def test_world_model_bundle_cap_preserves_existing_index_entries():
             )
 
             assert result["total_traces"] == 2
-            assert classified == ["root-existing-z", "root-new-a"]
+            # The retained bundle's eligible verdict is final and replays from the
+            # delta index's screening cache; only the admitted new bundle is read.
+            assert classified == ["root-new-a"], classified
+            assert result["screening_cache_hits"] == 1
             index = json.loads((Path(out) / "delta-index.json").read_text(encoding="utf-8"))
             assert set(index["bundles"]) == {"root-existing-z", "root-new-a"}
         finally:
@@ -1105,6 +2260,89 @@ def test_world_model_bundle_cap_preserves_existing_index_entries():
             else:
                 os.environ["WMH_MAX_BUNDLES"] = prior_cap
             world_model_harness.bundle_world_model_mode = original_mode
+            restore()
+
+
+def test_demo_filter_purges_previously_indexed_steps_without_ingestion_failure():
+    import benchmarks.world_model_harness as wmh
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        original_demo_task_names = wmh._DEMO_BENCHMARK_TASK_NAMES
+        try:
+            _write_golden_bundle("root-real")
+            _write_golden_bundle("root-demo")
+            from helpers.trace_archive import archive_json
+
+            demo_manifest = wmh.read_archive_json("root-demo", "manifest.json.gz.enc")
+            demo_manifest["benchmark_task_name"] = "test-mass-agent-run-0"
+            archive_json(
+                root_agent_id="root-demo",
+                path="manifest.json.gz.enc",
+                payload=demo_manifest,
+            )
+
+            class FakeMetrics:
+                def model_dump(self):
+                    return {"held_out_accuracy": 0.5}
+
+            class FakeResult:
+                metrics = FakeMetrics()
+
+            def fake_upstream_build(config, **kwargs):
+                Path(kwargs["root"]).mkdir(parents=True, exist_ok=True)
+                return FakeResult()
+
+            # Reproduce a corpus and cached verdict created before the DEMO
+            # screen existed, then mark its delta index with the old policy.
+            wmh._DEMO_BENCHMARK_TASK_NAMES = frozenset()
+            initial = wmh.update_world_model_for_simulation(
+                output_dir=out,
+                root_agent_ids=["root-real", "root-demo"],
+                name="rose-demo-purge",
+                gepa_budget=0,
+                upstream_build=fake_upstream_build,
+                config_factory=lambda **kwargs: {"config": kwargs},
+            )
+            assert initial["total_traces"] == 2
+            wmh._DEMO_BENCHMARK_TASK_NAMES = original_demo_task_names
+            index_path = Path(out) / "delta-index.json"
+            stale_index = json.loads(index_path.read_text(encoding="utf-8"))
+            stale_index["screening_policy"] = "exportable-v3"
+            index_path.write_text(json.dumps(stale_index), encoding="utf-8")
+
+            refreshed_corpora: list[str] = []
+
+            def fake_index_refresh(trace_file, _model_root, **_kwargs):
+                corpus = Path(trace_file).read_text(encoding="utf-8")
+                refreshed_corpora.append(corpus)
+                return {"indexed_traces": 1, "indexed_steps": 2, "index_path": "fake-index"}
+
+            filtered = wmh.update_world_model_for_simulation(
+                output_dir=out,
+                root_agent_ids=["root-real", "root-demo"],
+                name="rose-demo-purge",
+                gepa_budget=0,
+                upstream_build=fake_upstream_build,
+                config_factory=lambda **kwargs: {"config": kwargs},
+                index_refresher=fake_index_refresh,
+            )
+
+            assert filtered["status"] == "ready"
+            assert filtered["total_traces"] == 1
+            assert filtered["updated_traces"] == 0
+            assert filtered["excluded_reasons"] == {"demo-task": 1}
+            assert filtered["index_refreshed"] is True
+            assert len(refreshed_corpora) == 1
+            assert "root-real" in refreshed_corpora[0]
+            assert "root-demo" not in refreshed_corpora[0]
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            assert set(index["bundles"]) == {"root-real"}
+            assert filtered["purged_staging_files"] == 2
+            assert not (Path(out) / "otel" / "root-demo.otel.jsonl").exists()
+            assert not (Path(out) / "sessions" / "root-demo.session.json").exists()
+        finally:
+            wmh._DEMO_BENCHMARK_TASK_NAMES = original_demo_task_names
             restore()
 
 
@@ -1412,7 +2650,7 @@ def test_wmh_http_clients_allow_slow_grounded_transitions():
     try:
         os.environ.pop("WMH_HTTP_TIMEOUT_SECONDS", None)
         for client_type in (BenchmarkClient, RuntimeClient):
-            assert client_type("https://wmh.example.test").timeout == 180
+            assert client_type("https://wmh.example.test").timeout == 660
             assert client_type("https://wmh.example.test", timeout=12).timeout == 12
 
         os.environ["WMH_HTTP_TIMEOUT_SECONDS"] = "95"
@@ -1584,8 +2822,10 @@ def test_canonical_action_categories_cover_agent_tool_families():
     from benchmarks.world_model_harness import canonical_action_from_tool_call
 
     cases = {
+        "spawn_explore_agent": "explore",
         "spawn_browser_agent": "browser",
         "spawn_claude_code_agent": "code",
+        "spawn_general_purpose_agent_for_each": "for_each",
         "message_person": "message",
         "request_payment_card": "payment",
         "call_phone_number": "vapi",
@@ -1601,7 +2841,10 @@ def test_canonical_action_categories_cover_agent_tool_families():
 
 def test_world_model_action_timestamp_uses_sim_clock_env_and_validates_it():
     from benchmarks.world_model_harness import canonical_action_from_tool_call
-    from helpers.world_model_runtime import canonical_action_from_tool_call as runtime_action_from_tool_call
+    from helpers.world_model_runtime import (
+        WorldModelToolExecutionAdapter,
+        canonical_action_from_tool_call as runtime_action_from_tool_call,
+    )
 
     old_env = {
         "WMH_SIM_TIME_MS": os.environ.get("WMH_SIM_TIME_MS"),
@@ -1614,6 +2857,11 @@ def test_world_model_action_timestamp_uses_sim_clock_env_and_validates_it():
         runtime_action = runtime_action_from_tool_call("vapi_poll_call", {"call_id": "c"}, "tool-1")
         assert bridge_action.timestamp_ms == 1893456000123
         assert runtime_action.timestamp_ms == 1893456000123
+        adapter_action = WorldModelToolExecutionAdapter(
+            mode="simulate",
+            timestamp_ms=1893542400123,
+        ).action_for_tool("spawn_explore_agent", {"goal": "check again"}, "tool-3")
+        assert adapter_action.timestamp_ms == 1893542400123
 
         os.environ["WMH_SIM_TIME_MS"] = "not-an-int"
         try:
@@ -1627,6 +2875,67 @@ def test_world_model_action_timestamp_uses_sim_clock_env_and_validates_it():
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+async def test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids():
+    """Run-local action IDs and timestamps must not bust identical DEMO predictions."""
+    from benchmarks.wmh_rose_provider import RoseUsageAccumulator, RoseWMHProvider
+    from providers.fast_cache.context import current_context
+    from providers.fast_cache.rose_cache import request_key_material
+    from providers.rose import RoseResponse
+    from wmh.core.render import build_env_prompt
+    from wmh.core.types import Action, ActionKind, EnvState
+    from wmh.providers.base import Message
+
+    goal = "Raise me 5m dollars for my company Rose Labs\nNo questions asked"
+    keys = []
+    sent_prompts = []
+
+    class RecordingClient:
+        async def collect(self, **kwargs):
+            context = current_context()
+            assert context is not None and context.read_enabled
+            material = request_key_material({**kwargs, "provider_fast_mode": context.provider_fast_mode})
+            keys.append(context.llm_key("wmh_world_model", material))
+            sent_prompts.append(kwargs["messages"][1]["content"])
+            response = RoseResponse()
+            response.content = '{"output":"ok","is_error":false,"state_note":""}'
+            response.actual_model = "gpt-5.6-terra-gpt"
+            return response
+
+    provider = RoseWMHProvider(client=RecordingClient(), usage=RoseUsageAccumulator())
+
+    async def no_auth():
+        return None, None
+
+    with patch.object(provider, "_lease_auth", no_auth):
+        for root_id, tool_id, timestamp_ms, phase in (
+            ("5ef8d350-deab-46b7-9077-5ebe64c94c41", "call_abcdefghijklmnop", 1790596437171, "plan"),
+            ("944a1e33-c63a-4e2f-a896-0fcdde85b526", "call_qrstuvwxyzabcdef", 1790601558171, "plan"),
+            ("944a1e33-c63a-4e2f-a896-0fcdde85b526", "call_qrstuvwxyzabcdef", 1790601558171, "execute"),
+        ):
+            state = EnvState(
+                structured={"schema": "rose.runtime_initial_state.v1", "root_agent_id": root_id, "root_goal": goal}
+            )
+            action = Action(
+                kind=ActionKind.TOOL_CALL,
+                name="rose.message.notify_sms_event",
+                arguments={
+                    "schema": "rose.canonical_action.v1",
+                    "category": "message",
+                    "name": "notify_sms_event",
+                    "arguments": {"event_type": "agent_started", "payload": {"goal": goal, "phase": phase}},
+                    "agent_id": root_id,
+                    "tool_call_id": tool_id,
+                    "timestamp_ms": timestamp_ms,
+                },
+            )
+            system, user = build_env_prompt("SYS", goal, state, action)
+            await provider._complete_async(system, [Message(role="user", content=user)], max_tokens=16384)
+
+    assert sent_prompts[0] != sent_prompts[1], "The provider must see the unmodified WMH prompt"
+    assert keys[0] == keys[1], "Equivalent DEMO actions must reuse the same WHM cache entry"
+    assert keys[1] != keys[2], "A meaningful action change must still produce a new key"
 
 
 def test_world_model_observation_latency_normalization_matches_runtime_helper():
@@ -1695,6 +3004,115 @@ def test_world_model_observation_decodes_real_server_json_content():
         assert result["structured_response"] == {"purchase_completed": True}
         assert result["world_model_observation"] == observation
         assert result["world_model_simulated"] is True
+
+
+def test_world_model_observation_unwraps_archived_prod_result_shape():
+    """Archive OTel envelopes are training format, not parent-agent tool output."""
+    from benchmarks.world_model_harness import world_model_observation_to_tool_result
+    from helpers.world_model_runtime import world_model_observation_to_tool_result as runtime_to_tool_result
+
+    observation = {
+        "content": json.dumps(
+            {
+                "schema": "rose.canonical_observation.v1",
+                "category": "explore_result",
+                "content": "Found three investors and verified their contact details.",
+                "is_error": False,
+                "metadata": {"source": "agent_message", "tool_status": "FINISHED"},
+            }
+        ),
+        "is_error": False,
+        "metadata": {},
+    }
+
+    for convert in (world_model_observation_to_tool_result, runtime_to_tool_result):
+        result = convert(observation, simulated=True)
+        assert result["success"] is True
+        assert result["message"] == "Found three investors and verified their contact details."
+        assert result["result"] == "Found three investors and verified their contact details."
+        assert result["world_model_observation"] == observation
+
+
+def test_world_model_observation_preserves_archived_browser_state_shape():
+    """Browser transitions in the real corpus contain action_result + browser_state."""
+    from benchmarks.world_model_harness import world_model_observation_to_tool_result
+    from helpers.world_model_runtime import world_model_observation_to_tool_result as runtime_to_tool_result
+
+    browser_result = {
+        "action_result": {"success": True},
+        "browser_state": {"url": "https://example.test/dashboard", "title": "Dashboard"},
+    }
+    observation = {
+        "content": json.dumps(
+            {
+                "schema": "rose.canonical_observation.v1",
+                "category": "browser_state",
+                "content": json.dumps(browser_result),
+                "is_error": False,
+                "metadata": {"source": "browser"},
+            }
+        ),
+        "is_error": False,
+        "metadata": {},
+    }
+
+    for convert in (world_model_observation_to_tool_result, runtime_to_tool_result):
+        result = convert(observation, simulated=True)
+        assert result["action_result"] == browser_result["action_result"]
+        assert result["browser_state"] == browser_result["browser_state"]
+        assert result["success"] is True
+        assert result["world_model_observation"] == observation
+
+
+def test_world_model_observation_unwraps_nested_output_envelope():
+    """An off-contract extra WMH output wrapper must not leak archive JSON."""
+    from benchmarks.world_model_harness import world_model_observation_to_tool_result
+    from helpers.world_model_runtime import world_model_observation_to_tool_result as runtime_to_tool_result
+
+    canonical = json.dumps(
+        {
+            "schema": "rose.canonical_observation.v1",
+            "category": "explore_result",
+            "content": "Thirty investor candidates found.",
+            "is_error": False,
+            "metadata": {"source": "agent_message"},
+        }
+    )
+    observation = {
+        "content": json.dumps({"output": canonical, "is_error": False}),
+        "is_error": False,
+        "metadata": {},
+    }
+
+    for convert in (world_model_observation_to_tool_result, runtime_to_tool_result):
+        result = convert(observation, simulated=True)
+        assert result["message"] == "Thirty investor candidates found."
+        assert result["result"] == "Thirty investor candidates found."
+        assert "output" not in result
+
+
+def test_world_model_observation_keeps_error_text_for_temporal_messages():
+    """A WMH error must never become a boolean post_agent_message argument."""
+    from benchmarks.world_model_harness import world_model_observation_to_tool_result
+    from helpers.world_model_runtime import world_model_observation_to_tool_result as runtime_to_tool_result
+
+    observation = {
+        "content": json.dumps(
+            {
+                "error": True,
+                "message": "The approved transport was rejected by the provider.",
+                "is_error": True,
+            }
+        ),
+        "is_error": True,
+        "metadata": {},
+    }
+
+    for convert in (world_model_observation_to_tool_result, runtime_to_tool_result):
+        result = convert(observation, simulated=True)
+        assert result["success"] is False
+        assert result["error"] == "The approved transport was rejected by the provider."
+        assert isinstance(result["error"], str)
 
 
 def test_simulated_browser_transition_contract_requires_one_grounded_action():
@@ -2545,6 +3963,188 @@ async def test_runtime_world_model_session_uses_first_tool_goal_as_task():
         teardown_mock()
 
 
+async def test_runtime_world_model_session_prioritizes_root_and_delegated_goals():
+    from helpers import world_model_runtime as runtime
+
+    requests: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        requests.append((str(request.url), body))
+        if str(request.url).endswith("/world_models/rose-golden/sessions"):
+            return httpx.Response(200, json={"session_id": "session-root-goal"})
+        if str(request.url).endswith("/world_models/rose-golden/sessions/session-root-goal/step"):
+            return httpx.Response(
+                200,
+                json={
+                    "observation": {
+                        "content": '{"status":"completed","success":true}',
+                        "is_error": False,
+                        "metadata": {},
+                    }
+                },
+            )
+        return httpx.Response(404, json={"error": "unexpected"})
+
+    async def real_executor(_tool_name: str, _tool_args: dict, _tool_call_id: str) -> dict:
+        raise AssertionError("simulate mode must not call the real executor")
+
+    cache_key = ("agent-root-goal-test", "rose-golden")
+    runtime._WMH_SESSION_CACHE.pop(cache_key, None)
+    setup_mock_fn(handler)
+    try:
+        adapter = runtime.WorldModelToolExecutionAdapter(
+            mode="simulate",
+            client=runtime.WMHHttpClient("https://wmh.example.test"),
+            world_model_name="rose-golden",
+            agent_id="agent-root-goal-test",
+        )
+        await adapter.execute(
+            "spawn_explore_agent",
+            {
+                "root_goal": "Raise $5M for Rose Labs",
+                "goal": "Check for replies to the latest outreach wave",
+            },
+            "tool-explore",
+            real_executor,
+        )
+        assert requests[0][1]["task"] == (
+            "ROOT OBJECTIVE:\nRaise $5M for Rose Labs\n\n"
+            "CURRENT DELEGATION:\nCheck for replies to the latest outreach wave"
+        )
+        assert requests[0][1]["seed_state"] == {
+            "structured": {
+                "schema": "rose.runtime_initial_state.v1",
+                "root_agent_id": "agent-root-goal-test",
+                "root_goal": "Raise $5M for Rose Labs",
+            },
+            "scratchpad": "",
+        }
+    finally:
+        runtime._WMH_SESSION_CACHE.pop(cache_key, None)
+        teardown_mock()
+
+
+async def test_startup_sms_seeds_wmh_with_demo_root_goal():
+    """The first lifecycle notification must not label the shared WMH session as SMS."""
+    from helpers import world_model_runtime as runtime
+
+    created: list[dict] = []
+    actions: list[str] = []
+
+    class FakeClient:
+        async def create_session(self, _model, *, task=None, seed_state=None, session_scope_id=None):
+            created.append({"task": task, "seed_state": seed_state, "scope": session_scope_id})
+            return "session-startup"
+
+        async def step(self, _model, _session_id, action):
+            actions.append(action.name)
+            return {"content": '{"success":true}', "is_error": False, "metadata": {}}
+
+    async def forbidden_real(_tool_name, _tool_args, _tool_call_id):
+        raise AssertionError("simulate mode must not send an actual SMS")
+
+    root_goal = "Raise me 5m dollars for my company Rose Labs\nNo questions asked"
+    cache_key = ("agent-startup-test", "rose-golden")
+    runtime._WMH_SESSION_CACHE.pop(cache_key, None)
+    try:
+        adapter = runtime.WorldModelToolExecutionAdapter(
+            mode="simulate",
+            client=FakeClient(),
+            world_model_name="rose-golden",
+            agent_id="agent-startup-test",
+        )
+        await adapter.execute(
+            "notify_sms_event",
+            {
+                "event_type": "agent_started",
+                "agent_id": "agent-startup-test",
+                "payload": {"goal": root_goal},
+            },
+            "startup-sms",
+            forbidden_real,
+            allow_real_fallback=False,
+        )
+        await adapter.execute(
+            "spawn_browser_agent",
+            {"root_goal": root_goal, "goal": "Inspect Brex"},
+            "browser-tool",
+            forbidden_real,
+            allow_real_fallback=False,
+        )
+        assert created == [{
+            "task": root_goal,
+            "seed_state": {
+                "structured": {
+                    "schema": "rose.runtime_initial_state.v1",
+                    "root_agent_id": "agent-startup-test",
+                    "root_goal": root_goal,
+                },
+                "scratchpad": "",
+            },
+            "scope": "agent-startup-test",
+        }]
+        assert actions == ["notify_sms_event", "spawn_browser_agent"]
+    finally:
+        runtime._WMH_SESSION_CACHE.pop(cache_key, None)
+
+
+async def test_runtime_world_model_session_is_shared_by_root_agent_tree():
+    """Root and real GP children share WMH state; separate roots stay isolated."""
+    from helpers import world_model_runtime as runtime
+
+    created: list[str] = []
+    stepped: list[tuple[str, str]] = []
+
+    class FakeClient:
+        async def create_session(
+            self, _model, *, task=None, seed_state=None, session_scope_id=None
+        ):
+            session_id = f"session-{len(created) + 1}"
+            created.append(session_id)
+            return session_id
+
+        async def step(self, _model, session_id, action):
+            stepped.append((session_id, action.agent_id))
+            return {"content": "ok", "is_error": False}
+
+    async def forbidden_real(_tool_name, _tool_args, _tool_call_id):
+        raise AssertionError("simulate mode must not call the real executor")
+
+    keys = [("root-tree-1", "rose-golden"), ("root-tree-2", "rose-golden")]
+    for key in keys:
+        runtime._WMH_SESSION_CACHE.pop(key, None)
+    try:
+        for agent_id, scope_id in (
+            ("root-tree-1", "root-tree-1"),
+            ("gp-child-1", "root-tree-1"),
+            ("root-tree-2", "root-tree-2"),
+        ):
+            adapter = runtime.WorldModelToolExecutionAdapter(
+                mode="simulate",
+                client=FakeClient(),
+                world_model_name="rose-golden",
+                agent_id=agent_id,
+                session_scope_id=scope_id,
+            )
+            await adapter.execute(
+                "browser_action",
+                {"goal": "inspect shared state"},
+                f"tool-{agent_id}",
+                forbidden_real,
+            )
+
+        assert created == ["session-1", "session-2"]
+        assert stepped == [
+            ("session-1", "root-tree-1"),
+            ("session-1", "gp-child-1"),
+            ("session-2", "root-tree-2"),
+        ]
+    finally:
+        for key in keys:
+            runtime._WMH_SESSION_CACHE.pop(key, None)
+
+
 async def test_runtime_world_model_session_forwards_seed_state():
     from helpers import world_model_runtime as runtime
 
@@ -2578,6 +4178,7 @@ async def test_runtime_world_model_session_forwards_seed_state():
             {
                 "task": "Complete the Amazon checkout",
                 "seed_state": seed_state,
+                "session_scope_id": "agent-seed-test",
             }
         ]
     finally:
@@ -2622,7 +4223,10 @@ def test_browser_adapter_can_ignore_run_wide_world_model_session():
 def test_per_agent_world_model_mode_overrides_process_default():
     """A product agent's persisted mode wins over the worker-wide benchmark default."""
 
-    from helpers.world_model_runtime import WorldModelToolExecutionAdapter
+    from helpers.world_model_runtime import (
+        WorldModelToolExecutionAdapter,
+        is_world_model_environment_boundary,
+    )
 
     old_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
     try:
@@ -2633,6 +4237,13 @@ def test_per_agent_world_model_mode_overrides_process_default():
         )
         assert adapter.mode == "simulate"
         assert adapter.should_simulate("web_search") is True
+        assert adapter.should_simulate("spawn_explore_agent") is True
+        assert adapter.should_simulate("spawn_browser_agent") is True
+        assert adapter.should_simulate("browser_action") is True
+        assert adapter.should_simulate("spawn_code_agent") is True
+        assert adapter.should_simulate("spawn_general_purpose_agent") is False
+        assert adapter.should_simulate("spawn_general_purpose_agent_for_each") is False
+        assert is_world_model_environment_boundary("spawn_agent") is False
     finally:
         if old_mode is None:
             os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
@@ -2688,7 +4299,11 @@ async def test_world_model_tool_execution_adapter_simulate_and_shadow_modes():
         assert is_world_model_environment_boundary("web_fetch") is True
         assert is_world_model_environment_boundary("people_search") is True
         assert is_world_model_environment_boundary("spawn_agent") is False
-        assert is_world_model_environment_boundary("spawn_browser_agent") is False
+        assert is_world_model_environment_boundary("spawn_explore_agent") is True
+        assert is_world_model_environment_boundary("spawn_browser_agent") is True
+        assert is_world_model_environment_boundary("spawn_code_agent") is True
+        assert is_world_model_environment_boundary("spawn_general_purpose_agent") is False
+        assert is_world_model_environment_boundary("spawn_general_purpose_agent_for_each") is False
         assert is_world_model_environment_boundary("browser_action") is True
         assert is_world_model_environment_boundary("call_phone_number") is True
         assert is_world_model_environment_boundary("payment_mint") is True
@@ -2699,6 +4314,9 @@ async def test_world_model_tool_execution_adapter_simulate_and_shadow_modes():
         assert is_world_model_environment_boundary("fast_cache_write") is False
         assert simulate.should_simulate("vapi_poll_call") is True
         assert simulate.should_simulate("spawn_agent") is False
+        assert simulate.should_simulate("spawn_explore_agent") is True
+        assert simulate.should_simulate("spawn_general_purpose_agent") is False
+        assert simulate.should_simulate("spawn_general_purpose_agent_for_each") is False
 
         simulated = await simulate.execute("vapi_poll_call", {"call_id": "call-1"}, "tool-vapi", real_executor)
         assert simulated["world_model_simulated"] is True
@@ -2892,9 +4510,257 @@ def test_write_eval_suite_matches_wmh_examples_shape():
         assert 'judge = "rubric"' in text
 
 
+def test_served_wmh_parallelizes_same_session_llm_calls_and_keeps_both_steps():
+    """Parallel child actions may predict together without losing session writes."""
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    from fastapi import FastAPI
+    from wmh.core.types import Action
+    from wmh.engine.world_model import WorldModel
+    from wmh.providers.base import Completion, ProviderConfig, ProviderKind, TokenUsage
+
+    from benchmarks.serve_world_model import _install_root_scoped_sessions
+
+    class Retriever:
+        def topk(self, state, action, k):
+            return []
+
+        def add(self, step):
+            pass
+
+    class Provider:
+        config = ProviderConfig(kind=ProviderKind.OPENAI, model="gpt-5")
+
+        def __init__(self):
+            self.barrier = threading.Barrier(2)
+            self.lock = threading.Lock()
+            self.active = 0
+            self.peak_active = 0
+
+        def complete(self, system, messages, **kwargs):
+            with self.lock:
+                self.active += 1
+                self.peak_active = max(self.peak_active, self.active)
+            try:
+                try:
+                    self.barrier.wait(timeout=3)
+                except threading.BrokenBarrierError:
+                    pass
+                return Completion(
+                    text=json.dumps({"output": "sent", "state_note": "delivery recorded"}),
+                    usage=TokenUsage(input_tokens=1, output_tokens=1),
+                )
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    with tempfile.TemporaryDirectory() as tmp:
+        provider = Provider()
+        model = WorldModel(provider, Retriever(), telemetry_root=tmp)
+        session = model.new_session(task="Send two independent messages")
+        _install_root_scoped_sessions(FastAPI(), "rose", model)
+        actions = [
+            Action(kind="tool_call", name="rose.message.message_transport_send", arguments={"id": n})
+            for n in (1, 2)
+        ]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(model.step, session.id, action) for action in actions]
+            observations = [future.result(timeout=5) for future in futures]
+
+        assert provider.peak_active == 2, "same-session WMH predictions must overlap"
+        assert [observation.content for observation in observations] == ["sent", "sent"]
+        assert len(session.history) == 2
+        assert session.state.scratchpad.count("delivery recorded") == 2
+        assert model.session_usage(session.id).total.calls == 2
+
+
+def test_wmh_rose_provider_shares_one_event_loop_across_parallel_calls():
+    """WMH cache batches use asyncio futures, which require one owning event loop."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    from wmh.providers.base import Message
+
+    from benchmarks.wmh_rose_provider import RoseUsageAccumulator, RoseWMHProvider
+    from providers.rose import RoseResponse
+
+    class Client:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.active = 0
+            self.peak_active = 0
+            self.loops = []
+
+        async def collect(self, **kwargs):
+            with self.lock:
+                self.active += 1
+                self.peak_active = max(self.peak_active, self.active)
+                self.loops.append(asyncio.get_running_loop())
+            try:
+                await asyncio.sleep(0.05)
+                response = RoseResponse()
+                response.content = '{"output":"ok"}'
+                response.actual_model = "gpt-5"
+                response.usage = {"prompt_tokens": 1, "completion_tokens": 1}
+                return response
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    class NoLeaseProvider(RoseWMHProvider):
+        async def _lease_auth(self):
+            return None, None
+
+    client = Client()
+    provider = NoLeaseProvider(client=client, usage=RoseUsageAccumulator())
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(provider.complete, "SYS", [Message(role="user", content="go")]) for _ in range(2)]
+        observations = [future.result(timeout=5) for future in futures]
+
+    assert client.peak_active == 2, "WMH LLM calls must overlap"
+    assert len(client.loops) == 2 and client.loops[0] is client.loops[1], (
+        "parallel WMH cache lookups must share the event loop that owns their futures"
+    )
+    assert [observation.text for observation in observations] == ['{"output":"ok"}'] * 2
+
+
+def test_wmh_parallel_calls_finish_real_fast_cache_batch_lookups():
+    """Two served LLM calls must both leave the actual Fast Cache future queue."""
+    import asyncio
+    import itertools
+    import threading
+
+    from wmh.providers.base import Message
+
+    from benchmarks.wmh_rose_provider import RoseUsageAccumulator, RoseWMHProvider
+    from providers.fast_cache import client as cache_client
+    from providers.rose import RoseResponse
+
+    async def fake_fetch(keys):
+        return {key: {"hit": False, "value": None, "blobPath": None} for key in keys}
+
+    class Client:
+        keys = itertools.count()
+
+        async def collect(self, **kwargs):
+            record = await cache_client._cache_get_record_batched(f"wmh-parallel-{next(self.keys)}")
+            assert record["hit"] is False
+            response = RoseResponse()
+            response.content = '{"output":"ok"}'
+            response.actual_model = "gpt-5"
+            response.usage = {"prompt_tokens": 1, "completion_tokens": 1}
+            return response
+
+    class NoLeaseProvider(RoseWMHProvider):
+        async def _lease_auth(self):
+            return None, None
+
+    provider = NoLeaseProvider(client=Client(), usage=RoseUsageAccumulator())
+    finished = []
+    errors = []
+
+    def call():
+        try:
+            finished.append(provider.complete("SYS", [Message(role="user", content="go")]).text)
+        except BaseException as exc:
+            errors.append(exc)
+
+    with patch.object(cache_client, "_fetch_cache_records_many", fake_fetch), patch.object(
+        cache_client, "_GET_BATCH_DELAY_S", 0.05
+    ):
+        threads = [threading.Thread(target=call, daemon=True) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+        assert not errors
+        assert finished == ['{"output":"ok"}'] * 2, "a WMH cache future was left pending"
+
+
+def test_served_wmh_rejects_empty_and_truncated_rose_predictions_without_committing():
+    """Replay reasoning-only output through Rose and the actual WMH HTTP step."""
+    from fastapi.testclient import TestClient
+    from wmh.engine.world_model import WorldModel
+    from wmh.serving.server import create_app
+
+    from benchmarks.serve_world_model import _install_root_scoped_sessions
+    from benchmarks.wmh_rose_provider import RoseUsageAccumulator, RoseWMHProvider
+    from providers.rose import RoseResponse
+
+    class Retriever:
+        def __init__(self):
+            self.added = []
+
+        def topk(self, state, action, k):
+            return []
+
+        def add(self, step):
+            self.added.append(step)
+
+    class Client:
+        content = ""
+        finish_reason = "length"
+
+        async def collect(self, **kwargs):
+            response = RoseResponse()
+            response.content = self.content
+            response.actual_model = "qwen-3.8-27b"
+            response.usage = {
+                "prompt_tokens": 100,
+                "completion_tokens": 16384,
+                "finish_reason": self.finish_reason,
+            }
+            return response
+
+    class NoLeaseProvider(RoseWMHProvider):
+        async def _lease_auth(self):
+            return None, None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        client = Client()
+        usage = RoseUsageAccumulator()
+        retriever = Retriever()
+        model = WorldModel(NoLeaseProvider(client=client, usage=usage), retriever, telemetry_root=tmp)
+        app = create_app(world_models={"rose": model})
+        _install_root_scoped_sessions(app, "rose", model)
+        http = TestClient(app, raise_server_exceptions=False)
+        session = model.new_session(task="Research investor prospects")
+        before = session.model_dump(mode="json")
+        url = f"/world_models/rose/sessions/{session.id}/step"
+        action = {"kind": "tool_call", "name": "rose.explore.spawn_explore_agent", "arguments": {}}
+
+        for content, finish in [("", "length"), (" \n\t", "stop"), ('{"output":"unfinished', "length")]:
+            client.content, client.finish_reason = content, finish
+            response = http.post(url, json={"action": action})
+            assert response.status_code == 500, "blank or truncated WMH completion must not become successful tool output"
+            assert session.model_dump(mode="json") == before, "failed prediction changed WMH state"
+            assert not retriever.added, "failed prediction polluted retrieval"
+
+        client.content, client.finish_reason = '{"output":"verified prospects","state_note":"research complete"}', "stop"
+        response = http.post(url, json={"action": action})
+        assert response.status_code == 200
+        assert response.json()["observation"]["content"] == "verified prospects"
+        assert len(session.history) == len(retriever.added) == 1
+        assert usage.snapshot().calls == 4, "rejected completions must still be metered"
+
+
 async def run_all_tests():
     print("world model harness blackbox tests:")
     r = BlackboxResult()
+    r.record(
+        "served_wmh_rejects_empty_and_truncated_rose_predictions_without_committing",
+        test_served_wmh_rejects_empty_and_truncated_rose_predictions_without_committing,
+    )
+    r.record(
+        "served_wmh_parallelizes_same_session_llm_calls_and_keeps_both_steps",
+        test_served_wmh_parallelizes_same_session_llm_calls_and_keeps_both_steps,
+    )
+    r.record(
+        "wmh_rose_provider_shares_one_event_loop_across_parallel_calls",
+        test_wmh_rose_provider_shares_one_event_loop_across_parallel_calls,
+    )
     r.record(
         "exported_otel_jsonl_ingests_with_upstream_wmh_and_preserves_state_refs",
         test_exported_otel_jsonl_ingests_with_upstream_wmh_and_preserves_state_refs,
@@ -2905,11 +4771,15 @@ async def run_all_tests():
     )
     r.record(
         "bundle_signature_ignores_plaintext_public_manifest_but_rejects_untracked_ciphertext",
-        test_bundle_signature_ignores_plaintext_public_manifest_but_rejects_untracked_ciphertext,
+        test_bundle_signature_ignores_plaintext_public_manifest_and_tracks_unrelated_orphan,
     )
     r.record(
         "bundle_signature_r2_rejects_enumerated_ciphertext_without_metadata",
-        test_bundle_signature_r2_rejects_enumerated_ciphertext_without_metadata,
+        test_bundle_signature_r2_tracks_enumerated_ciphertext_without_metadata,
+    )
+    r.record(
+        "bundle_signature_and_refs_read_metadata_only_under_r2",
+        test_bundle_signature_and_refs_read_metadata_only_under_r2,
     )
     r.record(
         "replay_corpus_split_and_initial_state_are_deterministic_and_public",
@@ -2936,12 +4806,60 @@ async def run_all_tests():
         test_update_world_model_excludes_simulated_bundles_from_corpus,
     )
     r.record(
+        "index_refresh_parallel_embeddings_match_in_process",
+        test_index_refresh_parallel_embeddings_match_in_process,
+    )
+    r.record(
+        "partial_run_recovers_completed_tool_results_from_llm_contexts",
+        test_partial_run_recovers_completed_tool_results_from_llm_contexts,
+    )
+    r.record(
+        "index_records_survive_unicode_line_breaks_in_observations",
+        test_index_records_survive_unicode_line_breaks_in_observations,
+    )
+    r.record(
+        "update_world_model_skips_bundles_that_fail_export",
+        test_update_world_model_skips_bundles_that_fail_export,
+    )
+    r.record(
+        "corpus_screening_admits_only_exportable_bundles_and_caches_verdicts",
+        test_corpus_screening_admits_only_exportable_bundles_and_caches_verdicts,
+    )
+    r.record(
+        "corpus_screening_retries_transient_r2_throttles",
+        test_corpus_screening_retries_transient_r2_throttles,
+    )
+    r.record(
+        "bundle_signature_retries_transient_r2_throttles",
+        test_bundle_signature_retries_transient_r2_throttles,
+    )
+    r.record(
+        "export_worker_filters_bundles_without_completed_results",
+        test_export_worker_filters_bundles_without_completed_results,
+    )
+    r.record(
+        "export_worker_retries_transient_r2_stream_failures",
+        test_export_worker_retries_transient_r2_stream_failures,
+    )
+    r.record(
         "world_model_bundle_cap_preserves_existing_index_entries",
         test_world_model_bundle_cap_preserves_existing_index_entries,
     )
     r.record(
+        "demo_filter_purges_previously_indexed_steps_without_ingestion_failure",
+        test_demo_filter_purges_previously_indexed_steps_without_ingestion_failure,
+    )
+    r.record(
         "grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_fallbacks",
         test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_fallbacks,
+    )
+    r.record(
+        "grounded_export_and_conformance_suite_cover_100_real_terminal_tool_results",
+        test_grounded_export_and_conformance_suite_cover_100_real_terminal_tool_results,
+    )
+    await r.record_async(
+        "prediction_conformance_replays_expected_observations_and_fails_on_low_fidelity",
+        test_prediction_conformance_replays_expected_observations_and_fails_on_low_fidelity,
     )
     r.record(
         "load_transitions_drops_fast_cache_replays_from_corpus",
@@ -2967,6 +4885,10 @@ async def run_all_tests():
         "world_model_action_timestamp_uses_sim_clock_env_and_validates_it",
         test_world_model_action_timestamp_uses_sim_clock_env_and_validates_it,
     )
+    await r.record_async(
+        "demo_wmh_cache_reuses_equivalent_actions_across_run_ids",
+        test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids,
+    )
     r.record(
         "world_model_observation_latency_normalization_matches_runtime_helper",
         test_world_model_observation_latency_normalization_matches_runtime_helper,
@@ -2978,6 +4900,22 @@ async def run_all_tests():
     r.record(
         "world_model_observation_decodes_real_server_json_content",
         test_world_model_observation_decodes_real_server_json_content,
+    )
+    r.record(
+        "world_model_observation_unwraps_archived_prod_result_shape",
+        test_world_model_observation_unwraps_archived_prod_result_shape,
+    )
+    r.record(
+        "world_model_observation_preserves_archived_browser_state_shape",
+        test_world_model_observation_preserves_archived_browser_state_shape,
+    )
+    r.record(
+        "world_model_observation_unwraps_nested_output_envelope",
+        test_world_model_observation_unwraps_nested_output_envelope,
+    )
+    r.record(
+        "world_model_observation_keeps_error_text_for_temporal_messages",
+        test_world_model_observation_keeps_error_text_for_temporal_messages,
     )
     r.record(
         "simulated_browser_transition_contract_requires_one_grounded_action",
@@ -3018,6 +4956,18 @@ async def run_all_tests():
     await r.record_async(
         "runtime_world_model_session_uses_first_tool_goal_as_task",
         test_runtime_world_model_session_uses_first_tool_goal_as_task,
+    )
+    await r.record_async(
+        "runtime_world_model_session_prioritizes_root_and_delegated_goals",
+        test_runtime_world_model_session_prioritizes_root_and_delegated_goals,
+    )
+    await r.record_async(
+        "startup_sms_seeds_wmh_with_demo_root_goal",
+        test_startup_sms_seeds_wmh_with_demo_root_goal,
+    )
+    await r.record_async(
+        "runtime_world_model_session_is_shared_by_root_agent_tree",
+        test_runtime_world_model_session_is_shared_by_root_agent_tree,
     )
     await r.record_async(
         "runtime_world_model_session_forwards_seed_state",
@@ -3066,6 +5016,10 @@ async def run_all_tests():
     await r.record_async(
         "simulated_provider_activities_call_wmh_instead_of_live_services",
         test_simulated_provider_activities_call_wmh_instead_of_live_services,
+    )
+    r.record(
+        "wmh_parallel_calls_finish_real_fast_cache_batch_lookups",
+        test_wmh_parallel_calls_finish_real_fast_cache_batch_lookups,
     )
     teardown_mock()
     return r.all_passed

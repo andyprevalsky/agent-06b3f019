@@ -9,6 +9,11 @@ SUMMARY_HTTP_TIMEOUT = 15.0
 # Cache TTL for local data summaries (minutes)
 SUMMARY_CACHE_TTL_MINUTES = 5
 
+# Agent-side cap on a grep page's total match content (chars). The backend
+# enforces MAX_RESULT_CHARS (32k) per page; this mirrors it defensively so a
+# page can never balloon an explore context or a Temporal payload again.
+GREP_RESULT_MAX_CHARS = 40_000
+
 # Truncation limit for display pattern in tool events
 DISPLAY_PATTERN_MAX_LENGTH = 80
 

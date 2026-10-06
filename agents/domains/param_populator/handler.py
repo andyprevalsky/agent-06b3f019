@@ -32,7 +32,7 @@ async def populate_tool_params_activity(
         tool_name: Name of the tool to populate params for.
         goal: The task goal from the plan.
         agent_id: Agent ID to fetch context from DB.
-        model: LLM model identifier (unused — overridden to rose-1-ultra in service).
+        model: LLM model identifier selected for the agent.
         alias_hint: Original alias name for type-specific prompt instructions.
         claude_token: Optional Claude OAuth token for direct Anthropic calls.
 
@@ -44,6 +44,7 @@ async def populate_tool_params_activity(
             tool_name=tool_name,
             goal=goal,
             agent_id=agent_id,
+            model=model,
             alias_hint=alias_hint,
             claude_token=claude_token,
             heartbeat=activity.heartbeat,

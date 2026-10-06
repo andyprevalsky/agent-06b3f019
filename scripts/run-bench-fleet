@@ -8293,6 +8293,12 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
       done
       worker_provision_cancelled && finish_cancelled_worker_provision
       log_worker_stage "worker did not reach queue readiness within ${worker_ready_timeout}s"
+      # Preserve the worker-side bootstrap failure before cleanup destroys its
+      # snapshot volume. Without this, a readiness timeout only reports the
+      # symptom and the actionable /data/worker.log disappears with the clone.
+      run_worker_stage_cmd "capture worker log after readiness timeout" \
+          fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
+          -C "tail -n 300 /data/worker.log" || true
       discard_replaceable_worker \
           "worker $wid did not reach queue readiness within ${worker_ready_timeout}s; see worker-$wid.stage.log"
     ) &
@@ -8333,6 +8339,17 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         # provisioners alive and reconcile their durable outcomes until the same
         # invariant used by final acceptance is stable.
         terminal_deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
+        # Capacity that is not in flight can never arrive after the child
+        # finished: the primary tears its stack down when the bench ends, so no
+        # later worker can reach queue readiness. Once no provisioner is
+        # pending, settle after a short grace instead of idling the paid
+        # primary for the full finalization budget (~86 min: observed
+        # 2026-09-08, raise-5m-rose-labs-brex, worker removed at +6 min, then
+        # nothing to wait for). Fail-closed semantics are unchanged.
+        local child_finished_at post_child_settle_seconds
+        child_finished_at="$(stat -c %Y "$out/benchmark-child.finished" 2>/dev/null \
+            || stat -f %m "$out/benchmark-child.finished" 2>/dev/null || date +%s)"
+        post_child_settle_seconds="${CLOUDBENCH_POST_CHILD_SETTLE_SECONDS:-120}"
         while :; do
             ready_reconcile_rc=0
             # Finalization owns the retry deadline. Use one ledger-lock attempt
@@ -8372,6 +8389,15 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
                 && ! find "$out" -maxdepth 1 -name 'worker-*.pending' \
                     -print -quit 2>/dev/null | grep -q .; then
                 break
+            fi
+            if [ "$SECONDS" -lt "$terminal_deadline" ] \
+                && [ "$tracked_workers" = "$ready_workers" ] \
+                && ! find "$out" -maxdepth 1 -name 'worker-*.pending' \
+                    -print -quit 2>/dev/null | grep -q . \
+                && [ "$(( $(date +%s) - child_finished_at ))" -ge "$post_child_settle_seconds" ]; then
+                # Nothing in flight and the grace elapsed: the deadline branch
+                # below would reach the identical verdict after ~86 idle minutes.
+                terminal_deadline="$SECONDS"
             fi
             if [ "$SECONDS" -ge "$terminal_deadline" ]; then
                 if [ "$ready_workers" -lt "$desired_workers" ]; then

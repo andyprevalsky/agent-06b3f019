@@ -3,6 +3,8 @@
  * Data domain service — business logic for grep and summary operations.
  */
 
+import { MAX_RESULT_CHARS } from './config';
+import { boundMatchesByChars } from './grepPageBounds';
 import { isPostgresRegexError } from './regexSafety';
 import { buildAgentNetworkMatch, buildDocumentMatch, buildTransactionMatch } from './format';
 import { formatTimeAgo } from './format.snippets';
@@ -194,8 +196,12 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
     sourceResults.flatMap((result) => result.matches),
     oldestFirst
   );
-  const matches = merged.slice(input.offset, input.offset + input.headLimit);
-  const truncated = totalMatches > input.offset + matches.length;
+  const page = merged.slice(input.offset, input.offset + input.headLimit);
+  // Bound every page by match-content chars. MAX_RESULT_CHARS existed but was
+  // never applied: broad patterns over a 10k-message history returned 240-323 KB
+  // pages, which overflowed explore-agent contexts and Temporal payloads.
+  const { matches, charTruncated } = boundMatchesByChars(page, MAX_RESULT_CHARS);
+  const truncated = totalMatches > input.offset + matches.length || charTruncated;
   const summaries: GrepResult['summaries'] = {};
 
   if (input.sources.includes('transactions')) {
@@ -239,6 +245,8 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
     returned: matches.length,
     has_more: truncated,
     next_offset: truncated ? input.offset + matches.length : null,
+    applied_char_limit: MAX_RESULT_CHARS,
+    ...(charTruncated ? { char_truncated: true } : {}),
     display_order: oldestFirst ? 'oldest_first' : 'newest_first',
     context_unit: oldestFirst
       ? 'message_record'

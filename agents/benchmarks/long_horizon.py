@@ -263,6 +263,24 @@ def _validate_evaluators(evaluators: list[Any], item_id: str) -> list[dict[str, 
     return parsed
 
 
+def validate_wmh_initial_state(value: Any, item_id: str) -> dict[str, Any]:
+    """Validate the benchmark-facing portion of upstream WHM's EnvState."""
+    if not isinstance(value, dict) or set(value) != {"structured", "scratchpad"}:
+        raise ValueError(f"{item_id}: wmh_initial_state must contain structured and scratchpad")
+    structured = value["structured"]
+    if not isinstance(structured, dict) or not isinstance(structured.get("schema"), str):
+        raise ValueError(f"{item_id}: wmh_initial_state.structured requires a schema string")
+    if not structured["schema"].strip() or "root_agent_id" in structured or "root_goal" in structured:
+        raise ValueError(f"{item_id}: wmh_initial_state must have a schema and omit runtime root fields")
+    if not isinstance(value["scratchpad"], str):
+        raise ValueError(f"{item_id}: wmh_initial_state.scratchpad must be a string")
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{item_id}: wmh_initial_state must contain finite JSON values") from exc
+    return value
+
+
 def validate_task_contract(raw: dict[str, Any]) -> None:
     """Validate one tasks.json entry's eval-contract fields (all additive/optional).
 
@@ -329,6 +347,11 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     world_model_mode = raw.get("world_model_mode")
     if world_model_mode is not None and world_model_mode not in WORLD_MODEL_MODES:
         raise ValueError(f"{item_id}: world_model_mode must be one of {sorted(WORLD_MODEL_MODES)}")
+    wmh_initial_state = raw.get("wmh_initial_state")
+    if wmh_initial_state is not None:
+        validate_wmh_initial_state(wmh_initial_state, item_id)
+        if world_model_mode != "simulate":
+            raise ValueError(f"{item_id}: wmh_initial_state requires world_model_mode=simulate")
     description = raw.get("description")
     if description is not None and (not isinstance(description, str) or not description.strip()):
         raise ValueError(f"{item_id}: description must be a non-empty string when present")

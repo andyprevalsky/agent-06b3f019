@@ -77,6 +77,7 @@ class TaskResult:
     payment_lifecycle: Optional[dict] = None
     world_model_fidelity: Optional[dict] = None
     world_model_mode: Optional[str] = None
+    wmh_initial_state: Optional[dict] = None  # scenario seed hash, provenance, and seeded session id
 
 
 @dataclass

@@ -16,6 +16,11 @@ from temporalio import activity
 JsonObject = dict[str, Any]
 ToolExecutor = Callable[[str, JsonObject, str], Awaitable[JsonObject]]
 
+# A WMH step can contain one full Rose provider completion. Rose permits that
+# completion to run for 590 seconds, including provider rotation, so the HTTP
+# transport must outlive it and still leave time to serialize the observation.
+WMH_HTTP_TIMEOUT_DEFAULT_SECONDS = 660.0
+
 _SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret|"
     r"compute_token_used|claude_token_error|gpt_token_error)",
@@ -26,10 +31,18 @@ _SECRET_VALUE_RE = re.compile(
     r"[A-Za-z0-9+/]{32,}={0,2})"
 )
 
+_EXPLORE_ORCHESTRATION_TOOLS = {"spawn_explore_agent", "explore"}
+_FOR_EACH_ORCHESTRATION_TOOLS = {"spawn_general_purpose_agent_for_each", "for_each"}
 _BROWSER_ORCHESTRATION_TOOLS = {"spawn_browser_agent", "spawn_browser_agent_activity_v3", "browser"}
 _BROWSER_BOUNDARY_TOOLS = {"browser_action", "browser_click", "browser_type", "browser_http"}
 _BROWSER_TOOLS = _BROWSER_ORCHESTRATION_TOOLS | _BROWSER_BOUNDARY_TOOLS
-_CODE_TOOLS = {"spawn_claude_code_agent", "spawn_codex_code_agent", "claude_code", "codex_code"}
+_CODE_TOOLS = {
+    "spawn_code_agent",
+    "spawn_claude_code_agent",
+    "spawn_codex_code_agent",
+    "claude_code",
+    "codex_code",
+}
 _MESSAGE_TOOLS = {"message_person", "send_message_to_user", "send_sms", "send_direct_sms", "notify_sms_event"}
 _PAYMENT_TOOLS = {"request_payment_card", "payment_lookup", "payment_mint", "x402", "purchase", "purchase_item"}
 _VAPI_ORCHESTRATION_TOOLS = {"call_phone_number", "vapi"}
@@ -42,7 +55,10 @@ _FAST_CACHE_TOOLS = {"fast_cache_read", "fast_cache_write"}
 # entries by the world-model scope segment in every cache key
 # (fast_cache/normalize.py:world_model_cache_scope).
 _ENVIRONMENT_BOUNDARY_TOOLS = (
-    _BROWSER_BOUNDARY_TOOLS
+    _EXPLORE_ORCHESTRATION_TOOLS
+    | _CODE_TOOLS
+    | _BROWSER_ORCHESTRATION_TOOLS
+    | _BROWSER_BOUNDARY_TOOLS
     | _VAPI_ORCHESTRATION_TOOLS
     | _VAPI_BOUNDARY_TOOLS
     | {
@@ -117,7 +133,9 @@ class WMHHttpClient:
         self.base_url = base_url.rstrip("/")
         configured_timeout = timeout
         if configured_timeout is None:
-            configured_timeout = float(os.environ.get("WMH_HTTP_TIMEOUT_SECONDS", "180"))
+            configured_timeout = float(
+                os.environ.get("WMH_HTTP_TIMEOUT_SECONDS", str(WMH_HTTP_TIMEOUT_DEFAULT_SECONDS))
+            )
         if configured_timeout <= 0:
             raise ValueError("WMH HTTP timeout must be greater than zero")
         self.timeout = configured_timeout
@@ -138,8 +156,13 @@ class WMHHttpClient:
         *,
         task: str | None = None,
         seed_state: JsonObject | None = None,
+        session_scope_id: str | None = None,
     ) -> str:
         body: JsonObject = {"task": task, "seed_state": seed_state}
+        if session_scope_id:
+            # The Rose server makes this key idempotent, so Temporal workers in
+            # separate processes still resolve one root tree to one WMH session.
+            body["session_scope_id"] = session_scope_id
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(f"{self.base_url}/world_models/{world_model}/sessions", json=body)
             response.raise_for_status()
@@ -165,6 +188,10 @@ class WMHHttpClient:
 
 
 def canonical_category_for_tool(tool_name: str) -> str:
+    if tool_name in _EXPLORE_ORCHESTRATION_TOOLS:
+        return "explore"
+    if tool_name in _FOR_EACH_ORCHESTRATION_TOOLS:
+        return "for_each"
     if tool_name in _BROWSER_TOOLS or tool_name.startswith("browser_"):
         return "browser"
     if tool_name in _CODE_TOOLS or "code" in tool_name:
@@ -185,7 +212,12 @@ def canonical_category_for_tool(tool_name: str) -> str:
 
 
 def is_world_model_environment_boundary(tool_name: str) -> bool:
-    """Return true only for provider/environment calls, not agent-facing tools."""
+    """Return true for simulated boundaries, including specialized subagents.
+
+    General-purpose agents are intentionally absent: their agent loops and
+    for-each batches remain real in simulator mode. Explore/browser/code
+    delegation is represented by one terminal WMH observation.
+    """
 
     return tool_name in _ENVIRONMENT_BOUNDARY_TOOLS
 
@@ -254,11 +286,11 @@ def _redact(value: Any) -> Any:
 
 
 # The adapter is constructed per tool call (each handler calls `from_env().execute()`),
-# so WMH sessions are cached at module level keyed by (agent_id, world_model). Repeated
-# boundary calls for one agent reuse the same world session, and no session id needs to be
-# pre-provisioned or injected via env. Product workflows thread the agent id through every
-# intercepted boundary; direct benchmark activity calls may omit it and use the worker's
-# single-run "default" session for backward compatibility.
+# so WMH sessions are cached at module level keyed by (root-agent scope, world_model).
+# Every real general-purpose child in one agent tree must observe and mutate the same
+# simulated world as its root while retaining its own agent_id in canonical actions.
+# Direct benchmark activity calls may omit the scope and fall back to the action agent
+# (or the worker's single-run "default" session) for backward compatibility.
 _WMH_SESSION_CACHE: dict[tuple[str, str], str] = {}
 _WMH_SESSION_LOCK = asyncio.Lock()
 
@@ -266,13 +298,13 @@ _WMH_SESSION_LOCK = asyncio.Lock()
 async def ensure_world_model_session(
     client: "WMHHttpClient",
     world_model_name: str,
-    agent_id: str | None,
+    session_scope_id: str | None,
     *,
     task: str | None = None,
     seed_state: JsonObject | None = None,
 ) -> str:
-    """Return a cached WMH session for (agent_id, world_model), creating one if absent."""
-    key = (agent_id or "default", world_model_name)
+    """Return a cached WMH session for (root-agent scope, world model)."""
+    key = (session_scope_id or "default", world_model_name)
     cached = _WMH_SESSION_CACHE.get(key)
     if cached:
         return cached
@@ -284,6 +316,7 @@ async def ensure_world_model_session(
             world_model_name,
             task=task,
             seed_state=seed_state,
+            session_scope_id=session_scope_id,
         )
         _WMH_SESSION_CACHE[key] = session_id
         return session_id
@@ -300,6 +333,8 @@ class WorldModelToolExecutionAdapter:
         world_model_name: str | None = None,
         session_id: str | None = None,
         agent_id: str | None = None,
+        session_scope_id: str | None = None,
+        timestamp_ms: int | None = None,
     ) -> None:
         if mode not in {"real", "shadow", "simulate"}:
             raise ValueError("mode must be one of: real, shadow, simulate")
@@ -308,14 +343,18 @@ class WorldModelToolExecutionAdapter:
         self.world_model_name = world_model_name
         self.session_id = session_id
         self.agent_id = agent_id
+        self.session_scope_id = session_scope_id or agent_id
+        self.timestamp_ms = timestamp_ms
 
     @classmethod
     def from_env(
         cls,
         *,
         agent_id: str | None = None,
+        session_scope_id: str | None = None,
         inherit_explicit_session: bool = True,
         mode: str | None = None,
+        timestamp_ms: int | None = None,
     ) -> "WorldModelToolExecutionAdapter":
         resolved_mode = (mode or os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real")).strip().lower() or "real"
         base_url = os.environ.get("WMH_BASE_URL") or os.environ.get("WORLD_MODEL_HARNESS_URL")
@@ -330,6 +369,8 @@ class WorldModelToolExecutionAdapter:
             world_model_name=model_name,
             session_id=session_id,
             agent_id=agent_id,
+            session_scope_id=session_scope_id,
+            timestamp_ms=timestamp_ms,
         )
 
     def action_for_tool(self, tool_name: str, tool_args: JsonObject, tool_call_id: str) -> CanonicalAction:
@@ -338,6 +379,7 @@ class WorldModelToolExecutionAdapter:
             tool_args,
             tool_call_id,
             agent_id=self.agent_id,
+            timestamp_ms=self.timestamp_ms,
         )
 
     def should_simulate(self, tool_name: str) -> bool:
@@ -358,7 +400,7 @@ class WorldModelToolExecutionAdapter:
         self.session_id = await ensure_world_model_session(
             self.client,
             self.world_model_name,
-            self.agent_id,
+            self.session_scope_id,
             task=task,
             seed_state=seed_state,
         )
@@ -377,10 +419,11 @@ class WorldModelToolExecutionAdapter:
             return await real_executor(tool_name, tool_args, tool_call_id)
         if not self.client or not self.world_model_name:
             raise RuntimeError("WMH simulation requires WMH_BASE_URL and WMH_MODEL_NAME")
-        # Session is created lazily on first boundary tool and cached per (agent, model);
-        # an explicit WMH_SESSION_ID (if set) still wins.
+        # Session is created lazily on first boundary tool and cached per
+        # (root-agent scope, model); an explicit WMH_SESSION_ID still wins.
         session_id = await self.ensure_session(
             task=_world_model_task_for_tool(tool_name, tool_args),
+            seed_state=_world_model_seed_state_for_tool(tool_args, self.session_scope_id, tool_name),
         )
         action = self.action_for_tool(tool_name, tool_args, tool_call_id)
         if self.mode == "simulate":
@@ -395,6 +438,7 @@ class WorldModelToolExecutionAdapter:
             result.setdefault("world_model_session_id", session_id)
             result.setdefault("world_model_name", self.world_model_name)
             result.setdefault("world_model_boundary", tool_name)
+            result.setdefault("world_model_timestamp_ms", action.timestamp_ms)
             if allow_real_fallback and _wmh_fallback_on_unavailable_enabled() and _wmh_result_unavailable(result):
                 real_result = await real_executor(tool_name, tool_args, tool_call_id)
                 if isinstance(real_result, dict):
@@ -459,9 +503,32 @@ def world_model_observation_to_tool_result(
         content = json.dumps(observation, ensure_ascii=False, sort_keys=True)
     predicted_latency_ms = predicted_latency_ms_from_observation(observation)
     payload = _observation_tool_result_payload(observation)
+    if isinstance(payload, dict) and isinstance(payload.get("output"), str):
+        try:
+            nested = json.loads(payload["output"])
+        except json.JSONDecodeError:
+            nested = None
+        if isinstance(nested, dict) and nested.get("schema") == "rose.canonical_observation.v1":
+            is_error = is_error or payload.get("is_error") is True
+            payload = nested
+    if isinstance(payload, dict) and payload.get("schema") == "rose.canonical_observation.v1":
+        # The offline corpus stores production results inside an OTel training
+        # envelope. The live caller needs the inner result, not that envelope.
+        is_error = is_error or payload.get("is_error") is True
+        inner = payload.get("content")
+        if isinstance(inner, str):
+            content = inner
+            try:
+                inner = json.loads(inner)
+            except json.JSONDecodeError:
+                pass
+        payload = inner if isinstance(inner, dict) else {"result": inner}
     if isinstance(payload, dict):
         result = dict(payload)
-        result.setdefault("success", not is_error)
+        if is_error:
+            result["success"] = False
+        else:
+            result.setdefault("success", True)
         result.setdefault("message", content)
         result.setdefault("world_model_observation", observation)
     else:
@@ -471,7 +538,20 @@ def world_model_observation_to_tool_result(
             "result": observation,
         }
     if is_error:
-        result["error"] = True
+        # Keep provider error payloads textual.  Several workflow handlers pass
+        # ``result["error"]`` straight into a typed ``post_agent_message``
+        # activity; replacing a model-provided error code/message with the
+        # boolean ``True`` makes Temporal reject that later activity argument.
+        # The observation envelope already carries ``is_error`` for callers
+        # that need a boolean failure flag.
+        error = result.get("error")
+        if not isinstance(error, str) or not error.strip():
+            message = result.get("message")
+            result["error"] = (
+                message
+                if isinstance(message, str) and message.strip()
+                else content or "World-model environment action failed"
+            )
     if simulated:
         result["world_model_simulated"] = True
     if predicted_latency_ms is not None:
@@ -509,13 +589,69 @@ def _observation_tool_result_payload(observation: JsonObject) -> Any:
 
 
 def _world_model_task_for_tool(tool_name: str, tool_args: JsonObject) -> str | None:
-    """Give a lazily-created WMH session the user-facing task when available."""
+    """Give a lazily-created WMH session both the root and delegated goals.
 
-    for key in ("goal", "task", "query", "condition"):
-        value = tool_args.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+    Specialized-agent sessions are lazy and their first action is often a
+    narrow discovery check.  Using only that check as WMH's ``TASK`` loses the
+    long-horizon objective even though the action arguments carry it.  Keep the
+    root objective in the task slot (where WMH gives it strongest precedence)
+    while retaining the concrete delegation that determines this transition.
+    """
+
+    root_goal = _world_model_root_goal_for_tool(tool_name, tool_args)
+    delegated_goal = next(
+        (
+            value.strip()
+            for key in ("goal", "task", "query", "condition")
+            if isinstance((value := tool_args.get(key)), str) and value.strip()
+        ),
+        None,
+    )
+    if isinstance(root_goal, str) and root_goal.strip():
+        root_goal = root_goal.strip()
+        if delegated_goal and delegated_goal != root_goal:
+            return f"ROOT OBJECTIVE:\n{root_goal}\n\nCURRENT DELEGATION:\n{delegated_goal}"
+        return root_goal
+    if delegated_goal:
+        return delegated_goal
     return tool_name or None
+
+
+def _world_model_seed_state_for_tool(
+    tool_args: JsonObject,
+    session_scope_id: str | None,
+    tool_name: str | None = None,
+) -> JsonObject:
+    """Seed the simulated world with task identity, never a live environment snapshot."""
+    structured: JsonObject = {
+        "schema": "rose.runtime_initial_state.v1",
+    }
+    if session_scope_id:
+        structured["root_agent_id"] = session_scope_id
+    root_goal = _world_model_root_goal_for_tool(tool_name, tool_args)
+    if isinstance(root_goal, str) and root_goal.strip():
+        structured["root_goal"] = root_goal.strip()
+    return {"structured": structured, "scratchpad": ""}
+
+
+def _world_model_root_goal_for_tool(tool_name: str | None, tool_args: JsonObject) -> str | None:
+    """Recover the root objective from an agent-started lifecycle notification.
+
+    The startup SMS is often the first simulated boundary and creates the shared
+    WMH session before the agent's first tool call. Its goal is nested in
+    ``payload`` rather than top-level ``root_goal``; without this, the session
+    task becomes ``notify_sms_event`` for the entire agent tree.
+    """
+    root_goal = tool_args.get("root_goal")
+    if isinstance(root_goal, str) and root_goal.strip():
+        return root_goal.strip()
+    if tool_name == "notify_sms_event" and tool_args.get("event_type") == "agent_started":
+        payload = tool_args.get("payload")
+        if isinstance(payload, dict):
+            goal = payload.get("goal")
+            if isinstance(goal, str) and goal.strip():
+                return goal.strip()
+    return None
 
 
 def _wmh_fallback_on_unavailable_enabled() -> bool:
@@ -570,3 +706,43 @@ async def world_model_step_activity(
     if not resolved_base_url:
         raise RuntimeError("WMH step requires WMH_BASE_URL or WORLD_MODEL_HARNESS_URL")
     return await WMHHttpClient(resolved_base_url).step(world_model_name, session_id, action)
+
+
+@activity.defn
+async def world_model_specialized_agent_activity(
+    world_model_mode: str,
+    agent_id: str,
+    tool_name: str,
+    tool_args: JsonObject,
+    tool_call_id: str,
+    timestamp_ms: int | None = None,
+    session_scope_id: str | None = None,
+) -> JsonObject:
+    """Resolve one simulated agent-orchestration call as a WMH observation.
+
+    This activity is the workflow-safe orchestration boundary for simulator
+    mode. It must never fall back to a real explore, browser, or code agent.
+    General-purpose orchestration does not call this activity.
+    """
+
+    adapter = WorldModelToolExecutionAdapter.from_env(
+        agent_id=agent_id,
+        session_scope_id=session_scope_id,
+        mode=world_model_mode,
+        timestamp_ms=timestamp_ms,
+    )
+
+    async def forbidden_real_specialized_agent(
+        _tool_name: str,
+        _tool_args: JsonObject,
+        _tool_call_id: str,
+    ) -> JsonObject:
+        raise RuntimeError("Simulator mode forbids launching this real subagent path")
+
+    return await adapter.execute(
+        tool_name,
+        tool_args,
+        tool_call_id,
+        forbidden_real_specialized_agent,
+        allow_real_fallback=False,
+    )

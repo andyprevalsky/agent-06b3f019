@@ -29,6 +29,6 @@ export {
   RoseServerError,
   RoseStallError,
 } from './errors';
-export { PARAM_POPULATOR_MODEL, POOL_REGISTRY, getPool, isRoseModel, poolForModel } from './pools';
+export { POOL_REGISTRY, getPool, isRoseModel, poolForModel } from './pools';
 export type { PoolName, PoolSpec } from './pools';
 export { StructuredOutputAccumulator, StructuredOutputCardinalityError } from './structuredOutput';

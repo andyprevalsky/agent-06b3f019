@@ -540,6 +540,20 @@ async def mock_resolve_fast_cache_goal_activity(agent_id: str) -> Optional[str]:
     )
 
 
+@activity.defn(name="resolve_fast_cache_context_activity")
+async def mock_resolve_fast_cache_context_activity(agent_id: str) -> dict:
+    persisted_goal = await mock_resolve_fast_cache_goal_activity(agent_id)
+    enabled = agent_id == "agent-test-fastcache"
+    return {
+        "enabled": enabled,
+        "goal": persisted_goal if enabled else None,
+        "write_enabled": enabled,
+        "root_agent_id": agent_id,
+        "root_goal": persisted_goal if enabled else None,
+        "provider_fast_mode": enabled,
+    }
+
+
 @activity.defn(name="call_llm_activity")
 async def mock_call_llm_activity(
     messages_or_agent_id: Any,
@@ -778,6 +792,7 @@ MOCK_ACTIVITIES = [
     mock_set_response_schema_activity,
     mock_send_direct_sms_activity,
     mock_resolve_fast_cache_goal_activity,
+    mock_resolve_fast_cache_context_activity,
 ]
 
 
@@ -2178,6 +2193,9 @@ class _FakeWorkflowModule:
 
     def uuid4(self):
         return "00000000-0000-0000-0000-000000000001"
+
+    def patched(self, _patch_id: str) -> bool:
+        return True
 
     def info(self):
         class _Info:
@@ -6689,10 +6707,7 @@ async def test_workflow_approval_text_repopulates_same_tool_then_executes_once()
         ]
         assert len(llm_args) <= len(positional_params)
         assert llm_args[2] == wf._current_tools, "JIT must preserve the execute-phase tool schema"
-        from domains.param_populator.config import PARAM_POPULATOR_MODEL
-
-        assert llm_args[1] == PARAM_POPULATOR_MODEL
-        assert llm_args[1] != wf.model
+        assert llm_args[1] == wf.model
         assert llm_args[8] == "approval_param_populator"
         assert llm_args[9] == "stable system prompt"
         assert "its 1:45pm local time" in llm_args[10]

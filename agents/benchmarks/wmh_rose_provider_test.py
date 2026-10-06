@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
 import pytest
@@ -27,6 +29,7 @@ from wmh.providers.base import Message
 
 from benchmarks import wmh_rose_provider
 from benchmarks.wmh_rose_provider import (
+    _WMH_MAX_TOKENS,
     RoseUsageAccumulator,
     RoseWMHProvider,
     _cost_usd_for_call,
@@ -110,6 +113,138 @@ def test_message_conversion_omits_empty_system():
     assert rose == [{"role": "user", "content": "hi"}]
 
 
+def test_wmh_cache_stream_never_contains_leased_access_token(monkeypatch):
+    from providers.rose import RoseClient
+    from providers.rose.types import StreamChunk
+
+    leased_usage = {
+        "prompt_tokens": 12,
+        "completion_tokens": 3,
+        "compute_token_used": {
+            "type": "gpt",
+            "source": "pool",
+            "accessToken": "secret-lease",
+        },
+    }
+
+    async def fake_complete_impl(self, **kwargs):
+        yield StreamChunk(kind="usage", data=leased_usage)
+        yield StreamChunk(kind="content", data={"text": '{"output":"ok"}'})
+        yield StreamChunk(kind="done")
+
+    monkeypatch.setattr(RoseClient, "_complete_impl", fake_complete_impl)
+    client = object.__new__(wmh_rose_provider._WMHCacheSafeRoseClient)
+
+    async def chunks_for(call_site):
+        return [chunk async for chunk in client._complete_impl(call_site=call_site)]
+
+    wmh_chunks = asyncio.run(chunks_for("wmh_world_model"))
+    assert wmh_chunks[0].data["compute_token_used"] == {"type": "gpt", "source": "pool"}
+    assert "accessToken" not in str(wmh_chunks)
+    assert leased_usage["compute_token_used"]["accessToken"] == "secret-lease"
+
+    other_chunks = asyncio.run(chunks_for("execute_loop"))
+    assert other_chunks[0].data["compute_token_used"]["accessToken"] == "secret-lease"
+
+
+@pytest.mark.parametrize("content,finish", [("", "length"), (" \n\t", "stop"), ('{"output":"unfinished', "length")])
+def test_invalid_prediction_is_rejected_before_cache_done(monkeypatch, content, finish):
+    from providers.rose import RoseClient
+    from providers.rose.types import StreamChunk
+
+    async def fake_complete_impl(self, **kwargs):
+        yield StreamChunk(kind="metadata", data={"actual_model": "qwen-3.8-27b"})
+        yield StreamChunk(kind="content", data={"text": content})
+        yield StreamChunk(kind="usage", data={"completion_tokens": 16384, "finish_reason": finish})
+        yield StreamChunk(kind="done")
+
+    monkeypatch.setattr(RoseClient, "_complete_impl", fake_complete_impl)
+    client = object.__new__(wmh_rose_provider._WMHCacheSafeRoseClient)
+    observed = []
+
+    async def run():
+        async for chunk in client._complete_impl(call_site="wmh_world_model"):
+            observed.append(chunk)
+
+    with pytest.raises(ValueError, match="WMH prediction rejected"):
+        asyncio.run(run())
+    assert not any(chunk.kind == "done" for chunk in observed), "invalid output reached the cache write marker"
+
+
+def test_stream_rejection_retains_usage_without_credentials(monkeypatch):
+    error = wmh_rose_provider._WMHInvalidPrediction(
+        "empty visible content",
+        {"prompt_tokens": 100, "completion_tokens": 16384, "compute_token_used": {"accessToken": "secret"}},
+        "qwen-3.8-27b",
+    )
+
+    class Client:
+        async def collect(self, **kwargs):
+            raise error
+
+    async def fake_lease(self):
+        return None, None
+
+    monkeypatch.setattr(RoseWMHProvider, "_lease_auth", fake_lease)
+    usage = RoseUsageAccumulator()
+    provider = RoseWMHProvider(client=Client(), usage=usage)
+    with pytest.raises(ValueError, match="empty visible content"):
+        provider.complete("SYS", [Message(role="user", content="go")])
+    assert usage.snapshot().calls == 1
+    assert usage.snapshot().output_tokens == 16384
+    assert "secret" not in str(error.usage)
+
+
+def test_default_budget_leaves_room_for_reasoning_and_terminal_json(monkeypatch):
+    fake_client = _FakeRoseClient(
+        _canned_response(content='{"output":"complete"}', prompt=10, completion=20, token_used=None)
+    )
+
+    async def fake_lease(self):
+        return None, None
+
+    monkeypatch.setattr(RoseWMHProvider, "_lease_auth", fake_lease)
+    provider = RoseWMHProvider(client=fake_client)
+    completion = provider.complete("SYS", [Message(role="user", content="go")])
+
+    assert completion.text == '{"output":"complete"}'
+    assert _WMH_MAX_TOKENS == 16_384
+    assert fake_client.calls[0]["max_tokens"] == 16_384
+
+
+def test_rose_wmh_provider_allows_overlapping_llm_calls(monkeypatch):
+    """The sync-to-async Rose bridge must not reserialize WMH predictions."""
+
+    class ConcurrentClient:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.active = 0
+            self.peak_active = 0
+
+        async def collect(self, **kwargs):
+            with self.lock:
+                self.active += 1
+                self.peak_active = max(self.peak_active, self.active)
+            try:
+                await asyncio.sleep(0.05)
+                return _canned_response(content='{"output":"ok"}', prompt=1, completion=1, token_used=None)
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    async def fake_lease(self):
+        return None, None
+
+    monkeypatch.setattr(RoseWMHProvider, "_lease_auth", fake_lease)
+    client = ConcurrentClient()
+    provider = RoseWMHProvider(client=client, usage=RoseUsageAccumulator())
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(provider.complete, "SYS", [Message(role="user", content="go")]) for _ in range(2)]
+        results = [future.result(timeout=5) for future in futures]
+    assert client.peak_active == 2
+    assert [result.text for result in results] == ['{"output":"ok"}'] * 2
+
+
 def test_complete_maps_text_and_usage_via_rose_only(monkeypatch):
     fake_client = _FakeRoseClient(
         _canned_response(
@@ -144,7 +279,7 @@ def test_complete_maps_text_and_usage_via_rose_only(monkeypatch):
     # and no Anthropic anywhere (guarded by the autouse fixture).
     assert len(fake_client.calls) == 1
     call = fake_client.calls[0]
-    assert call["pool"] == "rose-1-flash"
+    assert call["pool"] == "rose-1-ultra"
     assert call["messages"][0] == {"role": "system", "content": "SYS"}
     assert call["messages"][1] == {"role": "user", "content": "go"}
     # The rotation-capable context is handed straight to the client — the provider does
@@ -153,10 +288,138 @@ def test_complete_maps_text_and_usage_via_rose_only(monkeypatch):
     assert call["gpt_auth"] is None
 
 
+def test_demo_wmh_completion_uses_demo_cache_context(monkeypatch):
+    """A DEMO task caches the WMH's own Rose completion, not only agent loops."""
+    import json
+    from pathlib import Path
+
+    from providers.fast_cache.context import current_context
+
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+
+    tasks = json.loads(Path(__file__).with_name("tasks.json").read_text())
+    demo_goal = next(task["prompt"] for task in tasks if "DEMO" in task.get("tags", []))
+    observed = []
+
+    class _ContextInspectingClient(_FakeRoseClient):
+        async def collect(self, **kwargs: Any) -> RoseResponse:
+            observed.append(current_context())
+            return await super().collect(**kwargs)
+
+    fake_client = _ContextInspectingClient(
+        _canned_response(content='{"output":"complete"}', prompt=10, completion=20, token_used=None)
+    )
+
+    async def fake_lease(self):
+        return None, None
+
+    monkeypatch.setattr(RoseWMHProvider, "_lease_auth", fake_lease)
+    provider = RoseWMHProvider(client=fake_client)
+
+    asyncio.run(
+        provider._complete_async(
+            "SYS",
+            [Message(role="user", content=f"TASK:\n{demo_goal}\n\nINTERACTION HISTORY:\n(start)")],
+            max_tokens=8192,
+        )
+    )
+
+    assert len(observed) == 1
+    assert observed[0] is not None
+    assert observed[0].read_enabled is True
+    assert observed[0].should_write is True
+    assert observed[0].goal == demo_goal
+    assert observed[0].root_goal == demo_goal
+    assert current_context() is None
+
+
+def test_demo_wmh_completion_extracts_root_goal_from_delegation(monkeypatch):
+    """Specialized WMH tasks inherit DEMO eligibility from ROOT OBJECTIVE."""
+    import json
+    from pathlib import Path
+
+    from providers.fast_cache.context import current_context
+
+    tasks = json.loads(Path(__file__).with_name("tasks.json").read_text())
+    demo_goal = next(task["prompt"] for task in tasks if "DEMO" in task.get("tags", []))
+    task = f"ROOT OBJECTIVE:\n{demo_goal}\n\nCURRENT DELEGATION:\nInspect Brex"
+    observed = []
+
+    class _ContextInspectingClient(_FakeRoseClient):
+        async def collect(self, **kwargs: Any) -> RoseResponse:
+            observed.append(current_context())
+            return await super().collect(**kwargs)
+
+    fake_client = _ContextInspectingClient(
+        _canned_response(content='{"output":"complete"}', prompt=10, completion=20, token_used=None)
+    )
+
+    async def fake_lease(self):
+        return None, None
+
+    monkeypatch.setattr(RoseWMHProvider, "_lease_auth", fake_lease)
+    provider = RoseWMHProvider(client=fake_client)
+    asyncio.run(
+        provider._complete_async(
+            "SYS",
+            [Message(role="user", content=f"TASK:\n{task}\n\nINTERACTION HISTORY:\n(start)")],
+            max_tokens=8192,
+        )
+    )
+
+    assert observed[0] is not None
+    assert observed[0].goal == demo_goal
+
+
+def test_non_demo_wmh_completion_does_not_enable_demo_cache(monkeypatch):
+    """Ordinary WMH inference cannot accidentally enter the DEMO cache namespace."""
+    from providers.fast_cache.context import current_context
+
+    observed = []
+
+    class _ContextInspectingClient(_FakeRoseClient):
+        async def collect(self, **kwargs: Any) -> RoseResponse:
+            observed.append(current_context())
+            return await super().collect(**kwargs)
+
+    fake_client = _ContextInspectingClient(
+        _canned_response(content='{"output":"complete"}', prompt=10, completion=20, token_used=None)
+    )
+
+    async def fake_lease(self):
+        return None, None
+
+    monkeypatch.setattr(RoseWMHProvider, "_lease_auth", fake_lease)
+    provider = RoseWMHProvider(client=fake_client)
+    asyncio.run(
+        provider._complete_async(
+            "SYS",
+            [Message(role="user", content="TASK:\nBuy socks\n\nINTERACTION HISTORY:\n(start)")],
+            max_tokens=8192,
+        )
+    )
+
+    assert observed == [None]
+
+
+def test_fundraiser_wmh_prompt_uses_demo_cache_goal():
+    """The startup session task resolves to the actual fundraiser DEMO namespace."""
+    import json
+    from pathlib import Path
+
+    from benchmarks.wmh_rose_provider import _demo_cache_goal_from_messages
+
+    tasks = json.loads(Path(__file__).with_name("tasks.json").read_text())
+    goal = next(task["prompt"] for task in tasks if task["name"] == "raise-5m-rose-labs-brex")
+    assert _demo_cache_goal_from_messages(
+        [Message(role="user", content=f"TASK:\n{goal}\n\nINTERACTION HISTORY:\n(start)")]
+    ) == goal
+
+
 def test_config_model_defaults_to_pool_for_metering():
     provider = RoseWMHProvider(client=_FakeRoseClient(RoseResponse()))
     # WorldModel.step reads provider.config.model for metering.
-    assert provider.config.model == "rose-1-flash"
+    assert provider.config.model == "rose-1-ultra"
 
     labeled = RoseWMHProvider(client=_FakeRoseClient(RoseResponse()), model_label="claude-haiku")
     assert labeled.config.model == "claude-haiku"
