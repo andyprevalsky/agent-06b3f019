@@ -8439,6 +8439,40 @@ def _fleet_pid_identity_helpers(source: str) -> str:
     )
 
 
+def test_extracted_fleet_pid_identity_callers_include_birth_helpers() -> None:
+    """Every fixture that extracts an identity-reading fleet function must also
+    load the birth-identity helpers, or its owner proofs pass vacuously."""
+    fleet = FLEET_SCRIPT.read_text()
+    starts = [
+        (match.start(), match.group(1))
+        for match in re.finditer(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{", fleet, re.M)
+    ]
+    helper_names = {"fleet_pid_start_time", "fleet_pid_matches_start"}
+    callers = {
+        name
+        for index, (start, name) in enumerate(starts)
+        if name not in helper_names
+        and re.search(
+            r"\bfleet_pid_(?:start_time|matches_start)\b",
+            fleet[start : starts[index + 1][0] if index + 1 < len(starts) else len(fleet)],
+        )
+    }
+    assert "registry_owner_alive" in callers
+
+    module = Path(__file__).read_text()
+    tests = [
+        (match.start(), match.group(1))
+        for match in re.finditer(r"^def (test_\w+)\(", module, re.M)
+    ]
+    missing = {}
+    for index, (start, name) in enumerate(tests):
+        body = module[start : tests[index + 1][0] if index + 1 < len(tests) else len(module)]
+        extracted = sorted(caller for caller in callers if f'"{caller}() {{"' in body)
+        if extracted and "_fleet_pid_identity_helpers(" not in body:
+            missing[name] = extracted
+    assert not missing, missing
+
+
 def _cloudbench_incremental_log_functions() -> str:
     source = CLOUD_SCRIPT.read_text()
     return "".join(
@@ -9914,7 +9948,7 @@ def test_exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reaper
     and retain every durable handle when that boundary cannot prove teardown.
     """
     fleet = FLEET_SCRIPT.read_text()
-    functions = "\n".join(
+    functions = _fleet_pid_identity_helpers(fleet) + "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",
@@ -10171,8 +10205,11 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
     )
     (registry / "guest-cleanup-unconfirmed").touch()
     calls = tmp_path / "calls"
+    # Sourced first so the fixture's stubs below override the shared library.
+    identity = _fleet_pid_identity_helpers(fleet)
 
     script = f"""set -uo pipefail
+{identity}
 APP=bench-app
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
 FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
@@ -10415,7 +10452,10 @@ def test_pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper(
     )
     (registry / "guest-cleanup-unconfirmed").touch()
     calls = tmp_path / "calls"
+    # Sourced first so the fixture's stubs below override the shared library.
+    identity = _fleet_pid_identity_helpers(fleet)
     script = f"""set -uo pipefail
+{identity}
 APP=bench-app
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(tmp_path / "ownership"))}
 FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / "audits"))}
@@ -13713,7 +13753,7 @@ def test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper(
     identity so the registry reaper can terminalize the exact owned volume.
     """
     fleet = FLEET_SCRIPT.read_text()
-    functions = "\n".join(
+    functions = _fleet_pid_identity_helpers(fleet) + "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",
@@ -14718,7 +14758,7 @@ test ! -e "$lock"
 def test_inventory_release_uses_sealed_owner_birth_identity(tmp_path: Path) -> None:
     """A fallible second ps read must not strand a live owner's keyed lock."""
     fleet = FLEET_SCRIPT.read_text()
-    helpers = "".join(
+    helpers = _fleet_pid_identity_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",
@@ -14755,9 +14795,14 @@ MACHINE_READINESS_SCRIPT="$READINESS"
 mkdir -p "$ROOT"
 mkfifo "$INVENTORY_WAIT_FIFO"
 {helpers}
-inventory_refresh_lock_acquire
-inventory_refresh_lock_release
-test ! -e "$INVENTORY_REFRESH_LOCK"
+# Linux reads birth identity from /proc rather than ps, so the drifting
+# source is injected where both formats are observed.
+fleet_pid_start_time() {{ ps -p "$1" -o lstart=; }}
+inventory_refresh_lock_acquire || exit 10
+[ -e "$INVENTORY_REFRESH_LOCK" ] || exit 11
+inventory_refresh_lock_release || exit 12
+test ! -e "$INVENTORY_REFRESH_LOCK" || exit 13
+[ "$(cat "$PS_COUNT")" -ge 1 ] || exit 14
 """,
         ],
         env={
