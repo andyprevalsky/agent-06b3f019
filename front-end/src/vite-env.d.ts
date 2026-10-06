@@ -3,6 +3,7 @@
 interface ImportMetaEnv {
   readonly VITE_ENABLE_REACT_GRAB?: 'true' | 'false';
   readonly VITE_REALTIME_PRIVATE?: 'true' | 'false';
+  readonly VITE_BACKEND_SAME_ORIGIN?: 'true' | 'false';
 }
 
 interface ElectronAuthBridge {

@@ -327,6 +327,10 @@ async function main(): Promise<void> {
     canonicalAuthRealm('https://localhost.evil.com/?authRealm=doordash.com') === 'evil.com',
     'backend trusted an authRealm override from a lookalike localhost domain'
   );
+  assert(
+    canonicalAuthRealm('https://anyone.loca.lt/?authRealm=doordash.com') !== 'doordash.com',
+    'backend trusted an authRealm override from a public localtunnel origin no dev stack serves'
+  );
 
   await verifyUnifiedCredentialBoundary();
 

@@ -41,6 +41,7 @@ import {
 } from './codex-credit-skip';
 import { waitForCodexOutput } from './codex-ws-output.support';
 import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
+import { assert, assertStatus, request } from './codex-sandbox.support';
 import { waitForCodexOutput } from './codex-smoke-output.support';
 config();
 
@@ -49,33 +50,6 @@ const API_KEY = process.env.BACKEND_API_KEY || '';
 const DEV_USER_ID = process.env.CODEX_BLACKBOX_USER_ID || '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
 const ErrorResponse = z.object({ error: z.string() });
-
-function assert(condition: boolean, message: string): void {
-  if (!condition) throw new Error(message);
-}
-
-function assertStatus(actual: number, expected: number, data: unknown): void {
-  if (actual !== expected) {
-    throw new Error(
-      `Expected status ${expected}, got ${actual}: ${JSON.stringify(data).substring(0, 400)}`
-    );
-  }
-}
-
-async function request(
-  url: string,
-  options: RequestInit = {}
-): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
-  const contentType = response.headers.get('content-type') || '';
-  const data = contentType.includes('application/json')
-    ? await response.json()
-    : await response.text();
-  return { status: response.status, data, headers: response.headers };
-}
 
 function apiKeyHeaders(): Record<string, string> {
   return { 'X-API-Key': API_KEY };

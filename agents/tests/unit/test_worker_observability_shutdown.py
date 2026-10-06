@@ -1,6 +1,8 @@
 """The real worker entry point must finish native RPCs before interpreter exit."""
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -15,34 +17,70 @@ import pytest
 
 
 AGENTS = Path(__file__).resolve().parents[2]
+NATIVE_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p)
+_pthread = ctypes.CDLL(None)
+_pthread.pthread_create.argtypes = [ctypes.POINTER(ctypes.c_ulong), ctypes.c_void_p, NATIVE_CALLBACK, ctypes.c_void_p]
+_pthread.pthread_join.argtypes = [ctypes.c_ulong, ctypes.c_void_p]
+
+
+def _run_python_on_native_thread(seconds):
+    """Execute Python on a thread threading did not start, as an SDK Tokio thread does."""
+    entered, finished = threading.Event(), threading.Event()
+
+    def body(_argument):
+        # Logging from a native thread registers a _DummyThread like this.
+        threading.current_thread()
+        entered.set()
+        time.sleep(seconds)
+        finished.set()
+        return None
+
+    callback = NATIVE_CALLBACK(body)
+    thread = ctypes.c_ulong()
+    assert _pthread.pthread_create(ctypes.byref(thread), None, callback, None) == 0
+    assert entered.wait(5)
+    return thread, callback, finished
+
+
+def test_worker_exit_waits_for_native_thread_python_callback():
+    import worker
+
+    thread, callback, finished = _run_python_on_native_thread(0.3)
+    try:
+        assert worker._foreign_threads_running_python()
+        assert asyncio.run(worker._drain_native_python_callbacks(timeout=5)) is True
+        assert finished.is_set(), "entry point could return while a native callback was still in Python"
+        assert not worker._foreign_threads_running_python()
+    finally:
+        assert _pthread.pthread_join(thread, None) == 0
+        del callback
+
+
+def test_worker_exit_native_callback_wait_is_bounded():
+    import worker
+
+    thread, callback, finished = _run_python_on_native_thread(1.0)
+    try:
+        started = time.monotonic()
+        assert asyncio.run(worker._drain_native_python_callbacks(timeout=0.05)) is False
+        assert time.monotonic() - started < 0.5
+        assert not finished.is_set()
+    finally:
+        assert _pthread.pthread_join(thread, None) == 0
+        del callback
 
 
 CHILD = r"""
 import asyncio
-import asyncio.selector_events as selector_events
 import os
 from pathlib import Path
 import sys
-import threading
-import time
 from types import SimpleNamespace
 from unittest.mock import patch
 import worker
 
 address, directory = sys.argv[1:]
 directory = Path(directory)
-
-# A starved SDK completion thread wakes the loop, then stays descheduled inside
-# Python while the loop consumes its result and the worker returns.
-main_thread_id = threading.get_ident()
-write_to_self = selector_events.BaseSelectorEventLoop._write_to_self
-
-def descheduled_after_wakeup(self):
-    write_to_self(self)
-    if threading.get_ident() != main_thread_id:
-        time.sleep(0.5)
-
-selector_events.BaseSelectorEventLoop._write_to_self = descheduled_after_wakeup
 config = SimpleNamespace(
     environment="development", health_check_port=0,
     temporal=SimpleNamespace(
@@ -73,19 +111,13 @@ def publish_status(active, **fields):
     if active and fields.get("phase") == "running":
         (directory / "worker-ready").touch()
 
-async def run_worker():
-    await worker.main()
-    started = {thread.ident for thread in threading.enumerate()}
-    native = [ident for ident in sys._current_frames() if ident not in started]
-    print(f"NATIVE_THREADS_IN_PYTHON_AT_RETURN={len(native)}", flush=True)
-
 with (
     patch.object(worker, "load_config", return_value=config),
     patch.object(worker, "Worker", IdleWorker),
     patch.object(worker, "SDK_METRICS_PORT", 0),
     patch.object(worker, "set_worker_status", side_effect=publish_status),
 ):
-    asyncio.run(run_worker())
+    asyncio.run(worker.main())
 (directory / "entrypoint-returned").touch()
 print("WORKER_ENTRYPOINT_RETURNED", flush=True)
 """
@@ -182,15 +214,12 @@ def test_worker_entrypoint_joins_inflight_metrics_rpc_before_exit(outcome, phase
                     )
                 assert process.returncode == 0, "Worker startup/shutdown failed before process-exit assertion"
                 assert b"WORKER_ENTRYPOINT_RETURNED" in output
-                assert b"NATIVE_THREADS_IN_PYTHON_AT_RETURN=0" in output, (
-                    "Worker entry point returned while an SDK completion thread was still running Python"
-                )
                 assert observations.get("worker_drained") is True
                 assert rpc_finished.wait(10)
                 if outcome != "deadline":
-                    assert observations["entrypoint_returned_before_first_response"] is False, (
-                        "Worker entry point returned while its native metrics RPC was unfinished"
-                    )
+                    assert (
+                        observations["entrypoint_returned_before_first_response"] is False
+                    ), "Worker entry point returned while its native metrics RPC was unfinished"
                 expected_calls = ["count"] if phase == "count" else ["count", "describe"]
                 assert calls == expected_calls, "Shutdown started another metrics RPC after worker drain"
                 assert 0 < observations["rpc_deadline_seconds"] <= 5.1

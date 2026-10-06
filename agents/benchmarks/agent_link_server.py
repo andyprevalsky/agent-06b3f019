@@ -33,8 +33,8 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.parse
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from functools import partial
@@ -60,7 +60,19 @@ class PortAllocationError(RuntimeError):
 
 
 def _pid_start_time(pid: int) -> str:
-    """Return the process birth identity used by the shell-side owner verifier."""
+    """Return the process birth identity used by the shell-side owner verifier.
+
+    Must match ``cloudbench_pid_start_time`` in scripts/lib/cloudbench-env.sh:
+    Linux ``ps -o lstart`` moves with wall-clock steps, so Linux uses the
+    boot-relative /proc start tick.
+    """
+    if os.path.exists("/proc/self/stat"):
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        fields = stat[stat.rfind(")") + 2 :].split()
+        if not boot_id or len(fields) <= 19 or not fields[19].isdigit():
+            raise RuntimeError(f"unreadable /proc birth identity for pid {pid}")
+        return f"proc-start:{boot_id}:{fields[19]}"
     return " ".join(
         subprocess.check_output(
             ["ps", "-p", str(pid), "-o", "lstart="],
@@ -78,9 +90,7 @@ def _publish_hub_owner(args: argparse.Namespace, status: str) -> None:
     pid = os.getpid()
     pid_start = _pid_start_time(pid)
     command = str(Path(__file__).resolve())
-    argv_sha256 = hashlib.sha256(
-        b"\0".join(os.fsencode(argument) for argument in sys.argv)
-    ).hexdigest()
+    argv_sha256 = hashlib.sha256(b"\0".join(os.fsencode(argument) for argument in sys.argv)).hexdigest()
     fields = {
         "version": "1",
         "pid": str(pid),
@@ -285,11 +295,7 @@ def _viewer_processes_by_context(viewers_root: Path) -> tuple[dict[Path, list[in
         return found, False
     for line in process_table.splitlines():
         raw_pid, separator, command = line.strip().partition(" ")
-        if (
-            not separator
-            or "archive_frontend.py" not in command
-            or " --context-dir " not in command
-        ):
+        if not separator or "archive_frontend.py" not in command or " --context-dir " not in command:
             continue
         try:
             pid = int(raw_pid)
@@ -450,20 +456,22 @@ def _resolve_fleet_source(fleet_dir: Path, agent_id: str) -> dict | None:
     for sub in sorted(p for p in fleet_dir.iterdir() if p.is_dir() and p.name != "_batch"):
         rj = sub / "cloudbench-run.json"
         if rj.exists() and _run_json_has_agent(rj, agent_id):
-            return {"key": sub.name, "run_json": rj, "upstream_url": "",
-                    "upstream_api_key": "", "upstream_user_id": ""}
+            return {"key": sub.name, "run_json": rj, "upstream_url": "", "upstream_api_key": "", "upstream_user_id": ""}
         if live is None:
             up = _read_json(sub / ".upstream.json")
             if up.get("upstream_url") and _card_has_agent(sub, agent_id):
                 # Always hand over the run.json PATH (even before it exists): the
                 # archive hot-reloads it the moment run-bench-cloud saves it, so the
                 # viewer survives the box/upstream teardown without going dead.
-                live = {"key": sub.name, "run_json": rj,
-                        "upstream_url": up.get("upstream_url", ""),
-                        "upstream_api_key": up.get("upstream_api_key", ""),
-                        "upstream_user_id": up.get("upstream_user_id", ""),
-                        "ssh_machine": up.get("machine_id", ""),
-                        "ssh_app": up.get("app", "")}
+                live = {
+                    "key": sub.name,
+                    "run_json": rj,
+                    "upstream_url": up.get("upstream_url", ""),
+                    "upstream_api_key": up.get("upstream_api_key", ""),
+                    "upstream_user_id": up.get("upstream_user_id", ""),
+                    "ssh_machine": up.get("machine_id", ""),
+                    "ssh_app": up.get("app", ""),
+                }
     return live
 
 
@@ -501,15 +509,9 @@ _MODE_FLAG = {"simulate": "🧪", "shadow": "👁️"}
 def _run_status(per_task: list) -> tuple[int, int, int]:
     """(passed, running, total) over a run's per_task rows."""
     total = len(per_task)
-    passed = sum(
-        1
-        for t in per_task
-        if str(t.get("status", "")).lower() in ("pass", "passed", "ok", "success")
-    )
+    passed = sum(1 for t in per_task if str(t.get("status", "")).lower() in ("pass", "passed", "ok", "success"))
     running = sum(
-        1
-        for t in per_task
-        if str(t.get("status", "")).lower() in ("running", "queued", "in_progress", "starting")
+        1 for t in per_task if str(t.get("status", "")).lower() in ("running", "queued", "in_progress", "starting")
     )
     return passed, running, total
 
@@ -614,13 +616,7 @@ def _run_index_page(runs: list[dict]) -> bytes:
 
 
 def html_escape(s: str) -> str:
-    return (
-        str(s)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 _RUN_INDEX_TEMPLATE = """<!doctype html><html><head><meta charset="utf-8">
@@ -690,9 +686,7 @@ def _launch_archive_for(args: argparse.Namespace, source: dict) -> str:
             existing = _existing_archive_in(ctx)
             if existing:
                 return existing
-            _terminated, slot_available = _reap_excess_viewers(
-                args.context_dir / "viewers", ctx
-            )
+            _terminated, slot_available = _reap_excess_viewers(args.context_dir / "viewers", ctx)
             if not slot_available:
                 return ""
             ctx.mkdir(parents=True, exist_ok=True)
@@ -700,9 +694,19 @@ def _launch_archive_for(args: argparse.Namespace, source: dict) -> str:
             cmd = ["python3", str(args.repo_root / "agents/benchmarks/archive_frontend.py")]
             if source.get("run_json"):
                 cmd.append(str(source["run_json"]))
-            cmd += ["--frontend-dir", str(args.frontend_dir), "--context-dir", str(ctx),
-                    "--host", "127.0.0.1", "--api-port", str(api_port),
-                    "--frontend-port", str(frontend_port), "--daemon"]
+            cmd += [
+                "--frontend-dir",
+                str(args.frontend_dir),
+                "--context-dir",
+                str(ctx),
+                "--host",
+                "127.0.0.1",
+                "--api-port",
+                str(api_port),
+                "--frontend-port",
+                str(frontend_port),
+                "--daemon",
+            ]
             if source.get("upstream_url"):
                 cmd += ["--upstream-url", source["upstream_url"]]
             if source.get("upstream_api_key"):
@@ -713,9 +717,7 @@ def _launch_archive_for(args: argparse.Namespace, source: dict) -> str:
                 cmd += ["--ssh-machine", source["ssh_machine"]]
             if source.get("ssh_app"):
                 cmd += ["--ssh-app", source["ssh_app"]]
-            subprocess.Popen(
-                cmd, cwd=args.repo_root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
+            subprocess.Popen(cmd, cwd=args.repo_root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             # Metadata is published before both listeners necessarily bind. Keep
             # the host lock until the complete frontend+API pair answers.
             for _ in range(60):
@@ -858,7 +860,7 @@ def _make_handler(args: argparse.Namespace):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             return (query.get("agent-id") or [""])[0].strip()
 
-        def do_HEAD(self) -> None:  # noqa: N802
+        def do_HEAD(self) -> None:
             if urllib.parse.urlparse(self.path).path != "/open-agent":
                 return super().do_HEAD()
             # HEAD never launches (used for prefetch); redirect only if already up.
@@ -893,12 +895,14 @@ def _make_handler(args: argparse.Namespace):
             if not str(target).startswith(str(base)) or not target.is_file():
                 self._send_bytes(_NOT_FOUND_PAGE, "text/html; charset=utf-8", 404)
                 return
-            ctype = "application/json" if target.suffix == ".json" else (
-                "text/html; charset=utf-8" if target.suffix in (".html", ".htm") else "text/plain"
+            ctype = (
+                "application/json"
+                if target.suffix == ".json"
+                else ("text/html; charset=utf-8" if target.suffix in (".html", ".htm") else "text/plain")
             )
             self._send_bytes(target.read_bytes(), ctype)
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             hub = getattr(args, "hub_runs_dir", None)
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
@@ -1036,9 +1040,7 @@ def main() -> int:
     if args.owner_file is not None:
         if args.hub_runs_dir is None:
             parser.error("--owner-file is supported only for central-hub mode")
-        if len(args.owner_token) != 32 or any(
-            character not in "0123456789abcdef" for character in args.owner_token
-        ):
+        if len(args.owner_token) != 32 or any(character not in "0123456789abcdef" for character in args.owner_token):
             parser.error("--owner-token must be 32 lowercase hexadecimal characters")
     args.root.mkdir(parents=True, exist_ok=True)
     _publish_hub_owner(args, "starting")

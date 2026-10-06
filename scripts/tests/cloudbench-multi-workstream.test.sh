@@ -2384,9 +2384,14 @@ context_dir = runs_root / "_hub"
 command = repo_root / "agents/benchmarks/agent_link_server.py"
 if os.getpgrp() != os.getpid():
     os.setsid()
-pid_start = " ".join(subprocess.check_output(
-    ["ps", "-p", str(os.getpid()), "-o", "lstart="], text=True
-).split())
+import importlib.util
+# The workstream's untracked files are its shipped patch; a stray .pyc here
+# changes the patch the guest receives.
+sys.dont_write_bytecode = True
+_link_spec = importlib.util.spec_from_file_location("agent_link_server_identity", command)
+_link_module = importlib.util.module_from_spec(_link_spec)
+_link_spec.loader.exec_module(_link_module)
+pid_start = _link_module._pid_start_time(os.getpid())
 argv_sha256 = hashlib.sha256(
     b"\0".join(os.fsencode(argument) for argument in sys.argv)
 ).hexdigest()
@@ -3861,7 +3866,11 @@ neighbor_token="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 neighbor_registry="$SANDBOX/.git/cloudbench-fleet-ownership/$neighbor_token"
 neighbor_volume="vol_neighbor_unattached"
 neighbor_host="$(hostname 2>/dev/null || uname -n)"
-neighbor_pid_start="$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+if [ -r /proc/self/stat ]; then
+    neighbor_pid_start="$(cloudbench_pid_start_time $$)"
+else
+    neighbor_pid_start="$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+fi
 mkdir -p "$neighbor_registry/clones"
 cat > "$neighbor_registry/meta" <<EOF
 version=1
@@ -5519,5 +5528,21 @@ done
 [ "$amb_orphans" -eq 0 ] ||
     fail "scenario 16: ambiguous clone failure left $amb_orphans name-only orphan record(s) — RCA #6 regression"
 echo "PASS: scenario 16 — ambiguous clone failure releases its reserved name (no orphan); retry provisions"
+
+# Fail-closed scenarios exit nonzero by design, but every controller must still
+# reap its own snapshot/aggregator loops instead of orphaning them to init.
+teardown_survivor_logs="$(grep -lE 'survived local teardown|Could not capture the process table' \
+    "$TMP_ROOT"/controller-*.log 2>/dev/null || true)"
+[ -z "$teardown_survivor_logs" ] ||
+    fail "controller teardown left owned local processes alive: $teardown_survivor_logs"
+orphaned_controllers="$(ps -axo pid=,args= 2>/dev/null |
+    awk -v root="$TMP_ROOT/" 'index($0, root) && $2 == "bash" && $3 ~ /\/run-bench-(fleet|cloud)$/')"
+if [ -n "$orphaned_controllers" ]; then
+    while read -r orphan_pid _; do
+        kill "$orphan_pid" 2>/dev/null || true
+    done <<< "$orphaned_controllers"
+    fail "controller processes outlived their runs: $orphaned_controllers"
+fi
+echo "PASS: every controller, including fail-closed runs, reaped its own local processes"
 
 echo "PASS: two workstreams ran cloud benchmarks concurrently, isolated end to end"

@@ -67,6 +67,19 @@ benchmark_base_cache_token() {
     fi
 }
 
+# pg_dump major that writes (and must be able to read) this host's seed archive:
+# the host client under system Postgres, the pinned postgres:16 image otherwise.
+# Anchor at the first X.Y: Ubuntu's "16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)"
+# contains a later "24.04" that a greedy "last X.Y" match treats as the major.
+benchmark_seed_client_major() {
+    local use_system_pg="${1:-false}"
+    local major=16
+    if [ "$use_system_pg" = "true" ]; then
+        major="$(pg_dump --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/')"
+    fi
+    printf '%s\n' "${major:-unknown}"
+}
+
 # Producers and consumers hold the same per-dump directory lock across every
 # read/delete/restore or replacement of the dump + sidecar pair. The lock is
 # host-local: it coordinates sibling isolated stacks without creating a global
@@ -198,9 +211,9 @@ materialize_benchmark_seed_dump() (
         return 1
     fi
 
-    printf '%s' "$schema_hash" > "$temp_hash"
-    mv "$temp_dump" "$target_dump"
-    mv "$temp_hash" "${target_dump}.schemahash"
+    printf '%s' "$schema_hash" > "$temp_hash" || return 1
+    mv "$temp_dump" "$target_dump" || return 1
+    mv "$temp_hash" "${target_dump}.schemahash" || return 1
     release_benchmark_seed_lock "$target_dump"
     trap - EXIT INT TERM
     printf '%s\n' "$target_dump"
