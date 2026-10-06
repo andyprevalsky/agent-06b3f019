@@ -533,11 +533,11 @@ smoke outcomes. The mass-demo `-k 50 --concurrency 50 --strict-barrier` diagnost
 means 50 controllers and 2,500 first-level children; task replay has zero LIVE proof
 credit and its unchanged declared judges may make provider calls. Ordinary
 source-only deploy benchmarks continue to reuse verified dependency snapshots.
-The optional cold `image-build --builder depot` path changes only that requested
-build (app scope, zstd level 3, `linux/amd64`); native is still the default and
-setup stays native. Retain its requested-option receipt and verify image
-resolution/runtime compatibility before using it. Do not assume a measured
-speedup or a cost guarantee, or change shared builder settings.
+Cold `image-build` defaults to Fly-integrated Depot (app scope, zstd level 3,
+`linux/amd64`); explicit `--builder native` remains available for diagnostics.
+The independent `807edee9f` no-cache build/push completed in 493.6 seconds in one attempt,
+excluding activation/fleet startup. Retain its receipt, activate the exact image
+and verify guest digest/runtime consumption before the benchmark cohort.
 Image publication automatically caches its checksum-verified pinned Fly client
 in the Git common directory; native uses child-only classic Docker over HTTPS
 (`DOCKER_BUILDKIT=0`, `--wg=false`). Shared Fly/PATH and runtime remain unchanged.
@@ -549,7 +549,7 @@ does not prove execution overlap; ordinary non-strict scheduling is unchanged.
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 
 ```bash
-scripts/run-bench image-build --no-cache --build-context <committed-checkout> --out-dir .context/image-build
+scripts/run-bench image-build --builder depot --no-cache --build-context <committed-checkout> --out-dir .context/image-build
 benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/image-build/cloudbench-image-build.json"))["image_ref"])')
 scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
 ```

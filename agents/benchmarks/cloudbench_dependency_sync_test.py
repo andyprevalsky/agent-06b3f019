@@ -7788,6 +7788,10 @@ def _make_execution_provenance(tmp_path: Path) -> tuple[Path, Path, Path]:
             "run_timeout_seconds=7200",
             "--config-value",
             "benchmark_wall_clock_backstop_seconds=300",
+            "--config-value",
+            "fast_mode_cache_disable_write_through=1",
+            "--config-value",
+            "benchmark_demo_cache_read_only=1",
             "--output",
             str(provenance),
         ],
@@ -7796,6 +7800,9 @@ def _make_execution_provenance(tmp_path: Path) -> tuple[Path, Path, Path]:
         check=False,
     )
     assert made_provenance.returncode == 0, made_provenance.stderr
+    cache_policy = json.loads(provenance.read_text())["config"]["values"]
+    assert cache_policy["fast_mode_cache_disable_write_through"] == "1"
+    assert cache_policy["benchmark_demo_cache_read_only"] == "1"
     return snapshot, manifest, provenance
 
 

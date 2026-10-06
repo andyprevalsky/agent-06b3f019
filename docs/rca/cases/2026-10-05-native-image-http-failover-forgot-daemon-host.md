@@ -172,3 +172,32 @@ diagnostic elapsed time must remain visible without being credited as a speedup.
 ## Reusable lesson
 
 Preserve the remote endpoint when reconstructing a failover client, and retain the original failure before treating the fallback's error as its cause.
+
+## Full uncached comparison (2026-10-05)
+
+The fresh-context CLI validator later ran the same clean immutable `807edee9f`
+image context through both supported builders with layer caching disabled. The
+native classic stream ended with `unexpected EOF` before publication twice; its
+existing third attempt continued. The first failed log's final write was observed
+1058.9 seconds after allocation of the local image job. That is diagnostic timing,
+not a completed cold build or a measured native success baseline. The daemon-host
+repair's earlier tiny success did not establish full-build transport stability.
+
+The independent Depot app-scoped route built and pushed in one attempt, with
+process time 493.6154 seconds and CLI receipt time 494 seconds. The receipt proves
+no-cache selection, unchanged source/recipe/config inputs, AMD64, zstd level 3 and
+successful publication. Its joined installer reported 203.4 seconds. Runtime
+consumption and fleet timing remain separate proofs, and no percentage speedup
+is inferred from the failed native attempt. Private receipts remain under
+`.context/fresh-cli-validation-20261005/`.
+
+The fresh-context validator then activated the exact receipt image through the
+documented CLI in 163.2725 seconds. Native state bound the donor to the expected
+image digest; its captured CLI completed actual SSH clone/fetch and setup before
+parking that donor. This proves boot/setup consumption, while Node/Python/backend
+consumption remains part of the subsequent fleet startup.
+
+The supported `image-build` CLI now selects this measured Depot route by
+default, retaining explicit native diagnostics. Ordinary branch runs continue to
+reuse verified dependencies, and exact prebuilt activation does not rebuild or
+change shared builder settings.

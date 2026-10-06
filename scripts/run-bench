@@ -65,9 +65,16 @@ fi
 if [[ "${1:-}" == "image-build" ]]; then
     shift
     IMAGE_BUILD_ARGS=()
+    image_build_builder_selected=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --no-cache|-h|--help)
+            --help|-h)
+                echo "Usage: scripts/run-bench image-build [--no-cache] [--builder depot|native] [--build-context <checkout>] [--out-dir <private-directory>]"
+                echo "Depot is the image-build default (app scope, zstd level 3, AMD64); native is an explicit diagnostic."
+                echo "After publication, use image-activate with the exact receipt image before the benchmark fleet."
+                exit 0
+                ;;
+            --no-cache)
                 IMAGE_BUILD_ARGS+=("$1"); shift
                 ;;
             --builder)
@@ -77,6 +84,7 @@ if [[ "${1:-}" == "image-build" ]]; then
                     *) echo "--builder requires native or depot" >&2; exit 2 ;;
                 esac
                 IMAGE_BUILD_ARGS+=("$1" "$2"); shift 2
+                image_build_builder_selected=1
                 ;;
             --build-context|--out-dir)
                 [ "$#" -ge 2 ] || { echo "$1 requires a directory" >&2; exit 2; }
@@ -91,6 +99,9 @@ if [[ "${1:-}" == "image-build" ]]; then
             *) echo "Unsupported image-build argument: $1" >&2; exit 2 ;;
         esac
     done
+    if [ "$image_build_builder_selected" = 0 ]; then
+        IMAGE_BUILD_ARGS+=(--builder depot)
+    fi
     IMAGE_BUILD_BIN="${RUN_BENCH_CLOUD_BIN_UNDER_TEST:-$ROOT_DIR/scripts/run-bench-cloud}"
     exec bash "$IMAGE_BUILD_BIN" --build-image "${IMAGE_BUILD_ARGS[@]}"
 fi
@@ -177,9 +188,9 @@ Usage: scripts/run-bench <slice-or-task...> [options]
        scripts/run-bench image-activate <exact-benchmark-image> [--ref <sha>] [--out-dir <private-directory>]
 
 Image builds:
-  --builder native   Existing Fly remote builder (default).
-  --builder depot    Explicit app-scoped Depot builder, zstd level 3.
-                     Build/push only; image boot compatibility remains to verify.
+  --builder depot    App-scoped Depot builder, zstd level 3 (image-build default).
+  --builder native   Existing Fly remote builder for an explicit diagnostic.
+                     Build/push only; activate the exact receipt image before the fleet.
 
 Selections:
   daily | pre-deploy | rose-bench | polar-bench | incomplete

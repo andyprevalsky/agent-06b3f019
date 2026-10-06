@@ -59,17 +59,17 @@ Follow CLAUDE.md's "Monitor every cloud launch" guidance through resource releas
 
 Ordinary source-only runs reuse verified dependency images and completed
 snapshots. For an explicitly requested cold build/push measurement, use
-`scripts/run-bench image-build --no-cache --build-context <checkout> --out-dir <private-output>`
+`scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`
 from the repository root. The selected checkout supplies both Dockerfile and
 Fly config; the private receipt records pre-launch source/dirty status and
 recipe/config hashes, not artifact equivalence. The shared final-layer installer
 joins unchanged npm/Prisma and Python installs concurrently and retains installed
 dependencies and home assets except npm download caches/logs.
-Optional `--builder depot` is supported only by `image-build`: it uses existing
-Fly-integrated Depot with app scope, zstd level 3 and `linux/amd64`, and records
-those requested options in the receipt. Native remains the default; setup stays
-native. Verify image tag resolution and runtime compatibility before activation;
-the opt-in does not change shared builder settings or guarantee speed/cost.
+`image-build` defaults to Fly-integrated Depot with app scope, zstd level 3 and
+`linux/amd64`; `--builder native` remains an explicit diagnostic. Its receipt
+records those requested options. Independent `807edee9f` no-cache build/push completed
+in 493.6 seconds in one attempt, excluding activation/fleet startup. Activate the
+exact receipt image and verify guest digest/runtime consumption before the cohort.
 Image publication automatically caches a checksum-verified pinned Fly client in
 the Git common directory. Native publishing uses child-only classic Docker over
 HTTPS (`DOCKER_BUILDKIT=0`, `--wg=false`); shared Fly/PATH and the benchmark
@@ -90,7 +90,7 @@ BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 
 ```bash
-scripts/run-bench image-build --no-cache --build-context <committed-checkout> --out-dir .context/image-build
+scripts/run-bench image-build --builder depot --no-cache --build-context <committed-checkout> --out-dir .context/image-build
 benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/image-build/cloudbench-image-build.json"))["image_ref"])')
 scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
 ```

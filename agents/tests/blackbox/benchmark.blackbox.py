@@ -563,7 +563,16 @@ def test_private_fleet_source_behavior_is_in_permanent_gate():
 def test_evaluated_fleet_outcomes_publish_before_teardown():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
-        [sys.executable, str(repo_root / "scripts/tests/benchmark-live-results.test.py")],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            str(repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py")
+            + "::test_fleet_publishes_evaluation_before_teardown",
+            str(repo_root / "agents/benchmarks/cloud_batch_cleanup_test.py")
+            + "::test_evaluated_outcome_is_visible_before_agent_and_phone_teardown",
+        ],
         cwd=repo_root,
         text=True,
         capture_output=True,

@@ -2303,20 +2303,38 @@ PY_INPUTS
 }
 
 if [ "$MODE" = build-image ]; then
-    image_build_started="$(date +%s)"
-    if ! declare -F cloudbench_image_publish >/dev/null; then
-        source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-image-publisher.sh" || exit $?
-    fi
-    IMAGE_PUBLISHER_CLIENT="$(cloudbench_image_publisher_client)" || exit $?
-    # Capture the selected inputs before provider launch; later edits must not
-    # be attributed to an image whose build context was already submitted.
-    image_build_provenance="$(image_build_input_provenance)" || exit $?
-    build_warm_image || exit $?
-    image_build_finished="$(date +%s)"
-    python3 - "$OUT_DIR/cloudbench-image-build.json" "$IMAGE_REF" \
-        "$IMAGE_BUILD_NO_CACHE" "$image_build_provenance" \
-        "$image_build_started" "$image_build_finished" \
-        "$IMAGE_BUILD_COMPLETION" "$IMAGE_BUILD_ATTEMPTS" <<'PY_RECEIPT'
+    image_build_pid=""
+    image_build_exit() {
+        local status=$?
+        trap - EXIT
+        trap '' HUP INT TERM
+        # $! also covers a signal between asynchronous launch and PID assignment.
+        # Capture native births before signaling; never touch the shared builder.
+        cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \
+            "${image_build_pid:-${!:-}}" || status=70
+        exit "$status"
+    }
+    trap image_build_exit EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    (
+        # Parent owns cancellation and joining; the publisher owns no CLI traps.
+        trap - EXIT HUP INT TERM
+        image_build_started="$(date +%s)"
+        if ! declare -F cloudbench_image_publish >/dev/null; then
+            source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-image-publisher.sh" || exit $?
+        fi
+        IMAGE_PUBLISHER_CLIENT="$(cloudbench_image_publisher_client)" || exit $?
+        # Capture the selected inputs before provider launch; later edits must not
+        # be attributed to an image whose build context was already submitted.
+        image_build_provenance="$(image_build_input_provenance)" || exit $?
+        build_warm_image || exit $?
+        image_build_finished="$(date +%s)"
+        python3 - "$OUT_DIR/cloudbench-image-build.json" "$IMAGE_REF" \
+            "$IMAGE_BUILD_NO_CACHE" "$image_build_provenance" \
+            "$image_build_started" "$image_build_finished" \
+            "$IMAGE_BUILD_COMPLETION" "$IMAGE_BUILD_ATTEMPTS" <<'PY_RECEIPT'
 import json,os,sys
 path,image,cold,provenance,started,finished,completion,attempts=sys.argv[1:]
 receipt={"schema":"cloudbench-image-build-v1","image_ref":image,
@@ -2329,8 +2347,17 @@ with open(path,"w") as handle:
     handle.write("\n")
 os.chmod(path,0o600)
 PY_RECEIPT
-    echo "Image build receipt: $OUT_DIR/cloudbench-image-build.json"
-    exit 0
+        echo "Image build receipt: $OUT_DIR/cloudbench-image-build.json"
+        exit 0
+    ) &
+    image_build_pid=$!
+    if wait "$image_build_pid"; then
+        image_build_status=0
+    else
+        image_build_status=$?
+    fi
+    trap - EXIT HUP INT TERM
+    exit "$image_build_status"
 fi
 
 # MODE: --setup — one-time: app + secrets + image + volume + machine + git clone.

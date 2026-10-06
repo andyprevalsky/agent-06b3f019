@@ -239,7 +239,11 @@ def test_cold_image_cli_routes_without_task_selection(tmp_path, builder):
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads(observed.read_text()) == ["--build-image", *options]
+    assert json.loads(observed.read_text()) == [
+        "--build-image",
+        *options,
+        *([] if builder is not None else ["--builder", "depot"]),
+    ]
 
 
 @pytest.mark.parametrize("flag", ["--setup", "--destroy", "--refresh-secrets", "chat-mode"])

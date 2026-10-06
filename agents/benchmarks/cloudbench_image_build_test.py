@@ -8,8 +8,14 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
+import os
 import shlex
+import shutil
+import signal
 import subprocess
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -221,3 +227,143 @@ def test_cloudbench_image_build_preserves_donor_paths_and_runtime_contract(image
         assert ("CMD", '["bash", "-c", "exec sleep infinity"]') in final.instructions
     else:
         assert ("ENTRYPOINT", '["/usr/local/bin/cloudbench-entrypoint.sh"]') in final.instructions
+
+
+def _image_build_process_state(pid: int, birth: str) -> str:
+    """Observe exact native execution state; lookup failures remain unknown."""
+    try:
+        observed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart=", "-o", "stat="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        return "unknown"
+    fields = observed.stdout.split()
+    if observed.returncode == 0 and len(fields) >= 6:
+        if " ".join(fields[:-1]) != birth:
+            return "replaced"
+        return "terminal" if fields[-1].startswith("Z") else "live"
+    if observed.returncode == 1:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return "absent"
+        except PermissionError:
+            pass
+    return "unknown"
+
+
+@pytest.mark.parametrize("builder", [None, "native"])
+def test_cloudbench_image_build_cli_cancellation_joins_only_owned_publishers(
+    tmp_path: Path, builder: str | None
+) -> None:
+    # CLI → real cloud controller → real publisher → controlled local provider.
+    # Its unrelated same-group sibling must survive exact controller TERM.
+    context = tmp_path / "checkout"
+    libraries = context / "scripts/lib"
+    libraries.mkdir(parents=True)
+    (context / "Dockerfile.cloudbench-warm").write_text("FROM fixture-only\n")
+    (context / "fly.cloudbench-warm.toml").write_text('app = "fixture-only"\n')
+    (libraries / "cloudbench-env.sh").write_text(f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n")
+    for name in ("cloudbench-github-token.sh", "cloudbench-app-env-lock.sh"):
+        (libraries / name).write_text("")
+    provider = tmp_path / "publisher"
+    ownership = tmp_path / "publisher-owner.json"
+    provider.write_text(
+        f"#!{sys.executable}\n"
+        "import json,os,subprocess,sys,time\n"
+        "from pathlib import Path\n"
+        "if sys.argv[1] != 'deploy' or '--push' not in sys.argv or '--build-only' not in sys.argv: sys.exit(91)\n"
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'])\n"
+        "def birth(pid): return ' '.join(subprocess.check_output(['ps','-p',str(pid),'-o','lstart='],text=True).split())\n"
+        "record={'processes':[[os.getpid(),birth(os.getpid())],[child.pid,birth(child.pid)]],"
+        "'builder':'depot' if '--depot=true' in sys.argv else 'native'}\n"
+        "target=Path(os.environ['IMAGE_TEST_OWNERSHIP']); temporary=target.with_suffix('.tmp')\n"
+        "temporary.write_text(json.dumps(record)); temporary.replace(target)\n"
+        "child.wait()\n"
+    )
+    provider.chmod(0o700)
+    (libraries / "cloudbench-image-publisher.sh").write_text(
+        f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-image-publisher.sh'))}\n"
+        f"cloudbench_image_publisher_client() {{ printf '%s\\n' {shlex.quote(str(provider))}; }}\n"
+    )
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    flyctl = binaries / "flyctl"
+    flyctl.write_text("#!/usr/bin/env bash\nexit 92\n")
+    flyctl.chmod(0o700)
+    output = tmp_path / "private-output"
+    env = {
+        **os.environ,
+        "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
+        "CLOUDBENCH_FLEET_ROOT": str(context),
+        "CLOUDBENCH_SCRIPT_SNAPSHOT": str(libraries),
+        "FLY_BENCH_API_TOKEN": "fixture-only-token-long-enough",
+        "WARM_IMAGE_REF": "",
+        "IMAGE_TEST_OWNERSHIP": str(ownership),
+        "RUN_BENCH_CLOUD_BIN_UNDER_TEST": str(ROOT / "scripts/run-bench-cloud"),
+    }
+    arguments = [
+        shutil.which("bash"),
+        str(ROOT / "scripts/run-bench"),
+        "image-build",
+        "--no-cache",
+        "--build-context",
+        str(context),
+        "--out-dir",
+        str(output),
+    ]
+    if builder is not None:
+        arguments += ["--builder", builder]
+    processes = []
+    sibling = None
+    with (tmp_path / "private-cli.log").open("wb") as log:
+        controller = subprocess.Popen(arguments, env=env, stdout=log, stderr=log, process_group=0)
+        try:
+            deadline = time.monotonic() + 60
+            while not ownership.exists() and controller.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert ownership.is_file(), "controlled publisher did not start"
+            record = json.loads(ownership.read_text())
+            processes = record["processes"]
+            assert record["builder"] == (builder or "depot")
+            assert all(_image_build_process_state(pid, birth) == "live" for pid, birth in processes)
+            sibling = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(120)"], process_group=controller.pid
+            )
+            sibling_birth = " ".join(
+                subprocess.check_output(
+                    ["ps", "-p", str(sibling.pid), "-o", "lstart="],
+                    text=True,
+                ).split()
+            )
+            controller.send_signal(signal.SIGTERM)
+            controller.wait(timeout=60)
+            states = [_image_build_process_state(pid, birth) for pid, birth in processes]
+            while "unknown" in states and time.monotonic() < deadline:
+                time.sleep(0.1)
+                states = [_image_build_process_state(pid, birth) for pid, birth in processes]
+            assert all(state in {"absent", "terminal", "replaced"} for state in states), (
+                f"owned publisher states after CLI exit: {states}"
+            )
+            assert controller.returncode == 143
+            assert _image_build_process_state(sibling.pid, sibling_birth) == "live"
+            assert not (output / "cloudbench-image-build.json").exists()
+            assert not (output / "cloudbench-image-publication.json").exists()
+        finally:
+            if controller.poll() is None:
+                controller.terminate()
+                try:
+                    controller.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    controller.kill()
+                    controller.wait(timeout=10)
+            # Fixture cleanup is restricted to the native births captured here.
+            for pid, birth in processes:
+                if _image_build_process_state(pid, birth) == "live":
+                    os.kill(pid, signal.SIGKILL)
+            if sibling is not None:
+                sibling.terminate()
+                sibling.wait(timeout=10)

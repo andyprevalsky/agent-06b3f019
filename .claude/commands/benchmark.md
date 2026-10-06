@@ -28,17 +28,17 @@ including from fresh checkouts. Use `scripts/run-bench --help` and CLAUDE.md's
 "Cloud startup reuse" guidance; do not rebuild dependencies for source-only changes.
 
 An explicitly requested uncached image measurement uses
-`scripts/run-bench image-build --no-cache --build-context <checkout> --out-dir <private-output>`.
+`scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`.
 The selected checkout supplies the Dockerfile and Fly config. Its receipt records
 pre-launch source/dirty status, recipe/config hashes and build/push timing;
 it does not prove artifact equivalence. The final image layer installs the
 unchanged npm/Prisma and Python dependencies concurrently and joins both before
 publication. Ordinary branch runs continue to reuse verified dependency images.
-Add `--builder depot` only to `image-build` to select existing Fly-integrated
-Depot (app scope, zstd level 3, `linux/amd64`); native remains the default and
-setup stays native. The receipt records these requested options. No shared
-builder setting changes or speed/cost guarantee; verify image tag resolution
-and runtime compatibility before activation.
+`image-build` defaults to Fly-integrated Depot (app scope, zstd level 3,
+`linux/amd64`); `--builder native` selects an explicit native diagnostic. The
+independent `807edee9f` no-cache build/push completed in 493.6 seconds in one attempt,
+excluding activation/fleet startup. Activate the exact receipt image and verify
+guest digest/runtime consumption before the benchmark cohort.
 Image publication automatically caches a checksum-verified pinned Fly client in
 the Git common directory. Native publishing uses only the image child’s classic
 Docker/HTTPS settings (`DOCKER_BUILDKIT=0`, `--wg=false`); shared Fly/PATH and the
@@ -59,7 +59,7 @@ BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 
 ```bash
-scripts/run-bench image-build --no-cache --build-context <committed-checkout> --out-dir .context/image-build
+scripts/run-bench image-build --builder depot --no-cache --build-context <committed-checkout> --out-dir .context/image-build
 benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/image-build/cloudbench-image-build.json"))["image_ref"])')
 scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
 ```

@@ -191,15 +191,17 @@ controllers and up to 2,500 first-level children, not fifty distinct tasks.
 Use its documented `--strict-barrier` to coordinate all ready copies in each
 bounded cohort; controller count alone is not execution overlap. Ordinary
 non-strict scheduling stays unchanged. Cold image publication automatically
-caches a checksum-verified pinned client in the Git common directory and uses
-child-only native classic Docker over HTTPS; no manual download or shared Fly
-installation change is needed. The 31.6-second tiny CLI control is not full
-cold-image timing.
+caches a checksum-verified pinned client in the Git common directory. The CLI
+defaults `image-build` to app-scoped Depot with zstd level 3 and AMD64; use
+`--builder native` for an explicit native diagnostic. Independent `807edee9f` no-cache
+build/push completed in 493.6 seconds in one attempt; activation/fleet startup
+remain separate stages. Native publishing uses child-only classic Docker over
+HTTPS; shared Fly installation remains unchanged.
 
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 
 ```bash
-scripts/run-bench image-build --no-cache --build-context <committed-checkout> --out-dir .context/image-build
+scripts/run-bench image-build --builder depot --no-cache --build-context <committed-checkout> --out-dir .context/image-build
 benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/image-build/cloudbench-image-build.json"))["image_ref"])')
 scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
 ```

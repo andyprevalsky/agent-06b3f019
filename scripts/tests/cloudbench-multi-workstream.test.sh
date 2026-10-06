@@ -304,7 +304,7 @@ fleet_production_function() {
       $0 ~ "^" function_name "\\(\\)" { capture = 1 }
       capture { print }
       capture && /^}$/ { exit }
-    ' "$ROOT_DIR/scripts/run-bench-fleet"
+    ' "$ROOT_DIR/scripts/run-bench-fleet" "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh"
 }
 
 clone_source_read_rate_limit_contract() (
@@ -3667,6 +3667,9 @@ grep -qF "fleet controller detached" "$detached_launcher_log" ||
 detached_log="$(sed -n 's/^    log: tail -f //p' "$detached_launcher_log" | tail -1)"
 [ -n "$detached_log" ] ||
     fail "default-detach launcher did not publish its controller log"
+detached_status_marker="$(sed -n 's/^    controller exit marker: \(.*\) (check on every poll, even if logs stop growing)$/\1/p' "$detached_launcher_log" | tail -1)"
+[ "$detached_status_marker" = "${detached_log%.log}.status" ] ||
+    fail "default-detach launcher did not publish its exact status marker"
 
 # Capture the exact controller while it is still live so EXIT cleanup can stop
 # it if this regression itself aborts early.
@@ -3722,6 +3725,8 @@ if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/n
     fail "default-detached fleet left durable ownership records after cleanup"
 fi
 assert_no_controller_script_snapshots "default-detached terminal cleanup"
+[ "$(cat "$detached_status_marker" 2>/dev/null)" = "0" ] ||
+    fail "default-detached fleet did not retain its successful terminal monitor status"
 echo "PASS: scenario 2-detach — disposable launcher returned; detached fleet completed and cleaned every owned resource"
 
 # Hub/predeploy supervisors need the same session durability without giving up
@@ -3748,6 +3753,9 @@ grep -qF "detached fleet completed (exit=0)" "$wait_launcher_log" ||
 wait_detached_log="$(sed -n 's/^    log: tail -f //p' "$wait_launcher_log" | tail -1)"
 [ -n "$wait_detached_log" ] && grep -qF "1/1 passed" "$wait_detached_log" ||
     fail "detached wait controller did not reach terminal aggregation"
+wait_status_marker="$(sed -n 's/^    controller exit marker: \(.*\) (check on every poll, even if logs stop growing)$/\1/p' "$wait_launcher_log" | tail -1)"
+[ "$wait_status_marker" = "${wait_detached_log%.log}.status" ] ||
+    fail "detached wait launcher did not publish its exact status marker"
 check_run_record "$WS_A" bench-detached-wait "$BASE_REF" workstream-a ||
     fail "detached wait fleet's run record is wrong"
 read -r wait_machines wait_volumes < <(
@@ -3766,9 +3774,11 @@ PY
 if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/null | grep -q .; then
     fail "detached wait fleet left durable ownership records after cleanup"
 fi
-if find "$WS_A/.context/fleet/runs" -name 'detached-*.status' -type f -print -quit 2>/dev/null | grep -q .; then
+if [ -e "$wait_status_marker" ]; then
     fail "detached wait fleet left a consumed status rendezvous"
 fi
+[ "$(cat "$detached_status_marker" 2>/dev/null)" = "0" ] ||
+    fail "detached wait cleanup consumed an earlier fleet's terminal monitor status"
 assert_no_controller_script_snapshots "detached-wait terminal cleanup"
 echo "PASS: scenario 2-wait — detached controller preserved synchronous status and cleaned every owned resource"
 

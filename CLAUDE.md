@@ -918,7 +918,7 @@ set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=1200` and pass `--timeout 1200`.
 The CLI flag alone sets the orchestration budget; the normal timeout remains unchanged.
 
 For an explicitly requested cold-image measurement, use the same CLI:
-`scripts/run-bench image-build --no-cache --build-context <checkout> --out-dir <private-output>`.
+`scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`.
 The selected checkout supplies both `Dockerfile.cloudbench-warm` and
 `fly.cloudbench-warm.toml`. The private receipt records its pre-launch HEAD,
 dirty status, recipe/config hashes and elapsed build/push time; those inputs
@@ -928,12 +928,13 @@ then copies source last. Only npm download cache/logs are omitted; installed
 dependencies, npm configuration and other home assets remain. Measure native
 cold timing before claiming a speedup. Ordinary source-only runs still reuse
 their verified dependency image and snapshots.
-Only `image-build` accepts `--builder depot` to opt into the existing
-Fly-integrated Depot backend; omit it or use `--builder native` for the native
-default. Setup remains native. Depot uses app scope, zstd level 3 and
-`linux/amd64`; the receipt records requested builder/scope/compression/platform.
-This does not change a shared builder setting or promise speed/cost savings.
-Verify the resulting image tag resolves and runs before donor activation.
+`image-build` defaults to the existing Fly-integrated Depot backend; use
+`--builder native` for an explicit native diagnostic. Setup consumes the exact
+prebuilt receipt image through `image-activate`. Depot uses app scope, zstd level 3
+and `linux/amd64`; the receipt records requested builder/scope/compression/platform.
+The independent `807edee9f` no-cache build/push completed in 493.6 seconds in one attempt;
+this excludes image activation and fleet startup. Activate the exact receipt image
+and verify guest digest/runtime consumption before the benchmark cohort.
 Image publication automatically caches the checksum-verified pinned Fly client
 in the Git common directory. Native publishing uses child-only
 `DOCKER_BUILDKIT=0` and `--wg=false` for classic Docker over HTTPS; the shared
@@ -956,7 +957,7 @@ BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 
 ```bash
-scripts/run-bench image-build --no-cache --build-context <committed-checkout> --out-dir .context/image-build
+scripts/run-bench image-build --builder depot --no-cache --build-context <committed-checkout> --out-dir .context/image-build
 benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/image-build/cloudbench-image-build.json"))["image_ref"])')
 scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
 ```
