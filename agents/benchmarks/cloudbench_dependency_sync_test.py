@@ -15847,7 +15847,7 @@ SNAPSHOT_LOOP_TOKEN=test-token
 inventory_machine_exists owned-primary; test "$?" -eq 0
 inventory_machine_exists missing-primary; test "$?" -eq 1
 printf 'publisher_token=test-token\\nvalid_until=%s\\n' "$((INVENTORY_CLOCK_EPOCH - 1))" > "$INVENTORY_INDEX/current/health"
-inventory_machine_exists owned-primary; test "$?" -eq 2
+inventory_machine_exists owned-primary; test "$?" -eq 75
 """
     result = subprocess.run(
         ["bash", "-c", script],

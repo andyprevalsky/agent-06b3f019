@@ -194,8 +194,10 @@ Do not automatically rebuild images during ordinary branch runs. Cached DEMO
 copies earn zero LIVE acceptance credit and retain genuine evaluation; declared
 judges may call providers. The mass-demo fifty-copy command means fifty
 controllers and up to 2,500 first-level children, not fifty distinct tasks.
-Use its documented `--strict-barrier` to coordinate all ready copies in each
-bounded cohort; controller count alone is not execution overlap. Ordinary
+Use its documented `--strict-barrier` to coordinate all surviving eligible ready
+copies in each bounded cohort. Retain failed members in the original requested
+count and report actual released width; partial release never earns full-width
+credit. Controller count alone is not execution overlap. Ordinary
 non-strict scheduling stays unchanged. Cold image publication automatically
 caches a checksum-verified pinned client in the Git common directory. The CLI
 defaults `image-build` to app-scoped Depot with zstd level 3 and AMD64; use

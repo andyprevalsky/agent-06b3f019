@@ -225,8 +225,18 @@ Startup reuse:
 Monitoring:
   Every launch prints its exact monitoring handle. Poll every 30 seconds,
   checking terminal lifecycle on every observation, including stale cards.
-  Task PASS/FAIL is available before cleanup. Observe through resource release;
-  a stale observation is a warning, never authorization to restart the run.
+  Controller status is separate from task PASS/FAIL; retain genuine task FAIL.
+  Retry transient observations with the original owner; preserve actual fatal
+  status. Observe required terminal publication and exact browser/provider/local
+  release. An outcome ACK or early pool return is not the final release audit.
+  Do not cancel or reset for a stale card. At an explicitly requested hard cutoff
+  or catastrophe, verify birth and stop only the exact owner through cleanup.
+  For a dead original owner with retained resources, use:
+    scripts/run-bench --recover-stale-owner <exact-token>
+  Keep original receipts; interruption/recovery never grants acceptance credit.
+  The documented cached 50-copy diagnostic alone uses execution 300s and hard 1200s
+  allocation-to-full-release per copy; retain its original native/claim clock,
+  or the conservative before-claim marker when native allocation is unavailable.
 EOF
 }
 

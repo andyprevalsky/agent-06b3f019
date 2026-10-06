@@ -551,8 +551,9 @@ Image publication automatically caches its checksum-verified pinned Fly client
 in the Git common directory; native uses child-only classic Docker over HTTPS
 (`DOCKER_BUILDKIT=0`, `--wg=false`). Shared Fly/PATH and runtime remain unchanged.
 The 31.6-second tiny CLI control is not full cold-image timing. Strict repeated
-campaigns also have compact cohort readiness/abort/inverse controls here, with
-the existing startup budget and normal owned cleanup. Controller count alone
+campaigns also have compact cohort readiness, healthy-survivor continuation,
+exact release-membership and catastrophic abort/inverse controls here, with the
+existing startup budget and normal owned cleanup. Controller count alone
 does not prove execution overlap; ordinary non-strict scheduling is unchanged.
 
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:

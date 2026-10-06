@@ -12877,6 +12877,12 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
         fi
         inventory_machine_exists "$cid" || inventory_status=$?
         if [ "$inventory_status" -ne 0 ]; then
+            if [ "$inventory_status" -eq 75 ]; then
+                inventory_status=0
+                echo "  ⚠️ [$bench] mandatory autoscaler: provider inventory temporarily unavailable during proxy startup; retrying" >&2
+                sleep 2
+                continue
+            fi
             if [ "$inventory_status" -eq 2 ]; then
                 fail_autoscaler "shared provider inventory is unhealthy during proxy startup"
             else
@@ -12890,8 +12896,8 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
     done
     echo "  🛰️ [$bench] autoscaler metrics via data plane :$metrics_port → fly:$BOX_HEALTH_PORT"
     # Wait for the box /metrics to answer (stack up) before scaling. Inventory
-    # lookup failure is not normal termination: a stale/failed publisher must
-    # fail closed unless this autoscaler has itself observed child completion.
+    # Transient feed loss pauses capacity changes under the existing child
+    # lifecycle. Invalid ownership or a missing primary still fails closed.
     while :; do
         if [ -e "$out/benchmark-child.finished" ]; then
             complete_autoscaler_after_child
@@ -12916,6 +12922,14 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
             if [ -e "$out/benchmark-child.finished" ]; then
                 complete_autoscaler_after_child
                 return $?
+            fi
+            if [ "$inventory_status" -eq 75 ]; then
+                inventory_status=0
+                scale_down_target=""
+                scale_down_since=""
+                echo "  ⚠️ [$bench] mandatory autoscaler: provider inventory temporarily unavailable during the run; retrying" >&2
+                sleep "$AUTOSCALE_POLL"
+                continue
             fi
             if [ "$inventory_status" -eq 2 ]; then
                 fail_autoscaler "shared provider inventory is unhealthy during the run"

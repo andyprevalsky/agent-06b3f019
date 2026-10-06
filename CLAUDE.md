@@ -1085,8 +1085,10 @@ Machines plus 50 primaries, up to 50 optional autoscaler workers and two transie
 slots. Inspect native app inventory and headroom again before a future run;
 ordinary ceiling 56 cannot hold this current cohort, and ceiling 88 leaves only
 two worker slots. This profile creates no idle resources and changes no default
-ceiling, shared-CPU governor or production headroom. `--strict-barrier` keeps all
-50 copies in one ready cohort; controller occupancy does not prove execution overlap.
+ceiling, shared-CPU governor or production headroom. `--strict-barrier` coordinates
+all surviving eligible copies in one ready cohort. Keep the original requested
+50-copy count alongside `released_count` and `failed_count`; a partial release
+never earns full-width credit. Controller occupancy does not prove execution overlap.
 The default mass-task primary uses `shared-cpu-2x` / 4 GB; its optional worker
 uses `performance-1x` / 2 GB. Fifty primaries add 100 active shared CPU units.
 The unchanged governor keeps 20 of 160 shared units for production, leaving
@@ -1134,9 +1136,13 @@ This requests 50 independent one-task fleet controllers. Each unchanged mass
 task spawns 50 first-level general-purpose children: 2,500 across the campaign;
 its existing explore allowance remains unchanged. It is not 50 distinct tasks.
 For repeated campaigns, `--strict-barrier` holds each bounded cohort until all
-copies finish normal stack and autoscaler readiness, then releases their existing
-start barriers together. Startup failure aborts the cohort through owned cleanup;
-ordinary non-strict campaigns retain sliding scheduling. Active controller count
+surviving eligible copies finish normal stack and autoscaler readiness, then
+releases their existing start barriers together. An ordinary terminal member
+failure stays failed while healthy peers and later cohorts continue. Preserve
+the original requested count and report actual released and failed membership;
+partial release never earns full-width credit. Shared publisher or parent loss,
+invalid readiness ownership or release membership, and explicit cancellation
+retain owned abort handling. Ordinary non-strict campaigns retain sliding scheduling. Active controller count
 alone is not execution overlap; inspect actual task start/terminal intervals.
 `--demo-cache` keeps task-agent cache reads read-only and blocks their live
 fallback on cache misses or unresolved context. The separate benchmark harness

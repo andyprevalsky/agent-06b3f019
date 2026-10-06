@@ -206,10 +206,14 @@ is not a recorded hit, and cached diagnostics earn zero LIVE acceptance credit.
 Keep tasks, prompts and evaluators unchanged and follow the printed monitor command.
 These compact regression controls run in the existing deploy gate; large cached
 campaigns remain explicitly requested experiments.
-Repeated `--strict-barrier` campaigns wait for every copy’s unchanged stack and
-autoscaler readiness before releasing each bounded cohort. A startup failure
-aborts through owned cleanup; ordinary non-strict sliding scheduling remains
-unchanged. Measure execution overlap from task start/terminal intervals rather
+Repeated `--strict-barrier` campaigns wait for every surviving eligible copy’s
+unchanged stack and autoscaler readiness before releasing each bounded cohort.
+An ordinary terminal member failure stays failed while healthy peers and later
+cohorts continue. Preserve the original requested count alongside released and
+failed counts; partial release never earns full-width credit. Shared publisher
+or parent loss, invalid readiness ownership or release membership, and explicit
+cancellation retain owned abort handling. Ordinary non-strict sliding scheduling
+remains unchanged. Measure execution overlap from task start/terminal intervals rather
 than the campaign’s active controller count.
 
 The controller regression command is `bash scripts/tests/cloudbench-multi-workstream.test.sh`.

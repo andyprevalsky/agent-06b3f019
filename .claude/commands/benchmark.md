@@ -133,9 +133,12 @@ provider spend, or LIVE acceptance credit. Do not edit tasks, prompts or evaluat
 to create a cheaper passing fixture. The compact mode/handoff controls run in
 the existing deploy gate; this large diagnostic remains user-requested.
 With repeated copies, `--strict-barrier` releases a bounded cohort only after
-every copy finishes its normal stack and autoscaler readiness. Startup failure
-aborts the cohort through owned cleanup; non-strict sliding scheduling remains
-unchanged. Report actual task start/terminal overlap, not controller count.
+every surviving eligible copy finishes its normal stack and autoscaler readiness.
+Ordinary terminal member failures stay failed while healthy peers and later
+cohorts continue. Keep the original requested count and actual released/failed
+counts; partial release never earns full-width credit. Shared publisher or parent
+loss, invalid readiness ownership or release membership, and explicit cancellation
+retain owned abort handling. Non-strict sliding scheduling remains unchanged. Report actual task start/terminal overlap, not controller count.
 
 Follow the exact monitoring command printed by every launch. Poll every 30 seconds;
 check controller terminal status even when the card is stale, and continue through

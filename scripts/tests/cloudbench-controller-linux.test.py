@@ -129,10 +129,9 @@ class ContainerOwnership(unittest.TestCase):
                 if args[1] in ("stop", "rm"):
                     return subprocess.CompletedProcess(args, 0, "", "")
                 if args[1] == "cp":
+                    (root / "fixture-tmp" / "retained.log").write_text("private")
                     if export_exception:
                         raise OSError("controlled export exception")
-                    if not export_failure:
-                        (root / "fixture-tmp" / "retained.log").write_text("private")
                     return subprocess.CompletedProcess(
                         args, int(export_failure), "", "controlled export failure"
                     )
@@ -156,7 +155,11 @@ class ContainerOwnership(unittest.TestCase):
                     "",
                 )
 
-            with patch.object(runner.subprocess, "run", side_effect=docker):
+            warnings = io.StringIO()
+            with (
+                patch.object(runner.subprocess, "run", side_effect=docker),
+                contextlib.redirect_stderr(warnings),
+            ):
                 result = runner.retire_owned_container(
                     root, "owned-name", "owned-label", image
                 )
@@ -166,6 +169,8 @@ class ContainerOwnership(unittest.TestCase):
                     (root / "fixture-tmp" / "retained.log").stat().st_mode & 0o777,
                     0o600,
                 )
+            if export_failure or export_exception:
+                self.assertIn("WARNING:", warnings.getvalue())
             return result, calls, identity
 
     def test_owned_container_is_stopped_exported_privately_and_removed(self):
@@ -191,11 +196,11 @@ class ContainerOwnership(unittest.TestCase):
                 self.assertFalse(result)
                 self.assertFalse(any(call[1] in ("stop", "cp", "rm") for call in calls))
 
-    def test_export_failure_still_removes_exact_owner_and_fails_evidence(self):
+    def test_export_failure_warns_and_preserves_exact_native_retirement(self):
         for settings in ({"export_failure": True}, {"export_exception": True}):
             with self.subTest(settings=settings):
                 result, calls, identity = self.check_retirement(**settings)
-                self.assertFalse(result)
+                self.assertTrue(result)
                 self.assertIn(["docker", "rm", identity], calls)
                 self.assertEqual(calls[-1], ["docker", "inspect", identity])
 
@@ -211,7 +216,7 @@ class ContainerOwnership(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(calls[0][2], "owned-name")
 
-    def check_dispatch(self, *, cancelled=False, fixture=None):
+    def check_dispatch(self, *, cancelled=False, fixture=None, fixture_exit_code=0):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             tests = root / "scripts/tests"
@@ -244,7 +249,7 @@ class ContainerOwnership(unittest.TestCase):
                         raise SystemExit(143)
                     lifecycle.append("join")
                     self.joined = True
-                    return 0
+                    return fixture_exit_code
 
                 def poll(self):
                     return None if cancelled else 0
@@ -289,7 +294,7 @@ class ContainerOwnership(unittest.TestCase):
                         runner.main()
                     self.assertEqual(exit_status.exception.code, 143)
                 else:
-                    self.assertEqual(runner.main(), 0)
+                    self.assertEqual(runner.main(), fixture_exit_code)
             command = calls[0]
             self.assertEqual(
                 command[-1],
@@ -321,6 +326,7 @@ class ContainerOwnership(unittest.TestCase):
 
     def test_dispatch_uses_native_storage_and_keeps_inherited_proxies(self):
         self.assertEqual(self.check_dispatch(), ["join", "retire"])
+        self.assertEqual(self.check_dispatch(fixture_exit_code=1), ["join", "retire"])
 
     def test_registered_fixture_selector_preserves_exact_dispatch_owner(self):
         for fixture in ("multi-workstream", "status-service-shutdown"):

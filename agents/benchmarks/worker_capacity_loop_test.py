@@ -16,17 +16,24 @@ def native(pid):
 
 
 def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
-    from benchmarks.cloudbench_dependency_sync_test import FLEET_SCRIPT, _extract_fleet_function
+    from benchmarks.cloudbench_dependency_sync_test import FLEET_SCRIPT, _extract_fleet_function, fleet_source_text
 
     BASE = tmp_path
     BASH = shutil.which("bash") or "bash"
     SOURCE = BASE / "subject.sh"
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     SOURCE.write_text(
-        "\n".join(
-            _extract_fleet_function(fleet, name + "() {")
+        f"source {shlex.quote(str(FLEET_SCRIPT.parent / 'lib/cloudbench-env.sh'))}\n" + "\n".join(
+            _extract_fleet_function(fleet, name + "() {").replace(
+                "inventory_machine_exists() {", "fixture_inventory_machine_exists() {", 1
+            )
             for name in (
                 "fleet_job_running",
+                "inventory_pid_start_time",
+                "inventory_pid_matches_start",
+                "inventory_index_healthy",
+                "inventory_machine_record_path",
+                "inventory_machine_exists",
                 "_box_desired",
                 "_pool_ids",
                 "_ready_pool_ids",
@@ -47,7 +54,9 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
     RUN.mkdir()
     results = []
 
-    for mode in ["pending_then_ready", "pending_until_child", "provision_failure"]:
+    transient_modes = {"inventory_expired_then_ready", "inventory_read_miss_then_ready"}
+    fatal_inventory_modes = {"inventory_wrong_token", "inventory_dead_publisher", "inventory_missing_machine"}
+    for mode in ["pending_then_ready", "pending_until_child", "provision_failure", *sorted(transient_modes), *sorted(fatal_inventory_modes)]:
         case = RUN / mode
         case.mkdir()
         out = case / "bench"
@@ -66,7 +75,26 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
     BOX_HEALTH_PORT=3003
     CLOUDBENCH_BOOT_LAUNCH=0
     _machine_priv_ip() { printf 'fdaa::1'; }
-    inventory_machine_exists() { return 0; }
+    case "$MODE" in
+        inventory_*)
+            INVENTORY_INDEX="$CASE/inventory"
+            INVENTORY_CLOCK_EPOCH="$(date +%s)"
+            INVENTORY_CLOCK_SECONDS="$SECONDS"
+            SNAPSHOT_LOOP_PID=$$
+            SNAPSHOT_LOOP_PID_START="$(inventory_pid_start_time "$$")"
+            SNAPSHOT_LOOP_TOKEN=fixture-publisher
+            mkdir -p "$INVENTORY_INDEX/current/machines"
+            printf 'state=started\n' > "$INVENTORY_INDEX/current/machines/feedface000001"
+            printf 'publisher_token=fixture-publisher\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH + 120))" > "$INVENTORY_INDEX/current/health"
+            inventory_machine_exists() {
+                local rc=0
+                fixture_inventory_machine_exists "$@" || rc=$?
+                printf '%s\n' "$rc" > "$CASE/inventory-observed"
+                return "$rc"
+            }
+            ;;
+        *) inventory_machine_exists() { return 0; } ;;
+    esac
     release_autoscaler_metrics_owner() { return 0; }
     claim_autoscaler_metrics_port() { printf -v "$1" 62345; }
     cloudbench_terminate_and_wait() {
@@ -79,7 +107,19 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
     }
     flyctl() { printf '%s\n' "$BASHPID" > "$CASE/proxy.pid"; exec sleep 120; }
     curl() {
-        case " $* " in *' -o /dev/null '*) return 0 ;; esac
+        case " $* " in *' -o /dev/null '*)
+            if [ ! -e "$CASE/inventory-fault" ]; then
+                case "$MODE" in
+                    inventory_expired_then_ready) printf 'publisher_token=fixture-publisher\nvalid_until=1\n' > "$INVENTORY_INDEX/current/health" ;;
+                    inventory_read_miss_then_ready) rm "$INVENTORY_INDEX/current/health" ;;
+                    inventory_wrong_token) printf 'publisher_token=wrong-publisher\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH + 120))" > "$INVENTORY_INDEX/current/health" ;;
+                    inventory_dead_publisher) SNAPSHOT_LOOP_PID=99999999 ;;
+                    inventory_missing_machine) rm "$INVENTORY_INDEX/current/machines/feedface000001" ;;
+                esac
+                : > "$CASE/inventory-fault"
+            fi
+            return 0 ;;
+        esac
         local poll=0
         [ ! -e "$CASE/polls" ] || poll="$(cat "$CASE/polls")"
         poll=$((poll+1)); printf '%s\n' "$poll" > "$CASE/polls"
@@ -91,6 +131,7 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
         count=$((count+1))
         [ ! -e "$OUT/benchmark-child.finished" ] || after=1
         printf '%s %s %s\n' "$count" "$(cat "$CASE/polls")" "$after" >> "$CASE/calls"
+        case "$MODE" in inventory_*) inventory_index_healthy || { : > "$CASE/stale-capacity-mutation"; return 18; } ;; esac
         if [ "$MODE" = provision_failure ]; then
             printf 'fixture-provision-failure\n' > "$OUT/autoscaler.failed"
             return 17
@@ -164,13 +205,23 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                 processes.append(scaler)
                 owners.append({"kind": "autoscaler", "pid": scaler.pid, "birth": native(scaler.pid)})
                 deadline = time.monotonic() + 30
+                restored_inventory = False
                 while True:
                     for name in ["proxy", "child"]:
                         p = case / f"{name}.pid"
                         if p.exists() and not any(o["kind"] == name for o in owners):
                             pid = int(p.read_text())
                             owners.append({"kind": name, "pid": pid, "birth": native(pid)})
-                    if mode == "pending_then_ready":
+                    observed_inventory = case / "inventory-observed"
+                    if mode in transient_modes and not restored_inventory and observed_inventory.exists() and observed_inventory.read_text().strip() not in {"", "0"}:
+                        time.sleep(0.1)
+                        assert scaler.poll() is None, "transient-inventory-aborted-live-autoscaler"
+                        assert not (case / "calls").exists(), "capacity-mutated-before-fresh-inventory"
+                        (case / "inventory/current/health").write_text(
+                            f"publisher_token=fixture-publisher\nvalid_until={int(time.time()) + 120}\n"
+                        )
+                        restored_inventory = True
+                    if mode == "pending_then_ready" or mode in transient_modes:
                         ready = (
                             (out / "worker-ready.ids").read_text().splitlines()
                             if (out / "worker-ready.ids").exists()
@@ -189,12 +240,12 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                 (case / "release-child").touch()
                 assert child.wait(timeout=10) == 1, "independent-child-return-code"
                 scaler_rc = scaler.wait(timeout=10)
-                calls = [list(map(int, line.split())) for line in (case / "calls").read_text().splitlines()]
+                calls = [list(map(int, line.split())) for line in (case / "calls").read_text().splitlines()] if (case / "calls").exists() else []
                 tracked = (out / "worker-clones.ids").read_text().splitlines()
                 ready = (out / "worker-ready.ids").read_text().splitlines()
                 assert all(row[2] == 0 for row in calls), "provision-called-after-independent-child-marker"
                 assert (out / "benchmark-child.finished").read_text().strip() == "1"
-                if mode == "pending_then_ready":
+                if mode == "pending_then_ready" or mode in transient_modes:
                     assert scaler_rc == 0, "pending-recovery-did-not-complete"
                     assert not (out / "autoscaler.failed").exists(), "pending-written-as-failure"
                     assert [row[1] for row in calls] == [1, 2, 2], "retried-pending-in-same-scale-pass"
@@ -202,12 +253,21 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                         "wrong-tracked-ready-identities"
                     )
                     assert (out / "autoscaler.completed-after-child").read_text().strip() == "1"
+                    if mode in transient_modes:
+                        assert restored_inventory
+                        assert not (case / "stale-capacity-mutation").exists()
+                        assert "retrying" in (case / "scaler.private.log").read_text()
                 elif mode == "pending_until_child":
                     assert [row[1] for row in calls] == [1, 2, 3], "persistent-unknown-retried-in-same-pass"
                     assert tracked == ready == [], "persistent-unknown-admitted-worker"
                     assert scaler_rc == 0, "unallocated-postterminal-demand-blocked-release"
                     assert not (out / "autoscaler.failed").exists()
                     assert (out / "autoscaler.completed-after-child").read_text().strip() == "1"
+                elif mode in fatal_inventory_modes:
+                    assert scaler_rc == 1, "invalid-inventory-did-not-stop-autoscaler"
+                    assert calls == [], "capacity-mutated-with-invalid-inventory"
+                    assert (out / "autoscaler.failed").is_file(), "invalid-inventory-missing-durable-failure"
+                    assert not (out / "autoscaler.completed-after-child").exists()
                 else:
                     assert scaler_rc == 17, "true-provision-return-code-lost"
                     assert len(calls) == 1, "provision-retried-after-hard-failure"
