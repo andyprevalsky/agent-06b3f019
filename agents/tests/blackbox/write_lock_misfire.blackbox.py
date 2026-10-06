@@ -201,6 +201,7 @@ class _Browser:
                 "--no-default-browser-check",
                 "--no-sandbox",
                 "--window-size=1280,900",
+                "--use-mock-keychain",
                 "about:blank",
             ],
             stdout=subprocess.DEVNULL,

@@ -19395,7 +19395,7 @@ def test_refresh_wmh_publishes_the_rebuilt_volume_as_the_proven_fleet_snapshot()
 def test_fleet_retained_resources_do_not_claim_release(tmp_path: Path) -> None:
     fleet = fleet_source_text()
     start = fleet.index("    # Report each bench's end-to-end duration")
-    end = fleet.index("    # Task failure and infrastructure failure", start)
+    end = fleet.index("    # Keep the parent live while releasing resources.", start)
     fallback = fleet[start:end]
     for keep, failed, already_released in ((0, 0, False), (1, 0, False), (1, 0, True), (0, 1, False)):
         out = tmp_path / f"{keep}-{failed}-{already_released}"

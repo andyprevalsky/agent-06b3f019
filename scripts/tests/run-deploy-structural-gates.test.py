@@ -62,6 +62,7 @@ class StructuralGateDocumentationTests(unittest.TestCase):
             "python3 scripts/tests/verify-successful-llm-queries.test.py",
             "python3 scripts/tests/cloudbench-exact-session-multi-root.test.py",
             "python3 scripts/tests/cloudbench-forensic-quiesced.test.py",
+            "python3 scripts/tests/cloudbench-bootstrap-recovery.test.py",
         }.issubset(_registry_commands()))
 
     def test_deploy_md_lists_every_registered_gate(self) -> None:

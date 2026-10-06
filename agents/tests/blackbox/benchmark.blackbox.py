@@ -94,7 +94,7 @@ def test_local_benchmark_rejects_disabled_trace_before_allocation():
 
 
 def test_every_benchmark_run_registers_in_app_hub_before_execution():
-    """The Mac-app Hub is a fail-closed launch invariant, not best-effort save telemetry."""
+    """Local registration stays fail-closed; fleets retain their terminal writer."""
     from benchmarks.hub_upload import HubVisibilityError, require_run_visible
 
     requests = []
@@ -166,7 +166,8 @@ def test_every_benchmark_run_registers_in_app_hub_before_execution():
     poller = (repo_root / "scripts/run-bench-hub-poller").read_text()
     assert "require_run_visible" in runner
     assert "BENCHMARK_HUB_PARENT_RUN_ID" in runner
-    assert "--require-visible" in fleet
+    assert "--register-starting" in fleet
+    assert 'SELF_MANAGED_HUB_RUN="1"' in fleet
     assert "BENCHMARK_HUB_PARENT_RUN_ID" in fleet
     assert 'BENCHMARK_HUB_PARENT_RUN_ID="$hub_run_id"' in poller
 

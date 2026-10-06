@@ -700,6 +700,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-exact-session-cleanup.py" \
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestart-recovery.py" \
+       "$ROOT_DIR/scripts/cloudbench-prestack-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-barrier.py" \
        "$ROOT_DIR/scripts/cloudbench-forensic-retirement.py" \
@@ -758,6 +759,7 @@ CONTROLLER_SNAPSHOT_MANIFEST="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-controller-
 CLOUDBENCH_RESULT_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_result.py"
 EXACT_SESSION_CLEANUP_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-exact-session-cleanup.py"
 GUEST_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-guest-recovery.py"
+PRESTACK_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestack-recovery.py"
 VOLUME_MIGRATION_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-volume-migration.py"
 FORENSIC_RETIREMENT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-forensic-retirement.py"
 RUNTIME_EVIDENCE_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-collect-runtime-evidence.py"
@@ -6988,6 +6990,44 @@ cloudbench_confirm_guest_shutdowns() {
     return "$failed"
 }
 
+cloudbench_validate_bootstrap_retirement() {  # <registry-dir> <bench> <output>
+    local registry="$1" bench="$2" output="$3" capture_dir machines volumes status=1
+    [ -f "$PRESTACK_RECOVERY_HELPER" ] && [ ! -L "$PRESTACK_RECOVERY_HELPER" ] || return 1
+    capture_dir="$(python3 - "$output/guest-bootstrap.confirmed" <<'PY'
+import json, os, stat, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 1048576:
+        raise ValueError("unsafe bootstrap retirement receipt")
+    with os.fdopen(fd, "rb", closefd=False) as stream:
+        receipt = json.load(stream)
+    if receipt.get("kind") != "fresh-infra-bootstrap-zero-provider":
+        raise ValueError("wrong bootstrap retirement family")
+    path = receipt.get("capture_dir")
+    if not isinstance(path, str) or not path.startswith("/") or "\n" in path:
+        raise ValueError("unsafe bootstrap capture path")
+    print(path)
+finally:
+    os.close(fd)
+PY
+)" || return 1
+    machines="$(mktemp "${TMPDIR:-/tmp}/cloudbench-bootstrap-machines.XXXXXX")" || return 1
+    volumes="$(mktemp "${TMPDIR:-/tmp}/cloudbench-bootstrap-volumes.XXXXXX")" \
+        || { rm -f "$machines"; return 1; }
+    if fly_with_timeout 30 machines list -a "$APP" --json > "$machines" \
+            2>> "$output/guest-bootstrap.validation.log" \
+        && fly_with_timeout 30 volumes list -a "$APP" --json > "$volumes" \
+            2>> "$output/guest-bootstrap.validation.log" \
+        && python3 "$PRESTACK_RECOVERY_HELPER" --registry "$registry" --bench "$bench" \
+            --capture-dir "$capture_dir" --machines-json "$machines" --volumes-json "$volumes" \
+            --validate-published-bootstrap >> "$output/guest-bootstrap.validation.log" 2>&1; then
+        status=0
+    fi
+    rm -f "$machines" "$volumes" || status=1
+    return "$status"
+}
+
 cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
     local registry="${1%/}" owner="${1%/}" recovered=0 failed=0 recovery_index
     local bench clone_name machine_id machine_state guest_run_token proxy_port output
@@ -7055,6 +7095,17 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
             --state-receipt "$state_evidence"
             --receipt "$receipt"
         )
+
+        if [ -e "$output/guest-bootstrap.confirmed" ] || [ -L "$output/guest-bootstrap.confirmed" ]; then
+            if cloudbench_validate_bootstrap_retirement "$registry" "$bench" "$output"; then
+                echo "✅ [$bench] exact original infra bootstrap canceled before service/provider launch; isolated DB remains on owned volume"
+                recovered=$((recovered + 1))
+                continue
+            fi
+            echo "❌ [$bench] original bootstrap retirement proof is incomplete or mismatched" >&2
+            failed=1
+            continue
+        fi
 
         if [ -e "$output/guest-shutdown.confirmed" ] \
             || [ -L "$output/guest-shutdown.confirmed" ]; then

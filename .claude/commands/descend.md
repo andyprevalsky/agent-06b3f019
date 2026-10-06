@@ -867,7 +867,7 @@ summarize, or paraphrase `task.prompt`, even when it is long or multiline:
 
 **FE link:** [Open agent](frontend-agent-url) — <verification status>
 
-**LLM dump:** [Open rendered dump](rendered-html-url) — last call `<call_site>` on `<agent_id>`
+**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`
 
 **Local repro (<wall-clock>):**
 
