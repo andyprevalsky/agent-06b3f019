@@ -19,6 +19,49 @@ if [[ "${1:-}" == "--single-box" ]]; then
     exit 2
 fi
 
+if [[ "${1:-}" == "image-activate" ]]; then
+    shift
+    if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+        echo "Usage: scripts/run-bench image-activate <exact-benchmark-image> [--ref <sha>] [--out-dir <private-directory>]"
+        echo "Activates the published image through owned warm-source setup; no image rebuild."
+        exit 0
+    fi
+    image_activate_ref="${1:-}"
+    image_activate_pattern='^registry\.fly\.io/navi-whisper-lux-bench(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})$'
+    [[ "$image_activate_ref" =~ $image_activate_pattern ]] || {
+        echo "image-activate requires an exact registry.fly.io/navi-whisper-lux-bench tag or digest" >&2
+        exit 2
+    }
+    shift
+    IMAGE_ACTIVATE_ARGS=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --ref|--out-dir)
+                [ "$#" -ge 2 ] || { echo "$1 requires a value" >&2; exit 2; }
+                image_activate_option="$1"
+                image_activate_value="$2"
+                [ -n "$image_activate_value" ] && [[ "$image_activate_value" != -* ]] || {
+                    echo "$image_activate_option requires a nonempty value" >&2
+                    exit 2
+                }
+                if [ "$image_activate_option" = --out-dir ]; then
+                    case "$image_activate_value" in
+                        /*) ;;
+                        *) image_activate_value="$CALLER_DIR/$image_activate_value" ;;
+                    esac
+                fi
+                IMAGE_ACTIVATE_ARGS+=("$image_activate_option" "$image_activate_value")
+                shift 2
+                ;;
+            *) echo "Unsupported image-activate argument: $1" >&2; exit 2 ;;
+        esac
+    done
+    echo "Activating the exact published image through owned warm-source setup; no rebuild."
+    echo "Keep the private output and verify the guest image digest before measuring the fleet."
+    IMAGE_ACTIVATE_BIN="${RUN_BENCH_CLOUD_BIN_UNDER_TEST:-$ROOT_DIR/scripts/run-bench-cloud}"
+    exec env WARM_IMAGE_REF="$image_activate_ref" bash "$IMAGE_ACTIVATE_BIN" --setup "${IMAGE_ACTIVATE_ARGS[@]}"
+fi
+
 if [[ "${1:-}" == "image-build" ]]; then
     shift
     IMAGE_BUILD_ARGS=()
@@ -131,6 +174,7 @@ usage() {
 Usage: scripts/run-bench <slice-or-task...> [options]
        scripts/run-bench monitor <exact-run-directory>
        scripts/run-bench image-build [--no-cache] [--builder native|depot]
+       scripts/run-bench image-activate <exact-benchmark-image> [--ref <sha>] [--out-dir <private-directory>]
 
 Image builds:
   --builder native   Existing Fly remote builder (default).

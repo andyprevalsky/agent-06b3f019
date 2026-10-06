@@ -17,6 +17,114 @@ BASH = shutil.which("bash")
 PUBLISHER_LIB = ROOT / "scripts/lib/cloudbench-image-publisher.sh"
 
 
+@pytest.mark.parametrize(
+    "image",
+    [
+        "registry.fly.io/navi-whisper-lux-bench:cloudbench-warm-fixture",
+        "registry.fly.io/navi-whisper-lux-bench@sha256:" + "a" * 64,
+        "registry.fly.io/navi-whisper-lux-bench:cloudbench-warm-fixture@sha256:" + "a" * 64,
+    ],
+)
+def test_cold_image_activation_uses_owned_setup_without_rebuilding(tmp_path, image):
+    child = tmp_path / "cloud.sh"
+    observed = tmp_path / "activation.json"
+    child.write_text(
+        "#!/usr/bin/env bash\n"
+        "python3 -c 'import json,os,sys; "
+        'open(os.environ["IMAGE_TEST_ARGS"],"w").write(json.dumps({"args":sys.argv[1:],'
+        '"image":os.environ.get("WARM_IMAGE_REF")}))\' "$@"\n'
+    )
+    result = subprocess.run(
+        [
+            BASH,
+            str(ROOT / "scripts/run-bench"),
+            "image-activate",
+            image,
+            "--ref",
+            "fixture-sha",
+            "--out-dir",
+            "private-output",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "RUN_BENCH_CLOUD_BIN_UNDER_TEST": str(child), "IMAGE_TEST_ARGS": str(observed)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(observed.read_text()) == {
+        "args": ["--setup", "--ref", "fixture-sha", "--out-dir", str(tmp_path / "private-output")],
+        "image": image,
+    }
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "registry.fly.io/navi-whisper-lux:production",
+        "registry.fly.io/navi-whisper-lux-bench",
+        "registry.fly.io/navi-whisper-lux-bench:valid --push",
+    ],
+)
+def test_cold_image_activation_rejects_wrong_or_inexact_images(tmp_path, argument):
+    child = tmp_path / "must-not-run.sh"
+    observed = tmp_path / "called"
+    child.write_text(f"touch {shlex.quote(str(observed))}\n")
+    result = subprocess.run(
+        [BASH, str(ROOT / "scripts/run-bench"), "image-activate", argument],
+        env={**os.environ, "RUN_BENCH_CLOUD_BIN_UNDER_TEST": str(child)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 2
+    assert not observed.exists()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--ref", "--out-dir"],
+        ["--ref", ""],
+        ["--out-dir", ""],
+        ["--ref"],
+        ["--unknown", "value"],
+    ],
+)
+def test_cold_image_activation_rejects_missing_option_values_before_setup(tmp_path, options):
+    child = tmp_path / "must-not-run.sh"
+    observed = tmp_path / "called"
+    child.write_text(f"touch {shlex.quote(str(observed))}\n")
+    result = subprocess.run(
+        [
+            BASH,
+            str(ROOT / "scripts/run-bench"),
+            "image-activate",
+            "registry.fly.io/navi-whisper-lux-bench:fixture",
+            *options,
+        ],
+        env={**os.environ, "RUN_BENCH_CLOUD_BIN_UNDER_TEST": str(child)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 2
+    assert not observed.exists()
+
+
+def test_cold_image_activation_propagates_owned_setup_failure(tmp_path):
+    child = tmp_path / "failed-setup.sh"
+    child.write_text("exit 29\n")
+    result = subprocess.run(
+        [BASH, str(ROOT / "scripts/run-bench"), "image-activate", "registry.fly.io/navi-whisper-lux-bench:fixture"],
+        env={**os.environ, "RUN_BENCH_CLOUD_BIN_UNDER_TEST": str(child)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 29
+
+
 def _publisher_fixture(tmp_path, version="0.4.112"):
     client = (
         "#!/usr/bin/env bash\n"
@@ -428,8 +536,7 @@ def test_cold_image_published_tag_completion_prevents_only_proven_rebuild(
         f"IMAGE_BUILD_BUILDER={builder}\n"
         f"source {shlex.quote(str(PUBLISHER_LIB))}\n"
         f"cloudbench_image_publisher_client() {{ printf '%s\\n' {shlex.quote(str(publisher))}; }}\n"
-        "sleep() { :; }\n"
-        + source[start:end]
+        "sleep() { :; }\n" + source[start:end]
     )
     result = subprocess.run([BASH, str(harness)], capture_output=True, text=True, timeout=30)
     assert (result.returncode == 0) is successful, result.stderr
