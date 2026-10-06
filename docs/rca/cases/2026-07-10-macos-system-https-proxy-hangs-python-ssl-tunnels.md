@@ -85,3 +85,14 @@ discovery, and the real streamed child produced three passes in 1.05 seconds.
 The complete standard unit tail then passed all 120 tests in 36.48 seconds and
 the preserved composite agents coverage passed its normal threshold. No Freedom
 settings or production timeout changed; the original failed tail is retained.
+
+The October 6 main integration also imported a public browser smoke that passed
+`--noproxy '*'` to its external request. The existing routing suite's case 13
+was extended to require all eight inherited proxy variables and reject proxy,
+resolver, and destination overrides. Against the unchanged smoke it failed its
+existing app-shell success case. Removing only the bypass restored all 21
+existing routing checks, including the browser User-Agent, exact HTTP 200,
+app-shell marker, and failing 511/200 interstitial inverses. Independent review
+approved the two-file repair. The original failed log and successful rerun are
+private; this routing finding is not attributed as the cause of the separate
+Hub SQL admission failure and earns no fleet speedup credit.

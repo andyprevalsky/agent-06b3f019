@@ -374,12 +374,18 @@ grep -qF "$app_marker" "$ROOT_DIR/front-end/index.html" \
 mkdir -p "$TMP/smoke/bin" "$TMP/smoke/ctx"
 cat > "$TMP/smoke/bin/curl" <<'STUB'
 #!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in --noproxy|--noproxy=*|--resolve|--resolve=*|--connect-to|--connect-to=*) exit 97 ;; esac
+done
+for key in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
+  [ "${!key-}" = "route-sentinel-$key" ] || exit 98
+done
 out="" ua="" url=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift ;;
     -A) ua="$2"; shift ;;
-    -w|--noproxy|--max-time|--connect-timeout|-H) shift ;;
+    -w|--max-time|--connect-timeout|-H) shift ;;
     http*://*) url="$1" ;;
   esac
   shift
@@ -407,6 +413,10 @@ chmod +x "$TMP/smoke/bin/curl" "$TMP/smoke/bin/sleep"
 run_smoke() { # run_smoke <tunnel mode>
   rm -f "$TMP/smoke/ctx/user_agents"
   PATH="$TMP/smoke/bin:$PATH" STUB_STATE="$TMP/smoke/ctx" TUNNEL_MODE="$1" \
+    HTTP_PROXY=route-sentinel-HTTP_PROXY HTTPS_PROXY=route-sentinel-HTTPS_PROXY \
+    ALL_PROXY=route-sentinel-ALL_PROXY NO_PROXY=route-sentinel-NO_PROXY \
+    http_proxy=route-sentinel-http_proxy https_proxy=route-sentinel-https_proxy \
+    all_proxy=route-sentinel-all_proxy no_proxy=route-sentinel-no_proxy \
     BENCHMARK_CONTEXT_DIR="$TMP/smoke/ctx" BACKEND_PORT=28600 \
     PUBLIC_BASE_URL="https://stub-origin.trycloudflare.com" \
     bash "$SMOKE" > "$TMP/smoke/out" 2>&1
