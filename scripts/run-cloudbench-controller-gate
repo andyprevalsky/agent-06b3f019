@@ -20,7 +20,7 @@
 #   bash scripts/run-cloudbench-controller-gate            # the Step 4cb suites
 #   bash scripts/run-cloudbench-controller-gate -- bash scripts/tests/cloudbench-env.test.sh
 #   CLOUDBENCH_GATE_REF=<sha> bash scripts/run-cloudbench-controller-gate
-# Env: CLOUDBENCH_GATE_TIMEOUT_S (default 2400), WARM_IMAGE_REF (default: newest
+# Env: CLOUDBENCH_GATE_TIMEOUT_S (default 5400), WARM_IMAGE_REF (default: newest
 # cloudbench-warm image on the fleet), CLOUDBENCH_GATE_VM_SIZE / _VM_MEMORY.
 set -euo pipefail
 ROOT_DIR="${CLOUDBENCH_GATE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
@@ -40,7 +40,9 @@ APP="${CLOUDBENCH_APP:-navi-whisper-lux-bench}"
 REGION="${CLOUDBENCH_REGION:-iad}"
 VM_SIZE="${CLOUDBENCH_GATE_VM_SIZE:-shared-cpu-4x}"
 VM_MEMORY="${CLOUDBENCH_GATE_VM_MEMORY:-8192}"
-TIMEOUT_S="${CLOUDBENCH_GATE_TIMEOUT_S:-2400}"
+# The multi-workstream suite alone took 30–42 min on shared-cpu-4x (2026-10-06),
+# so the ten suites need more than the former 40 min; 2400s timed out mid-suite.
+TIMEOUT_S="${CLOUDBENCH_GATE_TIMEOUT_S:-5400}"
 REPO_URL="${CLOUDBENCH_GATE_REPO_URL:-https://github.com/Rose-Ai-Labs/rose.git}"
 
 # shellcheck disable=SC2016  # the pytest -k expression is quoted for the remote shell
@@ -257,7 +259,20 @@ print(next((m.get("state", "") for m in machines if m.get("id") == os.environ["M
     break
   fi
 done
-[ -n "$result" ] || { echo "❌ gate timed out after ${TIMEOUT_S}s; destroying $MACHINE_ID" >&2; exit 1; }
+if [ -z "$result" ]; then
+  # Keep the evidence: the suite still running when the budget ran out is the
+  # one to diagnose, and --rm destroys the machine the moment this script exits.
+  running_step="$(grep -oE 'GATE_STEP_START .*' "$MACHINE_LOG" | wc -l | tr -d ' ')"
+  if [ "$running_step" -gt 0 ]; then
+    step_log="${MACHINE_LOG%.log}-step-$running_step.partial.log"
+    if flyctl ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$running_step.log" "$step_log" >/dev/null 2>&1 \
+      && [ -s "$step_log" ]; then
+      echo "   suite #$running_step was still running; its partial output: $step_log ($(wc -l < "$step_log") lines)" >&2
+    fi
+  fi
+  echo "❌ gate timed out after ${TIMEOUT_S}s; destroying $MACHINE_ID" >&2
+  exit 1
+fi
 code="${result##*=}"
 if [ "$code" = "0" ]; then
   echo "✅ cloud-bench controller gate passed on Linux ($MACHINE_ID)"
