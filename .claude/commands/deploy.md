@@ -523,6 +523,22 @@ exact composite-root cleanup, and quiesced resource retirement offline. Larger
 paid fleet campaigns remain explicit human-requested validation; they are not
 added to this automatic gate.
 
+The same compact `benchmark-live-results.test.py` gate also covers cold-image
+CLI context/provenance, joined image installers and retained artifacts, explicit
+DEMO replay admission, task-only read-only guards, genuine replay hits, ordinary
+flag-off behavior and pooled/worker handoff. It calls the owning controls through
+the supported scripts; it adds no paid fleet stage. Explicit cold/cached startup
+experiments use `/benchmark` and CLAUDE.md's commands, without replacing deploy
+smoke outcomes. The mass-demo `-k 50 --concurrency 50` diagnostic means 50
+controllers and up to 2,500 first-level children; task replay has zero LIVE proof
+credit and its unchanged declared judges may make provider calls. Ordinary
+source-only deploy benchmarks continue to reuse verified dependency snapshots.
+The optional cold `image-build --builder depot` path changes only that requested
+build (app scope, zstd level 3, `linux/amd64`); native is still the default and
+setup stays native. Retain its requested-option receipt and verify image
+resolution/runtime compatibility before using it. Do not assume a measured
+speedup or a cost guarantee, or change shared builder settings.
+
 During deploy benchmarks, follow CLAUDE.md's "Monitor every cloud launch"
 instructions and the exact metrics command in the printed controller log.
 Poll every 30 seconds, check the printed controller exit marker on every poll,

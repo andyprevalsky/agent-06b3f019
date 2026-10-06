@@ -182,6 +182,13 @@ The ordinary CLI automatically reuses verified completed dependency snapshots
 across fresh checkouts. Follow CLAUDE.md's "Cloud startup reuse" guidance and
 `scripts/run-bench --help`; source-only changes do not require dependency rebuilds.
 
+For an explicitly requested cold-image or cached startup diagnostic, follow
+CLAUDE.md's CLI commands and `/benchmark` guidance through the same entrypoint.
+Do not automatically rebuild images during ordinary branch runs. Cached DEMO
+copies earn zero LIVE acceptance credit and retain genuine evaluation; declared
+judges may call providers. The mass-demo fifty-copy command means fifty
+controllers and up to 2,500 first-level children, not fifty distinct tasks.
+
 Follow CLAUDE.md's "Monitor every cloud launch" instructions and the exact command
 printed at launch. Poll every 30 seconds, check terminal status on every poll, and
 observe through owned-resource release. A stale observation never authorizes a reset.

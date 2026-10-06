@@ -917,6 +917,47 @@ not a reason to rotate keys or rebuild the image. Use `scripts/run-bench
 set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=1200` and pass `--timeout 1200`.
 The CLI flag alone sets the orchestration budget; the normal timeout remains unchanged.
 
+For an explicitly requested cold-image measurement, use the same CLI:
+`scripts/run-bench image-build --no-cache --build-context <checkout> --out-dir <private-output>`.
+The selected checkout supplies both `Dockerfile.cloudbench-warm` and
+`fly.cloudbench-warm.toml`. The private receipt records its pre-launch HEAD,
+dirty status, recipe/config hashes and elapsed build/push time; those inputs
+are provenance, not artifact-equivalence proof. The shared image installer joins
+the unchanged npm/Prisma and Python installs concurrently in the final layer,
+then copies source last. Only npm download cache/logs are omitted; installed
+dependencies, npm configuration and other home assets remain. Measure native
+cold timing before claiming a speedup. Ordinary source-only runs still reuse
+their verified dependency image and snapshots.
+Only `image-build` accepts `--builder depot` to opt into the existing
+Fly-integrated Depot backend; omit it or use `--builder native` for the native
+default. Setup remains native. Depot uses app scope, zstd level 3 and
+`linux/amd64`; the receipt records requested builder/scope/compression/platform.
+This does not change a shared builder setting or promise speed/cost savings.
+Verify the resulting image tag resolves and runs before donor activation.
+
+**Temporary cached startup diagnostic:** reuse an existing DEMO replay task;
+do not add cache tags, prompts or seed fixtures to make a performance run pass.
+The known recorded mass demo can be run with:
+
+```bash
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  scripts/run-bench test-mass-agent-run-0 --demo-cache \
+  -k 50 --concurrency 50 --timeout 300
+```
+
+This requests 50 independent one-task fleet controllers. Each unchanged mass
+task spawns 50 first-level general-purpose children: up to 2,500 across the
+campaign, plus its existing explore fan-out. It is not 50 distinct tasks.
+`--demo-cache` keeps task-agent cache reads read-only and blocks their live
+fallback on cache misses or unresolved context. The separate benchmark harness
+retains genuine evaluation; declared LLM judges may still call providers and
+incur cost. Existing cold-terminal passthrough is not a recorded cache hit.
+Every cached diagnostic earns zero LIVE acceptance credit. Normal timeout,
+provider Fast Mode, task, evaluator and cleanup contracts remain unchanged.
+Compact CLI, replay-hit/miss, scope and pooled-handoff controls run in the
+existing `benchmark-live-results.test.py` deploy gate; this large diagnostic
+is only for an explicit user request.
+
 **Monitor every cloud launch:** the detached launcher prints the private log
 and exact controller exit marker. Its controller log's "Monitor this exact fleet"
 section prints the complete metrics command; retain it:

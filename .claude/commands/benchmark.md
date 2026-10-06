@@ -27,6 +27,38 @@ Ordinary cloud runs automatically reuse verified completed dependency snapshots,
 including from fresh checkouts. Use `scripts/run-bench --help` and CLAUDE.md's
 "Cloud startup reuse" guidance; do not rebuild dependencies for source-only changes.
 
+An explicitly requested uncached image measurement uses
+`scripts/run-bench image-build --no-cache --build-context <checkout> --out-dir <private-output>`.
+The selected checkout supplies the Dockerfile and Fly config. Its receipt records
+pre-launch source/dirty status, recipe/config hashes and build/push timing;
+it does not prove artifact equivalence. The final image layer installs the
+unchanged npm/Prisma and Python dependencies concurrently and joins both before
+publication. Ordinary branch runs continue to reuse verified dependency images.
+Add `--builder depot` only to `image-build` to select existing Fly-integrated
+Depot (app scope, zstd level 3, `linux/amd64`); native remains the default and
+setup stays native. The receipt records these requested options. No shared
+builder setting changes or speed/cost guarantee; verify image tag resolution
+and runtime compatibility before activation.
+
+For the existing recorded mass-demo cache diagnostic, from the repository root:
+
+```bash
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  scripts/run-bench test-mass-agent-run-0 --demo-cache \
+  -k 50 --concurrency 50 --timeout 300
+```
+
+These are 50 independent one-task controllers, each retaining the task's 50
+first-level general-purpose children: up to 2,500, plus existing explore fan-out.
+They are not 50 distinct tasks. The explicit flag requires an existing DEMO task
+admitted by runtime replay policy with `fast_cache:on`; task agents stay read-only
+and refuse live fallback on misses or unresolved context. The separate harness
+keeps genuine evaluation, including declared LLM judges that may call providers.
+Do not claim a recorded hit for existing cold-terminal passthrough, total zero
+provider spend, or LIVE acceptance credit. Do not edit tasks, prompts or evaluators
+to create a cheaper passing fixture. The compact mode/handoff controls run in
+the existing deploy gate; this large diagnostic remains user-requested.
+
 Follow the exact monitoring command printed by every launch. Poll every 30 seconds;
 check controller terminal status even when the card is stale, and continue through
 owned-resource release. See CLAUDE.md's "Monitor every cloud launch" guidance.

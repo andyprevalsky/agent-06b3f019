@@ -1,0 +1,263 @@
+"""The explicit replay probe must stay separate from live benchmark proof."""
+
+import json
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+READ_ONLY = "FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"
+PROBE = "BENCHMARK_DEMO_CACHE_READ_ONLY"
+TRANSPORT = "CLOUDBENCH_FAST_CACHE_READ_ONLY"
+
+
+def launch_probe(tmp_path: Path, *arguments: str):
+    receipt = tmp_path / "launch.json"
+    fleet = tmp_path / "fleet.sh"
+    fleet.write_text(
+        "#!/usr/bin/env bash\n"
+        "python3 - \"$@\" <<'PY'\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['DEMO_CACHE_TEST_RECEIPT']).write_text(json.dumps({\n"
+        " 'args': sys.argv[1:],\n"
+        " 'read_only': os.environ.get('FAST_MODE_CACHE_DISABLE_WRITE_THROUGH'),\n"
+        " 'probe': os.environ.get('BENCHMARK_DEMO_CACHE_READ_ONLY'),\n"
+        " 'provider_fast_mode': os.environ.get('BENCHMARK_FAST_MODE_CACHE'),\n"
+        "}))\n"
+        "PY\n"
+    )
+    env = dict(os.environ)
+    env.pop("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", None)
+    env.pop("BENCHMARK_FAST_MODE_CACHE", None)
+    env.pop(PROBE, None)
+    env.pop(TRANSPORT, None)
+    env.update(
+        {
+            "DEMO_CACHE_TEST_RECEIPT": str(receipt),
+            "RUN_BENCH_FLEET_BIN_UNDER_TEST": str(fleet),
+            "RUN_BENCH_CAMPAIGN_ROOT": str(tmp_path / "campaigns"),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/run-bench"), *arguments],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return result, json.loads(receipt.read_text()) if receipt.exists() else None
+
+
+def test_demo_cache_probe_preserves_tasks_and_sets_command_scoped_readonly(tmp_path):
+    names = ["demo-fleet-alpha", "demo-fleet-beta", "demo-fleet-gamma"]
+    result, receipt = launch_probe(tmp_path, *names, "--demo-cache", "--timeout", "300")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert receipt == {
+        "args": [*names, "--timeout", "300"],
+        "read_only": "1",
+        "probe": "1",
+        "provider_fast_mode": None,
+    }
+    assert "zero LIVE proof credit" in result.stdout
+
+
+def test_demo_cache_probe_existing_mass_replay_keeps_declared_judge(tmp_path):
+    result, receipt = launch_probe(tmp_path, "test-mass-agent-run-0", "--demo-cache", "--timeout", "300")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert receipt == {
+        "args": ["test-mass-agent-run-0", "--timeout", "300"],
+        "read_only": "1",
+        "probe": "1",
+        "provider_fast_mode": None,
+    }
+    assert "declared LLM judges may make provider calls" in result.stdout
+    assert "zero LIVE proof credit" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["spawn-sub-agents", "--demo-cache"],
+        ["single-creator-arm", "--demo-cache"],
+        ["demo-fleet-alpha", "--demo-cache", "--skip-autoscaler"],
+        ["demo-fleet-alpha", "--demo-cache", "--sim-on", "demo-fleet-alpha"],
+        ["--provision-pool", "50", "--demo-cache"],
+    ],
+)
+def test_demo_cache_probe_rejects_uncovered_spend_or_runtime_before_launch(tmp_path, arguments):
+    result, receipt = launch_probe(tmp_path, *arguments)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "--demo-cache" in result.stderr
+    assert receipt is None
+
+
+def test_demo_cache_probe_leaves_ordinary_launch_unchanged(tmp_path):
+    result, receipt = launch_probe(tmp_path, "spawn-sub-agents", "--timeout", "300")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert receipt == {
+        "args": ["spawn-sub-agents", "--timeout", "300"],
+        "read_only": None,
+        "probe": None,
+        "provider_fast_mode": None,
+    }
+
+
+def shell_json(code: str, env: dict[str, str]) -> dict:
+    result = subprocess.run(
+        ["bash", "-c", code],
+        env={"PATH": os.environ["PATH"], **env},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("read_only", ["1", None])
+def test_demo_cache_probe_handoff_is_ephemeral_and_reaches_stack(read_only):
+    cloud = (ROOT / "scripts/run-bench-cloud").read_text()
+    boot_args = cloud[cloud.index("    _envargs=(") : cloud.index("    _pool_shape_args=()")]
+    environment = {PROBE: read_only} if read_only is not None else {}
+    fields = shell_json(
+        boot_args
+        + "\npython3 - \"${_envargs[@]}\" <<'PY'\n"
+        + "import json,sys\n"
+        + "args=sys.argv[1:]; fields=dict(args[i+1].split('=',1) for i in range(0,len(args),2))\n"
+        + "print(json.dumps({k:v for k,v in fields.items() if k in "
+        + repr([READ_ONLY, TRANSPORT])
+        + "}))\nPY\n",
+        environment,
+    )
+    assert fields == {TRANSPORT: read_only or ""}
+    # The next ordinary boot explicitly clears the transport slot; the actual
+    # write guard never becomes persistent Machine configuration.
+    driver = (ROOT / "scripts/cloudbench-run.sh").read_text()
+    inputs = driver[
+        driver.index('BENCHMARK_FAST_MODE_CACHE="') : driver.index('BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="')
+    ]
+    stack_env = driver[
+        driver.index("STACK_ENV=(") : driver.index('if [ -n "$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY" ]; then')
+    ]
+    received = shell_json(
+        inputs
+        + "\n"
+        + stack_env
+        + "\npython3 - \"${STACK_ENV[@]}\" <<'PY'\n"
+        + "import json,os,sys\n"
+        + "fields=dict(arg.split('=',1) for arg in sys.argv[1:])\n"
+        + f"print(json.dumps({{'driver':os.environ.get('{READ_ONLY}'),'stack':fields.get('{READ_ONLY}'),"
+        + f"'driver_probe':os.environ.get('{PROBE}'),'stack_probe':fields.get('{PROBE}')}}))\n"
+        + "PY\n",
+        fields,
+    )
+    assert received == {
+        "driver": read_only,
+        "stack": read_only,
+        "driver_probe": read_only,
+        "stack_probe": read_only,
+    }
+
+
+def test_demo_cache_probe_legacy_wrapper_preserves_process_scoped_guard():
+    cloud = (ROOT / "scripts/run-bench-cloud").read_text()
+    start = cloud.index('    if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then')
+    export = cloud[start : cloud.index("    fi", start) + len("    fi")]
+    received = shell_json(
+        "exports=$(\n"
+        + export
+        + "\n)\n"
+        + f"unset {PROBE}\n"
+        + 'eval "$exports"\n'
+        + f"python3 -c 'import json,os; print(json.dumps(dict(value=os.environ.get(\"{TRANSPORT}\"))))'",
+        {PROBE: "1"},
+    )
+    assert received == {"value": "1"}
+
+
+def test_demo_cache_probe_rejects_demo_tag_without_runtime_replay_admission(tmp_path):
+    catalog = tmp_path / "tasks.json"
+    tasks = json.loads((ROOT / "agents/benchmarks/tasks.json").read_text())
+    task = next(task for task in tasks if task["name"] == "demo-fleet-alpha")
+    task["prompt"] = "A new uncached prompt outside the existing DEMO replay policy"
+    catalog.write_text(json.dumps(tasks))
+    (tmp_path / "polar_tasks.json").write_bytes((ROOT / "agents/benchmarks/polar_tasks.json").read_bytes())
+    result = subprocess.run(
+        [
+            str(ROOT / "agents/venv/bin/python"),
+            str(ROOT / "scripts/cloudbench-demo-cache.py"),
+            str(catalog),
+            "demo-fleet-alpha",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "existing DEMO replay policy" in result.stderr
+
+
+@pytest.mark.parametrize("probe", ["1", None])
+def test_demo_cache_probe_task_guard_keeps_harness_judges_unchanged(probe):
+    driver = (ROOT / "scripts/cloudbench-run.sh").read_text()
+    start = driver.index("BENCH_HARNESS_ENV=()")
+    end = driver.index('log "running benchmark:', start)
+    harness_env = driver[start:end]
+    received = shell_json(
+        harness_env
+        + "\nenv \"${BENCH_HARNESS_ENV[@]}\" python3 - <<'PY'\n"
+        + "import json,os\n"
+        + f"print(json.dumps({{k:os.environ.get(k) for k in {repr([PROBE, READ_ONLY, TRANSPORT])}}}))\nPY",
+        {READ_ONLY: "1", **({PROBE: probe, TRANSPORT: probe} if probe is not None else {})},
+    )
+    assert received == {
+        PROBE: None,
+        READ_ONLY: None if probe is not None else "1",
+        TRANSPORT: None,
+    }
+    assert 'run_with_heartbeat "benchmark" gosu "$APP_USER" env "${BENCH_HARNESS_ENV[@]}"' in driver
+
+
+def test_demo_cache_probe_repeated_copies_keep_guard_and_existing_topology(tmp_path):
+    result, receipt = launch_probe(tmp_path, "demo-fleet-alpha", "--demo-cache", "-k", "2", "--concurrency", "2")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert receipt["read_only"] == "1"
+    summaries = list((tmp_path / "campaigns").glob("*/summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text())
+    assert summary["total_jobs"] == 2
+    assert summary["peak_concurrency"] == 2
+    assert [job["task"] for job in summary["jobs"]] == ["demo-fleet-alpha"] * 2
+    for job in summary["jobs"]:
+        assert job["controller_exit_code"] == 0
+        assert "zero LIVE proof credit" in Path(job["log"]).read_text()
+
+
+@pytest.mark.parametrize("probe", ["1", None])
+def test_demo_cache_probe_worker_only_process_retains_spend_fence(probe):
+    fleet = (ROOT / "scripts/run-bench-fleet").read_text()
+    worker = fleet[
+        fleet.index("    local wrapper worker_env;") : fleet.index(
+            '    } > "$wrapper"', fleet.index("    local wrapper worker_env;")
+        )
+    ]
+    start = worker.index('        if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then')
+    export = worker[start : worker.index("        fi", start) + len("        fi")]
+    received = shell_json(
+        "exports=$(\n"
+        + export
+        + "\n)\n"
+        + f"unset {PROBE}\n"
+        + 'eval "$exports"\n'
+        + "python3 - <<'PY'\nimport json,os\n"
+        + f"print(json.dumps({{k:os.environ.get(k) for k in {repr([PROBE, READ_ONLY, 'BENCHMARK_ISOLATED_RUN'])}}}))\nPY",
+        {PROBE: probe} if probe is not None else {},
+    )
+    assert received == {
+        PROBE: probe,
+        READ_ONLY: probe,
+        "BENCHMARK_ISOLATED_RUN": "true" if probe is not None else None,
+    }

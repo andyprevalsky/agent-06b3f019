@@ -4549,6 +4549,7 @@ capacity_release_stale_owner_reservations() {  # <owner-meta> <exact-token>
 import fcntl
 import os
 import re
+import stat
 import sys
 
 root, app, host, pid, pid_start, owner, token = sys.argv[1:]
@@ -4558,35 +4559,52 @@ if (
 ):
     raise SystemExit(1)
 reservations = os.path.join(root, "reservations")
+if os.path.islink(root) or os.path.islink(reservations):
+    raise SystemExit(1)
 if not os.path.isdir(reservations):
     raise SystemExit(0)
 with open(os.path.join(root, "admission.lock"), "a+", encoding="utf-8") as lock_handle:
     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-    path = os.path.join(reservations, token)
-    if not os.path.exists(path):
-        raise SystemExit(0)
-    if not os.path.isfile(path):
-        raise SystemExit(1)
-    try:
-        fields = dict(
-            line.rstrip("\n").split("=", 1)
-            for line in open(path, encoding="utf-8")
-            if "=" in line
+    # Recovery already verified this exact controller's death, guest receipts
+    # and native resource retirement. A worker admission can outlive its unused
+    # clone attempt, even after the primary reservation was removed. Validate
+    # the complete owner cohort before releasing any part of it.
+    paths = []
+    for name in os.listdir(reservations):
+        if not name.startswith(f"{owner}-"):
+            continue
+        if re.fullmatch(rf"{owner}-(?:primary|worker-[0-9a-f]{{32}})", name) is None:
+            raise SystemExit(1)
+        path = os.path.join(reservations, name)
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                raise SystemExit(1)
+            with open(path, encoding="utf-8") as handle:
+                pairs = [line.rstrip("\n").split("=", 1) for line in handle if line.strip()]
+            fields = dict(pairs)
+        except (OSError, UnicodeError, ValueError):
+            raise SystemExit(1)
+        expected = (
+            len(pairs) == len(fields)
+            and fields.get("version") == "1"
+            and fields.get("app") == app
+            and fields.get("host") == host
+            and fields.get("pid") == pid
+            and fields.get("pid_start") == pid_start
+            and fields.get("fleet_owner_token") == owner
+            and fields.get("token") == name
         )
-    except OSError:
-        raise SystemExit(1)
-    expected = (
-        fields.get("version") == "1"
-        and fields.get("app") == app
-        and fields.get("host") == host
-        and fields.get("pid") == pid
-        and fields.get("pid_start") == pid_start
-        and fields.get("fleet_owner_token") == owner
-        and fields.get("token") == token
-    )
-    if not expected:
-        raise SystemExit(1)
-    os.unlink(path)
+        if not expected:
+            raise SystemExit(1)
+        paths.append(path)
+    for path in paths:
+        os.unlink(path)
+    if paths:
+        descriptor = os.open(reservations, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 PY
 }
 
@@ -5095,20 +5113,173 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
             return 1
         fi
     fi
-    for record in "$registry"/clones/*; do
-        [ -f "$record" ] || continue
-        clone_name="$(registry_meta_value "$record" name)"
-        id="$(registry_meta_value "$record" id)"
-        volume_id="$(registry_meta_value "$record" volume_id)"
-        [ -n "$clone_name" ] || { echo "❌ malformed fleet clone ownership record: $record" >&2; return 1; }
-        case "$volume_id" in *[!a-zA-Z0-9_-]*) echo "❌ malformed fleet volume ownership record: $record" >&2; return 1 ;; esac
-        if [ -z "$id" ]; then
-            if [ "$mode" = "forced" ] && [ -n "$volume_id" ]; then
-                # Exact cancellation recovery accepts only canonical v2
-                # Volume-only ownership. The provider-returned Volume ID is
-                # already complete authority; resolving its clone name would
-                # inventory unrelated Machines and cannot strengthen identity.
-                echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
+    # Only normal live-owner teardown fans out. Legacy and exact stale
+    # recovery retain their existing ordered reconciliation contract.
+    local reap_limit=1 reap_pid reap_status
+    local -a reap_pids
+    reap_pids=()
+    if [ "$mode" = current ]; then
+        reap_limit="${CLOUDBENCH_REAP_MAX_IN_FLIGHT:-4}"
+        case "$reap_limit" in ''|*[!0-9]*|0) return 1 ;; esac
+        [ "$reap_limit" -le 32 ] || return 1
+        # No mutation starts until every record in this cohort has safe local
+        # ownership and disjoint exact resource identities. Native name,
+        # mounted-volume and lifecycle verification still runs below unchanged.
+        if ! python3 - "$registry" "${WARM_ID:-}" "${WARM_VOLUME_ID:-}" <<'PYCOHORT'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+registry = Path(sys.argv[1])
+protected_machine, protected_volume = sys.argv[2:]
+try:
+    clones = registry / "clones"
+    if registry.is_symlink() or clones.is_symlink():
+        raise ValueError("linked registry")
+    machines, volumes = set(), set()
+    for record in clones.iterdir():
+        if not stat.S_ISREG(os.lstat(record).st_mode):
+            raise ValueError("non-regular ownership record")
+        with record.open(encoding="utf-8") as handle:
+            payload = handle.read(65537)
+        if len(payload) > 65536:
+            raise ValueError("oversized ownership record")
+        pairs = [line.split("=", 1) for line in payload.splitlines()]
+        fields = dict(pairs)
+        name = fields.get("name", "")
+        machine = fields.get("id", "")
+        volume = fields.get("volume_id", "")
+        if (len(pairs) != len(fields) or set(fields) - {"name", "id", "volume_id"}
+                or name != record.name or not re.fullmatch(r"[A-Za-z0-9._-]+", name)
+                or (machine and not re.fullmatch(r"[0-9a-f]+", machine))
+                or (volume and not re.fullmatch(r"[A-Za-z0-9_-]+", volume))):
+            raise ValueError("malformed ownership record")
+        if machine:
+            if machine == protected_machine or machine in machines:
+                raise ValueError("protected or duplicated Machine")
+            machines.add(machine)
+        if volume:
+            if volume == protected_volume or volume in volumes:
+                raise ValueError("protected or duplicated volume")
+            volumes.add(volume)
+except (OSError, UnicodeError, ValueError):
+    raise SystemExit(1)
+PYCOHORT
+        then
+            echo "❌ unsafe exact ownership cohort; refusing parallel provider teardown" >&2
+            return 1
+        fi
+    fi
+    reap_one_registry_record() {
+        local record clone_name id volume_id resolved details detail_status state
+        local actual_name runner_count cleanup_status terminal_disposition unresolved=0
+        for record in "$1"; do
+            [ -f "$record" ] || continue
+            clone_name="$(registry_meta_value "$record" name)"
+            id="$(registry_meta_value "$record" id)"
+            volume_id="$(registry_meta_value "$record" volume_id)"
+            [ -n "$clone_name" ] || { echo "❌ malformed fleet clone ownership record: $record" >&2; return 1; }
+            case "$volume_id" in *[!a-zA-Z0-9_-]*) echo "❌ malformed fleet volume ownership record: $record" >&2; return 1 ;; esac
+            if [ -z "$id" ]; then
+                if [ "$mode" = "forced" ] && [ -n "$volume_id" ]; then
+                    # Exact cancellation recovery accepts only canonical v2
+                    # Volume-only ownership. The provider-returned Volume ID is
+                    # already complete authority; resolving its clone name would
+                    # inventory unrelated Machines and cannot strengthen identity.
+                    echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
+                    if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+                    terminal_disposition=""
+                    [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
+                    [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
+                    if [ "$cleanup_status" -eq 75 ]; then
+                        unresolved=1
+                        continue
+                    fi
+                    [ -n "$terminal_disposition" ] || return 1
+                    fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
+                        "$terminal_disposition" || return 1
+                    rm -f "$record"
+                    continue
+                fi
+                resolved="$(registry_resolve_name "$clone_name")"
+                case $? in
+                    0)
+                        id="$resolved"
+                        ;;
+                    1)
+                        if [ -n "$volume_id" ]; then
+                            # A failed clone can create a volume without a Machine.
+                            # Its provider-returned ID in this exact-owner record is
+                            # sufficient cleanup authority; global inventory is not.
+                            echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
+                            if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+                            terminal_disposition=""
+                            [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
+                            [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
+                            if [ "$cleanup_status" -eq 75 ]; then
+                                unresolved=1
+                                continue
+                            fi
+                            [ -n "$terminal_disposition" ] || return 1
+                            fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
+                                "$terminal_disposition" || return 1
+                            rm -f "$record"
+                            continue
+                        fi
+                        # A successful Fly clone request may become list-visible only
+                        # after our lookup deadline. For the CURRENT (live-owner)
+                        # registry the name-only ledger is the sole durable ownership
+                        # proof during that gap, so keep it and fail closed — a
+                        # late-visible clone must not be orphaned while a successor
+                        # provisions another fleet.
+                        #
+                        # For STALE auto-recovery and FORCED exact recovery the owner
+                        # is already proven dead. Retain young name-only records while
+                        # a clone may still cross provider visibility, then retire an
+                        # aged, authoritatively absent phantom. Restrict this to the
+                        # two dead-owner modes: CURRENT live-owner cleanup must never
+                        # discard its only durable ownership proof.
+                        if { [ "$mode" = "stale" ] || [ "$mode" = "forced" ]; } \
+                            && registry_record_is_stale_phantom "$record"; then
+                            echo "🧹 discarding aged-out phantom name-only clone '$clone_name' (absent from Fly > ${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}s; owner proven dead)"
+                            fleet_audit_update_registry_clone "$registry" "$clone_name" "" "" \
+                                not-allocated-verified || return 1
+                            rm -f "$record"
+                            continue
+                        fi
+                        echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
+                        # This record must keep the overall cleanup fail-closed, but
+                        # it is independent of later records whose exact machine IDs
+                        # are already proven. Returning here leaked every known clone
+                        # sorted after one young name-only record. Retain this record,
+                        # continue reaping those known IDs, then report failure.
+                        unresolved=1
+                        continue
+                        ;;
+                    *) echo "❌ ambiguous/unreadable stale clone name '$clone_name'; refusing to provision" >&2; return 1 ;;
+                esac
+            fi
+            case "$id" in ''|*[!0-9a-f]*) echo "❌ malformed fleet machine ownership record: $record" >&2; return 1 ;; esac
+            if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
+                echo "❌ ownership registry points at warm source machine $id; refusing cleanup" >&2
+                return 1
+            fi
+            if [ "$legacy_batch_status" -eq 3 ] && [ -z "$volume_id" ] \
+                && registry_record_is_stale_pre_volume_id "$record"; then
+                echo "❌ stale pre-volume-ID record '$clone_name' remains unresolved because a clone volume is unattached or points at an absent machine" >&2
+                unresolved=1
+                continue
+            fi
+            details="$(registry_machine_details "$id")"
+            detail_status=$?
+            if [ "$detail_status" -eq 1 ]; then
+                if [ -z "$volume_id" ]; then
+                    echo "❌ owned fleet machine $id disappeared before exact volume ownership was durable; retaining record" >&2
+                    unresolved=1
+                    continue
+                fi
                 if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
                 terminal_disposition=""
                 [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
@@ -5118,89 +5289,63 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
                     continue
                 fi
                 [ -n "$terminal_disposition" ] || return 1
-                fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
+                fleet_audit_update_registry_clone "$registry" "$clone_name" "$id" "$volume_id" \
                     "$terminal_disposition" || return 1
                 rm -f "$record"
                 continue
             fi
-            resolved="$(registry_resolve_name "$clone_name")"
-            case $? in
-                0)
-                    id="$resolved"
-                    ;;
-                1)
-                    if [ -n "$volume_id" ]; then
-                        # A failed clone can create a volume without a Machine.
-                        # Its provider-returned ID in this exact-owner record is
-                        # sufficient cleanup authority; global inventory is not.
-                        echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
-                        if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
-                        terminal_disposition=""
-                        [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
-                        [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
-                        if [ "$cleanup_status" -eq 75 ]; then
-                            unresolved=1
-                            continue
-                        fi
-                        [ -n "$terminal_disposition" ] || return 1
-                        fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
-                            "$terminal_disposition" || return 1
-                        rm -f "$record"
-                        continue
-                    fi
-                    # A successful Fly clone request may become list-visible only
-                    # after our lookup deadline. For the CURRENT (live-owner)
-                    # registry the name-only ledger is the sole durable ownership
-                    # proof during that gap, so keep it and fail closed — a
-                    # late-visible clone must not be orphaned while a successor
-                    # provisions another fleet.
-                    #
-                    # For STALE auto-recovery and FORCED exact recovery the owner
-                    # is already proven dead. Retain young name-only records while
-                    # a clone may still cross provider visibility, then retire an
-                    # aged, authoritatively absent phantom. Restrict this to the
-                    # two dead-owner modes: CURRENT live-owner cleanup must never
-                    # discard its only durable ownership proof.
-                    if { [ "$mode" = "stale" ] || [ "$mode" = "forced" ]; } \
-                        && registry_record_is_stale_phantom "$record"; then
-                        echo "🧹 discarding aged-out phantom name-only clone '$clone_name' (absent from Fly > ${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}s; owner proven dead)"
-                        fleet_audit_update_registry_clone "$registry" "$clone_name" "" "" \
-                            not-allocated-verified || return 1
-                        rm -f "$record"
-                        continue
-                    fi
-                    echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
-                    # This record must keep the overall cleanup fail-closed, but
-                    # it is independent of later records whose exact machine IDs
-                    # are already proven. Returning here leaked every known clone
-                    # sorted after one young name-only record. Retain this record,
-                    # continue reaping those known IDs, then report failure.
+            [ "$detail_status" -eq 0 ] || { echo "❌ could not verify owned fleet machine $id; refusing to provision" >&2; return 1; }
+            state="$(printf '%s' "$details" | awk '{print $1}')"
+            actual_name="$(printf '%s' "$details" | awk '{print $2}')"
+            if [ "$actual_name" != "$clone_name" ]; then
+                echo "❌ machine identity mismatch for $id ($actual_name != $clone_name); refusing cleanup" >&2
+                return 1
+            fi
+            if [ -z "$volume_id" ]; then
+                volume_id="$(machine_volume_id "$id")"
+                if [ -z "$volume_id" ] \
+                    || ! registry_record_machine_identity "$record" "$clone_name" "$id" "$volume_id"; then
+                    echo "❌ owned fleet machine $id has no durable exact volume attribution; retaining record" >&2
                     unresolved=1
                     continue
-                    ;;
-                *) echo "❌ ambiguous/unreadable stale clone name '$clone_name'; refusing to provision" >&2; return 1 ;;
-            esac
-        fi
-        case "$id" in ''|*[!0-9a-f]*) echo "❌ malformed fleet machine ownership record: $record" >&2; return 1 ;; esac
-        if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
-            echo "❌ ownership registry points at warm source machine $id; refusing cleanup" >&2
-            return 1
-        fi
-        if [ "$legacy_batch_status" -eq 3 ] && [ -z "$volume_id" ] \
-            && registry_record_is_stale_pre_volume_id "$record"; then
-            echo "❌ stale pre-volume-ID record '$clone_name' remains unresolved because a clone volume is unattached or points at an absent machine" >&2
-            unresolved=1
-            continue
-        fi
-        details="$(registry_machine_details "$id")"
-        detail_status=$?
-        if [ "$detail_status" -eq 1 ]; then
-            if [ -z "$volume_id" ]; then
-                echo "❌ owned fleet machine $id disappeared before exact volume ownership was durable; retaining record" >&2
-                unresolved=1
-                continue
+                fi
             fi
-            if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+            if [ "$registry_version" = "2" ]; then
+                volume_id="$(fleet_registry_reconcile_mounted_volume \
+                    "$registry" "$clone_name" "$id")" || return 1
+            fi
+            if [ "$state" = "destroyed" ]; then
+                # Exact-ID provider status already proves this Machine is terminal.
+                # Reissuing Fly's destroy call can wait a full minute per clone on
+                # an already retired fleet; only its separately owned Volume needs
+                # a final exact-ID deletion receipt.
+                echo "🧹 verifying volume of already-destroyed fleet clone $id (name=$clone_name)"
+                if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+            else
+                if [ "$mode" = "stale" ]; then
+                    case "$state" in
+                        stopped) : ;;
+                        started)
+                            runner_count="$(registry_runner_count "$id")" || {
+                                echo "❌ refusing to reap stale fleet machine $id: runner probe unreadable" >&2
+                                return 1
+                            }
+                            if [ "$runner_count" != "0" ]; then
+                                echo "❌ refusing to reap stale fleet machine $id: runner count=$runner_count" >&2
+                                return 1
+                            fi
+                            ;;
+                        *)
+                            echo "❌ refusing to reap stale fleet machine $id in transitional/unknown state '$state'" >&2
+                            return 1
+                            ;;
+                    esac
+                    echo "🧹 reaping stale fleet machine $id (name=$clone_name, state=$state, dead owner proven)"
+                else
+                    echo "🧹 destroying fleet-owned clone $id (name=$clone_name)"
+                fi
+                if reap_machine "$id" "" "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+            fi
             terminal_disposition=""
             [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
             [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
@@ -5209,77 +5354,42 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
                 continue
             fi
             [ -n "$terminal_disposition" ] || return 1
+            # reap_machine already carries the exact Volume through its terminal
+            # lifecycle. A second destroy/read loop cannot strengthen that receipt.
             fleet_audit_update_registry_clone "$registry" "$clone_name" "$id" "$volume_id" \
                 "$terminal_disposition" || return 1
             rm -f "$record"
-            continue
-        fi
-        [ "$detail_status" -eq 0 ] || { echo "❌ could not verify owned fleet machine $id; refusing to provision" >&2; return 1; }
-        state="$(printf '%s' "$details" | awk '{print $1}')"
-        actual_name="$(printf '%s' "$details" | awk '{print $2}')"
-        if [ "$actual_name" != "$clone_name" ]; then
-            echo "❌ machine identity mismatch for $id ($actual_name != $clone_name); refusing cleanup" >&2
-            return 1
-        fi
-        if [ -z "$volume_id" ]; then
-            volume_id="$(machine_volume_id "$id")"
-            if [ -z "$volume_id" ] \
-                || ! registry_record_machine_identity "$record" "$clone_name" "$id" "$volume_id"; then
-                echo "❌ owned fleet machine $id has no durable exact volume attribution; retaining record" >&2
-                unresolved=1
-                continue
-            fi
-        fi
-        if [ "$registry_version" = "2" ]; then
-            volume_id="$(fleet_registry_reconcile_mounted_volume \
-                "$registry" "$clone_name" "$id")" || return 1
-        fi
-        if [ "$state" = "destroyed" ]; then
-            # Exact-ID provider status already proves this Machine is terminal.
-            # Reissuing Fly's destroy call can wait a full minute per clone on
-            # an already retired fleet; only its separately owned Volume needs
-            # a final exact-ID deletion receipt.
-            echo "🧹 verifying volume of already-destroyed fleet clone $id (name=$clone_name)"
-            if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
-        else
-            if [ "$mode" = "stale" ]; then
-                case "$state" in
-                    stopped) : ;;
-                    started)
-                        runner_count="$(registry_runner_count "$id")" || {
-                            echo "❌ refusing to reap stale fleet machine $id: runner probe unreadable" >&2
-                            return 1
-                        }
-                        if [ "$runner_count" != "0" ]; then
-                            echo "❌ refusing to reap stale fleet machine $id: runner count=$runner_count" >&2
-                            return 1
-                        fi
-                        ;;
-                    *)
-                        echo "❌ refusing to reap stale fleet machine $id in transitional/unknown state '$state'" >&2
-                        return 1
-                        ;;
-                esac
-                echo "🧹 reaping stale fleet machine $id (name=$clone_name, state=$state, dead owner proven)"
+        done
+        [ "$unresolved" = "0" ] || return 75
+    }
+    for record in "$registry"/clones/*; do
+        [ -f "$record" ] || continue
+        if [ "$reap_limit" -eq 1 ]; then
+            if reap_one_registry_record "$record"; then
+                :
             else
-                echo "🧹 destroying fleet-owned clone $id (name=$clone_name)"
+                reap_status=$?
+                [ "$reap_status" -eq 75 ] || {
+                    unset -f reap_one_registry_record
+                    return 1
+                }
+                unresolved=1
             fi
-            if reap_machine "$id" "" "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+        else
+            reap_one_registry_record "$record" &
+            reap_pids+=("$!")
+            if [ "${#reap_pids[@]}" -ge "$reap_limit" ]; then
+                for reap_pid in "${reap_pids[@]}"; do
+                    wait "$reap_pid" || unresolved=1
+                done
+                reap_pids=()
+            fi
         fi
-        terminal_disposition=""
-        [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
-        [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
-        if [ "$cleanup_status" -eq 75 ]; then
-            unresolved=1
-            continue
-        fi
-        [ -n "$terminal_disposition" ] || return 1
-        # reap_machine already carries the exact Volume through its terminal
-        # lifecycle. A second destroy/read loop cannot strengthen that receipt.
-        fleet_audit_update_registry_clone "$registry" "$clone_name" "$id" "$volume_id" \
-            "$terminal_disposition" || return 1
-        rm -f "$record"
     done
+    for reap_pid in "${reap_pids[@]}"; do
+        wait "$reap_pid" || unresolved=1
+    done
+    unset -f reap_one_registry_record
     [ "$unresolved" = "0" ]
 }
 
@@ -11642,6 +11752,8 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "per_child_max_concurrency=5"
     --config-value "wmh_model_name=rose-r2-archive-anthropic"
     --config-value "benchmark_fast_mode_cache=${BENCHMARK_FAST_MODE_CACHE:-}"
+    --config-value "fast_mode_cache_disable_write_through=${FAST_MODE_CACHE_DISABLE_WRITE_THROUGH:-}"
+    --config-value "benchmark_demo_cache_read_only=${BENCHMARK_DEMO_CACHE_READ_ONLY:-}"
     --config-value "benchmark_claude_code_cache_ratchet_warn_only=${BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY:-}"
     --config-value "rose_exclude_anthropic_family=${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}"
     --config-value "task_count=${#BENCHES[@]}"
@@ -12296,6 +12408,11 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         echo "export WMH_PORT=$(printf '%q' "$BOX_WMH_PORT")"
         echo "export HEALTH_PORT=$(printf '%q' "$FLEET_WORKER_HEALTH_PORT")"
         echo "export BENCH_SIMULATE=$(printf '%q' "$sim")"
+        if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then
+            echo "export BENCHMARK_DEMO_CACHE_READ_ONLY=1"
+            echo "export FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1"
+            echo "export BENCHMARK_ISOLATED_RUN=true"
+        fi
         echo "export WORKER_READY_FILE=$(printf '%q' "$ready_file")"
         echo "rm -f $(printf '%q' "$ready_file")"
         [ -n "$FLEET_PATCH_FILE" ] && echo "export LOCAL_PATCH_FILE=/tmp/cloudbench-local.patch" || echo "unset LOCAL_PATCH_FILE"

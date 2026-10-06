@@ -57,6 +57,38 @@ own run. Poll that command every 30 seconds; its `--controller-status` marker
 reports the actual controller exit independently of card freshness and cleanup.
 Follow CLAUDE.md's "Monitor every cloud launch" guidance through resource release.
 
+Ordinary source-only runs reuse verified dependency images and completed
+snapshots. For an explicitly requested cold build/push measurement, use
+`scripts/run-bench image-build --no-cache --build-context <checkout> --out-dir <private-output>`
+from the repository root. The selected checkout supplies both Dockerfile and
+Fly config; the private receipt records pre-launch source/dirty status and
+recipe/config hashes, not artifact equivalence. The shared final-layer installer
+joins unchanged npm/Prisma and Python installs concurrently and retains installed
+dependencies and home assets except npm download caches/logs.
+Optional `--builder depot` is supported only by `image-build`: it uses existing
+Fly-integrated Depot with app scope, zstd level 3 and `linux/amd64`, and records
+those requested options in the receipt. Native remains the default; setup stays
+native. Verify image tag resolution and runtime compatibility before activation;
+the opt-in does not change shared builder settings or guarantee speed/cost.
+
+The existing recorded mass-demo cache diagnostic uses:
+
+```bash
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  scripts/run-bench test-mass-agent-run-0 --demo-cache \
+  -k 50 --concurrency 50 --timeout 300
+```
+
+This launches 50 independent one-task controllers, each with the unchanged 50
+first-level general-purpose children: up to 2,500 plus existing explore fan-out,
+not 50 distinct tasks. Task-agent replay is read-only and refuses live fallback
+on misses or unresolved context. The separate harness keeps genuine declared
+evaluation; LLM judges may call providers. Existing cold-terminal passthrough
+is not a recorded hit, and cached diagnostics earn zero LIVE acceptance credit.
+Keep tasks, prompts and evaluators unchanged and follow the printed monitor command.
+These compact regression controls run in the existing deploy gate; large cached
+campaigns remain explicitly requested experiments.
+
 The daily `agent-payment-new-user-journey` task exercises an isolated, fresh
 non-admin account from exhausted free credit through a real Stripe **test-mode**
 subscription Checkout, subscription-gate resolution, payment-card approval,

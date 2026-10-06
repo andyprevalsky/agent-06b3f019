@@ -9370,6 +9370,123 @@ rc=$?
     ]
 
 
+@pytest.mark.parametrize("failed_disposition", [0, 75])
+def test_current_registry_retirement_is_bounded_parallel_and_joins_receipts(
+    tmp_path: Path, failed_disposition: int,
+) -> None:
+    """Slow independent exact native receipts overlap, and failures stay owned."""
+    fleet = FLEET_SCRIPT.read_text()
+    ownership = tmp_path / "ownership"
+    registry = ownership / ("5d" * 16)
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    (registry / "meta").write_text("version=2\n")
+    machines = [f"{index + 1:014x}" for index in range(8)]
+    for machine in machines:
+        (clones / f"cloudbench-{machine}").write_text(
+            f"name=cloudbench-{machine}\nid={machine}\nvolume_id=vol_{machine}\n"
+        )
+    provider = tmp_path / "provider.py"
+    provider.write_text('''import fcntl,json,sys,time
+from pathlib import Path
+root=Path(sys.argv[1]); stage=sys.argv[2]; machine=sys.argv[3]
+def update():
+    with (root/'provider.lock').open('a+') as lock:
+        fcntl.flock(lock.fileno(),fcntl.LOCK_EX)
+        path=root/'counts.json'
+        row=json.loads(path.read_text()) if path.exists() else {'active':0,'peak':0,'calls':[]}
+        row['active']+=1 if stage=='enter' else -1
+        if stage=='enter': row['calls'].append(machine)
+        row['peak']=max(row['peak'],row['active'])
+        path.write_text(json.dumps(row))
+        if row['active']==4: (root/'release').touch()
+update()
+if stage=='enter':
+    # One serialized operation cannot release this real concurrency barrier.
+    deadline=time.monotonic()+5
+    while not (root/'release').exists():
+        if time.monotonic()>=deadline: raise SystemExit(90)
+        time.sleep(.01)
+    time.sleep(.05)
+''')
+    reaper = _extract_fleet_function(fleet, "reap_registry_clones() {")
+    script = f'''set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership))}
+REGISTRY={shlex.quote(str(registry))}
+TEST_ROOT={shlex.quote(str(tmp_path))}
+PYTHON_BIN={shlex.quote(sys.executable)}
+CLOUDBENCH_REAP_MAX_IN_FLIGHT=4
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_machine_details() {{ printf 'stopped cloudbench-%s\\n' "$1"; }}
+fleet_registry_reconcile_mounted_volume() {{ printf 'vol_%s\\n' "$3"; }}
+reap_machine() {{
+  "$PYTHON_BIN" "$TEST_ROOT/provider.py" "$TEST_ROOT" enter "$1" || return $?
+  "$PYTHON_BIN" "$TEST_ROOT/provider.py" "$TEST_ROOT" leave "$1" || return $?
+  [ "$1" != {machines[0]} ] || return {failed_disposition}
+}}
+fleet_audit_update_registry_clone() {{ printf '%s\\n' "$2" >> "$TEST_ROOT/audits"; }}
+{reaper}
+reap_registry_clones "$REGISTRY" current
+'''
+    started = time.monotonic()
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=60,
+    )
+    elapsed = time.monotonic() - started
+    (tmp_path / "duration.json").write_text(json.dumps({"elapsed_seconds": elapsed}))
+    assert result.returncode == (0 if failed_disposition == 0 else 1), result.stdout + result.stderr
+    counts = json.loads((tmp_path / "counts.json").read_text())
+    assert counts["active"] == 0, "all submitted native receipts must be joined"
+    assert 1 < counts["peak"] <= 4, "independent retirement must overlap within admission bound"
+    assert sorted(counts["calls"]) == machines
+    expected = [] if failed_disposition == 0 else [f"cloudbench-{machines[0]}"]
+    assert sorted(path.name for path in clones.iterdir()) == expected
+    audits = (tmp_path / "audits").read_text().splitlines()
+    assert sorted(audits) == [f"cloudbench-{machine}" for machine in machines if failed_disposition == 0 or machine != machines[0]]
+
+
+@pytest.mark.parametrize("unsafe_record", ["symlink", "duplicate-machine", "warm-machine"])
+def test_current_registry_retirement_validates_cohort_before_native_mutations(
+    tmp_path: Path, unsafe_record: str,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    ownership = tmp_path / "ownership"
+    registry = ownership / ("5d" * 16)
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    (registry / "meta").write_text("version=2\n")
+    first = clones / "cloudbench-first"
+    first.write_text("name=cloudbench-first\nid=deadbeef000001\nvolume_id=vol_first\n")
+    second = clones / "cloudbench-second"
+    machine = "feedface000001" if unsafe_record == "warm-machine" else "deadbeef000001"
+    payload = f"name=cloudbench-second\nid={machine}\nvolume_id=vol_second\n"
+    if unsafe_record == "symlink":
+        original = tmp_path / "foreign-record"
+        original.write_text(payload)
+        second.symlink_to(original)
+    else:
+        second.write_text(payload)
+    before = {path.name: path.read_bytes() for path in clones.iterdir()}
+    reaper = _extract_fleet_function(fleet, "reap_registry_clones() {")
+    native_calls = tmp_path / "native-calls"
+    script = f'''set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership))}
+REGISTRY={shlex.quote(str(registry))}
+WARM_ID=feedface000001
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_machine_details() {{ touch {shlex.quote(str(native_calls))}; return 99; }}
+{reaper}
+reap_registry_clones "$REGISTRY" current
+'''
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10,
+    )
+    assert result.returncode != 0
+    assert not native_calls.exists(), "unsafe cohort must reject before native provider mutations"
+    assert {path.name: path.read_bytes() for path in clones.iterdir()} == before
+    assert second.is_symlink() == (unsafe_record == "symlink")
+
+
 def test_exact_owner_recovery_records_provider_retained_terminal_volume(
     tmp_path: Path,
 ) -> None:
@@ -13084,8 +13201,10 @@ def test_exact_recovery_releases_only_its_capacity_and_proxy_leases(
         )
 
     owner_token = f"{owner}-primary"
+    worker_token = f"{owner}-worker-{'7d' * 16}"
     neighbor_token = f"{neighbor}-primary"
     (reservations / owner_token).write_text(reservation_payload(owner_token, owner))
+    (reservations / worker_token).write_text(reservation_payload(worker_token, owner))
     neighbor_reservation = reservations / neighbor_token
     neighbor_reservation.write_text(reservation_payload(neighbor_token, neighbor))
     capacity_functions = "\n".join(
@@ -13116,6 +13235,15 @@ capacity_release_stale_owner_reservations "$2" "$3"
     )
     assert result.returncode == 0, result.stderr
     assert not (reservations / owner_token).exists()
+    assert not (reservations / worker_token).exists()
+    assert neighbor_reservation.exists()
+
+    # A preceding recovery may already have released its primary reservation.
+    # The exact unused worker still belongs to the same verified owner cohort.
+    (reservations / worker_token).write_text(reservation_payload(worker_token, owner))
+    repeated = subprocess.run(result.args, text=True, capture_output=True, check=False, timeout=10)
+    assert repeated.returncode == 0, repeated.stderr
+    assert not (reservations / worker_token).exists()
     assert neighbor_reservation.exists()
 
     release_proxy = _extract_fleet_function(fleet, "release_recovery_status_proxy_ports() {")
@@ -13152,6 +13280,57 @@ release_recovery_status_proxy_ports exact-token
         timeout=10,
     )
     assert release_result.returncode == 0, release_result.stderr
+
+
+@pytest.mark.parametrize("corruption", ["symlink", "foreign-birth", "duplicate-key"])
+def test_exact_recovery_validates_complete_capacity_cohort_before_release(
+    tmp_path: Path, corruption: str,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    owner = "5d" * 16
+    reservations = tmp_path / "capacity" / "reservations"
+    reservations.mkdir(parents=True)
+    owner_meta = tmp_path / "meta"
+    identity = "host=test-host\npid=999999\npid_start=Mon Jan 1 00:00:00 2001\n"
+    owner_meta.write_text(identity + f"fleet_owner_token={owner}\n")
+    primary_token = f"{owner}-primary"
+    worker_token = f"{owner}-worker-{'7d' * 16}"
+
+    def record(token: str) -> str:
+        return (
+            "version=1\napp=bench-app\n" + identity
+            + f"fleet_owner_token={owner}\ntoken={token}\n"
+        )
+
+    primary = reservations / primary_token
+    primary.write_text(record(primary_token))
+    worker = reservations / worker_token
+    original_worker = record(worker_token)
+    if corruption == "symlink":
+        target = tmp_path / "foreign-record"
+        target.write_text(original_worker)
+        worker.symlink_to(target)
+    elif corruption == "foreign-birth":
+        worker.write_text(original_worker.replace("pid=999999\n", "pid=999998\n"))
+    else:
+        worker.write_text(original_worker + "pid=999999\n")
+    before = {path.name: path.read_bytes() for path in reservations.iterdir()}
+    helpers = "\n".join(
+        _extract_fleet_function(fleet, name + "() {")
+        for name in ("registry_meta_value", "capacity_release_stale_owner_reservations")
+    )
+    result = subprocess.run(
+        [
+            "bash", "-c",
+            "set -uo pipefail\nAPP=bench-app\nCAPACITY_RESERVATION_ROOT=\"$1\"\n"
+            + helpers + '\ncapacity_release_stale_owner_reservations "$2" "$3"\n',
+            "complete-capacity-cohort", str(tmp_path / "capacity"), str(owner_meta), primary_token,
+        ],
+        text=True, capture_output=True, check=False, timeout=10,
+    )
+    assert result.returncode != 0, "unsafe cohort must reject the entire release"
+    assert {path.name: path.read_bytes() for path in reservations.iterdir()} == before
+    assert worker.is_symlink() == (corruption == "symlink")
 
 
 def test_exact_v2_pool_recovery_reads_only_owner_audit_claims(
