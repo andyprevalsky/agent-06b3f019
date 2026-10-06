@@ -29,6 +29,11 @@ via its `call_phone_number` tool, the two AIs talk, and we verify BOTH sides:
     6. PhoneCalleeSession.cleanup(): end live persona calls, detach, then delete
        persona assistant/tools
 
+With phone_persona.hold_line the agent dials a leased Twilio hold line
+instead (benchmarks/phone_hold_line.py): recorded airline queue audio for
+hold_seconds, then a <Dial> transfer to the persona number above, so the
+persona is the representative who picks up after the wait.
+
 Each session owns a transient inbound number. Cloud fleet benchmarks run in
 separate processes and machines, so an in-process lock cannot protect one
 mutable phone-number-to-assistant attachment across distributed runners.
@@ -46,6 +51,7 @@ from typing import List, Optional
 import httpx
 
 from benchmarks.logs import load_env_var
+from benchmarks.phone_hold_line import HoldLineSession, load_hold_audio_manifest
 
 VAPI_BASE_URL = "https://api.vapi.ai"
 CALLEE_NUMBER_NAME = "rose-benchmark-callee"
@@ -57,14 +63,9 @@ CALLEE_SESSION_NUMBER_TTL = timedelta(hours=5)
 # keep a small propagation margin so benchmark calls never race that boundary.
 CALLEE_SESSION_NUMBER_ACTIVATION_DELAY = timedelta(minutes=3)
 VAPI_PHONE_NUMBER_NAME_MAX_LENGTH = 40
-# Hold-queue benches wait a real multi-hour queue. Cap accidental day-long
-# holds; 2h45m (9900) is the intended phone-call-hold-queue representative time.
-HOLD_SUCCESS_MAX_SECONDS = 14400.0
-HOLD_KEEPALIVE_DEFAULT_SECONDS = 1200.0
-# Short holds can poll every second. Multi-hour holds would otherwise issue
-# tens of thousands of Vapi list/detail calls and miss keepalives on 429s.
-HOLD_WATCH_POLL_SECONDS = 1.0
-HOLD_WATCH_POLL_LONG_SECONDS = 15.0
+# The hold line lease outlives the hold plus the representative conversation;
+# the margin covers planning before the call and post-call analysis.
+HOLD_LINE_LEASE_MARGIN_SECONDS = 3600
 CALLEE_ANALYSIS_TIMEOUT_SECONDS = 180
 CALLEE_ANALYSIS_TIMEOUT_LONG_SECONDS = 900
 
@@ -478,8 +479,13 @@ class PhoneCalleeSession:
         self.started_at: Optional[datetime] = None
         self._keypad_success_task: Optional[asyncio.Task] = None
         self._keypad_success_announced = False
-        self._hold_success_task: Optional[asyncio.Task] = None
-        self._hold_success_announced = False
+        self.hold_line: Optional[HoldLineSession] = None
+        self._hold_line_task: Optional[asyncio.Task] = None
+
+    @property
+    def dial_number(self) -> str:
+        """The number the benchmark agent calls: the hold line when one is leased."""
+        return self.hold_line.number if self.hold_line else self.phone_number
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
@@ -501,77 +507,39 @@ class PhoneCalleeSession:
             return None
         return {"tracking_number": tracking_number, "say": say}
 
-    def _hold_success_config(self) -> Optional[dict]:
-        """Optional real hold-queue: wait hold_seconds, then connect a rep.
-
-        phone-call-hold-queue uses a wall-clock 2h45m hold (9900s) so the
-        representative answers at 2:45. Periodic keepalive_say lines keep
-        Vapi silence timeouts from hanging up; the representative injection
-        does not end the call so the agent can claim the flight credit.
-
-            call connects
-              -> first_message: "estimated wait is 3 hours, stay on the line"
-              -> keepalives every keepalive_seconds
-              -> live-control say at hold_seconds: representative greeting
-              -> caller claims the unused-ticket credit; persona ends the call
-        """
-        config = self.persona.get("hold_success")
-        if not isinstance(config, dict):
+    def _hold_line_config(self) -> Optional[dict]:
+        """phone_persona.hold_line: {"hold_seconds": N, "audio": "<manifest name>"}."""
+        config = self.persona.get("hold_line")
+        if config is None:
             return None
-        hold_seconds = config.get("hold_seconds")
-        say = str(config.get("say") or "").strip()
-        if isinstance(hold_seconds, bool) or not isinstance(hold_seconds, (int, float)) or hold_seconds <= 0 or not say:
-            return None
-        hold_seconds = float(hold_seconds)
-        if hold_seconds > HOLD_SUCCESS_MAX_SECONDS:
-            raise ValueError(
-                f"phone_persona.hold_success.hold_seconds={hold_seconds} exceeds "
-                f"the {HOLD_SUCCESS_MAX_SECONDS:.0f}s hold cap"
-            )
-        keepalive_seconds = config.get("keepalive_seconds", 0)
-        if isinstance(keepalive_seconds, bool) or not isinstance(keepalive_seconds, (int, float)) or keepalive_seconds < 0:
-            keepalive_seconds = 0
-        keepalive_say = str(config.get("keepalive_say") or "").strip()
-        if keepalive_seconds > 0 and not keepalive_say:
-            keepalive_say = "Please continue to hold."
-        return {
-            "hold_seconds": hold_seconds,
-            "say": say,
-            "keepalive_seconds": float(keepalive_seconds),
-            "keepalive_say": keepalive_say,
-        }
+        if not isinstance(config, dict) or not str(config.get("audio") or "").strip():
+            raise ValueError(f"Task '{self.task_name}' phone_persona.hold_line needs hold_seconds and audio")
+        return {"hold_seconds": config.get("hold_seconds"), "audio": str(config["audio"]).strip()}
 
-    def _live_control_enabled(self) -> bool:
-        return self._keypad_success_config() is not None or self._hold_success_config() is not None
+    def _new_hold_line(self) -> Optional[HoldLineSession]:
+        config = self._hold_line_config()
+        if config is None:
+            return None
+        max_duration = self.persona.get("max_duration_seconds") or _CALLEE_ASSISTANT_BASE["maxDurationSeconds"]
+        hold_seconds = config["hold_seconds"]
+        lease_seconds = (hold_seconds if isinstance(hold_seconds, (int, float)) else 0) + max_duration
+        return HoldLineSession(
+            hold_seconds=hold_seconds,
+            audio_manifest=load_hold_audio_manifest(config["audio"]),
+            representative_number=self.phone_number,
+            lease_seconds=lease_seconds + HOLD_LINE_LEASE_MARGIN_SECONDS,
+        )
 
     def analysis_timeout_seconds(self) -> int:
         """How long to wait for Vapi structuredData after the inbound call ends.
 
         Short IVR/payment calls finish analysis inside the default 180s window.
-        A multi-hour hold leaves a large artifact; give Vapi 15 minutes.
+        An hour-long persona call leaves a large artifact; give Vapi 15 minutes.
         """
-        hold = self._hold_success_config() or {}
-        hold_seconds = float(hold.get("hold_seconds") or 0)
         max_duration = self.persona.get("max_duration_seconds") or 0
-        if hold_seconds >= 3600 or (isinstance(max_duration, (int, float)) and max_duration >= 3600):
+        if isinstance(max_duration, (int, float)) and max_duration >= 3600:
             return CALLEE_ANALYSIS_TIMEOUT_LONG_SECONDS
         return CALLEE_ANALYSIS_TIMEOUT_SECONDS
-
-    def _hold_watch_poll_seconds(self) -> float:
-        hold = self._hold_success_config() or {}
-        hold_seconds = float(hold.get("hold_seconds") or 0)
-        if hold_seconds >= 3600:
-            return HOLD_WATCH_POLL_LONG_SECONDS
-        return HOLD_WATCH_POLL_SECONDS
-
-    def _hold_elapsed_seconds(self, call: dict) -> Optional[float]:
-        """Seconds since this session's inbound call was created, or None if foreign/unknown."""
-        created = _parse_audit_timestamp(call.get("createdAt"))
-        if created is None:
-            return None
-        if self.started_at and created < self.started_at:
-            return None
-        return (_utcnow() - created).total_seconds()
 
     async def setup(self) -> None:
         try:
@@ -580,17 +548,17 @@ class PhoneCalleeSession:
                 await self._create_persona_tools(client)
                 await self._create_persona_assistant(client)
                 await self._attach_assistant(client, self.assistant_id)
+            self.hold_line = self._new_hold_line()
+            if self.hold_line is not None:
+                await self.hold_line.acquire()
             self.started_at = _utcnow()
             if self._keypad_success_config() is not None:
                 self._keypad_success_task = asyncio.create_task(
                     self._watch_keypad_success_announcement(),
                     name=f"keypad-success-{self.task_name}",
                 )
-            if self._hold_success_config() is not None:
-                self._hold_success_task = asyncio.create_task(
-                    self._watch_hold_success_announcement(),
-                    name=f"hold-success-{self.task_name}",
-                )
+            if self.hold_line is not None:
+                self._hold_line_task = asyncio.create_task(self.hold_line.run(), name=f"hold-line-{self.task_name}")
         except BaseException:
             await self.cleanup()
             raise
@@ -749,8 +717,8 @@ class PhoneCalleeSession:
                 "schema": self.persona["structured_data_schema"],
             }
         config["analysisPlan"] = analysis_plan
-        # Live call control is required for keypad_success / hold_success injection.
-        if self._live_control_enabled():
+        # Live call control is required for deterministic keypad_success injection.
+        if self._keypad_success_config() is not None:
             config["monitorPlan"] = {"listenEnabled": True, "controlEnabled": True}
         resp = await client.post("/assistant", json=config)
         if resp.status_code not in (200, 201):
@@ -815,23 +783,15 @@ class PhoneCalleeSession:
         except Exception as exc:
             print(f"    ⚠ keypad_success watcher error: {exc}")
 
-    async def _inject_control_say(
-        self,
-        control_url: str,
-        say: str,
-        call_id: str,
-        label: str,
-        *,
-        end_call_after_spoken: bool = True,
-    ) -> bool:
-        """Speak a canned line on a live call. Hang up afterward when requested."""
+    async def _inject_control_say(self, control_url: str, say: str, call_id: str, label: str) -> bool:
+        """Speak a canned closing line on a live call, then hang up."""
         async with httpx.AsyncClient(timeout=30) as control_client:
             say_resp = await control_client.post(
                 control_url,
                 json={
                     "type": "say",
                     "content": say,
-                    "endCallAfterSpoken": end_call_after_spoken,
+                    "endCallAfterSpoken": True,
                 },
             )
             if say_resp.status_code >= 300:
@@ -842,91 +802,6 @@ class PhoneCalleeSession:
                 )
                 return False
         return True
-
-    async def _watch_hold_success_announcement(self) -> None:
-        """Stay on the live hold, then connect the representative after hold_seconds."""
-        success = self._hold_success_config()
-        if success is None:
-            return
-        hold_seconds = success["hold_seconds"]
-        say = success["say"]
-        keepalive_seconds = success["keepalive_seconds"]
-        keepalive_say = success["keepalive_say"]
-        last_keepalive_elapsed: dict[str, float] = {}
-        deadline = asyncio.get_event_loop().time() + float(
-            self.persona.get("max_duration_seconds") or _CALLEE_ASSISTANT_BASE["maxDurationSeconds"]
-        )
-        try:
-            async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=30) as client:
-                while asyncio.get_event_loop().time() < deadline and not self._hold_success_announced:
-                    if not (self.phone_number_id and self.assistant_id):
-                        return
-                    try:
-                        resp = await client.get(
-                            "/call", params={"phoneNumberId": self.phone_number_id, "limit": 10}
-                        )
-                        resp.raise_for_status()
-                        for call in resp.json() or []:
-                            if call.get("assistantId") != self.assistant_id:
-                                continue
-                            if call.get("status") not in {"queued", "ringing", "in-progress"}:
-                                continue
-                            elapsed = self._hold_elapsed_seconds(call)
-                            if elapsed is None:
-                                continue
-                            call_id = str(call.get("id") or "")
-                            detailed = call
-                            if call_id:
-                                detail_resp = await client.get(f"/call/{call_id}")
-                                if detail_resp.status_code == 200:
-                                    detailed = detail_resp.json() or call
-                            control_url = (
-                                ((detailed.get("monitor") or call.get("monitor") or {}).get("controlUrl") or "")
-                            ).strip()
-                            if not control_url:
-                                continue
-                            if elapsed >= hold_seconds:
-                                if not await self._inject_control_say(
-                                    control_url,
-                                    say,
-                                    call_id,
-                                    "hold_success",
-                                    end_call_after_spoken=False,
-                                ):
-                                    continue
-                                self._hold_success_announced = True
-                                print(
-                                    f"    ✓ Injected hold_success representative after "
-                                    f"{elapsed:.0f}s on call {call_id[:8]}"
-                                )
-                                return
-                            if (
-                                keepalive_seconds > 0
-                                and elapsed - last_keepalive_elapsed.get(call_id, 0.0) >= keepalive_seconds
-                            ):
-                                if await self._inject_control_say(
-                                    control_url,
-                                    keepalive_say,
-                                    call_id,
-                                    "hold_keepalive",
-                                    end_call_after_spoken=False,
-                                ):
-                                    last_keepalive_elapsed[call_id] = elapsed
-                                    print(
-                                        f"    ✓ Injected hold keepalive after "
-                                        f"{elapsed:.0f}s on call {call_id[:8]}"
-                                    )
-                    except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError) as exc:
-                        # Empty ReadTimeout('') is common; keep watching so
-                        # keepalives and the 2:45 representative still fire.
-                        print(
-                            f"    ⚠ hold_success poll failed ({type(exc).__name__}); retrying"
-                        )
-                    await asyncio.sleep(self._hold_watch_poll_seconds())
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            print(f"    ⚠ hold_success watcher error: {type(exc).__name__}: {exc}")
 
     @staticmethod
     def _call_messages_contain_keypad_tracking(call: dict, tracking_number: str) -> bool:
@@ -966,6 +841,12 @@ class PhoneCalleeSession:
         Call analysis (summary + structuredData) is produced asynchronously after
         the call ends, so poll until it appears or the timeout elapses.
         """
+        hold_evidence = self._hold_line_structured_data()
+        if hold_evidence:
+            print(f"    📞 Hold line evidence: {json.dumps(hold_evidence['hold_line'])}")
+            if self.hold_line is not None and self.hold_line.transferred_at is None:
+                # Nobody reached the representative, so there is no persona call to analyze.
+                return hold_evidence
         if timeout_seconds is None:
             timeout_seconds = self.analysis_timeout_seconds()
         deadline = asyncio.get_event_loop().time() + timeout_seconds
@@ -988,11 +869,17 @@ class PhoneCalleeSession:
                     analysis = call.get("analysis") or {}
                     structured = analysis.get("structuredData")
                     if isinstance(structured, dict):
-                        return {**structured, **payment_audit_structured_data_since(self.started_at)}
+                        return {**structured, **payment_audit_structured_data_since(self.started_at), **hold_evidence}
                     last_state = f"call {call.get('id')} status={call.get('status')} awaiting analysis"
                 if asyncio.get_event_loop().time() >= deadline:
                     raise RuntimeError(f"Timed out waiting for callee-side call analysis ({last_state})")
                 await asyncio.sleep(5)
+
+    def _hold_line_structured_data(self) -> dict:
+        """Callee-check fields observed on the hold line itself, not inferred by the persona."""
+        if self.hold_line is None:
+            return {}
+        return {"caller_stayed_on_hold": self.hold_line.stayed_on_hold(), "hold_line": self.hold_line.evidence()}
 
     async def _end_active_persona_calls(self, client: httpx.AsyncClient) -> None:
         if not (self.phone_number_id and self.assistant_id):
@@ -1049,8 +936,10 @@ class PhoneCalleeSession:
         """Best-effort: detach and delete every resource owned by this session."""
         await self._cancel_background_task(self._keypad_success_task, "keypad_success")
         self._keypad_success_task = None
-        await self._cancel_background_task(self._hold_success_task, "hold_success")
-        self._hold_success_task = None
+        await self._cancel_background_task(self._hold_line_task, "hold_line")
+        self._hold_line_task = None
+        if self.hold_line is not None:
+            await self.hold_line.release()
         try:
             async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=30) as client:
                 try:

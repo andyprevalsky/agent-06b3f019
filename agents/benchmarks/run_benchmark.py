@@ -13020,9 +13020,10 @@ async def _run_single_task_as_run_user(
     if task.phone_persona:
         phone_callee = PhoneCalleeSession(task.name, task.phone_persona)
         await phone_callee.setup()
-        task._callee_phone_number = phone_callee.phone_number
+        task._callee_phone_number = phone_callee.dial_number
+        hold_note = f" via hold line {phone_callee.dial_number}" if phone_callee.hold_line else ""
         print(
-            f"    📞 Benchmark callee ready: {phone_callee.phone_number} "
+            f"    📞 Benchmark callee ready: {phone_callee.phone_number}{hold_note} "
             f"(persona assistant {phone_callee.assistant_id[:8]})"
         )
 

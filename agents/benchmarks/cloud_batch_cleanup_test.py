@@ -49,6 +49,8 @@ async def _assert_evaluated_before_teardown(monkeypatch, passed):
 
     class Callee:
         phone_number = "fixture-phone"
+        dial_number = "fixture-phone"
+        hold_line = None
         assistant_id = "fixture-assistant"
 
         def __init__(self, *_args):
