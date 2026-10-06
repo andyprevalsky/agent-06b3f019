@@ -38,6 +38,22 @@ Prediction behavior, model/corpus selection, benchmark assertions, timeout,
 and production remain unchanged in this follow-up. The contact/fundraiser
 RCA remains open until a general repair and exact outcome verification pass.
 
+The user subsequently clarified that plausible synthetic forms are expected;
+unknown Rose company facts are acceptable blockers. Actual website records
+are therefore not a prerequisite. Exact recorded Precursor and Founders Fund
+browser goals are included in the new diagnostic evidence. Original Sol and
+GPT-6.1 Sol each return 0/6 public routes under the original browser inputs.
+An explicit open-world simulation-policy control lets Sol produce forms;
+recorded context still suppresses some results. For Founders, original policy
+with cleared history/notes stays negative (both models 0/3); open-world policy
+with recorded context stays negative (0/3); the same open-world policy with
+history/notes cleared yields 3/3 plausible submitted inquiries, retaining $0
+funding. This isolates policy/context interaction and demonstrates existing
+Sol capability, without isolating a single prior sentence or proving a
+production repair. All 57 valid diagnostic trials and exact goal/policy text
+are in the portable evidence directory. The production prompt, model, seed,
+corpus and benchmark remain unchanged in this diagnostic follow-up.
+
 ## Goal and user decisions
 
 October 6 local continuation uses the isolated worktree

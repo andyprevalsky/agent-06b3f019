@@ -1,12 +1,12 @@
 ---
 id: 2026-10-06-wmh-contact-lookups-lack-target-resource-grounding
 date: 2026-10-06
-title: WMH public-contact predictions lack target website observations
+title: WMH simulation policy and accumulated context suppress plausible public forms
 surface: harness
 component: serve-world-model prediction and archive retrieval
 classification: unresolved
-problem_class: fixture-environment-data-mismatch
-first_bad_boundary: WMH explore result at live history 13 falsely reports no verified Precursor route; missing-resource sensitivity reproduced, general remedy and fundraiser outcome remain unproven
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: WMH explore/browser predicts unavailable forms; controlled simulation-policy and compound-context effects reproduced, production repair remains unproven
 symptoms:
   - I could not verify an official founder pitch-submission form
   - No verified Founders Fund investment-contact route was found
@@ -68,8 +68,8 @@ finds no Precursor or Hustle records, and only an unrelated Founders Fund
 investment mention plus the ordinary phrase 'founders fundraise'. There is
 no target contact/application resource in those matches. This is a concrete
 coverage gap, not proof the entire corpus is corrupt. The corrected artifact
-has 179,169 rows; clock normalization did not change the sampled contact
-outcomes. Literal `DEMO FIXTURE ONLY` appears in one separately retrieved
+has 179,169 rows. The policy/model controls below reuse the original captured
+demonstrations; they do not test a changed corpus artifact. Literal `DEMO FIXTURE ONLY` appears in one separately retrieved
 archive-labelled task (event 264); its export eligibility still needs an
 independent audit before claiming every corpus trajectory is clean.
 
@@ -124,6 +124,91 @@ Archive searches used `Claude Code Spinning up Code agent complete` and
 case is a relative, not proof of this cause: the current trace contains the
 root goal and connected-service defaults.
 
+### User clarification and simulation-policy/model controls
+
+The user clarified that exact real-site contact fidelity is not the intended
+criterion: WMH should instantiate plausible forms in its simulated world.
+Unknown Rose product/company facts are acceptable application blockers. The
+prior first-party-page control demonstrated resource sensitivity, but it did
+not establish that fetching real pages was necessary for this simulation.
+The user asked to isolate missing predictive context, the system prompt, and
+GPT-6.1 Sol, and to include the actual browser-agent goal.
+
+The full root goal and specialized browser goal were already present in the
+original request. The exact Precursor browser action is history 97; Founders
+Fund is history 88. Both allow a truthful private introductory inquiry and
+prohibit invented company facts. The complete goals and all diagnostic
+system additions are preserved in
+`docs/plans/active/wmh-evidence-20261006/browser-goals-and-simulation-policy.md`.
+Precursor's goal suggests `tamarachayo@gmail.com`, while fixed state identifies
+`tamara@roselabs.ai`; every control preserves that same goal and state. Positive
+simulations use the state identity. The email suggestion was held fixed in
+every comparison; those positive results show it does not categorically
+prevent a submission. Its independent causal effect was not isolated.
+
+Model-only controls use an in-memory PoolSpec replacement, changing only
+`gpt_auth_model` to `gpt-6.1-sol`. Original system/user messages and collected
+arguments are byte-identical across models. Responses confirm the expected
+actual models and the same GPT OAuth path. Both use default xhigh reasoning,
+16,384 provider max tokens, no added tools, and disabled Rose response cache.
+
+Completed browser trials:
+
+| Control | Precursor | Founders Fund |
+| --- | --- | --- |
+| Original GPT-6 Sol, recorded context | 0/3 routes | 0/3 routes |
+| Original GPT-6.1 Sol, recorded context | 0/3 routes | 0/3 routes |
+| Sol plus open-world policy, recorded context | 1/3 routes and inquiry submissions | 0/3 routes |
+| Sol plus open-world policy, history and notes removed | 3/3 routes; 1 inquiry submitted, 2 valid unknown-company-data blockers | 3/3 inquiries submitted |
+| Original Sol, history and notes removed | 1 concrete route, 1 nonspecific intake, 1 no route; 0 submissions | 0/3 routes |
+| Original GPT-6.1 Sol, history and notes removed | Not run | 0/3 routes |
+
+The Founders comparison is a two-by-two policy/context control: changing only
+the policy fails with recorded context; removing only history/notes fails
+with the original policy; their combination produces 3/3 plausible form
+submissions. Under the fixed open-world policy, only the compound history and
+scratchpad intervention changes between the failing and positive Founders
+arms. Task, retrieved examples, structured state and complete action remain
+identical. These generated inquiries do not invent Rose product, traction,
+terms, investor commitments or funds; funding remains $0.
+
+The early Precursor explore request further separates the policy from model
+capacity: original Sol 0/3 forms, boundary-only context clarification 0/3,
+removing only the grounding paragraph 0/3, and append-only open-world policy
+3/3 forms with fields. GPT-6.1 Sol with the original prompt returns one
+concrete form with fields and two partial intake descriptions. Therefore the
+original model can synthesize useful environmental details; a model upgrade
+alone does not resolve the recorded browser cases. The boundary clarification
+also leaves all three recorded Precursor browser requests negative.
+
+The original prompt emphasizes a real system, concrete values grounded in
+state/history, and filling unknown fields when a target already exists. It
+lacks a clear contract for instantiating previously unobserved public page
+contents and distinguishing unverified from nonexistent. The diagnostic
+open-world addition supplies that policy while preserving explicit facts and
+real action failures. The controls prove sensitivity to this policy and to
+accumulated context; they do not isolate a single literal system line,
+individual earlier observation, history separately from scratchpad, or a
+universally correct production prompt. Replays excluding a failed preparatory
+`role_only` edit are recorded honestly; that accidental unchanged-input batch
+is not counted as a policy intervention.
+
+Browser retrieval event 105 includes two completed checkout flows, one paused
+Uber task, a FCaptcha form, and a submitted Shadow DOM form. This also rejects
+the theory that the browser demonstrations are universally unsuccessful.
+Independent adversarial review verified the controlled inputs and corrected
+partial-result counts before handoff.
+
+The portable receipt
+`docs/plans/active/wmh-evidence-20261006/synthetic-form-policy-diagnosis.json`
+contains 57 valid trial records, input/output hashes, model identities,
+synthetic route/action summaries and explicit limitations. No production
+prompt or model was changed, and no new full benchmark was run. The next
+repair must define the general simulation contract for unseen environment
+facts and epistemic history; it must not force every lookup or fundraiser to
+succeed. This open case records controlled findings, not production or
+fundraiser recovery.
+
 ## Solution
 
 No production prediction prompt, model selection, corpus artifact, seed,
@@ -132,9 +217,10 @@ evaluator, or timeout was changed. Full evidence remains locally under
 `.context/wmh-contact-{direct-replay-pinned,goal-only,first-party-control}/`;
 a portable comparison receipt is in the plan evidence directory.
 
-The next authorized repair should establish a general resource-grounding and
-observation-fidelity contract, then reproduce its accuracy in the permanent
-WMH suite and matching inference conformance. The page-data control is
+The next authorized repair should establish a general world-generation and
+observation-consistency contract, then reproduce it in the permanent WMH suite
+and matching inference conformance. Public world facts may be instantiated;
+fixed user/company facts and prior effects must be preserved. The page-data control is
 supporting causal evidence, not a hardcoded Precursor fix or a passing
 fundraiser. General remediation and the exact unchanged fundraiser fail/pass
 proof are still open. No production rollout has occurred.
@@ -144,9 +230,12 @@ proof are still open. No production rollout has occurred.
 The user rejected the earlier speculative explanation and required reading
 the actual WMH trace and underlying retrieved samples. They requested a real
 diagnosis, authorized the separate code-card fix, and prohibited preemptive
-prediction changes. Their supplied Founders Fund screenshot is not proof that
-Founders Fund publishes a submission channel.
+prediction changes. Their supplied Founders Fund screenshot is not proof about its real website.
+They explicitly clarified that real-world form fidelity is not required: the
+simulator should generate plausible forms, while unknown Rose company facts
+remain acceptable blockers. They asked for controlled system/context/model
+comparisons and the exact browser-agent goal.
 
 ## Reusable lesson
 
-Distinguish simulated source-availability predictions from fetched resource evidence, and isolate missing target data with an unchanged-request first-party control before blaming archived errors or model intelligence.
+Define the simulator’s policy for unseen environment facts and preserve exact delegated goals when isolating prompt, accumulated-context, and model effects.
