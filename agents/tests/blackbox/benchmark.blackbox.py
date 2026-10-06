@@ -964,8 +964,8 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     # controller-token/private-repo auth, bounded dependency-refresh ownership,
     # isolated-backend queue alignment, exact workspace replay, and pgvector
     # installation, shared snapshot discovery, pinned controls, and the
-    # SIGPIPE-safe target-mode parse cover 44 cases.
-    assert "44 passed" in result.stdout
+    # SIGPIPE-safe target-mode parse cover 48 cases.
+    assert "48 passed" in result.stdout
 
 
 def test_run_benchmark_task_selection_suite_is_in_permanent_gate():
