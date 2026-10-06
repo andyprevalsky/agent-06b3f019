@@ -3517,7 +3517,8 @@ async def test_spawn_browser_routes_simulation_without_calling_real_browser():
         )
     assert result == simulated_result
     from_env.assert_called_once_with(
-        agent_id="agent-1:browser:tool-browser",
+        agent_id="agent-1",
+        session_scope_id="agent-1:browser:tool-browser",
         inherit_explicit_session=False,
         mode="simulate",
     )
