@@ -25,5 +25,7 @@ RETRY_MAX_INTERVAL_SECONDS = 30
 ACTIVITY_TIMEOUT_MINUTES = 210
 HEARTBEAT_TIMEOUT_SECONDS = 60
 HTTP_TIMEOUT_INITIATE = 45.0
-HTTP_TIMEOUT_POLL = 15.0
+# Backend poll of a live Vapi call can exceed 15s when the provider is slow
+# or the response artifact is large. Stay under HEARTBEAT_TIMEOUT_SECONDS.
+HTTP_TIMEOUT_POLL = 30.0
 HTTP_TIMEOUT_MESSAGE = 5.0

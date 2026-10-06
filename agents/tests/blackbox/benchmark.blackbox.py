@@ -16417,7 +16417,11 @@ def test_phone_call_ivr_dtmf_task_defines_call_tree_verification():
 
 def test_phone_call_hold_queue_task_waits_real_three_hours_for_flight_credit():
     """Hold-queue bench stays on a live 2h45m hold, then claims an Air Canada-style flight credit."""
-    from domains.call_phone_number.config import ACTIVITY_TIMEOUT_MINUTES, MAX_POLL_ATTEMPTS
+    from domains.call_phone_number.config import (
+        ACTIVITY_TIMEOUT_MINUTES,
+        HTTP_TIMEOUT_POLL,
+        MAX_POLL_ATTEMPTS,
+    )
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.phone_callee import HOLD_SUCCESS_MAX_SECONDS
 
@@ -16431,6 +16435,7 @@ def test_phone_call_hold_queue_task_waits_real_three_hours_for_flight_credit():
     assert hold.timeout_seconds >= 9900
     assert ACTIVITY_TIMEOUT_MINUTES * 60 >= hold.timeout_seconds
     assert MAX_POLL_ATTEMPTS * 5 >= hold.timeout_seconds
+    assert HTTP_TIMEOUT_POLL >= 30
     assert "phone" in hold.tags
     assert "{callee_phone_number}" in hold.prompt
     assert "exactly once" in hold.prompt

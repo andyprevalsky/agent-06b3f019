@@ -338,6 +338,7 @@ async def _call_phone_number_activity_real(
         polls += 1
 
         try:
+            activity.heartbeat(f"Fetching call status (attempt {polls})...")
             async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_POLL) as client:
                 response = await client.get(
                     f"{config.backend.api_url}/api/vapi/call/{call_id}",
