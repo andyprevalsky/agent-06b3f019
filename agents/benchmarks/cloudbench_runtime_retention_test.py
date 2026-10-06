@@ -449,7 +449,7 @@ recover_exact_stale_fleet_owner "$TOKEN"
 
 @pytest.mark.parametrize(
     "corrupt",
-    ["none", "canonical-mismatch", "raw-log", "result-rejected", "omitted-task", "fsync-file", "fsync-directory"],
+    ["none", "absent-pool", "preallocation", "linked-pool", "canonical-mismatch", "raw-log", "result-rejected", "omitted-task", "fsync-file", "fsync-directory"],
 )
 def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_path: Path, corrupt: str) -> None:
     token = "a" * 32
@@ -484,6 +484,15 @@ def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_pa
     (out / "post-config-start.accepted").write_text("abc123\n")
     (out / "cloudbench-run.json").write_bytes((raw / "run.json").read_bytes())
     (out / "runtime-evidence.pending").write_bytes((out / "runtime-evidence.owner.json").read_bytes())
+    if corrupt in {"absent-pool", "preallocation", "linked-pool"}:
+        (audit / "pool").rmdir()
+    if corrupt == "linked-pool":
+        (audit / "pool").symlink_to(audit / "fresh", target_is_directory=True)
+    if corrupt == "preallocation":
+        import shutil
+
+        shutil.rmtree(out)
+        (audit / "fresh/primary").unlink()
     (registry / "meta").write_text(f"fleet_owner_token={token}\naudit_dir={audit}\nruns_root={runs}\nrun_id=run-a\n")
     latch = registry / "runtime-evidence-unconfirmed"
     latch.touch()
@@ -547,9 +556,10 @@ fleet_recovery_confirm_runtime_evidence "$REGISTRY"
         timeout=10,
         check=False,
     )
-    assert (result.returncode == 0) == (corrupt == "none"), result.stderr
-    assert latch.exists() == (corrupt != "none")
-    assert (out / "runtime-evidence.pending").exists() == (corrupt != "none")
+    accepted = corrupt in {"none", "absent-pool", "preallocation"}
+    assert (result.returncode == 0) == accepted, result.stderr
+    assert latch.exists() == (not accepted)
+    assert (out / "runtime-evidence.pending").exists() == (not accepted)
 
 
 @pytest.mark.parametrize(

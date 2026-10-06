@@ -52,6 +52,11 @@ The pool directory is created only at the first claim. The first repair admitted
 an empty directory, but the actual CLI retry still failed because the original
 preallocation owner had no such directory. Its same recorded failure was kept;
 the owning control was extended to that actual shape before the final repair.
+The next actual retry passed the source guard and exposed the same absent-pool
+assumption in the runtime-evidence mapper. That consumer now also interprets
+absence as zero borrowed claims, retaining all task/provenance, admitted-output,
+guest result, log/hash and durability checks. It adds no guest receipt to an
+unallocated task.
 Retain the exact owner/app/run binding, ordinary directory checks, empty clone
 and fresh ledgers, source-manifest exclusion and validation of every present
 borrowed pool record. Existing non-directory or linked pool paths remain rejected.
@@ -66,6 +71,13 @@ existing unsafe hierarchical graph control, in 0.44 seconds. It also rejects
 a populated partial clone ledger and a linked pool directory. The real absent
 directory shape failed the intermediate repair in 1.38 seconds and passed the
 same extended control plus unsafe graph cases in 0.68 seconds. The existing
+runtime-copy control's absent-pool and preallocation cases failed old mapping in
+0.22 seconds; all 12 existing recovery controls passed the repair in 1.29 seconds.
+An independent reviewer passed all 10 copy/corruption/fsync variants in 1.16
+seconds. The same documented actual recovery then exited successfully in 1.22
+seconds, retired that exact registry and sealed provider teardown. The original
+failed benchmark remains rejected; retained Hub ownership is a separate cleanup
+step. The existing
 compact deploy control selects both owning tests; no paid verification is added.
 Actual stale-owner recovery is a separate runtime check, and cannot turn the
 interrupted diagnostic into an accepted benchmark.

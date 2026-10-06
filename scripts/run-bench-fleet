@@ -8119,10 +8119,10 @@ admitted_outputs = {path.name for path in run.iterdir() if path.is_dir() and any
 assert admitted_outputs <= task_names
 fresh = {row['machine_id'] for p in (audit / 'fresh').iterdir() if (row := fields(p)).get('machine_id')}
 pool_dir = audit / 'pool'
-assert pool_dir.is_dir() and not pool_dir.is_symlink()
+assert not pool_dir.is_symlink() and (not pool_dir.exists() or pool_dir.is_dir())
 pool = set()
 pool_volumes = {}
-for record in pool_dir.iterdir():
+for record in pool_dir.iterdir() if pool_dir.exists() else ():
     row = fields(record)
     assert (row.get('version') == '1'
             and row.get('fleet_owner_token') == registry.name
