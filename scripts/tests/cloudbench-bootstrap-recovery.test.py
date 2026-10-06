@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tarfile
@@ -397,6 +398,17 @@ class BootstrapRecoveryTest(unittest.TestCase):
                 )
                 self.assertNotEqual(rejected.returncode, 0)
                 self.assertIn("trusted committed source", rejected.stderr)
+                source_policy = ROOT / "cloudbench-prestack-source-reviews.json"
+                source_policy_bytes = source_policy.read_bytes()
+                source_policy_mode = stat.S_IMODE(source_policy.stat().st_mode)
+                self.assertEqual(policy.stat().st_mode & stat.S_IWUSR, source_policy_mode & stat.S_IWUSR)
+                # Tamper only this controller's generated fixture, after proving
+                # its ordinary committed-policy path. Exercise readonly copies
+                # independently of the checkout's mode and inherited umask.
+                policy.chmod(stat.S_IMODE(policy.stat().st_mode) & ~0o222)
+                self.assertEqual(stat.S_IMODE(policy.stat().st_mode) & 0o222, 0)
+                for fixture in (policy, snapshot / "cloudbench-controller-snapshot-manifest.json"):
+                    fixture.chmod(stat.S_IMODE(fixture.stat().st_mode) | stat.S_IWUSR)
                 policy.write_bytes(policy.read_bytes() + b"\n")
                 subprocess.run(
                     [
@@ -417,6 +429,8 @@ class BootstrapRecoveryTest(unittest.TestCase):
                 )
                 self.assertNotEqual(rejected.returncode, 0)
                 self.assertIn("trusted committed source", rejected.stderr)
+                self.assertEqual(source_policy.read_bytes(), source_policy_bytes)
+                self.assertEqual(stat.S_IMODE(source_policy.stat().st_mode), source_policy_mode)
             finally:
                 release.touch()
                 controller.wait(timeout=30)

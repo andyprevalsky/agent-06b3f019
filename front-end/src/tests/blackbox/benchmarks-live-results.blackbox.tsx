@@ -2,6 +2,7 @@ import { afterEach, it, vi } from 'vitest';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { renderWithProviders } from './test-wrapper';
 import { BenchmarksView } from '@/features/benchmarks';
+import { BenchmarkRunView } from '@/features/benchmarks/BenchmarkRunView';
 
 type FetchInput = Parameters<typeof fetch>[0];
 const base = {
@@ -263,4 +264,234 @@ it('keeps grouped completion counts across task pages while showing only the cur
   expect(screen.getAllByTestId(/^run-view-task-member-/)).toHaveLength(100);
   expect(screen.getByTestId('run-tiles')).toHaveTextContent('130/150 done');
   expect(offsets).toEqual([0, 100, 0]);
+});
+
+// Captured from the existing campaign-hub-grouping owning inverse, using the
+// production Hub projection. A controller exit without a verdict remains null.
+const owningMixedInfra = {
+  run_id: 'group-a',
+  timestamp: '2026-10-06T20:00:00+00:00',
+  suite: 'cloud-fleet',
+  source: 'benchmark-campaign',
+  live: false,
+  uploaded_at: '2026-10-06T21:02:37.809Z',
+  tasks: [
+    {
+      name: 'repeat-task',
+      passed: true,
+      status: 'passed',
+      agent_id: 'agent-one',
+      duration_seconds: null,
+      cost_cents: 10,
+      world_model_mode: null,
+      fast_mode: false,
+      tree_agent_count: null,
+      failure_reason: null,
+      tokens_in: 7,
+      tokens_out: 3,
+      cache_hit_pct: null,
+      llm_call_count: null,
+      message_count: null,
+      row_id: 'm1-0',
+      child_run_id: 'child-a1',
+      run_number: 1,
+    },
+    {
+      name: 'repeat-task',
+      passed: null,
+      status: 'INFRA_ERROR',
+      agent_id: null,
+      duration_seconds: null,
+      cost_cents: null,
+      world_model_mode: null,
+      fast_mode: false,
+      tree_agent_count: null,
+      failure_reason: 'Controller exited with code 17 before a benchmark result was published',
+      lifecycle_stage: 'controller-terminal-cleanup-unknown',
+      row_id: 'm2-0',
+      run_number: 2,
+      tokens_in: null,
+      tokens_out: null,
+      cache_hit_pct: null,
+      llm_call_count: null,
+      message_count: null,
+    },
+  ],
+  task_counts: {
+    passed: 1,
+    failed: 0,
+    queued: 0,
+    infra_error: 1,
+    cancelled: 0,
+  },
+  task_total: 2,
+  is_group: true,
+  code: null,
+  elapsed_s: 12.5,
+  cost: {
+    agents_llm_usd: null,
+    wmh_grounding_usd: null,
+    infra_usd: null,
+    total_usd: null,
+    fast_cache_hit_rate: null,
+  },
+  pagination: {
+    offset: 0,
+    limit: 100,
+    total: 2,
+  },
+  totals: {
+    passed: 1,
+    failed: 0,
+    running: 0,
+    cost_cents: 10,
+    tokens_in: 7,
+    tokens_out: 3,
+    agents: 0,
+  },
+} as const;
+const owningMixedCancelled = {
+  run_id: 'group-a',
+  timestamp: '2026-10-06T20:00:00+00:00',
+  suite: 'cloud-fleet',
+  source: 'benchmark-campaign',
+  live: false,
+  uploaded_at: '2026-10-06T21:02:37.809Z',
+  tasks: [
+    {
+      name: 'repeat-task',
+      passed: true,
+      status: 'passed',
+      agent_id: 'agent-one',
+      duration_seconds: null,
+      cost_cents: 10,
+      world_model_mode: null,
+      fast_mode: false,
+      tree_agent_count: null,
+      failure_reason: null,
+      tokens_in: 7,
+      tokens_out: 3,
+      cache_hit_pct: null,
+      llm_call_count: null,
+      message_count: null,
+      row_id: 'm1-0',
+      child_run_id: 'child-a1',
+      run_number: 1,
+    },
+    {
+      name: 'repeat-task',
+      passed: null,
+      status: 'cancelled',
+      agent_id: null,
+      duration_seconds: null,
+      cost_cents: null,
+      world_model_mode: null,
+      fast_mode: false,
+      tree_agent_count: null,
+      failure_reason: 'Campaign controller was cancelled before a benchmark result was published',
+      lifecycle_stage: 'controller-terminal-cleanup-unknown',
+      row_id: 'm2-0',
+      run_number: 2,
+      tokens_in: null,
+      tokens_out: null,
+      cache_hit_pct: null,
+      llm_call_count: null,
+      message_count: null,
+    },
+  ],
+  task_counts: {
+    passed: 1,
+    failed: 0,
+    queued: 0,
+    infra_error: 0,
+    cancelled: 1,
+  },
+  task_total: 2,
+  is_group: true,
+  code: null,
+  elapsed_s: 12.5,
+  cost: {
+    agents_llm_usd: null,
+    wmh_grounding_usd: null,
+    infra_usd: null,
+    total_usd: null,
+    fast_cache_hit_rate: null,
+  },
+  pagination: {
+    offset: 0,
+    limit: 100,
+    total: 2,
+  },
+  totals: {
+    passed: 1,
+    failed: 0,
+    running: 0,
+    cost_cents: 10,
+    tokens_in: 7,
+    tokens_out: 3,
+    agents: 0,
+  },
+} as const;
+
+it.each([
+  { label: 'one PASS and an infrastructure-only terminal copy', kind: 'infra', expected: 'failed' },
+  { label: 'one PASS and a cancelled terminal copy', kind: 'cancelled', expected: 'failed' },
+  { label: 'all evaluated PASS copies', kind: 'passed', expected: 'pass' },
+  { label: 'a genuine evaluated benchmark FAIL', kind: 'failed', expected: 'failed' },
+])('keeps the terminal group badge honest for $label', async ({ kind, expected }) => {
+  window.localStorage.setItem(
+    'rose-session',
+    JSON.stringify({ access_token: 'fixture-token', user: { id: 'fixture-admin' } }),
+  );
+  const group = structuredClone(
+    kind === 'cancelled' ? owningMixedCancelled : owningMixedInfra,
+  ) as any;
+  if (kind === 'passed' || kind === 'failed') {
+    group.tasks[1] = {
+      ...group.tasks[1],
+      passed: kind === 'passed',
+      status: kind === 'passed' ? 'passed' : 'failed',
+      lifecycle_stage: 'released',
+      failure_reason: kind === 'passed' ? null : 'Fixture evaluated goal failure',
+    };
+    group.totals = {
+      ...group.totals,
+      passed: kind === 'passed' ? 2 : 1,
+      failed: kind === 'failed' ? 1 : 0,
+      running: 0,
+    };
+    group.task_counts = {
+      passed: kind === 'passed' ? 2 : 1,
+      failed: kind === 'failed' ? 1 : 0,
+      queued: 0,
+      infra_error: 0,
+      cancelled: 0,
+    };
+  }
+  vi.spyOn(global, 'fetch').mockImplementation(async () =>
+    jsonResponse({ run: { ...group, dispatch: null } }),
+  );
+  renderWithProviders(
+    <BenchmarkRunView runId={group.run_id} onBack={() => {}} onOpenAgent={() => {}} />,
+  );
+  await waitFor(() => expect(screen.getByTestId('run-view-task-m2-0')).toBeInTheDocument());
+  const row = screen.getByTestId('run-view-task-m2-0');
+  expect(
+    within(row).getByText(
+      kind === 'infra'
+        ? 'infra_error'
+        : kind === 'cancelled'
+          ? 'cancelled'
+          : kind === 'passed'
+            ? 'pass'
+            : 'failed',
+    ),
+  ).toBeInTheDocument();
+  if (kind === 'infra' || kind === 'cancelled') {
+    expect(within(row).getByText('Controller finished; cleanup unconfirmed')).toBeInTheDocument();
+    expect(screen.getByTestId('run-tiles')).toHaveTextContent('1/2 done');
+  }
+  const header = screen.getByTestId('run-back').parentElement!;
+  expect(within(header).getByText(expected)).toBeInTheDocument();
+  if (expected === 'failed') expect(within(header).queryByText('pass')).not.toBeInTheDocument();
 });

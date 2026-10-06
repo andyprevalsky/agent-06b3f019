@@ -27,6 +27,16 @@ import {
   offlineArchiveArtifact as artifact,
 } from './trace-archive-test-utils';
 
+const offlineArchiveEnvironment = {
+  TRACE_ARCHIVE_ENABLED: '1',
+  TRACE_ARCHIVE_BACKEND: 'r2',
+  TRACE_ARCHIVE_ENCRYPTION_KEY_B64: Buffer.alloc(32, 7).toString('base64'),
+  R2_ACCOUNT_ID: 'offline',
+  R2_ACCESS_KEY_ID: 'offline',
+  R2_SECRET_ACCESS_KEY: 'offline',
+  R2_BUCKET_TRACE_ARCHIVE: 'offline',
+};
+
 const { test, finish } = createTestHarness('archive batch storage tests');
 
 const sender = S3Client.prototype as unknown as {
@@ -245,7 +255,11 @@ async function directWriterInterleaving() {
       const reordered = Object.fromEntries(Object.entries(manifest).reverse());
       reordered.sensitive = Object.fromEntries(Object.entries(manifest.sensitive).reverse());
       assert(
-        await archiveJson({ rootAgentId, objectPath: 'manifest.json.gz.enc', value: reordered })
+        await archiveJson({
+          rootAgentId,
+          objectPath: 'manifest.json.gz.enc',
+          value: reordered,
+        })
       );
     } else if (changes === 2) {
       assert(
@@ -427,172 +441,158 @@ async function lostTransactionStopsWrites() {
 async function main(): Promise<void> {
   await test(
     'whole batch validation precedes bounded uploads and failed batches remain retryable',
-    withEnv(
-      {
-        TRACE_ARCHIVE_ENABLED: '1',
-        TRACE_ARCHIVE_BACKEND: 'r2',
-        TRACE_ARCHIVE_ENCRYPTION_KEY_B64: Buffer.alloc(32, 7).toString('base64'),
-        R2_ACCOUNT_ID: 'offline',
-        R2_ACCESS_KEY_ID: 'offline',
-        R2_SECRET_ACCESS_KEY: 'offline',
-        R2_BUCKET_TRACE_ARCHIVE: 'offline',
-      },
-      async () => {
-        const rootAgentId = 'offline-batch-root';
-        const artifacts = Array.from({ length: 8 }, (_, index) => {
-          const objectPath = `media/browser/task/frame-${index}.txt`;
-          const encrypted = encryptArtifact(
-            objectPath,
-            Buffer.from(`frame ${index}`),
-            'text/plain'
-          );
-          assert(encrypted);
-          return {
-            path: objectPath,
-            metadata: encrypted.metadata,
-            ciphertextB64: encrypted.ciphertext.toString('base64'),
-          };
-        });
-        const sender = S3Client.prototype as unknown as {
-          send: (command: unknown) => Promise<unknown>;
+    withEnv(offlineArchiveEnvironment, async () => {
+      const rootAgentId = 'offline-batch-root';
+      const artifacts = Array.from({ length: 8 }, (_, index) => {
+        const objectPath = `media/browser/task/frame-${index}.txt`;
+        const encrypted = encryptArtifact(objectPath, Buffer.from(`frame ${index}`), 'text/plain');
+        assert(encrypted);
+        return {
+          path: objectPath,
+          metadata: encrypted.metadata,
+          ciphertextB64: encrypted.ciphertext.toString('base64'),
         };
-        const originalSend = sender.send;
-        const objects = new Map<string, Buffer>();
-        let active = 0;
-        let maximumActive = 0;
-        let requests = 0;
-        let failPath: string | null = null;
-        sender.send = async (command: unknown) => {
-          requests++;
-          const name = command?.constructor?.name;
-          const input = (command as { input: Record<string, unknown> }).input;
-          assert.strictEqual(input.Bucket, 'offline');
-          if (name === 'PutObjectCommand') {
-            active++;
-            maximumActive = Math.max(maximumActive, active);
-            try {
-              await new Promise((resolve) => setTimeout(resolve, 5));
-              if (String(input.Key).endsWith(failPath ?? '\\0'))
-                throw new Error('fixture store refused');
-              objects.set(String(input.Key), bodyToBuffer(input.Body));
-              return {};
-            } finally {
-              active--;
-            }
+      });
+      const sender = S3Client.prototype as unknown as {
+        send: (command: unknown) => Promise<unknown>;
+      };
+      const originalSend = sender.send;
+      const objects = new Map<string, Buffer>();
+      let active = 0;
+      let maximumActive = 0;
+      let requests = 0;
+      let failPath: string | null = null;
+      sender.send = async (command: unknown) => {
+        requests++;
+        const name = command?.constructor?.name;
+        const input = (command as { input: Record<string, unknown> }).input;
+        assert.strictEqual(input.Bucket, 'offline');
+        if (name === 'PutObjectCommand') {
+          active++;
+          maximumActive = Math.max(maximumActive, active);
+          try {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            if (String(input.Key).endsWith(failPath ?? '\\0'))
+              throw new Error('fixture store refused');
+            objects.set(String(input.Key), bodyToBuffer(input.Body));
+            return {};
+          } finally {
+            active--;
           }
-          if (name === 'HeadObjectCommand' || name === 'GetObjectCommand') {
-            throw Object.assign(new Error('fixture absent'), {
-              name: 'NoSuchKey',
-            });
-          }
-          throw new Error(`unexpected storage command ${name}`);
-        };
-        try {
-          const batch = { rootAgentId, artifacts };
-          const reservedPath = artifacts[0].path + '.meta.json';
-          const reserved = encryptArtifact(
-            reservedPath,
-            Buffer.from('reserved path'),
-            'text/plain'
-          );
-          assert(reserved);
-          for (const invalid of [
-            {
-              rootAgentId,
-              artifacts: [
-                artifacts[0],
-                {
-                  path: reservedPath,
-                  metadata: reserved.metadata,
-                  ciphertextB64: reserved.ciphertext.toString('base64'),
-                },
-              ],
-            },
-            {
-              ...batch,
-              artifacts: [artifacts[0], { ...artifacts[1], metadata: {} }],
-            },
-            { ...batch, padding: 'x'.repeat(ARCHIVE_BATCH_MAX_BYTES) },
-            {
-              ...batch,
-              artifacts: [
-                artifacts[0],
-                {
-                  ...artifacts[1],
-                  ciphertextB64: artifacts[1].ciphertextB64 + '\n',
-                },
-              ],
-            },
-          ]) {
-            await assert.rejects(storeWorkerArtifacts(invalid), /Archive /);
-            assert.strictEqual(requests, 0, 'invalid later records must not partially publish');
-          }
-          const result = await storeWorkerArtifacts(batch);
-          assert.deepStrictEqual(
-            result.artifacts.map((item) => item.path),
-            artifacts.map((item) => item.path)
-          );
-          assert.strictEqual(
-            maximumActive,
-            4,
-            'storage concurrency must be bounded independently of record count'
-          );
-          for (const [index, artifact] of artifacts.entries()) {
-            const ciphertext = objects.get(`trace-archive/${rootAgentId}/${artifact.path}`);
-            const metadata = objects.get(`trace-archive/${rootAgentId}/${artifact.path}.meta.json`);
-            assert(ciphertext && metadata);
-            assert.strictEqual(
-              decryptAndValidateArtifact({
-                ciphertext,
-                metadata: JSON.parse(metadata.toString()),
-              }).toString(),
-              `frame ${index}`
-            );
-          }
-          objects.clear();
-          failPath = artifacts[1].path;
-          await assert.rejects(storeWorkerArtifacts(batch), /disabled or unavailable/);
-          assert.strictEqual(active, 0, 'a failed response must wait for all started uploads');
-          assert(objects.size > 0, 'fixture must exercise partial remote acceptance');
-          failPath = null;
-          const retry = await storeWorkerArtifacts(batch);
-          assert.strictEqual(retry.artifacts.length, artifacts.length);
-          assert.strictEqual(
-            objects.size,
-            artifacts.length * 2,
-            'retry must preserve every individual pair'
-          );
-        } finally {
-          sender.send = originalSend;
         }
+        if (name === 'HeadObjectCommand' || name === 'GetObjectCommand') {
+          throw Object.assign(new Error('fixture absent'), {
+            name: 'NoSuchKey',
+          });
+        }
+        throw new Error(`unexpected storage command ${name}`);
+      };
+      try {
+        const batch = { rootAgentId, artifacts };
+        const reservedPath = artifacts[0].path + '.meta.json';
+        const reserved = encryptArtifact(reservedPath, Buffer.from('reserved path'), 'text/plain');
+        assert(reserved);
+        for (const invalid of [
+          {
+            rootAgentId,
+            artifacts: [
+              artifacts[0],
+              {
+                path: reservedPath,
+                metadata: reserved.metadata,
+                ciphertextB64: reserved.ciphertext.toString('base64'),
+              },
+            ],
+          },
+          {
+            ...batch,
+            artifacts: [artifacts[0], { ...artifacts[1], metadata: {} }],
+          },
+          { ...batch, padding: 'x'.repeat(ARCHIVE_BATCH_MAX_BYTES) },
+          {
+            ...batch,
+            artifacts: [
+              artifacts[0],
+              {
+                ...artifacts[1],
+                ciphertextB64: artifacts[1].ciphertextB64 + '\n',
+              },
+            ],
+          },
+        ]) {
+          await assert.rejects(storeWorkerArtifacts(invalid), /Archive /);
+          assert.strictEqual(requests, 0, 'invalid later records must not partially publish');
+        }
+        const result = await storeWorkerArtifacts(batch);
+        assert.deepStrictEqual(
+          result.artifacts.map((item) => item.path),
+          artifacts.map((item) => item.path)
+        );
+        assert.strictEqual(
+          maximumActive,
+          4,
+          'storage concurrency must be bounded independently of record count'
+        );
+        for (const [index, artifact] of artifacts.entries()) {
+          const ciphertext = objects.get(`trace-archive/${rootAgentId}/${artifact.path}`);
+          const metadata = objects.get(`trace-archive/${rootAgentId}/${artifact.path}.meta.json`);
+          assert(ciphertext && metadata);
+          assert.strictEqual(
+            decryptAndValidateArtifact({
+              ciphertext,
+              metadata: JSON.parse(metadata.toString()),
+            }).toString(),
+            `frame ${index}`
+          );
+        }
+        objects.clear();
+        failPath = artifacts[1].path;
+        await assert.rejects(storeWorkerArtifacts(batch), /disabled or unavailable/);
+        assert.strictEqual(active, 0, 'a failed response must wait for all started uploads');
+        assert(objects.size > 0, 'fixture must exercise partial remote acceptance');
+        failPath = null;
+        const retry = await storeWorkerArtifacts(batch);
+        assert.strictEqual(retry.artifacts.length, artifacts.length);
+        assert.strictEqual(
+          objects.size,
+          artifacts.length * 2,
+          'retry must preserve every individual pair'
+        );
+      } finally {
+        sender.send = originalSend;
       }
-    )
+    })
   );
-  sender.send = interleavingSend;
-  try {
-    await test('concurrent late batches retain both acknowledgements and full manifest equality', () =>
-      sameRootInterleaving('batch'));
-    await test('concurrent late single publication retains both acknowledgements and full manifest equality', () =>
-      sameRootInterleaving('single'));
-    await test('independent roots remain independent', differentRootIndependence);
-    await test(
-      'direct JSON and binary writers converge without losing terminal metadata',
-      directWriterInterleaving
-    );
-    await test('late start archival preserves terminal manifest ownership', lateStartInterleaving);
-    await test(
-      'removed artifacts and malformed evidence remain rejected without retry',
-      destructiveChangesRemainRejected
-    );
-    await test(
-      'native transaction ownership loss stops rewrites and joins work',
-      lostTransactionStopsWrites
-    );
-  } finally {
-    onPublicWrite = undefined;
-    sender.send = originalSend;
-    await prisma.$disconnect();
-  }
+  await withEnv(offlineArchiveEnvironment, async () => {
+    sender.send = interleavingSend;
+    try {
+      await test('concurrent late batches retain both acknowledgements and full manifest equality', () =>
+        sameRootInterleaving('batch'));
+      await test('concurrent late single publication retains both acknowledgements and full manifest equality', () =>
+        sameRootInterleaving('single'));
+      await test('independent roots remain independent', differentRootIndependence);
+      await test(
+        'direct JSON and binary writers converge without losing terminal metadata',
+        directWriterInterleaving
+      );
+      await test(
+        'late start archival preserves terminal manifest ownership',
+        lateStartInterleaving
+      );
+      await test(
+        'removed artifacts and malformed evidence remain rejected without retry',
+        destructiveChangesRemainRejected
+      );
+      await test(
+        'native transaction ownership loss stops rewrites and joins work',
+        lostTransactionStopsWrites
+      );
+    } finally {
+      onPublicWrite = undefined;
+      sender.send = originalSend;
+      await prisma.$disconnect();
+    }
+  })();
   finish();
 }
 void main().catch((error: unknown) => {

@@ -38,7 +38,10 @@ function verdictBadge(detail: HubRunDetail) {
         ● live
       </Badge>
     );
-  if (detail.totals.failed === 0 && detail.totals.passed > 0)
+  const allGroupTasksPassed =
+    !detail.is_group ||
+    detail.totals.passed === (detail.task_total ?? detail.pagination?.total ?? detail.tasks.length);
+  if (detail.totals.failed === 0 && detail.totals.passed > 0 && allGroupTasksPassed)
     return (
       <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
         pass
