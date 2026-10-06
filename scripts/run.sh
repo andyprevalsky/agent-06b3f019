@@ -1637,6 +1637,18 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 path, expected_url, expected_port = sys.argv[1:]
+
+
+def owned_upstream(addr, port):
+    if isinstance(addr, str):
+        return addr == f"http://localhost:{port}"
+    # ngrok 3.39 logs the upstream as a serialized Go url.URL.
+    if isinstance(addr, dict):
+        rest = (value for key, value in addr.items() if key not in ("Scheme", "Host"))
+        return addr.get("Scheme") == "http" and addr.get("Host") == f"localhost:{port}" and not any(rest)
+    return False
+
+
 try:
     port = int(expected_port)
     parsed = urlsplit(expected_url)
@@ -1656,7 +1668,7 @@ try:
     if len(events) != 1:
         raise ValueError("ambiguous emitted endpoints")
     event = events[0]
-    if event.get("obj") != "tunnels" or event.get("name") != "command_line" or event.get("url") != expected_url or event.get("addr") != f"http://localhost:{port}":
+    if event.get("obj") != "tunnels" or event.get("name") != "command_line" or event.get("url") != expected_url or not owned_upstream(event.get("addr"), port):
         raise ValueError("emitted endpoint does not belong to requested upstream")
 except FileNotFoundError:
     raise SystemExit(1)

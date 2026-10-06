@@ -523,12 +523,16 @@ case "$1" in
       foreign-url) domain=foreign.ngrok.app ;;
       wrong-upstream) upstream=3999 ;;
     esac
+    addr="\"http://localhost:$upstream\""
+    # ngrok 3.39 logs the upstream as a serialized Go url.URL, not a string.
+    [ "${NGROK_ADDR_FORMAT:-string}" = url-object ] &&
+      addr="{\"Scheme\":\"http\",\"Opaque\":\"\",\"User\":null,\"Host\":\"localhost:$upstream\",\"Path\":\"\",\"RawPath\":\"\",\"OmitHost\":false,\"ForceQuery\":false,\"RawQuery\":\"\",\"Fragment\":\"\",\"RawFragment\":\"\"}"
     if [ "${NGROK_EVENT_KIND:-}" = delayed ]; then
       rm -f "$RUN_CONTEXT_DIR/ngrok-fallback.log"
       sleep 1
-      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":"http://localhost:%s"}\n' "${domain:-free.ngrok-free.dev}" "$upstream" > "$RUN_CONTEXT_DIR/ngrok-fallback.log"
+      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":%s}\n' "${domain:-free.ngrok-free.dev}" "$addr" > "$RUN_CONTEXT_DIR/ngrok-fallback.log"
     else
-      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":"http://localhost:%s"}\n' "${domain:-free.ngrok-free.dev}" "$upstream"
+      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":%s}\n' "${domain:-free.ngrok-free.dev}" "$addr"
     fi
     exec sleep 30
     ;;
@@ -618,6 +622,15 @@ for event in foreign-url wrong-upstream; do
   [ ! -e "$TMP/ngrok-published" ] || fail "case 10: $event was published before ownership rejection"
 done
 echo "PASS: foreign ngrok endpoint and wrong upstream are rejected before publication"
+NGROK_ADDR_FORMAT=url-object NGROK_RESPONSE_KIND=healthy run_ngrok_fallback krakow-bench-url-object-origin \
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: ngrok's structured upstream address must identify its owned origin"; }
+for event in foreign-url wrong-upstream; do
+  if NGROK_ADDR_FORMAT=url-object NGROK_EVENT_KIND="$event" run_ngrok_fallback krakow-bench-url-object-negative; then
+    fail "case 10: $event with a structured upstream address must be rejected"
+  fi
+  [ ! -e "$TMP/ngrok-published" ] || fail "case 10: structured $event was published before ownership rejection"
+done
+echo "PASS: ngrok's structured upstream address is owned only for the requested origin and port"
 for response in offline unmarked proxy proxy-after-connect wrong-body; do
   if NGROK_RESPONSE_KIND="$response" run_ngrok_fallback krakow-bench-route-negative; then
     fail "case 10: ngrok $response must not certify routing"
