@@ -10476,6 +10476,9 @@ def _append_structured_output_evidence(evidence: list[dict], data: dict) -> list
 def _declared_evaluator_evidence(data: dict) -> list[dict]:
     """Build a bounded evidence-only context for a declared LLM judge.
 
+    Rows are whole whenever the bundle fits the single-turn budget; only a
+    bundle that does not fit has each row cut to ``SINGLE_TURN_TEXT_CAP``.
+
     Payment-approval metadata and root transcripts come from the tree-aware
     single-turn builder. ``benchmark_state`` is the compact T-row view so
     mass-agent trees cannot 413 the judge with 35MB child bodies. When the
@@ -10494,10 +10497,16 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
     )
 
     compact_state = _compact_benchmark_state_for_judge(data)
-    evidence = _apply_compact_benchmark_state(build_single_turn_evidence(data), compact_state)
-    evidence = _append_structured_output_evidence(evidence, data)
-    if not single_turn_evidence_exceeds_budget(evidence):
-        return evidence
+    # Whole rows first. The per-row cap exists only to fit the budget, and it
+    # cuts without a marker: a 17k grep result lost the one line its judge had
+    # to ground on (grep-agent-trajectories-code-tool-status).
+    for text_cap in (None, SINGLE_TURN_TEXT_CAP):
+        evidence = _apply_compact_benchmark_state(
+            build_single_turn_evidence(data, text_cap=text_cap), compact_state
+        )
+        evidence = _append_structured_output_evidence(evidence, data)
+        if not single_turn_evidence_exceeds_budget(evidence):
+            return evidence
     slim = dict(data)
     slim["_semantic_evaluator_tree"] = None
     evidence = _apply_compact_benchmark_state(build_single_turn_evidence(slim), compact_state)
