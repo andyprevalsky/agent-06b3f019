@@ -1,17 +1,114 @@
 """Cold image builds use the supported CLI and retain their exact inputs."""
 
 import hashlib
+import io
 import json
 import os
 import shlex
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 BASH = shutil.which("bash")
+PUBLISHER_LIB = ROOT / "scripts/lib/cloudbench-image-publisher.sh"
+
+
+def _publisher_fixture(tmp_path, version="0.4.112"):
+    client = (
+        "#!/usr/bin/env bash\n"
+        f"if [ \"${{1:-}}\" = version ]; then echo 'flyctl v{version} fixture'; exit 0; fi\n"
+        "python3 -c 'import json,os,sys; "
+        'open(os.environ["IMAGE_TEST_ARGS"],"w").write(json.dumps({"args":sys.argv[1:],'
+        '"docker_buildkit":os.environ.get("DOCKER_BUILDKIT")}))\' "$@"\n'
+    ).encode()
+    archive = tmp_path / "publisher.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        member = tarfile.TarInfo("flyctl")
+        member.size = len(client)
+        member.mode = 0o700
+        output.addfile(member, io.BytesIO(client))
+    return archive, hashlib.sha256(archive.read_bytes()).hexdigest(), client
+
+
+def _install_publisher(tmp_path, archive, checksum):
+    harness = tmp_path / "install.sh"
+    harness.write_text(
+        f"source {shlex.quote(str(PUBLISHER_LIB))}\n"
+        f"cloudbench_image_install_client {shlex.quote(str(tmp_path / 'cache'))} "
+        f"{shlex.quote(archive.as_uri())} {checksum} 0.4.112\n"
+    )
+    return subprocess.run([BASH, str(harness)], capture_output=True, text=True, timeout=30)
+
+
+def test_cold_image_publisher_cache_is_verified_and_reused(tmp_path):
+    archive, checksum, client = _publisher_fixture(tmp_path)
+    first = _install_publisher(tmp_path, archive, checksum)
+    assert first.returncode == 0, first.stderr
+    executable = Path(first.stdout.strip())
+    assert executable.read_bytes() == client
+    assert executable.stat().st_mode & 0o777 == 0o700
+    archive.unlink()
+    second = _install_publisher(tmp_path, archive, checksum)
+    assert second.returncode == 0, second.stderr
+    assert second.stdout.strip() == str(executable)
+    assert executable.read_bytes() == client
+
+
+def test_cold_image_publisher_corrupt_cache_is_replaced(tmp_path):
+    archive, checksum, client = _publisher_fixture(tmp_path)
+    first = _install_publisher(tmp_path, archive, checksum)
+    assert first.returncode == 0, first.stderr
+    executable = Path(first.stdout.strip())
+    executable.write_bytes(b"corrupted cached publisher\n")
+    repaired = _install_publisher(tmp_path, archive, checksum)
+    assert repaired.returncode == 0, repaired.stderr
+    assert executable.read_bytes() == client
+
+
+def test_cold_image_publisher_rejects_unverified_asset(tmp_path):
+    archive, _, _ = _publisher_fixture(tmp_path)
+    result = _install_publisher(tmp_path, archive, "0" * 64)
+    assert result.returncode != 0
+    assert not (tmp_path / "cache/flyctl").exists()
+
+
+def test_cold_image_publisher_rejects_wrong_client_version(tmp_path):
+    archive, checksum, _ = _publisher_fixture(tmp_path, version="0.4.76")
+    result = _install_publisher(tmp_path, archive, checksum)
+    assert result.returncode != 0
+    assert not (tmp_path / "cache/flyctl").exists()
+
+
+@pytest.mark.parametrize("builder", ["native", "depot"])
+def test_cold_image_publisher_scopes_transport_to_build_child(tmp_path, builder):
+    archive, checksum, _ = _publisher_fixture(tmp_path)
+    installed = _install_publisher(tmp_path, archive, checksum)
+    assert installed.returncode == 0, installed.stderr
+    observed = tmp_path / "arguments.json"
+    harness = tmp_path / "publish.sh"
+    harness.write_text(
+        f"source {shlex.quote(str(PUBLISHER_LIB))}\n"
+        f"cloudbench_image_publisher_client() {{ printf '%s\\n' {shlex.quote(installed.stdout.strip())}; }}\n"
+        f"IMAGE_BUILD_BUILDER={builder}\n"
+        "export DOCKER_BUILDKIT=1\n"
+        "cloudbench_image_publish deploy unchanged-context --build-only --push\n"
+        'test "$DOCKER_BUILDKIT" = 1\n'
+    )
+    result = subprocess.run(
+        [BASH, str(harness)],
+        env={**os.environ, "IMAGE_TEST_ARGS": str(observed)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    invocation = json.loads(observed.read_text())
+    assert invocation["args"] == ["deploy", "unchanged-context", "--build-only", "--push", "--wg=false"]
+    assert invocation["docker_buildkit"] == ("0" if builder == "native" else "1")
 
 
 @pytest.mark.parametrize("builder", [None, "native", "depot"])
@@ -101,6 +198,10 @@ def test_cold_image_build_skips_repository_auth_export(tmp_path, mode):
     libraries.mkdir(parents=True)
     (libraries / "cloudbench-env.sh").write_text(f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n")
     (libraries / "cloudbench-app-env-lock.sh").write_text("")
+    (libraries / "cloudbench-image-publisher.sh").write_text(
+        'cloudbench_image_publish() { FLY "$@"; }\n'
+        "cloudbench_image_publisher_client() { printf '%s\\n' fixture-publisher; }\n"
+    )
     # Exercise the real env writer with fixture credentials, then stop setup
     # before it reaches any provider. Image-only builds must skip it entirely.
     (libraries / "cloudbench-github-token.sh").write_text(
@@ -163,6 +264,7 @@ def test_cold_image_build_keeps_provider_cache_bypass_and_context(tmp_path, buil
         f"IMAGE_BUILD_CONTEXT={shlex.quote(str(context))}\n"
         "IMAGE_BUILD_NO_CACHE=1\nWARM_IMAGE_REF=''\n"
         + (f"IMAGE_BUILD_BUILDER={builder}\n" if builder is not None else "")
+        + 'cloudbench_image_publish() { FLY "$@"; }\n'
         + "FLY() { python3 -c 'import json,os,sys; "
         'open(os.environ["IMAGE_TEST_ARGS"],"w").write(json.dumps({"args":sys.argv[1:],"cwd":os.getcwd()}))\' "$@"; }\n'
         + helper
@@ -236,6 +338,8 @@ def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_pa
         f"IMAGE_BUILD_CONTEXT={shlex.quote(str(context))}\n"
         f"OUT_DIR={shlex.quote(str(output))}\nIMAGE_BUILD_NO_CACHE=1\nWARM_IMAGE_REF=''\n"
         + (f"IMAGE_BUILD_BUILDER={builder}\n" if builder is not None else "")
+        + 'cloudbench_image_publish() { FLY "$@"; }\n'
+        + "cloudbench_image_publisher_client() { printf '%s\\n' fixture-publisher; }\n"
         + f"FLY() {{ python3 {shlex.quote(str(observer))} {shlex.quote(str(context))}; }}\n"
         + source[start:end]
     )
@@ -266,3 +370,6 @@ def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_pa
     assert receipt["requested_compression"] == ("zstd" if builder == "depot" else None)
     assert receipt["requested_compression_level"] == (3 if builder == "depot" else None)
     assert receipt["requested_platform"] == ("linux/amd64" if builder == "depot" else "linux/arm64")
+    assert receipt["image_publisher_version"] == "0.4.112"
+    assert receipt["image_publisher_transport"] == "https"
+    assert receipt["image_publisher_engine"] == ("depot-buildkit" if builder == "depot" else "docker-classic")

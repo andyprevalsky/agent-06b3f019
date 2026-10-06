@@ -167,6 +167,7 @@ IMAGE_BUILD_NO_CACHE=0
 IMAGE_BUILD_CONTEXT="$ROOT_DIR"
 IMAGE_BUILD_BUILDER=native
 IMAGE_BUILD_BUILDER_REQUESTED=0
+IMAGE_PUBLISHER_CLIENT=""
 BENCH_TASKS=()          # one or more task names (positional).
 BENCH_SIMULATE="1"
 BENCH_PARALLEL="0"
@@ -2220,6 +2221,11 @@ build_warm_image() {
         echo "✅ Using pre-built image (WARM_IMAGE_REF): $IMAGE_REF"
         return 0
     fi
+    if ! declare -F cloudbench_image_publish >/dev/null; then
+        # Load from the invocation snapshot so later edits cannot change an
+        # in-flight controller's publisher.
+        source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-image-publisher.sh" || return $?
+    fi
     local attempt build_ok=0
     IMAGE_LABEL="cloudbench-warm-$(date +%Y%m%d-%H%M%S)-$$"
     local build_args=(
@@ -2236,7 +2242,7 @@ build_warm_image() {
         # Fly resolves build files from the config directory. Bind every path
         # and the invocation directory to the selected checkout, even when the
         # CLI itself belongs to a different worktree.
-        if (cd "$IMAGE_BUILD_CONTEXT" && FLY "${build_args[@]}"); then
+        if (cd "$IMAGE_BUILD_CONTEXT" && cloudbench_image_publish "${build_args[@]}"); then
             build_ok=1
             break
         fi
@@ -2280,12 +2286,19 @@ print(json.dumps({
     "requested_compression": "zstd" if builder == "depot" else None,
     "requested_compression_level": 3 if builder == "depot" else None,
     "requested_platform": "linux/amd64" if builder == "depot" else (os.environ.get("FLY_DEV_PLATFORM") or "linux/amd64"),
+    "image_publisher_version": "0.4.112",
+    "image_publisher_transport": "https",
+    "image_publisher_engine": "docker-classic" if builder == "native" else "depot-buildkit",
 }))
 PY_INPUTS
 }
 
 if [ "$MODE" = build-image ]; then
     image_build_started="$(date +%s)"
+    if ! declare -F cloudbench_image_publish >/dev/null; then
+        source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-image-publisher.sh" || exit $?
+    fi
+    IMAGE_PUBLISHER_CLIENT="$(cloudbench_image_publisher_client)" || exit $?
     # Capture the selected inputs before provider launch; later edits must not
     # be attributed to an image whose build context was already submitted.
     image_build_provenance="$(image_build_input_provenance)" || exit $?

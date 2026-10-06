@@ -692,6 +692,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-github-token.sh" \
+       "$ROOT_DIR/scripts/lib/cloudbench-image-publisher.sh" \
        "$CLOUDBENCH_SCRIPT_SNAPSHOT/"; then
         echo "FATAL: could not populate the fleet script snapshot" >&2
         exit 1
