@@ -1011,6 +1011,12 @@ Bootstrap preserves both hoisted and workspace-local baked dependencies and uses
 
 Image installation loads the actual Vite configuration and compiles a small entry with its installed SWC, Rollup and esbuild dependencies before readiness. A missing declared native binding is repaired at the requesting package's exact installed version, without changing manifests or locks; healthy compilers need no extra install. Broken binaries, incorrect versions and unrelated configuration errors fail the build. Use the normal image CLI instead of ad hoc package upgrades. Matching fresh Linux dependency trees use a private writable overlay with metadata copy-up; unsupported kernels or mount permissions use the existing copy path. Checkout source, generated Prisma clients and activated Python remain isolated from the image donor. `CLOUDBENCH_DEPENDENCY_OVERLAY=0` selects the original copy path for a scoped diagnostic. Exact-owner recovery handles an empty cleanup join without weakening ownership checks. Preserve original failure receipts and use `--recover-stale-owner`; do not delete claims manually or stop a pre-existing shared Hub. These regressions remain in the normal compact deploy gate.
 
+Cloud dependency overlays preserve each donor root’s owner, group and mode while
+keeping their backing directories private. A matching image fingerprint and
+successful compiler check do not replace dependency admission as the runtime
+user. If a guest unexpectedly installs dependencies, inspect the retained startup
+steps and npm error boundary before rebuilding or retrying.
+
 An accepted delete plus an exact owned-volume `pending_destroy` or `destroyed`
 terminal receipt qualifies release even when Fly retains the object. Request
 acceptance alone does not establish release.
