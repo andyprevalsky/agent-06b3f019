@@ -24,7 +24,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 
 def _trusted_github_host() -> str:
@@ -56,10 +56,6 @@ REVIEW_TRIGGER = re.compile(r"^\s*@coderabbitai\s+(full\s+)?review\b", re.IGNORE
 # after the command and before the commanded review starts (PR 1415: command
 # 02:27:32Z, this skip 02:28:06Z, "Review in progress" 02:28:43Z).
 PUSH_AUTO_SKIP = "incremental reviews are disabled"
-# How long after a command the push's auto-skip is still expected to be
-# replaced. Past it the skip stands, so an ignored command (CodeRabbit does not
-# answer bot-authored ones) reaches the fallback without spending the full wait.
-TRIGGER_GRACE_SECONDS = 180.0
 
 
 class ReviewWaitError(RuntimeError):
@@ -424,18 +420,18 @@ def _is_push_auto_skip(status: ReviewStatus) -> bool:
     return status.state == "REVIEW_SKIPPED" and PUSH_AUTO_SKIP in description
 
 
-def _awaiting_triggered_review(
-    status: ReviewStatus, triggered_at: datetime, now: datetime
-) -> bool:
+def _awaiting_triggered_review(status: ReviewStatus, triggered_at: datetime) -> bool:
     """Whether a terminal non-success still predates the commanded review.
 
-    The push's auto-skip is judged by the command's age alone: its own
-    timestamp can fall on either side of the command, or be missing, and none
-    of those says whether the commanded review is still coming. Any other
-    result counts only if it was posted after the command.
+    The push's auto-skip is never a command's result, whenever it was posted,
+    so it never ends a commanded wait. CodeRabbit has taken from one to seven
+    minutes to start a commanded review (PR 1415: 71s, PR 1348: 391s), and no
+    shorter cut-off can tell a slow start from a command it ignored; an ignored
+    command ends at the wait's own timeout, which routes to the fallback. Any
+    other result counts only if it was posted after the command.
     """
     if _is_push_auto_skip(status):
-        return (now - triggered_at).total_seconds() < TRIGGER_GRACE_SECONDS
+        return True
     started = parse_github_time(status.raw.get("startedAt"))
     return started is None or started < triggered_at
 
@@ -451,7 +447,6 @@ def wait_for_review(
     sleeper: Callable[[float], None] = time.sleep,
     progress: Callable[[str], None] | None = None,
     triggered_at: datetime | None = None,
-    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> ReviewStatus:
     deadline = time.monotonic() + timeout_seconds
     last_message = ""
@@ -509,7 +504,7 @@ def wait_for_review(
             triggered_at is not None
             and status.terminal
             and not status.successful
-            and _awaiting_triggered_review(status, triggered_at, clock())
+            and _awaiting_triggered_review(status, triggered_at)
         ):
             status = ReviewStatus(
                 "AWAITING_TRIGGERED_REVIEW", False, False, status.kind, status.raw
