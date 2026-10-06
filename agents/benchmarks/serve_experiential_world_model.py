@@ -28,6 +28,24 @@ from benchmarks.build_experiential_world_model import (
 from benchmarks.experiential_world_model import ParallelWorldModel, RoseNativeRetriever
 
 
+class _ReadSnapshot(ArtifactStore):
+    """Reuse exact publicly verified immutable bytes within one loading scope.
+
+    Every fresh instance verifies storage again. Public typed loaders still
+    validate content identities, source spans and provenance against this
+    consistent snapshot. Raw bytes are released on both success and failure.
+    """
+
+    def __init__(self, paths):
+        super().__init__(paths)
+        self.verified = {}
+
+    def read(self, artifact_id):
+        if artifact_id not in self.verified:
+            self.verified[artifact_id] = super().read(artifact_id)
+        return self.verified[artifact_id]
+
+
 def load_native(root, name, pool, pool_sha256):
     root = Path(root)
     paths = ProjectPaths(root / "experiential", name)
@@ -38,7 +56,14 @@ def load_native(root, name, pool, pool_sha256):
         or pointer.get("adapter_contract") != ADAPTER_CONTRACT
     ):
         raise ValueError("Native artifact version differs from the pinned runtime")
-    store = ArtifactStore(paths)
+    store = _ReadSnapshot(paths)
+    try:
+        return _load_snapshot(store, pointer, pool, pool_sha256)
+    finally:
+        store.verified.clear()
+
+
+def _load_snapshot(store, pointer, pool, pool_sha256):
     stored = store.read(pointer["world_model_id"])
     if artifact_input(stored.manifest).sha256 != pointer["world_model_manifest_sha256"]:
         raise ValueError("Native artifact manifest differs from its published pointer")

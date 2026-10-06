@@ -568,6 +568,53 @@ def test_native_artifact_preserves_context_pairs_errors_and_rejects_identity_dri
         load_native(out, "rose-test", "rose-1-ultra", digest)
 
 
+def test_native_load_verifies_each_immutable_artifact_once(tmp_path, monkeypatch):
+    from exp.common.project import ArtifactCorruptionError, ArtifactStore
+    from exp.common.project.database import project_connection
+
+    from benchmarks.build_experiential_world_model import build
+    from benchmarks.serve_experiential_world_model import _ReadSnapshot, load_native
+
+    source = _source_fixture(tmp_path)
+    output = tmp_path / "output"
+    build(source, output, "test", "rose-1-ultra", "a" * 64)
+    original = ArtifactStore.read
+    calls = {}
+    snapshots = []
+    original_init = _ReadSnapshot.__init__
+
+    def initialize(snapshot, paths):
+        original_init(snapshot, paths)
+        snapshots.append(snapshot)
+
+    monkeypatch.setattr(_ReadSnapshot, "__init__", initialize)
+
+    def read(store, artifact_id):
+        calls[artifact_id] = calls.get(artifact_id, 0) + 1
+        return original(store, artifact_id)
+
+    monkeypatch.setattr(ArtifactStore, "read", read)
+    _, retriever = load_native(output, "test", "rose-1-ultra", "a" * 64)
+    assert len(retriever.loaded.transitions) == 2
+    assert len(calls) == 3 and set(calls.values()) == {1}, calls
+    # A fresh load revalidates all three artifacts; no trust survives the scope.
+    load_native(output, "test", "rose-1-ultra", "a" * 64)
+    assert set(calls.values()) == {2}, calls
+    assert all(not snapshot.verified for snapshot in snapshots)
+    with pytest.raises(ValueError, match="pool identity"):
+        load_native(output, "test", "rose-1-ultra", "b" * 64)
+    assert all(not snapshot.verified for snapshot in snapshots)
+    dataset_id = retriever.loaded.index.sources[0].artifact_input.artifact_id
+    with project_connection(output / "experiential", write=True) as connection:
+        connection.execute(
+            "UPDATE project_artifact_files SET payload=? WHERE project_id=? AND artifact_id=? AND path=?",
+            (b"corrupted source", "test", dataset_id, "traces.jsonl"),
+        )
+    with pytest.raises(ArtifactCorruptionError):
+        load_native(output, "test", "rose-1-ultra", "a" * 64)
+    assert all(not snapshot.verified for snapshot in snapshots)
+
+
 def test_native_conformance_binds_every_case_to_exact_real_records(tmp_path):
     from benchmarks.build_experiential_world_model import bind_conformance, build
     from benchmarks.serve_experiential_world_model import load_native

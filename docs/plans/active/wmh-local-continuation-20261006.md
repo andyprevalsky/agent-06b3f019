@@ -229,8 +229,8 @@ Invocation receipts survive caller disconnects and deduplicate retries;
 failed operations release their receipts, and the parent joins its exact
 native child during shutdown. Generated predictions remain outside fit data.
 
-The final WMH blackbox gate returned `all_passed: True` with 23 native checks
-and 46 provider checks. The focused serving/provider/initial-state suites
+The final WMH blackbox gate returned `all_passed: True` with 24 native checks
+and 47 provider checks. The focused serving/provider/initial-state suites
 passed 60 tests. New evaluator tests first failed for exact canonical receipts,
 then passed with protocol-neutral decoding and unchanged fidelity thresholds.
 The caller retains its prior result shape. Native suites now record exact
@@ -240,7 +240,14 @@ suites remain compatible. Native traces retain full root and delegated goals,
 returned responses, and typed failures with timing; a response rejected inside
 the provider is not falsely reported as captured. Unchanged archive updates
 validate/rebind the existing artifact rather than reconstructing the corpus;
-changed builds retain upstream embedding checkpoints.
+changed builds retain upstream embedding checkpoints. Scoped artifact loading
+reads each immutable artifact once while retaining public typed/provenance
+validation; fresh loads revalidate storage and release the verified bytes on
+success or failure. The owning test first reproduced 3/4/4 whole-artifact
+reads, then passed at 1/1/1. Full-corpus startup timing remains unproven. Native
+cache keys retain exact call IDs and state/history clocks while ignoring only
+the current candidate envelope timestamp; the real-key UUID collision has an
+owning red/green regression.
 
 The full native import reached 179,150 observations, excluding nine explicit
 DEMO-fixture trajectories (19 observations) from the original 179,169-pair

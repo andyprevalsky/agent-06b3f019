@@ -26,7 +26,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
 import pytest
-from providers.rose import ClaudeAuthContext, RoseResponse
 from wmh.providers.base import Message
 
 from benchmarks import wmh_rose_provider
@@ -37,6 +36,7 @@ from benchmarks.wmh_rose_provider import (
     _cost_usd_for_call,
     _to_rose_messages,
 )
+from providers.rose import ClaudeAuthContext, RoseResponse
 
 
 @pytest.mark.parametrize("legacy_wrapper", [False, True])
@@ -63,6 +63,50 @@ def test_native_canonical_receipt_scores_identically_to_unwrapped_observation(le
     assert world_model_observation_to_tool_result(predicted, simulated=True)["message"] == actual.content
     assert score_observation_prediction(actual, predicted) == score_observation_prediction(actual, expected)
     assert score_observation_prediction(actual, predicted)[0] == 1.0
+
+
+def test_native_cache_identity_preserves_correlated_call_ids():
+    from benchmarks.wmh_rose_provider import _WMHFastCacheContext
+
+    cache = _WMHFastCacheContext(enabled=True, goal="DEMO FIXTURE ONLY native cache", write_enabled=True)
+
+    def key(call_id, timestamp, state_clock=30, history_clock=40):
+        payload = {
+            "environment_state": {"timestamp_ms": state_clock},
+            "visible_history": [{"timestamp_ms": history_clock}],
+            "candidate_response": {
+                "tool_calls": [
+                    {
+                        "call_id": call_id,
+                        "name": "rose.browser.spawn_browser_agent",
+                        "arguments": {
+                            "schema": "rose.canonical_action.v1",
+                            "category": "browser",
+                            "name": "spawn_browser_agent",
+                            "arguments": {"goal": "submit form"},
+                            "tool_call_id": call_id,
+                            "timestamp_ms": timestamp,
+                        },
+                    }
+                ]
+            }
+        }
+        return cache.llm_key(
+            "wmh_world_model_v3",
+            {
+                "messages": [
+                    {"role": "system", "content": "Native protocol"},
+                    {"role": "user", "content": json.dumps(payload)},
+                ]
+            },
+        )
+
+    first = "4de585b2-3488-4976-825c-154502883d1b"
+    second = "59c835ac-fb82-4b30-944e-bd3f59ab8e61"
+    assert key(first, 10) == key(first, 20)
+    assert key(first, 10) != key(second, 10), "Native cached results are correlated to exact call IDs"
+    assert key(first, 10) != key(first, 10, state_clock=31)
+    assert key(first, 10) != key(first, 10, history_clock=41)
 
 
 @pytest.mark.parametrize("matching", [False, True])

@@ -13,6 +13,14 @@
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-artifact-match-red.log",
       "sha256": "473193241057fa2b72c1bd0210013bf603aec9b6592197d6b58eeb962521aae0"
     },
+    "native-cache-id-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-cache-id-green.log",
+      "sha256": "6931bddfddab02dec950e9903ead9beab4968e254b85248891b49323acf97f4f"
+    },
+    "native-cache-id-red.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-cache-id-red.log",
+      "sha256": "bfe74b41c1efbc3fddc1df1caebb516ba69cb98a513ee774301102816414d69f"
+    },
     "native-delta-green.log": {
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-delta-green.log",
       "sha256": "0ac412a703e5306d79cb34510271b4cf81ba64721e662cf77a9b936c54e41ee6"
@@ -29,6 +37,18 @@
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-focused-acceptance.log",
       "sha256": "9c6f346e014c03718e1d9497d23fb6c9201a77571bc78f3276b1ddac594910ff"
     },
+    "native-provider-cache-final.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-provider-cache-final.log",
+      "sha256": "8177df1a8cf8f450eea9ba515a42dadc88a7513201945ec99fa4fd67e39d7313"
+    },
+    "native-snapshot-read-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-snapshot-read-green.log",
+      "sha256": "6a9c2f355ec8e85b6f84786ae0554d58ed225239350f696846b31f2cd89942f7"
+    },
+    "native-snapshot-read-red.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-snapshot-read-red.log",
+      "sha256": "e727a3ba5e28411015c89a6608b00f7c607641146545a630e13338872b3bf390"
+    },
     "native-trace-green.log": {
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-trace-green.log",
       "sha256": "42a441decbe4506d8435c1279af9feb5b00a3636d2e5e76a415d02ddfa8f2300"
@@ -39,8 +59,13 @@
     },
     "native-wmh-blackbox-acceptance.log": {
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-wmh-blackbox-acceptance.log",
-      "sha256": "0dd363b9c4863d98c59b58c833246662144b80714edad36a8ced4e91f7837e4e"
+      "sha256": "454642c27f46134967ca9e1a6e98297bddb964009f6bb11280c0d1a397e7cfac"
     }
+  },
+  "native_cache_identity": {
+    "candidate_envelope_timestamp_ignored": true,
+    "exact_call_ids_preserved": true,
+    "state_history_clocks_preserved": true
   },
   "parallel_boundary": {
     "committed_effects": 8,
@@ -50,7 +75,16 @@
   },
   "production": "not_deployed",
   "schema": "rose.wmh_native_migration_verification.v1",
+  "scoped_artifact_reads": {
+    "dataset": 1,
+    "fresh_load_revalidates": true,
+    "full_corpus_startup_verified": false,
+    "rag": 1,
+    "snapshot_released": true,
+    "world_model": 1
+  },
   "source_import": {
+    "embedding_checkpoints_committed": true,
     "excluded_demo_observations": 19,
     "excluded_demo_trajectories": 9,
     "index_construction": "in_progress",
@@ -59,8 +93,8 @@
   },
   "tests": {
     "focused_suites": 60,
-    "native_checks": 23,
-    "provider_checks": 46,
+    "native_checks": 24,
+    "provider_checks": 47,
     "wmh_blackbox_all_passed": true
   },
   "upstream_revision": "bf75987eac5e8c984d8f3868249f84e4095d1733",

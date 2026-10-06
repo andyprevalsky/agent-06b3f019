@@ -27,6 +27,7 @@ asyncio futures and tasks that must stay on their owning loop.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -35,6 +36,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
 import structlog
+
 from providers.fast_cache.context import FastCacheContext
 from providers.rose import (
     ClaudeAuthContext,
@@ -43,12 +45,12 @@ from providers.rose import (
 )
 from providers.rose.pricing import get_model_pricing
 from providers.rose.types import StreamChunk
-
 from utils.world_model_observation import effective_world_model_content
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from providers.rose.types import PoolName
     from wmh.providers.base import Completion, Message
+
+    from providers.rose.types import PoolName
 
 logger = structlog.get_logger(__name__)
 
@@ -149,6 +151,16 @@ class _WMHFastCacheContext(FastCacheContext):
     def llm_key(self, call_site: str, messages: object = None) -> str:
         if call_site in {"wmh_world_model", "wmh_world_model_v3"}:
             messages = _wmh_cache_key_material(messages)
+        if (
+            call_site == "wmh_world_model_v3"
+            and isinstance(messages, dict)
+            and isinstance(messages.get("messages"), list)
+        ):
+            # Generic DEMO normalization removes UUIDs and clocks. Native output
+            # is correlated to exact call IDs, and state/history clocks shape its
+            # prediction. Bind those inputs before applying generic normalization.
+            material = json.dumps(messages["messages"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            messages = {**messages, "native_request_fingerprint": hashlib.sha256(material.encode()).hexdigest()}
         return super().llm_key(call_site, messages)
 
 
@@ -502,12 +514,13 @@ class RoseWMHProvider:
     ) -> "Completion":
         # Import the vendored value types lazily so importing this module doesn't require
         # the `wmh` package (e.g. for unit tests that monkeypatch the client).
+        from wmh.providers.base import Completion, TokenUsage
+
         from providers.fast_cache.context import (
             current_context,
             reset_context,
             set_context,
         )
-        from wmh.providers.base import Completion, TokenUsage
 
         rose_messages = _to_rose_messages(system, messages)
         demo_goal = _demo_cache_goal_from_messages(messages)

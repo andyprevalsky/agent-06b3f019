@@ -1,0 +1,205 @@
+{
+  "schema": "rose.wmh_native_read_cost_review.v1",
+  "date": "2026-10-06",
+  "upstream_revision": "bf75987eac5e8c984d8f3868249f84e4095d1733",
+  "status": "offline_measurements_only_full_scale_cause_unproven",
+  "scope": {
+    "artifact_fixture": "Existing _source_fixture: one completed real-source trace with two canonical action/observation pairs.",
+    "models_called": 0,
+    "network_inference_calls": 0,
+    "active_full_builder_touched": false,
+    "full_corpus_loaded_for_review": false,
+    "production_implementation_changed": false,
+    "reference_or_installed_upstream_changed": false,
+    "only_authorized_write": "docs/plans/active/wmh-evidence-20261006/native-read-cost-review.json"
+  },
+  "baseline_measurement": {
+    "implementation_state": "Historical measurement before the owning agent added load_native's scoped _ReadSnapshot. Its recorded command is a receipt of that baseline, not an expectation that today's optimized loader still repeats those reads.",
+    "source_traces": 1,
+    "source_observations": 2,
+    "build_seconds": 0.3004356250166893,
+    "load_seconds": 0.08249008294660598,
+    "calls": {
+      "build": {
+        "_assert_payload_secret_free": 34,
+        "_decode_trace_record": 2,
+        "_load_real_sources": 1,
+        "_verify_sources": 1,
+        "canonical_json_bytes": 77,
+        "canonical_jsonl_bytes": 3,
+        "extract_real_transitions": 2,
+        "load_rag_index": 1,
+        "load_trace_dataset": 2,
+        "read:trace-dataset": 8,
+        "read:trace-rag-index": 4
+      },
+      "load": {
+        "_assert_payload_secret_free": 23,
+        "_decode_trace_record": 1,
+        "_verify_sources": 1,
+        "canonical_json_bytes": 38,
+        "load_rag_index": 1,
+        "load_trace_dataset": 1,
+        "read:grounded-world-model": 3,
+        "read:trace-dataset": 4,
+        "read:trace-rag-index": 4
+      }
+    },
+    "read_bytes_requested": {
+      "build": {
+        "rag-index.json": 1,
+        "trace-dataset.json": 2,
+        "traces.jsonl": 2,
+        "transitions.jsonl": 1,
+        "vectors.jsonl": 1
+      },
+      "load": {
+        "rag-index.json": 1,
+        "trace-dataset.json": 1,
+        "traces.jsonl": 1,
+        "transitions.jsonl": 1,
+        "vectors.jsonl": 1,
+        "world-model.json": 1
+      }
+    },
+    "verified_payload_bytes": {
+      "build": {
+        "trace-dataset": 37648,
+        "trace-rag-index": 32428
+      },
+      "load": {
+        "grounded-world-model": 3027,
+        "trace-dataset": 18824,
+        "trace-rag-index": 32428
+      }
+    }
+  },
+  "snapshot_assessment": {
+    "scope": "Private process-local prototype over a temporary fixture. Public ArtifactStore.read verifies each artifact once; subsequent public loader reads reuse its exact immutable StoredArtifact. No application implementation was written.",
+    "measurement": {
+      "decoded_artifact_and_rag_equal": true,
+      "guards": {
+        "cold_corrupt_dataset_rejected": "ArtifactCorruptionError",
+        "wrong_pool_identity_rejected": true
+      },
+      "phase_counts": {
+        "baseline": {
+          "_assert_payload_secret_free": 23,
+          "_decode_trace_record": 1,
+          "_verify_sources": 1,
+          "load_rag_index": 1,
+          "load_trace_dataset": 1,
+          "verified_payload_bytes": 54279,
+          "verified_read:grounded-world-model": 3,
+          "verified_read:trace-dataset": 4,
+          "verified_read:trace-rag-index": 4
+        },
+        "snapshot": {
+          "_assert_payload_secret_free": 6,
+          "_decode_trace_record": 1,
+          "_verify_sources": 1,
+          "cache_hits": 8,
+          "load_rag_index": 1,
+          "load_trace_dataset": 1,
+          "verified_payload_bytes": 13822,
+          "verified_read:grounded-world-model": 1,
+          "verified_read:trace-dataset": 1,
+          "verified_read:trace-rag-index": 1
+        }
+      },
+      "snapshot_payload_bytes_after_release": 0,
+      "verified_snapshot_payload_bytes_retained_before_release": 13822
+    },
+    "command": "PYTHONPATH=agents .context/experiential-venv/bin/python - <<'PY'\nimport collections,json,sys,tempfile\nfrom pathlib import Path\nfrom exp.common.project import ArtifactStore,ProjectPaths\nfrom exp.common.project.database import project_connection\nfrom benchmarks.experiential_world_model_checks import _source_fixture\nfrom benchmarks.build_experiential_world_model import build\nimport benchmarks.serve_experiential_world_model as serving\nphase='setup';counts={p:collections.Counter() for p in ('setup','baseline','snapshot','guards')};original_read=ArtifactStore.read\ninstances=[]\ndef counted_read(self,artifact_id):\n    value=original_read(self,artifact_id);counts[phase]['verified_read:'+value.manifest.artifact_type]+=1\n    counts[phase]['verified_payload_bytes']+=sum(len(p) for p in value.payloads.values())\n    return value\nArtifactStore.read=counted_read\nclass ReadSnapshot(ArtifactStore):\n    def __init__(self,paths):super().__init__(paths);self.cached={};instances.append(self)\n    def read(self,artifact_id):\n        if artifact_id not in self.cached:self.cached[artifact_id]=super().read(artifact_id)\n        else:counts[phase]['cache_hits']+=1\n        return self.cached[artifact_id]\n    def release(self):self.cached.clear()\nwanted={'load_trace_dataset','_decode_trace_record','_verify_sources','load_rag_index','_assert_payload_secret_free'}\ndef profile(frame,event,arg):\n    if event=='call' and frame.f_code.co_name in wanted and '/exp/' in frame.f_code.co_filename:counts[phase][frame.f_code.co_name]+=1\nsys.setprofile(profile)\nwith tempfile.TemporaryDirectory(prefix='wmh-snapshot-assessment-') as d:\n    root=Path(d);source=_source_fixture(root);out=root/'native';pointer=build(source,out,'rose-test','rose-1-ultra','a'*64)\n    phase='baseline';before,rag_before=serving.load_native(out,'rose-test','rose-1-ultra','a'*64)\n    serving.ArtifactStore=ReadSnapshot;phase='snapshot';after,rag_after=serving.load_native(out,'rose-test','rose-1-ultra','a'*64)\n    equality=before==after and rag_before.loaded==rag_after.loaded\n    retained=sum(sum(len(p) for item in instance.cached.values() for p in item.payloads.values()) for instance in instances)\n    for instance in instances:instance.release()\n    released=sum(sum(len(p) for item in instance.cached.values() for p in item.payloads.values()) for instance in instances)\n    phase='guards';guards={}\n    try:serving.load_native(out,'rose-test','rose-1-ultra','b'*64)\n    except ValueError:guards['wrong_pool_identity_rejected']=True\n    paths=ProjectPaths(out/'experiential','rose-test');base=ArtifactStore(paths)\n    dataset_id=rag_after.loaded.manifest.inputs[0].artifact_id\n    good=base.read_bytes(dataset_id,'trace-dataset.json')\n    with project_connection(paths.root,write=True) as db:db.execute('UPDATE project_artifact_files SET payload=? WHERE project_id=? AND artifact_id=? AND path=?',(b'{\"corrupted\":true}',paths.project_id,dataset_id,'trace-dataset.json'))\n    try:serving.load_native(out,'rose-test','rose-1-ultra','a'*64)\n    except Exception as exc:guards['cold_corrupt_dataset_rejected']=type(exc).__name__\n    finally:\n        with project_connection(paths.root,write=True) as db:db.execute('UPDATE project_artifact_files SET payload=? WHERE project_id=? AND artifact_id=? AND path=?',(good,paths.project_id,dataset_id,'trace-dataset.json'))\n    for instance in instances:instance.release()\n    sys.setprofile(None)\n    print(json.dumps({'phase_counts':{p:dict(counts[p]) for p in ('baseline','snapshot')},'decoded_artifact_and_rag_equal':equality,'verified_snapshot_payload_bytes_retained_before_release':retained,'snapshot_payload_bytes_after_release':released,'guards':guards,'scope':'private offline prototype, no production implementation, no full-corpus startup measurement'},sort_keys=True))\nPY",
+    "limitations": [
+      "No full-scale startup failure or 180-second gate result was observed in this review.",
+      "Times and byte totals from temporary fixture runs are not full-corpus estimates; timestamps and temporary source paths can change exact artifact byte sizes.",
+      "The candidate must be scoped to one load, per project and artifact identity, cache only successful public reads, expose no writes, and clear every raw payload reference on success or failure.",
+      "Reusing a verified byte snapshot within a load does not promise detection of later on-disk mutation during that same load. A fresh load must reverify and reject corruption.",
+      "Public content-ID, manifest, typed trace/vector, source provenance, lineage, span and prompt/model checks remain necessary; the prototype changed none of those functions.",
+      "Wrong pool identity and a cold corrupted dataset were executed. The source/provenance verifier was counted as executing unchanged; no new forged-provenance fixture was executed here.",
+      "The active macOS sample shows JSON encoding and Pydantic work without Python frames sufficient to assign the current bottleneck."
+    ]
+  },
+  "interpretation": {
+    "proven": [
+      "The measured baseline native startup invoked three verified world-model reads, four verified RAG reads, and four verified trace-dataset reads.",
+      "Each public read_bytes invokes a complete ArtifactStore.read, including payload digest and secret checks.",
+      "Startup reopens and decodes the entire source trace dataset once to run public RAG source validation.",
+      "Building also reopens sources for persist_trace_rag and again for persist_grounded_world_model.",
+      "A load-scoped verified-byte snapshot eliminates repeated payload verification on the tiny fixture while preserving all observed public typed/source checks and exact decoded artifact/RAG equality."
+    ],
+    "unproven": [
+      "Repeated verification is the first-bad cause of the active full build's elapsed time or memory peak.",
+      "The candidate will meet the full native load target of 180 seconds.",
+      "Native corpus, benchmark, viewer replay, production outcome or large-agent capacity acceptance."
+    ]
+  },
+  "observed_active_profile": {
+    "source": ".context/native-rag-build.sample.txt",
+    "sample_time_local": "2026-10-06 16:17:15.967 -0700",
+    "physical_footprint": "14.9G",
+    "physical_footprint_peak": "38.6G",
+    "status": "Read-only sample evidence, not a reproduced full-scale root cause."
+  },
+  "full_build_metadata_review": {
+    "receipt_saved_at_utc": "2026-10-06T23:41:46Z",
+    "scope": "Read-only SQLite manifests, the 488497-byte inline dataset envelope, runtime file names and existing process samples. No read of the 3079529667-byte traces.jsonl blob, full source load, new build, model call, injection or process termination.",
+    "source_metadata": {
+      "project_id": "rose-archive",
+      "dataset_id": "rose-real-traces-2ff2d425fc285834a3ac",
+      "manifest_sha256": "e7b255d826ccf31ffdfe667b034b3a683254051790c5abef1899ab84b95b8c2c",
+      "created_at": "2026-10-06T23:04:17.278910Z",
+      "code_revision": "rose-native-canonical-export-v1@bf75987eac5e8c984d8f3868249f84e4095d1733",
+      "semantic_convention_version": "rose-canonical-export-v11",
+      "trace_count": 12510,
+      "trace_ids_ordered_and_unique": true,
+      "traces_sha256": "484921ab1a6774aba103c0b55c1513319b321d94acc8bf700d4351564bb7dacf",
+      "traces_bytes": 3079529667,
+      "dataset_envelope_bytes": 488497,
+      "verification_limit": "These are storage metadata observations. This review did not independently verify or decode the full published source blob. The public RAG path does so before embedding."
+    },
+    "checkpoint_progress": {
+      "storage": "SQLite project_state_records; checkpoint JSON files are not used by this upstream version.",
+      "namespace": "rag-embeddings/2ceec7249aa93b6f93f81cbf87a218cc3f639bf1e423d13c626766aa14e78947",
+      "record_count": 230101,
+      "payload_bytes": 664638971,
+      "maximum_record_revision": 2301,
+      "lock_mtime_local": "2026-10-06 16:40:17 America/Los_Angeles",
+      "interpretation": "The lock is first acquired at checkpoint lookup after complete source verification, transition extraction and embedding input planning. Nonempty checkpoint records additionally prove committed embedding work, beyond the lock alone. This is progress evidence, not a completed RAG artifact, native startup proof or benchmark result.",
+      "query": "SELECT namespace,COUNT(*),SUM(length(payload)),MAX(revision) FROM project_state_records WHERE project_id='rose-archive' AND namespace LIKE 'rag-embeddings/%' GROUP BY namespace",
+      "command": "PYTHONPATH=agents .context/experiential-venv/bin/python - <<'PY'\nimport json,sqlite3\nfrom pathlib import Path\np=Path('.context/world-model-native/experiential/gateway/traffic.db').resolve()\nc=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True,timeout=2)\nrows=c.execute(\"SELECT namespace,COUNT(*),SUM(length(payload)),MAX(revision) FROM project_state_records WHERE project_id=? AND namespace LIKE 'rag-embeddings/%' GROUP BY namespace\",('rose-archive',)).fetchall()\nprint(json.dumps({'checkpoint_namespaces':rows,'read_only':True,'large_source_blob_read':False}))\nc.close()\nPY"
+    },
+    "public_build_path": {
+      "verified_whole_source_reads_before_embedding": 4,
+      "basis": "Pinned persist_trace_rag calls _load_real_sources; its direct store.read plus load_trace_dataset's direct read and two read_bytes calls each fully verify all artifact payloads. The existing real tiny-fixture counters confirm this public path. The advancing full process uses this path without a build-time read snapshot.",
+      "source_files": [
+        "exp/simulation/retrieval/build.py:236",
+        "exp/common/traces/store.py:45",
+        "exp/common/traces/store.py:50",
+        "exp/common/traces/store.py:64",
+        "exp/common/project/store.py:385"
+      ],
+      "limits": "The full process's individual reads were not instrumented. Repeated verification follows from the pinned executed public path, but does not prove that those reads caused its elapsed time or peak memory. Startup's scoped snapshot does not change this already running build."
+    },
+    "import_copy_retention": {
+      "current_source": "agents/benchmarks/build_experiential_world_model.py:318 releases traces and records before public RAG construction.",
+      "active_process_version": "The owning parent reports that child 53121 imported the earlier function before that release was added. Earlier build locals keep the imported typed traces and serialized records alive across persist_trace_rag, which then loads its own source records.",
+      "direct_active_heap_measurement": false,
+      "limit": "The reviewer did not inspect active heap references or inject Python code. Source-level retention and owner-reported launch chronology do not assign the observed full memory peak."
+    },
+    "safe_resume_contract": {
+      "status": "Source-reviewed option only; no full resume or independent fresh-process full verification performed.",
+      "path": "After the existing owner exits, a fresh process may invoke the public persist_trace_rag with the exact committed ArtifactInput, deterministic original fit lineage bindings, original code revision, local embedder identity and top_k. Public loading must reverify the source manifest, full payload digests, secrets, typed traces and real provenance. Preserve ordered source identities and the original observation-count gate. Then retain the public world-model persistence, conformance binding, exact model/prompt identity and startup gates before publishing a pointer.",
+      "checkpoint_reuse": "The public checkpoint namespace binds the exact project, model connection, RAG key schema and chunk identity, and validates saved vectors. Earlier real tiny-fixture tests proved completed components are reused on identical rebuild; uncommitted work can repeat.",
+      "guardrails": "Do not run a competing full resume while the current owner is active, trust metadata alone, skip source verification, change lineage membership, cap the corpus or lose original exclusion/redaction audit records.",
+      "recommendation": "Keep the progressing owner alive. Observe its existing checkpoint counts and native-ready receipt. Once the exact artifact is ready, measure the required public full native startup with the scoped snapshot and the 180-second gate. Only an actual startup failure can establish that next incident."
+    },
+    "acceptance_limit": "No full startup occurred in this review. Native artifact readiness, full conformance, captured semantic improvements, fundraising benchmark, viewer-visible replay, production result and capacity acceptance remain open."
+  },
+  "reproduction": {
+    "cwd": "Repository root of the migration worktree.",
+    "setup": "Use the already installed pinned Python 3.12 environment. Do not launch a full build, full load or inference.",
+    "baseline_command": "PYTHONPATH=agents .context/experiential-venv/bin/python - <<'PY'\nimport collections,json,sys,tempfile,time\nfrom pathlib import Path\nfrom exp.common.project import ArtifactStore\nfrom benchmarks.experiential_world_model_checks import _source_fixture\nfrom benchmarks.build_experiential_world_model import build\nfrom benchmarks.serve_experiential_world_model import load_native\nphase='build';stats={key:collections.Counter() for key in ('build','load')};read_paths={key:collections.Counter() for key in ('build','load')};read_bytes={key:collections.Counter() for key in ('build','load')}\noriginal_read=ArtifactStore.read;original_read_bytes=ArtifactStore.read_bytes\ndef counted_read(self,artifact_id):\n    value=original_read(self,artifact_id);kind=value.manifest.artifact_type\n    stats[phase]['read:'+kind]+=1;read_bytes[phase][kind]+=sum(len(v) for v in value.payloads.values())\n    return value\ndef counted_bytes(self,artifact_id,path):\n    read_paths[phase][path]+=1\n    return original_read_bytes(self,artifact_id,path)\nArtifactStore.read=counted_read;ArtifactStore.read_bytes=counted_bytes\nwanted={'load_trace_dataset','_decode_trace_record','extract_real_transitions','load_rag_index','_assert_payload_secret_free','canonical_json_bytes','canonical_jsonl_bytes','_verify_sources','_load_real_sources'}\ndef profile(frame,event,arg):\n    if event=='call' and frame.f_code.co_name in wanted:\n        filename=frame.f_code.co_filename\n        if '/exp/' in filename:stats[phase][frame.f_code.co_name]+=1\nsys.setprofile(profile)\nwith tempfile.TemporaryDirectory(prefix='wmh-verify-path-review-') as d:\n    root=Path(d);source=_source_fixture(root);out=root/'native';started=time.perf_counter();pointer=build(source,out,'rose-test','rose-1-ultra','a'*64);build_seconds=time.perf_counter()-started\n    phase='load';started=time.perf_counter();artifact,retriever=load_native(out,'rose-test','rose-1-ultra','a'*64);load_seconds=time.perf_counter()-started\n    sys.setprofile(None)\n    print(json.dumps({'source_traces':1,'source_observations':2,'build_seconds':build_seconds,'load_seconds':load_seconds,'calls':{k:dict(v) for k,v in stats.items()},'read_bytes_requested':{k:dict(v) for k,v in read_paths.items()},'verified_payload_bytes':{k:dict(v) for k,v in read_bytes.items()}},sort_keys=True))\nPY"
+  }
+}
