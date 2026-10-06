@@ -4285,6 +4285,12 @@ for readiness_boundary in active-retry finished-unused; do
     if [ "$readiness_boundary" = active-retry ]; then
         : > "$FAKE_DIR/worker-readiness-retry"
     fi
+    python3 - "$WS_A/.context/fleet/runs" > "$TMP_ROOT/readiness-outputs-$readiness_boundary.json" <<'PY_UNREADY_BEFORE'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+print(json.dumps(sorted(str(p.relative_to(root)) for p in root.glob("*/autoscaler-worker-never-ready"))))
+PY_UNREADY_BEFORE
     autoscale_status=0
     CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=2 \
         CLOUDBENCH_WORKER_READY_TIMEOUT=5 \
@@ -4308,11 +4314,13 @@ for readiness_boundary in active-retry finished-unused; do
             fail "a launched-but-unready worker was counted as queue-ready capacity"
         fi
     fi
-    python3 - "$WS_A/.context/fleet/runs" "$readiness_boundary" <<'PY_UNREADY_CAPTURE' || fail "readiness worker was released without its captured runtime evidence"
+    python3 - "$WS_A/.context/fleet/runs" "$readiness_boundary" "$TMP_ROOT/readiness-outputs-$readiness_boundary.json" <<'PY_UNREADY_CAPTURE' || fail "readiness worker was released without its captured runtime evidence"
 import json, sys
 from pathlib import Path
 boundary = sys.argv[2]
-outputs = list(Path(sys.argv[1]).glob("*/autoscaler-worker-never-ready-" + boundary))
+root = Path(sys.argv[1])
+before = set(json.loads(Path(sys.argv[3]).read_text()))
+outputs = [p for p in root.glob("*/autoscaler-worker-never-ready") if str(p.relative_to(root)) not in before]
 assert len(outputs) == 1
 output = outputs[0]
 if boundary == "finished-unused":
