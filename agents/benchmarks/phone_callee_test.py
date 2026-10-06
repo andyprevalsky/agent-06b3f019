@@ -488,6 +488,93 @@ def test_hold_success_watcher_sends_keepalive_without_ending_call(monkeypatch):
     asyncio.run(run())
 
 
+def test_hold_success_watcher_retries_after_empty_read_timeout(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    async def run() -> None:
+        started = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
+        now = {"value": started + timedelta(seconds=21)}
+        injected: list[str] = []
+        gets = {"n": 0}
+
+        monkeypatch.setattr(phone_callee, "_utcnow", lambda: now["value"])
+
+        call = {
+            "id": "call-hold-1",
+            "assistantId": "asst-hold",
+            "status": "in-progress",
+            "createdAt": started.isoformat(),
+            "monitor": {"controlUrl": "https://example.test/control"},
+        }
+
+        class ListResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return [call]
+
+        class DetailResponse:
+            status_code = 200
+
+            def json(self):
+                return call
+
+        class Client:
+            async def get(self, path, params=None):
+                gets["n"] += 1
+                if gets["n"] == 1:
+                    raise phone_callee.httpx.ReadTimeout("")
+                return ListResponse() if path == "/call" else DetailResponse()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        session = phone_callee.PhoneCalleeSession(
+            "phone-call-hold-queue",
+            {
+                "system_prompt": "Hold queue persona",
+                "hold_success": {
+                    "hold_seconds": 9900,
+                    "keepalive_seconds": 20,
+                    "keepalive_say": "Please continue to hold.",
+                    "say": "This is Riley. How can I help you today?",
+                },
+                "max_duration_seconds": 40,
+            },
+            api_key="test-key",
+        )
+        session.assistant_id = "asst-hold"
+        session.phone_number_id = "pn-hold"
+        session.started_at = started
+
+        async def fake_inject(control_url, say, call_id, label, **kwargs):
+            injected.append(label)
+            return True
+
+        async def fake_sleep(_seconds):
+            if injected:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(session, "_inject_control_say", fake_inject)
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(phone_callee.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+        try:
+            await session._watch_hold_success_announcement()
+        except asyncio.CancelledError:
+            pass
+
+        assert gets["n"] >= 2
+        assert injected == ["hold_keepalive"]
+        assert session._hold_success_announced is False
+
+    asyncio.run(run())
+
+
 def test_long_hold_uses_slower_watch_poll_and_longer_analysis_wait():
     short = phone_callee.PhoneCalleeSession(
         "phone-call-ivr-dtmf",

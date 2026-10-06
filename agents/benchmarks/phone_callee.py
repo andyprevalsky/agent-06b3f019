@@ -721,65 +721,72 @@ class PhoneCalleeSession:
                 while asyncio.get_event_loop().time() < deadline and not self._hold_success_announced:
                     if not (self.phone_number_id and self.assistant_id):
                         return
-                    resp = await client.get(
-                        "/call", params={"phoneNumberId": self.phone_number_id, "limit": 10}
-                    )
-                    resp.raise_for_status()
-                    for call in resp.json() or []:
-                        if call.get("assistantId") != self.assistant_id:
-                            continue
-                        if call.get("status") not in {"queued", "ringing", "in-progress"}:
-                            continue
-                        elapsed = self._hold_elapsed_seconds(call)
-                        if elapsed is None:
-                            continue
-                        call_id = str(call.get("id") or "")
-                        detailed = call
-                        if call_id:
-                            detail_resp = await client.get(f"/call/{call_id}")
-                            if detail_resp.status_code == 200:
-                                detailed = detail_resp.json() or call
-                        control_url = (
-                            ((detailed.get("monitor") or call.get("monitor") or {}).get("controlUrl") or "")
-                        ).strip()
-                        if not control_url:
-                            continue
-                        if elapsed >= hold_seconds:
-                            if not await self._inject_control_say(
-                                control_url,
-                                say,
-                                call_id,
-                                "hold_success",
-                                end_call_after_spoken=False,
-                            ):
+                    try:
+                        resp = await client.get(
+                            "/call", params={"phoneNumberId": self.phone_number_id, "limit": 10}
+                        )
+                        resp.raise_for_status()
+                        for call in resp.json() or []:
+                            if call.get("assistantId") != self.assistant_id:
                                 continue
-                            self._hold_success_announced = True
-                            print(
-                                f"    ✓ Injected hold_success representative after "
-                                f"{elapsed:.0f}s on call {call_id[:8]}"
-                            )
-                            return
-                        if (
-                            keepalive_seconds > 0
-                            and elapsed - last_keepalive_elapsed.get(call_id, 0.0) >= keepalive_seconds
-                        ):
-                            if await self._inject_control_say(
-                                control_url,
-                                keepalive_say,
-                                call_id,
-                                "hold_keepalive",
-                                end_call_after_spoken=False,
-                            ):
-                                last_keepalive_elapsed[call_id] = elapsed
+                            if call.get("status") not in {"queued", "ringing", "in-progress"}:
+                                continue
+                            elapsed = self._hold_elapsed_seconds(call)
+                            if elapsed is None:
+                                continue
+                            call_id = str(call.get("id") or "")
+                            detailed = call
+                            if call_id:
+                                detail_resp = await client.get(f"/call/{call_id}")
+                                if detail_resp.status_code == 200:
+                                    detailed = detail_resp.json() or call
+                            control_url = (
+                                ((detailed.get("monitor") or call.get("monitor") or {}).get("controlUrl") or "")
+                            ).strip()
+                            if not control_url:
+                                continue
+                            if elapsed >= hold_seconds:
+                                if not await self._inject_control_say(
+                                    control_url,
+                                    say,
+                                    call_id,
+                                    "hold_success",
+                                    end_call_after_spoken=False,
+                                ):
+                                    continue
+                                self._hold_success_announced = True
                                 print(
-                                    f"    ✓ Injected hold keepalive after "
+                                    f"    ✓ Injected hold_success representative after "
                                     f"{elapsed:.0f}s on call {call_id[:8]}"
                                 )
+                                return
+                            if (
+                                keepalive_seconds > 0
+                                and elapsed - last_keepalive_elapsed.get(call_id, 0.0) >= keepalive_seconds
+                            ):
+                                if await self._inject_control_say(
+                                    control_url,
+                                    keepalive_say,
+                                    call_id,
+                                    "hold_keepalive",
+                                    end_call_after_spoken=False,
+                                ):
+                                    last_keepalive_elapsed[call_id] = elapsed
+                                    print(
+                                        f"    ✓ Injected hold keepalive after "
+                                        f"{elapsed:.0f}s on call {call_id[:8]}"
+                                    )
+                    except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError) as exc:
+                        # Empty ReadTimeout('') is common; keep watching so
+                        # keepalives and the 2:45 representative still fire.
+                        print(
+                            f"    ⚠ hold_success poll failed ({type(exc).__name__}); retrying"
+                        )
                     await asyncio.sleep(self._hold_watch_poll_seconds())
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f"    ⚠ hold_success watcher error: {exc}")
+            print(f"    ⚠ hold_success watcher error: {type(exc).__name__}: {exc}")
 
     @staticmethod
     def _call_messages_contain_keypad_tracking(call: dict, tracking_number: str) -> bool:
