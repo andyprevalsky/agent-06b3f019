@@ -67,7 +67,12 @@ throughput limit. This failure is the next layer of the same boundary, not a
 recurrence of its pool exhaustion: no SQL cancellation or pool timeout appears
 here, and every request was eventually stored. The 2026-09-10
 ambiguous-commit case concerned replay before reconciliation; here the client
-never saw a response. No other branch carried a priority repair.
+never saw a response. Main's same-day
+`2026-10-06-starting-hub-timeout-aborted-fleet-before-execution` and
+`2026-10-06-hash-only-hub-coalescing-lost-last-write` repairs share only
+identical pending packets for one run. They explicitly keep admission order for
+distinct runs, so a final upload still waited behind 50 runs' distinct
+snapshots. No branch carried a priority repair.
 
 ## Solution
 
@@ -89,8 +94,14 @@ Reproduction:
 - On the repaired store, it writes `holder, final, snapshot-a, snapshot-b`, and
   the published index shows the final `live:false` (exit 0). The other five
   controls in that blackbox pass unchanged.
-- The extracted-owner unit suite adds a priority control and passes 5/5.
-- The structural suite passes 1,384 checks.
+- The extracted-owner unit suite adds a priority control. After merging main's
+  coalescing controls it passes 16/16.
+- Main's "distinct packet content, run, source and live mode" control
+  submitted a same-run final behind three queued snapshots. A prioritized final
+  correctly absorbs those snapshots, which hid the coalescing check. The
+  control now checks live mode against one pending identical snapshot; all of
+  its other distinct-packet and order assertions are unchanged.
+- The structural suite passes.
 
 At 10,000 agents, each backend process still uses one SQL connection here,
 plus one queued closure per waiting request, and processes coordinate through

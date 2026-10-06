@@ -297,15 +297,19 @@ test('50 identical pending Hub packets share one publication before SQL admissio
 
 test('distinct packet content, run, source and live mode retain publication order', async () => {
   const boundary = putBoundary();
-  const requests = [
+  const results = await Promise.all([
     boundary.putRun(packet, { live: true, source: 'fixture' }),
     boundary.putRun({ ...packet, marker: 'changed' }, { live: true, source: 'fixture' }),
     boundary.putRun({ ...packet, run_id: 'fixture-other' }, { live: true, source: 'fixture' }),
     boundary.putRun(packet, { live: true, source: 'other-source' }),
+  ]);
+  // A final is admitted ahead of queued snapshots and absorbs its run's later
+  // ones, so live mode is distinguished against one pending identical snapshot.
+  const modes = await Promise.all([
+    boundary.putRun(packet, { live: true, source: 'fixture' }),
     boundary.putRun(packet, { live: false, source: 'fixture' }),
-  ];
-  const results = await Promise.all(requests);
-  assert.equal(boundary.stats().transactions, 5);
+  ]);
+  assert.equal(boundary.stats().transactions, 6);
   assert.deepEqual(
     boundary.runWrites().map(({ value }) => JSON.parse(value)),
     [
@@ -314,10 +318,14 @@ test('distinct packet content, run, source and live mode retain publication orde
       { ...packet, run_id: 'fixture-other' },
       packet,
       packet,
+      packet,
     ]
   );
   assert.equal(results[3].source, 'other-source');
-  assert.equal(results[4].live, false);
+  assert.deepEqual(
+    modes.map((mode) => mode.live),
+    [true, false]
+  );
 });
 
 test('failed identical publication rejects every waiter and permits an unchanged retry', async () => {
