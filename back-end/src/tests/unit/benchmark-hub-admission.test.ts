@@ -6,13 +6,15 @@ import vm from 'node:vm';
 import ts from 'typescript';
 
 type Operation = () => Promise<unknown>;
+type Admission = 'foreground' | 'snapshot';
+type Owner = (operation: Operation, admission?: Admission) => Promise<unknown>;
 type Transaction = { $executeRaw: (sql: TemplateStringsArray, key: string) => Promise<void> };
 type Prisma = {
   $transaction: (body: (tx: Transaction) => Promise<unknown>, options: unknown) => Promise<unknown>;
 };
 
 /** Execute the actual storage owner's admission and transaction boundary. */
-function loadOwner(prisma: Prisma): (operation: Operation) => Promise<unknown> {
+function loadOwner(prisma: Prisma): Owner {
   const filename = path.join(process.cwd(), 'src/providers/benchmarkHubStore.ts');
   const source = readFileSync(filename, 'utf8');
   const tree = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
@@ -21,7 +23,9 @@ function loadOwner(prisma: Prisma): (operation: Operation) => Promise<unknown> {
     return (
       ts.isVariableStatement(node) &&
       node.declarationList.declarations.some((declaration) =>
-        ['INDEX_LOCK_KEY', 'indexAdmissionTail'].includes(declaration.name.getText(tree))
+        ['INDEX_LOCK_KEY', 'indexAdmissionWaiters', 'indexAdmissionHeld'].includes(
+          declaration.name.getText(tree)
+        )
       )
     );
   });
@@ -94,6 +98,35 @@ test('50 Hub mutations wait for process admission before borrowing SQL connectio
   release?.();
   const outcomes = await results;
   assert.equal(outcomes.filter((result) => result.status === 'fulfilled').length, 50);
+  assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
+});
+
+test('queued foreground Hub work is admitted ahead of queued live snapshots', async () => {
+  const database = databaseBoundary(4);
+  const owner = loadOwner(database.prisma);
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const admitted: string[] = [];
+  const run = (label: string, admission?: Admission) =>
+    owner(async () => {
+      admitted.push(label);
+      if (label === 'holder') await gate;
+      return label;
+    }, admission);
+  const outcomes = Promise.all([
+    run('holder', 'snapshot'),
+    run('snapshot-1', 'snapshot'),
+    run('snapshot-2', 'snapshot'),
+    run('final-1', 'foreground'),
+    run('index-read'),
+  ]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(admitted, ['holder']);
+  release?.();
+  assert.deepEqual(await outcomes, ['holder', 'snapshot-1', 'snapshot-2', 'final-1', 'index-read']);
+  assert.deepEqual(admitted, ['holder', 'final-1', 'index-read', 'snapshot-1', 'snapshot-2']);
   assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
 });
 
