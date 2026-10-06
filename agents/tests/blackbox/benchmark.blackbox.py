@@ -21,6 +21,12 @@ import time
 
 from _test_utils import BlackboxResult
 
+# A command family verifies many native cases. Use the owning coverage domain's
+# generous guard, including in standalone runs, rather than sub-suite race caps.
+NATIVE_VERIFICATION_TIMEOUT_SECONDS = int(os.environ.get("AGENTS_COVERAGE_DOMAIN_TIMEOUT", "1800"))
+if NATIVE_VERIFICATION_TIMEOUT_SECONDS <= 0:
+    raise ValueError("AGENTS_COVERAGE_DOMAIN_TIMEOUT must be a positive integer")
+
 
 @contextlib.contextmanager
 def anthropic_family(*, excluded: bool):
@@ -576,7 +582,7 @@ def test_private_fleet_source_behavior_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=60,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -597,7 +603,7 @@ def test_evaluated_fleet_outcomes_publish_before_teardown():
         cwd=repo_root,
         text=True,
         capture_output=True,
-        timeout=60,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -618,7 +624,7 @@ def test_fly_native_completion_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=90,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -641,12 +647,12 @@ def test_autoscaler_runtime_handoff_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=90,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def _run_owned_benchmark_commands(commands, cwd, timeout=60):
+def _run_owned_benchmark_commands(commands, cwd, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS):
     # Do not poll/wait leaders until cleanup: an unreaped child pins its PID
     # and group even after exit, so group signals cannot target a reused PGID.
     deadline = time.monotonic() + timeout
@@ -753,7 +759,7 @@ def test_cloudbench_pool_vm_shapes_are_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=60,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -780,11 +786,11 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
             cwd=repo_root,
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
         )
         assert rejected.returncode == 2, rejected.stdout + rejected.stderr
         assert "zero-live-spend tasks" in rejected.stderr
-        ordinary = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=30)
+        ordinary = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS)
         assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
         assert json.loads(ordinary.stdout)["slices"][0]["names"] == ["test-mass-agent-run-0"]
         # A DEMO-bound child can replay without a zero-spend evaluator or DEMO
@@ -797,11 +803,11 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
                 env={**os.environ, "BENCHMARK_FAST_MODE_CACHE": speed},
                 text=True,
                 capture_output=True,
-                timeout=30,
+                timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
             )
             assert rejected_child.returncode == 2, rejected_child.stdout + rejected_child.stderr
             assert "DEMO-replay tasks" in rejected_child.stderr
-        ordinary_child = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=30)
+        ordinary_child = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS)
         assert ordinary_child.returncode == 0, ordinary_child.stdout + ordinary_child.stderr
         assert json.loads(ordinary_child.stdout)["slices"][0]["names"] == ["single-creator-arm"]
         sampled = subprocess.run(
@@ -823,7 +829,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
             cwd=repo_root,
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
         )
         assert sampled.returncode == 0, sampled.stderr
         # Sampling the full eligible pool makes exclusion independent of seed.
@@ -845,7 +851,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
             cwd=repo_root,
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
         )
         assert full.returncode == 0, full.stderr
         assert not {
@@ -857,7 +863,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
         }.intersection(full.stdout.splitlines())
         pool.write_text(json.dumps(["polar-bu-070"]))
         live = subprocess.run(
-            command + ["--min-successful-llm", "3"], cwd=repo_root, text=True, capture_output=True, timeout=30
+            command + ["--min-successful-llm", "3"], cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS
         )
         assert live.returncode == 0, live.stdout + live.stderr
         assert json.loads(live.stdout)["slices"][0]["names"] == ["polar-bu-070"]
@@ -871,7 +877,7 @@ def test_successful_llm_evidence_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -884,7 +890,7 @@ def test_cloudbench_codex_auth_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=60,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -964,7 +970,7 @@ def test_cloudbench_log_transport_contract_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=60,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "2 passed" in result.stdout
@@ -1014,7 +1020,7 @@ def test_run_benchmark_task_selection_suite_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=120,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr

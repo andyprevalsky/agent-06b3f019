@@ -61,3 +61,36 @@ all task budgets, existing cleanup controls and measured coverage evidence.
 ## Reusable lesson
 
 Size an aggregate verification-domain deadline for its complete measured control collection while preserving each task's own limits.
+
+
+### October 6 follow-up: native command families retained shorter inner guards
+
+The normal covered benchmark domain on committed `7872fa3d` completed in about
+400 seconds but recorded two native verification-family failures at their
+60-second wrappers: `private_fleet_source_permanent_gate` and
+`boot_terminal_runtime_evidence_permanent_gate`. The other 108 domains passed.
+Their original temporary pytest streams were not retained by the wrapper error
+path, so a particular slow assertion or a production cause is not established.
+No timeout is reclassified as a passing original attempt.
+
+The exact unchanged private-source command subsequently passed all 70 cases in
+16.534 seconds. The same two boot-evidence groups, using the existing exact-owned
+helper with a diagnostic-only 600-second aggregate guard and retained output,
+passed all 166 cases in 44.545 seconds. These are scoped native verification
+measurements, not evidence of live benchmark performance or a proved contention
+mechanism. The prior cleanup contract and every test assertion remained intact.
+
+A class-wide audit found 17 whole native command-family guards between 15 and
+120 seconds, including the parallel owned-command helper default. They now
+share the existing AGENTS_COVERAGE_DOMAIN_TIMEOUT value, with the same 1800-second
+standalone default. Synthetic fault, transport, native snapshot and exact-owner
+retirement bounds remain identical; all 2,246 assertion AST nodes are unchanged.
+This removes inner aggregate verification deadlines rather than relaxing an
+individual fault assertion or a task deadline. The original 60-second failures
+and private native reductions remain durably separate. The final affected
+covered benchmark domain must qualify once on the composed source, combined
+with the retained 108 unchanged domain receipts through the supported runner.
+No model, task, evaluator, prompt, task execution bound or allocation-to-release
+limit changes. The user explicitly requested liberal infrastructure observation
+budgets and meaningful stage handoffs, rather than repeated sub-suite timer
+adjustments.

@@ -5469,9 +5469,9 @@ def test_autoscaler_port_allocator_serializes_and_recovers_interruption(
 
 def test_autoscaler_retries_metrics_transport_until_first_capacity_observation() -> None:
     """A Fly data-plane proxy can die while the primary is still restoring its
-    stack and before /metrics exists. Pre-readiness transport loss must retry
-    under the stack/child lifecycle; once desired capacity has been observed,
-    the identical loss remains a bounded mandatory-autoscaler failure."""
+    stack and before /metrics exists. Transport observation loss must retry
+    under the exact inventory/child lifecycle both before and after readiness;
+    the independent task and overall release deadlines remain authoritative."""
     autoscaler = _extract_fleet_function(fleet_source_text(), "bench_autoscaler() {")
     recovery = autoscaler.split('if ! fleet_job_running "$metrics_proxy_pid"; then', 1)[1].split(
         "local desired want cur", 1
@@ -5480,9 +5480,9 @@ def test_autoscaler_retries_metrics_transport_until_first_capacity_observation()
     assert "until start_metrics_proxy 30; do" in autoscaler
     assert 'if [ -e "$out/autoscaler.ready" ]; then' in recovery
     assert "metrics proxy unavailable before first desired count; retrying" in recovery
-    pre_ready = recovery.split("else", 1)[1]
-    assert "continue" in pre_ready
-    assert "metrics proxy died and did not recover" in recovery
+    assert "metrics proxy unavailable during the run; retrying" in recovery
+    assert "continue" in recovery
+    assert "autoscaler.failed" not in recovery
 
 
 def test_autoscaler_worker_clone_failure_sets_the_fatal_marker(tmp_path: Path) -> None:

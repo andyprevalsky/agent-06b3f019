@@ -55,8 +55,9 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
     results = []
 
     transient_modes = {"inventory_expired_then_ready", "inventory_read_miss_then_ready"}
+    metrics_modes = {"metrics_proxy_loss_then_ready", "metrics_empty_scrapes_then_ready"}
     fatal_inventory_modes = {"inventory_wrong_token", "inventory_dead_publisher", "inventory_missing_machine"}
-    for mode in ["pending_then_ready", "pending_until_child", "provision_failure", *sorted(transient_modes), *sorted(fatal_inventory_modes)]:
+    for mode in ["pending_then_ready", "pending_until_child", "provision_failure", *sorted(transient_modes), *sorted(metrics_modes), *sorted(fatal_inventory_modes)]:
         case = RUN / mode
         case.mkdir()
         out = case / "bench"
@@ -76,7 +77,7 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
     CLOUDBENCH_BOOT_LAUNCH=0
     _machine_priv_ip() { printf 'fdaa::1'; }
     case "$MODE" in
-        inventory_*)
+        inventory_*|metrics_*)
             INVENTORY_INDEX="$CASE/inventory"
             INVENTORY_CLOCK_EPOCH="$(date +%s)"
             INVENTORY_CLOCK_SECONDS="$SECONDS"
@@ -105,7 +106,23 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
             wait "$pid" 2>/dev/null || true
         done
     }
-    flyctl() { printf '%s\n' "$BASHPID" > "$CASE/proxy.pid"; exec sleep 120; }
+    date() {
+        if [ "$MODE" = metrics_proxy_loss_then_ready ] && [ "$*" = +%s ] \
+            && [ -e "$CASE/proxy-fault-active" ]; then
+            local tick=0
+            [ ! -e "$CASE/proxy-clock" ] || tick="$(cat "$CASE/proxy-clock")"
+            tick=$((tick + 31)); printf '%s\n' "$tick" > "$CASE/proxy-clock"
+            [ "$tick" -lt 62 ] || : > "$CASE/proxy-recovery-expired"
+            printf '%s\n' "$((1000 + tick))"
+        else
+            command date "$@"
+        fi
+    }
+    flyctl() {
+        printf '%s\n' "$BASHPID" > "$CASE/proxy.pid"
+        printf '%s\n' "$BASHPID" >> "$CASE/proxy.pids"
+        exec sleep 120
+    }
     curl() {
         case " $* " in *' -o /dev/null '*)
             if [ ! -e "$CASE/inventory-fault" ]; then
@@ -123,6 +140,20 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
         local poll=0
         [ ! -e "$CASE/polls" ] || poll="$(cat "$CASE/polls")"
         poll=$((poll+1)); printf '%s\n' "$poll" > "$CASE/polls"
+        if [ "$MODE" = metrics_proxy_loss_then_ready ] && [ "$poll" -ge 3 ]; then
+            if [ ! -e "$CASE/proxy-fault-started" ]; then
+                : > "$CASE/proxy-fault-started"
+                : > "$CASE/proxy-fault-active"
+                kill -TERM "$metrics_proxy_pid"
+            elif [ ! -e "$CASE/proxy-fault-active" ]; then
+                : > "$CASE/proxy-observation-recovered"
+            fi
+        elif [ "$MODE" = metrics_empty_scrapes_then_ready ] && [ "$poll" -ge 3 ] && [ "$poll" -le 10 ]; then
+            printf '%s\n' "$((poll - 2))" > "$CASE/empty-metrics-count"
+            return 1
+        elif [ "$MODE" = metrics_empty_scrapes_then_ready ] && [ "$poll" -gt 10 ]; then
+            : > "$CASE/empty-metrics-recovered"
+        fi
         printf 'desired_machine_count 3\n'
     }
     provision_worker() {
@@ -131,7 +162,7 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
         count=$((count+1))
         [ ! -e "$OUT/benchmark-child.finished" ] || after=1
         printf '%s %s %s\n' "$count" "$(cat "$CASE/polls")" "$after" >> "$CASE/calls"
-        case "$MODE" in inventory_*) inventory_index_healthy || { : > "$CASE/stale-capacity-mutation"; return 18; } ;; esac
+        case "$MODE" in inventory_*|metrics_*) inventory_index_healthy || { : > "$CASE/stale-capacity-mutation"; return 18; } ;; esac
         if [ "$MODE" = provision_failure ]; then
             printf 'fixture-provision-failure\n' > "$OUT/autoscaler.failed"
             return 17
@@ -206,12 +237,20 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                 owners.append({"kind": "autoscaler", "pid": scaler.pid, "birth": native(scaler.pid)})
                 deadline = time.monotonic() + 30
                 restored_inventory = False
+                restored_metrics_proxy = False
                 while True:
                     for name in ["proxy", "child"]:
                         p = case / f"{name}.pid"
-                        if p.exists() and not any(o["kind"] == name for o in owners):
-                            pid = int(p.read_text())
-                            owners.append({"kind": name, "pid": pid, "birth": native(pid)})
+                        if p.exists():
+                            all_proxies = case / "proxy.pids"
+                            identifiers = (all_proxies.read_text().splitlines()
+                                           if name == "proxy" and all_proxies.exists() else [p.read_text()])
+                            for identifier in identifiers:
+                                if not identifier.strip():
+                                    continue
+                                pid = int(identifier)
+                                if not any(o["kind"] == name and o["pid"] == pid for o in owners):
+                                    owners.append({"kind": name, "pid": pid, "birth": native(pid)})
                     observed_inventory = case / "inventory-observed"
                     if mode in transient_modes and not restored_inventory and observed_inventory.exists() and observed_inventory.read_text().strip() not in {"", "0"}:
                         time.sleep(0.1)
@@ -221,13 +260,23 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                             f"publisher_token=fixture-publisher\nvalid_until={int(time.time()) + 120}\n"
                         )
                         restored_inventory = True
-                    if mode == "pending_then_ready" or mode in transient_modes:
+                    if mode == "metrics_proxy_loss_then_ready" and not restored_metrics_proxy and (case / "proxy-recovery-expired").exists():
+                        time.sleep(0.1)
+                        assert scaler.poll() is None, "post-ready-proxy-observation-aborted-live-child"
+                        assert not (out / "autoscaler.failed").exists(), "post-ready-proxy-observation-written-as-failure"
+                        (case / "proxy-fault-active").unlink()
+                        restored_metrics_proxy = True
+                    if mode == "pending_then_ready" or mode in transient_modes or mode in metrics_modes:
                         ready = (
                             (out / "worker-ready.ids").read_text().splitlines()
                             if (out / "worker-ready.ids").exists()
                             else []
                         )
                         resolved = len(ready) == 2
+                        if mode == "metrics_proxy_loss_then_ready":
+                            resolved = resolved and (case / "proxy-observation-recovered").exists()
+                        elif mode == "metrics_empty_scrapes_then_ready":
+                            resolved = resolved and (case / "empty-metrics-recovered").exists()
                     elif mode == "pending_until_child":
                         resolved = (case / "third-pending").exists()
                     else:
@@ -245,7 +294,7 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                 ready = (out / "worker-ready.ids").read_text().splitlines()
                 assert all(row[2] == 0 for row in calls), "provision-called-after-independent-child-marker"
                 assert (out / "benchmark-child.finished").read_text().strip() == "1"
-                if mode == "pending_then_ready" or mode in transient_modes:
+                if mode == "pending_then_ready" or mode in transient_modes or mode in metrics_modes:
                     assert scaler_rc == 0, "pending-recovery-did-not-complete"
                     assert not (out / "autoscaler.failed").exists(), "pending-written-as-failure"
                     assert [row[1] for row in calls] == [1, 2, 2], "retried-pending-in-same-scale-pass"
@@ -257,6 +306,13 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                         assert restored_inventory
                         assert not (case / "stale-capacity-mutation").exists()
                         assert "retrying" in (case / "scaler.private.log").read_text()
+                    if mode in metrics_modes:
+                        assert not (case / "stale-capacity-mutation").exists()
+                        assert "retrying" in (case / "scaler.private.log").read_text()
+                        if mode == "metrics_proxy_loss_then_ready":
+                            assert restored_metrics_proxy
+                        else:
+                            assert int((case / "empty-metrics-count").read_text()) >= 8
                 elif mode == "pending_until_child":
                     assert [row[1] for row in calls] == [1, 2, 3], "persistent-unknown-retried-in-same-pass"
                     assert tracked == ready == [], "persistent-unknown-admitted-worker"
@@ -275,7 +331,10 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                     assert (out / "autoscaler.failed").read_text().strip() == "fixture-provision-failure"
                     assert not (out / "autoscaler.completed-after-child").exists()
             except Exception as exc:
-                error = {"class": type(exc).__name__, "category": str(exc)}
+                error = {"class": type(exc).__name__, "category": str(exc),
+                         "child_finished_at_failure": (out / "benchmark-child.finished").exists(),
+                         "desired_capacity_already_observed": (out / "autoscaler.ready").exists(),
+                         "durable_autoscaler_failure": (out / "autoscaler.failed").read_text().strip() if (out / "autoscaler.failed").exists() else None}
             finally:
                 (case / "release-child").touch(exist_ok=True)
                 for p in processes:

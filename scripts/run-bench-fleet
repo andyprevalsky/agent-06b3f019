@@ -12946,25 +12946,21 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
             scale_down_target=""
             scale_down_since=""
             metrics_proxy_pid=""
-            if [ -e "$out/autoscaler.ready" ]; then
-                start_metrics_proxy 30 || {
-                    if [ -e "$out/benchmark-child.finished" ]; then
-                        complete_autoscaler_after_child
-                        return $?
-                    fi
-                    printf '%s\n' "metrics proxy died and did not recover" > "$out/autoscaler.failed"
-                    echo "  ❌ [$bench] mandatory autoscaler: metrics proxy died and did not recover" >&2
-                    return 1
-                }
-            else
-                if ! start_metrics_proxy 30; then
-                    if [ -e "$out/benchmark-child.finished" ]; then
-                        complete_autoscaler_after_child
-                        return $?
-                    fi
-                    echo "  ⚠️ [$bench] mandatory autoscaler: metrics proxy unavailable before first desired count; retrying" >&2
-                    continue
+            if ! start_metrics_proxy 30; then
+                if [ -e "$out/benchmark-child.finished" ]; then
+                    complete_autoscaler_after_child
+                    return $?
                 fi
+                # A transport retry window is an observation boundary, not the
+                # task deadline. The next loop rechecks exact inventory/child
+                # ownership before making any further capacity decision.
+                if [ -e "$out/autoscaler.ready" ]; then
+                    echo "  ⚠️ [$bench] mandatory autoscaler: metrics proxy unavailable during the run; retrying" >&2
+                else
+                    echo "  ⚠️ [$bench] mandatory autoscaler: metrics proxy unavailable before first desired count; retrying" >&2
+                fi
+                sleep "$AUTOSCALE_POLL"
+                continue
             fi
             echo "  🛰️ [$bench] autoscaler metrics proxy recovered on :$metrics_port"
         fi
@@ -12989,10 +12985,8 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
                     return $?
                 fi
                 scrape_failures=$((scrape_failures + 1))
-                if [ "$scrape_failures" -ge 6 ]; then
-                    printf '%s\n' "metrics returned no valid desired_machine_count for 6 consecutive polls" > "$out/autoscaler.failed"
-                    echo "  ❌ [$bench] mandatory autoscaler: metrics became unreadable for 6 consecutive polls" >&2
-                    return 1
+                if [ $((scrape_failures % 6)) -eq 0 ]; then
+                    echo "  ⚠️ [$bench] mandatory autoscaler: metrics temporarily unreadable for $scrape_failures consecutive polls; retrying" >&2
                 fi
             fi
             sleep "$AUTOSCALE_POLL"

@@ -221,7 +221,9 @@ canary.write_text(
 (directory / "manifest.json").write_text(json.dumps({
     "cohort_id": "c001", "jobs": {"parent-job": os.getpid()},
 }))
-(directory / "release.json").write_text(json.dumps({"cohort_id": "c001"}))
+(directory / "release.json").write_text(json.dumps({
+    "cohort_id": "c001", "jobs": {"parent-job": os.getpid()},
+}))
 with (directory.parent / "parent.lock").open("w") as parent_lock:
     fcntl.flock(parent_lock, fcntl.LOCK_EX)
     for campaign in (True, False):
