@@ -801,10 +801,25 @@ POOL_CLAIMS_DIR="$TMP_ROOT/mixed-shape-claims"
 CLAIMED_POOL_FILE="$FLEET_DIR/claimed.ids"
 UNAVAILABLE_POOL_IDS=()
 : > "$CLAIMED_POOL_FILE"
-machine_volume_id_from_json() { printf 'vol-mixed-shape'; }
+machine_volume_id_from_json() {
+  cat >/dev/null || return
+  printf 'vol-mixed-shape'
+}
 write_pool_claim() { printf 'owned\n' > "$1"; }
 cloudbench_env_sha256() { printf '%064d' 0; }
 fleet_audit_record_pool_machine() { return 0; }
+volume_fixture_input="$TMP_ROOT/mixed-shape-inventory.json"
+python3 - "$volume_fixture_input" "$POOL_INVENTORY_JSON" <<'PY'
+import sys
+from pathlib import Path
+
+# Provider inventories can exceed a pipe buffer. Retain valid JSON while
+# proving the fixture consumer drains the stream before returning its volume.
+Path(sys.argv[1]).write_text(" " * (1024 * 1024) + sys.argv[2])
+PY
+fixture_volume="$(cat "$volume_fixture_input" | machine_volume_id_from_json a1)" ||
+  fail "pool volume fixture did not consume its complete JSON input"
+[ "$fixture_volume" = "vol-mixed-shape" ] || fail "pool volume fixture changed its volume"
 large_claim="$(claim_pool_machine shared-cpu-4x 8192)"
 [ "$large_claim" = "b2" ] ||
   fail "large benchmark did not prefer the admitted 8GB Machine"

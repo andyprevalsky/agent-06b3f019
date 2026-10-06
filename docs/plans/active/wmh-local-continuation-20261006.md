@@ -16,6 +16,17 @@ October 6 local continuation uses the isolated worktree
 `e5e0ff622` are integrated. The new uncapped rebuild is local and pending;
 historical conformance remains historical evidence only.
 
+October 6 local verification: backend coverage passed all 184 blackbox domains
+and 253 unit files, with 89.23% lines / 80.34% branches. Codex sandbox auth uses
+an isolated test identity with the current authoritative auth file; no shared
+integration was removed. Five cold seed-fidelity runs passed at 168–171MB,
+under the unchanged 228MB bound. Agent coverage remains pending: one batch had
+all 109 domains pass but an obsolete unit fixture failed; the corrected batch
+hit benchmark/worker fixture timeouts. Focused unchanged worker and private
+source fixtures passed afterward, but full owning coverage must pass before
+deploy. A controller mock's early stdin close has an owning red/green proof
+and permanent stress regression; full controller validation remains pending.
+
 Open operational TODO: cancellation of the first coverage stage after ENOSPC
 left its bash controller holding the stdout pipe after npm exited. The exact
 owned controller was terminated and cleanup finished. `run_deploy_stage.py`
