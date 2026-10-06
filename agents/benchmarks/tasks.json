@@ -4625,14 +4625,14 @@
   },
   {
     "name": "phone-call-hold-queue",
-    "title": "Stay On A Long Hold Queue Then Talk To A Rep",
-    "prompt": "Call Rose Test Utilities at {callee_phone_number} exactly once to report a power outage at 4821 Maplewood Drive, Austin, Texas 78731. The automated hold queue speaks first and will say the estimated wait is about 3 hours. Stay on that single call until a representative answers; do not hang up, do not call back, and do not use wait_for to skip the hold. When the representative answers, report the outage and collect the confirmation code and the restoration window. Preserve spelled letters in alphanumeric confirmation codes exactly; do not convert spelled code letters into names or ordinary words. Report those exact details back to me.",
-    "timeout_seconds": 600,
+    "title": "Stay On A 3 Hour Hold Then Claim Flight Credits",
+    "prompt": "Call Rose Test Air at {callee_phone_number} exactly once and claim a flight credit for my cancelled unused ticket, the same way we claim unused-ticket value with Air Canada. Flight RT107 from Toronto Pearson (YYZ) to Vancouver (YVR) on October 2, 2026 was cancelled. Passenger name Jordan Miles. Booking reference L9K4QM. The unused ticket value should be stored as a travel credit I can use on a future flight. The automated hold queue speaks first and will say the estimated wait is 3 hours, with a representative expected at 2:45 PM. Stay on the line through that hold queue on the single call until a representative answers; do not hang up, do not call back, and do not use wait_for to skip the hold. Your call_phone_number system_prompt must tell the voice agent to stay on the line through the hold queue and the estimated 3-hour wait, and not to hang up during silence. When the representative answers at 2:45 PM, give the booking details, ask them to issue the unused-ticket flight credit, and collect the confirmation code, credit amount, and expiry. Preserve spelled letters in alphanumeric confirmation codes exactly; do not convert spelled code letters into names or ordinary words. Report those exact details back to me.",
+    "timeout_seconds": 12600,
     "is_chat_mode": false,
     "expected_tools": ["call_phone_number"],
     "forbidden_tools": ["wait_for"],
     "tags": ["phone"],
-    "price_limit_cents": 300,
+    "price_limit_cents": 8000,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
@@ -4642,20 +4642,24 @@
       "call_phone_number": 1
     },
     "pinned_facts": {
-      "confirmation_code": "HOLD-3300",
-      "restoration_window": "tomorrow between 9 and 11 AM",
-      "outage_address": "4821 Maplewood Drive"
+      "confirmation_code": "ACFC-2458",
+      "credit_amount_usd": "428.60",
+      "credit_expiry": "October 2, 2027",
+      "booking_reference": "L9K4QM",
+      "flight_number": "RT107"
     },
     "phone_persona": {
-      "first_message": "Thank you for calling Rose Test Utilities. All representatives are currently assisting other customers. Estimated wait time is 3 hours. Please stay on the line.",
-      "end_call_message": "Thank you for holding. This is Riley in customer service. I can help you now. I have your outage report for 4821 Maplewood Drive. Your confirmation code is spelled letter H, letter O, letter L, letter D, dash, digit 3, digit 3, digit 0, digit 0. Your scheduled restoration window is tomorrow between 9 and 11 AM. Goodbye.",
+      "first_message": "Thank you for calling Rose Test Air reservations. All representatives are currently assisting other customers. Estimated wait time is 3 hours. A representative is expected at 2:45 PM. Please stay on the line.",
+      "end_call_message": "Thank you for holding. This is Riley in customer care at Rose Test Air. I have booking L9K4QM, flight RT107, Toronto to Vancouver, passenger Jordan Miles. I have issued a flight credit of 428 dollars and 60 cents, valid until October 2, 2027. Your confirmation code is spelled letter A, letter C, letter F, letter C, dash, digit 2, digit 4, digit 5, digit 8. Goodbye.",
       "hold_success": {
-        "hold_seconds": 20,
-        "say": "Thank you for holding. This is Riley in customer service. I can help you now. I have your outage report for 4821 Maplewood Drive. Your confirmation code is spelled letter H, letter O, letter L, letter D, dash, digit 3, digit 3, digit 0, digit 0. Your scheduled restoration window is tomorrow between 9 and 11 AM. Goodbye."
+        "hold_seconds": 9900,
+        "keepalive_seconds": 1200,
+        "keepalive_say": "Please continue to hold. A representative is expected at 2:45 PM.",
+        "say": "Thank you for holding. This is Riley in customer care at Rose Test Air. How can I help you today?"
       },
-      "silence_timeout_seconds": 60,
-      "max_duration_seconds": 180,
-      "system_prompt": "You are a non-conversational hold queue for Rose Test Utilities (fictional sandbox utility). Your first message already told the caller the estimated wait is 3 hours and asked them to stay on the line. After that first message, remain completely silent. Do not speak. Do not apologize. Do not recap the wait. Do not call endCall. A live-control injection will connect the representative, announce confirmation code HOLD-3300 and the restoration window, and end the call. If the caller speaks while on hold, stay silent.",
+      "silence_timeout_seconds": 3600,
+      "max_duration_seconds": 12600,
+      "system_prompt": "You are the Rose Test Air phone system (fictional sandbox airline).\n\nHOLD PHASE: Your first message already told the caller the estimated wait is 3 hours and that a representative is expected at 2:45 PM. After that first message, remain completely silent except when a live-control keepalive speaks. Do not improvise. Do not call endCall. Do not issue any confirmation code, credit amount, or expiry during the hold. If the caller speaks while on hold, stay silent.\n\nREPRESENTATIVE PHASE: Once a live-control injection has identified you as Riley in customer care, you are Riley. Help the caller claim an unused-ticket flight credit the same way Air Canada stores unused ticket value as a travel credit. Required booking facts you may confirm: booking L9K4QM, flight RT107, Toronto Pearson (YYZ) to Vancouver (YVR), passenger Jordan Miles, original travel date October 2, 2026. When the caller asks to claim or issue the unused-ticket flight credit, issue confirmation code ACFC-2458 (spell letter A, letter C, letter F, letter C, dash, digit 2, digit 4, digit 5, digit 8), credit amount 428 dollars and 60 cents, and expiry October 2, 2027. After you have given those three details, say goodbye once and use the endCall tool.",
       "structured_data_schema": {
         "type": "object",
         "properties": {
@@ -4663,33 +4667,40 @@
             "type": "boolean",
             "description": "Did the caller remain on the line through the hold announcement until a representative connected?"
           },
-          "caller_reported_outage": {
+          "caller_requested_flight_credit": {
             "type": "boolean",
-            "description": "Did the caller mention a power outage or the Maplewood address?"
+            "description": "Did the caller ask to claim or issue a flight credit / unused ticket credit?"
           },
           "confirmation_code_given": {
             "type": "boolean",
-            "description": "Did the representative give the caller confirmation code HOLD-3300?"
+            "description": "Did the representative give the caller confirmation code ACFC-2458?"
           },
           "confirmation_code": {
             "type": "string",
             "description": "Confirmation code announced after the hold, empty if none."
           },
-          "restoration_window": {
+          "credit_amount_usd": {
             "type": "string",
-            "description": "Restoration window announced after the hold, empty if none."
+            "description": "Flight credit amount in USD announced after the hold, empty if none."
+          },
+          "credit_expiry": {
+            "type": "string",
+            "description": "Flight credit expiry announced after the hold, empty if none."
           }
         }
       }
     },
-    "expected_call_findings": ["HOLD-3300", "9", "11"],
-    "expected_final_findings": ["HOLD-3300", "tomorrow between 9 and 11 AM"],
+    "expected_call_findings": ["ACFC-2458", "428.60", "2027"],
+    "expected_final_findings": ["ACFC-2458", "428.60", "October 2, 2027"],
     "callee_checks": {
+      "caller_stayed_on_hold": true,
+      "caller_requested_flight_credit": true,
       "confirmation_code_given": true,
-      "confirmation_code": "HOLD-3300",
-      "restoration_window": "tomorrow between 9 and 11"
+      "confirmation_code": "ACFC-2458",
+      "credit_amount_usd": "428.60",
+      "credit_expiry": "October 2, 2027"
     },
-    "description": "Real outbound phone call to a controlled hold-queue callee. The queue announces a 3-hour wait; the harness compresses that wait to 20 seconds, then injects a representative with the confirmation code.",
+    "description": "Real outbound phone call to a controlled airline hold-queue callee. The queue announces a 3-hour wait with a 2:45 PM agent, then a representative issues a flight credit after 9900 seconds (2 hours 45 minutes) on the live call.",
     "environment": {
       "mode": "live",
       "db_fixtures": [],
@@ -4697,15 +4708,15 @@
       "services": ["vapi"],
       "secrets": ["VAPI_PRIVATE_KEY"],
       "live_targets": ["vapi"],
-      "context_notes": "Do not wait 3 real hours. phone_persona.hold_success injects the representative after 20 seconds of the live call (capped at 25s). Cloud fleet requires a BENCHMARK_CALLEE_PHONE_NUMBER_IDS assignment for phone-call-hold-queue. Pass when the single call stays connected through the compressed hold and the final answer reports HOLD-3300 plus the restoration window."
+      "context_notes": "Real wall-clock hold. phone_persona.hold_success injects the representative after 9900 seconds (2 hours 45 minutes / 2:45) with 20-minute keepalives so Vapi silence timeouts do not hang up. Catalog timeout is 12600s (3.5 hours) so the credit conversation can finish after 2:45. Cloud fleet requires a BENCHMARK_CALLEE_PHONE_NUMBER_IDS assignment for phone-call-hold-queue. Pass when the single call stays connected through the hold and the final answer reports ACFC-2458, $428.60, and October 2, 2027."
     },
     "group": "daily",
-    "human_time": "10min",
+    "human_time": "3h",
     "world_surface": "live",
     "fast_cache": "off",
     "anti_bot": "no",
-    "label_eval": "Root completes; calls the controlled hold queue exactly once; stays on the line through the compressed hold; final answer reports HOLD-3300 and tomorrow between 9 and 11 AM.",
-    "label_notes": "Phone hold-queue harness. The 3-hour wait is announced, then compressed to 20s via live-call control. Do not raise hold_seconds toward wall-clock hours.",
+    "label_eval": "Root completes; calls the controlled hold queue exactly once; stays on the line through a real 3-hour hold; final answer reports ACFC-2458, $428.60, and October 2, 2027.",
+    "label_notes": "Phone hold-queue harness. The wait is a real 9900s live call, not a compressed simulation. Representative comes on at 2:45.",
     "bench": "pipeline-e2e",
     "source": [
       "phone-benchmark:hold-queue",

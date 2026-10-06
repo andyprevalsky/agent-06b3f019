@@ -52,15 +52,15 @@ CALLEE_NUMBER_NAME = "rose-benchmark-callee"
 CALLEE_SESSION_NUMBER_PREFIX = f"{CALLEE_NUMBER_NAME}-session-"
 CALLEE_NUMBER_ID_ENV = "BENCHMARK_CALLEE_PHONE_NUMBER_ID"
 CALLEE_NUMBER_IDS_ENV = "BENCHMARK_CALLEE_PHONE_NUMBER_IDS"
-CALLEE_SESSION_NUMBER_TTL = timedelta(hours=2)
+CALLEE_SESSION_NUMBER_TTL = timedelta(hours=5)
 # Vapi documents a "couple of minutes" before free numbers become functional;
 # keep a small propagation margin so benchmark calls never race that boundary.
 CALLEE_SESSION_NUMBER_ACTIVATION_DELAY = timedelta(minutes=3)
 VAPI_PHONE_NUMBER_NAME_MAX_LENGTH = 40
-# Hold-queue benches announce a multi-hour wait, then compress it. Never honor
-# a real 3-hour hold_seconds — that would burn Vapi minutes and the 10-minute
-# benchmark budget. 25s stays under the outbound silenceTimeout of 30s.
-HOLD_SUCCESS_MAX_SECONDS = 25.0
+# Hold-queue benches wait a real multi-hour queue. Cap accidental day-long
+# holds; 2h45m (9900) is the intended phone-call-hold-queue representative time.
+HOLD_SUCCESS_MAX_SECONDS = 14400.0
+HOLD_KEEPALIVE_DEFAULT_SECONDS = 1200.0
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BACKEND_ENV = str(_REPO_ROOT / "back-end" / ".env")
@@ -356,18 +356,18 @@ class PhoneCalleeSession:
         return {"tracking_number": tracking_number, "say": say}
 
     def _hold_success_config(self) -> Optional[dict]:
-        """Optional compressed hold-queue: announce a long wait, then connect a rep.
+        """Optional real hold-queue: wait hold_seconds, then connect a rep.
 
-        Production hold queues can last hours. Benchmarks cannot. When
-        phone_persona.hold_success is set, the callee first_message tells the
-        caller the wait is ~3 hours; a watcher then injects the representative
-        after hold_seconds of the live call (capped at HOLD_SUCCESS_MAX_SECONDS).
+        phone-call-hold-queue uses a wall-clock 2h45m hold (9900s) so the
+        representative answers at 2:45. Periodic keepalive_say lines keep
+        Vapi silence timeouts from hanging up; the representative injection
+        does not end the call so the agent can claim the flight credit.
 
             call connects
               -> first_message: "estimated wait is 3 hours, stay on the line"
-              -> compressed hold (hold_seconds)
-              -> live-control say: representative + confirmation facts
-              -> endCall
+              -> keepalives every keepalive_seconds
+              -> live-control say at hold_seconds: representative greeting
+              -> caller claims the unused-ticket credit; persona ends the call
         """
         config = self.persona.get("hold_success")
         if not isinstance(config, dict):
@@ -380,10 +380,20 @@ class PhoneCalleeSession:
         if hold_seconds > HOLD_SUCCESS_MAX_SECONDS:
             raise ValueError(
                 f"phone_persona.hold_success.hold_seconds={hold_seconds} exceeds "
-                f"the {HOLD_SUCCESS_MAX_SECONDS:.0f}s compressed-hold cap; do not "
-                "simulate a real multi-hour wait on a live Vapi call"
+                f"the {HOLD_SUCCESS_MAX_SECONDS:.0f}s hold cap"
             )
-        return {"hold_seconds": hold_seconds, "say": say}
+        keepalive_seconds = config.get("keepalive_seconds", 0)
+        if isinstance(keepalive_seconds, bool) or not isinstance(keepalive_seconds, (int, float)) or keepalive_seconds < 0:
+            keepalive_seconds = 0
+        keepalive_say = str(config.get("keepalive_say") or "").strip()
+        if keepalive_seconds > 0 and not keepalive_say:
+            keepalive_say = "Please continue to hold."
+        return {
+            "hold_seconds": hold_seconds,
+            "say": say,
+            "keepalive_seconds": float(keepalive_seconds),
+            "keepalive_say": keepalive_say,
+        }
 
     def _live_control_enabled(self) -> bool:
         return self._keypad_success_config() is not None or self._hold_success_config() is not None
@@ -639,15 +649,23 @@ class PhoneCalleeSession:
         except Exception as exc:
             print(f"    ⚠ keypad_success watcher error: {exc}")
 
-    async def _inject_control_say(self, control_url: str, say: str, call_id: str, label: str) -> bool:
-        """Speak a canned line on a live call and hang up after it finishes."""
+    async def _inject_control_say(
+        self,
+        control_url: str,
+        say: str,
+        call_id: str,
+        label: str,
+        *,
+        end_call_after_spoken: bool = True,
+    ) -> bool:
+        """Speak a canned line on a live call. Hang up afterward when requested."""
         async with httpx.AsyncClient(timeout=30) as control_client:
             say_resp = await control_client.post(
                 control_url,
                 json={
                     "type": "say",
                     "content": say,
-                    "endCallAfterSpoken": True,
+                    "endCallAfterSpoken": end_call_after_spoken,
                 },
             )
             if say_resp.status_code >= 300:
@@ -660,12 +678,15 @@ class PhoneCalleeSession:
         return True
 
     async def _watch_hold_success_announcement(self) -> None:
-        """Connect the representative after the compressed hold elapses."""
+        """Stay on the live hold, then connect the representative after hold_seconds."""
         success = self._hold_success_config()
         if success is None:
             return
         hold_seconds = success["hold_seconds"]
         say = success["say"]
+        keepalive_seconds = success["keepalive_seconds"]
+        keepalive_say = success["keepalive_say"]
+        last_keepalive_elapsed: dict[str, float] = {}
         deadline = asyncio.get_event_loop().time() + float(
             self.persona.get("max_duration_seconds") or _CALLEE_ASSISTANT_BASE["maxDurationSeconds"]
         )
@@ -684,7 +705,7 @@ class PhoneCalleeSession:
                         if call.get("status") not in {"queued", "ringing", "in-progress"}:
                             continue
                         elapsed = self._hold_elapsed_seconds(call)
-                        if elapsed is None or elapsed < hold_seconds:
+                        if elapsed is None:
                             continue
                         call_id = str(call.get("id") or "")
                         detailed = call
@@ -697,14 +718,37 @@ class PhoneCalleeSession:
                         ).strip()
                         if not control_url:
                             continue
-                        if not await self._inject_control_say(control_url, say, call_id, "hold_success"):
-                            continue
-                        self._hold_success_announced = True
-                        print(
-                            f"    ✓ Injected hold_success representative after "
-                            f"{elapsed:.0f}s on call {call_id[:8]}"
-                        )
-                        return
+                        if elapsed >= hold_seconds:
+                            if not await self._inject_control_say(
+                                control_url,
+                                say,
+                                call_id,
+                                "hold_success",
+                                end_call_after_spoken=False,
+                            ):
+                                continue
+                            self._hold_success_announced = True
+                            print(
+                                f"    ✓ Injected hold_success representative after "
+                                f"{elapsed:.0f}s on call {call_id[:8]}"
+                            )
+                            return
+                        if (
+                            keepalive_seconds > 0
+                            and elapsed - last_keepalive_elapsed.get(call_id, 0.0) >= keepalive_seconds
+                        ):
+                            if await self._inject_control_say(
+                                control_url,
+                                keepalive_say,
+                                call_id,
+                                "hold_keepalive",
+                                end_call_after_spoken=False,
+                            ):
+                                last_keepalive_elapsed[call_id] = elapsed
+                                print(
+                                    f"    ✓ Injected hold keepalive after "
+                                    f"{elapsed:.0f}s on call {call_id[:8]}"
+                                )
                     await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             raise

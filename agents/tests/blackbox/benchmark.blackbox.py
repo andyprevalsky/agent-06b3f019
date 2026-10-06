@@ -16391,8 +16391,9 @@ def test_phone_call_ivr_dtmf_task_defines_call_tree_verification():
     assert any("308c7437-b205-45ca-aa47-0a9c6a5c5f0a" in entry for entry in ivr.source)
 
 
-def test_phone_call_hold_queue_task_compresses_three_hour_wait():
-    """Hold-queue bench announces a 3-hour wait, then connects a rep after a compressed hold."""
+def test_phone_call_hold_queue_task_waits_real_three_hours_for_flight_credit():
+    """Hold-queue bench stays on a live 2h45m hold, then claims an Air Canada-style flight credit."""
+    from domains.call_phone_number.config import ACTIVITY_TIMEOUT_MINUTES, MAX_POLL_ATTEMPTS
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.phone_callee import HOLD_SUCCESS_MAX_SECONDS
 
@@ -16402,51 +16403,81 @@ def test_phone_call_hold_queue_task_compresses_three_hour_wait():
     assert hold.expected_tool_counts == {"call_phone_number": 1}
     assert hold.approval_handling == "auto_approve"
     assert hold.group == "daily"
+    assert hold.timeout_seconds == 12600
+    assert hold.timeout_seconds >= 9900
+    assert ACTIVITY_TIMEOUT_MINUTES * 60 >= hold.timeout_seconds
+    assert MAX_POLL_ATTEMPTS * 5 >= hold.timeout_seconds
     assert "phone" in hold.tags
     assert "{callee_phone_number}" in hold.prompt
     assert "exactly once" in hold.prompt
     assert "3 hours" in hold.prompt
+    assert "2:45 PM" in hold.prompt
+    assert "flight credit" in hold.prompt
+    assert "Air Canada" in hold.prompt
+    assert "stay on the line" in hold.prompt.lower()
+    assert "hold queue" in hold.prompt.lower()
+    assert "estimated wait" in hold.prompt.lower()
     assert "do not use wait_for" in hold.prompt
     assert "Preserve spelled letters in alphanumeric confirmation codes exactly" in hold.prompt
     assert hold.pinned_facts == {
-        "confirmation_code": "HOLD-3300",
-        "restoration_window": "tomorrow between 9 and 11 AM",
-        "outage_address": "4821 Maplewood Drive",
+        "confirmation_code": "ACFC-2458",
+        "credit_amount_usd": "428.60",
+        "credit_expiry": "October 2, 2027",
+        "booking_reference": "L9K4QM",
+        "flight_number": "RT107",
     }
     persona = hold.phone_persona
     assert persona["first_message"]
     assert "3 hours" in persona["first_message"]
+    assert "2:45 PM" in persona["first_message"]
     assert "stay on the line" in persona["first_message"].lower()
-    assert persona["hold_success"]["hold_seconds"] == 20
+    assert persona["hold_success"]["hold_seconds"] == 9900
+    assert persona["hold_success"]["keepalive_seconds"] == 1200
     assert persona["hold_success"]["hold_seconds"] <= HOLD_SUCCESS_MAX_SECONDS
-    assert "letter H" in persona["hold_success"]["say"]
-    assert "digit 3" in persona["hold_success"]["say"]
-    assert "9 and 11" in persona["hold_success"]["say"]
-    assert "HOLD-3300" in persona["system_prompt"]
+    assert "Riley" in persona["hold_success"]["say"]
+    assert "How can I help you today" in persona["hold_success"]["say"]
+    assert "ACFC-2458" not in persona["hold_success"]["say"]
+    assert "letter A" in persona["system_prompt"]
+    assert "digit 2" in persona["system_prompt"]
+    assert "428" in persona["system_prompt"]
+    assert "ACFC-2458" in persona["system_prompt"]
     assert "remain completely silent" in persona["system_prompt"]
-    assert hold.callee_checks["confirmation_code"] == "HOLD-3300"
+    assert persona["silence_timeout_seconds"] == 3600
+    assert persona["max_duration_seconds"] == 12600
+    assert "letter A" in persona["end_call_message"]
+    assert "428" in persona["end_call_message"]
+    assert hold.callee_checks["caller_stayed_on_hold"] is True
+    assert hold.callee_checks["caller_requested_flight_credit"] is True
+    assert hold.callee_checks["confirmation_code"] == "ACFC-2458"
     assert hold.callee_checks["confirmation_code_given"] is True
-    assert "HOLD-3300" in hold.expected_call_findings
-    assert "HOLD-3300" in hold.expected_final_findings
-    assert "tomorrow between 9 and 11 AM" in hold.expected_final_findings
-    assert "20 seconds" in hold.environment["context_notes"]
-    assert "Do not wait 3 real hours" in hold.environment["context_notes"]
+    assert hold.callee_checks["credit_amount_usd"] == "428.60"
+    assert "ACFC-2458" in hold.expected_call_findings
+    assert "ACFC-2458" in hold.expected_final_findings
+    assert "428.60" in hold.expected_final_findings
+    assert "October 2, 2027" in hold.expected_final_findings
+    assert "9900 seconds" in hold.environment["context_notes"]
+    assert "Real wall-clock hold" in hold.environment["context_notes"]
     from benchmarks.phone_callee import PhoneCalleeSession
 
     session = PhoneCalleeSession(hold.name, hold.phone_persona, api_key="test-key")
-    assert session._hold_success_config() == {
-        "hold_seconds": 20.0,
-        "say": persona["hold_success"]["say"],
-    }
+    assert session._hold_success_config()["hold_seconds"] == 9900.0
+    assert session._hold_success_config()["keepalive_seconds"] == 1200.0
     assert session._live_control_enabled() is True
     oversized = dict(hold.phone_persona)
-    oversized["hold_success"] = {"hold_seconds": 10800, "say": persona["hold_success"]["say"]}
+    oversized["hold_success"] = {"hold_seconds": 20000, "say": persona["hold_success"]["say"]}
     try:
         PhoneCalleeSession(hold.name, oversized, api_key="test-key")._hold_success_config()
     except ValueError as exc:
-        assert "compressed-hold cap" in str(exc)
+        assert "hold cap" in str(exc)
     else:
-        raise AssertionError("expected multi-hour hold_seconds to fail closed")
+        raise AssertionError("expected an over-cap hold_seconds to fail closed")
+    import inspect
+    import benchmarks.run_benchmark as bench
+
+    backstop_source = inspect.getsource(bench._run_with_agent_execution_backstop)
+    assert hold.timeout_seconds > 7200
+    assert "resolved > seconds" in backstop_source
+    assert "task.timeout_seconds" in backstop_source
 
 
 def test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap():
@@ -19864,7 +19895,7 @@ async def run_all_tests():
     )
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
     r.record("phone_call_ivr_dtmf_task", test_phone_call_ivr_dtmf_task_defines_call_tree_verification)
-    r.record("phone_call_hold_queue_task", test_phone_call_hold_queue_task_compresses_three_hour_wait)
+    r.record("phone_call_hold_queue_task", test_phone_call_hold_queue_task_waits_real_three_hours_for_flight_credit)
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
     r.record(
         "phone_callee_session_number_name_contract",

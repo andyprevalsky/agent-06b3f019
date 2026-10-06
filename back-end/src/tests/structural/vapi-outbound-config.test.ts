@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   BASE_SYSTEM_PROMPT,
   DEFAULT_CALL_ASSISTANT_CONFIG,
+  HOLD_QUEUE_MAX_DURATION_SECONDS,
+  HOLD_QUEUE_SILENCE_TIMEOUT_SECONDS,
   buildCallAssistantConfig,
   isHoldQueuePrompt,
   isIvrNavigationPrompt,
@@ -84,4 +86,8 @@ test('buildCallAssistantConfig waits for hold-queue callee to speak first', () =
   );
   assert.equal(assistant.firstMessage, '');
   assert.equal(assistant.firstMessageMode, 'assistant-waits-for-user');
+  assert.equal(assistant.silenceTimeoutSeconds, HOLD_QUEUE_SILENCE_TIMEOUT_SECONDS);
+  assert.equal(assistant.maxDurationSeconds, HOLD_QUEUE_MAX_DURATION_SECONDS);
+  assert.equal(HOLD_QUEUE_SILENCE_TIMEOUT_SECONDS, 3600);
+  assert.equal(HOLD_QUEUE_MAX_DURATION_SECONDS, 12600);
 });

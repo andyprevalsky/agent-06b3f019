@@ -4004,7 +4004,7 @@ async def poll_agent(
     async def execute(snapshot: dict):
         return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
 
-    return await _run_with_agent_execution_backstop(base_url, agent_id, execute)
+    return await _run_with_agent_execution_backstop(base_url, agent_id, execute, task=task)
 
 
 async def _run_with_agent_execution_backstop(
@@ -4012,9 +4012,16 @@ async def _run_with_agent_execution_backstop(
     agent_id: str,
     execute: Callable[[dict], Awaitable[Any]],
     started_at: Optional[float] = None,
+    task: Optional[BenchmarkTask] = None,
 ) -> Any:
     """Bound all post-create execution, including preparation and checkpoints."""
     seconds = benchmark_wall_clock_backstop_seconds()
+    if task is not None:
+        resolved = getattr(task, "_resolved_timeout_seconds", None)
+        if resolved is None:
+            resolved = task.timeout_seconds
+        if isinstance(resolved, (int, float)) and resolved > seconds:
+            seconds = int(resolved)
     print(f"    🛑 Agent execution wall-clock backstop: {seconds}s")
     snapshot: dict = {}
     started_at = asyncio.get_running_loop().time() if started_at is None else started_at
@@ -13197,7 +13204,7 @@ async def _run_single_task_as_run_user(
             return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
 
         execution_result = await _run_with_agent_execution_backstop(
-            base_url, agent_id, execute_agent, started_at=execution_started_at
+            base_url, agent_id, execute_agent, started_at=execution_started_at, task=task
         )
         if isinstance(execution_result, TaskResult):
             return execution_result

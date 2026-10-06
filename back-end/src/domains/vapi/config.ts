@@ -52,6 +52,11 @@ export function isHoldQueuePrompt(systemPrompt: string): boolean {
   );
 }
 
+// Long enough for a 3-hour hold plus the post-hold conversation. Keepalives
+// on the callee leg reset silence before this 1-hour caller silence budget.
+export const HOLD_QUEUE_SILENCE_TIMEOUT_SECONDS = 3600;
+export const HOLD_QUEUE_MAX_DURATION_SECONDS = 12600;
+
 export const DEFAULT_CALL_ASSISTANT_CONFIG: JsonObject = {
   name: 'Rose Outbound Call Agent',
   model: {
@@ -125,12 +130,20 @@ export function buildCallAssistantConfig(
     isIvrNavigationPrompt(systemPrompt) ||
     isHoldQueuePrompt(systemPrompt);
 
+  const holdQueue = isHoldQueuePrompt(systemPrompt);
+
   return {
     ...configuredAssistant,
     ...(calleeSpeaksFirst
       ? {
           firstMessage: '',
           firstMessageMode: 'assistant-waits-for-user',
+        }
+      : {}),
+    ...(holdQueue
+      ? {
+          silenceTimeoutSeconds: HOLD_QUEUE_SILENCE_TIMEOUT_SECONDS,
+          maxDurationSeconds: HOLD_QUEUE_MAX_DURATION_SECONDS,
         }
       : {}),
     model: {
