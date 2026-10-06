@@ -98,6 +98,33 @@ identity test runs teardown and matching from an EXIT trap with pending status
 check passes. `cloudbench-multi-workstream.test.sh` now fails if any controller
 log reports a teardown survivor, or if any controller process outlives its run.
 
+### Follow-up: fixtures that faulted or omitted the old source
+
+After the October 6 merge of `main`, deploy lane 4cb failed in two places.
+Both were fixtures that still reached identity only through `ps`.
+
+- `cloudbench-hub-reaping.test.py` (added on `main`) faked a drifted or
+  unknown Hub birth by stubbing `ps -p <pid> -o lstart=`. Linux Hub records
+  are `proc-start:` identities, so the stub never reached the read. The
+  drift and unknown cases reaped the live Hub and failed with exit 14 and 15.
+  The fixture now also faults `cloudbench_proc_pid_observation` for the
+  target PID. Its fault variable is renamed because `cloudbench_pid_start_time`
+  declares `local observation`: dynamic scoping shadowed the fixture's value,
+  and under `set -u` the drift case passed only as an unknown. A probe of
+  `cloudbench_pid_birth_state` now shows `live`, `absent`, and `unknown` for
+  the normal, drift, and unknown cases.
+- Five `cloudbench_dependency_sync_test.py` fixtures extracted
+  `registry_owner_alive` or `inventory_refresh_lock_acquire` without the
+  `fleet_pid_*` helpers they call. The resulting `command not found` read
+  every owner as dead. One recovery fixture failed closed on it. The others
+  passed vacuously, including the sealed-lock fixture, which never acquired
+  its lock. They now load the helpers ahead of any fixture stubs. The
+  sealed-lock fixture now injects its drifting source at `fleet_pid_start_time`
+  and must acquire and release, so it fails when release re-reads identity.
+  `test_extracted_fleet_pid_identity_callers_include_birth_helpers` fails
+  whenever a fixture extracts an identity-reading fleet function without
+  the helpers.
+
 `scripts/setup-db.sh` still uses lstart. There, descendant identities are
 captured and re-verified within one bounded teardown, so the exposure is a
 fork inside that teardown window rather than across a run.
