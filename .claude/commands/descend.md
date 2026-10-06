@@ -879,6 +879,8 @@ Tests: <one sentence naming the actual assertion>
 - Pre-fix: <measured wrong value>
 - Post-fix: <measured passing value>
 
+**Golden reference:** `<reference-repo>/<path>:<line>` — <what the reference harness does in this situation>; this change <converges on it | diverges from it because <reason>>.
+
 **Environment**
 
 - **Evaluators:** `<id>` — **<how checked>**: <what is checked>. Catalog: `<method>` / `<check.type or judge>`
@@ -953,6 +955,8 @@ Tests: <one sentence naming the actual assertion>
 
 - Pre-fix: <measured wrong value>
 - Post-fix: <measured passing value>
+
+**Golden reference:** `<reference-repo>/<path>:<line>` — <what the reference harness does in this situation>; this change <converges on it | diverges from it because <reason>>.
 
 **Environment**
 

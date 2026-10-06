@@ -104,6 +104,20 @@ actual time you measured running this owning-boundary repro (for example
 Do not replace the measurement with “the test failed” or “the test passed.”
 Do not omit `Tests:`; a command list without saying what is asserted is invalid.
 
+**Golden reference:** `<reference-repo>/<path>:<line>` — <what the reference harness does in this situation, in one sentence>; this change <converges on it | diverges from it because <reason>>.
+
+Name the implementation in a reference harness that handles the same problem:
+`claude-code-src/` (vendored), `openclaw/`, `hermes-agent/`, or `codex/` (run
+`bash scripts/sync-reference-repos.sh` when a clone is missing). Cite a real
+`path:line` you opened in this session, one bullet per repo that has an analog,
+and say for each whether the proposed change moves Rose toward it. These
+harnesses are heavily tested, so the default fix is the one that brings Rose
+closer to them; a change that moves away from all of them must say why their
+approach does not fit. Look the references up before designing the fix, not
+after the request is questioned. When no reference repo has an analog, write
+`Not applicable — <which repos you searched and for what>`. Never cite a
+reference from memory, and never cite only the repo name.
+
 **Environment**
 
 - **Evaluators:** one bullet per catalog evaluator, in this shape:
@@ -178,8 +192,8 @@ End with one explicit approval question and unambiguous response syntax:
 An approval is invalid if any required section, Evidence field, in-scope file
 link, **What failed:** task-framed sentence, concrete FE agent link, last-call
 rendered LLM dump, local-repro `Tests:` sentence plus steps and measured
-wall-clock, or Environment triple (evaluators with how they are checked,
-fixtures, task prompt) is missing. For prompt / LLM-visible text approvals it
+wall-clock, **Golden reference:** citation, or Environment triple (evaluators
+with how they are checked, fixtures, task prompt) is missing. For prompt / LLM-visible text approvals it
 is also invalid if the exact diff body is omitted or replaced by a file link
 alone. `Not applicable — <reason>` counts as present; a blank field does
 not. Approval remains snapshot-scoped: if an in-scope hunk changes, issue a new
