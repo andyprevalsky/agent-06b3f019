@@ -4652,9 +4652,12 @@ PY
 # Default primary shape shared-cpu-2x (2 units/bench); 2 benches = 4 requested units.
 # active_shared = 71*2 + 1*2 = 144; projected = 148 > ceiling 140 → hard block. The
 # 15 stopped + 5 performance machines must NOT contribute (else active_shared > 144).
+# The fixture's live work never releases, so the admission wait only delays the
+# same rejection; one retry still exercises the wait loop.
 capacity_status=0
 CLOUDBENCH_SHARED_CPU_GOVERNOR=160 CLOUDBENCH_SHARED_CPU_HEADROOM=20 \
 CLOUDBENCH_APP_MACHINE_CEILING=1000 \
+CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=1 CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1 \
 CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=shared-cpu-2x \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-active-capacity.log" \
     capacity-h capacity-i --timeout 240 || capacity_status=$?
@@ -4666,8 +4669,10 @@ grep -qF "this run's 2 primaries (4 units) = 148" "$TMP_ROOT/controller-active-c
     fail "active capacity rejection must report the projected shared-unit total"
 grep -qF "ceiling 140 (governor 160" "$TMP_ROOT/controller-active-capacity.log" ||
     fail "active capacity rejection must report the governor ceiling"
+grep -qF "capacity admission remained blocked for 1s" "$TMP_ROOT/controller-active-capacity.log" ||
+    fail "a governor denial is retryable and must exhaust the admission wait before failing"
 if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
-    fail "an over-governor burst must be rejected BEFORE cloning"
+  fail "an over-governor burst must be rejected BEFORE cloning"
 fi
 echo "PASS: scenario 4 — shared-CPU governor blocks an over-ceiling burst; stopped + perf excluded"
 
