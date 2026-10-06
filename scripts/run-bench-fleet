@@ -170,8 +170,15 @@ cleanup_owned_script_snapshot() {
         --pid-start "$owner_start"
     )
     [ "$SCRIPT_SNAPSHOT_ALLOW_TRANSFER" = "1" ] && cleanup_args+=(--allow-transfer)
+    if [ -n "${CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_VANISH_BEFORE_CLEANUP:-}" ]; then
+        rm -rf "$CLOUDBENCH_SCRIPT_SNAPSHOT"
+    fi
     python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/$SCRIPT_SNAPSHOT_OWNER_HELPER" \
         "${cleanup_args[@]}" >/dev/null || {
+            # The helper lives inside the snapshot. A claimant that took the
+            # snapshot over removes it on its own exit; when that lands after
+            # the existence check above, nothing is left to remove or to leak.
+            [ -e "$CLOUDBENCH_SCRIPT_SNAPSHOT" ] || return 0
             echo "FATAL: could not remove the exact owned script snapshot" >&2
             return 1
         }
