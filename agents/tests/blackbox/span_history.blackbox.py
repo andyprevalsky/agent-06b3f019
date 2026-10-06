@@ -176,6 +176,141 @@ def test_span_history_appends_to_latest_existing_segment():
                 os.environ["SPAN_HISTORY_FILE"] = old_env
 
 
+def _init_history_repo(path: str, branch: str) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", path], check=True)
+    subprocess.run(["git", "symbolic-ref", "HEAD", f"refs/heads/{branch}"], cwd=path, check=True)
+
+
+def test_concurrent_branches_roll_into_separate_segments():
+    """A union merge of two branches' appends to one segment can exceed the blob cap each side respected."""
+    import subprocess
+
+    import benchmarks.span_history as history
+
+    def observation(agent_id: str) -> dict:
+        return {
+            "benchmark": "chat-mode",
+            "environment": "local",
+            "agent_id": agent_id,
+            "run_status": "passed",
+            "span_key": "agents.helpers.llm.call_llm:execute_loop",
+            "span_name": "call_llm",
+            "duration_ms": 1234,
+        }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        original_dir = history.HISTORY_DIR
+        original_file = history.HISTORY_FILE
+        original_limit = history.MAX_HISTORY_FILE_BYTES
+        old_env = os.environ.pop("SPAN_HISTORY_FILE", None)
+        try:
+            _init_history_repo(tmp, "feature/A_one")
+            history.HISTORY_DIR = tmp
+            history.HISTORY_FILE = str(Path(tmp) / "span_durations.jsonl")
+            history.MAX_HISTORY_FILE_BYTES = 1
+            Path(history.HISTORY_FILE).write_text("already-full\n")
+            date_key = datetime.now(timezone.utc).strftime("%Y%m%d")
+
+            assert history.record_span_observations([observation("agent-a")]) == 1
+            subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/other/b"], cwd=tmp, check=True)
+            assert history.record_span_observations([observation("agent-b")]) == 1
+            assert history.record_span_observations([observation("agent-b2")]) == 1
+
+            segments = sorted(path.name for path in Path(tmp).glob("span_durations.*.jsonl"))
+            assert segments == [
+                f"span_durations.{date_key}.feature-a-one.jsonl",
+                f"span_durations.{date_key}.other-b.02.jsonl",
+                f"span_durations.{date_key}.other-b.jsonl",
+            ], segments
+            assert sorted(record["agent_id"] for record in history.load_records()) == [
+                "agent-a",
+                "agent-b",
+                "agent-b2",
+            ]
+
+            Path(tmp, ".git", "HEAD").write_text("1" * 40 + "\n")
+            assert Path(history._append_history_path()).name == f"span_durations.{date_key}.jsonl"
+        finally:
+            history.HISTORY_DIR = original_dir
+            history.HISTORY_FILE = original_file
+            history.MAX_HISTORY_FILE_BYTES = original_limit
+            if old_env is not None:
+                os.environ["SPAN_HISTORY_FILE"] = old_env
+
+
+def test_every_history_ledger_fits_under_github_blob_limit():
+    import benchmarks.span_history as history
+
+    github_blob_limit = 100 * 1024 * 1024
+    oversized = {
+        path.name: path.stat().st_size
+        for path in Path(history.HISTORY_DIR).glob("*.jsonl")
+        if path.stat().st_size >= github_blob_limit
+    }
+    assert not oversized, f"history ledgers GitHub will reject on push: {oversized}"
+
+
+def test_every_tracked_history_ledger_is_union_merged():
+    """Concurrent branches append rows to the same ledger tail, so a text merge conflicts at EOF."""
+    import subprocess
+
+    import benchmarks.span_history as history
+    import benchmarks.timeout_history as timeouts
+
+    ledger_names = {
+        Path(history.HISTORY_FILE).name,
+        Path(timeouts.HISTORY_FILE).name,
+        Path(timeouts.ATTEMPTS_FILE).name,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        original_dir = history.HISTORY_DIR
+        original_file = history.HISTORY_FILE
+        original_limit = history.MAX_HISTORY_FILE_BYTES
+        old_env = os.environ.pop("SPAN_HISTORY_FILE", None)
+        try:
+            _init_history_repo(tmp, "feature/a")
+            history.HISTORY_DIR = tmp
+            history.HISTORY_FILE = str(Path(tmp) / "span_durations.jsonl")
+            history.MAX_HISTORY_FILE_BYTES = 1
+            Path(history.HISTORY_FILE).write_text("already-full\n")
+            for _ in range(2):
+                segment = Path(history._append_history_path())
+                ledger_names.add(segment.name)
+                segment.write_text("already-full\n")
+        finally:
+            history.HISTORY_DIR = original_dir
+            history.HISTORY_FILE = original_file
+            history.MAX_HISTORY_FILE_BYTES = original_limit
+            if old_env is not None:
+                os.environ["SPAN_HISTORY_FILE"] = old_env
+
+    history_dir = Path(history.HISTORY_DIR).resolve()
+    repo_root = Path(
+        subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=history_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    relative_dir = history_dir.relative_to(repo_root)
+    paths = [str(relative_dir / name) for name in sorted(ledger_names)]
+    attrs = subprocess.run(
+        ["git", "check-attr", "merge", "--", *paths],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+
+    assert len(paths) == 5, paths
+    not_union = [line for line in attrs if not line.endswith(": merge: union")]
+    assert not not_union, f"history ledgers without merge=union in .gitattributes: {not_union}"
+
+
 def test_compare_observations_marks_regression():
     from benchmarks.span_history import compare_observations, record_span_observations
 
@@ -456,6 +591,9 @@ async def run_all_tests():
     r.record("default_history_rollover", test_default_span_history_rolls_over_before_git_blob_limit)
     r.record("batch_history_rollover", test_one_batch_cannot_overfill_a_span_history_segment)
     r.record("latest_segment_append", test_span_history_appends_to_latest_existing_segment)
+    r.record("history_ledgers_union_merged", test_every_tracked_history_ledger_is_union_merged)
+    r.record("branches_roll_into_separate_segments", test_concurrent_branches_roll_into_separate_segments)
+    r.record("history_ledgers_fit_github_blob_limit", test_every_history_ledger_fits_under_github_blob_limit)
     r.record("compare_marks_regression", test_compare_observations_marks_regression)
     r.record("record_from_embedded_logs", test_agent_latency_records_span_history_from_embedded_logs)
     r.record("parse_nested_fly_clickhouse_json", test_agent_latency_parses_nested_fly_clickhouse_json)

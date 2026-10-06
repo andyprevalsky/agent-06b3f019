@@ -24,6 +24,7 @@ import type { RoseStreamChunk } from '../../providers/rose/types';
 import { CEREBRAS_API_URL, OPENAI_RESPONSES_API_URL } from '../../providers/rose/transport';
 import { buildRouterCompletionOptions } from '../../providers/chat/routerLlm';
 import { buildGeneratorCompletionOptions } from '../../providers/chat/generatorLlm';
+import { withIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
 
 type ProviderFormat = 'anthropic' | 'openai_chat' | 'openai_responses';
 
@@ -265,9 +266,9 @@ async function testChatCompletionDumps(consumerClose = false): Promise<void> {
 async function main(): Promise<void> {
   await testSharedFixtures();
   testAmbiguousFinalItemsFailTyped();
-  await testCompletionClientPreservesItemProvenance();
-  await testChatCompletionDumps();
-  await testChatCompletionDumps(true);
+  await withIsolatedFundedKeyCooldowns(testCompletionClientPreservesItemProvenance);
+  await withIsolatedFundedKeyCooldowns(() => testChatCompletionDumps());
+  await withIsolatedFundedKeyCooldowns(() => testChatCompletionDumps(true));
   console.log(`PASS llm-stream-contract (${fixtures.cases.length} shared provider fixtures)`);
 }
 

@@ -470,6 +470,13 @@ failures = mod.validate_browser_agents_terminated_with_recording(
 )
 assert any("no correctly attached recording" in f for f in failures), failures
 
+# A lifecycle row without a tool name still counts as browser progress
+failures = mod.validate_browser_agents_terminated_with_recording(
+    agent,
+    [msg(task_id="t4", action_type="task_complete", toolStatus="FINISHED")],
+)
+assert any("no correctly attached recording" in f for f in failures), failures
+
 # Exercise actual socket timeouts at the public verifier boundary. A fresh GET
 # can recover a stalled response, while persistent/auth/JSON failures stay closed.
 for fault in ("headers-once", "body-once", "always", "forbidden", "malformed"):

@@ -205,6 +205,10 @@ def test_worker_and_backend_use_the_same_canonical_auth_realms() -> None:
         auth_realm_from_url("https://localhost.evil.com/?authRealm=doordash.com")
         != "doordash.com"
     )
+    assert (
+        auth_realm_from_url("https://anyone.loca.lt/?authRealm=doordash.com")
+        != "doordash.com"
+    )
     assert auth_realm_from_url("about:blank") == ""
     assert auth_realm_from_url("file:///tmp/page.html") == ""
     assert auth_realm_matches_url("doordash.com", "https://identity.doordash.com/login")

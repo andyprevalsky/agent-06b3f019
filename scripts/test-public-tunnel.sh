@@ -56,18 +56,37 @@ if [ "$actual_json" != "$expected_json" ]; then
     exit 1
 fi
 
+# Cloud browsers are this origin's only consumer, so ask as one. Providers that
+# gate browsers behind an interstitial pass curl's own User-Agent: localtunnel
+# answers a browser with a 511 password page that a cloud browser can never get
+# past, which surfaced as payment tasks timing out instead of failing here.
+BROWSER_USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+# The mount point in front-end/index.html.
+APP_SHELL_MARKER='<div id="root">'
+body_file="$(mktemp "${TMPDIR:-/tmp}/rose-public-tunnel.XXXXXX")"
+trap 'rm -f "$body_file"' EXIT
+
 status=""
 for attempt in $(seq 1 60); do
     # --noproxy '*' so an inherited proxy can neither fake a healthy tunnel with
     # a 407/5xx nor mask a healthy one by refusing the trycloudflare host.
-    status="$(curl -fsS -o /dev/null -w '%{http_code}' --noproxy '*' "$PUBLIC_BASE_URL/test_payment" 2>/dev/null || true)"
-    if [ "$status" = "200" ]; then
+    status="$(curl -sS -o "$body_file" -w '%{http_code}' --noproxy '*' \
+        -A "$BROWSER_USER_AGENT" "$PUBLIC_BASE_URL/test_payment" 2>/dev/null || true)"
+    if [ "$status" = "200" ] && grep -qF "$APP_SHELL_MARKER" "$body_file"; then
         break
     fi
+    # 511 Network Authentication Required is a tunnel's browser gate, not a
+    # transient state of the stack.
+    [ "$status" = "511" ] && break
     sleep 1
 done
 if [ "$status" != "200" ]; then
-    echo "❌ $PUBLIC_BASE_URL/test_payment returned HTTP $status, expected 200"
+    echo "❌ $PUBLIC_BASE_URL/test_payment returned HTTP $status to a browser, expected 200"
+    [ "$status" = "511" ] && echo "   The tunnel provider gates browsers behind an interstitial that cloud browsers cannot pass."
+    exit 1
+fi
+if ! grep -qF "$APP_SHELL_MARKER" "$body_file"; then
+    echo "❌ $PUBLIC_BASE_URL/test_payment answered a browser with a page that is not the app (tunnel interstitial?)"
     exit 1
 fi
 

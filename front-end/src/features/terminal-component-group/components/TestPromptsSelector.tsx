@@ -59,13 +59,14 @@ const TEST_PAYMENT_BASE_URL_TOKEN = '{{TEST_PAYMENT_BASE_URL}}';
 async function resolvePromptText(prompt: string): Promise<string> {
   if (!prompt.includes(TEST_PAYMENT_BASE_URL_TOKEN)) return prompt;
   const tunnelUrl = await fetchTestPaymentPublicUrl();
+  const localBaseUrl = BACKEND_BASE_URL || window.location.origin;
   if (!tunnelUrl) {
     console.warn(
-      `[TestPrompts] No ngrok tunnel for the local backend — using ${BACKEND_BASE_URL}, ` +
+      `[TestPrompts] No ngrok tunnel for the local backend — using ${localBaseUrl}, ` +
         `which the cloud browser agent cannot reach. Start one: ngrok http <backend-port>.`,
     );
   }
-  return prompt.replaceAll(TEST_PAYMENT_BASE_URL_TOKEN, tunnelUrl ?? BACKEND_BASE_URL);
+  return prompt.replaceAll(TEST_PAYMENT_BASE_URL_TOKEN, tunnelUrl ?? localBaseUrl);
 }
 
 function promptMatchesSearchQuery(prompt: TestPrompt, searchQuery: string): boolean {
