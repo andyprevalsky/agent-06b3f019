@@ -16,9 +16,6 @@
  * and completed runs through one index.
  */
 
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import * as fs from 'node:fs/promises';
-import path from 'path';
 import { ADMIN_USER_IDS } from '../utils/adminAccess';
 import {
   deleteHubAncestorSkeletonsFromBundle,
@@ -44,6 +41,28 @@ import {
 } from './benchmarkHubLookup';
 import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
 import { coalesceHubRunPuts } from './benchmarkHubInFlight';
+import {
+  finiteMetric,
+  normalizeAgentId,
+  taskSummary,
+  groupedRunCatalog,
+  HUB_GROUP_FIELDS,
+  HUB_GROUP_PAGE_SIZE,
+  runGroupFields,
+  runGroupSchedule,
+} from './benchmarkHubRunProjection';
+import {
+  getObject,
+  getObjectStrict,
+  putObject,
+  resetHubObjectStorageForTests,
+} from './benchmarkHubStorage';
+import type {
+  HubRunCost,
+  HubRunDetail,
+  HubRunSummary,
+  HubRunTaskDetail,
+} from './benchmarkHubTypes';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -75,27 +94,17 @@ export {
   type HubAgentRunIndexSnapshot,
 } from './benchmarkHubAgentIndex';
 export { canonicalAgentTree, getRunAgent, subtreeAgentsForBus } from './benchmarkHubView';
+export type {
+  HubAgentView,
+  HubRunCost,
+  HubRunDetail,
+  HubRunSummary,
+  HubRunTaskDetail,
+  HubRunTaskSummary,
+} from './benchmarkHubTypes';
 
 const log = createLogger('BenchmarkHubStore');
 
-const KEY_PREFIX = 'benchmark-hub';
-const LOCAL_HUB_ROOT = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
-const isolatedRunId =
-  process.env.BENCHMARK_ISOLATED_RUN === 'true' ? process.env.BENCHMARK_RUN_ID : undefined;
-if (
-  process.env.BENCHMARK_ISOLATED_RUN === 'true' &&
-  (isolatedRunId === '.' ||
-    isolatedRunId === '..' ||
-    !/^[A-Za-z0-9._-]+$/.test(isolatedRunId ?? ''))
-) {
-  throw new Error('BENCHMARK_RUN_ID must be a safe, nonempty ID for an isolated Benchmark Hub');
-}
-// Each isolated stack has its own database. Keep its local Hub index in the
-// same isolation boundary so parallel stacks cannot overwrite one another's
-// run registrations before the terminal bundles are mirrored to the durable Hub.
-const LOCAL_DIR = isolatedRunId
-  ? path.join(LOCAL_HUB_ROOT, 'isolated-runs', isolatedRunId)
-  : LOCAL_HUB_ROOT;
 const AGENT_RUN_INDEX_KEY = 'agent-run-index.json';
 const AGENT_RUN_INDEX_REVISION_KEY = 'agent-run-index-revision.json';
 
@@ -113,177 +122,8 @@ export function canReadBenchmarkArchive(req: { isInternal?: boolean; userId?: st
   return req.userId !== undefined && BENCHMARK_HUB_ADMIN_USER_IDS.has(req.userId);
 }
 
-export interface HubRunTaskSummary {
-  name: string;
-  passed: boolean | null;
-  status: string;
-  agent_id: string | null;
-  duration_seconds: number | null;
-  cost_cents: number | null;
-  world_model_mode: string | null;
-  fast_mode: boolean;
-  tree_agent_count: number | null;
-  failure_reason: string | null;
-  lifecycle_stage?: string;
-  startup_label?: string;
-  row_id?: string;
-  child_run_id?: string;
-  run_number?: number;
-  tokens_in?: number | null;
-  tokens_out?: number | null;
-  cache_hit_pct?: number | null;
-  llm_call_count?: number | null;
-  message_count?: number | null;
-}
-
-export interface HubRunSummary {
-  run_id: string;
-  timestamp: string;
-  suite: string | null;
-  source: string | null;
-  live: boolean;
-  uploaded_at: string;
-  tasks: HubRunTaskSummary[];
-  group_run_id?: string;
-  group_member_id?: string;
-  group_run_number?: number;
-  group_timestamp?: string;
-  group_total?: number;
-  run_group?: {
-    members: Array<{ member_id: string; name: string; run_number: number }>;
-    status: string;
-    outcomes: Record<string, { status: string; controller_exit_code: number | null }>;
-    wall_clock_seconds: number | null;
-    finished_at: string | null;
-  };
-  is_group?: boolean;
-  task_total?: number;
-  task_counts?: {
-    passed: number;
-    failed: number;
-    queued: number;
-    infra_error?: number;
-    cancelled?: number;
-  };
-  code?: string | null;
-  elapsed_s?: number | null;
-  cost?: Record<string, unknown> | null;
-}
-
-export interface HubAgentView {
-  agent: Record<string, unknown>;
-  messages: Array<Record<string, unknown>>;
-  tree: Array<Record<string, unknown>>;
-}
-
 export function hubRunVisibleFromMarker(marker: string | null): boolean {
   return marker === null || marker === 'true';
-}
-
-let s3Client: S3Client | null = null;
-
-function r2Configured(): boolean {
-  // Local workspaces have production R2 credentials available for trace
-  // diagnostics, but Benchmark Hub writes must stay worktree-local. Otherwise
-  // independent test databases race through one production index and local
-  // cleanup can hide real runs. Use Render's deployment identity rather than
-  // NODE_ENV: local production-mode builds must remain isolated too.
-  const useR2 = process.env.BENCHMARK_HUB_STORAGE !== 'local' && process.env.RENDER === 'true';
-  return Boolean(
-    useR2 &&
-    process.env.R2_ACCOUNT_ID &&
-    process.env.R2_ACCESS_KEY_ID &&
-    process.env.R2_SECRET_ACCESS_KEY &&
-    process.env.R2_BUCKET_TRACE_ARCHIVE
-  );
-}
-
-function getS3Client(): S3Client {
-  if (s3Client !== null) return s3Client;
-  const accountId = process.env.R2_ACCOUNT_ID || '';
-  s3Client = new S3Client({
-    region: 'auto',
-    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
-      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
-    },
-  });
-  return s3Client;
-}
-
-async function streamToBuffer(body: unknown): Promise<Buffer> {
-  if (body instanceof Buffer) return body;
-  const stream = body as AsyncIterable<Uint8Array>;
-  const chunks: Uint8Array[] = [];
-  for await (const chunk of stream) chunks.push(chunk);
-  return Buffer.concat(chunks);
-}
-
-async function putObject(key: string, data: string): Promise<void> {
-  if (r2Configured()) {
-    await getS3Client().send(
-      new PutObjectCommand({
-        Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
-        Key: `${KEY_PREFIX}/${key}`,
-        Body: data,
-        ContentType: 'application/json',
-      })
-    );
-    return;
-  }
-  const target = path.join(LOCAL_DIR, key);
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  const tmp = `${target}.tmp-${process.pid}`;
-  await fs.writeFile(tmp, data);
-  await fs.rename(tmp, target);
-}
-
-function isObjectNotFound(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const record = error as {
-    code?: unknown;
-    name?: unknown;
-    $metadata?: { httpStatusCode?: unknown };
-  };
-  return (
-    record.code === 'ENOENT' ||
-    record.name === 'NoSuchKey' ||
-    record.name === 'NotFound' ||
-    record.$metadata?.httpStatusCode === 404
-  );
-}
-
-/** Null means a confirmed missing object; transport/permission faults throw. */
-async function getObjectStrict(key: string): Promise<string | null> {
-  if (r2Configured()) {
-    try {
-      const response = await getS3Client().send(
-        new GetObjectCommand({
-          Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
-          Key: `${KEY_PREFIX}/${key}`,
-        })
-      );
-      return (await streamToBuffer(response.Body)).toString('utf-8');
-    } catch (error: unknown) {
-      if (isObjectNotFound(error)) return null;
-      throw error;
-    }
-  }
-  try {
-    return await fs.readFile(path.join(LOCAL_DIR, key), 'utf-8');
-  } catch (error: unknown) {
-    if (isObjectNotFound(error)) return null;
-    throw error;
-  }
-}
-
-async function getObject(key: string): Promise<string | null> {
-  try {
-    return await getObjectStrict(key);
-  } catch {
-    return null;
-  }
 }
 
 async function readAgentRunIndexStrict(): Promise<HubAgentRunIndexSnapshot | null> {
@@ -428,307 +268,7 @@ async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
   return pending;
 }
 
-function normalizeAgentId(value: unknown): string | null {
-  return (typeof value === 'string' ? value.trim() : '') || null;
-}
-
-function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
-  const passed = typeof task.passed === 'boolean' ? task.passed : null;
-  // The verdict wins over the raw agent status (run bundles carry the AGENT
-  // status — e.g. ACTIVE at scoring time — which is not the task outcome).
-  const status =
-    passed !== null
-      ? passed
-        ? 'passed'
-        : 'failed'
-      : typeof task.status === 'string' && task.status
-        ? task.status
-        : 'running';
-  return {
-    name: String(task.name ?? ''),
-    passed,
-    status,
-    agent_id: normalizeAgentId(task.agent_id),
-    duration_seconds: typeof task.duration_seconds === 'number' ? task.duration_seconds : null,
-    cost_cents: typeof task.cost_cents === 'number' ? task.cost_cents : null,
-    world_model_mode: typeof task.world_model_mode === 'string' ? task.world_model_mode : null,
-    fast_mode: task.fast_mode_cache_enabled === true || task.fast_mode === true,
-    tree_agent_count: typeof task.tree_agent_count === 'number' ? task.tree_agent_count : null,
-    failure_reason: typeof task.failure_reason === 'string' ? task.failure_reason : null,
-    ...(typeof task.lifecycle_stage === 'string' ? { lifecycle_stage: task.lifecycle_stage } : {}),
-    ...(typeof task.startup_label === 'string' ? { startup_label: task.startup_label } : {}),
-  };
-}
-
-/**
- * Upsert a run bundle (live snapshot or final). Returns the stored summary.
- */
-const HUB_GROUP_FIELDS = [
-  'group_run_id',
-  'group_member_id',
-  'group_run_number',
-  'group_timestamp',
-  'group_total',
-] as const;
-const HUB_GROUP_PAGE_SIZE = 100;
-
-function finiteMetric(value: unknown): number | null {
-  return typeof value === 'number' &&
-    Number.isFinite(value) &&
-    value >= 0 &&
-    value <= Number.MAX_SAFE_INTEGER
-    ? value
-    : null;
-}
-
-function runGroupFields(bundle: Record<string, unknown>): Partial<HubRunSummary> {
-  if (bundle.group_run_id === undefined) return {};
-  if (
-    typeof bundle.group_run_id !== 'string' ||
-    !/^[A-Za-z0-9._-]{1,128}$/.test(bundle.group_run_id) ||
-    bundle.group_run_id === bundle.run_id ||
-    typeof bundle.group_member_id !== 'string' ||
-    !/^[A-Za-z0-9._-]{1,64}$/.test(bundle.group_member_id) ||
-    typeof bundle.group_run_number !== 'number' ||
-    !Number.isInteger(bundle.group_run_number) ||
-    bundle.group_run_number < 1 ||
-    typeof bundle.group_total !== 'number' ||
-    !Number.isInteger(bundle.group_total) ||
-    bundle.group_total < 1 ||
-    bundle.group_total > 100000 ||
-    typeof bundle.group_timestamp !== 'string' ||
-    bundle.group_timestamp.length > 40 ||
-    !Number.isFinite(Date.parse(bundle.group_timestamp))
-  )
-    throw new Error('Invalid Benchmark Hub group membership');
-  return {
-    group_run_id: bundle.group_run_id,
-    group_member_id: bundle.group_member_id,
-    group_run_number: bundle.group_run_number,
-    group_timestamp: bundle.group_timestamp,
-    group_total: bundle.group_total,
-  };
-}
-
-function runGroupSchedule(bundle: Record<string, unknown>): HubRunSummary['run_group'] {
-  if (bundle.run_group === undefined) return undefined;
-  if (
-    bundle.group_run_id !== undefined ||
-    typeof bundle.run_group !== 'object' ||
-    bundle.run_group === null ||
-    Array.isArray(bundle.run_group)
-  ) {
-    throw new Error('Invalid Benchmark Hub group schedule');
-  }
-  const value = bundle.run_group as Record<string, unknown>;
-  if (
-    !Array.isArray(value.members) ||
-    value.members.length < 1 ||
-    value.members.length > 100000 ||
-    typeof value.status !== 'string' ||
-    !['running', 'passed', 'failed', 'cancelled'].includes(value.status)
-  ) {
-    throw new Error('Invalid Benchmark Hub group schedule');
-  }
-  const seen = new Set<string>();
-  const members = value.members.map((raw) => {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw))
-      throw new Error('Invalid Benchmark Hub group member');
-    const member = raw as Record<string, unknown>;
-    if (
-      typeof member.member_id !== 'string' ||
-      !/^[A-Za-z0-9._-]{1,64}$/.test(member.member_id) ||
-      seen.has(member.member_id) ||
-      typeof member.name !== 'string' ||
-      !/^[A-Za-z0-9._-]{1,200}$/.test(member.name) ||
-      typeof member.run_number !== 'number' ||
-      !Number.isInteger(member.run_number) ||
-      member.run_number < 1
-    ) {
-      throw new Error('Invalid Benchmark Hub group member');
-    }
-    seen.add(member.member_id);
-    return { member_id: member.member_id, name: member.name, run_number: member.run_number };
-  });
-  if (JSON.stringify(members).length > 10 * 1024 * 1024)
-    throw new Error('Benchmark Hub group schedule is oversized');
-  const outcomes: NonNullable<HubRunSummary['run_group']>['outcomes'] = {};
-  if (value.outcomes !== undefined) {
-    if (!value.outcomes || typeof value.outcomes !== 'object' || Array.isArray(value.outcomes))
-      throw new Error('Invalid campaign controller outcomes');
-    for (const [id, raw] of Object.entries(value.outcomes as Record<string, unknown>)) {
-      if (!seen.has(id) || !raw || typeof raw !== 'object' || Array.isArray(raw))
-        throw new Error('Invalid campaign controller outcome');
-      const outcome = raw as Record<string, unknown>;
-      if (
-        typeof outcome.status !== 'string' ||
-        !['queued', 'running', 'passed', 'failed', 'cancelled'].includes(outcome.status) ||
-        (outcome.controller_exit_code !== null &&
-          (typeof outcome.controller_exit_code !== 'number' ||
-            !Number.isInteger(outcome.controller_exit_code) ||
-            Math.abs(outcome.controller_exit_code) > 65535))
-      ) {
-        throw new Error('Invalid campaign controller outcome');
-      }
-      outcomes[id] = {
-        status: outcome.status,
-        controller_exit_code: outcome.controller_exit_code as number | null,
-      };
-    }
-  }
-  const elapsed =
-    value.wall_clock_seconds === null || value.wall_clock_seconds === undefined
-      ? null
-      : finiteMetric(value.wall_clock_seconds);
-  if (
-    value.wall_clock_seconds !== null &&
-    value.wall_clock_seconds !== undefined &&
-    elapsed === null
-  )
-    throw new Error('Invalid campaign elapsed time');
-  const finished =
-    value.finished_at === null || value.finished_at === undefined ? null : value.finished_at;
-  if (
-    finished !== null &&
-    (typeof finished !== 'string' || finished.length > 40 || !Number.isFinite(Date.parse(finished)))
-  )
-    throw new Error('Invalid campaign finish time');
-  return {
-    members,
-    status: value.status,
-    outcomes,
-    wall_clock_seconds: elapsed,
-    finished_at: finished as string | null,
-  };
-}
-
-/** One immutable schedule and compact child summaries own the visible group. */
-function groupedRunCatalog(index: HubRunSummary[], preview = true): HubRunSummary[] {
-  const output: HubRunSummary[] = [];
-  const owners = new Map(index.filter((run) => run.run_group).map((run) => [run.run_id, run]));
-  const members = new Map<string, HubRunSummary[]>();
-  for (const run of index) {
-    if (run.group_run_id) {
-      const children = members.get(run.group_run_id) ?? [];
-      children.push(run);
-      members.set(run.group_run_id, children);
-    } else if (!run.run_group) output.push(run);
-  }
-  for (const id of new Set([...owners.keys(), ...members.keys()])) {
-    const owner = owners.get(id);
-    const children = (members.get(id) ?? []).sort((a, b) =>
-      (a.group_member_id ?? a.run_id).localeCompare(b.group_member_id ?? b.run_id)
-    );
-    const byMember = new Map(children.map((child) => [child.group_member_id!, child]));
-    const schedule =
-      owner?.run_group?.members ??
-      children.map((child) => ({
-        member_id: child.group_member_id!,
-        name: child.tasks[0]?.name ?? 'benchmark',
-        run_number: child.group_run_number ?? 1,
-      }));
-    const tasks: HubRunTaskSummary[] = schedule.flatMap((member) => {
-      const child = byMember.get(member.member_id);
-      const rows = child?.tasks ?? [
-        {
-          name: member.name,
-          passed: null,
-          status: 'queued',
-          agent_id: null,
-          duration_seconds: null,
-          cost_cents: null,
-          world_model_mode: null,
-          fast_mode: false,
-          tree_agent_count: null,
-          failure_reason: null,
-        },
-      ];
-      return rows.map((task, slot) => {
-        const outcome = owner?.run_group?.outcomes?.[member.member_id];
-        const terminalController =
-          outcome && ['passed', 'failed', 'cancelled'].includes(outcome.status);
-        const pendingTask =
-          task.passed === null && !['INFRA_ERROR', 'error', 'cancelled'].includes(task.status);
-        const lifecycle =
-          terminalController && pendingTask
-            ? {
-                status: outcome.status === 'cancelled' ? 'cancelled' : 'INFRA_ERROR',
-                passed: null,
-                lifecycle_stage:
-                  task.lifecycle_stage === 'released'
-                    ? 'released'
-                    : 'controller-terminal-cleanup-unknown',
-                failure_reason:
-                  outcome.status === 'cancelled'
-                    ? 'Campaign controller was cancelled before a benchmark result was published'
-                    : `Controller exited with code ${outcome.controller_exit_code ?? 'unknown'} before a benchmark result was published`,
-              }
-            : {};
-        return {
-          ...task,
-          ...lifecycle,
-          row_id: `${member.member_id}-${slot}`,
-          ...(child ? { child_run_id: child.run_id } : {}),
-          run_number: member.run_number,
-        };
-      });
-    });
-    const total = owner
-      ? tasks.length
-      : Math.max(tasks.length, ...children.map((child) => child.group_total ?? 0));
-    const counts = {
-      passed: tasks.filter((task) => task.passed === true).length,
-      failed: tasks.filter((task) => task.passed === false).length,
-      queued:
-        tasks.filter(
-          (task) =>
-            task.passed === null && !['INFRA_ERROR', 'error', 'cancelled'].includes(task.status)
-        ).length +
-        total -
-        tasks.length,
-      infra_error: tasks.filter(
-        (task) => task.passed === null && ['INFRA_ERROR', 'error'].includes(task.status)
-      ).length,
-      cancelled: tasks.filter((task) => task.passed === null && task.status === 'cancelled').length,
-    };
-    const timestamp =
-      owner?.timestamp || children[0]?.group_timestamp || children[0]?.timestamp || '';
-    const uploadedAt =
-      [owner?.uploaded_at ?? '', ...children.map((child) => child.uploaded_at)].sort().at(-1) ?? '';
-    const elapsed =
-      owner?.run_group?.wall_clock_seconds ??
-      (owner?.live ? (Date.now() - Date.parse(timestamp)) / 1000 : null);
-    const cost: Record<string, unknown> = {};
-    for (const field of ['agents_llm_usd', 'wmh_grounding_usd', 'infra_usd', 'total_usd']) {
-      const values = children
-        .map((child) => finiteMetric(child.cost?.[field]))
-        .filter((value): value is number => value !== null);
-      const sum = values.reduce((acc, value) => acc + value, 0);
-      cost[field] = values.length && Number.isFinite(sum) ? sum : null;
-    }
-    cost.fast_cache_hit_rate = null;
-    const codes = new Set(children.map((child) => child.code ?? null));
-    output.push({
-      run_id: id,
-      timestamp,
-      suite: owner?.suite ?? children[0]?.suite ?? null,
-      source: 'benchmark-campaign',
-      live: owner ? owner.live : true,
-      uploaded_at: uploadedAt,
-      tasks: preview ? tasks.slice(0, HUB_GROUP_PAGE_SIZE) : tasks,
-      task_counts: counts,
-      task_total: total,
-      is_group: true,
-      code: codes.size === 1 ? [...codes][0] : null,
-      elapsed_s: finiteMetric(elapsed),
-      cost,
-    });
-  }
-  // Match the physical catalog's newest-started-run ordering, independently of
-  // the time that any one member last published.
-  return output.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-}
-
+/** Upsert a run bundle (live snapshot or final), returning the stored summary. */
 export const putRun = coalesceHubRunPuts(storeRun);
 
 async function storeRun(
@@ -1016,42 +556,6 @@ export async function getRunBundleStrict(runId: string): Promise<Record<string, 
   return parseHubRunBundle(raw);
 }
 
-export interface HubRunTaskDetail extends HubRunTaskSummary {
-  tokens_in: number | null;
-  tokens_out: number | null;
-  cache_hit_pct: number | null;
-  llm_call_count: number | null;
-  message_count: number | null;
-}
-
-export interface HubRunCost {
-  agents_llm_usd: number | null;
-  wmh_grounding_usd: number | null;
-  infra_usd: number | null;
-  total_usd: number | null;
-  fast_cache_hit_rate: number | null;
-}
-
-export interface HubRunDetail extends Omit<HubRunSummary, 'tasks' | 'cost'> {
-  tasks: HubRunTaskDetail[];
-  totals: {
-    passed: number;
-    failed: number;
-    running: number;
-    cost_cents: number;
-    tokens_in: number;
-    tokens_out: number;
-    agents: number;
-  };
-  /** Code provenance from the executing controller (branch@ref + dirty diff). */
-  code: string | null;
-  /** Run wall-clock from the report card (falls back to now - timestamp live). */
-  elapsed_s: number | null;
-  /** Report-card cost breakdown (LLM / WMH grounding / infra vCPU / total). */
-  cost: HubRunCost | null;
-  pagination?: { offset: number; limit: number; total: number };
-}
-
 /**
  * The run view's data: index summary enriched per-task from the stored bundle
  * (tokens, cache hit, call/message counts — the report-card fields the fleet
@@ -1168,6 +672,6 @@ export async function deleteRun(runId: string): Promise<boolean> {
 
 /** Test-only: reset in-process state (local dir is controlled by the caller). */
 export function _resetForTests(): void {
-  s3Client = null;
+  resetHubObjectStorageForTests();
   __resetHubResolutionCachesForTest();
 }

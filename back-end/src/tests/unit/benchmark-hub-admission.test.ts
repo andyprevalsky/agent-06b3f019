@@ -24,12 +24,30 @@ function loadDeclaration<T>(name: string, bindings: Record<string, unknown>): T 
     path.join(process.cwd(), 'src/providers/benchmarkHubStore.ts');
   const source = readFileSync(filename, 'utf8');
   const tree = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
+  const groupFilename = path.join(path.dirname(filename), 'benchmarkHubRunProjection.ts');
+  const grouped = tree.statements.some(
+    (node) =>
+      ts.isImportDeclaration(node) &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      node.moduleSpecifier.text === './benchmarkHubRunProjection'
+  );
+  const statements = [
+    ...tree.statements,
+    ...(grouped
+      ? ts.createSourceFile(
+          groupFilename,
+          readFileSync(groupFilename, 'utf8'),
+          ts.ScriptTarget.Latest,
+          true
+        ).statements
+      : []),
+  ];
   const named = new Map<string, ts.Statement>();
-  for (const node of tree.statements) {
+  for (const node of statements) {
     if (ts.isFunctionDeclaration(node) && node.name) named.set(node.name.text, node);
     if (ts.isVariableStatement(node)) {
       for (const declaration of node.declarationList.declarations) {
-        named.set(declaration.name.getText(tree), node);
+        named.set(declaration.name.getText(), node);
       }
     }
   }
@@ -47,9 +65,9 @@ function loadDeclaration<T>(name: string, bindings: Record<string, unknown>): T 
   };
   include(name);
   assert.ok(included.has(named.get(name)!));
-  const declarations = tree.statements.filter((node) => included.has(node));
+  const declarations = statements.filter((node) => included.has(node));
   const compiled = ts.transpileModule(
-    declarations.map((node) => node.getText(tree)).join('\n') + `\nglobalThis.owner = ${name};`,
+    declarations.map((node) => node.getText()).join('\n') + `\nglobalThis.owner = ${name};`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }
   ).outputText;
   const context = vm.createContext({ ...bindings, exports: {} });

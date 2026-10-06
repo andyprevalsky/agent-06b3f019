@@ -47,13 +47,34 @@ function owningBoundary() {
     ts.ScriptTarget.Latest,
     true,
   );
+  const groupFilename = path.join(
+    path.dirname(filename),
+    "benchmarkHubRunProjection.ts",
+  );
+  const grouped = tree.statements.some(
+    (node) =>
+      ts.isImportDeclaration(node) &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      node.moduleSpecifier.text === "./benchmarkHubRunProjection",
+  );
+  const declarations = [
+    ...tree.statements,
+    ...(grouped
+      ? ts.createSourceFile(
+          groupFilename,
+          readFileSync(groupFilename, "utf8"),
+          ts.ScriptTarget.Latest,
+          true,
+        ).statements
+      : []),
+  ];
   const named = new Map<string, TypeScript.Statement>();
-  for (const node of tree.statements) {
+  for (const node of declarations) {
     if (ts.isFunctionDeclaration(node) && node.name)
       named.set(node.name.text, node);
     if (ts.isVariableStatement(node))
       for (const declaration of node.declarationList.declarations)
-        named.set(declaration.name.getText(tree), node);
+        named.set(declaration.name.getText(), node);
   }
   const bindings: Record<string, unknown> = {
     Promise,
@@ -114,9 +135,9 @@ function owningBoundary() {
   ];
   for (const name of methods) include(name);
   const compiled = ts.transpileModule(
-    tree.statements
+    declarations
       .filter((node) => included.has(node))
-      .map((node) => node.getText(tree))
+      .map((node) => node.getText())
       .join("\n") +
       "\nglobalThis.owner = {" +
       methods.filter((name) => named.has(name)).join(",") +

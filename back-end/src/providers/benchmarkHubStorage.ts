@@ -1,0 +1,134 @@
+/** Benchmark Hub object I/O, with Render R2 and isolated local storage. */
+
+import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import * as fs from 'node:fs/promises';
+import path from 'path';
+
+const KEY_PREFIX = 'benchmark-hub';
+const LOCAL_HUB_ROOT = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
+const isolatedRunId =
+  process.env.BENCHMARK_ISOLATED_RUN === 'true' ? process.env.BENCHMARK_RUN_ID : undefined;
+if (
+  process.env.BENCHMARK_ISOLATED_RUN === 'true' &&
+  (isolatedRunId === '.' ||
+    isolatedRunId === '..' ||
+    !/^[A-Za-z0-9._-]+$/.test(isolatedRunId ?? ''))
+) {
+  throw new Error('BENCHMARK_RUN_ID must be a safe, nonempty ID for an isolated Benchmark Hub');
+}
+// Each isolated stack has its own database. Keep its local Hub index in the
+// same isolation boundary so parallel stacks cannot overwrite one another's
+// run registrations before the terminal bundles are mirrored to the durable Hub.
+const LOCAL_DIR = isolatedRunId
+  ? path.join(LOCAL_HUB_ROOT, 'isolated-runs', isolatedRunId)
+  : LOCAL_HUB_ROOT;
+let s3Client: S3Client | null = null;
+
+function r2Configured(): boolean {
+  // Local workspaces have production R2 credentials available for trace
+  // diagnostics, but Benchmark Hub writes must stay worktree-local. Otherwise
+  // independent test databases race through one production index and local
+  // cleanup can hide real runs. Use Render's deployment identity rather than
+  // NODE_ENV: local production-mode builds must remain isolated too.
+  const useR2 = process.env.BENCHMARK_HUB_STORAGE !== 'local' && process.env.RENDER === 'true';
+  return Boolean(
+    useR2 &&
+    process.env.R2_ACCOUNT_ID &&
+    process.env.R2_ACCESS_KEY_ID &&
+    process.env.R2_SECRET_ACCESS_KEY &&
+    process.env.R2_BUCKET_TRACE_ARCHIVE
+  );
+}
+
+function getS3Client(): S3Client {
+  if (s3Client !== null) return s3Client;
+  const accountId = process.env.R2_ACCOUNT_ID || '';
+  s3Client = new S3Client({
+    region: 'auto',
+    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+    credentials: {
+      accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
+      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
+    },
+  });
+  return s3Client;
+}
+
+async function streamToBuffer(body: unknown): Promise<Buffer> {
+  if (body instanceof Buffer) return body;
+  const stream = body as AsyncIterable<Uint8Array>;
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
+export async function putObject(key: string, data: string): Promise<void> {
+  if (r2Configured()) {
+    await getS3Client().send(
+      new PutObjectCommand({
+        Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
+        Key: `${KEY_PREFIX}/${key}`,
+        Body: data,
+        ContentType: 'application/json',
+      })
+    );
+    return;
+  }
+  const target = path.join(LOCAL_DIR, key);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const tmp = `${target}.tmp-${process.pid}`;
+  await fs.writeFile(tmp, data);
+  await fs.rename(tmp, target);
+}
+
+function isObjectNotFound(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const record = error as {
+    code?: unknown;
+    name?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+  return (
+    record.code === 'ENOENT' ||
+    record.name === 'NoSuchKey' ||
+    record.name === 'NotFound' ||
+    record.$metadata?.httpStatusCode === 404
+  );
+}
+
+/** Null means a confirmed missing object; transport/permission faults throw. */
+export async function getObjectStrict(key: string): Promise<string | null> {
+  if (r2Configured()) {
+    try {
+      const response = await getS3Client().send(
+        new GetObjectCommand({
+          Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
+          Key: `${KEY_PREFIX}/${key}`,
+        })
+      );
+      return (await streamToBuffer(response.Body)).toString('utf-8');
+    } catch (error: unknown) {
+      if (isObjectNotFound(error)) return null;
+      throw error;
+    }
+  }
+  try {
+    return await fs.readFile(path.join(LOCAL_DIR, key), 'utf-8');
+  } catch (error: unknown) {
+    if (isObjectNotFound(error)) return null;
+    throw error;
+  }
+}
+
+export async function getObject(key: string): Promise<string | null> {
+  try {
+    return await getObjectStrict(key);
+  } catch {
+    return null;
+  }
+}
+
+/** Test-only: clear the lazily configured object-store client. */
+export function resetHubObjectStorageForTests(): void {
+  s3Client = null;
+}
