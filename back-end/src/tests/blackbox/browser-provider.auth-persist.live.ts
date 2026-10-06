@@ -6,6 +6,10 @@ import { buildPreferredBrowserConfig } from '../../providers/browser/challengeRe
 import { releaseKernelRemoteSession } from '../../providers/browser/kernel';
 import { releaseSteelRemoteSession } from '../../providers/steel/session';
 import { steelCdpConnectionUrl } from '../../providers/steel/urls';
+import {
+  completeCloudBrowserSignIn,
+  deleteCloudBrowserSignInEvidence,
+} from '../helpers/browser-sign-in-evidence';
 import { deleteKernelProfile } from './browser-provider-rotation.support';
 import { assert, navigateKernelPage, retryBackendFetch } from './browser-provider.helpers';
 
@@ -97,6 +101,16 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
     } finally {
       await remote.close();
     }
+    const firstRow = await prisma.browserSession.findUniqueOrThrow({
+      where: { sessionId: firstSessionId },
+    });
+    await completeCloudBrowserSignIn({
+      userId,
+      agentId: firstAgent.id,
+      browserSessionId: firstRow.id,
+      steelSessionId: firstSessionId,
+      authRealm: 'https://example.com/login',
+    });
 
     await post('/api/browser-session/close', {
       session_id: firstSessionId,
@@ -191,6 +205,7 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
         await deleteKernelProfile(session.profileId).catch(() => undefined);
       }
     }
+    await deleteCloudBrowserSignInEvidence(userId);
     await prisma.browserContext.deleteMany({ where: { userId } });
     await prisma.cookie.deleteMany({ where: { userId } });
     await prisma.cookieBundle.deleteMany({ where: { userId } });
