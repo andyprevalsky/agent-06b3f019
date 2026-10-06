@@ -27,6 +27,7 @@ import assert from 'node:assert/strict';
 import { loadDotenvWithCallerOverrides } from '../../providers/loadDotenvWithCallerOverrides';
 import { callOrgTool } from '../../providers/agentcard/org-runtime';
 import { readAgentCardOrgWallet } from '../../providers/agentcard/org-wallet-monitor';
+import { resolveBenchmarkCardholderId } from '../../providers/agentcard/benchmark-float';
 import { recoverAllCardholderResiduals } from '../../providers/agentcard/fund-recovery';
 import { planOrgWalletTopUp } from '../../providers/agentcard/org-wallet-topup';
 import { fiatPullEnabled, resolveFiatSource } from '../../providers/agentcard/org-wallet-fiat';
@@ -38,6 +39,7 @@ import { loadCoinbaseTreasuryConfig } from '../../providers/coinbase/config';
 import { createCoinbaseTreasury } from '../../providers/coinbase/treasury';
 import { createBrexTreasury, loadBrexConfig } from '../../providers/brex/treasury';
 import { cleanupTreasuryRailCards } from './treasury-rails-card-cleanup';
+import { selectTreasuryRailCardholder } from './treasury-rails-cardholder';
 
 loadDotenvWithCallerOverrides();
 
@@ -286,22 +288,18 @@ async function main(): Promise<void> {
       }
     ).structuredContent?.cardholders ?? [];
   assert.ok(cardholders.length > 0, 'sandbox org has no cardholders to test with');
-  // An open card owned by another workspace holds this cardholder's recoverable headroom.
-  // Use an idle cardholder so the unused mint can reclaim without touching foreign cards.
-  let cardholderId: string | undefined;
-  for (const cardholder of cardholders) {
-    const cards =
-      (
-        (await callOrgTool('list_cards', { cardholder_id: cardholder.id, limit: 100 })) as {
-          structuredContent?: { cards?: Array<{ status: string }> };
-        }
-      ).structuredContent?.cards ?? [];
-    if (cards.every((card) => card.status !== 'OPEN')) {
-      cardholderId = cardholder.id;
-      break;
-    }
-  }
+  const paymentBenchmarkCardholderId = await resolveBenchmarkCardholderId();
+  const cardholderId = await selectTreasuryRailCardholder(
+    cardholders.map((cardholder) => cardholder.id),
+    paymentBenchmarkCardholderId,
+    callOrgTool
+  );
   assert.ok(cardholderId !== undefined, 'sandbox org has no idle cardholder for reclaim proof');
+  record(
+    cardholderId === paymentBenchmarkCardholderId
+      ? `reclaim proof on shared payment-benchmark cardholder ${cardholderId} (no other idle cardholder)`
+      : `reclaim proof on cardholder ${cardholderId}, away from the payment-benchmark cardholder`
+  );
 
   const preSweepCents = await sweepResidualHeadroom();
   if (preSweepCents > 0) {
