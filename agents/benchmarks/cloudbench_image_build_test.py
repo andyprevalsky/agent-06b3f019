@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import io
 import json
 import os
 import shlex
@@ -15,8 +16,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
+import threading
 import time
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -227,6 +231,109 @@ def test_cloudbench_image_build_preserves_donor_paths_and_runtime_contract(image
         assert ("CMD", '["bash", "-c", "exec sleep infinity"]') in final.instructions
     else:
         assert ("ENTRYPOINT", '["/usr/local/bin/cloudbench-entrypoint.sh"]') in final.instructions
+
+
+def test_cloudbench_image_build_actual_context_excludes_nested_generated_state(tmp_path: Path) -> None:
+    """Observe Docker's packed upload, with no daemon or private workspace inputs."""
+    docker = shutil.which("docker")
+    assert docker is not None, "Docker CLI is a normal cloudbench prerequisite"
+    context = tmp_path / "context"
+    context.mkdir()
+    required = {
+        "agents/worker.py": b"runtime-worker\n",
+        "back-end/src/server.ts": b"runtime-backend\n",
+        "scripts/cloudbench-entrypoint.sh": b"runtime-entrypoint\n",
+        "agents/benchmarks/tasks.json": b'{"tasks":["fixture"]}\n',
+        "agents/benchmarks/history/task_attempts.jsonl": b'{"task":"fixture","attempt":1}\n',
+        "agents/benchmarks/history/span_durations.jsonl": b'{"span":"fixture","seconds":1}\n',
+        "agents/benchmarks/history/task_durations.jsonl": b'{"task":"fixture","seconds":1}\n',
+    }
+    generated = {
+        f"{prefix}{directory}/generated-marker": b"generated-state-must-stay-local\n"
+        for prefix in ("", "agents/", "back-end/", "agents/nested/deep/")
+        for directory in (".context", ".llm-dumps")
+    }
+    for name, content in {**required, **generated}.items():
+        target = context / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    (context / "Dockerfile").write_text("FROM scratch\nCOPY . /fixture\n")
+    (context / ".dockerignore").write_bytes((ROOT / ".dockerignore").read_bytes())
+    config = tmp_path / "docker-config"
+    config.mkdir()
+    uploads: list[bytes] = []
+
+    class Receiver(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+        def reply(self, body: bytes) -> None:
+            self.send_response(200)
+            self.send_header("API-Version", "1.47")
+            self.send_header("OSType", "linux")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_HEAD(self) -> None:
+            self.reply(b"")
+
+        def do_GET(self) -> None:
+            self.reply(b"OK" if self.path.endswith("/_ping") else b'{"ApiVersion":"1.47","OSType":"linux"}')
+
+        def do_POST(self) -> None:
+            assert self.path.split("?", 1)[0].endswith("/build")
+            if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+                chunks = []
+                while size := int(self.rfile.readline().split(b";", 1)[0], 16):
+                    chunks.append(self.rfile.read(size))
+                    assert self.rfile.read(2) == b"\r\n"
+                assert self.rfile.readline() == b"\r\n"
+                body = b"".join(chunks)
+            else:
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+            uploads.append(body)
+            self.reply(b'{"stream":"synthetic context received\\n"}\n')
+
+    # Explicit local transport and empty auth config isolate this synthetic
+    # receiver; every inherited proxy key remains unchanged in the child.
+    with HTTPServer(("127.0.0.1", 0), Receiver) as server:
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+        thread.start()
+        try:
+            result = subprocess.run(
+                [
+                    docker,
+                    "--config",
+                    str(config),
+                    "--host",
+                    f"tcp://127.0.0.1:{server.server_port}",
+                    "--tls=false",
+                    "build",
+                    str(context),
+                ],
+                env={**os.environ, "DOCKER_BUILDKIT": "0", "DOCKER_TLS_VERIFY": "", "DOCKER_CONTEXT": ""},
+                capture_output=True,
+                timeout=30,
+            )
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+        assert not thread.is_alive()
+    assert result.returncode == 0, "Docker CLI failed to upload the synthetic context"
+    assert len(uploads) == 1
+    with tarfile.open(fileobj=io.BytesIO(uploads[0]), mode="r:*") as archive:
+        files = {
+            member.name.removeprefix("./"): archive.extractfile(member).read()
+            for member in archive.getmembers()
+            if member.isfile()
+        }
+    assert all(files.get(name) == content for name, content in required.items()), "runtime inputs were omitted"
+    assert not generated.keys() & files.keys(), "generated state entered Docker's build archive"
 
 
 def _image_build_process_state(pid: int, birth: str) -> str:

@@ -943,6 +943,11 @@ then copies source last. Only npm download cache/logs are omitted; installed
 dependencies, npm configuration and other home assets remain. Measure native
 cold timing before claiming a speedup. Ordinary source-only runs still reuse
 their verified dependency image and snapshots.
+Build contexts exclude generated `.context` and `.llm-dumps` directories at
+every depth. Runtime source, task definitions, current metrics and task selection
+history remain available in the image. The normal image regression gate checks
+the actual Docker archive with controlled generated-state and runtime sentinels;
+do not trim runtime inputs to improve startup measurements.
 `image-build` defaults to the existing Fly-integrated Depot backend; use
 `--builder native` for an explicit native diagnostic. Setup consumes the exact
 prebuilt receipt image through `image-activate`. Depot uses app scope, zstd level 3
@@ -975,7 +980,6 @@ deadline supersedes the older 1,800-second proof budget only for this diagnostic
 normal 7,200-second defaults remain unchanged. A task verdict does not establish
 resource release. On a cutoff, signal only the exact owned controller, let its
 cleanup traps run, audit its resources, and grant no acceptance credit.
-
 
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 
