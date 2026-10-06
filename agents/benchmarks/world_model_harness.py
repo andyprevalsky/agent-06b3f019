@@ -930,6 +930,41 @@ def jsonl_line(text: str) -> str:
     return text
 
 
+def normalize_world_model_index_records(model_root: str | Path) -> JsonObject:
+    """Publish upstream's index with the same JSONL framing as delta refreshes.
+
+    Ingestion decodes the exported escapes before upstream serializes Steps again.
+    Stream physical records so embedded Unicode separators remain string content;
+    validate the complete index before replacing it, without re-embedding or
+    changing any decoded data or the parallel matrix.
+    """
+    import tempfile
+
+    import numpy as np
+    from wmh.core.types import Step
+
+    index_path = Path(model_root) / "index"
+    steps_path = index_path / "steps.jsonl"
+    matrix = np.load(index_path / "embeddings.npy", mmap_mode="r")
+    records = 0
+    escaped_records = 0
+    with tempfile.TemporaryDirectory(prefix="index-framing-", dir=str(index_path)) as tmp:
+        normalized_path = Path(tmp) / "steps.jsonl"
+        with steps_path.open(encoding="utf-8") as source, normalized_path.open("w", encoding="utf-8") as output:
+            for line in source:
+                if not line.strip():
+                    continue
+                Step.model_validate_json(line)
+                normalized = jsonl_line(line)
+                output.write(normalized)
+                records += 1
+                escaped_records += int(normalized != line)
+        if matrix.ndim != 2 or matrix.shape[0] != records:
+            raise ValueError(f"WMH index has {records} records but matrix shape {matrix.shape}")
+        os.replace(normalized_path, steps_path)
+    return {"indexed_steps": records, "escaped_records": escaped_records}
+
+
 def _otel_attr(key: str, value: Any) -> JsonObject:
     if isinstance(value, bool):
         encoded: JsonObject = {"boolValue": value}
@@ -2341,6 +2376,11 @@ def build_world_model_from_otel_jsonl(
         judge_provider=judge_provider,
         embedder=embedder,
     )
+    index_serialization = (
+        normalize_world_model_index_records(model_root)
+        if (model_root / "index" / "steps.jsonl").exists()
+        else None
+    )
     metrics = getattr(result, "metrics", None)
     if hasattr(metrics, "model_dump"):
         metrics_value = metrics.model_dump()
@@ -2359,6 +2399,7 @@ def build_world_model_from_otel_jsonl(
         "model": model,
         "provider_abstraction": provider_abstraction_decision(),
         "metrics": metrics_value,
+        "index_serialization": index_serialization,
     }
     manifest_path = out_dir / "build.manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")

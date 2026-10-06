@@ -2436,13 +2436,22 @@ def test_load_transitions_drops_fast_cache_replays_from_corpus():
 
 
 def test_build_world_model_from_archives_runs_actual_upstream_build_with_fake_provider():
+    import dataclasses
+
     for name in list(sys.modules):
         if name == "wmh" or name.startswith("wmh."):
             del sys.modules[name]
 
-    from benchmarks.world_model_harness import build_world_model_from_archives
+    import numpy as np
+
+    from benchmarks.world_model_harness import (
+        build_world_model_from_archives,
+        load_grounded_transitions,
+        normalize_world_model_index_records,
+    )
+    from wmh.engine.build import build as native_build
     from wmh.providers.base import Completion, Message, ProviderConfig, ProviderKind
-    from wmh.retrieval import HashingEmbedder
+    from wmh.retrieval import EmbeddingRetriever, HashingEmbedder
 
     class FakeProvider:
         def __init__(self) -> None:
@@ -2472,22 +2481,79 @@ def test_build_world_model_from_archives_runs_actual_upstream_build_with_fake_pr
         restore = _with_archive_env(tmp)
         try:
             _write_golden_bundle("root-upstream-build")
-            manifest = build_world_model_from_archives(
-                ["root-upstream-build"],
-                out,
-                name="rose-upstream",
-                provider="bedrock",
-                model="fake-model",
-                gepa_budget=0,
-                train_split=0.5,
-                embed_dim=32,
-                serve_provider=FakeProvider(),
-                embedder=HashingEmbedder(dim=32),
-            )
+            observation = "Trusted by\u2028everyone\u2029and\u0085more — café"
+            transitions = load_grounded_transitions("root-upstream-build")
+            transitions = [
+                dataclasses.replace(
+                    transition,
+                    observation=dataclasses.replace(transition.observation, content=f"{row}: {observation}"),
+                )
+                for row, transition in enumerate(transitions)
+            ]
+            original_rows = []
+            original_matrix = None
+
+            def capture_native_build(config, **kwargs):
+                nonlocal original_matrix
+                result = native_build(config, **kwargs)
+                index = Path(kwargs["root"]) / "index"
+                with (index / "steps.jsonl").open(encoding="utf-8") as source:
+                    original_rows.extend(json.loads(line) for line in source)
+                original_matrix = (index / "embeddings.npy").read_bytes()
+                return result
+
+            with patch("benchmarks.world_model_harness.load_grounded_transitions", return_value=transitions):
+                manifest = build_world_model_from_archives(
+                    ["root-upstream-build"],
+                    out,
+                    name="rose-upstream",
+                    provider="bedrock",
+                    model="fake-model",
+                    gepa_budget=0,
+                    train_split=0.5,
+                    embed_dim=32,
+                    serve_provider=FakeProvider(),
+                    embedder=HashingEmbedder(dim=32),
+                    upstream_build=capture_native_build,
+                )
             model_root = Path(manifest["model_root"])
             assert (model_root / "config.toml").exists()
             assert (model_root / "prompts" / "optimized.txt").read_text(encoding="utf-8")
             assert (model_root / "index").exists()
+            retriever = EmbeddingRetriever(HashingEmbedder(dim=32))
+            retriever.load(model_root / "index")
+            assert len(retriever._steps) == len(transitions)
+            assert [step.model_dump(mode="json") for step in retriever._steps] == original_rows
+            assert [json.loads(step.observation.content)["content"] for step in retriever._steps] == [
+                f"{row}: {observation}" for row in range(len(transitions))
+            ]
+            assert retriever._matrix.shape == (len(transitions), 32)
+            index = model_root / "index"
+            assert (index / "embeddings.npy").read_bytes() == original_matrix
+            normalized_bytes = (index / "steps.jsonl").read_bytes()
+            assert normalize_world_model_index_records(model_root)["escaped_records"] == 0
+            assert (index / "steps.jsonl").read_bytes() == normalized_bytes
+
+            malformed_bytes = normalized_bytes + b'{"action":'
+            (index / "steps.jsonl").write_bytes(malformed_bytes)
+            try:
+                normalize_world_model_index_records(model_root)
+                raise AssertionError("malformed Step was accepted")
+            except ValueError as exc:
+                assert "Invalid JSON" in str(exc)
+            assert (index / "steps.jsonl").read_bytes() == malformed_bytes
+            assert (index / "embeddings.npy").read_bytes() == original_matrix
+
+            (index / "steps.jsonl").write_bytes(normalized_bytes)
+            np.save(index / "embeddings.npy", np.zeros((len(transitions) + 1, 32)))
+            mismatched_matrix = (index / "embeddings.npy").read_bytes()
+            try:
+                normalize_world_model_index_records(model_root)
+                raise AssertionError("mismatched matrix was accepted")
+            except ValueError as exc:
+                assert "matrix shape" in str(exc)
+            assert (index / "steps.jsonl").read_bytes() == normalized_bytes
+            assert (index / "embeddings.npy").read_bytes() == mismatched_matrix
         finally:
             restore()
 

@@ -13,19 +13,29 @@ For a checkout from another branch, use the local Git worktree command in
 October 6 local continuation uses the isolated worktree
 `/Users/andyprevalsky/Developer/rose-wmh-continuation`, branch
 `codex/wmh-continuation-20261006`. Main `8ed0c776d` and portable handoff
-`e5e0ff622` are integrated. The new uncapped rebuild is local and pending;
-historical conformance remains historical evidence only.
+`e5e0ff622` are integrated. The complete uncapped local rebuild finished on October 6: 12,519 real
+trajectories and 179,169 eligible tool observations. Corpus structural sampling
+passed all 100 examples across 47 tools and 10 categories. All 97 export
+failures are explicitly recorded ciphertext checksum mismatches and remain
+unresolved exclusions. Matching live inference conformance remains pending.
 
 October 6 local verification: backend coverage passed all 184 blackbox domains
 and 253 unit files, with 89.23% lines / 80.34% branches. Codex sandbox auth uses
 an isolated test identity with the current authoritative auth file; no shared
 integration was removed. Five cold seed-fidelity runs passed at 168–171MB,
-under the unchanged 228MB bound. Agent coverage remains pending: one batch had
-all 109 domains pass but an obsolete unit fixture failed; the corrected batch
-hit benchmark/worker fixture timeouts. Focused unchanged worker and private
-source fixtures passed afterward, but full owning coverage must pass before
-deploy. A controller mock's early stdin close has an owning red/green proof
+under the unchanged 228MB bound. Full agent coverage subsequently passed all 109 blackbox domains,
+181 Fast Cache tests, and 131 unit tests with 82% total coverage. Earlier
+fixture failures and timeout observations remain recorded; no bounds were
+relaxed. A controller mock's early stdin close has an owning red/green proof
 and permanent stress regression; full controller validation remains pending.
+
+The first exact fundraiser startup failed before agent creation because full
+build persistence reintroduced Unicode JSONL separators. The native full-build
+blackbox has unchanged red/green proof; full artifact normalization validates
+179,449 index rows against the embedding matrix and escapes 13 records without
+changing decoded content. The exact authorized run has been restarted; no new
+fundraising or production outcome is established yet. See the October 6
+full-build JSONL framing RCA.
 
 Open operational TODO: cancellation of the first coverage stage after ENOSPC
 left its bash controller holding the stdout pipe after npm exited. The exact
