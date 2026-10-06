@@ -46,8 +46,6 @@ with workflow.unsafe.imports_passed_through():
         poll_new_messages,
         post_agent_message,
         resolve_fast_cache_context_activity,
-        resolve_fast_cache_goal_activity,
-        unpack_fast_cache_goal_resolution,
         update_agent_status,
     )
     from helpers.completion_summary_contract import (
@@ -1811,78 +1809,38 @@ class AgentWorkflow:
         # DB-row goal once and thread it into all cache keying (the DAG path
         # already resolves it via ensure_position_context; this aligns the
         # explicitly-threaded plan/execute/verifier/summary paths with it).
-        if workflow.patched("general-demo-fast-cache-context-v1"):
-            try:
-                cache_context = await workflow.execute_activity(
-                    resolve_fast_cache_context_activity,
-                    args=[agent_id],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-                persisted_goal = cache_context.get("goal") if isinstance(cache_context, dict) else None
-                root_goal = cache_context.get("root_goal") if isinstance(cache_context, dict) else None
-                if persisted_goal:
-                    if persisted_goal != self.fast_cache_goal:
-                        workflow.logger.info(
-                            "Fast Mode cache goal resolved from agent row (differs from workflow input goal)"
-                        )
-                    self.fast_cache_goal = persisted_goal
-                if root_goal:
-                    self.fast_cache_root_goal = root_goal
-                    self.root_goal = root_goal
-                if isinstance(cache_context, dict):
-                    self.fast_mode_cache_enabled = bool(cache_context.get("enabled"))
-                    self.provider_fast_mode = bool(
-                        cache_context.get("provider_fast_mode", self.provider_fast_mode)
-                    )
-                self.compute_token_fast_cache_affinity_key = (
-                    _fast_cache_compute_affinity_key(user_id, self.fast_cache_goal)
-                    if self.fast_mode_cache_enabled
-                    else None
-                )
-            except Exception as e:
-                workflow.logger.warning(
-                    f"Failed to resolve Fast Mode cache context, using workflow input goal: {e}"
-                )
-        elif (
-            self.provider_fast_mode
-            or self.fast_mode_cache_enabled
-            or self.parent_workflow_id
-            or user_id in FAST_MODE_WRITE_THROUGH_USER_IDS
-        ):
-            # Replay compatibility for workflow histories started before the
-            # generalized DEMO cache context activity was introduced.
-            try:
-                persisted_goal, resolved_root_goal = unpack_fast_cache_goal_resolution(
-                    await workflow.execute_activity(
-                        resolve_fast_cache_goal_activity,
-                        args=[agent_id],
-                        start_to_close_timeout=timedelta(seconds=30),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
-                    )
-                )
-                if resolved_root_goal:
-                    self.root_goal = resolved_root_goal
-                if persisted_goal and persisted_goal != self.fast_cache_goal:
+        try:
+            cache_context = await workflow.execute_activity(
+                resolve_fast_cache_context_activity,
+                args=[agent_id],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            persisted_goal = cache_context.get("goal") if isinstance(cache_context, dict) else None
+            root_goal = cache_context.get("root_goal") if isinstance(cache_context, dict) else None
+            if persisted_goal:
+                if persisted_goal != self.fast_cache_goal:
                     workflow.logger.info(
                         "Fast Mode cache goal resolved from agent row (differs from workflow input goal)"
                     )
-                    self.fast_cache_goal = persisted_goal
-                if persisted_goal or resolved_root_goal:
-                    # Recompute DEMO cache gate after durable child + root goals
-                    # are known. Leftover GPs inherit demo wait_for from root_goal.
-                    self.fast_mode_cache_enabled = is_demo_cache_task(self)
-                    # Compute-token cache affinity pins by the child's goal —
-                    # keep it on the same stable namespace, not the root's.
-                    self.compute_token_fast_cache_affinity_key = (
-                        _fast_cache_compute_affinity_key(
-                            user_id, self.fast_cache_goal or persisted_goal or self.goal
-                        )
-                        if self.fast_mode_cache_enabled
-                        else None
-                    )
-            except Exception as e:
-                workflow.logger.warning(f"Failed to resolve Fast Mode cache goal, using workflow input goal: {e}")
+                self.fast_cache_goal = persisted_goal
+            if root_goal:
+                self.fast_cache_root_goal = root_goal
+                self.root_goal = root_goal
+            if isinstance(cache_context, dict):
+                self.fast_mode_cache_enabled = bool(cache_context.get("enabled"))
+                self.provider_fast_mode = bool(
+                    cache_context.get("provider_fast_mode", self.provider_fast_mode)
+                )
+            self.compute_token_fast_cache_affinity_key = (
+                _fast_cache_compute_affinity_key(user_id, self.fast_cache_goal)
+                if self.fast_mode_cache_enabled
+                else None
+            )
+        except Exception as e:
+            workflow.logger.warning(
+                f"Failed to resolve Fast Mode cache context, using workflow input goal: {e}"
+            )
 
         # Helper: gate is open unless explicitly False
         def _gate_open(name: str) -> bool:

@@ -9,7 +9,7 @@ import structlog
 from temporalio import activity
 
 from config import load_config
-from domains.grep.bounds import bound_grep_result
+from utils.grep_budget import bound_grep_result
 from domains.grep.config import (
     GREP_HTTP_TIMEOUT,
     GREP_RESULT_MAX_CHARS,

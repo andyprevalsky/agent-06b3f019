@@ -69,7 +69,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         "if os.environ.get('FIXTURE_EXPECT_AUTH'): assert os.environ.get('FLY_API_TOKEN') == os.environ['FIXTURE_EXPECT_AUTH'], 'wrong selected credential'\n"
         "payload=Path(os.environ['FIXTURE_'+kind.upper()]).read_bytes()\n"
         "fd=os.open(os.environ['FIXTURE_CALLS'],os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)\n"
-        "os.write(fd,(json.dumps({'kind':kind,'decoded_bytes':len(payload)})+'\\n').encode());os.close(fd)\n"
+        "os.write(fd,(json.dumps({'kind':kind,'decoded_bytes':len(payload),'job':os.environ.get('RUN_BENCH_CAMPAIGN_JOB_ID')})+'\\n').encode());os.close(fd)\n"
         "sys.stdout.buffer.write(payload)\n"
     )
     fly.chmod(0o700)
@@ -85,6 +85,11 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         'FLY() { flyctl "$@"; }\n'
         'finish() { if declare -F stop_owned_machines_snapshot_loop >/dev/null; then stop_owned_machines_snapshot_loop; else cloudbench_terminate_tree_and_wait 30 "$SNAPSHOT_LOOP_PID"; fi; touch "$FLEET_DIR/closed"; }\n'
         "trap finish EXIT\ntrap 'exit 143' TERM\nstart_machines_snapshot_loop\n"
+        'if [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then\n'
+        # The ordinary control asserts two reads per owner. Observe its first
+        # loop read before immediate fixture exit can stop that owner.
+        ' while [ "$(python3 -c \'import json,os;print(sum(json.loads(s)["kind"]=="machines" and json.loads(s)["job"]==os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"] for s in open(os.environ["FIXTURE_CALLS"])))\')" -lt 2 ]; do sleep 0.1; done\n'
+        'fi\n'
         'if [ "$FIXTURE_DEATH" = 1 ]; then\n'
         ' if [[ "$RUN_BENCH_CAMPAIGN_JOB_ID" == *j0002 ]]; then\n'
         '  while [ "$(python3 -c \'import json,os;print(sum(json.loads(s)["kind"]=="machines" for s in open(os.environ["FIXTURE_CALLS"])))\')" -lt 2 ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'

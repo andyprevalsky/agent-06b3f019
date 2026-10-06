@@ -341,7 +341,7 @@ async def test_grep_network_source_forwarded():
 
 def test_bound_grep_result_keeps_whole_matches_and_rewrites_paging():
     """A page is capped by summed match content; the tail is dropped, not silently lost."""
-    from domains.grep.bounds import bound_grep_result
+    from utils.grep_budget import bound_grep_result
 
     matches = [{"source": "messages", "path": f"messages/t/{i}", "content": "x" * 1000} for i in range(10)]
     result = {

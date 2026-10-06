@@ -250,12 +250,12 @@ expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$boot_only_env' agent-id
   fake_store="$TMP_ROOT/agent-store"
   mkdir -p "$fake_store"
   printf 'bc-live' >"$fake_store/self-store-id"
-  bash -c 'exec -a cursor-agent-store-fuse sleep 60' &
+  printf 'import signal\nsignal.pause()\n' >"$fake_store/cursor-agent-store-fuse"
+  python3 "$fake_store/cursor-agent-store-fuse" &
   store_pid=$!
-  # The real daemon writes ready once it runs. Until exec completes, /proc shows the
-  # forked test shell's cmdline (or none mid-exec), so publish the pid only after that.
+  # Publish ready after the daemon command is visible on Linux and macOS.
   for _ in $(seq 1 100); do
-    tr '\0' ' ' <"/proc/$store_pid/cmdline" 2>/dev/null | grep -q '^cursor-agent-store-fuse ' && break
+    ps -p "$store_pid" -o command= 2>/dev/null | grep -q 'cursor-agent-store-fuse' && break
     sleep 0.05
   done
   printf 'pid=%s\n' "$store_pid" >"$fake_store/ready"
