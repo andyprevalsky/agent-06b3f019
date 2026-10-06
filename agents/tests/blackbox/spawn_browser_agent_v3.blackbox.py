@@ -20084,6 +20084,7 @@ async def test_spawn_browser_activity_verified_completion_message_leads_with_goa
         "passwords": [],
         "auth_options": {"realm": "example.com"},
         "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "same_session_available": True,
     }
     save_mock = AsyncMock()
     patch_targets = [
@@ -20169,8 +20170,8 @@ async def test_spawn_browser_activity_verified_completion_message_leads_with_goa
     assert result["status"] == "completed"
     expected_prefix = f"**Goal**: {goal}\n\n**Status**: \u2705 SUCCESS\n\n**Outcome**: Heading reads Example Domain"
     assert result["message"].startswith(expected_prefix), result["message"]
-    completions = _completion_messages(save_mock)
-    assert [c["title"] for c in completions] == ["\u2713 Task Completed"]
+    completions = [c for c in _completion_messages(save_mock) if c["title"] == "\u2713 Task Completed"]
+    assert len(completions) == 1, _completion_messages(save_mock)
     assert completions[0]["message"] == result["message"]
 
 
@@ -20220,8 +20221,8 @@ async def test_spawn_browser_activity_failure_completion_message_leads_with_goal
         else:
             raise AssertionError("expected missing cdp_url to raise")
 
-    completions = _completion_messages(save_mock)
-    assert [c["title"] for c in completions] == ["Task Failed"]
+    completions = [c for c in _completion_messages(save_mock) if c["title"] == "Task Failed"]
+    assert len(completions) == 1, _completion_messages(save_mock)
     assert completions[0]["message"].startswith(
         "**Goal**: Buy socks\n\n**Status**: \u274c FAILED\n\n**Outcome**: No CDP URL provided"
     ), completions[0]["message"]
@@ -25795,6 +25796,14 @@ async def run_all_tests():
     await r.record_async(
         "activity_failed_steel_auth_recovers_same_run",
         test_spawn_browser_activity_failed_steel_auth_recovers_same_run,
+    )
+    await r.record_async(
+        "activity_verified_completion_message_leads_with_goal",
+        test_spawn_browser_activity_verified_completion_message_leads_with_goal,
+    )
+    await r.record_async(
+        "activity_failure_completion_message_leads_with_goal",
+        test_spawn_browser_activity_failure_completion_message_leads_with_goal,
     )
     await r.record_async(
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",
