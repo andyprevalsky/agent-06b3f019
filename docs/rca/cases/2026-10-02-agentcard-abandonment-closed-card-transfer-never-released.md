@@ -149,6 +149,12 @@ previous 6a run at 18:24 on HEAD `89a09930a`.
 This repeats the 2026-10-03 shape: AgentCard released nothing for the closed,
 unused card while the same cardholder's later mints settled normally.
 
+The unchanged lane rerun at 20:07 on HEAD `585fac704` (runtime identical;
+docs and benchmark history only since `d9d8996be`) passed all four tasks.
+`agent-payment-abandonment` (agent `cff60cf0-2953-4efd-9c5d-37212338bd20`)
+passed in 205 seconds, with both owned-cleanup receipts clean. The stall is
+intermittent on AgentCard's side, not deterministic in our reclaim path.
+
 Still open:
 
 - Report the stuck transfers (`owt_…8ce5`, card `card_cb91b224db24a8dd6f1448c0`;
