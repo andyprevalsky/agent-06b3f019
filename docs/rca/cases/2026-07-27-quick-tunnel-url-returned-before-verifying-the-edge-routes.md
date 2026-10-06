@@ -8,11 +8,11 @@ classification: third-party-failure
 problem_class: fixture-environment-data-mismatch
 first_bad_boundary: start_cloudflare_quick_tunnel — returned as soon as cloudflared printed a URL, with no check that the Cloudflare edge actually routes to the origin
 symptoms:
+  - "https://<name>.trycloudflare.com/test_payment returned HTTP 000, expected 200"
   - "https://<name>.trycloudflare.com/test_payment returned HTTP 530, expected 200"
   - "RuntimeError: run.sh exited early with code 1"
+  - "every new tunnel is dead after ~6-9 in quick succession, not recovering within ~15 min"
   - "edge identity: proxy HTTP 200 must not count as tunnel routing"
-  - "❌ https://<worktree>-bench-<run>-bench.ngrok.app never routed."
-  - "failed to start tunnel: The endpoint 'https://rose-<worktree>.ngrok.app' is already online (ERR_NGROK_334)"
 tags:
   - cloudflared
   - tunnel
@@ -23,7 +23,6 @@ sources:
   - commit c59ee25a8
   - memory:project_trycloudflare_quick_tunnel_flakiness
   - PR #1419
-  - PR #1416
 repro: scripts/tests/run-public-tunnel-routing.test.sh
 status: fixed
 ---
@@ -127,42 +126,6 @@ overrides at ten thousand agents. The early probe cannot reuse the later app
 shell assertion because the frontend is not started yet; verifying the
 existing response's identity preserves the two phases' distinct contracts.
 
-### 2026-10-06: the Cloudflare identity check rejected every ngrok fallback
-
-PR #1416's Group 4 smoke on merged HEAD `6e72af2f0` exited 1. Its isolated
-stack (`1791274973-1205391-31326`) and the concurrent AgentCard lifecycle
-stack (`1791274972-1205215-21299`) each lost the 10s quick-tunnel window, then
-reported their run-scoped ngrok fallback as `never routed`. Both raced for the
-worktree's single reserved domain; the lifecycle stack won and the smoke stack
-died with ERR_NGROK_334. The same fallback had routed on the pre-merge tree.
-
-The fallback's own `ngrok-fallback.log` recorded six `failed to open private
-leg` requests: the ngrok edge was delivering probes to this agent while the
-origin was not yet listening. The first bad boundary is the shared probe: the
-identity check above requires `Server: cloudflare` and `CF-Ray`, and
-`start_ngrok_ephemeral_tunnel` reused `cloudflare_tunnel_edge_is_routing`.
-A live ngrok edge returns 502 `ERR_NGROK_8012` before the origin starts and
-the origin's own headers afterwards, so it can never carry that identity. The
-routing blackbox missed it because case 10 stubbed the routing function.
-
-Problem class: a provider-specific readiness proof applied to another
-provider through a shared helper. Live repro with real ngrok and curl against
-an unused run-scoped domain: the shipped fallback failed in 13s; the fixed
-fallback reported ready in 2s. `ngrok_tunnel_edge_is_routing` probes a unique
-URI through the configured route and accepts it only when this agent's local
-inspection API recorded that URI, so offline endpoints (`ERR_NGROK_3200`),
-proxy block pages and dead routes stay rejected. Only the agent's exact local
-address bypasses the proxy. New case 14 drives the shipped fallback through
-modeled edge states. The unchanged full suite failed at case 14's
-`agent-down` positive on the pre-fix `run.sh` (50.0s), passed with
-**25 PASS markers in 56s** on the fix, and a mutant that skips the record
-check fails the `offline` negative.
-
-At ten thousand agents this remains one per-stack probe plus one loopback GET
-per attempt, with no shared endpoint, lock or agent-wide scan. Run-scoped
-fallback domains are unique, so concurrent stacks no longer reach the
-single-holder worktree domain merely because the fallback was misclassified.
-
 ## Human feedback
 
 The October 5 standing user instruction requires preserving Freedom and its
@@ -173,6 +136,4 @@ resolver and destination policy, including when that route rejects a request.
 
 Verify a tunnel's edge actually routes before returning its URL — treat origin-facing
 502/404 as healthy, but persistent HTTP 000 or Cloudflare 530 as dead — and never probe
-a rate-limited quick tunnel, since each attempt deepens the limit. Prove each
-provider's edge with that provider's own evidence; never reuse one provider's
-identity check for another.
+a rate-limited quick tunnel, since each attempt deepens the limit.
