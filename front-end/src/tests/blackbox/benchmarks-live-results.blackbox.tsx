@@ -122,8 +122,10 @@ it('shows evaluated pass/fail while teardown is pending, then stops terminal det
     'aria-label',
     '0 passed, 0 failed, 1 queued',
   );
+  expect(screen.getByTestId('run-row-run-abc')).toHaveTextContent('1 task');
   fireEvent.click(screen.getByTestId('run-row-run-abc'));
   await waitFor(() => expect(screen.getByTestId('run-view-task-chat-mode')).toBeInTheDocument());
+  expect(screen.getByTestId('run-tiles')).toHaveTextContent('0/1 done');
   expect(screen.getByText('Loading services')).toBeInTheDocument();
   lifecycle_stage = 'ready';
   status = 'ready';
@@ -173,4 +175,92 @@ it('shows evaluated pass/fail while teardown is pending, then stops terminal det
     await vi.advanceTimersByTimeAsync(15000);
   });
   expect(detailReads).toBe(terminalReads);
+});
+
+function installPagedGroupMock() {
+  window.localStorage.setItem(
+    'rose-session',
+    JSON.stringify({ access_token: 'fixture-token', user: { id: 'fixture-admin' } }),
+  );
+  const tasks = Array.from({ length: 150 }, (_, index) => ({
+    ...base.tasks[0],
+    name: 'repeated-task',
+    row_id: `member-${index}`,
+    child_run_id: `child-${index}`,
+    run_number: index + 1,
+    passed: index < 120 ? true : index < 130 ? false : null,
+    status: index < 120 ? 'passed' : index < 130 ? 'failed' : 'running',
+  }));
+  const group = {
+    ...base,
+    run_id: 'group-150',
+    source: 'benchmark-campaign',
+    is_group: true,
+    task_total: tasks.length,
+    task_counts: { passed: 120, failed: 10, queued: 20 },
+  };
+  const offsets: number[] = [];
+  vi.spyOn(global, 'fetch').mockImplementation(async (input: FetchInput) => {
+    const url = new URL(
+      typeof input === 'string' ? input : input instanceof URL ? input.href : input.url,
+    );
+    if (url.pathname.includes('/benchmarks/tasks')) return jsonResponse({ tasks: [] });
+    if (url.pathname.includes('/benchmarks/run-requests')) {
+      return jsonResponse({ requests: [] });
+    }
+    if (url.pathname.endsWith('/benchmarks/runs/group-150')) {
+      const offset = Number(url.searchParams.get('offset') ?? 0);
+      offsets.push(offset);
+      return jsonResponse({
+        run: {
+          ...toDetail(base),
+          ...group,
+          tasks: tasks.slice(offset, offset + 100),
+          totals: { ...toDetail(base).totals, passed: 120, failed: 10, running: 20 },
+          pagination: { offset, limit: 100, total: tasks.length },
+        },
+      });
+    }
+    if (url.pathname.endsWith('/benchmarks/runs')) {
+      return jsonResponse({ runs: [{ ...group, tasks: tasks.slice(0, 100) }] });
+    }
+    return jsonResponse({});
+  });
+  return offsets;
+}
+
+it('shows the full grouped task count when the run catalog contains only a preview', async () => {
+  installPagedGroupMock();
+  renderWithProviders(<BenchmarksView />);
+  await waitFor(() => expect(screen.getByTestId('run-row-group-150')).toBeInTheDocument());
+  const row = screen.getByTestId('run-row-group-150');
+  expect(row).toHaveTextContent('150 tasks');
+  expect(within(row).getByTestId('run-status-bar')).toHaveAttribute(
+    'aria-label',
+    '120 passed, 10 failed, 20 queued',
+  );
+});
+
+it('keeps grouped completion counts across task pages while showing only the current page', async () => {
+  const offsets = installPagedGroupMock();
+  renderWithProviders(<BenchmarksView />);
+  await waitFor(() => expect(screen.getByTestId('run-row-group-150')).toBeInTheDocument());
+  fireEvent.click(screen.getByTestId('run-row-group-150'));
+  await waitFor(() => expect(screen.getByTestId('run-tiles')).toBeInTheDocument());
+  expect(screen.getByTestId('run-tiles')).toHaveTextContent('130/150 done');
+  expect(screen.getAllByTestId(/^run-view-task-member-/)).toHaveLength(100);
+  expect(screen.queryByTestId('run-view-task-member-100')).not.toBeInTheDocument();
+  expect(screen.getByText('1–100 of 150')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+  await waitFor(() => expect(screen.getByTestId('run-view-task-member-100')).toBeInTheDocument());
+  expect(screen.getAllByTestId(/^run-view-task-member-/)).toHaveLength(50);
+  expect(screen.queryByTestId('run-view-task-member-0')).not.toBeInTheDocument();
+  expect(screen.getByText('101–150 of 150')).toBeInTheDocument();
+  expect(screen.getByTestId('run-tiles')).toHaveTextContent('130/150 done');
+  expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
+  await waitFor(() => expect(screen.getByTestId('run-view-task-member-0')).toBeInTheDocument());
+  expect(screen.getAllByTestId(/^run-view-task-member-/)).toHaveLength(100);
+  expect(screen.getByTestId('run-tiles')).toHaveTextContent('130/150 done');
+  expect(offsets).toEqual([0, 100, 0]);
 });

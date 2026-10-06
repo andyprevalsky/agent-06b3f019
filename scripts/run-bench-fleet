@@ -572,6 +572,11 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
         echo "FATAL: could not create the fleet script snapshot owner token" >&2
         exit 1
     fi
+    # Recovery approvals belong to the invoked committed controller source,
+    # outside any captured guest evidence. Preserve that immutable anchor when
+    # later recovery runs from this flat, content-sealed script snapshot.
+    CLOUDBENCH_PRESTACK_CONTROLLER_REF="$(git -C "$ROOT_DIR" rev-parse --verify HEAD 2>/dev/null || true)"
+    export CLOUDBENCH_PRESTACK_CONTROLLER_REF
     # Shell traps do not protect an external mktemp hit by the same process-group
     # signal. The helper owns directory creation through marker + result
     # publication and defers those signals itself, so every failure before the
@@ -701,8 +706,11 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestart-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestack-recovery.py" \
+       "$ROOT_DIR/scripts/cloudbench-prestack-source-reviews.json" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-barrier.py" \
+       "$ROOT_DIR/scripts/cloudbench-campaign-seed.py" \
+       "$ROOT_DIR/scripts/cloudbench-seed-get.sh" \
        "$ROOT_DIR/scripts/cloudbench-forensic-retirement.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh" \
@@ -3057,7 +3065,7 @@ fleet_audit_record_pool_handoff() {  # <transfer-claim> <clone-name> <machine-id
 fleet_audit_finalize_provider_teardown() {
     local hub_disposition hub_owner_file hub_owner_token
     local hub_pid hub_pid_start hub_argv_sha256 hub_port hub_birth_state
-    local source_manifest_sha256
+    local source_manifest_sha256 prior_teardown_status
     local shared_only="${FLEET_AUDIT_SHARED_ONLY:-0}"
     local shared_only_reason="${FLEET_AUDIT_SHARED_ONLY_REASON:-}"
     local tmp="$FLEET_TEARDOWN_OWNERSHIP_DIR/meta.tmp.$$"
@@ -3350,6 +3358,8 @@ PY
         "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_argv_sha256)"
     source_manifest_sha256="$(registry_meta_value \
         "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" source_manifest_sha256)"
+    prior_teardown_status="$(registry_meta_value \
+        "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" status)"
     case "$hub_disposition" in
         not-applicable)
             [ -n "$PROVISION_POOL" ] || [ "$shared_only" = "1" ] || return 1
@@ -3385,6 +3395,16 @@ PY
             ;;
         *) return 1 ;;
     esac
+    # All native checks have completed. Prepare the producer clock before
+    # publishing verified status; a failed write remains incomplete/retryable.
+    # The audit's source digest binds this scalar to its owner/run metadata.
+    # Preserve a sealed clock (or a legacy clockless audit) on re-verification.
+    if [ "$prior_teardown_status" != "provider-teardown-verified" ]; then
+        date +%s > "$FLEET_TEARDOWN_OWNERSHIP_DIR/provider-teardown-verified.epoch.tmp.$$" \
+            && mv "$FLEET_TEARDOWN_OWNERSHIP_DIR/provider-teardown-verified.epoch.tmp.$$" \
+                "$FLEET_TEARDOWN_OWNERSHIP_DIR/provider-teardown-verified.epoch" \
+            || { rm -f "$FLEET_TEARDOWN_OWNERSHIP_DIR/provider-teardown-verified.epoch.tmp.$$"; return 1; }
+    fi
     {
         printf 'version=1\n'
         printf 'fleet_owner_token=%s\n' "$FLEET_OWNER_TOKEN"
@@ -10683,7 +10703,7 @@ cleanup() {
                         "$FLEET_OWNER_PID_START"; then
                     for i in "${!CHILD_MACHINE[@]}"; do
                         if [ "${CHILD_MACHINE[$i]}" = "$id" ]; then
-                            date +%s > "${CHILD_OUT[$i]}/bench-e2e.finished-epoch" \
+                            date +%s > "${CHILD_OUT[$i]}/pool-primary.returned-epoch" \
                                 || { ec=1; teardown_failed=1; }
                             break
                         fi
@@ -10768,15 +10788,19 @@ cleanup() {
             || { ec=1; teardown_failed=1; }
     fi
     cloudbench_controller_lock_release "$LOCK_DIR"
-    # Report each bench's end-to-end duration only after its provider claim has
-    # been released or its exact clone teardown has finished. Pool members get
-    # an earlier, per-machine finish receipt in the claim-release loop below;
-    # this fallback covers fresh clones and recovery paths.
+    # Report each bench's end-to-end duration only after the complete primary,
+    # worker and exact-claim audit. An early pool return has a separate marker.
+    # Legacy clockless audits retain a truthful post-verification fallback.
     if [ "$teardown_failed" = "0" ] && [ "$KEEP_CLONES" != "1" ]; then
+        local fleet_release_epoch
+        fleet_release_epoch="$(cat "$FLEET_TEARDOWN_OWNERSHIP_DIR/provider-teardown-verified.epoch" 2>/dev/null || true)"
+        case "$fleet_release_epoch" in
+            ''|*[!0-9]*) fleet_release_epoch="$(date +%s)" ;;
+        esac
         for out in "${CHILD_OUT[@]}"; do
             if [ -s "$out/bench-e2e.started-epoch" ] \
                 && [ ! -s "$out/bench-e2e.finished-epoch" ]; then
-                date +%s > "$out/bench-e2e.finished-epoch" \
+                printf '%s\n' "$fleet_release_epoch" > "$out/bench-e2e.finished-epoch" \
                     || { ec=1; teardown_failed=1; }
             fi
         done
@@ -10941,7 +10965,6 @@ _SEED_GUEST_TOKEN="$(
         --pg-major "$CLOUDBENCH_GUEST_PG_MAJOR" \
         "$ROOT_DIR/back-end/prisma/schema.prisma"
 )"
-_SEED_GUEST_PROBE="$(mktemp "${TMPDIR:-/tmp}/cloudbench-seed-probe.XXXXXX")"
 # Detached fleet controllers can inherit a stripped PATH (Cursor cloud / minimal
 # launchers). Ensure npx from nvm or common prefixes is visible before probing.
 if ! command -v npx >/dev/null 2>&1; then
@@ -10957,81 +10980,29 @@ if ! command -v npx >/dev/null 2>&1; then
     done
 fi
 command -v npx >/dev/null 2>&1 || {
-    rm -f "$_SEED_GUEST_PROBE"
     echo "❌ npx not found on PATH; cannot verify the cloud-guest seed dump." >&2
     echo "   Install Node.js or ensure nvm's bin dir is on PATH before run-bench-fleet." >&2
     exit 1
 }
-# Resolve a seed-dump runner that does not depend on a writable npm cache.
-# Hermetic fleet tests ship an empty package.json (no node_modules); live
-# coverage can race `npx --yes tsx` into ENOTEMPTY / `tsx: not found`.
-# Prefer repo-local tsx, then PATH tsx, then Node 22 type-stripping, then npx.
-_seed_dump_get() {
-    local token="$1" out="$2"
-    # Prefer a runner that can resolve back-end deps. Cloud agents sometimes
-    # have an empty/partial back-end/node_modules (npm arborist edgesOut bugs
-    # on full installs); fall back to NODE_PATH + a known-good tsx binary so
-    # we do not provision N Fly clones and then fail the start barrier because
-    # the host falsely reported "missing" for a dump that exists in R2.
-    local -a runners=()
-    if [ -x "$ROOT_DIR/node_modules/.bin/tsx" ]; then
-        runners+=("$ROOT_DIR/node_modules/.bin/tsx")
+if [ -n "${CLOUDBENCH_CAMPAIGN_SEED_PROOF:-}" ]; then
+    python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-campaign-seed.py" consume \
+        --root "$ROOT_DIR" --inventory "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:?}" \
+        --barrier "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:?}" \
+        --proof "$CLOUDBENCH_CAMPAIGN_SEED_PROOF" \
+        --job "${RUN_BENCH_CAMPAIGN_JOB_ID:?}" --controller-pid "$$" \
+        --deadline "$((FLEET_CONTROLLER_STARTED_EPOCH + START_BARRIER_WAIT_SECONDS))" || exit 1
+else
+    _SEED_GUEST_PROBE="$(mktemp "${TMPDIR:-/tmp}/cloudbench-seed-probe.XXXXXX")"
+    if ! bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-seed-get.sh" \
+        "$ROOT_DIR" "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"; then
+        rm -f "$_SEED_GUEST_PROBE"
+        echo "❌ Missing canonical base fixture for cloud guests: $_SEED_GUEST_TOKEN" >&2
+        echo "   Publish a dump produced by a pg${CLOUDBENCH_GUEST_PG_MAJOR} client before provisioning." >&2
+        echo "   (Host-only pg16 publications are not readable by Fly guest Postgres ${CLOUDBENCH_GUEST_PG_MAJOR}.)" >&2
+        exit 1
     fi
-    if [ -x "$ROOT_DIR/back-end/node_modules/.bin/tsx" ]; then
-        runners+=("$ROOT_DIR/back-end/node_modules/.bin/tsx")
-    fi
-    if command -v tsx >/dev/null 2>&1; then
-        runners+=("$(command -v tsx)")
-    fi
-    local runner
-    for runner in "${runners[@]}"; do
-        if (
-            cd "$ROOT_DIR/back-end" &&
-                NODE_PATH="$ROOT_DIR/back-end/node_modules${NODE_PATH:+:$NODE_PATH}" \
-                    "$runner" scripts/seed-dump-cache.ts get "$token" "$out"
-        ) && [ -s "$out" ]; then
-            return 0
-        fi
-    done
-    if node --experimental-strip-types -e 'export {}' >/dev/null 2>&1; then
-        if (
-            cd "$ROOT_DIR/back-end" &&
-                NODE_PATH="$ROOT_DIR/back-end/node_modules${NODE_PATH:+:$NODE_PATH}" \
-                    node --experimental-strip-types scripts/seed-dump-cache.ts get "$token" "$out"
-        ) && [ -s "$out" ]; then
-            return 0
-        fi
-    fi
-    if (
-        cd "$ROOT_DIR/back-end" &&
-            NODE_PATH="$ROOT_DIR/back-end/node_modules${NODE_PATH:+:$NODE_PATH}" \
-                npx --yes tsx scripts/seed-dump-cache.ts get "$token" "$out"
-    ) && [ -s "$out" ]; then
-        return 0
-    fi
-    return 1
-}
-# Retry transient runner races before failing closed on a missing dump.
-_SEED_GUEST_OK=0
-for _seed_try in 1 2 3 4 5; do
     rm -f "$_SEED_GUEST_PROBE"
-    if (
-            cd "$ROOT_DIR/back-end" &&
-                _seed_dump_get "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"
-        ) && [ -s "$_SEED_GUEST_PROBE" ]; then
-        _SEED_GUEST_OK=1
-        break
-    fi
-    sleep "$_seed_try"
-done
-if [ "$_SEED_GUEST_OK" -ne 1 ]; then
-    rm -f "$_SEED_GUEST_PROBE"
-    echo "❌ Missing canonical base fixture for cloud guests: $_SEED_GUEST_TOKEN" >&2
-    echo "   Publish a dump produced by a pg${CLOUDBENCH_GUEST_PG_MAJOR} client before provisioning." >&2
-    echo "   (Host-only pg16 publications are not readable by Fly guest Postgres ${CLOUDBENCH_GUEST_PG_MAJOR}.)" >&2
-    exit 1
 fi
-rm -f "$_SEED_GUEST_PROBE"
 echo "✅ Canonical seed dump present for guest pg${CLOUDBENCH_GUEST_PG_MAJOR}: $_SEED_GUEST_TOKEN"
 
 # ── Resolve the warm machine (clone source) + its volume ────────────────────

@@ -350,7 +350,7 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-ben
   run_suite "Cloud Benchmark Seed Budget" bash scripts/tests/cloudbench-seed-budget.test.sh
   run_suite "Cloud Benchmark Restore Readiness" bash scripts/tests/cloudbench-restore-readiness.test.sh
   run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
-  run_suite "Cloud Benchmark Status-Service Shutdown" bash scripts/tests/cloudbench-status-service-shutdown.test.sh
+  run_suite "Cloud Benchmark Status-Service Shutdown" python3 scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown
 fi
 if auto_rca_changed '^(scripts/(seed-|setup-db|cloud-build)|back-end/(prisma/|scripts/seed))'; then
   run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh

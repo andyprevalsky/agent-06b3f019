@@ -20,6 +20,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Reuse the existing owning control on Linux without adding pytest or dotenv
+# to the offline controller image. Its host family skips this native branch.
+python3 - "$ROOT" "$tmp" <<'PY_COHORT_OWNER'
+import ast
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root, temporary = map(Path, sys.argv[1:])
+source = root / 'agents/benchmarks/cloudbench_campaign_inventory_test.py'
+name = 'test_campaign_inventory_seed_preflight_native_linux_owner_tick_and_legacy_formats'
+function = next(node for node in ast.parse(source.read_text()).body
+                if isinstance(node, ast.FunctionDef) and node.name == name)
+namespace = {'Path': Path, 'os': os, 'subprocess': subprocess, 'ROOT': root}
+exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+scope = temporary / 'seed-owner'
+scope.mkdir()
+namespace[name](scope)
+print('PASS: native cohort owner, wrong parent/publisher ticks and legacy birth format')
+PY_COHORT_OWNER
+
 # Exercise the actual server at the create-before-write boundary. A killed
 # writer and concurrent readers must never expose a partial generation.
 python3 - "$ROOT/scripts/cloudbench-status-server.py" "$tmp" <<'PY_GENERATION'

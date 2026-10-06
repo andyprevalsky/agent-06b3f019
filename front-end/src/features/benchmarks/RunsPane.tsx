@@ -247,7 +247,8 @@ export function RunsPane({
               </span>
             </span>
             <span className="text-[11px] text-muted-foreground shrink-0 text-right">
-              {run.tasks.length} task{run.tasks.length === 1 ? '' : 's'} ·{' '}
+              {run.task_total ?? run.tasks.length} task
+              {(run.task_total ?? run.tasks.length) === 1 ? '' : 's'} ·{' '}
               {new Date(run.timestamp || run.uploaded_at).toLocaleString()}
             </span>
             <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />

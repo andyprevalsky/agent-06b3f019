@@ -103,19 +103,21 @@ If an isolated worktree fails, return it to `/descend` preparation. Do not run
 `scripts/setup-db.sh` with an inherited parent identity and do not borrow a
 different worktree's database.
 
-An approval wait or any other pause can outlive the isolated worktree's lease.
-Whenever control returns after a pause, and before running the next deploy
-action from an isolated worktree, atomically reactivate its ownership and
-reprovision anything cleanup may have reclaimed:
+After a pause, rerun the existing full preparation for the same isolated
+worktree and source, then require the check gate again. Load its recorded
+identity first and preserve any original `--port-registry` selection:
 
 ```bash
-bash scripts/prepare-deploy-worktree.sh --resume
+source .context/deploy-worktree.env
+bash scripts/prepare-deploy-worktree.sh \
+  --worktree "$ROSE_DEPLOY_WORKTREE_PATH" --source "$ROSE_DEPLOY_SOURCE_WORKSPACE"
+bash scripts/prepare-deploy-worktree.sh --check
 ```
 
-This resume gate must finish successfully before continuing. It waits when
-cleanup already owns the manifest lock; it never overwrites an in-progress
-reclamation. Primary Conductor worktrees have no deploy manifest and skip this
-isolated-worktree-only resume command.
+Full preparation serializes its owner lock, reuses the exact identity and port
+claim, validates credential links, and preserves its existing correctly labeled
+Postgres container. It refuses foreign resources. The script has no `--resume`
+option. Primary Conductor worktrees continue to use the check gate above.
 
 **You must fix ALL non-overridden failing tests, even if they are not caused by the changes in this branch.** The deploy flow defaults to keeping main green. If a test was already broken before your branch, that is now your responsibility to fix before merging unless the user explicitly overrides that exact gate. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else.
 
@@ -701,8 +703,9 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
 bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
-# Native Linux with ripgrep: driver ownership reads /proc.
-bash scripts/tests/cloudbench-status-service-shutdown.test.sh
+# Driver ownership reads Linux /proc; Mac dispatches the same unchanged control
+# through the offline exact-owner Linux image and verifies retirement.
+python3 scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown
 bash scripts/tests/fleet-infra-canary.test.sh
 bash scripts/tests/fleet-infra-stability-proof.test.sh
 python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py

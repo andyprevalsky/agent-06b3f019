@@ -140,9 +140,14 @@ def retire_owned_container(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument(
+        "--fixture",
+        choices=("multi-workstream", "status-service-shutdown"),
+        default="multi-workstream",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    fixture = "scripts/tests/cloudbench-multi-workstream.test.sh"
+    fixture = f"scripts/tests/cloudbench-{args.fixture}.test.sh"
     if sys.platform == "linux":
         subprocess.run([sys.executable, "-c", TOOL_CHECK], check=True)
         if args.check_only:
@@ -243,6 +248,7 @@ def main() -> int:
             "hub_upload",
             "outcome_publication",
             "seed_cache_path",
+            "cloudbench_campaign_inventory_test",
         )
     ]
     hashes = {}

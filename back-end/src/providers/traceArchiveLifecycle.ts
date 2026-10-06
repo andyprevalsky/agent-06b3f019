@@ -146,12 +146,17 @@ export async function storeWorkerArtifacts(input: unknown): Promise<{
   let next = 0;
   const uploads = await Promise.allSettled(
     Array.from(
-      { length: Math.min(ARCHIVE_BATCH_UPLOAD_CONCURRENCY, batch.artifacts.length) },
+      {
+        length: Math.min(ARCHIVE_BATCH_UPLOAD_CONCURRENCY, batch.artifacts.length),
+      },
       async () => {
         while (next < batch.artifacts.length) {
           const index = next++;
           const artifact = batch.artifacts[index];
-          const ref = await storeEncryptedArtifact({ rootAgentId: batch.rootAgentId, ...artifact });
+          const ref = await storeEncryptedArtifact({
+            rootAgentId: batch.rootAgentId,
+            ...artifact,
+          });
           if (ref === null) throw new Error('Trace archive is disabled or unavailable');
           refs[index] = { path: artifact.objectPath, ref };
         }
@@ -161,7 +166,9 @@ export async function storeWorkerArtifacts(input: unknown): Promise<{
   const failure = uploads.find((result) => result.status === 'rejected');
   if (failure?.status === 'rejected') throw failure.reason;
   if (await finalizationFenceExists(batch.rootAgentId)) {
-    const reconciled = await reconcileFinalizedManifest(batch.rootAgentId, { markerExists: true });
+    const reconciled = await reconcileFinalizedManifest(batch.rootAgentId, {
+      markerExists: true,
+    });
     if (reconciled.status === 'updated') {
       log.info('Trace archive manifest reconciled after late worker artifact batch', {
         root_agent_id: batch.rootAgentId,
@@ -438,33 +445,43 @@ async function writeStartManifest(
   fixture: Awaited<ReturnType<typeof collectFixture>>
 ): Promise<void> {
   if (fixture.agent_ids[0] !== agentId) return;
-  const refs = uniqueArtifacts(excludeControlArtifacts(await listArchivedObjects(agentId)));
-  const manifestValue = buildManifestValue({
-    rootAgentId: agentId,
-    refs,
-    worldModelMode: startWorldModelMode(agentId, fixture),
-    benchmarkResult: null,
-    run: encryptedRunMetadata(fixture),
-    correlations: {
-      root_agent_id: agentId,
-      user_id: fixture.user_id,
-      agent_ids: fixture.agent_ids,
-    },
-    finalized: false,
-    force: false,
-  });
-  const manifest = await archiveJson({
-    rootAgentId: agentId,
-    objectPath: 'manifest.json.gz.enc',
-    value: manifestValue,
-  });
-  await writePublicManifest(agentId, refs);
-  if (manifest !== null) {
-    log.info('Trace archive manifest initialized at start', {
-      root_agent_id: agentId,
-      artifact_count: refs.length,
+  await withArchiveManifestLock(agentId, async (ownership) => {
+    // A delayed start capture must not replace a finalizing/terminal control file.
+    // Its fixture is already durable, and the owning finalizer/reconciler includes it.
+    if (await finalizationFenceExists(agentId)) {
+      await ownership.reconcile();
+      return;
+    }
+    const refs = uniqueArtifacts(excludeControlArtifacts(await listArchivedObjects(agentId)));
+    const manifestValue = buildManifestValue({
+      rootAgentId: agentId,
+      refs,
+      worldModelMode: startWorldModelMode(agentId, fixture),
+      benchmarkResult: null,
+      run: encryptedRunMetadata(fixture),
+      correlations: {
+        root_agent_id: agentId,
+        user_id: fixture.user_id,
+        agent_ids: fixture.agent_ids,
+      },
+      finalized: false,
+      force: false,
     });
-  }
+    await ownership.assertOwned();
+    const manifest = await archiveJson({
+      rootAgentId: agentId,
+      objectPath: 'manifest.json.gz.enc',
+      value: manifestValue,
+    });
+    await ownership.assertOwned();
+    await writePublicManifest(agentId, refs);
+    if (manifest !== null) {
+      log.info('Trace archive manifest initialized at start', {
+        root_agent_id: agentId,
+        artifact_count: refs.length,
+      });
+    }
+  });
 }
 
 type PreparedArchiveTask<TFixture> = {

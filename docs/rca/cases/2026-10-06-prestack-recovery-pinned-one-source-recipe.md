@@ -107,3 +107,34 @@ make a separate cybersecurity investigation a prerequisite.
 ## Reusable lesson
 
 Bind recovery to the actual immutable source and independently reviewed execution phase rather than a historical commit or a fabricated completion receipt.
+
+### October 6 review follow-up: external phase authority and normal snapshots
+
+The review found that capture-local source-review metadata was the sole phase
+approval authority. Three new owning inverses failed on unchanged source while
+all twenty original controls passed: capture-local phase self-approval, a substituted
+adjacent provenance validator, and a missing packed provenance document. A fourth normal CLI
+snapshot control failed because the builder omitted the policy file. These
+failures preserve the original immutable capture and do not allocate providers.
+
+The revised helper reads the phase policy from the invoked controller's
+committed Git source. Canonical helper, policy and provenance-validator bytes
+must match those trusted blobs. A flat native snapshot carries the committed
+policy plus its immutable controller ref and verifies the existing content
+manifest before using them. Capture-local review remains an exact instance
+binding, not an approval source. Source review hashes twenty-one checkout
+inputs, every actual packed executable and all three boot controls; only
+execution-instance provenance/configuration/ref labels are excluded from the
+content fingerprint. The old immutable recipe retains its reviewed entry;
+root independently reproduced the combined 39-input fingerprint and authorized
+the same two pre-service phases; the existing approved recipe is preserved.
+
+The original twenty control-method ASTs remain unchanged. All twenty-four
+controls passed author and independent native replay; root replay took 77.084
+seconds with all four sealed file hashes verified before and after. The
+normal snapshot builder preserves both dedup helpers, the policy and the
+controller ref anchor. No further full recovery suite was repeated for
+composition. Combined fingerprint source review is complete; the normal deploy gates
+remain pending. This repairs policy authority and source-equivalent admission,
+not historical performance, interrupted-run acceptance or resource-credit
+semantics. Status remains mitigated until root's final integration/outcome.

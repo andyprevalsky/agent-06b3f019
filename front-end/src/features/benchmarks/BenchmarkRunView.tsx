@@ -299,7 +299,7 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
           <div className="flex flex-wrap gap-2 pb-3" data-testid="run-tiles">
             <Tile
               label="Tasks"
-              value={`${detail.totals.passed + detail.totals.failed}/${detail.tasks.length} done`}
+              value={`${detail.totals.passed + detail.totals.failed}/${detail.pagination?.total ?? detail.tasks.length} done`}
             />
             <Tile label="Passed" value={String(detail.totals.passed)} />
             <Tile label="Failed" value={String(detail.totals.failed)} />

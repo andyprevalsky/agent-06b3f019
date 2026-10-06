@@ -39,6 +39,19 @@ cd agents && python scripts/run_blackbox_tests.py web-search    # single domain
 cd agents && python scripts/run_blackbox_tests.py --list        # list domains
 ```
 
+Agents coverage runs each blackbox domain in its own bounded interpreter and
+then combines coverage before fast-cache and unit checks:
+
+```bash
+cd agents && bash scripts/run-coverage.sh
+```
+
+`AGENTS_COVERAGE_DOMAIN_TIMEOUT` sets the whole verification-domain budget in
+seconds (default 1800, positive integer). A large domain includes many individual
+checks and shares the host with the other coverage pools. Timeout and cancellation
+still fail the domain and retire its owned process group. This infrastructure
+budget does not change benchmark task execution or allocation-to-release deadlines.
+
 ### Backend Structural (`back-end/src/tests/structural/`)
 
 Architecture invariant tests — import direction, cross-domain isolation, provider boundaries, Prisma/Express encapsulation. Fast, no server needed.

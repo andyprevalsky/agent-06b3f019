@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -214,17 +215,30 @@ class BootstrapRecoveryTest(unittest.TestCase):
             )
             packed[name] = base64.b64encode(git_blob(path)).decode()
         packed["cloudbench-execution-provenance.json"] = base64.b64encode(json.dumps(document).encode()).decode()
-        envelope = gzip.compress(json.dumps({"version": 1, "files": packed}, sort_keys=True).encode(), mtime=0)
+        envelope = gzip.compress(
+            json.dumps({"version": 1, "files": packed}, sort_keys=True).encode(),
+            mtime=0,
+        )
         self.config["env"].update(
             CLOUDBENCH_BOOT_PAYLOAD_FILE="/cloudbench-boot-payload.json.gz",
             CLOUDBENCH_BOOT_PAYLOAD_SHA256=digest(envelope),
         )
         self.config["files"] = [
-            {"guest_path": "/" + name, "raw_value": base64.b64encode(git_blob("scripts/" + name)).decode()}
-            for name in ("cloudbench-boot.sh", "cloudbench-boot-payload.py", "cloudbench-status-server.py")
+            {
+                "guest_path": "/" + name,
+                "raw_value": base64.b64encode(git_blob("scripts/" + name)).decode(),
+            }
+            for name in (
+                "cloudbench-boot.sh",
+                "cloudbench-boot-payload.py",
+                "cloudbench-status-server.py",
+            )
         ]
         self.config["files"].append(
-            {"guest_path": "/cloudbench-boot-payload.json.gz", "raw_value": base64.b64encode(envelope).decode()}
+            {
+                "guest_path": "/cloudbench-boot-payload.json.gz",
+                "raw_value": base64.b64encode(envelope).decode(),
+            }
         )
         write(self.machines, json.dumps(self.native))
         write(
@@ -279,7 +293,9 @@ class BootstrapRecoveryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.verify()
 
-    def test_every_injected_executable_must_match_even_with_a_new_envelope_checksum(self):
+    def test_every_injected_executable_must_match_even_with_a_new_envelope_checksum(
+        self,
+    ):
         original = copy.deepcopy(self.config)
         file = next(f for f in original["files"] if f["guest_path"] == "/cloudbench-boot-payload.json.gz")
         packed = json.loads(gzip.decompress(base64.b64decode(file["raw_value"])))
@@ -312,6 +328,151 @@ class BootstrapRecoveryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             recovery.publish(self.out, receipt)
 
+    def test_normal_controller_snapshot_preserves_trusted_source_policy(self):
+        snapshot_temp = self.base / "native-snapshot-temp"
+        snapshot_temp.mkdir()
+        ready, release = self.base / "entry-ready", self.base / "entry-release"
+        environment = os.environ.copy()
+        for key in tuple(environment):
+            if key.startswith("CLOUDBENCH_SCRIPT_SNAPSHOT"):
+                environment.pop(key)
+        environment.update(
+            TMPDIR=str(snapshot_temp),
+            PYTHONDONTWRITEBYTECODE="1",
+            CLOUDBENCH_FAKE_DIR=str(self.base / "fake-provider"),
+            CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_READY=str(ready),
+            CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_RELEASE=str(release),
+        )
+        with tempfile.TemporaryFile() as output:
+            controller = subprocess.Popen(
+                ["bash", str(ROOT / "run-bench-fleet"), "--help"],
+                env=environment,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                deadline = time.monotonic() + 30
+                while not ready.exists() and controller.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(ready.exists(), "normal controller did not enter its sealed snapshot")
+                snapshots = list(snapshot_temp.glob("cloudbench-scripts.*"))
+                self.assertEqual(len(snapshots), 1)
+                snapshot = snapshots[0]
+                helper = snapshot / "cloudbench-prestack-recovery.py"
+                policy = snapshot / "cloudbench-prestack-source-reviews.json"
+                self.assertTrue(policy.is_file(), "normal snapshot omitted its committed source policy")
+                environment.update(
+                    CLOUDBENCH_FLEET_ROOT=str(ROOT.parent),
+                    CLOUDBENCH_SCRIPT_SNAPSHOT=str(snapshot),
+                    CLOUDBENCH_PRESTACK_CONTROLLER_REF=subprocess.check_output(
+                        ["git", "-C", str(ROOT.parent), "rev-parse", "HEAD"], text=True
+                    ).strip(),
+                )
+                args = [
+                    sys.executable,
+                    str(helper),
+                    "--registry",
+                    str(self.registry),
+                    "--bench",
+                    BENCH,
+                    "--capture-dir",
+                    str(self.captures),
+                    "--machines-json",
+                    str(self.machines),
+                    "--volumes-json",
+                    str(self.volumes),
+                ]
+                published = subprocess.run(args + ["--publish"], env=environment, capture_output=True, text=True)
+                self.assertEqual(published.returncode, 0, published.stderr)
+                self.assertEqual(json.loads(published.stdout)["proof_credit"], 0)
+                validated = subprocess.run(
+                    args + ["--validate-published-bootstrap"], env=environment, capture_output=True, text=True
+                )
+                self.assertEqual(validated.returncode, 0, validated.stderr)
+                foreign_root = self.base / "foreign-source"
+                subprocess.run(["git", "init", "-q", str(foreign_root)], check=True)
+                foreign = {**environment, "CLOUDBENCH_FLEET_ROOT": str(foreign_root)}
+                rejected = subprocess.run(
+                    args + ["--validate-published-bootstrap"], env=foreign, capture_output=True, text=True
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("trusted committed source", rejected.stderr)
+                policy.write_bytes(policy.read_bytes() + b"\n")
+                subprocess.run(
+                    [
+                        sys.executable,
+                        str(snapshot / "cloudbench_execution_provenance.py"),
+                        "snapshot",
+                        "--snapshot-dir",
+                        str(snapshot),
+                        "--output",
+                        str(snapshot / "cloudbench-controller-snapshot-manifest.json"),
+                    ],
+                    env=environment,
+                    check=True,
+                    capture_output=True,
+                )
+                rejected = subprocess.run(
+                    args + ["--validate-published-bootstrap"], env=environment, capture_output=True, text=True
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("trusted committed source", rejected.stderr)
+            finally:
+                release.touch()
+                controller.wait(timeout=30)
+            self.assertEqual(controller.returncode, 0)
+            self.assertFalse(snapshot.exists(), "normal exact snapshot owner did not retire")
+
+    def test_capture_local_review_cannot_authorize_unreviewed_executable_source(self):
+        out, receipt = self.verify()
+        receipt["source_recipe_sha256"] = "f" * 64
+        receipt["source_review_fingerprint"] = "e" * 64
+        review = {
+            "reviewed": True,
+            "reviewer": "capture writer",
+            "source_ref": receipt["source_ref"],
+            "source_recipe_sha256": receipt["source_recipe_sha256"],
+            "pre_service_boundaries": [receipt["bootstrap_phase"]],
+        }
+        write(self.captures / "source-boundary-reviewed.safe.json", json.dumps(review))
+        write(
+            self.captures / "cloudbench-prestack-source-reviews.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "reviewed_executable_sources": {"e" * 64: [receipt["bootstrap_phase"]]},
+                }
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "trusted independent review"):
+            recovery.publish(out, receipt)
+        self.assertFalse((out / "guest-bootstrap.confirmed").exists())
+
+    def test_adjacent_provenance_validator_must_match_the_bound_ref(self):
+        helper = ROOT / "cloudbench_execution_provenance.py"
+        original = helper.read_bytes()
+        try:
+            helper.write_bytes(original + b"\n# mismatched local validator\n")
+            with self.assertRaisesRegex(ValueError, "local provenance validator differs"):
+                recovery.bound_recipe(
+                    recovery.fields(self.registry / "meta"),
+                    self.config,
+                    self.provenance,
+                )
+        finally:
+            helper.write_bytes(original)
+
+    def test_absent_packed_provenance_document_is_explicit(self):
+        mutant = copy.deepcopy(self.config)
+        payload = next(file for file in mutant["files"] if file["guest_path"] == "/cloudbench-boot-payload.json.gz")
+        packed = json.loads(gzip.decompress(base64.b64decode(payload["raw_value"])))
+        del packed["files"]["cloudbench-execution-provenance.json"]
+        envelope = gzip.compress(json.dumps(packed, sort_keys=True).encode(), mtime=0)
+        payload["raw_value"] = base64.b64encode(envelope).decode()
+        mutant["env"]["CLOUDBENCH_BOOT_PAYLOAD_SHA256"] = digest(envelope)
+        with self.assertRaisesRegex(ValueError, "provenance document is missing"):
+            recovery.bound_recipe(recovery.fields(self.registry / "meta"), mutant, self.provenance)
+
     def test_missing_source_config_schema_and_module_spec_fail_clearly(self):
         for field, value in (("env", None), ("files", {})):
             mutant = copy.deepcopy(self.config)
@@ -320,7 +481,11 @@ class BootstrapRecoveryTest(unittest.TestCase):
                 recovery.bound_recipe(recovery.fields(self.registry / "meta"), mutant, self.provenance)
         with patch.object(recovery.importlib.util, "spec_from_file_location", return_value=None):
             with self.assertRaisesRegex(ValueError, "owner module cannot be loaded"):
-                recovery.bound_recipe(recovery.fields(self.registry / "meta"), self.config, self.provenance)
+                recovery.bound_recipe(
+                    recovery.fields(self.registry / "meta"),
+                    self.config,
+                    self.provenance,
+                )
 
     def test_native_driver_path_cannot_redirect_to_another_bound_executable(self):
         mutant = copy.deepcopy(self.config)

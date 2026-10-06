@@ -71,7 +71,11 @@ def bootstrap_regular(path: Path, maximum: int = 64 * 1024 * 1024) -> bytes:
 
 
 def bootstrap_identity(
-    registry: Path, bench: str, capture_dir: Path, machines_file: Path, volumes_file: Path
+    registry: Path,
+    bench: str,
+    capture_dir: Path,
+    machines_file: Path,
+    volumes_file: Path,
 ) -> tuple[Path, dict[str, object]]:
     """Fresh task-free infra probe canceled during DB/dependency bootstrap.
 
@@ -112,7 +116,10 @@ def bootstrap_identity(
     audit_meta = fields(audit / "meta")
     if any(audit_meta.get(key) != meta[key] for key in ("fleet_owner_token", "run_id", "app")):
         raise ValueError("bootstrap audit owner disagrees")
-    lifecycle, tasks = obj(run / "_batch/lifecycle.json"), obj(run / "_batch/benches.json")
+    lifecycle, tasks = (
+        obj(run / "_batch/lifecycle.json"),
+        obj(run / "_batch/benches.json"),
+    )
     if (
         lifecycle.get("status") != "failed"
         or lifecycle.get("fleet_owner_token") != owner
@@ -155,13 +162,23 @@ def bootstrap_identity(
         or bootstrap_regular(out / "desired-worker-count", 256).strip() != b"0"
     ):
         raise ValueError("bootstrap child did not terminate before worker allocation")
-    for name in ("cloudbench-run.json", "runtime-evidence.pending", "worker-runtime-evidence"):
+    for name in (
+        "cloudbench-run.json",
+        "runtime-evidence.pending",
+        "worker-runtime-evidence",
+    ):
         if (out / name).exists() or (out / name).is_symlink():
             raise ValueError("bootstrap guest crossed runtime evidence boundary")
-    for name in ("guest-cleanup.provider-manifest.json", "guest-cleanup.recovery-receipt.json"):
+    for name in (
+        "guest-cleanup.provider-manifest.json",
+        "guest-cleanup.recovery-receipt.json",
+    ):
         if (out / name).exists() or (out / name).is_symlink():
             raise ValueError("bootstrap receipt must remain distinct from guest/provider acknowledgement")
-    machines, volumes = obj(machines_file, 128 * 1024 * 1024), obj(volumes_file, 128 * 1024 * 1024)
+    machines, volumes = (
+        obj(machines_file, 128 * 1024 * 1024),
+        obj(volumes_file, 128 * 1024 * 1024),
+    )
     if not isinstance(machines, list) or not isinstance(volumes, list):
         raise ValueError("unsafe bootstrap native inventory")
     native = [row for row in machines if row.get("id") == machine]
@@ -192,7 +209,14 @@ def bootstrap_identity(
     marker = out / "guest-shutdown.confirmed"
     if (marker.exists() or marker.is_symlink()) and bootstrap_regular(marker, 256) != (run_id + "\n").encode():
         raise ValueError("existing genuine cleanup confirmation belongs to another run")
-    return out, dict(meta=meta, config=config, token=token, machine=machine, volume=volume, clone=clone)
+    return out, dict(
+        meta=meta,
+        config=config,
+        token=token,
+        machine=machine,
+        volume=volume,
+        clone=clone,
+    )
 
 
 RECIPE_PATHS = (
@@ -220,7 +244,7 @@ RECIPE_PATHS = (
 )
 
 
-def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[str, str]:
+def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[str, str, str]:
     if (
         not isinstance(config, dict)
         or not isinstance(config.get("env"), dict)
@@ -259,7 +283,11 @@ def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[
         raise ValueError("execution lacks an immutable source binding")
 
     def blob(path: str) -> bytes:
-        result = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{path}"], capture_output=True, timeout=15)
+        result = subprocess.run(
+            ["git", "-C", str(root), "show", f"{ref}:{path}"],
+            capture_output=True,
+            timeout=15,
+        )
         if result.returncode or len(result.stdout) > 67108864:
             raise ValueError("bound source blob is unavailable")
         return result.stdout
@@ -278,7 +306,11 @@ def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[
         if not isinstance(item, dict) or set(item) != {"guest_path", "raw_value"} or item["guest_path"] in injected:
             raise ValueError("unsafe original injected control files")
         injected[item["guest_path"]] = base64.b64decode(item["raw_value"], validate=True)
-    for name in ("cloudbench-boot.sh", "cloudbench-boot-payload.py", "cloudbench-status-server.py"):
+    for name in (
+        "cloudbench-boot.sh",
+        "cloudbench-boot-payload.py",
+        "cloudbench-status-server.py",
+    ):
         if injected.get("/" + name) != blob("scripts/" + name):
             raise ValueError("original injected boot control differs from bound source")
     payload_path = config["env"].get("CLOUDBENCH_BOOT_PAYLOAD_FILE")
@@ -323,7 +355,11 @@ def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[
         raise ValueError("original packed driver/fetch pair is incomplete")
     # JSON is owned by the existing provenance validator, never interpreted as
     # executable code or admitted solely because its filename ends in .json.
+    if document is None:
+        raise ValueError("original packed execution provenance document is missing")
     helper = Path(__file__).with_name("cloudbench_execution_provenance.py")
+    if bootstrap_regular(helper) != blob("scripts/cloudbench_execution_provenance.py"):
+        raise ValueError("local provenance validator differs from bound source")
     spec = importlib.util.spec_from_file_location("bound_execution_owner", helper)
     if spec is None or spec.loader is None:
         raise ValueError("execution provenance owner module cannot be loaded")
@@ -340,15 +376,29 @@ def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[
         "injected_controls": controls,
         "boot_controls": {
             name: sha(injected["/" + name])
-            for name in ("cloudbench-boot.sh", "cloudbench-boot-payload.py", "cloudbench-status-server.py")
+            for name in (
+                "cloudbench-boot.sh",
+                "cloudbench-boot-payload.py",
+                "cloudbench-status-server.py",
+            )
         },
         "execution_provenance_sha256": sha(module.canonical_bytes(document)),
     }
-    return ref, sha(json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode())
+    source_recipe = {key: recipe[key] for key in ("checkout", "injected_controls", "boot_controls")}
+    source_fingerprint = sha(json.dumps(source_recipe, sort_keys=True, separators=(",", ":")).encode())
+    return (
+        ref,
+        sha(json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()),
+        source_fingerprint,
+    )
 
 
 def verify_bootstrap_current(
-    registry: Path, bench: str, capture_dir: Path, machines_file: Path, volumes_file: Path
+    registry: Path,
+    bench: str,
+    capture_dir: Path,
+    machines_file: Path,
+    volumes_file: Path,
 ) -> tuple[Path, dict]:
     out, ctx = bootstrap_identity(registry, bench, capture_dir, machines_file, volumes_file)
     meta, config, token, machine, volume, clone = (
@@ -380,7 +430,7 @@ def verify_bootstrap_current(
         or provenance.get("native_original_config_sha256") != sha(config_bytes)
     ):
         raise ValueError("original stopped guest archive/config provenance differs")
-    ref, recipe_sha = bound_recipe(meta, config, provenance)
+    ref, recipe_sha, source_fingerprint = bound_recipe(meta, config, provenance)
     originals = {}
     with tarfile.open(fileobj=io.BytesIO(captured), mode="r:gz") as stream:
         for member in stream:
@@ -398,7 +448,11 @@ def verify_bootstrap_current(
             originals[member.name] = reader.read(member.size + 1)
             if len(originals[member.name]) != member.size:
                 raise ValueError("truncated original-volume member")
-    base = {"bench.log", "cloudbench-driver.state", f"cloudbench-shutdown-{token}.request"}
+    base = {
+        "bench.log",
+        "cloudbench-driver.state",
+        f"cloudbench-shutdown-{token}.request",
+    }
     optional = {
         "repo/.context/cloudbench/stack.log",
         f"cloudbench-driver-clean-{token}.ack",
@@ -517,6 +571,7 @@ def verify_bootstrap_current(
         "bootstrap_phase": phase,
         "source_ref": ref,
         "source_recipe_sha256": recipe_sha,
+        "source_review_fingerprint": source_fingerprint,
         "capture_dir": str(capture_dir),
         "capture_sha256": sha(captured),
         "capture_provenance_sha256": sha(bootstrap_regular(provenance_file)),
@@ -525,7 +580,97 @@ def verify_bootstrap_current(
     }
 
 
+def trusted_source_review_policy() -> dict[str, list[str]]:
+    """Read executable-source approvals from the invoked helper's committed Git source."""
+    helper = Path(__file__).resolve()
+    result = subprocess.run(
+        ["git", "-C", str(helper.parent), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    canonical_root = Path(result.stdout.strip()).resolve() if result.returncode == 0 else None
+    canonical = canonical_root is not None and helper == canonical_root / "scripts/cloudbench-prestack-recovery.py"
+    if canonical:
+        root, ref = canonical_root, "HEAD"
+    else:
+        workspace = os.environ.get("CLOUDBENCH_FLEET_ROOT", "")
+        ref = os.environ.get("CLOUDBENCH_PRESTACK_CONTROLLER_REF", "")
+        snapshot = os.environ.get("CLOUDBENCH_SCRIPT_SNAPSHOT", "")
+        if (
+            not workspace
+            or not Path(workspace).is_absolute()
+            or Path(workspace).resolve() != Path(workspace)
+            or re.fullmatch(r"[0-9a-f]{40}", ref) is None
+            or snapshot != str(helper.parent)
+        ):
+            raise ValueError("source review policy lacks a trusted controller source binding")
+        root = Path(workspace)
+        source_root = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if source_root.returncode or source_root.stdout.strip() != str(root):
+            raise ValueError("source review policy lacks a trusted Git checkout")
+    policy_path = helper.with_name("cloudbench-prestack-source-reviews.json")
+    owner_path = helper.with_name("cloudbench_execution_provenance.py")
+    committed = {}
+    for path in (helper, policy_path, owner_path):
+        relative = "scripts/" + path.name
+        blob = subprocess.run(
+            ["git", "-C", str(root), "show", f"{ref}:{relative}"],
+            capture_output=True,
+            timeout=15,
+        )
+        if blob.returncode or bootstrap_regular(path, 1048576) != blob.stdout:
+            raise ValueError("source review policy or helper differs from trusted committed source")
+        committed[path] = blob.stdout
+    if not canonical:
+        spec = importlib.util.spec_from_file_location("trusted_snapshot_owner", owner_path)
+        if spec is None or spec.loader is None:
+            raise ValueError("controller snapshot provenance owner cannot be loaded")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        manifest = json.loads(bootstrap_regular(helper.parent / module.SNAPSHOT_MANIFEST_NAME, 1048576))
+        module.verify_snapshot(helper.parent, manifest)
+    policy = json.loads(committed[policy_path])
+    if (
+        not isinstance(policy, dict)
+        or set(policy) != {"schema_version", "reviewed_executable_sources"}
+        or policy["schema_version"] != 1
+        or not isinstance(policy["reviewed_executable_sources"], dict)
+        or not policy["reviewed_executable_sources"]
+    ):
+        raise ValueError("trusted source review policy schema is invalid")
+    sources = policy["reviewed_executable_sources"]
+    for fingerprint, phases in sources.items():
+        if (
+            re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+            or not isinstance(phases, list)
+            or not phases
+            or len(set(phases)) != len(phases)
+            or any(
+                phase
+                not in {
+                    "before-stack-launch",
+                    "agent-network-index-bootstrap",
+                    "frontend-dependency-preflight",
+                }
+                for phase in phases
+            )
+        ):
+            raise ValueError("trusted source review policy entry is invalid")
+    return sources
+
+
 def require_independent_source_review(receipt: dict) -> None:
+    sources = trusted_source_review_policy()
+    if receipt.get("bootstrap_phase") not in sources.get(receipt.get("source_review_fingerprint"), []):
+        raise ValueError("executable source boundary lacks a trusted independent review")
+    # The capture-local marker binds this audited instance; only the committed
+    # source policy above can authorize its executable source and phase.
     review = json.loads(bootstrap_regular(Path(receipt["capture_dir"]) / "source-boundary-reviewed.safe.json", 65536))
     if (
         review.get("reviewed") is not True
@@ -539,13 +684,21 @@ def require_independent_source_review(receipt: dict) -> None:
 
 
 def verify_bootstrap(
-    registry: Path, bench: str, capture_dir: Path, machines_file: Path, volumes_file: Path
+    registry: Path,
+    bench: str,
+    capture_dir: Path,
+    machines_file: Path,
+    volumes_file: Path,
 ) -> tuple[Path, dict]:
     return verify_bootstrap_current(registry, bench, capture_dir, machines_file, volumes_file)
 
 
 def verify(
-    registry: Path, bench: str, capture_dir: Path, machines_file: Path, volumes_file: Path
+    registry: Path,
+    bench: str,
+    capture_dir: Path,
+    machines_file: Path,
+    volumes_file: Path,
 ) -> tuple[Path, dict[str, object]]:
     if bench != "message-person":
         return verify_bootstrap(registry, bench, capture_dir, machines_file, volumes_file)
@@ -715,7 +868,13 @@ def main() -> None:
     parser.add_argument("--publish", action="store_true")
     parser.add_argument("--validate-published-bootstrap", action="store_true")
     args = parser.parse_args()
-    out, receipt = verify(args.registry, args.bench, args.capture_dir, args.machines_json, args.volumes_json)
+    out, receipt = verify(
+        args.registry,
+        args.bench,
+        args.capture_dir,
+        args.machines_json,
+        args.volumes_json,
+    )
     if args.validate_published_bootstrap:
         require_independent_source_review(receipt)
         if (
@@ -728,7 +887,12 @@ def main() -> None:
         publish(out, receipt)
     print(
         json.dumps(
-            {"verified": True, "published": args.publish, "machine_id": receipt["machine_id"], "proof_credit": 0}
+            {
+                "verified": True,
+                "published": args.publish,
+                "machine_id": receipt["machine_id"],
+                "proof_credit": 0,
+            }
         )
     )
 

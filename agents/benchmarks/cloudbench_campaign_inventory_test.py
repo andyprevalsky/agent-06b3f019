@@ -132,7 +132,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
     result = subprocess.run(
         [
             sys.executable,
-            str(ROOT / "scripts/run-bench-campaign.py"),
+            str(Path(os.environ.get("CLOUDBENCH_CAMPAIGN_SCRIPT_UNDER_TEST", ROOT / "scripts/run-bench-campaign.py"))),
             "--root",
             str(tmp_path),
             "--runs",
@@ -201,3 +201,409 @@ def test_campaign_inventory_keeps_existing_production_only_mode_free_of_shared_f
     result, _, summary, _ = run_consumers(tmp_path, production_only=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "shared_inventory" not in summary
+
+
+# The owning campaign uses the actual seed client against a loopback object store.
+# No paid provider, Hub upload, credentials, or guest restore is used by these controls.
+def seed_fixture(tmp_path, monkeypatch):
+    import importlib.util
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    candidate = Path(os.environ.get("CLOUDBENCH_SEED_CANDIDATE_ROOT_UNDER_TEST", ROOT))
+    root = tmp_path / "workspace"
+    root.mkdir()
+    for relative in (
+        "scripts/run-bench-campaign.py",
+        "scripts/cloudbench-campaign-seed.py",
+        "scripts/cloudbench-seed-get.sh",
+    ):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        origin = (
+            Path(os.environ.get("CLOUDBENCH_SEED_CAMPAIGN_UNDER_TEST", candidate / relative))
+            if relative == "scripts/run-bench-campaign.py"
+            else candidate / relative
+        )
+        shutil.copyfile(origin, target)
+    for relative in (
+        "scripts/cloudbench-campaign-barrier.py",
+        "scripts/cloudbench-campaign-inventory.sh",
+        "scripts/cloudbench-port-lease.py",
+        "scripts/cloudbench-machine-readiness.py",
+        "scripts/lib/cloudbench-env.sh",
+        "scripts/lib/cloudbench-inventory.sh",
+        "agents/benchmarks/seed_cache_path.py",
+        "back-end/prisma/schema.prisma",
+        "back-end/scripts/seed-dump-cache.ts",
+        "back-end/package.json",
+    ):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, target)
+    (root / "node_modules").symlink_to(ROOT / "node_modules", target_is_directory=True)
+    (root / "back-end/node_modules").symlink_to(ROOT / "back-end/node_modules", target_is_directory=True)
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "add", "scripts", "agents", "back-end/prisma", "back-end/scripts", "back-end/package.json"],
+        ["git", "-c", "user.name=Local control", "-c", "user.email=control@localhost", "commit", "-qm", "fixture"],
+    ):
+        subprocess.run(command, cwd=root, check=True, capture_output=True)
+    body = b"local-complete-fixture-control\n" * 8192
+    calls = []
+
+    class Storage(BaseHTTPRequestHandler):
+        def do_GET(self):
+            calls.append(("GET", self.path))
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_HEAD(self):
+            calls.append(("HEAD", self.path))
+            self.send_error(500)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Storage)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    for key in list(os.environ):
+        if key.startswith(("RUN_BENCH_CAMPAIGN_", "CLOUDBENCH_CAMPAIGN_")):
+            monkeypatch.delenv(key)
+    for key, value in {
+        "R2_ACCOUNT_ID": "offline-fixture-account",
+        "R2_ACCESS_KEY_ID": "offline-fixture-key-id",
+        "R2_SECRET_ACCESS_KEY": "offline-fixture-secret-only",
+        "R2_BUCKET_TRACE_ARCHIVE": "fixture-bucket",
+        "R2_ENDPOINT": f"http://127.0.0.1:{server.server_port}",
+        "BENCHMARK_HUB_GROUP_RUN_ID": "offline-fixture-no-posts",
+        "FLY_BENCH_API_TOKEN": "offline-fixture-token",
+        "TZ": "UTC",
+        "NO_PROXY": "localhost,127.0.0.1,::1",
+        "no_proxy": "localhost,127.0.0.1,::1",
+        "PATH": str(Path(sys.executable).parent) + os.pathsep + "/opt/homebrew/bin:" + os.environ["PATH"],
+    }.items():
+        monkeypatch.setenv(key, value)
+    spec = importlib.util.spec_from_file_location("cohort_seed_fixture", root / "scripts/cloudbench-campaign-seed.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return root, module, server, thread, calls, body
+
+
+def test_campaign_inventory_seed_preflight_full_get_once_for_exact_50_and_standalone(tmp_path, monkeypatch):
+    root, module, server, thread, calls, body = seed_fixture(tmp_path, monkeypatch)
+    try:
+        binary = root / "bin"
+        binary.mkdir()
+        fly = binary / "flyctl"
+        fly.write_text('#!/usr/bin/env bash\nprintf "[]\\n"\n')
+        fly.chmod(0o700)
+        monkeypatch.setenv("PATH", str(binary) + os.pathsep + os.environ["PATH"])
+        cli = root / "scripts/run-bench"
+        cli.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+root="$PWD"
+if [ -n "${CLOUDBENCH_CAMPAIGN_SEED_PROOF:-}" ]; then
+ python3 "$root/scripts/cloudbench-campaign-seed.py" consume --root "$root" --inventory "$CLOUDBENCH_CAMPAIGN_INVENTORY_DIR" --barrier "$RUN_BENCH_CAMPAIGN_BARRIER_DIR" --proof "$CLOUDBENCH_CAMPAIGN_SEED_PROOF" --job "$RUN_BENCH_CAMPAIGN_JOB_ID" --controller-pid "$$" --deadline "$(python3 -c 'import time;print(time.time()+60)')"
+else
+ token="$(python3 "$root/agents/benchmarks/seed_cache_path.py" --cache-token --pg-major 15 "$root/back-end/prisma/schema.prisma")"
+ probe="$(mktemp)"
+ trap 'rm -f "$probe"' EXIT
+ bash "$root/scripts/cloudbench-seed-get.sh" "$root" "$token" "$probe"
+fi
+python3 "$root/scripts/cloudbench-campaign-barrier.py" --controller-pid "$$" --deadline "$(python3 -c 'import time;print(time.time()+60)')"
+""")
+        command = [
+            sys.executable,
+            str(root / "scripts/run-bench-campaign.py"),
+            "--root",
+            str(root),
+            "--runs",
+            "50",
+            "--concurrency",
+            "50",
+            "--task",
+            "local-fixture-control",
+            "--forward-arg=--strict-barrier",
+        ]
+        result = subprocess.run(command, env=dict(os.environ), capture_output=True, timeout=90)
+        assert result.returncode == 0, "owning local campaign failed; inspect private test capture"
+        summary = json.loads(next((root / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
+        assert summary["status"] == "passed" and summary["peak_concurrency"] == 50
+        assert len(summary["jobs"]) == 50 and all(job["controller_exit_code"] == 0 for job in summary["jobs"])
+        feed = Path(summary["shared_inventory"]["directory"])
+        assert not (feed / "owner").exists() and not (feed / "inventory-refresh.wait").exists()
+        check = subprocess.run(
+            ["ps", "-p", str(summary["shared_inventory"]["publisher_pid"]), "-o", "lstart="], capture_output=True
+        )
+        assert not check.stdout.strip()
+        proof = next((root / ".context/benchmarks/campaigns").glob("*/startup-cohorts/*/seed-proof.private.json"), None)
+        # This same control deliberately fails RED against the unchanged campaign:
+        # every child made a full GET and there was no shared cohort proof.
+        assert len(calls) == 1 and calls[0][0] == "GET"
+        assert proof is not None
+        payload = json.loads(proof.read_text())
+        assert payload["get"]["bytes"] == len(body) and payload["get"]["sha256"] == module.digest(body)
+        assert len(payload["members"]) == 50 and proof.stat().st_mode & 0o777 == 0o600
+        standalone = root / "standalone"
+        standalone.mkdir()
+        original_read = Path.read_bytes
+
+        def forbid_unbounded_dump_read(path):
+            if path.name.startswith("seed-probe-"):
+                raise AssertionError("host receipt must hash the completed full GET in bounded chunks")
+            return original_read(path)
+
+        monkeypatch.setattr(Path, "read_bytes", forbid_unbounded_dump_read)
+        transfer = module.get(root, root / "scripts", module.fixture(root, root / "scripts"), standalone)
+        assert transfer["bytes"] == len(body) and len(calls) == 2 and all(call[0] == "GET" for call in calls)
+        assert not list(standalone.glob("seed-probe-*"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_campaign_inventory_seed_preflight_rejects_foreign_owner_member_and_fixture_without_get(tmp_path, monkeypatch):
+    import copy
+    import fcntl
+    import time
+
+    import pytest
+
+    root, module, server, thread, calls, body = seed_fixture(tmp_path, monkeypatch)
+    campaign = root / "campaign"
+    campaign.mkdir()
+    inventory = campaign / "shared-inventory"
+    inventory.mkdir()
+    barrier = campaign / "startup-cohorts/c001"
+    barrier.mkdir(parents=True)
+    lock = (barrier.parent / "parent.lock").open("w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    authority = {
+        "app": "navi-whisper-lux-bench",
+        "pid": str(os.getpid()),
+        "pid_start": module.birth(os.getpid()),
+        "token": "local-owner-fixture",
+        "parent_pid": str(os.getpid()),
+        "parent_start": module.birth(os.getpid()),
+    }
+    (inventory / "owner").write_text("".join(f"{key}={value}\n" for key, value in authority.items()))
+    (barrier / "manifest.json").write_text(json.dumps({"cohort_id": "c001", "jobs": {"fixture": os.getpid()}}))
+    try:
+        proof = module.prepare(root, root / "scripts", inventory, barrier)
+        original = json.loads(proof.read_text())
+        # A real child can reach preflight between Popen and PID-map publication.
+        import threading
+
+        manifest_path = barrier / "manifest.json"
+        manifest_path.write_text(json.dumps({"cohort_id": "c001", "jobs": {"fixture": None}}))
+
+        def publish_pid():
+            temporary = barrier / ".manifest.delayed-publication"
+            temporary.write_text(json.dumps({"cohort_id": "c001", "jobs": {"fixture": os.getpid()}}))
+            temporary.replace(manifest_path)
+
+        publisher = threading.Timer(0.3, publish_pid)
+        publisher.start()
+        try:
+            assert module.consume(
+                root, root / "scripts", inventory, barrier, proof, "fixture", os.getpid(), time.time() + 10
+            )["bytes"] == len(body)
+        finally:
+            publisher.join()
+        manifest_path.write_text(json.dumps({"cohort_id": "c001", "jobs": {"fixture": os.getpid() + 1}}))
+        with pytest.raises(ValueError):
+            module.consume(root, root / "scripts", inventory, barrier, proof, "fixture", os.getpid(), time.time() + 10)
+        publish_pid()
+        assert module.consume(
+            root, root / "scripts", inventory, barrier, proof, "fixture", os.getpid(), time.time() + 2
+        )["bytes"] == len(body)
+        for field, key in (
+            ("owner", "token"),
+            ("owner", "parent_start"),
+            ("fixture", "selector_sha256"),
+            ("fixture", "source_sha"),
+            ("fixture", "schema_sha256"),
+            ("fixture", "token"),
+        ):
+            value = copy.deepcopy(original)
+            value[field][key] = "foreign-fixture"
+            proof.write_text(json.dumps(value))
+            with pytest.raises(ValueError):
+                module.consume(
+                    root, root / "scripts", inventory, barrier, proof, "fixture", os.getpid(), time.time() + 2
+                )
+        for name, value in (("members", ["foreign"]), ("cohort_id", "c999")):
+            changed = copy.deepcopy(original)
+            changed[name] = value
+            proof.write_text(json.dumps(changed))
+            with pytest.raises(ValueError):
+                module.consume(
+                    root, root / "scripts", inventory, barrier, proof, "fixture", os.getpid(), time.time() + 2
+                )
+        proof.write_text(json.dumps(original))
+        with pytest.raises(ValueError):
+            module.consume(root, root / "scripts", inventory, barrier, proof, "foreign", os.getpid(), time.time() + 2)
+        lock.close()
+        with pytest.raises(ValueError):
+            module.consume(root, root / "scripts", inventory, barrier, proof, "fixture", os.getpid(), time.time() + 2)
+        assert len(calls) == 1 and calls[0][0] == "GET"
+    finally:
+        if not lock.closed:
+            lock.close()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_campaign_inventory_seed_preflight_failed_proof_publication_never_admits_controller(tmp_path, monkeypatch):
+    root, module, server, thread, calls, body = seed_fixture(tmp_path, monkeypatch)
+    try:
+        binary = root / "bin"
+        binary.mkdir()
+        fly = binary / "flyctl"
+        # Fail only atomic publication after the real complete GET has succeeded.
+        fly.write_text("""#!/usr/bin/env bash
+mkdir -p "$RUN_BENCH_CAMPAIGN_ROOT/$RUN_BENCH_CAMPAIGN_ID/startup-cohorts/c001/seed-proof.private.json"
+printf '[]\n'
+""")
+        fly.chmod(0o700)
+        monkeypatch.setenv("PATH", str(binary) + os.pathsep + os.environ["PATH"])
+        monkeypatch.setenv("RUN_BENCH_CAMPAIGN_ID", "local-proof-write-failure")
+        monkeypatch.setenv("RUN_BENCH_CAMPAIGN_ROOT", str(root / "campaigns"))
+        (root / "scripts/run-bench").write_text('#!/usr/bin/env bash\ntouch "$PWD/unexpected-child"\nexit 0\n')
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(root / "scripts/run-bench-campaign.py"),
+                "--root",
+                str(root),
+                "--runs",
+                "50",
+                "--concurrency",
+                "50",
+                "--task",
+                "local-fixture-control",
+                "--forward-arg=--strict-barrier",
+            ],
+            env=dict(os.environ),
+            capture_output=True,
+            timeout=30,
+        )
+        summary = json.loads((root / "campaigns/local-proof-write-failure/summary.json").read_text())
+        assert result.returncode == 1 and summary["status"] == "failed" and summary["finished_at"]
+        assert summary["peak_concurrency"] == 0 and not (root / "unexpected-child").exists()
+        assert len(summary["jobs"]) == 50 and all(job["controller_exit_code"] is None for job in summary["jobs"])
+        assert summary["startup_cohorts"][0]["status"] == "aborted"
+        feed = Path(summary["shared_inventory"]["directory"])
+        assert not (feed / "owner").exists()
+        check = subprocess.run(
+            ["ps", "-p", str(summary["shared_inventory"]["publisher_pid"]), "-o", "lstart="], capture_output=True
+        )
+        assert not check.stdout.strip()
+        assert len(calls) == 1 and calls[0][0] == "GET"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_campaign_inventory_seed_preflight_native_linux_owner_tick_and_legacy_formats(tmp_path):
+    if not Path("/proc/self/stat").exists():
+        import pytest
+
+        pytest.skip("native Linux owner identity is verified in the existing offline Linux image")
+    import fcntl
+    import importlib.util
+
+    candidate = Path(os.environ.get("CLOUDBENCH_SEED_CANDIDATE_ROOT_UNDER_TEST", ROOT))
+    spec = importlib.util.spec_from_file_location(
+        "native_cohort_seed", candidate / "scripts/cloudbench-campaign-seed.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    inventory = tmp_path / "shared-inventory"
+    inventory.mkdir()
+    barrier = tmp_path / "startup-cohorts/c001"
+    barrier.mkdir(parents=True)
+    lock = (barrier.parent / "parent.lock").open("w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    native = subprocess.check_output(
+        [
+            "bash",
+            "-c",
+            'FLEET_DIR="$1"; source "$2"; source "$3"; inventory_pid_start_time "$4"',
+            "native-seed-owner",
+            str(inventory),
+            str(ROOT / "scripts/lib/cloudbench-env.sh"),
+            str(ROOT / "scripts/lib/cloudbench-inventory.sh"),
+            str(os.getpid()),
+        ],
+        text=True,
+    ).strip()
+    assert native.startswith("proc-start:")
+    authority = {
+        "app": "navi-whisper-lux-bench",
+        "pid": str(os.getpid()),
+        "pid_start": native,
+        "token": "offline-native-owner",
+        "parent_pid": str(os.getpid()),
+        "parent_start": native,
+    }
+
+    def publish():
+        (inventory / "owner").write_text("".join(f"{key}={value}\n" for key, value in authority.items()))
+
+    try:
+        publish()
+        assert module.owner(inventory, barrier) == authority
+        for field in ("pid_start", "parent_start"):
+            prefix, tick = native.rsplit(":", 1)
+            authority[field] = prefix + ":" + str(int(tick) + 1)
+            publish()
+            try:
+                module.owner(inventory, barrier)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("foreign native start tick was accepted")
+            authority[field] = native
+        legacy = subprocess.check_output(["ps", "-p", str(os.getpid()), "-o", "lstart="], text=True).strip()
+        authority.update(pid_start=legacy, parent_start=legacy)
+        publish()
+        assert module.owner(inventory, barrier) == authority
+    finally:
+        lock.close()
+
+
+def test_campaign_inventory_seed_preflight_preserves_parent_toolchain_path_for_both_paths(tmp_path):
+    candidate = Path(os.environ.get("CLOUDBENCH_SEED_CANDIDATE_ROOT_UNDER_TEST", ROOT))
+    fleet = Path(
+        os.environ.get("CLOUDBENCH_SEED_FLEET_SCRIPT_UNDER_TEST", candidate / "scripts/run-bench-fleet")
+    ).read_text()
+    anchor = "# Detached fleet controllers can inherit a stripped PATH"
+    assert anchor in fleet, "canonical preflight must retain the original parent PATH resolution"
+    start = fleet.index(anchor, fleet.index('CLOUDBENCH_GUEST_PG_MAJOR="${'))
+    end = fleet.index('if [ -n "${CLOUDBENCH_CAMPAIGN_SEED_PROOF:-}" ]; then', start)
+    stanza = fleet[start:end]
+    binary = tmp_path / "node_modules/.bin"
+    binary.mkdir(parents=True)
+    for name in ("node", "npx"):
+        path = binary / name
+        path.write_text("#!/bin/sh\nexit 0\n")
+        path.chmod(0o700)
+    command = (
+        'set -eu\nROOT_DIR="$1"\nexport PATH=/usr/bin:/bin\n'
+        + stanza
+        + '\ncommand -v npx >/dev/null\ncommand -v node >/dev/null\nnode -e "process.exit(0)"\n'
+    )
+    for proof in ("", "advertised-owned-proof"):
+        environment = dict(os.environ, CLOUDBENCH_CAMPAIGN_SEED_PROOF=proof)
+        result = subprocess.run(
+            ["bash", "-c", command, "seed-parent-path", str(tmp_path)], env=environment, capture_output=True, timeout=10
+        )
+        assert result.returncode == 0, "resolved Node/npm PATH did not survive in fleet parent"

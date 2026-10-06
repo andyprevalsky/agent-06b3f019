@@ -19441,7 +19441,11 @@ KEEP_CLONES={keep}
 teardown_failed={failed}
 ec=0
 CHILD_OUT=({shlex.quote(str(out))})
+FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(out))}
+finish_clock() {{
 {fallback}
+}}
+finish_clock
 """
         result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
@@ -19449,7 +19453,133 @@ CHILD_OUT=({shlex.quote(str(out))})
             "retained resources falsely reported release"
         )
         if already_released:
-            assert marker.read_text() == "2\n", "actual per-pool release receipt was overwritten"
+            assert marker.read_text() == "2\n", "legacy completed release receipt was overwritten"
+
+
+
+@pytest.mark.parametrize("pooled", [False, True])
+def test_fleet_retained_resources_do_not_claim_release_before_owned_worker_closes(
+    tmp_path: Path, pooled: bool
+) -> None:
+    """Run real pool-return/audit/final-clock code with an owned worker pending."""
+    registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
+    for path in (registry / "meta", audit / "meta", audit / "fresh" / clone):
+        path.write_text(path.read_text().replace("app=bench-app", "app=navi-whisper-lux-bench"))
+    fleet = fleet_source_text()
+    out = tmp_path / "workspace/.context/fleet/runs/fixture-run/task"
+    out.mkdir()
+    allocated = out / "bench-e2e.started-epoch"
+    allocated.write_text("1\n")
+    verdict = out / "result.json"
+    verdict.write_text('{"passed":true,"duration_seconds":7}\n')
+    before_verdict = verdict.read_bytes()
+    finished = out / "bench-e2e.finished-epoch"
+    pool_return = out / "pool-primary.returned-epoch"
+    if pooled:
+        anchor = fleet.index("if fleet_audit_record_pool_machine")
+        start = fleet.index('                    for i in "${!CHILD_MACHINE[@]}"; do', anchor)
+        end = fleet.index("                    done", start) + len("                    done")
+        pool_code = fleet[start:end]
+        result = subprocess.run(
+            ["bash", "-c", f"""set -eu
+id=feedface000004
+ec=0
+teardown_failed=0
+CHILD_MACHINE=($id)
+CHILD_OUT=({shlex.quote(str(out))})
+date() {{ [ "$1" = +%s ] && printf '100\\n'; }}
+{pool_code}
+"""], capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert not finished.exists(), "pool primary return stopped full-owned-resource accounting"
+        assert pool_return.read_text() == "100\n"
+        pool = audit / "pool"
+        pool.mkdir()
+        ledger = tmp_path / "common/cloudbench-pools/fixture.ids"
+        (pool / "feedface000004").write_text(
+            f"version=1\nfleet_owner_token={registry.name}\nrun_id=fixture-run\n"
+            "app=navi-whisper-lux-bench\nsource=borrowed-pool\nmachine_id=feedface000004\nvolume_id=vol_pool\n"
+            f"pool_ledger_file={ledger}\npool_meta_file={ledger}.deps\npool_meta_sha256={'a' * 64}\n"
+            "disposition=returned-stopped-claim-released\n"
+        )
+    clock = audit / "provider-teardown-verified.epoch"
+    pending = _private_source_identity_command(registry, audit, "fleet_audit_finalize_provider_teardown")
+    assert pending.returncode != 0, "full audit accepted an owned worker"
+    assert not clock.exists() and not finished.exists()
+    assert "status=incomplete\n" in (audit / "meta").read_text()
+    worker = audit / "fresh" / clone
+    worker.write_text(worker.read_text().replace("disposition=owned", "disposition=destroyed-verified-absent"))
+    closed = _private_source_identity_command(
+        registry, audit,
+        "date() { [ \"$1\" = +%s ] && printf '400\\n'; }\nfleet_audit_finalize_provider_teardown",
+    )
+    assert closed.returncode == 0, closed.stdout + closed.stderr
+    assert clock.read_text() == "400\n", "missing actual full-audit producer clock"
+    mirror = out.parent / "teardown-ownership"
+    assert (mirror / clock.name).read_bytes() == clock.read_bytes()
+    # A later verifier must retain the original immutable event, not reset time.
+    verified_again = _private_source_identity_command(
+        registry, audit,
+        "date() { [ \"$1\" = +%s ] && printf '900\\n'; }\nfleet_audit_finalize_provider_teardown",
+    )
+    assert verified_again.returncode == 0, verified_again.stdout + verified_again.stderr
+    assert clock.read_text() == "400\n"
+    start = fleet.index("    # Report each bench's end-to-end duration")
+    end = fleet.index("    # Keep the parent live while releasing resources.", start)
+    fallback = fleet[start:end]
+    completed = subprocess.run(
+        ["bash", "-c", f"""set -eu
+KEEP_CLONES=0
+teardown_failed=0
+ec=0
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300
+CHILD_RUN_TIMEOUT=300
+FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
+CHILD_OUT=({shlex.quote(str(out))})
+date() {{ [ "$1" = +%s ] && printf '900\\n'; }}
+finish_clock() {{
+{fallback}
+}}
+finish_clock
+[ "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" = 300 ]
+[ "$CHILD_RUN_TIMEOUT" = 300 ]
+"""], capture_output=True, text=True, timeout=10,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert finished.read_text() == "400\n", "observer/late fallback replaced native full-release time"
+    assert allocated.read_text() == "1\n" and verdict.read_bytes() == before_verdict
+    if pooled:
+        assert pool_return.read_text() == "100\n", "early exact pool return was discarded"
+
+
+
+def test_fleet_retained_resources_do_not_claim_release_when_clock_write_fails(
+    tmp_path: Path,
+) -> None:
+    """Clock-write failure cannot commit verified status and suppress retry."""
+    registry, audit, clone, _, _ = _private_source_identity_fixture(tmp_path, private=False)
+    fresh = audit / "fresh" / clone
+    fresh.write_text(fresh.read_text().replace("disposition=ownership-pending", "disposition=not-allocated-verified"))
+    result = _private_source_identity_command(registry, audit, r"""
+# Force failure of the exact clock temporary file, while meta remains writable.
+clock_tmp="$FLEET_TEARDOWN_OWNERSHIP_DIR/provider-teardown-verified.epoch.tmp.$$"
+mkdir "$clock_tmp"
+date() { [ "$1" = +%s ] && printf '600\n'; }
+if fleet_audit_finalize_provider_teardown; then exit 93; fi
+[ "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" status)" = incomplete ] || exit 94
+[ ! -e "$FLEET_TEARDOWN_OWNERSHIP_DIR/provider-teardown-verified.epoch" ] || exit 95
+rmdir "$clock_tmp"
+# Same owned audit can retry successfully; no observer/reset timestamp is used.
+date() { [ "$1" = +%s ] && printf '700\n'; }
+fleet_audit_finalize_provider_teardown || exit 96
+[ "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" status)" = provider-teardown-verified ] || exit 97
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    clock = audit / "provider-teardown-verified.epoch"
+    assert clock.read_text() == "700\n"
+    mirror = tmp_path / "workspace/.context/fleet/runs/fixture-run/teardown-ownership"
+    assert (mirror / clock.name).read_bytes() == clock.read_bytes()
 
 
 def test_start_barrier_tolerates_infra_failures() -> None:

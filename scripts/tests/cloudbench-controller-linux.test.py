@@ -211,7 +211,7 @@ class ContainerOwnership(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(calls[0][2], "owned-name")
 
-    def check_dispatch(self, *, cancelled=False):
+    def check_dispatch(self, *, cancelled=False, fixture=None):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             tests = root / "scripts/tests"
@@ -263,7 +263,11 @@ class ContainerOwnership(unittest.TestCase):
                     str(tests / "run-cloudbench-controller-linux.py"),
                 ),
                 patch.object(runner.sys, "platform", "darwin"),
-                patch.object(runner.sys, "argv", ["runner"]),
+                patch.object(
+                    runner.sys,
+                    "argv",
+                    ["runner"] + (["--fixture", fixture] if fixture else []),
+                ),
                 patch.dict(
                     os.environ,
                     {
@@ -287,6 +291,10 @@ class ContainerOwnership(unittest.TestCase):
                 else:
                     self.assertEqual(runner.main(), 0)
             command = calls[0]
+            self.assertEqual(
+                command[-1],
+                f"bash /repo/scripts/tests/cloudbench-{fixture or 'multi-workstream'}.test.sh",
+            )
             self.assertEqual(
                 retirement.call_args.args[1], command[command.index("--name") + 1]
             )
@@ -313,6 +321,30 @@ class ContainerOwnership(unittest.TestCase):
 
     def test_dispatch_uses_native_storage_and_keeps_inherited_proxies(self):
         self.assertEqual(self.check_dispatch(), ["join", "retire"])
+
+    def test_registered_fixture_selector_preserves_exact_dispatch_owner(self):
+        for fixture in ("multi-workstream", "status-service-shutdown"):
+            with self.subTest(fixture=fixture):
+                self.assertEqual(
+                    self.check_dispatch(fixture=fixture), ["join", "retire"]
+                )
+
+    def test_invalid_fixture_is_rejected_before_any_docker_operation(self):
+        for fixture in ("unknown", "../foreign"):
+            with (
+                self.subTest(fixture=fixture),
+                patch.object(runner.sys, "argv", ["runner", "--fixture", fixture]),
+                patch.object(runner.subprocess, "run") as docker,
+                patch.object(runner.subprocess, "Popen") as launch,
+                patch.object(runner, "retire_owned_container") as retire,
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as exit_status,
+            ):
+                runner.main()
+            self.assertEqual(exit_status.exception.code, 2)
+            docker.assert_not_called()
+            launch.assert_not_called()
+            retire.assert_not_called()
 
     def test_cancellation_joins_owned_client_before_export_retirement(self):
         self.assertEqual(

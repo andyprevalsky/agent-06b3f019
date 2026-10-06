@@ -3,20 +3,19 @@
 import asyncio
 import base64
 import gzip
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from _test_utils import BlackboxResult
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 AGENTS = Path(__file__).resolve().parents[2]
 FIXTURE_KEY = b"x" * 32
@@ -199,7 +198,7 @@ async def test_recording_batch_failure_retains_sources_and_retryable_envelopes()
     import helpers.trace_archive as archive
     import domains.spawn_browser_agent_v3.recording as recording
 
-    for mode in ("partial_failure", "malformed_ack", "success"):
+    for mode in ("partial_failure", "malformed_ack", "foreign_ack", "delayed_complete_ack", "success"):
         with tempfile.TemporaryDirectory(prefix="rose-recording-batch-") as temporary:
             root = Path(temporary)
             source = root / "sources"
@@ -228,9 +227,18 @@ async def test_recording_batch_failure_retains_sources_and_retryable_envelopes()
                             # The remote store accepted the first file but the batch failed.
                             accepted[batch[0]["path"]] = batch[0]["ciphertextB64"]
                             return httpx.Response(503)
+                        if mode == "delayed_complete_ack":
+                            # The archived native HTTP control proves a valid ACK
+                            # can arrive after the ordinary client's 30s window.
+                            # Model that wire boundary without a sleeping test.
+                            timeout = kwargs.get("timeout", httpx.Timeout(30.0))
+                            if timeout.read < 35.0:
+                                raise httpx.ReadTimeout("offline valid delayed batch ACK")
                         refs = [{"path": item["path"], "ref": "fixture/ref"} for item in batch]
                         if mode == "malformed_ack":
                             refs = refs[:-1]
+                        if mode == "foreign_ack":
+                            refs[0] = {"path": "media/browser/foreign-task/not-owned.txt", "ref": "fixture/ref"}
                         return httpx.Response(200, json={"artifacts": refs})
                     assert url.endswith("/artifact")
                     assert body["ciphertextB64"] == ciphertexts[body["path"]]
@@ -259,7 +267,7 @@ async def test_recording_batch_failure_retains_sources_and_retryable_envelopes()
             with patch.dict(os.environ, env), patch.object(archive, "_backend_http_client", return_value=Client()):
                 await run()
                 assert len(batches) == 1
-                if mode == "success":
+                if mode in ("success", "delayed_complete_ack"):
                     assert not source.exists(), "acknowledged source files should be cleaned"
                     assert not archive._root_outbox_has_artifacts("offline-root")
                 else:
@@ -277,6 +285,7 @@ async def test_recording_batch_failure_retains_sources_and_retryable_envelopes()
 
 def test_recording_batches_bound_count_bytes_and_preserve_large_sources():
     from unittest.mock import patch
+
     import helpers.trace_archive as archive
 
     with tempfile.TemporaryDirectory(prefix="rose-recording-chunks-") as temporary:
@@ -324,7 +333,9 @@ def test_recording_batches_bound_count_bytes_and_preserve_large_sources():
 
 def test_recording_batch_lease_blocks_foreign_process_drain_and_recovers_after_crash():
     from unittest.mock import patch
+
     import httpx
+
     import helpers.trace_archive as archive
 
     with tempfile.TemporaryDirectory(prefix="rose-recording-lease-") as temporary:
@@ -411,7 +422,9 @@ archive_files(root_agent_id='offline-root', artifacts=(
 
 def test_failed_recording_batch_still_publishes_later_files():
     from unittest.mock import patch
+
     import httpx
+
     import helpers.trace_archive as archive
 
     with tempfile.TemporaryDirectory(prefix="rose-recording-partial-") as temporary:
@@ -462,8 +475,60 @@ def test_failed_recording_batch_still_publishes_later_files():
             assert all(source.exists() for _, source, _, _ in entries)
 
 
+def test_closed_recording_archive_owner(mode: str):
+    """Native producer/encryption/HTTP proofs in an isolated credential-free child."""
+    fixture = Path(__file__).with_name("_recording_archive_closed_fixture.py")
+    with tempfile.TemporaryDirectory(prefix="rose-closed-archive-owner-") as temporary:
+        root = Path(temporary)
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHON_DOTENV_DISABLED": "1",
+            "FIXTURE_AGENTS_PATH": str(AGENTS),
+            "ANONYMIZED_TELEMETRY": "false",
+        }
+        for name in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ):
+            if name in os.environ:
+                env[name] = os.environ[name]
+        completed = subprocess.run(
+            [sys.executable, str(fixture), str(AGENTS.parent), mode],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            timeout=180,
+        )
+        artifact_dir = os.environ.get("BLACKBOX_TEST_ARTIFACT_DIR")
+        if artifact_dir:
+            retained = Path(artifact_dir) / "closed-recording-archive" / f"{mode}.private.log"
+            retained.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            retained.write_bytes(completed.stdout + completed.stderr)
+            retained.chmod(0o600)
+        assert completed.returncode == 0, f"closed recording archive {mode} child failed; private diagnostics retained"
+        reports = [json.loads(line) for line in completed.stdout.decode().splitlines() if line.startswith("{")]
+        assert len(reports) == 1 and reports[0]["models_tasks_provider_calls"] == 0
+
+
 async def run_all_tests():
     result = BlackboxResult()
+    for mode in (
+        "producer",
+        "backlog",
+        "queued",
+        "mutation",
+        "failed_ack",
+        "foreign_ack",
+        "incomplete_ack",
+        "byte_budget",
+    ):
+        result.record(f"closed_recording_archive_{mode}", lambda mode=mode: test_closed_recording_archive_owner(mode))
     result.record(
         "failed_recording_batch_still_publishes_later_files", test_failed_recording_batch_still_publishes_later_files
     )

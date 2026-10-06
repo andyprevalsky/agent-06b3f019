@@ -356,6 +356,18 @@ the worker log. Required recording attachments retry pre-request connection/pool
 failures at most three times with the same payload and generation; ambiguous
 read/write failures and HTTP rejections remain fail-closed. More archive wait
 cannot repair an attachment that was discarded after a connection failure.
+Closed network-body files publish automatically through the existing bounded
+batch path while recording is open; changed or incompletely acknowledged files
+retain their normal terminal fallback. Batch POST transport has a scoped
+120-second read/write budget; ordinary single-artifact transport and task,
+flush and allocation-to-release deadlines are unchanged. A late attempted ACK
+or HTTP 200 alone does not establish complete publication: retain encrypted
+outboxes and compare the final full manifest. Existing quick regressions run
+with `cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py
+recording-archive` and the backend trace-archive-batch unit family. Native
+fleet/R2 timing and historical attribution remain pending the matched normal
+CLI run; cached replay provides infrastructure proof only for exercised paths
+and zero LIVE LLM credit.
 A disconnected DELETE may still be sealing a large descendant tree. The runner
 waits at most 180 seconds for that exact root/owner's database deletion fence,
 preserving the last `delete_seal_observation`; provider/payment reconciliation
@@ -698,7 +710,13 @@ binds the clean checkout, native injected controls and original archive to the
 exact source recipe, then requires independent review of its pre-service phase.
 Its separate bootstrap receipt always grants zero benchmark credit; it does
 not fabricate a provider manifest or guest cleanup acknowledgment. Current
-source recipes need no commit-specific validator edit. Incomplete older captures
+source-equivalent clean recipes need no commit-specific validator edit.
+Pre-service phase approvals belong to the invoked controller's committed
+`scripts/cloudbench-prestack-source-reviews.json`, including its immutable
+script snapshot; capture-local review metadata is only an instance audit.
+A changed executable-source fingerprint requires independent review before a
+policy entry is committed. The existing bootstrap-recovery control remains in
+the normal CLI/deploy structural gate. Incomplete older captures
 still fail closed, and normal recovery must verify exact native resource release.
 An interrupted task
 that allocated no browser session may carry a `provider-zero-manifest` plus
@@ -1048,12 +1066,18 @@ Use `python3 scripts/tests/run-cloudbench-controller-linux.py --check-only` to
 check its local package runners before the normal controller suite. An existing
 verified image can be selected with `CLOUDBENCH_CONTROLLER_TEST_IMAGE`; that
 override is recorded separately from qualification of the default recipe.
+Run the status-service shutdown control with
+`python3 scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown`.
+Its driver-ownership check needs Linux `/proc`; the dispatcher uses native Linux
+there and the same offline exact-owner image on Mac, including verified retirement.
 
 An accepted delete plus an exact owned-volume `pending_destroy` or `destroyed`
 terminal receipt qualifies release even when Fly retains the object. Request
 acceptance alone does not establish release.
 
 Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
+
+A strict cohort with that live inventory owner performs the existing complete canonical fixture GET once before admitting controllers. Each controller verifies the private receipt against the live parent/publisher births, sealed cohort membership, committed source, schema/PG/cache token, runner code and storage scope identifiers. An invalid advertised receipt fails closed; it does not fall back to repeated downloads. Standalone fleets keep their full GET. Every guest still performs its actual fixture download, exact sidecar checks and database restore; this host receipt does not replace them.
 
 For this explicitly requested 50-copy cached stress run, use the command-scoped
 Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
@@ -1077,8 +1101,12 @@ Foreground campaigns may print no `--controller-status` marker; use only the
 actual printed handle and read each copy's controller exit separately from
 `summary.json` → `jobs[].controller_exit_code`, keyed by `job_id`. The monitor's
 null controller fields alone do not establish liveness or completion.
-Allocation timestamps are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
-`bench-e2e.finished-epoch`. The run's `teardown-ownership.path` identifies its
+Allocation/release timestamps are `<fleet-run>/<task-name>/bench-e2e.started-epoch`
+and `bench-e2e.finished-epoch`. Release follows the complete primary/worker/claim
+verification; `pool-primary.returned-epoch` is only the earlier borrowed-primary
+return. The immutable audit's `provider-teardown-verified.epoch` is the producer
+clock, bound to the same owner/run by `source-audit`; legacy clockless audits keep
+their post-verification fallback. The run's `teardown-ownership.path` identifies its
 exact audit/token; while live, capture `pid` and `pid_start` from
 `<git-common>/cloudbench-fleet-ownership/<token>/meta`. Normal cleanup removes
 that active claim, so retain the captured identity and verify native process

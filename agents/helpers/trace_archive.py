@@ -853,14 +853,37 @@ def store_encrypted_artifact(
 # ref is returned immediately. Benchmark CLI, tests, and scripts keep synchronous
 # read-after-write semantics. Backend failures are preserved as encrypted local
 # outbox entries and retried by later archive jobs.
+_ARCHIVE_WORKERS = int(os.environ.get("TRACE_ARCHIVE_WORKERS", "4") or "4")
 _ARCHIVE_EXECUTOR = ThreadPoolExecutor(
-    max_workers=int(os.environ.get("TRACE_ARCHIVE_WORKERS", "4") or "4"),
+    max_workers=_ARCHIVE_WORKERS,
     thread_name_prefix="trace-archive",
 )
 _ARCHIVE_SLOTS = threading.BoundedSemaphore(int(os.environ.get("TRACE_ARCHIVE_MAX_IN_FLIGHT", "64") or "64"))
 _ARCHIVE_DROPPED_JOBS = 0
 _ARCHIVE_PENDING_LOCK = threading.Lock()
 _ARCHIVE_PENDING_BY_ROOT: dict[str, set[Future[None]]] = {}
+# Closed-file jobs are optional early copies. Existing publishers may reclaim
+# only a positively cancelled queued copy; its source remains for final drain.
+_ARCHIVE_ADMISSION_LOCK = threading.RLock()
+_CLOSED_FILE_FUTURES: set[Future[Optional[dict[str, str]]]] = set()
+
+
+def _take_archive_slot(*, existing_publisher: bool = False) -> bool:
+    with _ARCHIVE_ADMISSION_LOCK:
+        if existing_publisher:
+            # Cancel only optional copies that have not started. Even when a
+            # slot is free, remove their FIFO backlog before original work.
+            # Active I/O is never cancelled; its source stays authoritative.
+            for future in tuple(_CLOSED_FILE_FUTURES):
+                future.cancel()
+        return _ARCHIVE_SLOTS.acquire(blocking=False)
+
+
+def _closed_file_completed(future: Future[Optional[dict[str, str]]]) -> None:
+    with _ARCHIVE_ADMISSION_LOCK:
+        _CLOSED_FILE_FUTURES.discard(future)
+        _ARCHIVE_SLOTS.release()
+
 
 # Artifacts ship to the backend as base64-in-JSON; a single oversized body (e.g.
 # a browser session video) freezes the Node event loop on parse/GC for minutes
@@ -888,6 +911,10 @@ def _publish_artifact_batch(root_agent_id: str, artifacts: list[dict[str, Any]])
             url.rsplit("/", 1)[0] + "/artifacts",
             headers={"X-API-Key": api_key, "Content-Type": "application/json"},
             json={"rootAgentId": root_agent_id, "artifacts": artifacts},
+            # A full batch includes bounded object writes and manifest publication.
+            # Keep connect/pool bounded while allowing the existing backend
+            # transaction budget; strict complete ACK and outbox rules still apply.
+            timeout=httpx.Timeout(120.0, connect=15.0, pool=30.0),
         )
         if response.status_code != 200:
             logger.warning("trace_archive.batch_store_failed", status=response.status_code, count=len(artifacts))
@@ -998,6 +1025,120 @@ def _archive_files_owned(*, root_agent_id: str, artifacts: Iterable[tuple[str, P
     if batch and not _publish_artifact_batch(safe_root, batch):
         all_acknowledged = False
     return all_acknowledged
+
+
+_CLOSED_FILE_BYTES_LOCK = threading.Condition()
+_CLOSED_FILE_BYTES_IN_FLIGHT = 0
+
+
+def _closed_file_wire_reservation(path: str, size: int) -> Optional[int]:
+    if _safe_path(path) != path or _outbox_artifact_target(Path(path)) != Path(path):
+        return None
+    if size < 0 or size > min(_max_artifact_bytes(), _DEFAULT_MAX_ARTIFACT_BYTES):
+        return None
+    return ((size + size // 16 + 65_536 + 18) // 3) * 4 + 8192 + len(path.encode()) * 6 + 1024
+
+
+def closed_file_archive_reservation(path: str, file_path: Path) -> Optional[int]:
+    """Conservative wire bound for one closed file; no source body is queued."""
+    try:
+        return _closed_file_wire_reservation(path, file_path.stat().st_size)
+    except OSError:
+        return None
+
+
+def archive_closed_files_in_background(
+    *, root_agent_id: str, artifacts: list[tuple[str, Path, str, Optional[bool]]]
+) -> Optional[Future[Optional[dict[str, str]]]]:
+    """Copy a bounded closed-file batch on the existing executor and slot limit.
+
+    Return hashes only after its complete native ACK. Original files and failed
+    encrypted outbox pairs stay available for ordinary terminal publication.
+    """
+    if not archive_enabled() or not artifacts or len(artifacts) > _BATCH_MAX_RECORDS:
+        return None
+    if len({path for path, *_ in artifacts}) != len(artifacts):
+        return None
+    safe_root = _safe_segment(root_agent_id)
+
+    def publish() -> Optional[dict[str, str]]:
+        global _CLOSED_FILE_BYTES_IN_FLIGHT
+        reserved = 0
+        claimed = False
+        try:
+            sizes = []
+            for path, file_path, _, _ in artifacts:
+                size = file_path.stat().st_size
+                estimate = _closed_file_wire_reservation(path, size)
+                if estimate is None:
+                    return None
+                reserved += estimate
+                sizes.append(size)
+            if reserved > _BATCH_MAX_BYTES:
+                return None
+            with _CLOSED_FILE_BYTES_LOCK:
+                _CLOSED_FILE_BYTES_LOCK.wait_for(lambda: _CLOSED_FILE_BYTES_IN_FLIGHT + reserved <= _BATCH_MAX_BYTES)
+                _CLOSED_FILE_BYTES_IN_FLIGHT += reserved
+                claimed = True
+            batch = []
+            hashes = {}
+            for (path, file_path, content_type, compress), size in zip(artifacts, sizes):
+                with file_path.open("rb") as source:
+                    body = source.read(size + 1)
+                if len(body) != size:
+                    return None
+                encrypted = encrypt_artifact(body, path=path, content_type=content_type, compress=compress)
+                del body
+                if encrypted is None:
+                    return None
+                ciphertext, metadata = encrypted
+                if len(ciphertext) > _BATCH_MAX_CIPHERTEXT_BYTES or len(json.dumps(metadata).encode()) > 8192:
+                    return None
+                batch.append(
+                    {"path": path, "ciphertextB64": base64.b64encode(ciphertext).decode("ascii"), "metadata": metadata}
+                )
+                hashes[path] = str(metadata["plaintext_sha256"])
+                del encrypted, ciphertext
+            if len(json.dumps({"rootAgentId": safe_root, "artifacts": batch}).encode()) > _BATCH_MAX_BYTES:
+                return None
+            if _use_r2_archive():
+                with _archive_publication_lease(safe_root, exclusive=False):
+                    acknowledged = _publish_artifact_batch(safe_root, batch)
+            else:
+                acknowledged = all(
+                    store_encrypted_artifact(
+                        root_agent_id=safe_root,
+                        path=item["path"],
+                        ciphertext=base64.b64decode(item["ciphertextB64"]),
+                        metadata=item["metadata"],
+                    )
+                    is not None
+                    for item in batch
+                )
+            return hashes if acknowledged else None
+        except Exception as exc:
+            logger.warning("trace_archive.closed_file_error", error_type=type(exc).__name__)
+            return None
+        finally:
+            if claimed:
+                with _CLOSED_FILE_BYTES_LOCK:
+                    _CLOSED_FILE_BYTES_IN_FLIGHT -= reserved
+                    _CLOSED_FILE_BYTES_LOCK.notify_all()
+
+    with _ARCHIVE_ADMISSION_LOCK:
+        # Optional early copies must not build a second executor backlog.
+        # Skip overflow descriptors; the ordinary final source walk retains them.
+        if len(_CLOSED_FILE_FUTURES) >= _ARCHIVE_WORKERS or not _take_archive_slot():
+            return None
+        try:
+            future = _ARCHIVE_EXECUTOR.submit(publish)
+        except Exception:
+            _ARCHIVE_SLOTS.release()
+            raise
+        _CLOSED_FILE_FUTURES.add(future)
+        future.add_done_callback(_closed_file_completed)
+    _track_archive_future(safe_root, future)
+    return future
 
 
 def _max_artifact_bytes() -> int:
@@ -1133,7 +1274,7 @@ def _submit_archive_job(
     # event loop. At 65+ concurrent jobs the old blocking acquire starved the
     # loop, delaying a 45s recording timeout until 142s and preventing the FE
     # recording pointer from being saved. Keep memory bounded and drop overflow.
-    if not _ARCHIVE_SLOTS.acquire(blocking=False):
+    if not _take_archive_slot(existing_publisher=True):
         _ARCHIVE_DROPPED_JOBS += 1
         drop_count = _ARCHIVE_DROPPED_JOBS
         if drop_count == 1 or drop_count & (drop_count - 1) == 0:

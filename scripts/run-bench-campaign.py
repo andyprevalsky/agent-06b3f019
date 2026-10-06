@@ -8,9 +8,9 @@ import fcntl
 import hashlib
 import json
 import os
-import signal
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -25,11 +25,7 @@ def utc_now() -> str:
 
 def public_value(value: object) -> object:
     if isinstance(value, dict):
-        return {
-            key: public_value(item)
-            for key, item in value.items()
-            if not str(key).startswith("_")
-        }
+        return {key: public_value(item) for key, item in value.items() if not str(key).startswith("_")}
     if isinstance(value, list):
         return [public_value(item) for item in value]
     return value
@@ -44,15 +40,23 @@ def write_json_atomic(path: Path, value: dict[str, object]) -> None:
 def publish_campaign_group(root: Path, campaign_dir: Path, state: dict[str, object], *, live: bool) -> None:
     """The schedule is a real Hub resource; task results remain child-owned."""
     record = {
-        "run_id": state["campaign_id"], "timestamp": state["started_at"],
-        "source": "benchmark-campaign", "suite": "cloud-fleet", "tasks": [],
-        "run_group": {"status": state["status"],
-            "finished_at": state.get("finished_at"), "wall_clock_seconds": state.get("wall_clock_seconds"),
-            "outcomes": {str(job["job_id"]): {"status": job["status"], "controller_exit_code": job["controller_exit_code"]}
-                         for job in state["jobs"]}, "members": [
-            {"member_id": job["job_id"], "name": job["task"], "run_number": job["run"]}
-            for job in state["jobs"]
-        ]},
+        "run_id": state["campaign_id"],
+        "timestamp": state["started_at"],
+        "source": "benchmark-campaign",
+        "suite": "cloud-fleet",
+        "tasks": [],
+        "run_group": {
+            "status": state["status"],
+            "finished_at": state.get("finished_at"),
+            "wall_clock_seconds": state.get("wall_clock_seconds"),
+            "outcomes": {
+                str(job["job_id"]): {"status": job["status"], "controller_exit_code": job["controller_exit_code"]}
+                for job in state["jobs"]
+            },
+            "members": [
+                {"member_id": job["job_id"], "name": job["task"], "run_number": job["run"]} for job in state["jobs"]
+            ],
+        },
     }
     target = campaign_dir / "hub-group.json"
     write_json_atomic(target, record)
@@ -61,6 +65,7 @@ def publish_campaign_group(root: Path, campaign_dir: Path, state: dict[str, obje
     if not environment.get("BENCHMARK_HUB_API_KEY") and not environment.get("BACKEND_API_KEY"):
         try:
             from dotenv import dotenv_values
+
             key = dotenv_values(root / "back-end/.env").get("BACKEND_API_KEY")
             if key:
                 environment["BACKEND_API_KEY"] = key
@@ -69,11 +74,21 @@ def publish_campaign_group(root: Path, campaign_dir: Path, state: dict[str, obje
     log = campaign_dir / "hub-group-publication.private.log"
     with log.open("a") as stream:
         os.chmod(log, 0o600)
-        result = subprocess.run([
-            sys.executable, str(root / "agents/benchmarks/hub_upload.py"),
-            "--register-starting" if live else "--upload-final", str(target),
-            "--source", "benchmark-campaign",
-        ], cwd=root, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(root / "agents/benchmarks/hub_upload.py"),
+                "--register-starting" if live else "--upload-final",
+                str(target),
+                "--source",
+                "benchmark-campaign",
+            ],
+            cwd=root,
+            env=environment,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
     if result.returncode:
         print("Warning: campaign Hub schedule publication is pending; child results and cleanup retain their owners")
 
@@ -101,8 +116,7 @@ def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if all(
-            isinstance(job["_process"], subprocess.Popen)
-            and job["_process"].poll() is not None
+            isinstance(job["_process"], subprocess.Popen) and job["_process"].poll() is not None
             for job in active.values()
         ):
             return
@@ -118,13 +132,9 @@ def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
                 pass
 
 
-def start_shared_inventory(
-    root: Path, campaign_dir: Path
-) -> tuple[subprocess.Popen, object, Path]:
+def start_shared_inventory(root: Path, campaign_dir: Path) -> tuple[subprocess.Popen, object, Path]:
     refresh = int(os.environ.get("CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS", "30"))
-    lock_wait = int(
-        os.environ.get("CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS", str(refresh * 3 + 5))
-    )
+    lock_wait = int(os.environ.get("CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS", str(refresh * 3 + 5)))
     seconds = int(os.environ.get("CLOUDBENCH_CHILD_TERM_SECONDS", "30"))
     if refresh < 1 or lock_wait < 1 or seconds < 1:
         raise ValueError("inventory section budgets must be positive")
@@ -164,16 +174,12 @@ def start_shared_inventory(
     while not (directory / "owner").is_file():
         if process.poll() is not None or time.monotonic() >= deadline:
             stop_shared_inventory(process, log, directory)
-            raise RuntimeError(
-                "campaign inventory did not initialize; see private publisher log"
-            )
+            raise RuntimeError("campaign inventory did not initialize; see private publisher log")
         time.sleep(0.1)
     return process, log, directory
 
 
-def stop_shared_inventory(
-    process: subprocess.Popen, log: object, directory: Path
-) -> bool:
+def stop_shared_inventory(process: subprocess.Popen, log: object, directory: Path) -> bool:
     (directory / "stop").touch()
     seconds = int(os.environ.get("CLOUDBENCH_CHILD_TERM_SECONDS", "30"))
     try:
@@ -199,14 +205,9 @@ def main() -> int:
 
     root = args.root.resolve()
     requested_id = os.environ.get("RUN_BENCH_CAMPAIGN_ID")
-    campaign_id = (
-        requested_id
-        or datetime.now(timezone.utc).strftime("campaign-%Y%m%d-%H%M%S")
-        + f"-{os.getpid()}"
-    )
+    campaign_id = requested_id or datetime.now(timezone.utc).strftime("campaign-%Y%m%d-%H%M%S") + f"-{os.getpid()}"
     safe_id = "".join(
-        character if character.isalnum() or character in "._-" else "-"
-        for character in campaign_id
+        character if character.isalnum() or character in "._-" else "-" for character in campaign_id
     ).strip(".-")
     if not safe_id:
         raise SystemExit("campaign id has no safe characters")
@@ -238,9 +239,7 @@ def main() -> int:
                     "started_at": None,
                     "finished_at": None,
                     "wall_clock_seconds": None,
-                    "controller_lock": (
-                        f"cloudbench-controller-campaign-{lock_prefix}-{index}.lock"
-                    ),
+                    "controller_lock": (f"cloudbench-controller-campaign-{lock_prefix}-{index}.lock"),
                     "log": str(campaign_dir / f"{job_id}.log"),
                 }
             )
@@ -257,17 +256,12 @@ def main() -> int:
         "peak_concurrency": 0,
         "jobs": jobs,
     }
-    strict_start = (
-        "--strict-barrier" in args.forward_arg
-        or os.environ.get("CLOUDBENCH_STRICT_BARRIER") == "1"
-    )
+    strict_start = "--strict-barrier" in args.forward_arg or os.environ.get("CLOUDBENCH_STRICT_BARRIER") == "1"
     cohorts: list[dict[str, object]] = []
     parent_lock = None
     if strict_start:
         if os.environ.get("CLOUDBENCH_SYNCHRONIZED_START", "1") != "1":
-            raise SystemExit(
-                "strict campaign startup requires synchronized fleet start"
-            )
+            raise SystemExit("strict campaign startup requires synchronized fleet start")
         barrier_root = campaign_dir / "startup-cohorts"
         barrier_root.mkdir(mode=0o700)
         parent_lock = (barrier_root / "parent.lock").open("w")
@@ -313,17 +307,12 @@ def main() -> int:
             "   native capacity includes existing/stopped Machines and worker "
             "headroom; controller count does not prove task execution overlap."
         )
-    print(
-        "   monitor every 30s: python3 -m json.tool " + shlex.quote(str(summary_path))
-    )
+    print("   monitor every 30s: python3 -m json.tool " + shlex.quote(str(summary_path)))
     print(
         "   follow each job log's exact printed fleet-monitor command; "
         "the campaign directory is not a fleet-monitor handle."
     )
-    print(
-        "   check controller exit and continue through owned teardown; "
-        "task PASS/FAIL is available before cleanup."
-    )
+    print("   check controller exit and continue through owned teardown; task PASS/FAIL is available before cleanup.")
 
     pending = deque(jobs)
     active: dict[int, dict[str, object]] = {}
@@ -379,17 +368,12 @@ def main() -> int:
                 or receipt.get("job_id") != job["job_id"]
                 or receipt.get("controller_pid") != process.pid
             ):
-                raise ValueError(
-                    "startup readiness does not belong to this campaign job"
-                )
+                raise ValueError("startup readiness does not belong to this campaign job")
             ready_count += 1
             job["startup_ready_at"] = receipt["ready_at"]
         if cohort["ready_count"] != ready_count:
             cohort["ready_count"] = ready_count
-            print(
-                f"⏸️ campaign startup {cohort['cohort_id']}: "
-                f"{ready_count}/{cohort['expected_count']} copies ready"
-            )
+            print(f"⏸️ campaign startup {cohort['cohort_id']}: {ready_count}/{cohort['expected_count']} copies ready")
             write_json_atomic(summary_path, state)
         if ready_count != cohort["expected_count"]:
             return
@@ -399,10 +383,7 @@ def main() -> int:
             {"cohort_id": cohort["cohort_id"], "released_at": cohort["released_at"]},
         )
         cohort["status"] = "released"
-        print(
-            f"🚦 campaign startup {cohort['cohort_id']}: releasing "
-            f"all {ready_count} ready copies"
-        )
+        print(f"🚦 campaign startup {cohort['cohort_id']}: releasing all {ready_count} ready copies")
         write_json_atomic(summary_path, state)
 
     classifier = root / "scripts/cloudbench-production-only-tasks.py"
@@ -429,9 +410,7 @@ def main() -> int:
             and os.environ.get("CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY", "1") == "1"
         ):
             try:
-                inventory_process, inventory_log, inventory_directory = (
-                    start_shared_inventory(root, campaign_dir)
-                )
+                inventory_process, inventory_log, inventory_directory = start_shared_inventory(root, campaign_dir)
                 print(
                     "Campaign inventory: one parent-owned native feed for all cloud controllers; capacity and resource mutation checks remain live"
                 )
@@ -443,18 +422,14 @@ def main() -> int:
                 first_failure = 1
                 barrier_failure = True
                 state["shared_inventory_failed"] = True
-                print(
-                    "Campaign inventory did not initialize; see private publisher log"
-                )
+                print("Campaign inventory did not initialize; see private publisher log")
             write_json_atomic(summary_path, state)
         while pending or active:
             if inventory_process is not None and inventory_process.poll() is not None:
                 barrier_failure = True
                 first_failure = first_failure or 1
                 if current_cohort:
-                    abort_startup_cohort(
-                        current_cohort, "campaign inventory publisher stopped"
-                    )
+                    abort_startup_cohort(current_cohort, "campaign inventory publisher stopped")
                 if not inventory_failure_signalled:
                     # Abort rendezvous first, then signal these exact waitable
                     # controller roots. Their existing EXIT cleanup owns the
@@ -470,6 +445,39 @@ def main() -> int:
                 current_cohort = pending[0]["_cohort"] if pending else None
                 if current_cohort:
                     current_cohort["status"] = "waiting"
+                    if inventory_directory is not None:
+                        try:
+                            log = current_cohort["_directory"] / "seed-preflight.private.log"
+                            with log.open("w") as stream:
+                                log.chmod(0o600)
+                                result = subprocess.run(
+                                    [
+                                        sys.executable,
+                                        str(root / "scripts/cloudbench-campaign-seed.py"),
+                                        "prepare",
+                                        "--root",
+                                        str(root),
+                                        "--inventory",
+                                        str(inventory_directory),
+                                        "--barrier",
+                                        str(current_cohort["_directory"]),
+                                    ],
+                                    cwd=root,
+                                    stdout=stream,
+                                    stderr=subprocess.STDOUT,
+                                    check=False,
+                                )
+                            if result.returncode:
+                                raise ValueError("canonical fixture preflight failed")
+                            current_cohort["_seed_proof"] = current_cohort["_directory"] / "seed-proof.private.json"
+                        except (OSError, ValueError):
+                            first_failure = first_failure or 1
+                            barrier_failure = True
+                            abort_startup_cohort(
+                                current_cohort, "canonical fixture full GET failed before child admission"
+                            )
+                            print("Campaign canonical fixture preflight failed; no cohort controller admitted")
+                        write_json_atomic(summary_path, state)
             while (
                 pending
                 and len(active) < args.concurrency
@@ -495,20 +503,17 @@ def main() -> int:
                     }
                 )
                 if inventory_directory is not None:
-                    environment["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"] = str(
-                        inventory_directory
-                    )
+                    environment["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"] = str(inventory_directory)
                 else:
                     environment.pop("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", None)
+                environment.pop("CLOUDBENCH_CAMPAIGN_SEED_PROOF", None)
                 if strict_start:
+                    if current_cohort.get("_seed_proof"):
+                        environment["CLOUDBENCH_CAMPAIGN_SEED_PROOF"] = str(current_cohort["_seed_proof"])
                     environment.update(
                         {
-                            "RUN_BENCH_CAMPAIGN_BARRIER_DIR": str(
-                                current_cohort["_directory"]
-                            ),
-                            "RUN_BENCH_CAMPAIGN_COHORT": str(
-                                current_cohort["cohort_id"]
-                            ),
+                            "RUN_BENCH_CAMPAIGN_BARRIER_DIR": str(current_cohort["_directory"]),
+                            "RUN_BENCH_CAMPAIGN_COHORT": str(current_cohort["cohort_id"]),
                         }
                     )
                 else:
@@ -539,20 +544,13 @@ def main() -> int:
                 job["status"] = "running"
                 active[process.pid] = job
                 if strict_start:
-                    current_cohort["_manifest"]["jobs"][str(job["job_id"])] = (
-                        process.pid
-                    )
+                    current_cohort["_manifest"]["jobs"][str(job["job_id"])] = process.pid
                     write_json_atomic(
                         current_cohort["_directory"] / "manifest.json",
                         current_cohort["_manifest"],
                     )
-                state["peak_concurrency"] = max(
-                    int(state["peak_concurrency"]), len(active)
-                )
-                print(
-                    f"▶ {job['job_id']} task={job['task']} run={job['run']} "
-                    f"pid={process.pid}"
-                )
+                state["peak_concurrency"] = max(int(state["peak_concurrency"]), len(active))
+                print(f"▶ {job['job_id']} task={job['task']} run={job['run']} pid={process.pid}")
                 write_json_atomic(summary_path, state)
 
             if stop_signal and not termination_requested:
@@ -572,19 +570,14 @@ def main() -> int:
                 handle = job.pop("_log_handle")
                 handle.close()
                 job.pop("_process")
-                exited_before_release = strict_start and job["_cohort"][
-                    "status"
-                ] not in {"released", "aborted"}
+                exited_before_release = strict_start and job["_cohort"]["status"] not in {"released", "aborted"}
                 if exited_before_release:
                     barrier_failure = True
                     first_failure = first_failure or exit_code or 1
-                    abort_startup_cohort(
-                        job["_cohort"], "controller exited before cohort release"
-                    )
+                    abort_startup_cohort(job["_cohort"], "controller exited before cohort release")
                 job["status"] = (
                     "cancelled"
-                    if job.pop("_terminated_by_campaign", False)
-                    or job.pop("_aborted_by_campaign", False)
+                    if job.pop("_terminated_by_campaign", False) or job.pop("_aborted_by_campaign", False)
                     else "failed"
                     if exited_before_release
                     else "passed"
@@ -593,9 +586,7 @@ def main() -> int:
                 )
                 job["controller_exit_code"] = exit_code
                 job["finished_at"] = utc_now()
-                job["wall_clock_seconds"] = round(
-                    time.monotonic() - float(job.pop("_started_monotonic")), 3
-                )
+                job["wall_clock_seconds"] = round(time.monotonic() - float(job.pop("_started_monotonic")), 3)
                 active.pop(process_id)
                 if exit_code and not first_failure:
                     first_failure = exit_code
@@ -617,13 +608,8 @@ def main() -> int:
                         output_bytes = Path(str(job["log"])).stat().st_size
                     except OSError:
                         output_bytes = -1
-                    evidence.append(
-                        f"{job['job_id']}:pid={process_id}:bytes={output_bytes}"
-                    )
-                print(
-                    f"⏳ campaign liveness active={len(active)} "
-                    f"pending={len(pending)} {' '.join(evidence)}"
-                )
+                    evidence.append(f"{job['job_id']}:pid={process_id}:bytes={output_bytes}")
+                print(f"⏳ campaign liveness active={len(active)} pending={len(pending)} {' '.join(evidence)}")
                 next_heartbeat = now + (10 if now - started < 60 else 60)
             if (stop_signal or barrier_failure) and not active:
                 break
@@ -641,9 +627,7 @@ def main() -> int:
             if handle is not None:
                 handle.close()
         if inventory_process is not None:
-            if not stop_shared_inventory(
-                inventory_process, inventory_log, inventory_directory
-            ):
+            if not stop_shared_inventory(inventory_process, inventory_log, inventory_directory):
                 first_failure = first_failure or 1
                 state["shared_inventory_failed"] = True
         if parent_lock is not None:
