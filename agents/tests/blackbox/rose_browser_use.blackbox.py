@@ -1843,6 +1843,71 @@ async def test_complete_browser_use_waterfall_only_path():
     assert "# Available Actions" not in body["messages"][0]["content"]
 
 
+async def test_complete_browser_use_recovers_a_step_cut_off_before_its_action():
+    """A step whose thinking used the whole output limit is not re-asked unchanged.
+
+    Repro of the hosted-auth bench timeouts: the reply ended finish=length with
+    no action, and the step was retried with identical context up to 5 times.
+    """
+    cut_off = _openai_sse(
+        [
+            {"choices": [{"delta": {"content": "Let me reconsider. Wait, actually"}, "finish_reason": "length"}]},
+            {"usage": {"prompt_tokens": 12, "completion_tokens": 6147, "total_tokens": 6159}},
+        ]
+    )
+    acted = _openai_sse(
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_click",
+                                    "type": "function",
+                                    "function": {"name": "click", "arguments": '{"index": 3}'},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {"usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}},
+        ]
+    )
+    seen: list[tuple[str, int]] = []
+
+    def handler(req):
+        if "openrouter.ai" not in str(req.url):
+            return httpx.Response(500, text="unexpected route")
+        body = json.loads(req.content.decode())
+        seen.append((body["model"], body["max_tokens"]))
+        text = acted if body["model"] == "google/gemini-3.8-flash" else cut_off
+        return httpx.Response(200, text=text, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+        result = await RoseClient(openrouter_key="ork-x").complete_browser_use(
+            task="click submit",
+            browser_state=_browser_state(),
+            action_history=[],
+            available_actions=["click", "goto"],
+            include_screenshot=False,
+            call_site="test-bu-cut-off",
+        )
+
+    assert seen == [
+        ("qwen/qwen3.8-27b", 2048),
+        ("qwen/qwen3.8-27b", 16000),
+        ("google/gemini-3.8-flash", 16000),
+    ], seen
+    assert result["action"]["action"] == "click" and result["action"]["index"] == 3, result["action"]
+    assert "reconsider" not in json.dumps(result["action"]), "the abandoned attempts must not reach the action"
+    assert result["actual_model"] == "google/gemini-3.8-flash", result["actual_model"]
+
+
 async def test_complete_browser_use_preserves_printable_native_tool_batch():
     """A provider turn that types several characters must not discard calls 2..N."""
     tool_calls = [
@@ -2376,6 +2441,10 @@ async def run_all_tests():
     )
 
     await r.record_async("complete_browser_use_waterfall_only", test_complete_browser_use_waterfall_only_path)
+    await r.record_async(
+        "complete_browser_use_recovers_cut_off_step",
+        test_complete_browser_use_recovers_a_step_cut_off_before_its_action,
+    )
     await r.record_async(
         "complete_browser_use_printable_native_tool_batch",
         test_complete_browser_use_preserves_printable_native_tool_batch,

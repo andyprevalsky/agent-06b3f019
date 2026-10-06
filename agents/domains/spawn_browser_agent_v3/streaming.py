@@ -30,6 +30,9 @@ class BrowserStreamingRoseClient(RoseClient):
         forwarded_tool = False
         async for chunk in super().complete(**kwargs):
             should_forward = True
+            if chunk.kind == "restart":
+                forwarded_tool = False
+                self._selected_tool_call_id = None
             if chunk.kind == "tool_call":
                 should_forward = not forwarded_tool
                 if should_forward:
