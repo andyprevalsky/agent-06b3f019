@@ -501,6 +501,65 @@ class ReviewWaitTest(unittest.TestCase):
             MODULE.gh_payload = original
         self.assertEqual(len(calls), 2)
 
+    def test_push_auto_skip_after_the_trigger_waits_for_the_commanded_review(self) -> None:
+        """PR 1415: command 02:27:32, the push's auto-skip 02:28:06, review 02:28:43."""
+        head = "2" * 40
+        triggered_at = MODULE.parse_github_time("2026-10-06T02:27:32Z")
+
+        def rollup(state: str, started: str, description: str) -> dict[str, object]:
+            entry = {
+                "__typename": "StatusContext",
+                "context": "CodeRabbit",
+                "state": state,
+                "startedAt": started,
+                "description": description,
+            }
+            return {"headRefOid": head, "statusCheckRollup": [entry]}
+
+        auto_skip = rollup(
+            "SUCCESS", "2026-10-06T02:28:06Z", "Review skipped: incremental reviews are disabled"
+        )
+        payloads = iter(
+            [
+                auto_skip,
+                rollup("PENDING", "2026-10-06T02:28:43Z", "Review in progress"),
+                rollup("SUCCESS", "2026-10-06T02:33:56Z", "Review completed"),
+            ]
+        )
+        progress: list[str] = []
+        status = MODULE.wait_for_review(
+            pr="1415",
+            expected_head=head,
+            repo=None,
+            timeout_seconds=1,
+            poll_seconds=0,
+            loader=lambda _pr, _repo: next(payloads),
+            sleeper=lambda _seconds: None,
+            progress=progress.append,
+            triggered_at=triggered_at,
+            clock=lambda: MODULE.parse_github_time("2026-10-06T02:28:10Z"),
+        )
+
+        self.assertEqual(status.state, "SUCCESS")
+        self.assertTrue(status.successful)
+        self.assertEqual(progress[0], f"CodeRabbit AWAITING_TRIGGERED_REVIEW on {head[:12]}")
+
+        # A command CodeRabbit never answers must still reach the fallback.
+        ignored = MODULE.wait_for_review(
+            pr="1415",
+            expected_head=head,
+            repo=None,
+            timeout_seconds=1,
+            poll_seconds=0,
+            loader=lambda _pr, _repo: auto_skip,
+            sleeper=lambda _seconds: None,
+            triggered_at=triggered_at,
+            clock=lambda: MODULE.parse_github_time("2026-10-06T02:30:33Z"),
+        )
+
+        self.assertEqual(ignored.state, "REVIEW_SKIPPED")
+        self.assertFalse(ignored.successful)
+
     def test_skip_posted_after_the_trigger_is_terminal(self) -> None:
         head = "1" * 40
         status = MODULE.wait_for_review(
