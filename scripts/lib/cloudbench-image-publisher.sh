@@ -104,9 +104,61 @@ cloudbench_image_publisher_client() {
 }
 
 cloudbench_image_publish() {
-    local client
+    local client status=0 log resolve_log warning="" resolved=0
     client="${IMAGE_PUBLISHER_CLIENT:-}"
     [ -n "$client" ] || client="$(cloudbench_image_publisher_client)" || return $?
+    if [ -n "${CLOUDBENCH_IMAGE_COMPLETION_FILE:-}" ]; then
+        log="$(mktemp "${CLOUDBENCH_IMAGE_COMPLETION_FILE%.json}.XXXXXX")" || return $?
+        mv "$log" "$log.private.log" || { rm -f "$log"; return 1; }
+        log="$log.private.log"
+        chmod 600 "$log"
+        echo "Private image publisher log: $log"
+        if cloudbench_image_publish_child "$client" "$@" >"$log" 2>&1; then
+            status=0
+        else
+            status=$?
+        fi
+        if [ "$status" != 0 ] && [ "${IMAGE_BUILD_BUILDER:-native}" = native ] &&
+            cloudbench_image_known_postpush_failure "$log" "$@"; then
+            resolve_log="${log%.private.log}.resolve.private.log"
+            (umask 077; : >"$resolve_log") || return $?
+            echo "Image pushed; verifying its exact owned tag after builder metadata refusal."
+            # An explicit --image takes the SDK prebuilt-image path. It does
+            # not submit another Docker build, push, or activate a Machine.
+            if DOCKER_BUILDKIT=0 "$client" deploy "$CLOUDBENCH_IMAGE_ATTEMPT_CONTEXT" \
+                -c "$CLOUDBENCH_IMAGE_ATTEMPT_CONTEXT/fly.cloudbench-warm.toml" \
+                --image "registry.fly.io/$CLOUDBENCH_IMAGE_ATTEMPT_APP:$CLOUDBENCH_IMAGE_ATTEMPT_LABEL" \
+                --build-only --depot=false --remote-only -a "$CLOUDBENCH_IMAGE_ATTEMPT_APP" \
+                --wg=false >"$resolve_log" 2>&1; then
+                resolved=1
+                warning="Builder refused final image metadata inspection after publication; exact published tag verified by SDK."
+            fi
+        fi
+        python3 - "$CLOUDBENCH_IMAGE_COMPLETION_FILE" "$status" "$resolved" "$warning" <<'PY_COMPLETION' || return $?
+import json,os,sys
+path,status,resolved,warning=sys.argv[1:]
+receipt={"publication_verified":status=="0" or resolved=="1",
+         "publisher_exit_code":int(status),
+         "published_tag_resolution_verified":resolved=="1",
+         "publication_metadata_warning":warning or None}
+with open(path,"w") as output:
+    json.dump(receipt,output)
+    output.write("\n")
+os.chmod(path,0o600)
+PY_COMPLETION
+        if [ "$status" = 0 ] || [ "$resolved" = 1 ]; then
+            [ -z "$warning" ] || echo "Warning: $warning"
+            return 0
+        fi
+        echo "Image publisher failed (exit $status); private log retained at $log." >&2
+        return "$status"
+    fi
+    cloudbench_image_publish_child "$client" "$@"
+}
+
+cloudbench_image_publish_child() {
+    local client="$1"
+    shift
     if [ "${IMAGE_BUILD_BUILDER:-native}" = native ]; then
         # The shared native builder's HTTPS endpoint cannot upgrade embedded
         # BuildKit gRPC. Use its supported classic Docker API without changing
@@ -115,4 +167,33 @@ cloudbench_image_publish() {
     else
         "$client" "$@" --wg=false
     fi
+}
+
+cloudbench_image_known_postpush_failure() {
+    python3 - "$1" "${CLOUDBENCH_IMAGE_ATTEMPT_CONTEXT:-}" \
+        "${CLOUDBENCH_IMAGE_ATTEMPT_APP:-}" "${CLOUDBENCH_IMAGE_ATTEMPT_LABEL:-}" \
+        "${CLOUDBENCH_IMAGE_ATTEMPT_PID:-}" "${@:2}" <<'PY_POSTPUSH'
+import re,sys
+from pathlib import Path
+
+log,context,app,label,pid,*arguments=sys.argv[1:]
+def option(name):
+    return arguments[arguments.index(name)+1] if name in arguments else None
+try:
+    context=Path(context).resolve(strict=True)
+    owned=(arguments[:2]==["deploy",str(context)] and Path.cwd()==context
+           and option("-c")==str(context/"fly.cloudbench-warm.toml")
+           and option("--dockerfile")==str(context/"Dockerfile.cloudbench-warm")
+           and option("-a")==app and option("--image-label")==label
+           and re.fullmatch(r"cloudbench-warm-\d{8}-\d{6}-"+re.escape(pid),label)
+           and all(flag in arguments for flag in ("--push","--build-only","--remote-only","--depot=false")))
+    text=re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]","",Path(log).read_text(errors="replace"))
+    marker=text.rfind("Pushing image done")
+    suffix="count not find built image: Error response from daemon: You are not authorized to use this builder"
+    final=text[marker:].strip() if marker>=0 else ""
+    known=final.endswith(suffix) and "Error: failed to fetch an image or build from source:" in final
+except (OSError,ValueError,IndexError):
+    owned=known=False
+raise SystemExit(0 if owned and known else 1)
+PY_POSTPUSH
 }

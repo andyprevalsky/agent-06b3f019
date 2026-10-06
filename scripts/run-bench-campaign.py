@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 import signal
+import shlex
+import shutil
 import subprocess
 import time
 from collections import deque
@@ -76,6 +78,80 @@ def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
                 job["_terminated_by_campaign"] = True
             except ProcessLookupError:
                 pass
+
+
+def start_shared_inventory(
+    root: Path, campaign_dir: Path
+) -> tuple[subprocess.Popen, object, Path]:
+    refresh = int(os.environ.get("CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS", "30"))
+    lock_wait = int(
+        os.environ.get("CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS", str(refresh * 3 + 5))
+    )
+    seconds = int(os.environ.get("CLOUDBENCH_CHILD_TERM_SECONDS", "30"))
+    if refresh < 1 or lock_wait < 1 or seconds < 1:
+        raise ValueError("inventory section budgets must be positive")
+    directory = campaign_dir / "shared-inventory"
+    directory.mkdir(mode=0o700)
+    source = directory / "scripts"
+    source.mkdir(mode=0o700)
+    for name, relative in (
+        (
+            "cloudbench-campaign-inventory.sh",
+            "scripts/cloudbench-campaign-inventory.sh",
+        ),
+        ("cloudbench-inventory.sh", "scripts/lib/cloudbench-inventory.sh"),
+        ("cloudbench-env.sh", "scripts/lib/cloudbench-env.sh"),
+        ("cloudbench-machine-readiness.py", "scripts/cloudbench-machine-readiness.py"),
+    ):
+        shutil.copyfile(root / relative, source / name)
+    log = (directory / "publisher.private.log").open("w")
+    os.chmod(log.name, 0o600)
+    environment = os.environ.copy()
+    environment.pop("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", None)
+    process = subprocess.Popen(
+        [
+            "bash",
+            str(source / "cloudbench-campaign-inventory.sh"),
+            str(root),
+            str(directory),
+            str(os.getpid()),
+        ],
+        cwd=root,
+        env=environment,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + refresh * 2 + lock_wait
+    while not (directory / "owner").is_file():
+        if process.poll() is not None or time.monotonic() >= deadline:
+            stop_shared_inventory(process, log, directory)
+            raise RuntimeError(
+                "campaign inventory did not initialize; see private publisher log"
+            )
+        time.sleep(0.1)
+    return process, log, directory
+
+
+def stop_shared_inventory(
+    process: subprocess.Popen, log: object, directory: Path
+) -> bool:
+    (directory / "stop").touch()
+    seconds = int(os.environ.get("CLOUDBENCH_CHILD_TERM_SECONDS", "30"))
+    try:
+        process.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            # This isolated, waitable auxiliary group owns only read-only API
+            # processes. Never signal a borrowed fleet or provider resource.
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+    finally:
+        log.close()
+    return process.returncode == 0
 
 
 def main() -> int:
@@ -189,6 +265,27 @@ def main() -> int:
         f"jobs={len(jobs)} concurrency={args.concurrency}"
     )
     print(f"   summary: {summary_path}")
+    if strict_start:
+        print(
+            f"   strict startup: {len(cohorts)} cohort(s), "
+            f"up to {args.concurrency} copies each; every member must be ready "
+            "before its cohort releases."
+        )
+        print(
+            "   native capacity includes existing/stopped Machines and worker "
+            "headroom; controller count does not prove task execution overlap."
+        )
+    print(
+        "   monitor every 30s: python3 -m json.tool " + shlex.quote(str(summary_path))
+    )
+    print(
+        "   follow each job log's exact printed fleet-monitor command; "
+        "the campaign directory is not a fleet-monitor handle."
+    )
+    print(
+        "   check controller exit and continue through owned teardown; "
+        "task PASS/FAIL is available before cleanup."
+    )
 
     pending = deque(jobs)
     active: dict[int, dict[str, object]] = {}
@@ -270,8 +367,65 @@ def main() -> int:
         )
         write_json_atomic(summary_path, state)
 
+    classifier = root / "scripts/cloudbench-production-only-tasks.py"
+    all_production_only = False
+    if classifier.is_file():
+        classified = subprocess.run(
+            [str(Path(os.sys.executable)), str(classifier), *args.task],
+            cwd=root,
+            capture_output=True,
+        )
+        if classified.returncode not in {0, 1}:
+            raise SystemExit("campaign production-only classification failed")
+        all_production_only = classified.returncode == 0
+    inventory_process = None
+    inventory_log = None
+    inventory_directory = None
+    inventory_failure_signalled = False
     try:
+        if (
+            args.concurrency > 1
+            and not all_production_only
+            and os.environ.get("CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY", "1") == "1"
+        ):
+            try:
+                inventory_process, inventory_log, inventory_directory = (
+                    start_shared_inventory(root, campaign_dir)
+                )
+                print(
+                    "Campaign inventory: one parent-owned native feed for all cloud controllers; capacity and resource mutation checks remain live"
+                )
+                state["shared_inventory"] = {
+                    "directory": str(inventory_directory),
+                    "publisher_pid": inventory_process.pid,
+                }
+            except (OSError, ValueError, RuntimeError):
+                first_failure = 1
+                barrier_failure = True
+                state["shared_inventory_failed"] = True
+                print(
+                    "Campaign inventory did not initialize; see private publisher log"
+                )
+            write_json_atomic(summary_path, state)
         while pending or active:
+            if inventory_process is not None and inventory_process.poll() is not None:
+                barrier_failure = True
+                first_failure = first_failure or 1
+                if current_cohort:
+                    abort_startup_cohort(
+                        current_cohort, "campaign inventory publisher stopped"
+                    )
+                if not inventory_failure_signalled:
+                    # Abort rendezvous first, then signal these exact waitable
+                    # controller roots. Their existing EXIT cleanup owns the
+                    # resource release. Add no short KILL escalation or new
+                    # harness timeout; poll/join cleanup before stopping feed.
+                    for job in active.values():
+                        process = job["_process"]
+                        if process.poll() is None:
+                            process.terminate()
+                            job["_aborted_by_campaign"] = True
+                    inventory_failure_signalled = True
             if strict_start and not active and not barrier_failure:
                 current_cohort = pending[0]["_cohort"] if pending else None
                 if current_cohort:
@@ -299,6 +453,12 @@ def main() -> int:
                         "CLOUDBENCH_CONTROLLER_LOCK_NAME": str(job["controller_lock"]),
                     }
                 )
+                if inventory_directory is not None:
+                    environment["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"] = str(
+                        inventory_directory
+                    )
+                else:
+                    environment.pop("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", None)
                 if strict_start:
                     environment.update(
                         {
@@ -433,9 +593,18 @@ def main() -> int:
                 abort_startup_cohort(current_cohort, "campaign parent is exiting")
             terminate_owned_children(active)
         for job in active.values():
+            process = job.get("_process")
+            if isinstance(process, subprocess.Popen):
+                process.wait()
             handle = job.get("_log_handle")
             if handle is not None:
                 handle.close()
+        if inventory_process is not None:
+            if not stop_shared_inventory(
+                inventory_process, inventory_log, inventory_directory
+            ):
+                first_failure = first_failure or 1
+                state["shared_inventory_failed"] = True
         if parent_lock is not None:
             parent_lock.close()
 

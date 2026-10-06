@@ -946,10 +946,28 @@ do not add cache tags, prompts or seed fixtures to make a performance run pass.
 The known recorded mass demo can be run with:
 
 ```bash
+CLOUDBENCH_APP_MACHINE_CEILING=138 \
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
   scripts/run-bench test-mass-agent-run-0 --demo-cache \
-  -k 50 --concurrency 50 --strict-barrier --timeout 300
+  -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
 ```
+
+
+Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
+
+For this explicitly requested 50-copy cached stress run, use the command-scoped
+Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
+Machines plus 50 primaries, up to 50 optional autoscaler workers and two transient
+slots. Inspect native app inventory and headroom again before a future run;
+ordinary ceiling 56 cannot hold this current cohort, and ceiling 88 leaves only
+two worker slots. This profile creates no idle resources and changes no default
+ceiling, shared-CPU governor or production headroom. `--strict-barrier` keeps all
+50 copies in one ready cohort; controller occupancy does not prove execution overlap.
+
+Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
+seconds, then follow each job log's exact printed fleet-monitor handle through
+controller exit and owned teardown. The campaign directory itself is not a
+fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
 
 This requests 50 independent one-task fleet controllers. Each unchanged mass
 task spawns 50 first-level general-purpose children: 2,500 across the campaign;

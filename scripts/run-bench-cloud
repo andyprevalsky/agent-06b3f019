@@ -2201,6 +2201,8 @@ fi
 # source-only benchmarks do not build an image.
 build_warm_image() {
     local builder_args=()
+    IMAGE_BUILD_COMPLETION='{"publication_verified":false,"publisher_exit_code":null,"published_tag_resolution_verified":false,"publication_metadata_warning":null}'
+    IMAGE_BUILD_ATTEMPTS=0
     case "${IMAGE_BUILD_BUILDER:-native}" in
         native) builder_args=(--depot=false) ;;
         depot)
@@ -2227,6 +2229,7 @@ build_warm_image() {
         source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-image-publisher.sh" || return $?
     fi
     local attempt build_ok=0
+    local completion_file="$OUT_DIR/cloudbench-image-publication.json"
     IMAGE_LABEL="cloudbench-warm-$(date +%Y%m%d-%H%M%S)-$$"
     local build_args=(
         deploy "$IMAGE_BUILD_CONTEXT"
@@ -2242,14 +2245,20 @@ build_warm_image() {
         # Fly resolves build files from the config directory. Bind every path
         # and the invocation directory to the selected checkout, even when the
         # CLI itself belongs to a different worktree.
-        if (cd "$IMAGE_BUILD_CONTEXT" && cloudbench_image_publish "${build_args[@]}"); then
+        if (cd "$IMAGE_BUILD_CONTEXT" &&
+            CLOUDBENCH_IMAGE_COMPLETION_FILE="$completion_file" \
+            CLOUDBENCH_IMAGE_ATTEMPT_CONTEXT="$IMAGE_BUILD_CONTEXT" \
+            CLOUDBENCH_IMAGE_ATTEMPT_APP="$APP" CLOUDBENCH_IMAGE_ATTEMPT_LABEL="$IMAGE_LABEL" \
+            CLOUDBENCH_IMAGE_ATTEMPT_PID="$$" cloudbench_image_publish "${build_args[@]}"); then
             build_ok=1
+            [ ! -f "$completion_file" ] || IMAGE_BUILD_COMPLETION="$(cat "$completion_file")"
             break
         fi
         [ "$attempt" = 3 ] || sleep 15
     done
     [ "$build_ok" = 1 ] || { echo "Image build failed after 3 attempts" >&2; return 1; }
     IMAGE_REF="registry.fly.io/$APP:$IMAGE_LABEL"
+    IMAGE_BUILD_ATTEMPTS="$attempt"
     echo "✅ Image: $IMAGE_REF"
 }
 
@@ -2306,13 +2315,15 @@ if [ "$MODE" = build-image ]; then
     image_build_finished="$(date +%s)"
     python3 - "$OUT_DIR/cloudbench-image-build.json" "$IMAGE_REF" \
         "$IMAGE_BUILD_NO_CACHE" "$image_build_provenance" \
-        "$image_build_started" "$image_build_finished" <<'PY_RECEIPT'
+        "$image_build_started" "$image_build_finished" \
+        "$IMAGE_BUILD_COMPLETION" "$IMAGE_BUILD_ATTEMPTS" <<'PY_RECEIPT'
 import json,os,sys
-path,image,cold,provenance,started,finished=sys.argv[1:]
+path,image,cold,provenance,started,finished,completion,attempts=sys.argv[1:]
 receipt={"schema":"cloudbench-image-build-v1","image_ref":image,
          "layer_cache_bypassed":cold=="1",**json.loads(provenance),
          "started_epoch":int(started),"finished_epoch":int(finished),
-         "elapsed_seconds":int(finished)-int(started)}
+         "elapsed_seconds":int(finished)-int(started),
+         **json.loads(completion),"build_attempts":int(attempts)}
 with open(path,"w") as handle:
     json.dump(receipt,handle)
     handle.write("\n")

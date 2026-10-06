@@ -63,6 +63,7 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
             env.pop(key)
     env.update(
         PATH=str(binary) + os.pathsep + str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", ""),
+        CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="0",
         FIXTURE_ROOT=str(tmp_path),
         FIXTURE_EVENTS=str(events),
         FIXTURE_FAIL_JOB=str(fail_job),

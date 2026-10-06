@@ -373,3 +373,87 @@ def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_pa
     assert receipt["image_publisher_version"] == "0.4.112"
     assert receipt["image_publisher_transport"] == "https"
     assert receipt["image_publisher_engine"] == ("depot-buildkit" if builder == "depot" else "docker-classic")
+
+
+@pytest.mark.parametrize(
+    "scenario,builder,successful,resolve_calls",
+    [
+        ("postpush", "native", True, 1),
+        ("prepush", "native", False, 0),
+        ("unrelated", "native", False, 0),
+        ("unresolved", "native", False, 3),
+        ("postpush", "depot", False, 0),
+        ("normal", "native", True, 0),
+        ("normal", "depot", True, 0),
+        ("receipt-write", "native", False, 0),
+    ],
+)
+def test_cold_image_published_tag_completion_prevents_only_proven_rebuild(
+    tmp_path, scenario, builder, successful, resolve_calls
+):
+    source = (ROOT / "scripts/run-bench-cloud").read_text()
+    start = source.index("build_warm_image() {")
+    end = source.index("# MODE: --setup", start)
+    context = tmp_path / "selected checkout"
+    context.mkdir()
+    (context / "Dockerfile.cloudbench-warm").write_text("FROM fixture\n")
+    (context / "fly.cloudbench-warm.toml").write_text('app = "fixture"\n')
+    output = tmp_path / "receipt"
+    output.mkdir()
+    if scenario == "receipt-write":
+        (output / "cloudbench-image-publication.json").mkdir()
+    calls = tmp_path / "calls.jsonl"
+    publisher = tmp_path / "publisher.py"
+    publisher.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json,os,sys\n"
+        "args=sys.argv[1:]\n"
+        f"with open({str(calls)!r},'a') as handle:handle.write(json.dumps({{'args':args,'cwd':os.getcwd()}})+'\\n')\n"
+        f"scenario={scenario!r}\n"
+        "if '--image' in args:sys.exit(1 if scenario=='unresolved' else 0)\n"
+        "print('fixture-private-line-not-human')\n"
+        "if scenario in ('normal','receipt-write'):sys.exit(0)\n"
+        "if scenario!='prepush':print('Pushing image done')\n"
+        "if scenario=='unrelated':print('Error: unrelated publisher failure')\n"
+        "else:print('Error: failed to fetch an image or build from source: count not find built image: Error response from daemon: You are not authorized to use this builder')\n"
+        "sys.exit(1)\n"
+    )
+    publisher.chmod(0o700)
+    harness = tmp_path / "build.sh"
+    harness.write_text(
+        "set -e\nAPP=owned-benchmark-app\nMODE=build-image\n"
+        f"ROOT_DIR={shlex.quote(str(ROOT))}\n"
+        f"IMAGE_BUILD_CONTEXT={shlex.quote(str(context))}\n"
+        f"OUT_DIR={shlex.quote(str(output))}\nIMAGE_BUILD_NO_CACHE=1\nWARM_IMAGE_REF=''\n"
+        f"IMAGE_BUILD_BUILDER={builder}\n"
+        f"source {shlex.quote(str(PUBLISHER_LIB))}\n"
+        f"cloudbench_image_publisher_client() {{ printf '%s\\n' {shlex.quote(str(publisher))}; }}\n"
+        "sleep() { :; }\n"
+        + source[start:end]
+    )
+    result = subprocess.run([BASH, str(harness)], capture_output=True, text=True, timeout=30)
+    assert (result.returncode == 0) is successful, result.stderr
+    observed = [json.loads(line) for line in calls.read_text().splitlines()]
+    resolves = [call for call in observed if "--image" in call["args"]]
+    builds = [call for call in observed if "--push" in call["args"]]
+    assert len(resolves) == resolve_calls
+    assert len(builds) == (1 if successful else 3)
+    for resolve in resolves:
+        args = resolve["args"]
+        assert args[args.index("--image") + 1].startswith("registry.fly.io/owned-benchmark-app:cloudbench-warm-")
+        assert args[args.index("-a") + 1] == "owned-benchmark-app"
+        assert args[args.index("-c") + 1] == str(context / "fly.cloudbench-warm.toml")
+        assert resolve["cwd"] == str(context)
+        assert "--build-only" in args and "--push" not in args
+        assert "--no-cache" not in args and "--wg=false" in args
+        assert "--depot=false" in args and "--remote-only" in args
+    if successful:
+        receipt = json.loads((output / "cloudbench-image-build.json").read_text())
+        assert receipt["publication_verified"] is True
+        assert receipt["publisher_exit_code"] == (1 if scenario == "postpush" else 0)
+        assert receipt["published_tag_resolution_verified"] is (scenario == "postpush")
+        assert bool(receipt["publication_metadata_warning"]) is (scenario == "postpush")
+        assert receipt["build_attempts"] == 1
+    assert "fixture-private-line-not-human" not in result.stdout + result.stderr
+    for private in output.glob("*.private.log"):
+        assert private.stat().st_mode & 0o777 == 0o600
