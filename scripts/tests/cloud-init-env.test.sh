@@ -23,7 +23,17 @@ done
 # Refuse network and privilege escalation; report the dev user as already seeded.
 printf '#!/bin/sh\nexit 1\n' >"$STUB_BIN/curl"
 printf '#!/bin/sh\nexit 1\n' >"$STUB_BIN/sudo"
-printf '#!/bin/sh\necho 1\n' >"$STUB_BIN/psql"
+# System Postgres is "up" while $PG_UP exists; `service postgresql start` brings
+# it up unless $PG_START_FAILS exists. Every service call is logged.
+PG_UP="$TMP_ROOT/pg-up"
+PG_START_FAILS="$TMP_ROOT/pg-start-fails"
+SERVICE_LOG="$TMP_ROOT/service.log"
+printf '#!/bin/sh\n[ -f "%s" ] || exit 2\necho 1\n' "$PG_UP" >"$STUB_BIN/psql"
+printf '#!/bin/sh\n[ -f "%s" ]\n' "$PG_UP" >"$STUB_BIN/pg_isready"
+printf '#!/bin/sh\nexit 0\n' >"$STUB_BIN/pg_ctlcluster"
+printf '#!/bin/sh\necho "$*" >>"%s"\n[ -f "%s" ] && exit 1\ntouch "%s"\n' \
+  "$SERVICE_LOG" "$PG_START_FAILS" "$PG_UP" >"$STUB_BIN/service"
+touch "$PG_UP"
 chmod +x "$STUB_BIN"/*
 ln -s "$PYTHON_BIN" "$STUB_BIN/python3"
 
@@ -73,5 +83,25 @@ expect_flag injected-false-overwrites-stale-true false
 
 run_cloud_init injected-true-overwrites-stale-false false BROWSER_AGENT_BROWSER_USE_ENABLED=true
 expect_flag injected-true-overwrites-stale-false true
+
+[ ! -e "$SERVICE_LOG" ] || fail "a reachable Postgres was restarted: $(cat "$SERVICE_LOG")"
+
+# Docker reachable leaves cloud-build.sh's system-Postgres fallback idle; the
+# snapshot's stopped cluster must be started before the seed targets it.
+rm -f "$PG_UP"
+run_cloud_init stopped-system-postgres-starts true
+[ "$(cat "$SERVICE_LOG")" = "postgresql start" ] || fail "stopped cluster: service calls '$(cat "$SERVICE_LOG")'"
+grep -q 'DB already seeded' "$TMP_ROOT/stopped-system-postgres-starts/cloud-init.log" ||
+  fail "stopped cluster: seed check did not run against the started Postgres"
+echo "PASS: stopped-system-postgres-starts"
+
+rm -f "$PG_UP" "$SERVICE_LOG"
+touch "$PG_START_FAILS"
+run_cloud_init unreachable-postgres-skips-seed true
+log="$TMP_ROOT/unreachable-postgres-skips-seed/cloud-init.log"
+grep -q 'WARN: no Postgres is reachable at localhost:5432' "$log" ||
+  fail "unreachable Postgres was not reported: $(cat "$log")"
+! grep -q 'seeding local DB' "$log" || fail "seed ran without a reachable Postgres"
+echo "PASS: unreachable-postgres-skips-seed"
 
 echo "All cloud-init env tests passed."

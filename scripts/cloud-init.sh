@@ -346,10 +346,18 @@ bash scripts/cloud-build.sh || log "WARN: cloud-build.sh returned non-zero"
 # writes into the LOCAL DATABASE_URL we pass here — the same contract run.sh and
 # setup-db.sh use. Requires the prod-backed back-end/.env from step 1; without it
 # the DB keeps schema only (WARN, no abort).
+# cloud-build.sh provisions system Postgres only when Docker is unavailable, but
+# a snapshot can carry an installed, stopped cluster while Docker is reachable.
+if ! pg_isready -h localhost -p 5432 -q 2>/dev/null && command -v pg_ctlcluster >/dev/null 2>&1; then
+    log "starting the installed system Postgres on localhost:5432…"
+    $SUDO service postgresql start >/dev/null 2>&1 || log "WARN: system Postgres did not start"
+fi
 seeded="$(PGPASSWORD=postgres psql -h localhost -U postgres -d victoria -tAc \
     "SELECT 1 FROM \"User\" WHERE \"userId\"='$DEV_USER_ID' LIMIT 1" 2>/dev/null | tr -d '[:space:]' || true)"
 if [ "$seeded" = "1" ]; then
     log "DB already seeded (dev user present) — skipping"
+elif ! pg_isready -h localhost -p 5432 -q 2>/dev/null; then
+    log "WARN: no Postgres is reachable at localhost:5432 — skipping the seed. DB is empty."
 else
     log "seeding local DB (schema + prod data)…"
     ( cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
