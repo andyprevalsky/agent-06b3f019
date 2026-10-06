@@ -12,6 +12,7 @@ import { archiveJson } from './traceArchive';
 import {
   buildMockSurgeSendResult,
   shouldMockMessagingSend,
+  transportMockArchiveContext,
   type MessagingMockReason,
 } from './smsTransportMock';
 
@@ -129,8 +130,7 @@ export async function sendSms(
       context: {
         ...(options.archiveContext ?? {}),
         message_id: mocked.messageSid,
-        benchmark_transport_mock: true,
-        transport_mock_reason: mockReason,
+        ...transportMockArchiveContext(mockReason),
       },
     });
     return { success: true, messageSid: mocked.messageSid };
@@ -252,8 +252,7 @@ export async function sendMms(
       context: {
         ...(options.archiveContext ?? {}),
         message_id: mocked.messageSid,
-        benchmark_transport_mock: true,
-        transport_mock_reason: mockReason,
+        ...transportMockArchiveContext(mockReason),
       },
     });
     return { success: true, messageSid: mocked.messageSid };

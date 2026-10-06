@@ -18,6 +18,7 @@ import { archiveJson } from './traceArchive';
 import {
   buildMockWhatsAppSendResult,
   shouldMockMessagingSend,
+  transportMockArchiveContext,
   type MessagingMockReason,
 } from './smsTransportMock';
 
@@ -218,8 +219,7 @@ async function postWhatsAppMessage(
       context: {
         ...(options.archiveContext ?? {}),
         message_id: mocked.messageSid,
-        benchmark_transport_mock: true,
-        transport_mock_reason: mockReason,
+        ...transportMockArchiveContext(mockReason),
       },
     });
     return { success: true, messageSid: mocked.messageSid };

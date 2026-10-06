@@ -107,6 +107,17 @@ export async function shouldMockMessagingSend(
   return isLiveMessagingRuntime() ? null : 'non_production_runtime';
 }
 
+/** Archive markers for a mocked send; `benchmark_transport_mock` stays benchmark-only. */
+export function transportMockArchiveContext(reason: MessagingMockReason): {
+  benchmark_transport_mock: boolean;
+  transport_mock_reason: MessagingMockReason;
+} {
+  return {
+    benchmark_transport_mock: reason === 'benchmark_agent',
+    transport_mock_reason: reason,
+  };
+}
+
 export async function buildMockSurgeSendResult(params: {
   phoneNumber: string;
   message: string;

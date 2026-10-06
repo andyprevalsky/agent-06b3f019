@@ -16,6 +16,7 @@ import {
   mockSurgeMessageId,
   mockWhatsAppMessageId,
   shouldMockMessagingSend,
+  transportMockArchiveContext,
 } from '../../providers/smsTransportMock';
 
 async function run() {
@@ -108,6 +109,15 @@ async function run() {
   assert.equal(mockWhatsApp.reason, 'non_production_runtime');
   assert.equal(mockWhatsApp.messageSid, mockWhatsAppMessageId('whatsapp-send'));
 
+  assert.deepEqual(transportMockArchiveContext('benchmark_agent'), {
+    benchmark_transport_mock: true,
+    transport_mock_reason: 'benchmark_agent',
+  });
+  assert.deepEqual(transportMockArchiveContext('non_production_runtime'), {
+    benchmark_transport_mock: false,
+    transport_mock_reason: 'non_production_runtime',
+  });
+
   const liveRuntimeCases: Array<[string, NodeJS.ProcessEnv, boolean]> = [
     ['production', { NODE_ENV: 'production' }, true],
     ['test NODE_ENV', { NODE_ENV: 'test' }, false],
@@ -197,7 +207,7 @@ async function run() {
   if (oldBenchmarkIsolatedRun === undefined) delete process.env.BENCHMARK_ISOLATED_RUN;
   else process.env.BENCHMARK_ISOLATED_RUN = oldBenchmarkIsolatedRun;
 
-  process.stdout.write('sms-transport-mock: 40 passed, 0 failed\n');
+  process.stdout.write('sms-transport-mock: 42 passed, 0 failed\n');
 }
 
 run().catch((error) => {
