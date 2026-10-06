@@ -15,6 +15,7 @@ import {
   claimToolSideEffect,
   markToolSideEffectFailed,
   markToolSideEffectSucceeded,
+  reclaimFailedToolSideEffect,
   ToolSideEffectAlreadyStartedError,
   type ToolSideEffectJson,
 } from '../../providers/toolSideEffects';
@@ -124,7 +125,7 @@ async function getExistingIdempotentCall(
     return undefined;
   }
 
-  const claim = await claimToolSideEffect({
+  let claim = await claimToolSideEffect({
     operationKey: call.operationKey,
     operationType: VAPI_CALL_OPERATION_TYPE,
     request: {
@@ -132,6 +133,11 @@ async function getExistingIdempotentCall(
       output_schema: call.normalizedSchema,
     } as ToolSideEffectJson,
   });
+  if (claim.status === 'existing' && claim.record.status === 'FAILED') {
+    // A 400/wallet rejection records FAILED with no call_id. Reclaim so a
+    // later funded retry can place the same idempotent outbound call.
+    claim = await reclaimFailedToolSideEffect(call.operationKey);
+  }
   if (claim.status !== 'existing') {
     return undefined;
   }

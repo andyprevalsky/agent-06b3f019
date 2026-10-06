@@ -7,6 +7,7 @@ import {
   claimToolSideEffect,
   markToolSideEffectFailed,
   markToolSideEffectSucceeded,
+  reclaimFailedToolSideEffect,
   ToolSideEffectAlreadyStartedError,
 } from '../../providers/toolSideEffects';
 import { prisma } from '../../providers/database';
@@ -72,6 +73,11 @@ async function main(): Promise<void> {
       });
       assert.strictEqual(failed.status, 'FAILED');
       assert.strictEqual(failed.error, 'provider rejected request');
+
+      const reclaimed = await reclaimFailedToolSideEffect(failedOperationKey);
+      assert.strictEqual(reclaimed.status, 'claimed');
+      assert.strictEqual(reclaimed.record.status, 'STARTED');
+      assert.strictEqual(reclaimed.record.error, null);
     } finally {
       await prisma.toolSideEffect.deleteMany({
         where: { operationKey: { startsWith: prefix } },
