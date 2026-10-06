@@ -26,6 +26,10 @@ const CALENDAR_MAX_PAGES = 8;
 const DRIVE_PAGE_SIZE = 1000;
 const DRIVE_CHANGES_MAX_PAGES = 5;
 const RETRY_DELAYS_MS = [400, 1500];
+/** A single Google request never holds a refresh or a search longer than this. */
+const REQUEST_TIMEOUT_MS = 20_000;
+/** Drive also reports rate limiting as HTTP 403 with one of these reasons. */
+const RATE_LIMIT_REASONS = new Set(['rateLimitExceeded', 'userRateLimitExceeded']);
 const DRIVE_FILE_FIELDS =
   'id,name,mimeType,parents,modifiedTime,webViewLink,size,trashed,owners(emailAddress)';
 
@@ -43,7 +47,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** GET with a short retry on rate limits and server errors. */
+async function rateLimited(response: Response): Promise<boolean> {
+  if (response.status === 429) return true;
+  if (response.status !== 403) return false;
+  try {
+    const body = (await response.clone().json()) as {
+      error?: { errors?: Array<{ reason?: string }> };
+    };
+    return (body.error?.errors ?? []).some(
+      (detail) => detail.reason !== undefined && RATE_LIMIT_REASONS.has(detail.reason)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** GET with a short retry on rate limits, server errors and stalled requests. */
 async function googleGet(
   url: string,
   token: string,
@@ -51,12 +70,30 @@ async function googleGet(
   fetcher: Fetcher
 ): Promise<Response> {
   for (let attempt = 0; ; attempt += 1) {
-    const response = await fetcher(url, { headers: { Authorization: `Bearer ${token}` } });
+    let response: Response;
+    try {
+      response = await fetcher(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      if (attempt >= RETRY_DELAYS_MS.length) {
+        log.warn('Google API request did not complete', {
+          api,
+          error: error instanceof Error ? error.name : String(error),
+        });
+        throw new GoogleApiError(504, api);
+      }
+      await sleep(RETRY_DELAYS_MS[attempt]);
+      continue;
+    }
     if (response.ok) return response;
-    const retryable = response.status === 429 || response.status >= 500;
-    if (!retryable || attempt >= RETRY_DELAYS_MS.length) {
-      log.warn('Google API request failed', { api, status: response.status });
-      throw new GoogleApiError(response.status, api);
+    const limited = await rateLimited(response);
+    if (!(limited || response.status >= 500) || attempt >= RETRY_DELAYS_MS.length) {
+      log.warn('Google API request failed', { api, status: response.status, limited });
+      // A rate limit is reported as 429 whatever its HTTP status, so a caller
+      // never mistakes it for a file Google refuses to export.
+      throw new GoogleApiError(limited ? 429 : response.status, api);
     }
     await sleep(RETRY_DELAYS_MS[attempt]);
   }

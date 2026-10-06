@@ -12,7 +12,7 @@ import {
   GOOGLE_DRIVE_SOURCE,
 } from '../../services/integrations/googleWorkspaceDocuments';
 import {
-  ensureDriveText,
+  ensureDriveTextWithin,
   ensureGoogleSourceFreshWithin,
   googleWorkspaceAccountEmails,
   type GoogleSyncOutcome,
@@ -20,11 +20,12 @@ import {
 import { buildGoogleSourceMatch, buildGoogleSourcePages } from './format.google';
 import { metadataString } from './format.snippets';
 import * as googleRepo from './googleSourceRepo';
-import type {
-  GoogleGrepSource,
-  GoogleSourceGrepFilters,
-  GrepMatch,
-  ValidatedGrepInput,
+import {
+  isCalendarOnly,
+  type GoogleGrepSource,
+  type GoogleSourceGrepFilters,
+  type GrepMatch,
+  type ValidatedGrepInput,
 } from './types';
 
 const DAY_MS = 86_400_000;
@@ -35,6 +36,8 @@ const DRIVE_TEXT_ON_ADDRESS = 10;
  * at 25 seconds, so a longer refresh continues in the background instead.
  */
 const REFRESH_WAIT_MS = 8_000;
+/** How long one search waits for Drive text it asked for; the rest loads later. */
+const DRIVE_TEXT_WAIT_MS = 6_000;
 
 /** What the agent is told when the rows it searched may not be current. */
 const STALE_NOTICE: Partial<Record<GoogleSyncOutcome, string>> = {
@@ -83,7 +86,7 @@ export async function searchGoogleSource(params: {
       filters.pathPrefix,
       DRIVE_TEXT_ON_ADDRESS
     );
-    await ensureDriveText(userId, unread);
+    await ensureDriveTextWithin(userId, unread, DRIVE_TEXT_WAIT_MS);
   }
 
   const query: googleRepo.GoogleSourceQuery = {
@@ -92,6 +95,7 @@ export async function searchGoogleSource(params: {
     documentSource,
     pattern: input.dbPattern,
     caseInsensitive: input.caseInsensitive,
+    oldestFirst: source === 'calendar' && isCalendarOnly(input.sources),
     filters,
   };
   const [total, rows] = await Promise.all([

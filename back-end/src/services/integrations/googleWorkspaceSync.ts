@@ -20,6 +20,15 @@ import { retryWithBackoff } from '../../providers/retry';
 import { GOOGLE_OAUTH_SCOPES } from '../../domains/integrations/googleScopes';
 import { getValidAccessToken } from './gmailSync';
 import {
+  LeaseLostError,
+  STATUS_CONNECTED,
+  STATUS_FAILED,
+  STATUS_NOT_CONNECTED,
+  STATUS_SYNCING,
+  claimSyncLease,
+  type SyncLease,
+} from './googleWorkspaceSyncLease';
+import {
   driveChangedSince,
   fetchDriveText,
   getDriveStartPageToken,
@@ -50,8 +59,6 @@ const log = createLogger('GoogleWorkspaceSync');
 
 /** A grep sees data at most this old; also the retry spacing after a failure. */
 export const GOOGLE_SOURCE_FRESHNESS_MS = 60_000;
-/** A refresh that has not finished after this long is treated as abandoned. */
-const SYNC_LEASE_MS = 120_000;
 const CONTENT_CONCURRENCY = 5;
 const WRITE_CHUNK = 500;
 const ON_DEMAND_TEXT_LIMIT = 10;
@@ -63,11 +70,6 @@ const ON_DEMAND_TEXT_LIMIT = 10;
  */
 const IN_FLIGHT_POLL_DELAYS_MS = [150, 300, 600, 1200];
 
-const STATUS_CONNECTED = 'CONNECTED';
-const STATUS_SYNCING = 'SYNCING';
-const STATUS_FAILED = 'SYNC_FAILED';
-const STATUS_NOT_CONNECTED = 'NOT_CONNECTED';
-
 export type GoogleSyncOutcome = 'fresh' | 'in_progress' | 'not_connected' | 'refreshed' | 'failed';
 
 export interface GoogleSyncOptions {
@@ -75,6 +77,8 @@ export interface GoogleSyncOptions {
   now?: Date;
   /** Refresh even inside the freshness window (used when an account connects). */
   force?: boolean;
+  /** How often a running refresh renews its lease (tests shorten it). */
+  leaseRenewMs?: number;
 }
 
 interface AccountCredential {
@@ -266,8 +270,10 @@ async function syncCalendarAccount(params: {
   token: string;
   fetcher: Fetcher;
   now: Date;
+  keepAlive: () => Promise<void>;
 }): Promise<void> {
   const events = await listCalendarEvents(params.token, calendarWindow(params.now), params.fetcher);
+  await params.keepAlive();
   const documents = events
     .map((event) => calendarEventToDocument(event, params.accountEmail))
     .filter((doc): doc is GoogleWorkspaceDocument => doc !== null);
@@ -302,8 +308,9 @@ async function syncDriveAccount(params: {
   token: string;
   fetcher: Fetcher;
   pageToken?: string;
+  keepAlive: () => Promise<void>;
 }): Promise<{ pageToken: string }> {
-  const { userId, accountEmail, token, fetcher } = params;
+  const { userId, accountEmail, token, fetcher, keepAlive } = params;
   let nextPageToken: string;
   if (params.pageToken === undefined) {
     // Taken before listing, so a change made during the listing is seen next time.
@@ -317,6 +324,7 @@ async function syncDriveAccount(params: {
   // Any change re-lists, because a folder rename moves every path below it.
   // Unchanged files keep their stored text, so only changed text is downloaded.
   const { files, truncated } = await listDriveFiles(token, DRIVE_MAX_FILES, fetcher);
+  await keepAlive();
   const folderPaths = driveFolderPaths(files);
   const stored = await storedRows(userId, GOOGLE_DRIVE_SOURCE, accountEmail);
   let textBudget = DRIVE_INITIAL_CONTENT_FILES;
@@ -335,6 +343,9 @@ async function syncDriveAccount(params: {
     if (plan === 'fetch') {
       const text = await fetchDriveText(token, file, fetcher);
       if (text !== null) content = { kind: 'fetched', ...text };
+      // A first sync can download hundreds of files; keep the lease alive so
+      // a later search does not start a second full sync alongside this one.
+      await keepAlive();
     } else {
       content = plan;
     }
@@ -354,28 +365,6 @@ async function syncDriveAccount(params: {
   });
   log.info('Drive refreshed', { userId, files: files.length, truncated, ...counts });
   return { pageToken: nextPageToken };
-}
-
-/** Take the per-(user, source) lease. False when another refresh holds it. */
-async function claimSync(userId: string, source: string, now: Date): Promise<boolean> {
-  await prisma.userDataProviderSyncState.upsert({
-    where: { userId_source: { userId, source } },
-    create: { userId, source, status: STATUS_NOT_CONNECTED },
-    update: {},
-  });
-  const claimed = await prisma.userDataProviderSyncState.updateMany({
-    where: {
-      userId,
-      source,
-      OR: [
-        { status: { not: STATUS_SYNCING } },
-        { lastStartedAt: null },
-        { lastStartedAt: { lt: new Date(now.getTime() - SYNC_LEASE_MS) } },
-      ],
-    },
-    data: { status: STATUS_SYNCING, lastStartedAt: now },
-  });
-  return claimed.count === 1;
 }
 
 async function removeDisconnectedAccounts(
@@ -399,12 +388,20 @@ async function syncAccount(params: {
   fetcher: Fetcher;
   now: Date;
   pageToken?: string;
+  keepAlive: () => Promise<void>;
 }): Promise<{ pageToken?: string }> {
-  const { userId, source, account, fetcher, now } = params;
+  const { userId, source, account, fetcher, now, keepAlive } = params;
   const token = await getValidAccessToken(account);
   if (token === null) throw new Error('No usable Google access token for this account');
   if (source === GOOGLE_CALENDAR_SOURCE) {
-    await syncCalendarAccount({ userId, accountEmail: account.email, token, fetcher, now });
+    await syncCalendarAccount({
+      userId,
+      accountEmail: account.email,
+      token,
+      fetcher,
+      now,
+      keepAlive,
+    });
     return {};
   }
   return syncDriveAccount({
@@ -413,6 +410,7 @@ async function syncAccount(params: {
     token,
     fetcher,
     pageToken: params.pageToken,
+    keepAlive,
   });
 }
 
@@ -427,6 +425,7 @@ export async function ensureGoogleSourceFresh(
 ): Promise<GoogleSyncOutcome> {
   const now = options.now ?? new Date();
   const fetcher = options.fetcher ?? fetch;
+  let lease: SyncLease | null = null;
   try {
     const state = await prisma.userDataProviderSyncState.findUnique({
       where: { userId_source: { userId, source } },
@@ -439,7 +438,9 @@ export async function ensureGoogleSourceFresh(
         state?.status === STATUS_FAILED && age(state.lastStartedAt) < GOOGLE_SOURCE_FRESHNESS_MS;
       if (failedRecently) return 'failed';
     }
-    if (!(await claimSync(userId, source, now))) return 'in_progress';
+    lease = await claimSyncLease(userId, source, now, options.leaseRenewMs);
+    if (lease === null) return 'in_progress';
+    const held = lease;
 
     const accounts = await connectedAccounts(userId);
     await removeDisconnectedAccounts(
@@ -459,8 +460,10 @@ export async function ensureGoogleSourceFresh(
           fetcher,
           now,
           pageToken: previous[account.email]?.pageToken,
+          keepAlive: () => held.keepAlive(),
         });
       } catch (error) {
+        if (error instanceof LeaseLostError) throw error;
         failures += 1;
         cursors[account.email] = previous[account.email] ?? {};
         log.warn('Google source refresh failed for an account', {
@@ -479,34 +482,28 @@ export async function ensureGoogleSourceFresh(
       stillConnected.map((account) => account.email)
     );
     const succeeded = accounts.length > 0 && failures === 0;
-    await prisma.userDataProviderSyncState.update({
-      where: { userId_source: { userId, source } },
-      data: {
-        status:
-          accounts.length === 0
-            ? STATUS_NOT_CONNECTED
-            : succeeded
-              ? STATUS_CONNECTED
-              : STATUS_FAILED,
-        cursor: { accounts: cursors },
-        lastError: failures === 0 ? null : `${failures} of ${accounts.length} accounts failed`,
-        ...(succeeded ? { lastSuccessfulSyncAt: now } : {}),
-      },
+    const written = await held.finish({
+      status:
+        accounts.length === 0 ? STATUS_NOT_CONNECTED : succeeded ? STATUS_CONNECTED : STATUS_FAILED,
+      cursor: { accounts: cursors },
+      lastError: failures === 0 ? null : `${failures} of ${accounts.length} accounts failed`,
+      ...(succeeded ? { lastSuccessfulSyncAt: now } : {}),
     });
+    // The refresh that took over owns the state and its outcome.
+    if (!written) return 'in_progress';
     if (accounts.length === 0) return 'not_connected';
     return succeeded ? 'refreshed' : 'failed';
   } catch (error) {
+    if (error instanceof LeaseLostError) {
+      log.info('Google source refresh stopped: another refresh took over', { userId, source });
+      return 'in_progress';
+    }
     log.error('Google source refresh failed', {
       userId,
       source,
       error: error instanceof Error ? error.message : String(error),
     });
-    await prisma.userDataProviderSyncState
-      .updateMany({
-        where: { userId, source, status: STATUS_SYNCING },
-        data: { status: STATUS_FAILED, lastError: 'refresh failed' },
-      })
-      .catch(() => undefined);
+    await lease?.fail('refresh failed');
     return 'failed';
   }
 }
@@ -658,6 +655,35 @@ export async function ensureDriveText(
     }
   });
   return loaded.filter(Boolean).length;
+}
+
+/**
+ * `ensureDriveText`, but the caller waits at most `waitMs`. Downloads that take
+ * longer finish in the background, so a search answers from what is stored
+ * instead of outliving its request timeout.
+ */
+export async function ensureDriveTextWithin(
+  userId: string,
+  documentIds: string[],
+  waitMs: number,
+  options: Pick<GoogleSyncOptions, 'fetcher'> = {}
+): Promise<void> {
+  const loading = ensureDriveText(userId, documentIds, options).catch((error: unknown) => {
+    log.warn('Drive text fetch failed', {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return 0;
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waited = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, waitMs);
+  });
+  try {
+    await Promise.race([loading, waited]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** First sync after an account connects; runs in the background. */

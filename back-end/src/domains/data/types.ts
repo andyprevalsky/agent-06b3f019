@@ -162,6 +162,11 @@ export function isGoogleGrepSource(source: ValidSource): source is GoogleGrepSou
   return source === 'calendar' || source === 'drive';
 }
 
+/** A search over calendar alone reads forward in time; any mix is newest first. */
+export function isCalendarOnly(sources: readonly ValidSource[]): boolean {
+  return sources.length > 0 && sources.every((source) => source === 'calendar');
+}
+
 export interface PersonInfo {
   firstName: string | null;
   lastName: string | null;

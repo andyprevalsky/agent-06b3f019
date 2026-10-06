@@ -14,181 +14,55 @@
  *   - rows of an account that is no longer connected do not survive.
  */
 
-import { randomUUID } from 'crypto';
 import { config } from 'dotenv';
-import { EmailProvider, IntegrationStatus, IntegrationType } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import { GOOGLE_OAUTH_SCOPES } from '../../domains/integrations/googleScopes';
-import type { Fetcher } from '../../services/integrations/googleWorkspaceApi';
 import {
   DRIVE_INITIAL_CONTENT_FILES,
   GOOGLE_CALENDAR_SOURCE,
   GOOGLE_DRIVE_SOURCE,
-  type GoogleCalendarEvent,
   type GoogleDriveFile,
 } from '../../services/integrations/googleWorkspaceDocuments';
 import {
   GOOGLE_SOURCE_FRESHNESS_MS,
   ensureDriveText,
+  ensureDriveTextWithin,
   ensureGoogleSourceFresh,
   ensureGoogleSourceFreshWithin,
 } from '../../services/integrations/googleWorkspaceSync';
 import { processGoogleDataPurge } from '../../services/integrations/googleDataPurge';
+import {
+  FOLDER,
+  FakeGoogle,
+  GDOC,
+  T0,
+  addAccount,
+  assert,
+  equal,
+  event,
+  later,
+  pathOf,
+  rows,
+  withUser,
+} from './google-workspace-sync.blackbox.helpers';
 config();
+
+const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The row's content once it equals `expected`, or its last value after 5 s. */
+async function contentOf(id: string, expected: string): Promise<string> {
+  let content = '';
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    content = (await prisma.userDataDocument.findUniqueOrThrow({ where: { id } })).content;
+    if (content === expected) break;
+    await pause(100);
+  }
+  return content;
+}
 
 type TestFn = () => Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];
 function test(name: string, fn: TestFn): void {
   tests.push({ name, fn });
-}
-function assert(cond: unknown, msg: string): asserts cond {
-  if (!cond) throw new Error(msg);
-}
-function equal<T>(actual: T, expected: T, label: string): void {
-  assert(
-    actual === expected,
-    `${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`
-  );
-}
-
-const ACCESS_TOKEN = 'access-token-for-test';
-const T0 = new Date('2026-10-05T12:00:00.000Z');
-const later = (minutes: number): Date => new Date(T0.getTime() + minutes * 60_000);
-const FOLDER = 'application/vnd.google-apps.folder';
-const GDOC = 'application/vnd.google-apps.document';
-
-/** Google at the fetch boundary: mutable state plus a log of what was asked. */
-class FakeGoogle {
-  events: GoogleCalendarEvent[] = [];
-  files: GoogleDriveFile[] = [];
-  text = new Map<string, string>();
-  driveChanged = false;
-  calendarStatus = 200;
-  /** How long Google takes to answer each call. */
-  delayMs = 0;
-  calls: string[] = [];
-  private token = 1;
-
-  count(kind: string): number {
-    return this.calls.filter((call) => call === kind).length;
-  }
-
-  reset(): void {
-    this.calls = [];
-  }
-
-  private json(body: unknown, status = 200): Response {
-    return new Response(JSON.stringify(body), {
-      status,
-      headers: { 'content-type': 'application/json' },
-    });
-  }
-
-  fetcher: Fetcher = async (input, init) => {
-    const url = new URL(String(input));
-    const auth = new Headers(init?.headers).get('authorization');
-    assert(auth === `Bearer ${ACCESS_TOKEN}`, 'every Google call must carry the stored token');
-    const path = url.pathname;
-    if (this.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.delayMs));
-    if (path.endsWith('/calendars/primary/events')) {
-      this.calls.push('calendar');
-      assert(url.searchParams.get('singleEvents') === 'true', 'recurring events must be expanded');
-      return this.calendarStatus === 200
-        ? this.json({ items: this.events })
-        : this.json({ error: { code: this.calendarStatus } }, this.calendarStatus);
-    }
-    if (path.endsWith('/changes/startPageToken')) {
-      this.calls.push('startToken');
-      return this.json({ startPageToken: `page-${this.token}` });
-    }
-    if (path.endsWith('/changes')) {
-      this.calls.push('changes');
-      this.token += 1;
-      return this.json({
-        changes: this.driveChanged ? [{ fileId: 'changed' }] : [],
-        newStartPageToken: `page-${this.token}`,
-      });
-    }
-    if (path.endsWith('/drive/v3/files')) {
-      this.calls.push('list');
-      return this.json({ files: this.files });
-    }
-    const fileId = /\/files\/([^/]+)/.exec(path)?.[1];
-    if (fileId !== undefined) {
-      this.calls.push('download');
-      const text = this.text.get(fileId);
-      return text === undefined
-        ? this.json({ error: { code: 403 } }, 403)
-        : new Response(text, { status: 200, headers: { 'content-type': 'text/plain' } });
-    }
-    return this.json({ error: { code: 404 } }, 404);
-  };
-}
-
-async function addAccount(
-  userId: string,
-  integrationId: string,
-  email: string,
-  scopes: readonly string[] = GOOGLE_OAUTH_SCOPES
-): Promise<void> {
-  await prisma.emailIntegrationCredential.create({
-    data: {
-      userId,
-      integrationId,
-      provider: EmailProvider.GMAIL,
-      email,
-      accessToken: ACCESS_TOKEN,
-      refreshToken: 'refresh-token-for-test',
-      expiresAt: new Date(Date.now() + 3_600_000),
-      scopes: [...scopes],
-      state: 'connected',
-    },
-  });
-}
-
-async function withUser(
-  run: (ctx: { userId: string; email: string; integrationId: string }) => Promise<void>
-): Promise<void> {
-  const userId = randomUUID();
-  const email = `gws-${userId.slice(0, 8)}@example.com`;
-  await prisma.user.create({ data: { userId, isAnonymous: true } });
-  try {
-    const integration = await prisma.integration.create({
-      data: {
-        userId,
-        name: 'gmail',
-        type: IntegrationType.DATA_SOURCE,
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-      },
-    });
-    await addAccount(userId, integration.id, email);
-    await run({ userId, email, integrationId: integration.id });
-  } finally {
-    await prisma.googleDataPurge.deleteMany({ where: { userId } });
-    await prisma.user.delete({ where: { userId } });
-  }
-}
-
-async function rows(userId: string, source: string) {
-  return prisma.userDataDocument.findMany({
-    where: { userId, source },
-    orderBy: { externalId: 'asc' },
-  });
-}
-
-function pathOf(row: { metadata: unknown }): string {
-  return String((row.metadata as { path?: string }).path);
-}
-
-function event(id: string, summary: string, start: string): GoogleCalendarEvent {
-  return {
-    id,
-    status: 'confirmed',
-    summary,
-    start: { dateTime: start },
-    end: { dateTime: start },
-  };
 }
 
 test('calendar rows mirror Google across refreshes', async () => {
@@ -375,12 +249,84 @@ test('drive text beyond the up-front budget is fetched when a file is addressed'
     assert(oldest !== undefined, 'the oldest file is still listed');
     equal(oldest.content, '', 'the oldest file starts as name and path only');
 
+    // A search waits only briefly for a slow download; the text still lands.
     google.reset();
-    equal(await ensureDriveText(userId, [oldest.id], { fetcher: google.fetcher }), 1, 'fetched');
-    const opened = await prisma.userDataDocument.findUniqueOrThrow({ where: { id: oldest.id } });
-    equal(opened.content, `text of file-${total - 1}.txt`, 'text after addressing the file');
+    google.delayMs = 1_000;
+    const waitStartedAt = Date.now();
+    await ensureDriveTextWithin(userId, [oldest.id], 100, { fetcher: google.fetcher });
+    assert(Date.now() - waitStartedAt < 800, 'the search is not held for the whole download');
+    const opened = await contentOf(oldest.id, `text of file-${total - 1}.txt`);
+    equal(opened, `text of file-${total - 1}.txt`, 'the download finishes after the search');
+    google.delayMs = 0;
     equal(await ensureDriveText(userId, [oldest.id], { fetcher: google.fetcher }), 0, 'idempotent');
     equal(google.count('download'), 1, 'addressing twice downloads once');
+  });
+});
+
+test('a rate-limited Drive download keeps the stored text and fails the refresh', async () => {
+  await withUser(async ({ userId }) => {
+    const google = new FakeGoogle();
+    google.files = [NOTES];
+    google.text.set('notes', 'remember the lease');
+    const first = { fetcher: google.fetcher, now: T0 };
+    equal(await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, first), 'refreshed', 'first');
+    // The file changes, and Drive answers the new download with its rate-limit 403.
+    google.files = [{ ...NOTES, modifiedTime: '2026-10-05T13:00:00.000Z' }];
+    google.driveChanged = true;
+    google.rateLimitDownloads = true;
+    google.reset();
+    const limited = { fetcher: google.fetcher, now: later(5) };
+    equal(
+      await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, limited),
+      'failed',
+      'a rate limit fails the refresh instead of passing as an unreadable file'
+    );
+    assert(google.count('download') >= 3, 'the rate limit is retried before giving up');
+    const [row] = await rows(userId, GOOGLE_DRIVE_SOURCE);
+    equal(row.content, 'remember the lease', 'the stored text survives');
+  });
+});
+
+test('a refresh renews its lease as it works', async () => {
+  await withUser(async ({ userId }) => {
+    const google = new FakeGoogle();
+    google.files = [NOTES];
+    google.text.set('notes', 'remember the lease');
+    const options = { fetcher: google.fetcher, now: T0, leaseRenewMs: 0 };
+    equal(await ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, options), 'refreshed', 'run');
+    const state = await prisma.userDataProviderSyncState.findUniqueOrThrow({
+      where: { userId_source: { userId, source: GOOGLE_DRIVE_SOURCE } },
+    });
+    assert(
+      (state.lastStartedAt?.getTime() ?? 0) > T0.getTime(),
+      'the lease moved past its claim while the refresh worked'
+    );
+  });
+});
+
+test('a refresh that lost its lease stops without overwriting the new owner', async () => {
+  await withUser(async ({ userId }) => {
+    const google = new FakeGoogle();
+    google.files = [NOTES];
+    google.text.set('notes', 'remember the lease');
+    google.delayMs = 300;
+    const options = { fetcher: google.fetcher, now: T0, leaseRenewMs: 0 };
+    const displaced = ensureGoogleSourceFresh(userId, GOOGLE_DRIVE_SOURCE, options);
+    // A later refresh takes the lease over while the first one is listing files.
+    for (let attempt = 0; attempt < 50 && google.calls.length === 0; attempt += 1) await pause(10);
+    const takeover = new Date(T0.getTime() + 10 * 60_000);
+    await prisma.userDataProviderSyncState.update({
+      where: { userId_source: { userId, source: GOOGLE_DRIVE_SOURCE } },
+      data: { status: 'SYNCING', lastStartedAt: takeover },
+    });
+    equal(await displaced, 'in_progress', 'the displaced refresh defers to the new owner');
+    const state = await prisma.userDataProviderSyncState.findUniqueOrThrow({
+      where: { userId_source: { userId, source: GOOGLE_DRIVE_SOURCE } },
+    });
+    equal(state.status, 'SYNCING', 'the new owner still holds the lease');
+    equal(state.lastStartedAt?.toISOString(), takeover.toISOString(), 'its stamp is untouched');
+    equal(state.lastSuccessfulSyncAt, null, 'the displaced refresh did not claim success');
+    equal(google.count('download'), 0, 'the displaced refresh stopped before downloading');
   });
 });
 

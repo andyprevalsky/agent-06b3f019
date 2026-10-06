@@ -83,6 +83,19 @@ async function testCalendarDefaultsToUpcoming(userId: string): Promise<void> {
     middle.matches.length === 1 && middle.matches[0].path.includes('all-day Offsite'),
     `an all-day event covers its inner days, got ${JSON.stringify(middle.matches.map((m) => m.path))}`
   );
+
+  // Mixed with Drive the merged result is newest first on every page, so the
+  // calendar page must come from the latest events, not the nearest ones.
+  const names = async (offset: number): Promise<string> =>
+    (await grepOk(userId, { sources: ['calendar', 'drive'], head_limit: 2, offset })).matches
+      .map((m) => m.path.split('/').pop())
+      .join('|');
+  const [first, second] = [await names(0), await names(2)];
+  assert(
+    first === '15:00 Dentist.event|all-day Offsite.event' &&
+      second === '12:00 Lunch with Alex.event|10:00 Project Sync.event',
+    `a mixed search pages newest first, got ${first} then ${second}`
+  );
 }
 
 async function testCalendarPathRoundTrips(userId: string, email: string): Promise<void> {

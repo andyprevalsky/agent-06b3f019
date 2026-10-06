@@ -27,6 +27,12 @@ export interface GoogleSourceQuery {
   pattern: string;
   caseInsensitive: boolean;
   filters: GoogleSourceGrepFilters;
+  /**
+   * Calendar rows come oldest first only when calendar is searched alone. Mixed
+   * with another source the merged result is newest first, and each source's
+   * page must be taken from the same end or the merge pages out of order.
+   */
+  oldestFirst: boolean;
 }
 
 /**
@@ -126,9 +132,11 @@ export async function searchGoogleSourceRows(
   limit: number
 ): Promise<GoogleSourceGrepRow[]> {
   const order =
-    query.source === 'calendar'
-      ? Prisma.sql`(d.metadata->>'start')::timestamptz ASC, d.id ASC`
-      : Prisma.sql`COALESCE(d."sourceUpdatedAt", d."updatedAt") DESC, d.id DESC`;
+    query.source !== 'calendar'
+      ? Prisma.sql`COALESCE(d."sourceUpdatedAt", d."updatedAt") DESC, d.id DESC`
+      : query.oldestFirst
+        ? Prisma.sql`(d.metadata->>'start')::timestamptz ASC, d.id ASC`
+        : Prisma.sql`(d.metadata->>'start')::timestamptz DESC, d.id DESC`;
   return prisma.$queryRaw<GoogleSourceGrepRow[]>`
     SELECT
       d.id,

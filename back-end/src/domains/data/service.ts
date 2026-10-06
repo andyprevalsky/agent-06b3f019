@@ -6,6 +6,7 @@ import { isPostgresRegexError } from './regexSafety';
 import { formatTimeAgo } from './format.snippets';
 import { sortMatches } from './grepSort';
 import {
+  isCalendarOnly,
   isGoogleGrepSource,
   isMessageFamilySource,
   type GrepMatch,
@@ -101,7 +102,7 @@ function displayOrder(input: ValidatedGrepInput): {
   const soleTrajectory = input.sources.length === 1 && input.sources[0] === 'agent_trajectories';
   const allMessages = input.sources.every(isMessageFamilySource);
   // Conversations and calendars read forward in time; everything else is newest first.
-  const allCalendar = input.sources.every((source) => source === 'calendar');
+  const allCalendar = isCalendarOnly(input.sources);
   const oldestFirst = soleTrajectory ? input.order === 'oldest_first' : allMessages || allCalendar;
   const contextUnit = allMessages
     ? 'message_record'
