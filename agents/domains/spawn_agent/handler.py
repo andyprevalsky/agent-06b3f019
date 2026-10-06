@@ -1211,6 +1211,12 @@ class SpawnAgentManager(ToolManager):
             "world_model_simulated": True,
             "world_model_boundary": boundary_tool,
         }
+        if agent_type == "code":
+            base_metadata.update(
+                toolName=boundary_tool,
+                task_id=task_id,
+                code_provider="claude",
+            )
 
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
@@ -1260,6 +1266,9 @@ class SpawnAgentManager(ToolManager):
             status_text = str(result.get("status") or "").strip().lower()
             failed = failed or status_text in {"error", "failed", "cancelled"}
             terminal_metadata = dict(base_metadata)
+            if agent_type == "code":
+                terminal_metadata.update(action_type="task_complete", success=not failed)
+                terminal_title = "Task Incomplete" if failed else "✓ Task Completed"
             for key in (
                 "world_model_session_id",
                 "world_model_name",
@@ -1283,12 +1292,16 @@ class SpawnAgentManager(ToolManager):
         except BaseException as exc:
             if isinstance(exc, GeneratorExit):
                 raise
+            terminal_metadata = dict(base_metadata)
+            if agent_type == "code":
+                terminal_metadata.update(action_type="task_complete", success=False)
+                terminal_title = "Task Incomplete"
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=terminal_title,
                 message=str(exc) or type(exc).__name__,
                 status=MessageStatus.ERROR,
-                metadata=base_metadata,
+                metadata=terminal_metadata,
             )
 
     async def _spawn_sub_agent(

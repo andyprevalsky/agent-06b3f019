@@ -8,6 +8,36 @@ For a checkout from another branch, use the local Git worktree command in
 `WMH_HANDOFF.md`. Portable run records and reports are included under
 `docs/plans/active/wmh-evidence-20261006/`.
 
+## October 6 user screenshot follow-up
+
+The authorized local 30-minute run `22da47fc-6ac7-4ab2-8cb7-ac2a3ca57b5f`
+finished with one failure, zero passes, `Timeout after 1801s`, and $0.99
+reported inference cost. No $5 million receipt or production deployment was
+established. The inspection transcript is not benchmark acceptance evidence.
+
+The user then authorized fixing the malformed code completion and requested
+an actual-trace contact diagnosis without preemptive prediction changes.
+The code-card producer and legacy replay path are fixed locally, with permanent
+owning agent/UI regressions, all FE coverage passing, and a local browser
+loading the archived API response and showing one completed expandable chip.
+The production frontend has not received this fix yet.
+
+The complete WMH session/retrieval trace was captured. Exact screenshot
+reconstruction reproduces its negative on the original GPT model/provider.
+Successful unrelated retrieved examples contradict the all-error-samples
+explanation. A controlled Precursor replay gives 3/3 false negatives on the
+original input and 3/3 correct official `/startup.html` routes after adding
+only independently fetched first-party page data. Removing the prospect list
+or error demo does not resolve it; simplifying the goal guesses an unverified
+URL. This establishes a target-resource grounding gap for that lookup, not a
+passing fundraiser or proof that every firm has a public pitch channel.
+Other recognized forms still require unknown Rose company/product facts.
+See the October 6 code-lifecycle and contact-resource RCA cases and the portable
+replay receipt in `wmh-evidence-20261006/contact-replay-diagnosis.json`.
+Prediction behavior, model/corpus selection, benchmark assertions, timeout,
+and production remain unchanged in this follow-up. The contact/fundraiser
+RCA remains open until a general repair and exact outcome verification pass.
+
 ## Goal and user decisions
 
 October 6 local continuation uses the isolated worktree

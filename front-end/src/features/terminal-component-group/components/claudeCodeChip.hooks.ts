@@ -20,6 +20,7 @@ import {
   useSavedOutputFetch,
   useTerminalManager,
 } from './claudeCodeChip.terminal';
+import { normalizeWMHCodeMessage } from './wmhCodeMessage';
 
 export interface ChipDerived {
   isComplete: boolean;
@@ -31,6 +32,7 @@ export interface ChipDerived {
   failureMessage: string | null;
   githubRepoUrl: string | undefined;
   codeProvider: CodeProvider;
+  simulatedOutput: string | undefined;
 }
 
 function textValue(value: unknown): string {
@@ -103,7 +105,9 @@ export function useClaudeCodeChipState(
   const { messages } = useAgentContext();
 
   return useMemo<ChipDerived>(() => {
-    const taskMessages = messages.filter((m) => m.metadata?.task_id === taskId);
+    const taskMessages = messages
+      .map(normalizeWMHCodeMessage)
+      .filter((m) => m.metadata?.task_id === taskId);
     // Handler cancel can omit metadata.task_id while sharing toolCallId with the
     // started/complete siblings. Include those bare session_cancelled rows so
     // the chip leaves spinning_up even when the session fetch fails.
@@ -180,6 +184,8 @@ export function useClaudeCodeChipState(
       failureMessage: failureText,
       githubRepoUrl: githubUrl,
       codeProvider: provider,
+      simulatedOutput:
+        completionMsg?.metadata?.world_model_simulated === true ? completionMsg.text : undefined,
     };
   }, [initialCodeProvider, messages, taskId]);
 }
@@ -301,7 +307,7 @@ export function useClaudeCodeChip(
   useSavedOutputFetch({
     taskId,
     codeProvider: derived.codeProvider,
-    shouldFetch: isComplete && taskId !== 'pending',
+    shouldFetch: isComplete && taskId !== 'pending' && derived.simulatedOutput === undefined,
     terminalRef,
     outputBufferRef,
     onOutputLoaded: setTerminalTranscript,
@@ -322,7 +328,7 @@ export function useClaudeCodeChip(
     chipState,
     isExpanded,
     isFullscreen,
-    terminalTranscript,
+    terminalTranscript: derived.simulatedOutput ?? terminalTranscript,
     terminalContainerRef,
     fullscreenContainerRef,
     openFullscreen,

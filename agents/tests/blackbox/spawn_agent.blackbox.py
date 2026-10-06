@@ -2002,6 +2002,53 @@ async def test_simulate_mocks_specialized_agents_but_keeps_general_purpose_real(
     assert for_each_events == []
 
 
+async def test_simulated_code_posts_code_chip_lifecycle():
+    """Whole-call simulation must publish the same chip identity and terminality."""
+    from tools.base import MessageStatus
+    import domains.spawn_agent.handler as h
+
+    cases = [
+        {"success": True, "message": "**Status**: ✅ SUCCESS\n\nDraft files created."},
+        {"success": False, "error": "Audit failed"},
+        RuntimeError("Prediction transport failed"),
+    ]
+    for result in cases:
+        def completed_activity(*_args, **_kwargs):
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        fake_workflow = _FakeSpawnWF(
+            activity_results={"world_model_specialized_agent_activity": completed_activity}
+        )
+        restore = _patch_spawn_workflow(fake_workflow)
+        try:
+            wf = _FakeWFInstance(goal="root task")
+            wf.world_model_mode = "simulate"
+            events = await _collect(
+                h.SpawnAgentManager().execute_tool(
+                    wf,
+                    {"type": "code", "goal": "prepare data room", "output_schema": {"type": "object"}},
+                    "tc-code",
+                )
+            )
+        finally:
+            restore()
+
+        progress, terminal = events
+        for event in events:
+            assert event.metadata["toolName"] == "spawn_claude_code_agent"
+            assert event.metadata["task_id"] == event.metadata["taskId"]
+            assert event.metadata["world_model_simulated"] is True
+        assert progress.metadata["task_id"] == terminal.metadata["task_id"]
+        assert terminal.metadata["action_type"] == "task_complete"
+        success = isinstance(result, dict) and result.get("success") is True
+        assert terminal.metadata["success"] is success
+        assert terminal.title == ("✓ Task Completed" if success else "Task Incomplete")
+        assert terminal.status == (MessageStatus.FINISHED if success else MessageStatus.ERROR)
+        assert fake_workflow.start_activity_calls == []
+
+
 def test_world_model_specialized_result_text_unwraps_output_envelope():
     """WMH's generic output envelope becomes direct downstream result text."""
     from domains.spawn_agent.handler import _world_model_specialized_result_text
@@ -5448,6 +5495,7 @@ async def run_all_tests():
         "simulate_mocks_specialized_keeps_general_purpose_real",
         test_simulate_mocks_specialized_agents_but_keeps_general_purpose_real,
     )
+    await r.record_async("simulated_code_chip_lifecycle", test_simulated_code_posts_code_chip_lifecycle)
     r.record(
         "world_model_specialized_result_text_unwraps_output_envelope",
         test_world_model_specialized_result_text_unwraps_output_envelope,
