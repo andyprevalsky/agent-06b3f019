@@ -1,12 +1,15 @@
 """Tests for hub_upload — env-gated, best-effort run-bundle upload."""
 
 import gzip
+import io
 import json
 import socket
 import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
 
 from benchmarks.hub_upload import (
     DEFAULT_HUB_URL,
@@ -299,6 +302,28 @@ def test_required_upload_retries_transient_disconnect(monkeypatch):
         assert len(attempts) == 2
     finally:
         server.shutdown()
+
+
+def test_starting_upload_cannot_reconcile_a_programming_error_as_success(monkeypatch):
+    from benchmarks import hub_upload
+
+    methods = []
+
+    class Opener:
+        def open(self, request, timeout):
+            methods.append(request.get_method())
+            if request.get_method() == "POST":
+                raise ValueError("controlled invalid transport invocation")
+            return io.BytesIO(b'{"run":{"run_id":"fixture-programming-error"}}')
+
+    monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", "https://fixture.invalid")
+    monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+    monkeypatch.setattr(hub_upload, "_hub_opener", lambda base: Opener())
+    monkeypatch.setattr(hub_upload.time, "sleep", lambda seconds: None)
+    with pytest.raises(HubVisibilityError) as failure:
+        hub_upload.register_starting_run({"run_id": "fixture-programming-error", "tasks": []})
+    assert isinstance(failure.value.__cause__, ValueError)
+    assert methods == ["POST"], "programming errors must not be acknowledged by an unrelated visible row"
 
 
 def test_prepare_run_bundle_strips_tool_usage_tree_and_keeps_child_transcripts():

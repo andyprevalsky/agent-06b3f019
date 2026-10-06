@@ -3350,18 +3350,29 @@ cloudbench_skip_held_driver_teardown_race() {
 }
 
 confirm_guest_shutdown() {
-    local deadline status_code port marker_tmp
+    local deadline status_code port marker_tmp confirmation_id
     [ -n "$FLEET_MACHINE_ID" ] || return 0
-    [ -e "$OUT_DIR/guest-shutdown.confirmed" ] && return 0
+    confirmation_id="${CLOUDBENCH_FLEET_RUN_ID:-$RUN_LOG_TOKEN}"
+    case "$confirmation_id" in ''|*[!a-zA-Z0-9._-]*) return 1 ;; esac
+    if [ -e "$OUT_DIR/guest-shutdown.confirmed" ] \
+        || [ -L "$OUT_DIR/guest-shutdown.confirmed" ]; then
+        [ -f "$OUT_DIR/guest-shutdown.confirmed" ] \
+            && [ ! -L "$OUT_DIR/guest-shutdown.confirmed" ] \
+            && [ "$(cat "$OUT_DIR/guest-shutdown.confirmed")" = "$confirmation_id" ] \
+            && return 0
+        echo "❌ existing guest cleanup confirmation does not match this run" >&2
+        return 1
+    fi
     # Infra probes and DEMO --skip-autoscaler fleets never open browsers/sessions.
     # The boot supervisor also holds the driver process after DONE for controller
     # collection, so /shutdown-health can sit on HTTP 202 until the child-term
     # deadline and flip a clean PASS into exit 125 + KEEP_CLONES. Skip the
     # browser-cleanup handshake and record the same confirmation marker fleet
     # teardown expects.
-    if [ -z "${CODEX_AUTH_SHA256:-}" ] && cloudbench_skip_held_driver_teardown_race; then
+    if [ "${FINISHED:-0}" = "1" ] && [ -z "${CODEX_AUTH_SHA256:-}" ] \
+        && cloudbench_skip_held_driver_teardown_race; then
         marker_tmp="$OUT_DIR/guest-shutdown.confirmed.tmp.$$"
-        printf '%s\n' "${RUN_LOG_TOKEN:-probe-or-demo}" > "$marker_tmp" \
+        printf '%s\n' "$confirmation_id" > "$marker_tmp" \
             && mv "$marker_tmp" "$OUT_DIR/guest-shutdown.confirmed"
         if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
             echo "✅ guest cleanup skipped for infra-probe (no browser/session work)"
@@ -3403,7 +3414,7 @@ confirm_guest_shutdown() {
             "http://127.0.0.1:$port/shutdown-health" 2>/dev/null || true)"
         if [ "$status_code" = "204" ]; then
             marker_tmp="$OUT_DIR/guest-shutdown.confirmed.tmp.$$"
-            printf '%s\n' "$RUN_LOG_TOKEN" > "$marker_tmp" \
+            printf '%s\n' "$confirmation_id" > "$marker_tmp" \
                 && mv "$marker_tmp" "$OUT_DIR/guest-shutdown.confirmed"
             echo "✅ guest browser/session cleanup acknowledged before machine release"
             return 0

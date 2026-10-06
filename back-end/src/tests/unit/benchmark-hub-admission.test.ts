@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { coalesceHubRunPuts } from '../../providers/benchmarkHubInFlight';
 
 type Operation = () => Promise<unknown>;
 type Transaction = { $executeRaw: (sql: TemplateStringsArray, key: string) => Promise<void> };
@@ -13,27 +14,101 @@ type Prisma = {
 
 /** Execute the actual storage owner's admission and transaction boundary. */
 function loadOwner(prisma: Prisma): (operation: Operation) => Promise<unknown> {
-  const filename = path.join(process.cwd(), 'src/providers/benchmarkHubStore.ts');
+  return loadDeclaration('withIndexLock', { prisma, Promise });
+}
+
+/** Include the owner's reachable declarations, replacing only external boundaries. */
+function loadDeclaration<T>(name: string, bindings: Record<string, unknown>): T {
+  const filename =
+    process.env.BENCHMARK_HUB_OWNER_SOURCE_PATH ??
+    path.join(process.cwd(), 'src/providers/benchmarkHubStore.ts');
   const source = readFileSync(filename, 'utf8');
   const tree = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
-  const declarations = tree.statements.filter((node) => {
-    if (ts.isFunctionDeclaration(node)) return node.name?.text === 'withIndexLock';
-    return (
-      ts.isVariableStatement(node) &&
-      node.declarationList.declarations.some((declaration) =>
-        ['INDEX_LOCK_KEY', 'indexAdmissionTail'].includes(declaration.name.getText(tree))
-      )
-    );
-  });
-  assert.equal(declarations.filter(ts.isFunctionDeclaration).length, 1);
+  const named = new Map<string, ts.Statement>();
+  for (const node of tree.statements) {
+    if (ts.isFunctionDeclaration(node) && node.name) named.set(node.name.text, node);
+    if (ts.isVariableStatement(node)) {
+      for (const declaration of node.declarationList.declarations) {
+        named.set(declaration.name.getText(tree), node);
+      }
+    }
+  }
+  const included = new Set<ts.Statement>();
+  const include = (identifier: string): void => {
+    if (Object.hasOwn(bindings, identifier)) return;
+    const node = named.get(identifier);
+    if (!node || included.has(node)) return;
+    included.add(node);
+    const visit = (child: ts.Node): void => {
+      if (ts.isIdentifier(child)) include(child.text);
+      ts.forEachChild(child, visit);
+    };
+    ts.forEachChild(node, visit);
+  };
+  include(name);
+  assert.ok(included.has(named.get(name)!));
+  const declarations = tree.statements.filter((node) => included.has(node));
   const compiled = ts.transpileModule(
-    declarations.map((node) => node.getText(tree)).join('\n') +
-      '\nglobalThis.owner = withIndexLock;',
+    declarations.map((node) => node.getText(tree)).join('\n') + `\nglobalThis.owner = ${name};`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }
   ).outputText;
-  const context = vm.createContext({ prisma, Promise });
+  const context = vm.createContext({ ...bindings, exports: {} });
   vm.runInContext(compiled, context);
   return context.owner;
+}
+
+type Bundle = Record<string, unknown>;
+type PutRun = (bundle: Bundle, options?: { live?: boolean; source?: string }) => Promise<Bundle>;
+
+function putBoundary(beforeWrite: (key: string) => Promise<void> = async () => {}) {
+  const database = databaseBoundary(4);
+  const objects = new Map<string, string>();
+  const writes: Array<{ key: string; value: string }> = [];
+  let transactions = 0;
+  let ancestors = 0;
+  let cacheUpdates = 0;
+  let revision = 0;
+  const putRun = loadDeclaration<PutRun>('putRun', {
+    Promise,
+    coalesceHubRunPuts,
+    prisma: {
+      $transaction: (body: (tx: Transaction) => Promise<unknown>, options: unknown) => {
+        transactions += 1;
+        return database.prisma.$transaction(body, options);
+      },
+    },
+    listRunsStrict: async () => JSON.parse(objects.get('index.json') ?? '[]'),
+    readAgentRunIndexForMutation: async () => ({ revision }),
+    agentIdsFromHubBundle: () => new Set(['fixture-agent']),
+    hubAgentIndexAfterPut: () => ({ revision: ++revision }),
+    putObject: async (key: string, value: string) => {
+      await beforeWrite(key);
+      writes.push({ key, value });
+      objects.set(key, value);
+    },
+    writeAgentRunIndex: async () => {},
+    slotHubAncestorSkeletonsFromBundle: async () => {
+      ancestors += 1;
+    },
+    applyHubRunToResolutionCaches: () => {
+      cacheUpdates += 1;
+    },
+    log: { info: () => {} },
+  });
+  return {
+    putRun,
+    objects,
+    runWrites: () => writes.filter(({ key }) => key.startsWith('runs/')),
+    stats: () => ({ transactions, ancestors, cacheUpdates, ...database.stats() }),
+  };
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 function databaseBoundary(capacity: number) {
@@ -154,4 +229,96 @@ test('separate backend admissions still serialize through the shared PostgreSQL 
   assert.equal(outcomes.length, 20);
   assert.equal(peakInside, 1);
   assert.deepEqual(database.stats(), { open: 0, peakOpen: 2, held: 0, peakHeld: 1 });
+});
+
+const packet = {
+  run_id: 'fixture-identical',
+  timestamp: '2026-10-06T11:55:18Z',
+  tasks: [{ name: 'fixture-task', passed: null, status: 'starting' }],
+};
+
+test('50 identical pending Hub packets share one publication before SQL admission', async () => {
+  const entered = deferred();
+  const gate = deferred();
+  const boundary = putBoundary(async (key) => {
+    if (key.startsWith('runs/')) {
+      entered.resolve();
+      await gate.promise;
+    }
+  });
+  const first = boundary.putRun(packet, { live: true, source: 'fixture' });
+  await entered.promise;
+  const requests = [
+    first,
+    ...Array.from({ length: 49 }, () =>
+      boundary.putRun(JSON.parse(JSON.stringify(packet)), { live: true, source: 'fixture' })
+    ),
+  ];
+  gate.resolve();
+  const results = await Promise.all(requests);
+  assert.equal(boundary.runWrites().length, 1);
+  assert.equal(boundary.stats().transactions, 1);
+  assert.equal(boundary.stats().ancestors, 1);
+  assert.equal(boundary.stats().cacheUpdates, 1);
+  assert.ok(requests.every((request) => request === first));
+  assert.ok(results.every((result) => result === results[0]));
+});
+
+test('distinct packet content, run, source and live mode retain publication order', async () => {
+  const boundary = putBoundary();
+  const requests = [
+    boundary.putRun(packet, { live: true, source: 'fixture' }),
+    boundary.putRun({ ...packet, marker: 'changed' }, { live: true, source: 'fixture' }),
+    boundary.putRun({ ...packet, run_id: 'fixture-other' }, { live: true, source: 'fixture' }),
+    boundary.putRun(packet, { live: true, source: 'other-source' }),
+    boundary.putRun(packet, { live: false, source: 'fixture' }),
+  ];
+  const results = await Promise.all(requests);
+  assert.equal(boundary.stats().transactions, 5);
+  assert.deepEqual(
+    boundary.runWrites().map(({ value }) => JSON.parse(value)),
+    [
+      packet,
+      { ...packet, marker: 'changed' },
+      { ...packet, run_id: 'fixture-other' },
+      packet,
+      packet,
+    ]
+  );
+  assert.equal(results[3].source, 'other-source');
+  assert.equal(results[4].live, false);
+});
+
+test('failed identical publication rejects every waiter and permits an unchanged retry', async () => {
+  const marker = new Error('fixture object write failure');
+  let fail = true;
+  const boundary = putBoundary(async (key) => {
+    if (key.startsWith('runs/') && fail) throw marker;
+  });
+  const outcomes = await Promise.allSettled(
+    Array.from({ length: 3 }, () => boundary.putRun(packet, { live: true }))
+  );
+  assert.ok(
+    outcomes.every((outcome) => outcome.status === 'rejected' && outcome.reason === marker)
+  );
+  assert.equal(boundary.stats().transactions, 1);
+  fail = false;
+  assert.equal((await boundary.putRun(packet, { live: true })).run_id, packet.run_id);
+  assert.equal(boundary.stats().transactions, 2);
+  assert.equal(boundary.runWrites().length, 1);
+});
+
+test('settled packets are evicted and late live packets preserve the absorbing final state', async () => {
+  const boundary = putBoundary();
+  const first = await boundary.putRun(packet, { live: true });
+  const second = await boundary.putRun(packet, { live: true });
+  assert.notEqual(first, second);
+  assert.equal(boundary.runWrites().length, 2);
+  const terminalPacket = { ...packet, tasks: [{ name: 'fixture-task', passed: false }] };
+  await boundary.putRun(terminalPacket, { live: false });
+  const lateLive = await boundary.putRun(packet, { live: true });
+  assert.equal(lateLive.live, false);
+  assert.equal(boundary.runWrites().length, 3);
+  assert.equal(boundary.stats().transactions, 4);
+  assert.deepEqual(JSON.parse(boundary.objects.get(`runs/${packet.run_id}.json`)!), terminalPacket);
 });

@@ -8174,12 +8174,10 @@ exit 0
             "--upload-final" if removal in ("removed", "upload-warning") else "--upload-live"
         ), "unreleased resources falsely stopped frontend polling"
         receipt = json.loads((fleet / "_batch/lifecycle.json").read_text())
-        assert receipt["status"] == ("verified" if removal in ("removed", "upload-warning") else "failed"), (
-            result.stderr
-        )
+        assert receipt["status"] == ("verified" if removal == "removed" else "failed"), result.stderr
         assert receipt["fleet_owner_token"] == "a" * 32
         assert receipt["run_id"] == removal
-        if removal == "failed":
+        if removal in ("failed", "upload-warning"):
             assert result.returncode != 0, result.stderr
         else:
             assert result.returncode == 0, result.stderr
@@ -26582,6 +26580,52 @@ done
     assert emitted["CLOUDBENCH_FRESH_VOLUME"] == str(int(allocated_source == "clone" and expected == "fresh"))
 
 
+@pytest.mark.parametrize("transport,allowed", [("timeout", True), ("server", True), ("auth", False)])
+def test_hub_transport_starting_snapshot_preserves_terminal_publication_owner(
+    tmp_path: Path, transport: str, allowed: bool
+) -> None:
+    """A transient starting write cannot abort work or lose its terminal writer."""
+    helper = tmp_path / "hub-helper.py"
+    helper.write_text(
+        "import sys,urllib.error\n"
+        f"sys.path.insert(0, {str(FLEET_SCRIPT.parents[1] / 'agents')!r})\n"
+        "from benchmarks import hub_upload\n"
+        "class Opener:\n"
+        " def open(self, request, timeout):\n"
+        + (
+            "  raise TimeoutError('controlled pending starting write')\n"
+            if transport == "timeout"
+            else "  raise urllib.error.HTTPError(request.full_url, "
+            + ("503" if transport == "server" else "403")
+            + ", 'controlled response', {}, None)\n"
+        )
+        + "hub_upload._hub_opener=lambda base: Opener()\n"
+        "hub_upload.time.sleep=lambda seconds: None\n"
+        "raise SystemExit(hub_upload._main())\n"
+    )
+    batch = tmp_path / "_batch"
+    batch.mkdir()
+    (batch / "report-card.json").write_text(
+        json.dumps({"run_id": "fixture-starting", "tasks": [{"name": "fixture", "status": "starting"}]})
+    )
+    function = _extract_fleet_function(fleet_source_text(), "require_in_app_hub_visibility() {")
+    script = f"""set -uo pipefail
+ROOT_DIR={shlex.quote(str(tmp_path))}
+FLEET_DIR={shlex.quote(str(tmp_path))}
+HUB_UPLOAD_HELPER={shlex.quote(str(helper))}
+INHERITED_HUB_RUN_ID=
+SELF_MANAGED_HUB_RUN=0
+RUN_ID=fixture-starting
+{function}
+if require_in_app_hub_visibility; then accepted=1; else accepted=0; fi
+printf '\\nOBSERVED=%s,%s,%s\\n' "$accepted" "$SELF_MANAGED_HUB_RUN" "${{BENCHMARK_HUB_PARENT_RUN_ID:-}}"
+"""
+    env = {**os.environ, "BENCHMARK_HUB_API_KEY": "fixture-key", "BENCHMARK_HUB_UPLOAD_URL": "https://fixture.invalid"}
+    result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert f"OBSERVED={int(allowed)},1,fixture-starting" in result.stdout, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize(
     "role,rejected",
     [("primary", ""), ("worker", ""), ("worker", "deps"), ("worker", "prisma")],
@@ -26785,3 +26829,139 @@ def test_prebuilt_prisma_client_sync_rejects_a_cli_outside_the_checkout(tmp_path
     assert "Prisma CLI must belong to this checkout" in result.stderr
     assert not generate_log.exists()
     assert not (repo / "node_modules/.prisma/.rose-schema-fingerprint").exists()
+
+
+@pytest.mark.parametrize("case", ["completed-probe", "interrupted-probe", "foreign-marker", "symlink-marker"])
+def test_guest_shutdown_child_confirmation_uses_fleet_identity_only_after_completion(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    """The real child producer must not turn an interrupted probe into an ACK."""
+    source = CLOUD_SCRIPT.read_text()
+    producer = _extract_fleet_function(source, "confirm_guest_shutdown() {")
+    marker = tmp_path / "guest-shutdown.confirmed"
+    if case == "foreign-marker":
+        marker.write_text("foreign-run\n")
+    elif case == "symlink-marker":
+        target = tmp_path / "foreign-marker"
+        target.write_text("fixture-fleet\n")
+        marker.symlink_to(target)
+    original = marker.read_bytes() if marker.exists() else None
+    calls = tmp_path / "calls"
+    script = f"""set -uo pipefail
+OUT_DIR={shlex.quote(str(tmp_path))}
+FLEET_MACHINE_ID=deadbeef000001
+RUN_LOG_TOKEN={"6e24d19a05a94cc39402dd06db3b454e-0"}
+CLOUDBENCH_FLEET_RUN_ID=fixture-fleet
+CLOUDBENCH_INFRA_PROBE=1
+FINISHED={"1" if case == "completed-probe" else "0"}
+LOCAL_STATUS_PORT=61001
+STATUS_PROXY_PID=$$
+CLOUDBENCH_BARRIER_TOKEN=fixture-barrier
+cloudbench_skip_held_driver_teardown_race() {{ return 0; }}
+curl() {{ printf 'shutdown-request\n' >> {shlex.quote(str(calls))}; printf 500; }}
+{producer}
+confirm_guest_shutdown
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    if case == "completed-probe":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.read_bytes() == b"fixture-fleet\n"
+        assert not calls.exists()
+    else:
+        assert result.returncode != 0, "unconfirmed or foreign cleanup marker authorized release"
+        if original is None:
+            assert not marker.exists()
+            assert calls.read_text().splitlines() == ["shutdown-request"]
+        else:
+            assert marker.read_bytes() == original
+            assert not calls.exists()
+
+
+@pytest.mark.parametrize("fault", ["none", "foreign-owner", "wrong-slot", "wrong-machine", "wrong-run", "symlink"])
+def test_exact_guest_recovery_archives_bound_child_token_without_treating_it_as_ack(
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    """Original infra-probe markers require exact mapping and provider cleanup."""
+    owner = "6e24d19a05a94cc39402dd06db3b454e"
+    run_id = "20261006-115614-55990"
+    token = owner + "-0"
+    machine = "89599db6ee3418"
+    registry = tmp_path / "ownership" / owner
+    registry.mkdir(parents=True)
+    run = tmp_path / "runs" / run_id
+    output = run / "agent-payment-idempotent-abandonment"
+    output.mkdir(parents=True)
+    (run / "_batch").mkdir()
+    (run / "_batch/benches.json").write_text(
+        json.dumps(
+            [
+                {"name": output.name, "mode": "REAL"},
+                {"name": "browser-event-ticket", "mode": "REAL"},
+            ]
+        )
+    )
+    (registry / "meta").write_text(
+        f"fleet_owner_token={owner}\nrun_id={'wrong-run' if fault == 'wrong-run' else run_id}\nruns_root={run.parent}\n"
+    )
+    (output / ".cid").write_text(f"clone {'deadbeef000001' if fault == 'wrong-machine' else machine}\n")
+    marker = output / "guest-shutdown.confirmed"
+    marker_token = "a" * 32 + "-0" if fault == "foreign-owner" else owner + "-1" if fault == "wrong-slot" else token
+    marker.write_text(marker_token + "\n")
+    if fault == "symlink":
+        marker.rename(output / "foreign-marker")
+        marker.symlink_to(output / "foreign-marker")
+    original = marker.read_bytes()
+    calls = tmp_path / "calls"
+    helper = tmp_path / "provider-helper"
+    helper.write_text("import os,sys\nwith open(os.environ['CALLS'], 'a') as f: f.write(sys.argv[1] + '\\n')\n")
+    helper.chmod(0o755)
+    fleet = fleet_source_text()
+    signatures = [
+        "cloudbench_archive_bound_child_shutdown_confirmation() {",
+        "cloudbench_recover_guest_cleanup_receipts() {",
+    ]
+    functions = "\n".join(_extract_fleet_function(fleet, s) for s in signatures if s in fleet)
+    script = f"""set -uo pipefail
+APP=bench-app
+ROOT_DIR=/workspace
+RUN_ID={run_id}
+EXACT_SESSION_CLEANUP_HELPER={shlex.quote(str(helper))}
+CALLS={shlex.quote(str(calls))}
+export CALLS
+recovery_benches=({output.name})
+recovery_clone_names=(cloudbench-17ca25229017468a817f129d)
+recovery_machine_ids=({machine})
+recovery_machine_states=(stopped)
+recovery_guest_tokens=({token})
+recovery_proxy_ports=(61001)
+recovery_outputs=({shlex.quote(str(output))})
+cloudbench_seal_guest_evidence_file() {{ mv "$1" "$2"; }}
+cloudbench_fetch_guest_evidence() {{ printf -v "$1" '%s' 404; }}
+machine_status_exact_read() {{ printf 'stopped cloudbench-17ca25229017468a817f129d\n'; }}
+cloudbench_publish_guest_shutdown_confirmation() {{
+  [ ! -e "$1/guest-shutdown.confirmed" ] || return 91
+  printf '%s\n' "$2" > "$1/guest-shutdown.confirmed"
+  printf 'publish-confirmation\n' >> "$CALLS"
+}}
+{functions}
+cloudbench_recover_guest_cleanup_receipts {shlex.quote(str(registry))}
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    retained = output / "guest-shutdown.child-confirmation"
+    if fault == "none":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert retained.read_bytes() == original
+        assert marker.read_bytes() == (run_id + "\n").encode()
+        assert calls.read_text().splitlines() == [
+            "publish-stopped-machine-proof",
+            "cleanup-sealed-provider-sessions",
+            "validate-recovery-receipt",
+            "publish-confirmation",
+        ], "child marker bypassed exact stopped/provider cleanup"
+    else:
+        assert result.returncode != 0, "unbound child marker was accepted"
+        assert marker.read_bytes() == original
+        assert not retained.exists()
+        assert not calls.exists()

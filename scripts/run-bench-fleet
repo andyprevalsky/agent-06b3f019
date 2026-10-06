@@ -6744,6 +6744,89 @@ finally:
 PY
 }
 
+cloudbench_archive_bound_child_shutdown_confirmation() {  # <registry> <bench> <machine-id> <output> <guest-token>
+    # The old child wrote its guest token even when an infra probe was canceled
+    # before completion. Preserve that exact, mapped artifact; it is never an
+    # acknowledgement and must not bypass stopped-state/provider recovery.
+    python3 - "$1" "$2" "$3" "$4" "$5" "${RUN_ID:-}" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+registry, bench, machine, output, guest_token, run_id = sys.argv[1:]
+registry, output = Path(registry), Path(output)
+
+def regular_bytes(path, maximum):
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        metadata = os.fstat(fd)
+        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            raise ValueError("unsafe child confirmation input")
+        payload = os.read(fd, maximum + 1)
+        if len(payload) > maximum:
+            raise ValueError("oversized child confirmation input")
+        return payload, metadata
+    finally:
+        os.close(fd)
+
+if (registry.is_symlink() or output.is_symlink()
+        or registry.resolve() != registry or output.resolve() != output
+        or not registry.is_dir() or not output.is_dir()
+        or re.fullmatch(r"[0-9a-f]{32}", registry.name) is None
+        or re.fullmatch(r"[0-9a-f]{14}", machine) is None):
+    raise ValueError("unsafe child confirmation identity")
+meta = {}
+for line in regular_bytes(registry / "meta", 65536)[0].decode().splitlines():
+    key, value = line.split("=", 1)
+    if key in meta:
+        raise ValueError("duplicate child confirmation metadata")
+    meta[key] = value
+owner = registry.name
+run = Path(meta["runs_root"]) / run_id
+if (meta.get("fleet_owner_token") != owner or meta.get("run_id") != run_id
+        or run.resolve() != run or output != run / bench):
+    raise ValueError("child confirmation does not belong to this fleet")
+catalog = json.loads(regular_bytes(run / "_batch" / "benches.json", 1048576)[0])
+if not isinstance(catalog, list) or any(not isinstance(row, dict) for row in catalog):
+    raise ValueError("unsafe child confirmation catalog")
+names = [row.get("name") for row in catalog]
+if (len(names) != len(set(names)) or bench not in names
+        or guest_token != f"{owner}-{names.index(bench)}"):
+    raise ValueError("child confirmation does not match the exact catalog slot")
+cid = regular_bytes(output / ".cid", 256)[0].decode().split()
+if len(cid) != 2 or cid[0] not in {"clone", "pool"} or cid[1] != machine:
+    raise ValueError("child confirmation does not match the exact Machine")
+marker = output / "guest-shutdown.confirmed"
+payload, original = regular_bytes(marker, 256)
+if payload != (guest_token + "\n").encode():
+    raise ValueError("child confirmation token does not match the exact guest")
+retained = output / "guest-shutdown.child-confirmation"
+try:
+    fd = os.open(retained, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+except FileExistsError:
+    if regular_bytes(retained, 256)[0] != payload:
+        raise ValueError("original child confirmation conflicts with retained bytes")
+else:
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+directory = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(directory)
+    current = marker.lstat()
+    if current.st_dev != original.st_dev or current.st_ino != original.st_ino or regular_bytes(marker, 256)[0] != payload:
+        raise ValueError("original child confirmation changed during retention")
+    marker.unlink()
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
 cloudbench_guest_shutdown_status() {  # <status-proxy-port>
     curl --noproxy '*' -sS --max-time 2 -o /dev/null -w '%{http_code}' \
         -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
@@ -6981,9 +7064,13 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
                 recovered=$((recovered + 1))
                 continue
             fi
-            echo "❌ [$bench] existing guest cleanup confirmation is unsafe" >&2
-            failed=1
-            continue
+            if ! cloudbench_archive_bound_child_shutdown_confirmation \
+                    "$registry" "$bench" "$machine_id" "$output" "$guest_run_token"; then
+                echo "❌ [$bench] existing guest cleanup confirmation is unsafe" >&2
+                failed=1
+                continue
+            fi
+            echo "🧭 [$bench] original child token retained; exact guest/provider cleanup still required"
         fi
 
         if [ -e "$receipt" ] || [ -L "$receipt" ]; then
@@ -9860,12 +9947,15 @@ require_in_app_hub_visibility() {
         python3 "$HUB_UPLOAD_HELPER" --verify-visible "$active_run_id" || return 1
     else
         active_run_id="$RUN_ID"
-        python3 "$HUB_UPLOAD_HELPER" \
-            --require-visible "$FLEET_DIR/_batch/report-card.json" \
-            --run-id "$active_run_id" --source direct-cloud-fleet || return 1
+        # Retain terminal publication authority even if the starting POST is
+        # still queued when its transport response times out.
         SELF_MANAGED_HUB_RUN="1"
+        export BENCHMARK_HUB_PARENT_RUN_ID="$active_run_id"
+        python3 "$HUB_UPLOAD_HELPER" \
+            --register-starting "$FLEET_DIR/_batch/report-card.json" \
+            --run-id "$active_run_id" --source direct-cloud-fleet || return 1
     fi
-    # Every per-machine run belongs to this already-visible aggregate. Child
+    # Every per-machine run belongs to this owned aggregate. Child
     # run_benchmark.py processes must not create duplicate one-task Hub rows.
     export BENCHMARK_HUB_PARENT_RUN_ID="$active_run_id"
     echo "📊 Mac app Benchmark Hub: run=$active_run_id"
@@ -10065,7 +10155,7 @@ finalize_terminal_projection() {  # finalize_terminal_projection <controller-exi
 
 
 cleanup() {
-    local result_ec=$? ec teardown_failed="${LOCAL_PROCESS_TEARDOWN_FAILED:-0}"
+    local result_ec=$? ec teardown_failed="${LOCAL_PROCESS_TEARDOWN_FAILED:-0}" publication_failed=0
     local id i out claim_path st presence machines round stop_pid pool_volume_id guest_shutdown_failed=0
     local claim_digest machine_reap_status runtime_evidence_failed=0
     local -a claimed_pool_ids pending_pool_ids next_pending_pool_ids stop_pids
@@ -10385,20 +10475,41 @@ cleanup() {
             fi
         done
     fi
-    # Task failure and infrastructure failure both use exit 1. Seal their
-    # independent lifecycle verdict only after provider audit publication AND
-    # removal of the exact recovery registry, which can itself still fail.
+    # Keep the parent live while releasing resources. Only this post-release
+    # projection closes dashboard polling and publishes the final transcripts.
+    if ! finalize_terminal_projection "$ec"; then
+        ec=1
+    elif [ "${SELF_MANAGED_HUB_RUN:-0}" = "1" ]; then
+        local hub_final_action=--upload-live
+        if [ "$teardown_failed" = "0" ] && [ "$KEEP_CLONES" != "1" ] \
+            && [ ! -e "$FLEET_REGISTRY_DIR" ] && [ ! -L "$FLEET_REGISTRY_DIR" ]; then
+            hub_final_action=--upload-final
+        fi
+        if ! python3 "$HUB_UPLOAD_HELPER" "$hub_final_action" "$FLEET_DIR/_batch/run.json" \
+            --run-id "$BENCHMARK_HUB_PARENT_RUN_ID" --source direct-cloud-fleet; then
+            if [ "$hub_final_action" = --upload-final ]; then
+                echo "❌ terminal Hub publication failed after resource release" >&2
+                publication_failed=1
+                ec=1
+            else
+                echo "⚠️ final live Hub update failed; canonical outcome and cleanup status are preserved" >&2
+            fi
+        fi
+    fi
+    # Seal the lifecycle after provider audit, exact registry retirement and
+    # required terminal publication. A publication failure does not change the
+    # recorded physical resource disposition or the benchmark verdict.
     if [ -d "$FLEET_DIR/_batch" ]; then
         if ! python3 - "$FLEET_DIR" "$FLEET_OWNER_TOKEN" "$RUN_ID" "$ROOT_DIR" \
             "$ec" "$teardown_failed" "$KEEP_CLONES" \
             "$FLEET_EXECUTION_COMPLETED" "${AUTOSCALER_FAILURE:-1}" \
-            "$FLEET_REGISTRY_DIR" <<'PY'
+            "$FLEET_REGISTRY_DIR" "$publication_failed" <<'PY'
 import json
 import os
 import sys
 from pathlib import Path
 
-directory, owner, run_id, workspace, exit_code, teardown, retained, completed, autoscaler, registry = sys.argv[1:]
+directory, owner, run_id, workspace, exit_code, teardown, retained, completed, autoscaler, registry, publication_failed = sys.argv[1:]
 root = Path(directory)
 audit_digest = ""
 try:
@@ -10409,7 +10520,7 @@ except (OSError, ValueError, KeyError):
 verified = (
     teardown == "0" and retained != "1" and completed == "1"
     and autoscaler == "0" and len(audit_digest) == 64
-    and exit_code in ("0", "1")
+    and publication_failed == "0" and exit_code in ("0", "1")
     and bool(registry) and not Path(registry).exists() and not Path(registry).is_symlink()
 )
 target = root / "_batch/lifecycle.json"
@@ -10418,6 +10529,7 @@ payload = {
     "version": 1, "fleet_owner_token": owner, "run_id": run_id,
     "workspace_root": workspace, "status": "verified" if verified else "failed",
     "controller_exit_code": int(exit_code), "audit_sha256": audit_digest,
+    "hub_publication_failed": publication_failed != "0",
 }
 try:
     with temporary.open("x") as handle:
@@ -10439,19 +10551,8 @@ PY
             ec=1
         fi
     fi
-    # Keep the parent live while releasing resources. Only this post-release
-    # projection closes dashboard polling and publishes the final transcripts.
-    if ! finalize_terminal_projection "$ec"; then
-        ec=1
-    elif [ "${SELF_MANAGED_HUB_RUN:-0}" = "1" ]; then
-        local hub_final_action=--upload-live
-        if [ "$teardown_failed" = "0" ] && [ "$KEEP_CLONES" != "1" ] \
-            && [ ! -e "$FLEET_REGISTRY_DIR" ] && [ ! -L "$FLEET_REGISTRY_DIR" ]; then
-            hub_final_action=--upload-final
-        fi
-        python3 "$HUB_UPLOAD_HELPER" "$hub_final_action" "$FLEET_DIR/_batch/run.json" \
-            --run-id "$BENCHMARK_HUB_PARENT_RUN_ID" --source direct-cloud-fleet \
-            || echo "⚠️ final Hub publication failed; canonical outcome and cleanup status are preserved" >&2
+    if [ "$publication_failed" = "1" ]; then
+        finalize_terminal_projection "$ec" || ec=1
     fi
     # Teardown and final publication both need the snapshotted helpers.
     cleanup_owned_script_snapshot || ec=1
@@ -13085,6 +13186,7 @@ for bench in "${BENCHES[@]}"; do
     # and its descendants have exited, including on controller cancellation.
     CLOUDBENCH_WORKSPACE_NAME="$local_ws" \
     CLOUDBENCH_FLEET_RUN_TOKEN="$FLEET_OWNER_TOKEN-$i" \
+    CLOUDBENCH_FLEET_RUN_ID="$RUN_ID" \
     CLOUDBENCH_ENV_VERIFIED=1 \
     CLOUDBENCH_STORAGE_READY="$([ "$src" = "pool" ] && printf 1 || printf 0)" \
     CLOUDBENCH_MACHINE_RECORD="$INVENTORY_INDEX/current/machines/$cid" \
