@@ -5760,6 +5760,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                             visited_urls=visited_urls,
                             reasoning_messages=reasoning_messages,
                             action_summary=action_summary,
+                            goal=goal,
                         ),
                         browser_url=str(browser_state.get("url") or ""),
                         structured_response=structured,
@@ -9301,6 +9302,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             visited_urls=visited_urls,
                             reasoning_messages=reasoning_messages,
                             action_summary=action_summary,
+                            goal=goal,
                         )
                         context_message = append_completion_evidence(
                             context_message,
@@ -10245,6 +10247,7 @@ Based on this feedback, I need to continue working on the task and address the i
             visited_urls=visited_urls,
             reasoning_messages=reasoning_messages,
             action_summary=action_summary,
+            goal=goal,
         )
 
         await save_browser_action_message(
@@ -10376,6 +10379,7 @@ Based on this feedback, I need to continue working on the task and address the i
             reasoning_messages=reasoning_messages,
             action_summary=action_summary,
             error_context=error_context,
+            goal=goal,
         )
 
         if task_id:

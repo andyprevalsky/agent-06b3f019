@@ -295,9 +295,14 @@ def build_context_summary(
     reasoning_messages: list,
     action_summary: list,
     error_context: Optional[str] = None,
+    *,
+    goal: str,
 ) -> str:
     """Build detailed execution context summary for main agent."""
     summary_parts = []
+
+    if goal and goal.strip():
+        summary_parts.append(f"**Goal**: {goal.strip()}\n")
 
     status = "\u2705 SUCCESS" if success else "\u274c FAILED"
     summary_parts.append(f"**Status**: {status}")
