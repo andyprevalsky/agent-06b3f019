@@ -4,6 +4,7 @@
  * other provider (and on a later browser-agent call) via CookieBundle inject.
  */
 import { createServer, type AddressInfo } from 'node:http';
+import { createServer as createNetServer } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { chromium, type Browser } from 'playwright';
 import { prisma } from '../../providers/database';
@@ -12,6 +13,25 @@ import { injectUserData } from '../../providers/steel/injection';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
+}
+
+async function freePort(): Promise<number> {
+  const server = createNetServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw new Error('failed to allocate a CDP debugging port');
+  }
+  const port = address.port;
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+  return port;
 }
 
 async function listen(): Promise<{ origin: string; close: () => Promise<void> }> {
@@ -151,11 +171,67 @@ async function verifyHarvestRestoresOnOtherProvider(): Promise<void> {
   }
 }
 
+async function verifyFreshCdpHarvestsSignedInLocalStorage(): Promise<void> {
+  const userId = `auth-persist-cdp-${randomUUID()}`;
+  const fixture = await listen();
+  const port = await freePort();
+  const launched = await chromium.launch({
+    headless: true,
+    args: [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1'],
+  });
+  await prisma.user.create({ data: { userId, isAnonymous: true } });
+  try {
+    await signIn(launched, fixture.origin);
+    const signedInPage = launched.contexts()[0]?.pages()[0];
+    assert(signedInPage !== undefined, 'source browser lost the signed-in page');
+    await signedInPage.goto('about:blank');
+    const harvestBrowser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+    try {
+      const kernelSession = await createSession({
+        userId,
+        provider: 'kernel',
+        sessionId: `kernel-cdp-${randomUUID()}`,
+      });
+      const harvested = await persistSignedInBrowserState(kernelSession.sessionId, {
+        browser: harvestBrowser,
+        currentUrl: fixture.origin,
+      });
+      assert(
+        harvested.persisted,
+        `fresh CDP harvest did not persist: ${harvested.reason ?? 'unknown'}`
+      );
+      assert(
+        harvested.localStorageOriginCount > 0,
+        'fresh CDP harvest missed localStorage after the signed-in tab closed'
+      );
+      const stored = await prisma.localStorageOrigin.findUnique({
+        where: { userId_origin: { userId, origin: fixture.origin } },
+      });
+      assert(stored !== null, 'fresh CDP harvest wrote no LocalStorageOrigin row');
+      const entries = stored.entries as Array<{ key: string; value: string }>;
+      assert(
+        entries.some((entry) => entry.key === 'rose_handoff' && entry.value === 'signed-in'),
+        `fresh CDP harvest wrote ${JSON.stringify(entries)}`
+      );
+    } finally {
+      await harvestBrowser.close().catch(() => undefined);
+    }
+  } finally {
+    await launched.close().catch(() => undefined);
+    await fixture.close();
+    await cleanup(userId);
+  }
+}
+
 async function main(): Promise<void> {
   process.stdout.write('Browser Session Auth Persist Black-box Tests\n');
   await verifyHarvestRestoresOnOtherProvider();
   process.stdout.write(
     '  PASS  persist -- kernel sign-in restores on steel and a later kernel call\n'
+  );
+  await verifyFreshCdpHarvestsSignedInLocalStorage();
+  process.stdout.write(
+    '  PASS  persist -- fresh CDP reconnect harvests signed-in localStorage\n'
   );
   process.stdout.write('All browser-session-auth-persist blackbox tests passed\n');
 }

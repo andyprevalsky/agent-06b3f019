@@ -7,7 +7,7 @@
  *   later init (same or other provider) ──injectUserData──▶ signed-in browser
  */
 import { createHash, randomUUID } from 'node:crypto';
-import type { Browser, Cookie } from 'playwright';
+import type { Browser, BrowserContext, Cookie, Page } from 'playwright';
 import { isAuthCredentialCookieName } from '../authCookies';
 import { authRealmFromCookieDomain } from '../authRealm';
 import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
@@ -205,9 +205,133 @@ async function persistHarvestedLocalStorage(
   return written;
 }
 
+export function httpOriginFromUrl(value: string | null | undefined): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  try {
+    const parsed = value.includes('://')
+      ? new URL(value)
+      : new URL(`https://${value.replace(/^\./, '')}`);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    if (parsed.hostname === '') return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function cookieDomainOrigin(domain: string): string | null {
+  return httpOriginFromUrl(`https://${domain.trim().replace(/^\./, '')}`);
+}
+
+async function readPageLocalStorage(
+  page: Pick<Page, 'evaluate'>
+): Promise<Array<{ name: string; value: string }>> {
+  return page.evaluate(() => {
+    const entries: Array<{ name: string; value: string }> = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const name = localStorage.key(i);
+      if (!name) continue;
+      entries.push({ name, value: localStorage.getItem(name) ?? '' });
+    }
+    return entries;
+  });
+}
+
+function mergeOriginLocalStorage(
+  into: Map<string, Map<string, string>>,
+  origin: string,
+  entries: Array<{ name: string; value: string }>
+): void {
+  if (entries.length === 0) return;
+  const existing = into.get(origin) ?? new Map<string, string>();
+  for (const entry of entries) {
+    if (entry.name === '') continue;
+    existing.set(entry.name, entry.value);
+  }
+  if (existing.size > 0) into.set(origin, existing);
+}
+
+function extraHarvestOrigins(params: {
+  currentUrl?: string | null;
+  startUrl?: string | null;
+  cookies: Cookie[];
+}): string[] {
+  const origins = new Set<string>();
+  for (const candidate of [
+    httpOriginFromUrl(params.currentUrl),
+    httpOriginFromUrl(params.startUrl),
+    ...params.cookies.map((cookie) => cookieDomainOrigin(cookie.domain)),
+  ]) {
+    if (candidate !== null) origins.add(candidate);
+  }
+  return [...origins];
+}
+
+/**
+ * Playwright `storageState()` only snapshots origins visited on *this*
+ * Playwright connection (`_origins`). A fresh CDP connect at session close
+ * therefore returns cookies (browser store) and zero localStorage origins
+ * even when the signed-in tab is still open. Read open pages and probe
+ * known HTTP origins so Kernel/Steel harvest survives a reconnect.
+ */
+export async function collectHarvestableLocalStorage(
+  context: Pick<BrowserContext, 'pages' | 'newPage'>,
+  extraOrigins: string[]
+): Promise<Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }>> {
+  const byOrigin = new Map<string, Map<string, string>>();
+  for (const page of context.pages()) {
+    const origin = httpOriginFromUrl(page.url());
+    if (origin === null) continue;
+    try {
+      mergeOriginLocalStorage(byOrigin, origin, await readPageLocalStorage(page));
+    } catch {
+      // The tab may have navigated away while harvest was running.
+    }
+  }
+
+  const missing = extraOrigins
+    .filter((origin) => httpOriginFromUrl(origin) === origin && !byOrigin.has(origin))
+    .slice(0, MAX_ORIGINS);
+  if (missing.length === 0) {
+    return [...byOrigin.entries()].map(([origin, entries]) => ({
+      origin,
+      localStorage: [...entries.entries()].map(([name, value]) => ({ name, value })),
+    }));
+  }
+
+  const probe = await context.newPage();
+  try {
+    let navigationUrl = '';
+    await probe.route('**/*', async (route) => {
+      const request = route.request();
+      if (
+        request.isNavigationRequest() &&
+        request.frame() === probe.mainFrame() &&
+        request.url() === navigationUrl
+      ) {
+        await route.fulfill({ status: 200, contentType: 'text/html', body: '<html></html>' });
+      } else {
+        await route.abort();
+      }
+    });
+    for (const origin of missing) {
+      navigationUrl = `${origin}/.rose-storage-harvest`;
+      await probe.goto(navigationUrl, { waitUntil: 'domcontentloaded' });
+      mergeOriginLocalStorage(byOrigin, origin, await readPageLocalStorage(probe));
+    }
+  } finally {
+    await probe.close().catch(() => undefined);
+  }
+
+  return [...byOrigin.entries()].map(([origin, entries]) => ({
+    origin,
+    localStorage: [...entries.entries()].map(([name, value]) => ({ name, value })),
+  }));
+}
+
 export async function persistSignedInBrowserState(
   sessionId: string,
-  options: { browser?: Browser } = {}
+  options: { browser?: Browser; currentUrl?: string } = {}
 ): Promise<PersistSignedInBrowserStateResult> {
   const skipped = { persisted: false, cookieCount: 0, realmCount: 0, localStorageOriginCount: 0 };
   const session = await prisma.browserSession.findUnique({
@@ -243,16 +367,40 @@ export async function persistSignedInBrowserState(
     }
     const context = browser.contexts()[0];
     if (context === undefined) return { ...skipped, reason: 'missing_browser_context' };
-    const state = await withTimeout(
-      context.storageState(),
+    const harvested = await withTimeout(
+      (async () => {
+        const state = await context.storageState();
+        const originsByName = new Map<string, Map<string, string>>();
+        for (const originState of state.origins) {
+          mergeOriginLocalStorage(originsByName, originState.origin, originState.localStorage);
+        }
+        const collected = await collectHarvestableLocalStorage(
+          context,
+          extraHarvestOrigins({
+            currentUrl: options.currentUrl ?? session.currentUrl,
+            startUrl: session.startUrl,
+            cookies: state.cookies,
+          }).filter((origin) => !originsByName.has(origin))
+        );
+        for (const originState of collected) {
+          mergeOriginLocalStorage(originsByName, originState.origin, originState.localStorage);
+        }
+        return {
+          cookies: state.cookies,
+          origins: [...originsByName.entries()].map(([origin, entries]) => ({
+            origin,
+            localStorage: [...entries.entries()].map(([name, value]) => ({ name, value })),
+          })),
+        };
+      })(),
       persistSignedInBrowserStateTimeoutMs(),
       'Timed out reading signed-in browser storage'
     );
-    if (state.cookies.length === 0 && state.origins.length === 0) {
+    if (harvested.cookies.length === 0 && harvested.origins.length === 0) {
       return { ...skipped, reason: 'empty_storage' };
     }
-    const cookies = await persistHarvestedCookies(userId, session.provider, state.cookies);
-    const localStorageOriginCount = await persistHarvestedLocalStorage(userId, state.origins);
+    const cookies = await persistHarvestedCookies(userId, session.provider, harvested.cookies);
+    const localStorageOriginCount = await persistHarvestedLocalStorage(userId, harvested.origins);
     log.info('Persisted signed-in browser state', {
       sessionId,
       provider: session.provider,

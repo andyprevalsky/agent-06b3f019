@@ -234,7 +234,7 @@ export async function closeSession(
   pause = false,
   currentUrl?: string
 ): Promise<void> {
-  await persistSignedInBrowserState(sessionId).catch((error) => {
+  await persistSignedInBrowserState(sessionId, { currentUrl }).catch((error) => {
     log.warn('Failed to persist signed-in browser state before close', {
       sessionId,
       error: error instanceof Error ? error.message : String(error),

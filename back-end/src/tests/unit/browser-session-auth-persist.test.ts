@@ -6,6 +6,8 @@ import type { Browser } from 'playwright';
 import { prisma } from '../../providers/database';
 import {
   CLOUD_PERSISTENT_BROWSER_PROFILE,
+  collectHarvestableLocalStorage,
+  httpOriginFromUrl,
   persistSignedInBrowserState,
   persistSignedInBrowserStateTimeoutMs,
   remoteWsUrlLooksPersistable,
@@ -38,6 +40,10 @@ function fakeBrowser(state: {
           })),
           origins: state.origins ?? [],
         }),
+        pages: () => [],
+        newPage: async () => {
+          throw new Error('storageState already had harvestable origins; no probe expected');
+        },
       },
     ],
     close: async () => undefined,
@@ -170,6 +176,127 @@ async function harvestWritesCloudPersistentBundle(): Promise<void> {
   });
 }
 
+async function harvestReadsOpenPagesWhenStorageStateOmitsOrigins(): Promise<void> {
+  await withUser(async (userId) => {
+    const session = await createKernelSession(userId);
+    const result = await persistSignedInBrowserState(session.sessionId, {
+      browser: {
+        contexts: () => [
+          {
+            storageState: async () => ({
+              cookies: [
+                {
+                  name: 'session',
+                  value: 'kernel-auth',
+                  domain: '.example.com',
+                  path: '/',
+                  expires: Math.floor(Date.now() / 1000) + 3600,
+                  secure: false,
+                  httpOnly: false,
+                  sameSite: 'Lax' as const,
+                },
+              ],
+              origins: [],
+            }),
+            pages: () => [
+              {
+                url: () => 'https://example.com/account',
+                evaluate: async () => [{ name: 'rose_handoff', value: 'from-open-page' }],
+              },
+            ],
+            newPage: async () => {
+              throw new Error('open page already supplied the origin');
+            },
+          },
+        ],
+        close: async () => undefined,
+      } as unknown as Browser,
+    });
+    assert.equal(result.persisted, true);
+    assert.equal(result.localStorageOriginCount, 1);
+    const storage = await prisma.localStorageOrigin.findUniqueOrThrow({
+      where: { userId_origin: { userId, origin: 'https://example.com' } },
+    });
+    assert.deepEqual(storage.entries, [{ key: 'rose_handoff', value: 'from-open-page' }]);
+  });
+}
+
+async function harvestProbesKnownOriginAfterBlankTabs(): Promise<void> {
+  await withUser(async (userId) => {
+    const session = await createKernelSession(userId);
+    const result = await persistSignedInBrowserState(session.sessionId, {
+      currentUrl: 'https://example.com/checkout',
+      browser: {
+        contexts: () => [
+          {
+            storageState: async () => ({
+              cookies: [
+                {
+                  name: 'session',
+                  value: 'kernel-auth',
+                  domain: '.example.com',
+                  path: '/',
+                  expires: Math.floor(Date.now() / 1000) + 3600,
+                  secure: false,
+                  httpOnly: false,
+                  sameSite: 'Lax' as const,
+                },
+              ],
+              origins: [],
+            }),
+            pages: () => [{ url: () => 'about:blank', evaluate: async () => [] }],
+            newPage: async () => {
+              let current = 'about:blank';
+              return {
+                url: () => current,
+                route: async () => undefined,
+                goto: async (url: string) => {
+                  current = url;
+                },
+                evaluate: async () => [{ name: 'rose_handoff', value: 'from-probe' }],
+                close: async () => undefined,
+              };
+            },
+          },
+        ],
+        close: async () => undefined,
+      } as unknown as Browser,
+    });
+    assert.equal(result.persisted, true);
+    assert.equal(result.localStorageOriginCount, 1);
+    const storage = await prisma.localStorageOrigin.findUniqueOrThrow({
+      where: { userId_origin: { userId, origin: 'https://example.com' } },
+    });
+    assert.deepEqual(storage.entries, [{ key: 'rose_handoff', value: 'from-probe' }]);
+  });
+}
+
+async function collectHelpersCoverReconnectOrigins(): Promise<void> {
+  assert.equal(httpOriginFromUrl('https://example.com/path'), 'https://example.com');
+  assert.equal(httpOriginFromUrl('.example.com'), 'https://example.com');
+  assert.equal(httpOriginFromUrl('about:blank'), null);
+  const collected = await collectHarvestableLocalStorage(
+    {
+      pages: () => [
+        {
+          url: () => 'https://shop.example.com/cart',
+          evaluate: async () => [{ name: 'rose_handoff', value: 'open-tab' }],
+        },
+      ],
+      newPage: async () => {
+        throw new Error('page origin should not be probed again');
+      },
+    } as never,
+    ['https://shop.example.com']
+  );
+  assert.deepEqual(collected, [
+    {
+      origin: 'https://shop.example.com',
+      localStorage: [{ name: 'rose_handoff', value: 'open-tab' }],
+    },
+  ]);
+}
+
 async function fixtureWsUrlDoesNotHangClosePath(): Promise<void> {
   await withUser(async (userId) => {
     const session = await createKernelSession(userId);
@@ -183,6 +310,9 @@ async function main(): Promise<void> {
   await skipGates();
   await persistableUrlAllowlist();
   await harvestWritesCloudPersistentBundle();
+  await harvestReadsOpenPagesWhenStorageStateOmitsOrigins();
+  await harvestProbesKnownOriginAfterBlankTabs();
+  await collectHelpersCoverReconnectOrigins();
   await fixtureWsUrlDoesNotHangClosePath();
   process.stdout.write('browser-session-auth-persist: ok\n');
 }
