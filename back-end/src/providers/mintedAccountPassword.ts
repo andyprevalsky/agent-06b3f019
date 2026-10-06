@@ -23,8 +23,13 @@ export const MINTED_NEW_PASSWORD_REF = 'pwd:new';
 /** Saved-login rows created at sign-up carry this source, like "chrome" for synced ones. */
 export const MINTED_PASSWORD_BROWSER_SOURCE = 'agent_signup';
 
+// A dedicated secret keeps minted passwords stable across API-key rotations and
+// out of the shared service credential's blast radius; the API key remains the
+// fallback until every environment carries the dedicated key.
 function derivationKey(): string {
-  return process.env.BACKEND_API_KEY?.trim() ?? '';
+  return (
+    process.env.MINTED_PASSWORD_DERIVATION_KEY?.trim() || process.env.BACKEND_API_KEY?.trim() || ''
+  );
 }
 
 /** Deterministic per user and realm; null when this backend has no key to derive from. */
@@ -64,6 +69,16 @@ export async function saveMintedAccountPassword(
   const username = identity?.email ?? minted?.accountLabel ?? null;
   if (password === null || minted === null || minted.disabledAt !== null || username === null) {
     return { saved: false, username: null };
+  }
+  // A login the user synced from a browser for this site is theirs; typing
+  // pwd:new on a page never changes the site's real password, so it must not
+  // replace that row.
+  const existing = (await repo.findBrowserPasswords(userId)).find(
+    (row) => row.origin === origin && row.username === username
+  );
+  if (existing !== undefined && existing.browserSource !== MINTED_PASSWORD_BROWSER_SOURCE) {
+    log.info("Kept the user's saved login instead of the minted password", { userId, realm });
+    return { saved: false, username };
   }
   await repo.upsertSignupPassword({
     userId,

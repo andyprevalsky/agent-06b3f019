@@ -6399,6 +6399,17 @@ async def _spawn_browser_agent_activity_v3_real(
             # that was kept alive for them and end the task; ``finally`` posts
             # the terminal event that closes the FE chip.
             declined_session_id = (write_lock_resume_state or {}).get("session_id") or session_id
+            # The handoff may have replaced the provider session while the task
+            # was paused; close the task's current session, not just the saved id.
+            try:
+                current = await fetch_session_info(config, task_id)
+                declined_session_id = str(current.get("session_id") or declined_session_id or "")
+            except Exception as lookup_error:
+                logger.warning(
+                    "Could not look up the declined task's current session; closing the saved one",
+                    task_id=task_id,
+                    error=str(lookup_error),
+                )
             if declined_session_id:
                 await close_browser_session(config, declined_session_id, pause=False)
             logger.info("User declined auth assistance; ending browser task", task_id=task_id)

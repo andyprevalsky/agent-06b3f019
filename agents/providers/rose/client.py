@@ -1649,7 +1649,11 @@ class RoseClient:
             # API keys either -- gating only the OAuth routes left this hole,
             # through which a pinned run could still be served by gpt_auth_model.
             openai_api_key = _openai_api_key() if pool_spec.direct_auth_enabled else ""
-            if openai_api_key and not await _gpt_api_key_on_cooldown():
+            if (
+                openai_api_key
+                and model_key(pool_spec.gpt_auth_model) not in _skip_models
+                and not await _gpt_api_key_on_cooldown()
+            ):
                 active_route = "openai_apikey"
                 openai_yielded_any = False
                 try:
@@ -1730,6 +1734,7 @@ class RoseClient:
                 pool_spec.direct_auth_enabled
                 and not _exclude_anthropic_family
                 and anthropic_api_key
+                and model_key(pool_spec.claude_auth_model) not in _skip_models
                 and not await _anthropic_api_key_on_cooldown()
             ):
                 active_route = "anthropic_apikey"
@@ -1803,7 +1808,9 @@ class RoseClient:
             # Funded Azure fallback for the same GPT model and Responses shape
             # as the compute-token route. A pre-content failure continues to
             # OpenRouter; an interrupted visible response remains an error.
-            if foundry_configured(pool_spec):
+            # A model that was cut off at its output limit is excluded from every
+            # route that serves it, funded ones included (see truncation.py).
+            if foundry_configured(pool_spec) and model_key(pool_spec.gpt_auth_model) not in _skip_models:
                 active_route = "foundry"
                 foundry_yielded_any = False
                 try:

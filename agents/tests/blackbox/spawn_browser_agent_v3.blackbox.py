@@ -19502,11 +19502,13 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
     The decline used to be read as "the user signed in": the task reconnected to a
     signed-out page and asked the user again. Now it must not touch the session
     except to release it, and must report the decline as its (non-error) result.
+    The handoff may have replaced the provider session while the task was paused,
+    so the task's current session is what gets released, not the saved id.
     """
     from domains.spawn_browser_agent_v3.handler import AUTH_ASSISTANCE_DECLINED, spawn_browser_agent_activity_v3
 
     close_mock = AsyncMock()
-    fetch_mock = AsyncMock()
+    fetch_mock = AsyncMock(return_value={"session_id": "session-refreshed-by-auth-page"})
     resume_mock = AsyncMock()
     with (
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
@@ -19537,9 +19539,10 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
     assert result["status"] == "completed" and result["success"] is False, result
     assert result["user_declined_auth"] is True and result["task_id"] == "task-1", result
     assert result["message"] == "User declined to sign in to shop.example.", result
-    assert close_mock.await_count == 1 and close_mock.await_args.args[1] == "session-1"
+    assert close_mock.await_count == 1
+    assert close_mock.await_args.args[1] == "session-refreshed-by-auth-page", close_mock.await_args
     assert close_mock.await_args.kwargs == {"pause": False}
-    fetch_mock.assert_not_awaited()
+    assert fetch_mock.await_count == 1 and fetch_mock.await_args.args[1] == "task-1"
     resume_mock.assert_not_awaited()
 
 

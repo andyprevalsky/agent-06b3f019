@@ -205,8 +205,15 @@ export async function deleteFixtureCredentials(params: {
     browserSource: SAVED_PASSWORD_BROWSER_SOURCE,
     browserProfile: params.siteId,
   };
+  // Only this site's fixture inboxes (each address carries `.<siteId>@`): two
+  // benches can run at once for one benchmark user, and tearing one down must
+  // not take the other's email_otp option away mid-run.
   await prisma.emailIntegrationCredential.deleteMany({
-    where: { userId: params.userId, accessToken: FIXTURE_INBOX_TOKEN },
+    where: {
+      userId: params.userId,
+      accessToken: FIXTURE_INBOX_TOKEN,
+      email: { contains: `.${params.siteId}@` },
+    },
   });
   const [passwords, mintedAccounts, passkeys, cookies, cookieBundles] = await Promise.all([
     // Saved logins the fixture seeded, plus any the agent saved on one of this

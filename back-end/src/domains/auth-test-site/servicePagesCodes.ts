@@ -1,5 +1,6 @@
 /** Pages for the code, link and sign-up flows. */
 
+import { normalizeEmail } from './serviceSignIn';
 import { AUTH_TEST_SITE_NAME } from './config';
 import { siteUrl } from './service';
 import { banner, escapeHtml, layout, nextField, nextQuery, type NextPage } from './servicePages';
@@ -46,15 +47,18 @@ const CODE_PAGES: Record<CodePage, { verify: string; resend: string; label: stri
  * to an account") is only for addresses the site does not know. Hedging at a
  * known member made agents doubt the account instead of waiting for the code.
  */
-function codeNotice(site: AuthTestSite, page: CodePage, target: string): string {
+function codeNotice(site: AuthTestSite, page: CodePage, rawTarget: string): string {
   const digits = (value: string | null) => (value ?? '').replace(/\D/g, '');
+  // Match on the normalized address the agent typed (case, surrounding space),
+  // not the HTML-escaped display string, or a known member reads the hedge.
   const known = site.accounts.some(
     (account) =>
-      (account.email === target ||
-        (digits(account.phone) !== '' && digits(account.phone) === digits(target))) &&
+      (normalizeEmail(account.email) === normalizeEmail(rawTarget) ||
+        (digits(account.phone) !== '' && digits(account.phone) === digits(rawTarget))) &&
       account.verified &&
       !account.locked
   );
+  const target = escapeHtml(rawTarget);
   if (page === 'sms') {
     return known
       ? `We texted a 6-digit sign-in code to ${target}. It expires in 10 minutes.`
@@ -85,7 +89,7 @@ export function renderCodeEntryPage(
     site,
     'Enter your code',
     `    <h1>${page === 'sms' ? 'Check your phone' : 'Check your email'}</h1>
-    <p class="notice">${codeNotice(site, page, target)}</p>
+    <p class="notice">${codeNotice(site, page, options.target)}</p>
     ${banner('error', options.error)}
     <form method="post" action="${siteUrl(site, paths.verify)}">
       ${nextField(next)}

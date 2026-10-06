@@ -10,8 +10,10 @@
 import assert from 'node:assert';
 import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/sessionRecovery';
 import {
+  inFlightSteelSessionIds,
   isOwnedSteelSessionId,
   newOwnedSteelSessionId,
+  registerInFlightSteelSession,
   steelEnvironmentIdentity,
   steelOwnershipMarker,
 } from '../../providers/steel/sessionIdentity';
@@ -35,6 +37,16 @@ async function test(name: string, fn: () => void | Promise<void>): Promise<void>
 
 async function main(): Promise<void> {
   const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  await test('an in-flight registration only has to outlive setup', () => {
+    const sessionId = newOwnedSteelSessionId();
+    registerInFlightSteelSession(sessionId);
+    assert.ok(inFlightSteelSessionIds().has(sessionId));
+    assert.ok(inFlightSteelSessionIds(Date.now() + 19 * 60 * 1000).has(sessionId));
+    // A committed BrowserSession row holds the session from then on; a stale
+    // entry must not keep growing the map or shield the session from the reaper.
+    assert.ok(!inFlightSteelSessionIds(Date.now() + 21 * 60 * 1000).has(sessionId));
+  });
 
   await test('each environment gets its own marker, production first', () => {
     assert.strictEqual(

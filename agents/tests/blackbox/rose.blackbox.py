@@ -5481,6 +5481,11 @@ async def test_collect_retries_a_cut_off_reply_with_a_larger_limit_then_the_next
     ], seen
     assert response.content == '{"answer":"ok"}', response.content
     assert response.actual_model == "google/gemini-3.8-flash", response.actual_model
+    # The two abandoned attempts were real spend: their tokens ride on the final
+    # usage, per attempt with the model that produced them.
+    assert response.usage.get("prompt_tokens") == 15, response.usage
+    assert response.usage.get("completion_tokens") == 27, response.usage
+    assert len(response.usage.get("abandoned_attempts") or []) == 2, response.usage
     assert response.usage.get("finish_reason") == "stop", response.usage
 
 

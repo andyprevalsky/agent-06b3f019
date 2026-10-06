@@ -89,12 +89,17 @@ async def recover_truncated(
     remaining: List[str] = (["larger_limit"] if larger else []) + ["next_model"]
     current = dict(kwargs)
     skipped: FrozenSet[str] = frozenset()
+    # Tokens the abandoned attempts consumed are real spend; they ride on the
+    # final usage chunk (per attempt, with the model that produced them) so the
+    # ledgers see the whole call rather than its last attempt.
+    abandoned: List[Dict[str, Any]] = []
 
     while True:
         held: List[StreamChunk] = []
         actual_model = ""
         finish_reason = ""
         completion_tokens = 0
+        prompt_tokens = 0
         saw_tool_call = False
         async with aclosing(attempt(**current)) as stream:
             async for chunk in stream:
@@ -105,6 +110,7 @@ async def recover_truncated(
                 elif chunk.kind == "usage":
                     finish_reason = str(chunk.data.get("finish_reason") or "")
                     completion_tokens = int(chunk.data.get("completion_tokens") or 0)
+                    prompt_tokens = int(chunk.data.get("prompt_tokens") or 0)
                 if chunk.kind in ("usage", "done"):
                     held.append(chunk)
                     continue
@@ -124,9 +130,37 @@ async def recover_truncated(
                     out_of_time=out_of_time,
                 )
             for chunk in held:
+                if chunk.kind == "usage" and abandoned:
+                    chunk = StreamChunk(
+                        kind="usage",
+                        data={
+                            **chunk.data,
+                            "prompt_tokens": int(chunk.data.get("prompt_tokens") or 0)
+                            + sum(item["prompt_tokens"] for item in abandoned),
+                            "completion_tokens": int(chunk.data.get("completion_tokens") or 0)
+                            + sum(item["completion_tokens"] for item in abandoned),
+                            "abandoned_attempts": list(abandoned),
+                        },
+                    )
                 yield chunk
             return
 
+        abandoned.append(
+            {
+                "model": actual_model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+        )
+        # Codex-style Responses routes (direct GPT, the funded OpenAI key,
+        # Foundry) send no output limit at all, so a larger limit changes
+        # nothing for them; go straight to the next model.
+        if "larger_limit" in remaining and actual_model.endswith(("-gpt", "-openai", "-foundry")):
+            remaining.remove("larger_limit")
+            if not remaining:
+                for chunk in held:
+                    yield chunk
+                return
         stage = remaining.pop(0)
         if stage == "next_model":
             skipped = skipped | {model_key(actual_model)}

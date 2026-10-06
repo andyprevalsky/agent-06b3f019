@@ -28,7 +28,11 @@ import {
   validateBrowserConnection,
 } from './sessionConnection';
 import { steelSessionTimeoutMs } from './sessionLifetime';
-import { newOwnedSteelSessionId, registerInFlightSteelSession } from './sessionIdentity';
+import {
+  newOwnedSteelSessionId,
+  registerInFlightSteelSession,
+  unregisterInFlightSteelSession,
+} from './sessionIdentity';
 import { steelCdpConnectionUrl } from './urls';
 
 function hasValue(value: string | null | undefined): value is string {
@@ -291,6 +295,7 @@ export async function recreateSession(
       });
       if (replaced.count !== 1) throw new ConcurrentSessionReplacementError(taskId);
       committed = true;
+      unregisterInFlightSteelSession(session.id);
 
       if (
         profile.persistProfile &&

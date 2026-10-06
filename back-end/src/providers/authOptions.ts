@@ -276,12 +276,15 @@ async function ensureMintedIdentity(
   existingIdentity: AgentIdentityRow,
   existingMintedAccount: Awaited<ReturnType<typeof repo.findMintedAccount>>
 ): Promise<AgentIdentityRow> {
-  const inFlight = identityMints.get(userId);
+  // Callers that already hold a minted account label must not inherit a mint
+  // that started without one, or the fresh inbox no longer matches their label.
+  const key = `${userId}|${existingMintedAccount?.accountLabel ?? ''}`;
+  const inFlight = identityMints.get(key);
   if (inFlight !== undefined) return inFlight;
   const mint = mintIdentity(userId, existingIdentity, existingMintedAccount).finally(() => {
-    identityMints.delete(userId);
+    identityMints.delete(key);
   });
-  identityMints.set(userId, mint);
+  identityMints.set(key, mint);
   return mint;
 }
 

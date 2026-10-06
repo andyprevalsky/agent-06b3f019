@@ -478,17 +478,17 @@ async def fetch_recent_otps(user_id: str, api_url: str, api_key: str) -> List[Ex
         seen_codes: set[str] = set()
         for email in emails:
             body_text = _email_otp_search_text(email)
-            if not body_text:
-                continue
-
-            code = extract_otp_from_text(body_text)
+            code = extract_otp_from_text(body_text) if body_text else None
             # A mail to the agent's own inbox that carries no code may carry the
-            # sign-in link a site sent instead; it is keyed by its message id.
+            # sign-in link a site sent instead (an HTML-only mail has no
+            # searchable text at all); it is keyed by its message id.
             links: List[str] = []
             if not code and MINTED_INBOX_LABEL in (email.get("labels") or []):
                 links = extract_email_links(email)
                 if links:
                     code = f"link:{email.get('id') or email.get('messageId') or links[0]}"
+            if not body_text and not code:
+                continue
             if code:
                 if code in seen_codes:
                     continue
@@ -627,6 +627,9 @@ def mask_secret_values(value: Any, secret_refs: Optional[Dict[str, str]]) -> Any
 # Dev tunnel hosts fronting a local stack; only these (plus localhost) may
 # override their realm with ?authRealm=. Keep in sync with the backend's
 # canonicalAuthRealm (back-end/src/providers/authRealm.ts).
+# Hosted benchmark fixture realms (back-end/src/domains/auth-test-site).
+FIXTURE_REALM_PATTERN = re.compile(r"^rose-shop-[0-9a-z]+(?:\.[a-z]+)?$")
+
 AUTH_REALM_OVERRIDE_HOST_SUFFIXES = (
     ".ngrok-free.dev",
     ".ngrok-free.app",
@@ -653,13 +656,15 @@ def auth_realm_from_url(url: str) -> str:
     host = (parsed.hostname or parsed.path.split("/")[0]).lower()
     if host.startswith("www."):
         host = host[4:]
-    allow_query_override = host in {"localhost", "127.0.0.1"} or host.endswith(AUTH_REALM_OVERRIDE_HOST_SUFFIXES)
-    if allow_query_override:
+    local_host = host in {"localhost", "127.0.0.1"}
+    if local_host or host.endswith(AUTH_REALM_OVERRIDE_HOST_SUFFIXES):
         query = parse_qs(parsed.query)
         override = (query.get("authRealm") or query.get("auth_realm") or [""])[0]
         if override:
             override_host = auth_realm_from_url(override)
-            if override_host:
+            # Anyone can open a tunnel on these domains, so a tunnel may only
+            # claim a hosted-fixture realm, never a real site's credentials.
+            if override_host and (local_host or FIXTURE_REALM_PATTERN.match(override_host)):
                 return override_host
     if host == "aws.amazon.com" or host.endswith(".aws.amazon.com"):
         return "aws.amazon.com"

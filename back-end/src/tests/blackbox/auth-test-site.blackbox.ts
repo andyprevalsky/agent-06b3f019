@@ -130,6 +130,12 @@ test('dev tunnel hosts honor authRealm overrides; ordinary hosts do not', async 
   }
   const spoofed = canonicalAuthRealm('https://shop.example.com/?authRealm=amazon.com');
   assert(spoofed === 'example.com', `public hosts must ignore override, got ${spoofed}`);
+  // Anyone can open a tunnel on these domains: a tunnel may stand in for a
+  // hosted fixture, never claim a real site's saved logins or passkeys.
+  const tunnelSpoof = canonicalAuthRealm('https://x.trycloudflare.com/?authRealm=bank.com');
+  assert(tunnelSpoof !== 'bank.com', `tunnels must not claim a real realm, got ${tunnelSpoof}`);
+  const local = canonicalAuthRealm('http://localhost:3000/?authRealm=doordash.com');
+  assert(local === 'doordash.com', `the developer's own stack keeps any realm, got ${local}`);
 });
 
 test('nothing the agent can see says the site is a test', async () => {

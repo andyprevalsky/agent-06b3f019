@@ -50,6 +50,10 @@ export function isOwnedSteelSessionId(
 }
 
 // Sessions this process is still setting up or using without a BrowserSession row.
+// Once the row commits it holds the session, so an entry only has to outlive
+// setup; entries older than this are dropped so the map cannot grow with every
+// committed session and the reaper never skips a session on a stale entry.
+const IN_FLIGHT_TTL_MS = 20 * 60 * 1000;
 const inFlight = new Map<string, number>();
 
 export function registerInFlightSteelSession(sessionId: string): void {
@@ -60,6 +64,9 @@ export function unregisterInFlightSteelSession(sessionId: string): void {
   inFlight.delete(sessionId);
 }
 
-export function inFlightSteelSessionIds(): ReadonlySet<string> {
+export function inFlightSteelSessionIds(now: number = Date.now()): ReadonlySet<string> {
+  for (const [sessionId, registeredAt] of inFlight) {
+    if (now - registeredAt > IN_FLIGHT_TTL_MS) inFlight.delete(sessionId);
+  }
   return new Set(inFlight.keys());
 }
