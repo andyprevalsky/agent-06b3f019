@@ -10,22 +10,141 @@ python3 - <<'PY'
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
+import urllib.request
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+from urllib.response import addinfourl
 
 path = Path("scripts/publish_evidence_links.py")
 spec = importlib.util.spec_from_file_location("publish_evidence_links", path)
 mod = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(mod)
+dual_spec = importlib.util.spec_from_file_location(
+    "dual_write_route_control", Path("scripts/dual_write_claude_code_sessions.py")
+)
+dual_mod = importlib.util.module_from_spec(dual_spec)
+assert dual_spec.loader is not None
+dual_spec.loader.exec_module(dual_mod)
+
+# Exercise the production opener and probe without creating a socket. The
+# terminal transport sees the route after urllib's real ProxyHandler runs.
+def check_inherited_proxy_routing() -> None:
+    proxy_keys = tuple(
+        key for stem in ("HTTP", "HTTPS", "ALL", "NO")
+        for key in (stem + "_PROXY", stem.lower() + "_proxy")
+    )
+    before = {key: os.environ.get(key) for key in proxy_keys}
+    requests = []
+    session_output = "synthetic-session-output-with-at-least-32-characters"
+
+    class SyntheticTransport(urllib.request.BaseHandler):
+        handler_order = 400
+
+        def http_open(self, request):
+            requests.append((request.full_url, request.host, request.get_method()))
+            headers = Message()
+            redirect = request.full_url.startswith("http://localhost:8766/redirect")
+            if redirect:
+                headers["Location"] = "https://evidence.example.invalid/redirected"
+            response = addinfourl(
+                io.BytesIO(json.dumps({"output": session_output}).encode()),
+                headers, request.full_url, 302 if redirect else 200,
+            )
+            response.msg = "OK"
+            return response
+
+        https_open = http_open
+
+    build_opener = urllib.request.build_opener
+
+    def isolated_opener(*handlers):
+        return build_opener(*handlers, SyntheticTransport())
+
+    cases = (
+        ("http://evidence.example.invalid/recording", "fixture-proxy.invalid:8765"),
+        ("https://evidence.example.invalid/recording", "fixture-proxy.invalid:8765"),
+        ("https://localhost.external.invalid/recording", "fixture-proxy.invalid:8765"),
+        ("http://localhost:8766/recording", "localhost:8766"),
+        ("http://127.0.0.1:8766/recording", "127.0.0.1:8766"),
+        ("http://[::1]:8766/recording", "[::1]:8766"),
+        ("https://bypass.example.invalid/recording", "bypass.example.invalid"),
+    )
+    with (
+        patch.object(urllib.request, "build_opener", isolated_opener),
+        patch.object(
+            urllib.request, "getproxies",
+            return_value={
+                "http": "http://fixture-proxy.invalid:8765",
+                "https": "http://fixture-proxy.invalid:8765",
+            },
+        ),
+        patch.object(
+            urllib.request, "proxy_bypass",
+            side_effect=lambda host: host == "bypass.example.invalid",
+        ),
+    ):
+        for url, expected in cases:
+            assert mod._probe_recording_view_url(url, timeout=1)
+        for url, expected in cases[:3]:
+            request = urllib.request.Request(url, data=b"synthetic-probe", method="POST")
+            with mod._opener().open(request, timeout=1) as response:
+                assert response.status == 200
+        assert mod._probe_recording_view_url("http://localhost:8766/redirect", timeout=1)
+        for url, expected in cases + (("http://localhost:8766/redirect", "localhost:8766"),):
+            with (
+                patch.object(dual_mod, "load_backend_env", return_value={}),
+                patch.object(
+                    dual_mod.os, "getenv",
+                    side_effect=lambda key, default=None: {
+                        "BENCHMARK_HUB_UPLOAD_URL": url,
+                        "BACKEND_API_KEY": "fixture-key",
+                    }.get(key, default),
+                ),
+            ):
+                assert dual_mod.verify_session_on_hub("fixture-session") == len(session_output)
+    assert {key: os.environ.get(key) for key in proxy_keys} == before
+    expected_routes = cases + cases[:3] + (
+        ("http://localhost:8766/redirect", "localhost:8766"),
+        ("https://evidence.example.invalid/redirected", "fixture-proxy.invalid:8765"),
+    )
+    helper_routes = tuple(
+        (url + "/api/claude-code-session/fixture-session", expected)
+        for url, expected in cases
+    ) + (
+        ("http://localhost:8766/redirect/api/claude-code-session/fixture-session", "localhost:8766"),
+        ("https://evidence.example.invalid/redirected", "fixture-proxy.invalid:8765"),
+    )
+    assert len(requests) == len(expected_routes) + len(helper_routes)
+    results = [
+        {"url": url, "expected_route_used": host == expected, "method": method}
+        for (url, host, method), (_, expected)
+        in zip(requests[:len(expected_routes)], expected_routes, strict=True)
+    ]
+    assert all(row["expected_route_used"] for row in results), (
+        "publisher lost configured/default external proxy routing", results
+    )
+    helper_results = [
+        {"url": url, "expected_route_used": host == expected, "method": method}
+        for (url, host, method), (_, expected)
+        in zip(requests[len(expected_routes):], helper_routes, strict=True)
+    ]
+    assert all(row["expected_route_used"] for row in helper_results), (
+        "dual-write verifier lost configured/default external proxy routing", helper_results
+    )
+
+
+check_inherited_proxy_routing()
 
 # Run the real verifier with only the declared backend package available.
 # Stop at launch so this control cannot allocate a browser or reach the network.

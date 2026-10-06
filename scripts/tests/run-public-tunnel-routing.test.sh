@@ -58,6 +58,28 @@ grep -qE 'supervised_edge_probe "\$url" -4' "$TMP/fn.sh" \
 grep -qE 'curl "\$@"' "$TMP/fn.sh" \
   || fail "supervised_edge_probe must forward curl args (including -4) via curl \"\$@\""
 
+# Model the response headers at the actual curl boundary, including a proxy's
+# CONNECT response followed by an unrelated block page.
+cat > "$TMP/edge-headers.sh" <<'STUB'
+#!/usr/bin/env bash
+status="$1"; shift
+headers=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in -D|--dump-header) headers="$2"; shift ;; esac
+  shift
+done
+[ -n "$headers" ] || exit 0
+case "${EDGE_RESPONSE_IDENTITY:-cloudflare}" in
+  cloudflare)
+    printf 'HTTP/1.1 %s Fixture\r\nServer: cloudflare\r\nCF-Ray: 0123456789abcdef-SJC\r\n\r\n' "$status" > "$headers" ;;
+  proxy)
+    printf 'HTTP/1.1 %s Blocked\r\nServer: fixture-blocker\r\n\r\n' "$status" > "$headers" ;;
+  proxy-after-connect)
+    printf 'HTTP/1.1 200 Connection established\r\nServer: cloudflare\r\nCF-Ray: 0123456789abcdef-SJC\r\n\r\nHTTP/1.1 %s Blocked\r\nServer: fixture-blocker\r\n\r\n' "$status" > "$headers" ;;
+  *) exit 98 ;;
+esac
+STUB
+
 # The public-edge probe must retain inherited proxy configuration.
 mkdir "$TMP/proxy-control"
 cat > "$TMP/proxy-control/curl" <<'STUB'
@@ -68,10 +90,11 @@ done
 for key in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy; do
   [ "${!key}" = "fixture-proxy-setting" ] || exit 30
 done
+bash "$EDGE_HEADERS_WRITER" 200 "$@"
 printf '200'
 STUB
 chmod +x "$TMP/proxy-control/curl"
-status="$(HTTP_PROXY=fixture-proxy-setting HTTPS_PROXY=fixture-proxy-setting ALL_PROXY=fixture-proxy-setting \
+status="$(EDGE_HEADERS_WRITER="$TMP/edge-headers.sh" HTTP_PROXY=fixture-proxy-setting HTTPS_PROXY=fixture-proxy-setting ALL_PROXY=fixture-proxy-setting \
   http_proxy=fixture-proxy-setting https_proxy=fixture-proxy-setting all_proxy=fixture-proxy-setting \
   NO_PROXY=fixture-proxy-setting no_proxy=fixture-proxy-setting PATH="$TMP/proxy-control:$PATH" \
   bash -c 'source "$1"; supervised_edge_probe https://fixture.invalid -4' fixture "$TMP/fn.sh")"
@@ -94,7 +117,9 @@ printf '%s\n' "$n" > "$TMPDIR_FOR_STUB/calls"
 total=$(wc -l < "$TMPDIR_FOR_STUB/statuses" | tr -d ' ')
 idx=$n
 [ "$idx" -gt "$total" ] && idx=$total
-sed -n "${idx}p" "$TMPDIR_FOR_STUB/statuses"
+status="$(sed -n "${idx}p" "$TMPDIR_FOR_STUB/statuses")"
+bash "$TMPDIR_FOR_STUB/edge-headers.sh" "$status" "$@"
+printf '%s' "$status"
 STUB
   chmod +x "$TMP/curl"
 
@@ -120,6 +145,21 @@ echo "PASS: HTTP 502 counts as routing (origin not started is not a dead tunnel)
 # --- case 3: 404 is routing -------------------------------------------------
 run_routing_check 10 404 || fail "case 3: HTTP 404 must count as routing"
 echo "PASS: HTTP 404 counts as routing"
+
+# An HTTP response through the configured proxy is not necessarily the tunnel.
+# Keep the real probe, its watchdog and all inherited proxy settings unchanged.
+for blocked_status in 200 403; do
+  if EDGE_RESPONSE_IDENTITY=proxy CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=0 \
+      run_routing_check 2 "$blocked_status"; then
+    fail "edge identity: proxy HTTP $blocked_status must not count as tunnel routing"
+  fi
+done
+echo "PASS: proxy HTTP 200 and 403 block pages are rejected"
+if EDGE_RESPONSE_IDENTITY=proxy-after-connect CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=0 \
+    run_routing_check 2 403; then
+  fail "edge identity: earlier CONNECT headers must not certify the final block page"
+fi
+echo "PASS: only the final HTTP response identifies the intended tunnel edge"
 
 # --- case 4: Cloudflare's no-live-route response is rejected ----------------
 started=$SECONDS
@@ -321,13 +361,15 @@ cat > "$TMP/dns/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DNS_STATE/edge_args"
 case "$*" in *--resolve*|*--connect-to*|*--noproxy*) exit 97 ;; esac
-[ "$EDGE_MODE" = dead ] && { printf '530'; exit 0; }
-[ "$EDGE_MODE" = blocked ] && { printf '000'; exit 0; }
-if [ $(( $(date +%s) - $(cat "$DNS_STATE/started") )) -lt 3 ]; then
-  printf '000'
+if [ "$EDGE_MODE" = dead ]; then
+  status=530
+elif [ "$EDGE_MODE" = blocked ] || [ $(( $(date +%s) - $(cat "$DNS_STATE/started") )) -lt 3 ]; then
+  status=000
 else
-  printf '502'
+  status=502
 fi
+bash "$EDGE_HEADERS_WRITER" "$status" "$@"
+printf '%s' "$status"
 STUB
 for tool in getent dig; do
   cat > "$TMP/dns/bin/$tool" <<'STUB'
@@ -340,7 +382,7 @@ chmod +x "$TMP/dns/bin/"*
 run_dns_case() { # <route outcome> <section seconds>
   rm -rf "$TMP/dns/state"; mkdir -p "$TMP/dns/state"
   date +%s > "$TMP/dns/state/started"
-  PATH="$TMP/dns/bin:$PATH" DNS_STATE="$TMP/dns/state" EDGE_MODE="$1" \
+  EDGE_HEADERS_WRITER="$TMP/edge-headers.sh" PATH="$TMP/dns/bin:$PATH" DNS_STATE="$TMP/dns/state" EDGE_MODE="$1" \
     CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS="$2" CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=1 \
     bash -c 'set -euo pipefail; source "$1"; cloudflare_tunnel_edge_is_routing https://race.trycloudflare.com' \
     _ "$TMP/fn.sh" > "$TMP/dns/state/out"

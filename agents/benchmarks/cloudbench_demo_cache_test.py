@@ -162,20 +162,29 @@ def test_demo_cache_probe_handoff_is_ephemeral_and_reaches_stack(read_only):
     }
 
 
-def test_demo_cache_probe_legacy_wrapper_preserves_process_scoped_guard():
+@pytest.mark.parametrize("probe,inherited_transport", [("1", None), (None, "1"), (None, None)])
+def test_demo_cache_probe_legacy_wrapper_preserves_process_scoped_guard(probe, inherited_transport):
     cloud = (ROOT / "scripts/run-bench-cloud").read_text()
     start = cloud.index('    if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then')
     export = cloud[start : cloud.index("    fi", start) + len("    fi")]
+    driver = (ROOT / "scripts/cloudbench-run.sh").read_text()
+    start = driver.index('if [ "${CLOUDBENCH_FAST_CACHE_READ_ONLY:-}" = 1 ]; then')
+    consumer = driver[start : driver.index("\nfi", start) + len("\nfi")]
+    inherited = f"export {TRANSPORT}=1" if inherited_transport else f"unset {TRANSPORT}"
     received = shell_json(
         "exports=$(\n"
         + export
         + "\n)\n"
         + f"unset {PROBE}\n"
+        + inherited
+        + "\n"
         + 'eval "$exports"\n'
-        + f"python3 -c 'import json,os; print(json.dumps(dict(value=os.environ.get(\"{TRANSPORT}\"))))'",
-        {PROBE: "1"},
+        + consumer
+        + "\npython3 - <<'PY'\nimport json,os\n"
+        + f"print(json.dumps({{k:os.environ.get(k) for k in {repr([TRANSPORT, READ_ONLY, PROBE])}}}))\nPY",
+        {PROBE: probe} if probe is not None else {},
     )
-    assert received == {"value": "1"}
+    assert received == {TRANSPORT: probe, READ_ONLY: probe, PROBE: probe}
 
 
 def test_demo_cache_probe_rejects_demo_tag_without_runtime_replay_admission(tmp_path):

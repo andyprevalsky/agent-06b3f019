@@ -1003,6 +1003,11 @@ ordinary ceiling 56 cannot hold this current cohort, and ceiling 88 leaves only
 two worker slots. This profile creates no idle resources and changes no default
 ceiling, shared-CPU governor or production headroom. `--strict-barrier` keeps all
 50 copies in one ready cohort; controller occupancy does not prove execution overlap.
+The default mass-task primary uses `shared-cpu-2x` / 4 GB; its optional worker
+uses `performance-1x` / 2 GB. Fifty primaries add 100 active shared CPU units.
+The unchanged governor keeps 20 of 160 shared units for production, leaving
+140 for this app. Native CPU kinds/counts and live workstream reservations
+must fit as well as the Machine count; the CLI rechecks both during admission.
 
 Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
 seconds, then follow each job log's exact printed fleet-monitor handle through
@@ -1036,6 +1041,11 @@ provider Fast Mode, task, evaluator and cleanup contracts remain unchanged.
 Compact CLI, replay-hit/miss, scope and pooled-handoff controls run in the
 existing `benchmark-live-results.test.py` deploy gate; this large diagnostic
 is only for an explicit user request.
+Both boot and legacy SSH handoff clear replay-only state before ordinary runs.
+External evidence requests, including redirects from loopback, follow the
+configured/default proxy route; exact loopback requests stay local. The existing
+demo-handoff, publisher-browser and Claude-session dual-write quick tests own
+these boundaries in the normal deploy gates.
 
 **Monitor every cloud launch:** the detached launcher prints the private log
 and exact controller exit marker. Its controller log's "Monitor this exact fleet"

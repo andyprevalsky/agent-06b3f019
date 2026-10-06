@@ -10,6 +10,7 @@ first_bad_boundary: RoseClient.complete entered its LIVE implementation when the
 symptoms:
   - an opted-in isolated replay probe invokes the real provider boundary after unresolved cache context
   - browser bypass and non-DEMO miss routes also escape a generic cache-write-disable flag
+  - an ordinary legacy SSH run inherits CLOUDBENCH_FAST_CACHE_READ_ONLY=1 and disables cache write-through
 tags:
   - fast-cache
   - demo
@@ -18,6 +19,7 @@ tags:
   - cli
 sources:
   - PR #1299
+  - PR #1419
 repro: agents/tests/fast_cache/test_fast_cache.py::test_demo_cache_probe_refuses_unresolved_or_uncached_live_provider
 status: fixed
 ---
@@ -112,6 +114,37 @@ and every cached diagnostic earns zero LIVE acceptance credit.
 At ten thousand agents the central guard is a constant-time branch only for
 the explicit isolated diagnostic. It adds no provider probes, polling, global
 locks or model calls. Ordinary runtime behavior remains unchanged.
+
+### 2026-10-06: the legacy handoff did not clear a prior replay marker
+
+CodeRabbit comment `4192570786` on `ec586779280340df50c3d9ece34015716eceab61`
+found a recurrence of the process-ownership contract. Ordinary boot launches
+already cleared the pooled Machine's auxiliary transport slot, but the legacy
+SSH wrapper emitted an export only for an explicit replay and no unset for an
+ordinary run. The real guest consumer therefore promoted an inherited
+`CLOUDBENCH_FAST_CACHE_READ_ONLY=1` into the write guard and replay marker.
+This is owning-boundary evidence, not a claim of observed provider spend or a
+new task failure.
+
+Archive searches used `CLOUDBENCH_FAST_CACHE_READ_ONLY legacy wrapper ordinary
+pooled` and `read only DEMO probe persists machine cache write through`. The
+earlier boot-handoff test held; the legacy test covered only explicit replay.
+The existing legacy control now generates the real wrapper, injects stale
+guest state, and executes the actual guest consumer. From `agents/`, the same
+`venv/bin/python3 -m pytest -q benchmarks/cloudbench_demo_cache_test.py -k
+legacy_wrapper_preserves_process_scoped_guard` produced **1 failed, 2 passed,
+16 deselected in 0.12s**, then **3 passed, 16 deselected in 0.10s**, with
+identical test bytes. The fix adds an explicit transport unset for ordinary
+legacy handoffs; it adds no persistent state, API calls or cache-policy changes.
+
+The normal unconditional compact deploy owner selects all nineteen demo-cache
+cases and passed **176 passed, 861 deselected in 60.14s**. Private receipts live
+under `.context/fresh-deploy-group4-20261006/review-continuation/` as
+`cache-permanent-{red,green}.safe.json` and `normal-quick-fix-batch.safe.json`.
+At ten thousand agents this remains one constant-size wrapper instruction per
+owned launch, with no new polling, locks or model calls. Removing the legacy
+handoff would discard supported guest lifecycle behavior; clearing its stale
+auxiliary state resolves the demonstrated contract without a second policy.
 
 ## Human feedback
 

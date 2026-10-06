@@ -1512,9 +1512,10 @@ supervised_edge_probe() {
     shift
     local curl_timeout="${CLOUDFLARE_TUNNEL_CURL_TIMEOUT_SECONDS:-5}"
     [[ "$curl_timeout" =~ ^[1-9][0-9]*$ ]] || curl_timeout=5
-    local status_file probe_pid probe_deadline status
+    local status_file headers_file probe_pid probe_deadline status
     status_file="$(mktemp "${TMPDIR:-/tmp}/rose-cloudflare-edge.XXXXXX")"
-    curl "$@" -s -o /dev/null -w '%{http_code}' \
+    headers_file="$(mktemp "${TMPDIR:-/tmp}/rose-cloudflare-edge-headers.XXXXXX")"
+    curl "$@" -s -o /dev/null -D "$headers_file" -w '%{http_code}' \
         --connect-timeout "$curl_timeout" --max-time "$curl_timeout" "$url" \
         >"$status_file" 2>/dev/null &
     probe_pid=$!
@@ -1530,7 +1531,30 @@ supervised_edge_probe() {
     done
     wait "$probe_pid" 2>/dev/null || true
     status="$(cat "$status_file" 2>/dev/null || true)"
-    rm -f "$status_file"
+    # A configured proxy can answer with its own block page. Only the final
+    # HTTP response identifies the edge; a proxy CONNECT response is earlier.
+    if [ -n "$status" ] && [ "$status" != "000" ] && ! awk -v expected_status="$status" '
+        {
+            line = tolower($0)
+            sub(/\r$/, "", line)
+            if (line ~ /^http\/[0-9.]+[ \t]+[0-9][0-9][0-9]([ \t]|$)/) {
+                split(line, fields, /[ \t]+/)
+                response_status = fields[2]
+                server = ray = 0
+                in_headers = 1
+            } else if (line == "") {
+                in_headers = 0
+            } else if (in_headers && line ~ /^server:[ \t]*cloudflare[ \t]*$/) {
+                server = 1
+            } else if (in_headers && line ~ /^cf-ray:[ \t]*[^ \t]+/) {
+                ray = 1
+            }
+        }
+        END { exit !(response_status == expected_status && server && ray) }
+    ' "$headers_file"; then
+        status=000
+    fi
+    rm -f "$status_file" "$headers_file"
     printf '%s' "$status"
 }
 

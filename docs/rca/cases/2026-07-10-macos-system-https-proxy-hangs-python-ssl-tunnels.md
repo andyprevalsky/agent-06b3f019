@@ -96,3 +96,44 @@ app-shell marker, and failing 511/200 interstitial inverses. Independent review
 approved the two-file repair. The original failed log and successful rerun are
 private; this routing finding is not attributed as the cause of the separate
 Hub SQL admission failure and earns no fleet speedup credit.
+
+The October 6 durable-evidence publication preparation found another inherited
+bypass before any publication request was made: `publish_evidence_links.py`
+constructed an empty `ProxyHandler` for every request, including external Hub,
+frontend, and recording URLs. This finding does not establish a transport
+failure or explain the separate Hub admission failure. The completed smoke
+(8/8, 1065.305 seconds) and AgentCard sandbox (4/4, 899.107 seconds) runs retain
+their original source and cleanup receipts.
+
+The existing automatic browser-validation suite now exercises the actual opener
+and recording probe through an in-memory terminal HTTP/HTTPS transport. Against
+the unchanged publisher, six external GET/POST routes ignored the configured
+proxy, including a `localhost.external.invalid` inverse; three exact loopback
+routes and a configured external proxy exception passed. The permanent control
+failed in 0.078 seconds. An initial URL-scoped repair passed the same ten route
+assertions and full browser owner in 0.636 seconds. Independent review then
+followed a real urllib 302 redirect from loopback to an external recording URL:
+the initial opener retained its direct transport for the redirected request.
+The permanent redirect inverse failed in 0.065 seconds, then the same owner
+passed in 0.638 seconds after moving exact-loopback handling into the standard
+configured `ProxyHandler` on each request. All other requests, including
+redirects, delegate to ordinary proxy discovery and configured exceptions.
+
+The normal publisher's adjacent session verifier had the same external bypass.
+Its actual verification request failed the expanded owning control in 0.067
+seconds before correction. The same automatic browser owner now checks that
+verifier's response extraction, external and exact-loopback routes, configured
+exception, and real redirect; the existing durable owner, including composite
+projection, passed in 1.173 seconds. These synthetic transport controls made no
+outbound request and preserved all eight proxy environment values, including
+absence. No Freedom, task, model, evaluator, or execution-budget setting changed.
+
+All four actual AgentCard roots were published through the normal CLI in
+36.020 seconds, with fresh-browser transcript, status, recording, and HTTPS dump
+verification. Their publication receipts retain the initial repair's source
+hash: each actual request began at an external URL and used ordinary proxy
+routing; the later loopback-redirect defect was not on those paths. No
+publication was repeated merely to change its source hash. Signing parameters
+remain private, while safe receipts contain canonical agent-ID URLs and dump
+hashes. Durable links still require the normal publisher's actual renderer,
+status, and recording checks.
