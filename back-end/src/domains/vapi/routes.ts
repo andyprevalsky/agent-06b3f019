@@ -2,12 +2,16 @@ import { Router, type Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { authenticate, type AuthRequest } from '../../providers/auth';
 import * as service from './service';
-import { VapiNotConfiguredError, VapiApiError } from './service';
+import { VapiNotConfiguredError, VapiApiError } from './vapiClientService';
+import holdRouter from './routesHold';
 import type { CreateCallRequest } from './types';
 import { createLogger } from '../../providers/logger';
 
 const log = createLogger('Vapi');
 const router = Router();
+
+// Twilio/Vapi hold webhooks; each URL carries a per-session HMAC token.
+router.use('/hold', holdRouter);
 
 /**
  * Initiate an outbound phone call via Vapi

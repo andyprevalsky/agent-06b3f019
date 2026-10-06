@@ -1,11 +1,12 @@
 import {
   VAPI_BASE_URL,
-  VAPI_PRIVATE_KEY,
   OUTBOUND_PHONE_NUMBER_POOL,
   BASE_SYSTEM_PROMPT,
   buildCallAssistantConfig,
-  isHoldQueuePrompt,
   isIvrNavigationPrompt,
+  resolveHoldRuntimeConfig,
+  type HoldRuntimeConfig,
+  type OutboundPhoneNumber,
 } from './config';
 import type { CreateCallRequest, VapiCallResponse } from './types';
 import { logJson, logTruncate } from '../../utils/log';
@@ -26,40 +27,33 @@ import {
   archiveVapiPollResult,
   buildVapiPollExchange,
 } from './archive';
+import { placeHoldCapableCall, type HoldCallPlacement } from './holdService';
+import { getHoldCallStatus } from './holdStatusService';
+import { TwilioApiError } from './holdTelephonyService';
+import {
+  fetchVapi,
+  getVapiPrivateKey,
+  postVapiCall,
+  VapiApiError,
+  VapiNotConfiguredError,
+} from './vapiClientService';
 
 const log = createLogger('Vapi');
 const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
 
+type Json = Record<string, unknown>;
+
 type PreparedCall = {
-  vapiPrivateKey: string;
-  phoneNumberId: string;
+  phone: OutboundPhoneNumber;
   fullSystemPrompt: string;
   /** Caller-provided brief only (no base prompt) — used for IVR detection. */
   userSystemPrompt: string;
   normalizedPhone: string;
   normalizedSchema: Record<string, unknown>;
   operationKey?: string;
+  userId?: string;
   voiceId?: string;
 };
-
-export class VapiNotConfiguredError extends Error {
-  constructor() {
-    super('Vapi not configured');
-    this.name = 'VapiNotConfiguredError';
-  }
-}
-
-export class VapiApiError extends Error {
-  public statusCode: number;
-  public details: string;
-
-  constructor(statusCode: number, details: string) {
-    super(`Vapi API error (${statusCode})`);
-    this.name = 'VapiApiError';
-    this.statusCode = statusCode;
-    this.details = details;
-  }
-}
 
 function getIdempotencyOperationKey(idempotencyKey: string): string {
   return `${VAPI_CALL_OPERATION_TYPE}:${idempotencyKey}`;
@@ -71,27 +65,7 @@ function getStoredCallStatus(response: unknown): string {
   return typeof status === 'string' && status !== '' ? status : 'queued';
 }
 
-function getVapiPrivateKey(): string {
-  const vapiPrivateKey = VAPI_PRIVATE_KEY;
-  if (vapiPrivateKey === undefined || vapiPrivateKey === '') {
-    log.error('VAPI_PRIVATE_KEY not configured');
-    throw new VapiNotConfiguredError();
-  }
-  return vapiPrivateKey;
-}
-
-async function fetchVapi(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-  try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
-  } catch (err: unknown) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new VapiApiError(504, 'VAPI request timed out');
-    }
-    throw err;
-  }
-}
-
-function getRandomPhoneNumberId(): string {
+function getRandomPhoneNumber(): OutboundPhoneNumber {
   if (OUTBOUND_PHONE_NUMBER_POOL.length === 0) throw new VapiNotConfiguredError();
   return OUTBOUND_PHONE_NUMBER_POOL[Math.floor(Math.random() * OUTBOUND_PHONE_NUMBER_POOL.length)];
 }
@@ -105,15 +79,16 @@ async function prepareCall(body: CreateCallRequest): Promise<PreparedCall> {
 
   const { systemName, voiceId } = await lookupUserVoiceAndName(user_id);
   const identityPrefix = `You are ${systemName}.\n\n`;
+  getVapiPrivateKey();
 
   return {
-    vapiPrivateKey: getVapiPrivateKey(),
-    phoneNumberId: getRandomPhoneNumberId(),
+    phone: getRandomPhoneNumber(),
     fullSystemPrompt: identityPrefix + BASE_SYSTEM_PROMPT + system_prompt,
     userSystemPrompt: system_prompt,
     normalizedPhone: normalizePhoneNumber(to),
     normalizedSchema: normalizeJsonSchema(output_schema),
     operationKey,
+    userId: typeof user_id === 'string' && user_id !== '' ? user_id : undefined,
     voiceId,
   };
 }
@@ -160,51 +135,76 @@ async function getExistingIdempotentCall(
   }
 }
 
-function buildCreateCallBody(call: PreparedCall): string {
-  return JSON.stringify({
-    phoneNumberId: call.phoneNumberId,
-    customer: {
-      number: call.normalizedPhone,
-    },
-    assistant: buildCallAssistantConfig(
-      call.fullSystemPrompt,
-      call.normalizedSchema,
-      call.voiceId,
-      {
-        calleeSpeaksFirst:
-          isIvrNavigationPrompt(call.userSystemPrompt) || isHoldQueuePrompt(call.userSystemPrompt),
-      }
-    ),
+function buildAssistant(call: PreparedCall, waitForHumanToolUrl?: string): Json {
+  return buildCallAssistantConfig(call.fullSystemPrompt, call.normalizedSchema, call.voiceId, {
+    calleeSpeaksFirst: isIvrNavigationPrompt(call.userSystemPrompt),
+    waitForHumanToolUrl,
   });
 }
 
-async function createVapiCall(call: PreparedCall): Promise<Response> {
+/** Vapi dials the callee itself; no hold parking. */
+async function placeDirectCall(call: PreparedCall): Promise<HoldCallPlacement> {
+  const request = {
+    phoneNumberId: call.phone.id,
+    customer: { number: call.normalizedPhone },
+    assistant: buildAssistant(call),
+  };
+  const response = await postVapiCall(JSON.stringify(request));
+  if (!response.ok) {
+    const errorText = await response.text();
+    log.error('Vapi API error', { status: response.status, details: logTruncate(errorText) });
+    throw new VapiApiError(response.status, errorText);
+  }
+  const result = (await response.json()) as VapiCallResponse;
+  if (typeof result.id !== 'string' || result.id === '') {
+    throw new VapiApiError(502, 'Vapi response did not include a call id');
+  }
+  return { callId: result.id, status: result.status, request, response: result as Json };
+}
+
+async function placeHoldCall(
+  call: PreparedCall,
+  config: HoldRuntimeConfig
+): Promise<HoldCallPlacement> {
   try {
-    return await fetchVapi(
-      `${VAPI_BASE_URL}/call`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${call.vapiPrivateKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: buildCreateCallBody(call),
-      },
-      45_000
-    );
+    return await placeHoldCapableCall({
+      config,
+      phone: call.phone,
+      to: call.normalizedPhone,
+      operationKey: call.operationKey,
+      agentId: agentIdFromOperationKey(call.operationKey),
+      userId: call.userId,
+      buildAssistant: (toolUrl) => buildAssistant(call, toolUrl),
+    });
+  } catch (error) {
+    if (error instanceof TwilioApiError) throw new VapiApiError(error.statusCode, error.details);
+    throw error;
+  }
+}
+
+async function placeCall(call: PreparedCall): Promise<HoldCallPlacement> {
+  const holdConfig = resolveHoldRuntimeConfig();
+  try {
+    return holdConfig === null
+      ? await placeDirectCall(call)
+      : await placeHoldCall(call, holdConfig);
   } catch (error) {
     if (call.operationKey !== undefined) {
-      await markToolSideEffectFailed({
-        operationKey: call.operationKey,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      const message =
+        error instanceof VapiApiError
+          ? error.details
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      await markToolSideEffectFailed({ operationKey: call.operationKey, error: message });
     }
     throw error;
   }
 }
 
 /**
- * Initiate an outbound phone call via Vapi
+ * Initiate an outbound phone call via Vapi. When hold parking is configured the
+ * backend owns the Twilio call and the assistant gets the wait_for_human tool.
  */
 export async function initiateCall(
   body: CreateCallRequest
@@ -213,54 +213,42 @@ export async function initiateCall(
   const existingCall = await getExistingIdempotentCall(call);
   if (existingCall !== undefined) return existingCall;
 
-  const response = await createVapiCall(call);
-  if (!response.ok) {
-    const errorText = await response.text();
-    log.error('Vapi API error', { status: response.status, details: logTruncate(errorText) });
-    if (call.operationKey !== undefined) {
-      await markToolSideEffectFailed({ operationKey: call.operationKey, error: errorText });
-    }
-    throw new VapiApiError(response.status, errorText);
-  }
-
-  const result = (await response.json()) as VapiCallResponse;
-  if (typeof result.id !== 'string' || result.id === '') {
-    const message = 'Vapi response did not include a call id';
-    if (call.operationKey !== undefined) {
-      await markToolSideEffectFailed({ operationKey: call.operationKey, error: message });
-    }
-    throw new VapiApiError(502, message);
-  }
-
+  const placed = await placeCall(call);
   if (call.operationKey !== undefined) {
     await markToolSideEffectSucceeded({
       operationKey: call.operationKey,
-      externalId: result.id,
-      response: result as ToolSideEffectJson,
+      externalId: placed.callId,
+      response: placed.response as ToolSideEffectJson,
     });
   }
 
   await archiveVapiJson(
     agentIdFromOperationKey(call.operationKey),
-    `${result.id}.create.json.gz.enc`,
-    {
-      request: JSON.parse(buildCreateCallBody(call)) as unknown,
-      response: result,
-      operationKey: call.operationKey,
-    }
+    `${placed.callId}.create.json.gz.enc`,
+    { request: placed.request, response: placed.response, operationKey: call.operationKey }
   );
 
   log.info('Vapi call initiated', {
-    callId: result.id,
+    callId: placed.callId,
     to: body.to.substring(0, 4) + '****',
-    status: result.status,
+    status: placed.status,
   });
-  return { success: true, call_id: result.id, status: result.status };
+  return { success: true, call_id: placed.callId, status: placed.status };
 }
 
-/** Poll call status from Vapi. */
+/** Poll call status from Vapi (merged across hold segments for hold-capable calls). */
 export async function getCallStatus(callId: string): Promise<Record<string, unknown>> {
   const vapiPrivateKey = getVapiPrivateKey();
+  const holdStatus = await getHoldCallStatus(resolveHoldRuntimeConfig(), callId);
+  if (holdStatus !== null) {
+    await archiveVapiPollResult(callId, holdStatus);
+    log.info('Vapi hold-capable call poll', {
+      callId,
+      status: String(holdStatus.status),
+      hold_state: String((holdStatus.phoneHold as Json | undefined)?.state),
+    });
+    return holdStatus;
+  }
   const requestUrl = `${VAPI_BASE_URL}/call/${callId}`;
   const startedAt = new Date();
   const response = await fetchVapi(
