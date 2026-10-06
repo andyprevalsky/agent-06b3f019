@@ -449,14 +449,33 @@ recover_exact_stale_fleet_owner "$TOKEN"
 
 @pytest.mark.parametrize(
     "corrupt",
-    ["none", "absent-pool", "preallocation", "linked-pool", "canonical-mismatch", "raw-log", "result-rejected", "omitted-task", "fsync-file", "fsync-directory"],
+    [
+        "none",
+        "absent-pool",
+        "preallocation",
+        "preallocation-no-inputs",
+        "preallocation-root-marker",
+        "preallocation-nested-marker",
+        "preallocation-dangling-link",
+        "admitted-no-inputs",
+        "linked-pool",
+        "canonical-mismatch",
+        "raw-log",
+        "result-rejected",
+        "omitted-task",
+        "fsync-file",
+        "fsync-directory",
+    ],
 )
 def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_path: Path, corrupt: str) -> None:
     token = "a" * 32
     registry = tmp_path / "registries" / token
     registry.mkdir(parents=True)
+    (registry / "clones").mkdir()
     audit = tmp_path / "audits" / token
     (audit / "fresh").mkdir(parents=True)
+    (audit / "expected-fresh").mkdir()
+    (audit / "by-machine-id").mkdir()
     (audit / "pool").mkdir()
     (audit / "meta").write_text(f"fleet_owner_token={token}\n")
     (audit / "fresh/primary").write_text("source_machine_id=123456\nmachine_id=abc123\n")
@@ -484,15 +503,26 @@ def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_pa
     (out / "post-config-start.accepted").write_text("abc123\n")
     (out / "cloudbench-run.json").write_bytes((raw / "run.json").read_bytes())
     (out / "runtime-evidence.pending").write_bytes((out / "runtime-evidence.owner.json").read_bytes())
-    if corrupt in {"absent-pool", "preallocation", "linked-pool"}:
+    if corrupt in {"absent-pool", "admitted-no-inputs", "linked-pool"} or corrupt.startswith("preallocation"):
         (audit / "pool").rmdir()
     if corrupt == "linked-pool":
         (audit / "pool").symlink_to(audit / "fresh", target_is_directory=True)
-    if corrupt == "preallocation":
+    if corrupt.startswith("preallocation"):
         import shutil
 
         shutil.rmtree(out)
         (audit / "fresh/primary").unlink()
+    if corrupt not in {"preallocation"} and (corrupt.startswith("preallocation") or corrupt == "admitted-no-inputs"):
+        (run / "execution-task-matrix.json").unlink()
+        (run / "execution-provenance.json").unlink()
+    if corrupt == "preallocation-root-marker":
+        (run / ".cid").write_text("clone abc123\n")
+    if corrupt == "preallocation-nested-marker":
+        nested = run / "task/deeper"
+        nested.mkdir(parents=True)
+        (nested / ".cid").write_text("clone abc123\n")
+    if corrupt == "preallocation-dangling-link":
+        (run / "unrelated").symlink_to(run / "absent")
     (registry / "meta").write_text(f"fleet_owner_token={token}\naudit_dir={audit}\nruns_root={runs}\nrun_id=run-a\n")
     latch = registry / "runtime-evidence-unconfirmed"
     latch.touch()
@@ -556,10 +586,10 @@ fleet_recovery_confirm_runtime_evidence "$REGISTRY"
         timeout=10,
         check=False,
     )
-    accepted = corrupt in {"none", "absent-pool", "preallocation"}
+    accepted = corrupt in {"none", "absent-pool", "preallocation", "preallocation-no-inputs"}
     assert (result.returncode == 0) == accepted, result.stderr
     assert latch.exists() == (not accepted)
-    assert (out / "runtime-evidence.pending").exists() == (not accepted)
+    assert (out / "runtime-evidence.pending").exists() == (not accepted and not corrupt.startswith("preallocation"))
 
 
 @pytest.mark.parametrize(

@@ -678,6 +678,10 @@ collector must never be mistaken for absent guest work.
 If a failed guest cannot seal runtime evidence, preserve its original bytes
 with `scripts/cloudbench-build-interrupted-pool-archive.py`, then run
 `scripts/run-bench-fleet --recover-stale-owner <exact-owner-token>`. A task
+owner canceled before allocation can legitimately lack a pool directory and
+execution inputs; normal recovery proves empty ledgers and absence of allocation
+markers recursively. Never fabricate missing inputs or guest receipts.
+An interrupted task
 that allocated no browser session may carry a `provider-zero-manifest` plus
 its exact zero-allocation query receipt; the forensic verifier checks those
 against the original run/backend bytes before releasing the owner. Such an
@@ -952,6 +956,14 @@ BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
   scripts/run-bench test-mass-agent-run-0 --demo-cache \
   -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
 ```
+
+For this requested cached diagnostic, the 300-second settings are temporary
+execution controls. Independently enforce a 1,200-second deadline for each copy
+from allocation through verified release of its exact owned resources. This
+deadline supersedes the older 1,800-second proof budget only for this diagnostic;
+normal 7,200-second defaults remain unchanged. A task verdict does not establish
+resource release. On a cutoff, signal only the exact owned controller, let its
+cleanup traps run, audit its resources, and grant no acceptance credit.
 
 
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:

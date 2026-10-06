@@ -86,6 +86,14 @@ BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
   -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
 ```
 
+For this requested cached diagnostic, the 300-second settings are temporary
+execution controls. Independently enforce a 1,200-second deadline for each copy
+from allocation through verified release of its exact owned resources. This
+deadline supersedes the older 1,800-second proof budget only for this diagnostic;
+normal 7,200-second defaults remain unchanged. A task verdict does not establish
+resource release. On a cutoff, signal only the exact owned controller, let its
+cleanup traps run, audit its resources, and grant no acceptance credit.
+
 
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 

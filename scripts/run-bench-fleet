@@ -8086,7 +8086,7 @@ fleet_recovery_confirm_runtime_evidence() {  # <exact dead-owner registry>; veri
     fi
     mapping="$(mktemp)" || return 1
     if ! python3 - "$registry" "$FLEET_AUDIT_ROOT" "$CLOUDBENCH_SCRIPT_SNAPSHOT" > "$mapping" <<'PY'
-import json, re, runpy, sys
+import json, os, re, runpy, sys
 from pathlib import Path
 registry = Path(sys.argv[1])
 def fields(path):
@@ -8104,13 +8104,6 @@ batch = run / '_batch/benches.json'
 assert batch.is_file() and not batch.is_symlink()
 tasks = json.loads(batch.read_text())
 assert isinstance(tasks, list) and len(tasks) <= 4096
-contract = runpy.run_path(str(Path(sys.argv[3]) / 'cloudbench_execution_provenance.py'))
-matrix = contract['load_task_matrix'](run / 'execution-task-matrix.json')
-provenance_path = run / 'execution-provenance.json'
-assert provenance_path.is_file() and not provenance_path.is_symlink()
-provenance = json.loads(provenance_path.read_text())
-assert not contract['validate_task_matrix_binding'](provenance, matrix)
-assert [{'name': task['name'], 'world_model_mode': 'simulate' if task['mode'] == 'SIM' else 'real'} for task in tasks] == matrix['tasks']
 task_names = {task['name'] for task in tasks}
 assert len(task_names) == len(tasks)
 admitted_outputs = {path.name for path in run.iterdir() if path.is_dir() and any(
@@ -8133,6 +8126,30 @@ for record in pool_dir.iterdir() if pool_dir.exists() else ():
     if row.get('disposition') == 'claimed':
         pool.add(record.name)
         pool_volumes[record.name] = row.get('volume_id')
+preallocation = not admitted_outputs and not pool and not any((audit / 'fresh').iterdir())
+if preallocation:
+    # Input provenance is staged after initial owner publication. A canceled
+    # preflight can have neither inputs nor a guest whose execution needs them.
+    for empty in (audit / 'fresh', audit / 'expected-fresh', audit / 'by-machine-id', registry / 'clones'):
+        assert empty.is_dir() and not empty.is_symlink() and not any(empty.iterdir())
+    assert not pool_dir.exists() or not any(pool_dir.iterdir())
+    allocation_markers = {'.cid', 'cloudbench-run.json', 'runtime-evidence.pending',
+                          'guest-never-started.confirmed', 'runtime-evidence.owner.json',
+                          'post-config-start.accepted', 'worker-runtime-evidence'}
+    def traversal_failed(error):
+        raise error
+    for parent, directories, files in os.walk(run, followlinks=False, onerror=traversal_failed):
+        for name in directories + files:
+            assert name not in allocation_markers
+            assert not (Path(parent) / name).is_symlink()
+else:
+    contract = runpy.run_path(str(Path(sys.argv[3]) / 'cloudbench_execution_provenance.py'))
+    matrix = contract['load_task_matrix'](run / 'execution-task-matrix.json')
+    provenance_path = run / 'execution-provenance.json'
+    assert provenance_path.is_file() and not provenance_path.is_symlink()
+    provenance = json.loads(provenance_path.read_text())
+    assert not contract['validate_task_matrix_binding'](provenance, matrix)
+    assert [{'name': task['name'], 'world_model_mode': 'simulate' if task['mode'] == 'SIM' else 'real'} for task in tasks] == matrix['tasks']
 for index, task in enumerate(tasks):
     name = task['name']
     assert re.fullmatch(r'[A-Za-z0-9._-]+', name) and name not in ('.', '..')

@@ -63,6 +63,15 @@ borrowed pool record. Existing non-directory or linked pool paths remain rejecte
 Normal recovery still owns registry, Hub, capacity and
 proxy retirement. This adds no inferred Machine identity or cleanup credit.
 
+A later pair of actual canceled preflight owners had no task matrix or execution
+provenance either: these files are staged after owner publication. The mapper
+now permits those missing inputs only for a proven unallocated owner: every
+canonical allocation ledger is empty and a non-following recursive traversal
+finds no allocation, admission or runtime-evidence marker and no symlink. Any
+allocated or admitted run still requires the original complete input binding.
+Independent review caught that the first draft checked only immediate task
+directories; root and nested markers and dangling links now remain rejected.
+
 ## Verification
 
 The extended existing control failed old source at the empty-pool assertion in
@@ -81,6 +90,18 @@ step. The existing
 compact deploy control selects both owning tests; no paid verification is added.
 Actual stale-owner recovery is a separate runtime check, and cannot turn the
 interrupted diagnostic into an accepted benchmark.
+
+The three additional recursive exclusion variants failed the intermediate
+source in 0.28 seconds and passed unchanged after the repair. All 15 mapper
+variants passed in 1.33 seconds; independent review passed those and the two
+existing recovery controls in 1.47 seconds. Missing input files and guest
+receipts are never recreated. Actual remaining owner recovery is tracked
+separately from this blackbox proof; the interrupted benchmark stays rejected.
+The two actual previously blocked missing-input owners then recovered through
+the normal CLI in 1.07 and 11.08 seconds, each removing its exact claim and
+recording provider teardown plus exact Hub retirement. Both retain zero
+execution credit. Other owners and the allocated canary require their own
+ordinary recovery proof.
 
 ## Human feedback
 
