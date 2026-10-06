@@ -68,6 +68,12 @@ Independent review passed 21 focused activation, target, pool and maintenance
 controls, including malformed or ambiguous target rejection and exclusion of
 active pool members. Original canary allocations and all canceled owner claims
 were retired normally before the new exact-image activation was authorized.
+The independent fresh CLI user then repeated normal activation from clean
+94a2e0f6f: exit 0 in 189.687 seconds, exact new image digest confirmed and donor
+stopped before exit. The original failed attempt remains archived. The CLI
+publishes no separate activation receipt or clone/setup/park durations; the
+reported time is its actual whole-stage process wall. Exact guest Git source is
+verified independently in ensuing runtime evidence, not inferred from a tag.
 The existing structural lock-scope assertion initially treated every failure
 release as the normal-path release. It now compares injection with the final
 normal release; the actual failed-stop control separately proves release before
