@@ -72,6 +72,42 @@ export class FakeCardProvider implements CardProvider {
   }
 }
 
+export class LifecycleCardProvider extends FakeCardProvider {
+  closed = false;
+  readFailure: Error | undefined;
+  async getDetails(cardId: string) {
+    if (this.readFailure) throw this.readFailure;
+    if (this.closed) throw Object.assign(new Error('card_closed'), { code: 'card_closed' });
+    return super.getDetails(cardId);
+  }
+  async closeCard(cardId: string) {
+    await super.closeCard(cardId);
+    if (this.closed) throw Object.assign(new Error('card_closed'), { code: 'card_closed' });
+    this.closed = true;
+  }
+}
+
+export async function createAgent(userId: string, label: string): Promise<string> {
+  const agent = await prisma.agent.create({
+    data: { userId, goal: `purchase cleanup test ${label}` },
+    select: { id: true },
+  });
+  return agent.id;
+}
+
+export function validMintBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    fingerprint: `fp-${randomUUID()}`,
+    merchant: 'Test Merchant',
+    currency: 'USD',
+    lineItems: [{ label: 'Widget', amountCents: 1000 }],
+    fees: [{ label: 'Tax', amountCents: 80 }],
+    subtotalCents: 1000,
+    totalCents: 1080,
+    ...overrides,
+  };
+}
+
 /**
  * Provider whose getDetails reports a fixed card state for ANY card id — used to exercise the
  * webhook-independent liveness guard (a card the network has already settled reports
@@ -307,6 +343,7 @@ export interface FakeStripeCalls {
   chargeResultIds: string[];
   refunds: string[];
   refundIdempotencyKeys: Array<string | undefined>;
+  refundRetrieves: string[];
   captures: string[];
   cancels: string[];
   retrieves: string[];
@@ -331,6 +368,8 @@ export async function withFakeStripe<T>(
   opts: {
     retrievePaymentIntent?: (id: string) => Promise<unknown> | unknown;
     refundError?: Error;
+    refundStatus?: string | null;
+    refundRetrievedStatus?: string | null;
     captureError?: Error;
     cancelError?: Error;
     fixedPaymentIntentId?: string;
@@ -345,7 +384,11 @@ export async function withFakeStripe<T>(
     search: (params: { query: string; limit?: number }) => Promise<{ data: Array<{ id: string }> }>;
   };
   const refunds = stripe.refunds as unknown as {
-    create: (params: unknown, options?: { idempotencyKey?: string }) => Promise<{ id: string }>;
+    create: (
+      params: unknown,
+      options?: { idempotencyKey?: string }
+    ) => Promise<{ id: string; status: string | null }>;
+    retrieve: (id: string) => Promise<{ id: string; status: string | null }>;
   };
   const customers = stripe.customers as unknown as {
     retrieve: (customerId: string) => Promise<{
@@ -360,6 +403,7 @@ export async function withFakeStripe<T>(
   const originalPaymentIntentRetrieve = paymentIntents.retrieve;
   const originalPaymentIntentSearch = paymentIntents.search;
   const originalRefundCreate = refunds.create;
+  const originalRefundRetrieve = refunds.retrieve;
   const originalCustomerRetrieve = customers.retrieve;
   const calls: FakeStripeCalls = {
     charges: [],
@@ -367,6 +411,7 @@ export async function withFakeStripe<T>(
     chargeResultIds: [],
     refunds: [],
     refundIdempotencyKeys: [],
+    refundRetrieves: [],
     captures: [],
     cancels: [],
     retrieves: [],
@@ -440,7 +485,14 @@ export async function withFakeStripe<T>(
     const id = `re_${randomUUID()}`;
     calls.refunds.push(JSON.stringify(params));
     calls.refundIdempotencyKeys.push(options?.idempotencyKey);
-    return { id };
+    return { id, status: opts.refundStatus === undefined ? 'succeeded' : opts.refundStatus };
+  };
+  refunds.retrieve = async (id: string) => {
+    calls.refundRetrieves.push(id);
+    return {
+      id,
+      status: opts.refundRetrievedStatus === undefined ? 'succeeded' : opts.refundRetrievedStatus,
+    };
   };
 
   try {
@@ -452,6 +504,7 @@ export async function withFakeStripe<T>(
     paymentIntents.retrieve = originalPaymentIntentRetrieve;
     paymentIntents.search = originalPaymentIntentSearch;
     refunds.create = originalRefundCreate;
+    refunds.retrieve = originalRefundRetrieve;
     customers.retrieve = originalCustomerRetrieve;
   }
 }

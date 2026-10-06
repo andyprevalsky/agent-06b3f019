@@ -21,6 +21,7 @@ import httpx
 import structlog
 
 from helpers.http_client import get_streaming_http_client
+from providers.rose.streaming import _note_stream_attempt
 
 logger = structlog.get_logger()
 
@@ -48,7 +49,7 @@ ANTHROPIC_API_KEY_BETA_HEADER = ",".join(
 ANTHROPIC_FAST_MODE_BETA = "fast-mode-2026-02-01"
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_X_APP = "cli"
-ANTHROPIC_USER_AGENT = "claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)"
+ANTHROPIC_USER_AGENT = "claude-cli/2.1.251 (external, sdk-ts, agent-sdk/0.2.75)"
 
 # Caller specifies the per-attempt connect/header deadline. 60s matches
 # WATERFALL_TIMEOUT_MS in research config; claude_auth.py uses the same
@@ -171,6 +172,7 @@ async def post_anthropic_stream(
         raise ValueError("post_anthropic_stream requires exactly one of claude_token / api_key")
     headers = _anthropic_api_key_headers(api_key) if api_key is not None else _anthropic_headers(claude_token)
     headers = _with_fast_mode_beta(headers, body)
+    _note_stream_attempt()
     timeout = httpx.Timeout(connect=connect_timeout_s, read=None, write=connect_timeout_s, pool=connect_timeout_s)
     logger.info(
         "rose.transport.anthropic.start",
@@ -214,6 +216,7 @@ async def post_openai_responses_stream(
     connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
 ) -> AsyncIterator[httpx.Response]:
     """Open a streaming POST to OpenAI Responses with a project API key."""
+    _note_stream_attempt()
     timeout = httpx.Timeout(connect=connect_timeout_s, read=None, write=connect_timeout_s, pool=connect_timeout_s)
     logger.info(
         "rose.transport.openai.start",
@@ -260,6 +263,7 @@ async def post_openrouter_stream(
     (e.g. `google/gemini-3-flash-preview`).
     """
     headers = _openrouter_headers(openrouter_key)
+    _note_stream_attempt()
     timeout = httpx.Timeout(connect=connect_timeout_s, read=None, write=connect_timeout_s, pool=connect_timeout_s)
     logger.info(
         "rose.transport.openrouter.start",
@@ -298,6 +302,7 @@ async def post_cerebras_stream(
     connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
 ) -> AsyncIterator[httpx.Response]:
     """Open a streaming POST to Cerebras chat completions (not OpenRouter)."""
+    _note_stream_attempt()
     timeout = httpx.Timeout(connect=connect_timeout_s, read=None, write=connect_timeout_s, pool=connect_timeout_s)
     logger.info(
         "rose.transport.cerebras.start",
@@ -343,6 +348,7 @@ async def post_codex_stream(
         **_codex_headers(gpt_token, account_id),
         **_codex_extra_headers_from_body(body, thread_id=agent_id),
     }
+    _note_stream_attempt()
     timeout = httpx.Timeout(connect=connect_timeout_s, read=None, write=connect_timeout_s, pool=connect_timeout_s)
     logger.info(
         "rose.transport.codex.start",

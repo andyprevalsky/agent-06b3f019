@@ -146,25 +146,25 @@ export function jsonbOriginSourceCopySql(
   `;
 }
 
-export function jsonbOriginTargetCopySql(table: JsonbOriginTable): string {
+export function jsonbOriginTargetCopySql(table: JsonbOriginTable): string[] {
   const payload = PAYLOAD_COLUMN[table];
   const columns = COPY_COLUMNS.replace('PAYLOAD', `"${payload}"`);
   const stage = `_Seed${table}`;
 
-  return `
-    BEGIN;
-    CREATE TEMP TABLE "${stage}" (LIKE "${table}" INCLUDING DEFAULTS) ON COMMIT DROP;
-    COPY "${stage}" (${columns}) FROM STDIN WITH (FORMAT csv);
-    INSERT INTO "${table}" AS existing (${columns})
+  return [
+    'BEGIN;',
+    `CREATE TEMP TABLE "${stage}" (LIKE "${table}" INCLUDING DEFAULTS) ON COMMIT DROP;`,
+    `COPY "${stage}" (${columns}) FROM STDIN WITH (FORMAT csv);`,
+    `INSERT INTO "${table}" AS existing (${columns})
       SELECT ${columns} FROM "${stage}"
       ON CONFLICT ("userId", "origin") DO UPDATE SET
         "${payload}" = EXCLUDED."${payload}",
         "hash" = EXCLUDED."hash",
         "updatedAt" = EXCLUDED."updatedAt"
-      WHERE existing."hash" IS DISTINCT FROM EXCLUDED."hash";
-    SELECT 'SEED_STREAM_COUNT=' || count(*) FROM "${stage}";
-    COMMIT;
-  `;
+      WHERE existing."hash" IS DISTINCT FROM EXCLUDED."hash";`,
+    `SELECT 'SEED_STREAM_COUNT=' || count(*) FROM "${stage}";`,
+    'COMMIT;',
+  ];
 }
 
 function quoteColumns(columns: readonly string[]): string {
@@ -211,7 +211,7 @@ export function cookieSourceCopySql(userId: string, domains: string[]): string {
  * whose only difference is its sync timestamp is left untouched — the same rows
  * the `cookieContent()` diff skips.
  */
-export function cookieTargetCopySql(): string {
+export function cookieTargetCopySql(): string[] {
   const columns = quoteColumns(COOKIE_COLUMNS);
   const stage = '_SeedCookie';
   const updates = [...COOKIE_CONTENT_COLUMNS, 'syncedAt']
@@ -220,26 +220,29 @@ export function cookieTargetCopySql(): string {
   const existingContent = COOKIE_CONTENT_COLUMNS.map((column) => `existing."${column}"`).join(', ');
   const incomingContent = COOKIE_CONTENT_COLUMNS.map((column) => `EXCLUDED."${column}"`).join(', ');
 
-  return `
-    BEGIN;
-    CREATE TEMP TABLE "${stage}" (LIKE "Cookie" INCLUDING DEFAULTS) ON COMMIT DROP;
-    COPY "${stage}" (${columns}) FROM STDIN WITH (FORMAT csv);
-    INSERT INTO "Cookie" AS existing (${columns})
+  return [
+    'BEGIN;',
+    `CREATE TEMP TABLE "${stage}" (LIKE "Cookie" INCLUDING DEFAULTS) ON COMMIT DROP;`,
+    `COPY "${stage}" (${columns}) FROM STDIN WITH (FORMAT csv);`,
+    `INSERT INTO "Cookie" AS existing (${columns})
       SELECT ${columns} FROM "${stage}"
       ON CONFLICT (${quoteColumns(COOKIE_IDENTITY_COLUMNS)}) DO UPDATE SET
         ${updates}
-      WHERE (${existingContent}) IS DISTINCT FROM (${incomingContent});
-    SELECT 'SEED_STREAM_COUNT=' || count(*) FROM "${stage}";
-    COMMIT;
-  `;
+      WHERE (${existingContent}) IS DISTINCT FROM (${incomingContent});`,
+    `SELECT 'SEED_STREAM_COUNT=' || count(*) FROM "${stage}";`,
+    'COMMIT;',
+  ];
 }
 
-type ProcessExit = { code: number | null; signal: NodeJS.Signals | null };
+type ProcessExit = { code: number | null; signal: NodeJS.Signals | null; error?: Error };
 
 function waitForExit(child: ChildProcess): Promise<ProcessExit> {
-  return new Promise((resolve, reject) => {
-    child.once('error', reject);
-    child.once('close', (code, signal) => resolve({ code, signal }));
+  return new Promise((resolve) => {
+    let error: Error | undefined;
+    child.once('error', (value) => {
+      error = value;
+    });
+    child.once('close', (code, signal) => resolve({ code, signal, error }));
   });
 }
 
@@ -262,7 +265,7 @@ interface CopyStreamOptions {
   remoteUrl: string;
   localUrl: string;
   sourceSql: string;
-  targetSql: string;
+  targetSql: string[];
 }
 
 /**
@@ -286,11 +289,24 @@ async function runCopyStream({
     [...commonArgs, '--dbname', psqlDatabaseUrl(remoteUrl), '--command', sourceSql],
     { stdio: ['ignore', 'pipe', 'pipe'] }
   );
+  const sourceCompletion = waitForExit(source);
   const target = spawn(
     'psql',
-    [...commonArgs, '--dbname', psqlDatabaseUrl(localUrl), '--command', targetSql],
+    // COPY must be its own request. Combining it with surrounding SQL in one
+    // --command is rejected by supported psql clients. Explicit BEGIN/COMMIT
+    // keep all requests on this connection in one atomic transaction.
+    [
+      ...commonArgs,
+      '--dbname',
+      psqlDatabaseUrl(localUrl),
+      ...targetSql.flatMap((sql) => ['--command', sql]),
+    ],
     { stdio: ['pipe', 'pipe', 'pipe'] }
   );
+  // Subscribe while both children are alive; an early target failure can close
+  // before source/pipeline completion. A lost close leaves Node able to exit0
+  // while the caller still awaits an unresolved Promise.
+  const targetCompletion = waitForExit(target);
 
   const sourceError = captureOutput(source.stderr);
   const targetOutput = captureOutput(target.stdout);
@@ -307,31 +323,35 @@ async function runCopyStream({
     (error: unknown) => error
   );
 
-  const [sourceExit, copyError] = await Promise.all([waitForExit(source), copy]);
+  const [sourceExit, copyError] = await Promise.all([sourceCompletion, copy]);
 
-  if (sourceExit.code === 0 && copyError === null) {
+  if (sourceExit.code === 0 && !sourceExit.error && copyError === null) {
     target.stdin!.end();
   } else {
     // Never a clean EOF: that is what would let a partial merge commit.
     target.kill('SIGKILL');
   }
 
-  const targetExit = await waitForExit(target);
+  const targetExit = await targetCompletion;
 
-  if (sourceExit.code !== 0) {
-    throw new Error(
+  const failures: string[] = [];
+  if (sourceExit.code !== 0 || sourceExit.error) {
+    failures.push(
       `${label} source COPY failed (${sourceExit.signal ?? `exit ${sourceExit.code}`}): ${
-        sourceError.read().trim() || 'psql returned no diagnostic'
+        sourceError.read().trim() || sourceExit.error?.message || 'psql returned no diagnostic'
       }`
     );
   }
-  if (targetExit.code !== 0) {
-    throw new Error(
+  if (targetExit.code !== 0 || targetExit.error) {
+    failures.push(
       `${label} target COPY failed (${targetExit.signal ?? `exit ${targetExit.code}`}): ${
-        targetError.read().trim() || 'psql returned no diagnostic'
+        targetError.read().trim() || targetExit.error?.message || 'psql returned no diagnostic'
       }`
     );
   }
+  // A target rejection can also break the source pipe; preserve both results
+  // instead of hiding the original target diagnostic behind source SIGPIPE.
+  if (failures.length > 0) throw new Error(failures.join('\n'));
   if (copyError !== null) {
     throw copyError;
   }

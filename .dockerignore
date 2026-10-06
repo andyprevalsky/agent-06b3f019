@@ -14,6 +14,10 @@ agents/venv
 # Generated / per-run state
 .context
 .llm-dumps
+agents/benchmarks/runs
+# Archived span metrics are controller history, not image build inputs. Keep
+# current metrics and task selection history available in the baked source.
+agents/benchmarks/history/span_durations.*.jsonl
 **/dist
 **/dist-ssr
 **/.next
@@ -44,6 +48,8 @@ agents/navi-worker-log.txt
 claude-code-src
 openclaw
 hermes-agent
+codex
+prime-agent
 
 # Media / decks
 pitch-deck

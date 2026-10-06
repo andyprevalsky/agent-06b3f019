@@ -25,11 +25,16 @@
  * Ceiling on the seed's peak RSS. Lower this — never raise it.
  *
  * Measured with `scripts/measure-seed-memory.sh 5`: every run restores the
- * 2026-07-29 prod dump into a local read-only source and seeds a fresh target.
- * The five OS-level `/usr/bin/time -l` peaks were 190, 190, 161, 176, and
- * 191MB; all source/target fingerprints matched. 230 is ceil(191 * 1.20).
+ * canonical prod dump into a local read-only source and seeds a fresh target.
+ * The first five OS-level `/usr/bin/time -l` peaks with a 96MB V8 old-space cap
+ * were 186, 184, 190, 189, and 189MB; all source/target fingerprints matched.
+ * 228 is ceil(190 * 1.20). A follow-up run on the edited tree peaked at 197MB,
+ * still below the tightened 228MB ratchet.
  *
  * History (newest first):
+ *   228 — measured max 190MB + 20% headroom (2026-10-02). A 96MB V8 old-space
+ *         cap bounds V8 retention during LocalStorage / IndexedDB streaming;
+ *         without it one of five verified seeds hit 238MB.
  *   230 — measured max 191MB + 20% headroom (2026-07-29). JSONB origin rows
  *         stream Postgres-to-Postgres without entering V8, and all growth
  *         tables use bounded pages. Pre-fix measured peak was 4823MB.
@@ -41,7 +46,7 @@
  *         materialised every row and its message body in one array before the
  *         first write; that was the rc=137 SIGKILL on a 4GB primary.
  */
-export const SEED_PEAK_RSS_BUDGET_MB = 230;
+export const SEED_PEAK_RSS_BUDGET_MB = 228;
 
 /** Exactly the user-requested headroom above the five-run measured maximum. */
 export const SEED_RSS_HEADROOM_RATIO = 0.2;

@@ -293,8 +293,7 @@ fi
 
 if ! command -v ngrok >/dev/null 2>&1; then
     log "installing ngrok…"
-    ( curl -fsSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -o /tmp/ngrok.tgz \
-        && $SUDO tar xzf /tmp/ngrok.tgz -C /usr/local/bin ngrok ) >/dev/null 2>&1 \
+    $SUDO bash "$ROOT/scripts/cloudbench-install-ngrok.sh" >/dev/null 2>&1 \
         || log "WARN: ngrok install failed (local-bench public tunnel only)"
 fi
 
@@ -363,6 +362,7 @@ else
         npx tsx scripts/ensure-agent-network-grep-indexes.ts >/dev/null 2>&1 ) \
         || log "WARN: ensure-agent-network-grep-indexes.ts skipped/failed"
     if ( cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
+            NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
             npx tsx scripts/seed-local.ts ); then
         log "DB seeded from prod"
     else

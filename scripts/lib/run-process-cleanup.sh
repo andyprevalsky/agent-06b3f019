@@ -1,5 +1,61 @@
 #!/usr/bin/env bash
 
+run_wait_owned_agent_shutdown() {  # <pid> <birth> <deadline-seconds>
+  local pid="$1" birth="$2" timeout="$3" current state deadline
+  [ -n "$pid" ] || return 1
+  current="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')"
+  if [ -z "$current" ]; then
+    ! kill -0 "$pid" 2>/dev/null
+    return $?
+  fi
+  [ -n "$birth" ] || return 1
+  [ "$current" = "$birth" ] || return 1
+  # The supervisor owns worker cancellation. A group/tree signal would also
+  # reach its workers, producing the second signal that requests forced exit.
+  if [ "${RUN_AGENT_SIGNALLED_IDENTITY:-}" != "$pid:$birth" ]; then
+    RUN_AGENT_SIGNALLED_IDENTITY="$pid:$birth"
+    kill -TERM "$pid" 2>/dev/null || return 1
+  fi
+  deadline=$((SECONDS + timeout))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    current="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')"
+    [ -n "$current" ] || return 0
+    [ "$current" = "$birth" ] || return 0
+    state="$(ps -p "$pid" -o stat= 2>/dev/null | tr -d ' ')"
+    case "$state" in Z*) return 0 ;; esac
+    sleep 0.1
+  done
+  echo "❌ Owned worker supervisor did not finish graceful cleanup" >&2
+  return 1
+}
+
+run_drain_owned_agents() {
+  if [ "${AGENTS_DRAINED:-false}" = true ]; then
+    [ "${AGENTS_DRAIN_FAILED:-false}" != true ]
+    return $?
+  fi
+  [ -n "${AGENTS_PID:-}" ] || return 0
+  local drain_seconds worker_exit=0
+  drain_seconds="$(python3 "$SCRIPT_DIR/../agents/scripts/local_worker_supervisor.py" --shutdown-timeout)" || return 1
+  run_wait_owned_agent_shutdown "$AGENTS_PID" "${AGENTS_BIRTH:-}" "$drain_seconds" || return 1
+  wait "$AGENTS_PID" 2>/dev/null || worker_exit=$?
+  AGENTS_DRAINED=true
+  if [ "$worker_exit" != 0 ]; then
+    AGENTS_DRAIN_FAILED=true
+    return 1
+  fi
+}
+
+run_publish_stack_cleanup_status() {  # <state>
+  local state="$1" path="${RUN_STACK_CLEANUP_STATUS_FILE:-}" temporary birth
+  [ -n "$path" ] || return 0
+  [ -n "${RUN_STACK_CLEANUP_TOKEN:-}" ] || return 1
+  temporary="${path}.tmp.$$"
+  birth="$(ps -p "$$" -o lstart= | sed 's/^ *//;s/ *$//')" || return 1
+  [ -n "$birth" ] || return 1
+  printf 'version=1\ntoken=%s\nstate=%s\nstack_pid=%s\nstack_birth=%s\n' "$RUN_STACK_CLEANUP_TOKEN" "$state" "$$" "$birth" > "$temporary" \
+    && mv -f "$temporary" "$path"
+}
 # pgrep -f matches its regex anywhere in argv, so every service token must stop
 # at an argument boundary: an unbounded `node_modules/.bin/vite` also matches
 # `.bin/vitest` and `worker\.py` matches `test_worker.py`, which let stack

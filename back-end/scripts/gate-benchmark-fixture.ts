@@ -1,5 +1,6 @@
 import { PrismaClient, IntegrationStatus, IntegrationType } from '@prisma/client';
 import dotenv from 'dotenv';
+import { basename } from 'node:path';
 import {
   ensureBenchmarkOrgCardholder,
   resolveBenchmarkCardholderId,
@@ -70,14 +71,16 @@ async function ensureUser(mode: FixtureMode, userId: string): Promise<void> {
  */
 export async function seedOrgManagedAgentCardForUser(
   userId: string,
-  cardholderId: string
+  cardholderId: string,
+  client: PrismaClient = prisma
 ): Promise<void> {
   const config = { orgManaged: true, cardholderId };
-  await prisma.integration.upsert({
+  await client.integration.upsert({
     where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
     create: {
       userId,
       name: 'agentcard',
+      accountId: '',
       type: IntegrationType.TOOL_SETUP,
       status: IntegrationStatus.CONNECTED,
       isActive: true,
@@ -164,11 +167,13 @@ async function main(): Promise<void> {
   }
 }
 
-main()
-  .catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+if (basename(process.argv[1] || '') === 'gate-benchmark-fixture.ts') {
+  main()
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await prisma.$disconnect();
+    });
+}

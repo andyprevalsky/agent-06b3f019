@@ -21,12 +21,24 @@ kill_pid_tree() {
 }
 
 cleanup() {
-    local pid
+    local status=$? pid diagnostics
+    if [ "$status" -ne 0 ]; then
+        diagnostics="${BLACKBOX_TEST_ARTIFACT_DIR:-$ROOT_DIR/.context/test-runs}/kill-services-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+        if mkdir -p -m 700 "$diagnostics"; then
+            cp -R "$TMP_ROOT/." "$diagnostics/" || true
+            if [ -n "${worker_port:-}" ]; then
+                lsof -nP -i :"$worker_port" -FpcnT > "$diagnostics/port-sockets.txt" 2>&1 || true
+            fi
+            chmod -R go-rwx "$diagnostics" || true
+            echo "Fixture failure evidence retained: $diagnostics" >&2
+        fi
+    fi
     for pid in "${PIDS[@]:-}"; do
         kill_pid_tree "$pid"
         wait "$pid" 2>/dev/null || true
     done
     rm -rf "$TMP_ROOT"
+    return "$status"
 }
 trap cleanup EXIT
 
@@ -46,7 +58,7 @@ wait_for_port() {
     local port="$1"
     local attempt
     for attempt in $(seq 1 30); do
-        if lsof -ti :"$port" >/dev/null 2>&1; then
+        if lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.1
@@ -370,6 +382,32 @@ wait_for_port "$foreign_port"
 foreign_pid="$(lsof -tiTCP:"$foreign_port" -sTCP:LISTEN | head -1)"
 PIDS+=("$foreign_pid")
 
+# A foreign client can retain a socket after our listener exits (CLOSE_WAIT).
+# It must survive service cleanup and must not be mistaken for a live listener.
+(
+    cd "$TMP_ROOT/foreign"
+    exec python3 - "$worker_port" "$TMP_ROOT/client-ready" <<'PY'
+import socket
+import sys
+import time
+from pathlib import Path
+
+client = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+Path(sys.argv[2]).touch()
+time.sleep(1000)
+PY
+) &
+foreign_client_pid=$!
+PIDS+=("$foreign_client_pid")
+for attempt in $(seq 1 30); do
+    [ -f "$TMP_ROOT/client-ready" ] && break
+    sleep 0.1
+done
+[ -f "$TMP_ROOT/client-ready" ] || {
+    echo "FAIL: foreign socket client did not connect" >&2
+    exit 1
+}
+
 cat > "$WORKTREE/.context/services.json" <<JSON
 {
   "status": "running",
@@ -403,8 +441,9 @@ fi
 assert_dead "$worker_pid" "worktree listener"
 assert_dead "$cwd_only_pid" "cwd-only service process"
 assert_alive "$foreign_pid" "foreign listener"
+assert_alive "$foreign_client_pid" "foreign client retaining a closed connection"
 
-if lsof -ti :"$worker_port" >/dev/null 2>&1; then
+if lsof -tiTCP:"$worker_port" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "FAIL: worktree service port $worker_port is still occupied" >&2
     exit 1
 fi

@@ -28,6 +28,8 @@ import {
 } from './codex-template-contract.case';
 import {
   CredentialExhaustionSkip,
+  runTest,
+  type TestResult,
   codexCreateUnavailableSkipReason,
   codexSmokeCreditSkipReason,
   detectCodexCreditExhaustion,
@@ -39,7 +41,7 @@ import {
 } from './codex-credit-skip';
 import { waitForCodexOutput } from './codex-ws-output.support';
 import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
-import { assert, assertStatus, request, runTest, type TestResult } from './codex-sandbox.support';
+import { assert, assertStatus, request } from './codex-sandbox.support';
 import { waitForCodexOutput } from './codex-smoke-output.support';
 config();
 
@@ -255,7 +257,11 @@ async function testSmoke_codexCompletesE2bTask() {
     }
     assertStatus(createRes.status, 200, createRes.data);
 
-    const body = createRes.data as { ws_url?: string; task_id?: string; sandbox_id?: string };
+    const body = createRes.data as {
+      ws_url?: string;
+      task_id?: string;
+      sandbox_id?: string;
+    };
     assert(!!body.ws_url, 'Missing ws_url');
     assert(!!body.task_id, 'Missing task_id');
     assert(!!body.sandbox_id, 'Missing sandbox_id');
@@ -323,8 +329,12 @@ async function testSmoke_codexCompletesE2bTask() {
     }
 
     const { Sandbox } = await import('e2b');
-    const sandbox = await Sandbox.connect(sandboxId!, { apiKey: process.env.E2B_API_KEY });
-    const promptFile = await sandbox.files.read('/home/user/AGENTS.md', { format: 'text' });
+    const sandbox = await Sandbox.connect(sandboxId!, {
+      apiKey: process.env.E2B_API_KEY,
+    });
+    const promptFile = await sandbox.files.read('/home/user/AGENTS.md', {
+      format: 'text',
+    });
     assert(
       String(promptFile).includes('/home/user/output') &&
         String(promptFile).includes('Do not return the original attachment path'),
@@ -368,7 +378,10 @@ async function runAll() {
   }
   tests.push(
     { name: 'POST /create -- no auth -> 401', fn: testCreate_noAuth },
-    { name: 'POST /create -- missing user_id -> 500', fn: testCreate_missingUserId },
+    {
+      name: 'POST /create -- missing user_id -> 500',
+      fn: testCreate_missingUserId,
+    },
     {
       name: 'prompt -- shared code-agent contract includes output rules',
       fn: testPromptBuilder_sharedContractMentionsOutputRules,

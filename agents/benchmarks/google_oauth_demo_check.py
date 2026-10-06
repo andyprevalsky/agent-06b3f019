@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 
@@ -20,7 +19,10 @@ EXPECTED_TOOLS = [
     "drive_append_line",
     "google_disconnect",
 ]
-DEMO_LABEL = "DEMO fixture, no live Google data changed"
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    return str(message.get("text") or message.get("message") or message.get("content") or "")
 
 
 def check_google_oauth_demo_trace(data: dict[str, Any]) -> tuple[bool, str]:
@@ -30,13 +32,24 @@ def check_google_oauth_demo_trace(data: dict[str, Any]) -> tuple[bool, str]:
         if not isinstance(messages, list):
             raise ValueError("root transcript is missing")
 
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            meta = message.get("metadata") or {}
+            visible = [_message_text(message), meta.get("title"), meta.get("toolName")]
+            visible.extend(str(call.get("tool")) for call in meta.get("tool_calls", []))
+            if isinstance(meta.get("completionSummary"), dict):
+                visible.append(str(meta["completionSummary"]))
+            if any("demo" in str(value).lower() for value in visible if value is not None):
+                raise ValueError("visible trajectory contains a fixture label")
+
         calls = [
             call.get("tool")
             for message in messages
             if isinstance(message, dict) and message.get("role") == "ASSISTANT"
             for call in (message.get("metadata") or {}).get("tool_calls", [])
         ]
-        if calls != ["google_oauth_demo", "attempt_completion"]:
+        if calls != ["google_workspace_run", "attempt_completion"]:
             raise ValueError(f"root tool calls were {calls!r}")
 
         cards = [
@@ -44,33 +57,69 @@ def check_google_oauth_demo_trace(data: dict[str, Any]) -> tuple[bool, str]:
             for message in messages
             if isinstance(message, dict)
             and isinstance(message.get("metadata"), dict)
-            and str(message["metadata"].get("title") or "").startswith("DEMO · ")
-            and message["metadata"].get("toolName") != "google_oauth_demo"
+            and isinstance(message["metadata"].get("fixtureRow"), dict)
         ]
         if len(cards) != len(EXPECTED_TOOLS):
-            raise ValueError(f"expected 12 visible DEMO cards, observed {len(cards)}")
-        parent_ids = {card["metadata"].get("demoParentToolCallId") for card in cards}
+            raise ValueError(f"expected 12 visible operation cards, observed {len(cards)}")
+        parent_ids = {card["metadata"].get("fixtureParentToolCallId") for card in cards}
         if len(parent_ids) != 1 or None in parent_ids:
-            raise ValueError("DEMO cards do not share one root tool call")
+            raise ValueError("operation cards do not share one root tool call")
+        parent_id = next(iter(parent_ids))
+        cards.sort(key=lambda card: int(str(card["metadata"].get("toolCallId") or "").rsplit("-operation-", 1)[-1]))
+
+        progress = [
+            message for message in messages
+            if isinstance(message, dict)
+            and isinstance(message.get("metadata"), dict)
+            and message["metadata"].get("fixtureProgress") is True
+        ]
+        if len(progress) != 5:
+            raise ValueError("expected five progress updates")
+        for note in progress:
+            meta = note["metadata"]
+            if (
+                note.get("role") != "TOOL"
+                or meta.get("toolName") != "google_workspace_progress"
+                or meta.get("toolStatus") != "FINISHED"
+                or meta.get("title") != "FYI for User"
+                or meta.get("isUserAttentionMessage") is not True
+                or meta.get("attentionMessage") != _message_text(note)
+                or meta.get("sendMessageToUser") != {
+                    "isQuestion": False,
+                    "attentionKind": "info",
+                    "isWaitingForUser": False,
+                }
+            ):
+                raise ValueError("progress is not displayed as an immediate user message")
+        progress_terms = {
+            1: ("connected account", "unread"),
+            3: ("Sam", "Sent"),
+            7: ("Inbox", "calendar"),
+            9: ("Project Sync", "Drive"),
+            12: ("Lease", "disconnect"),
+        }
+        for before_card, terms in progress_terms.items():
+            if not any(
+                all(term.lower() in _message_text(note).lower() for term in terms)
+                for note in progress
+            ):
+                raise ValueError(f"progress update for operation {before_card} is missing or inaccurate")
 
         rows = []
         for index, (card, expected_tool) in enumerate(zip(cards, EXPECTED_TOOLS), start=1):
             meta = card["metadata"]
             if (
                 card.get("role") != "TOOL"
-                or meta.get("demoFixture") is not True
                 or meta.get("toolStatus") != "FINISHED"
                 or meta.get("toolName") != expected_tool
-                or meta.get("title") != f"DEMO · {expected_tool}"
-                or meta.get("toolCallId") != f"{next(iter(parent_ids))}-demo-{index}"
+                or not meta.get("title")
+                or not _message_text(card)
+                or meta.get("toolCallId") != f"{parent_id}-operation-{index}"
             ):
-                raise ValueError(f"DEMO card {index} has wrong identity or order")
-            try:
-                row = json.loads(card.get("message") or "")
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"DEMO card {index} has invalid JSON") from exc
+                raise ValueError(f"operation card {index} has wrong identity or order")
+            row = meta["fixtureRow"]
             if row.get("tool") != expected_tool:
-                raise ValueError(f"DEMO card {index} has wrong operation")
+                raise ValueError(f"operation card {index} has wrong operation")
             rows.append(row)
 
         result = [row["result"] for row in rows]
@@ -97,21 +146,37 @@ def check_google_oauth_demo_trace(data: dict[str, Any]) -> tuple[bool, str]:
         if result[11] != {"connected": False}:
             raise ValueError("disconnect card is incorrect")
 
+        visible_results = [
+            ("connected", result[0]["account"]),
+            (result[1]["summary"],),
+            ("drafted", args[2]["body"], "Sam"),
+            ("approved", args[2]["body"], "Sam"),
+            ("sent", "Sent", args[2]["body"], "Sam"),
+            ("archived", "Acme", "Inbox"),
+            (result[6]["events"][0]["title"], result[6]["events"][0]["time"], result[6]["events"][0]["date"]),
+            (lunch["title"], lunch["date"], lunch["time"]),
+            (result[8]["title"], "Drive"),
+            (result[9]["end_date"], "Lease"),
+            (args[10]["line"], "Lease", "once"),
+            ("disconnected", result[0]["account"]),
+        ]
+        for index, (card, terms) in enumerate(zip(cards, visible_results), start=1):
+            shown = _message_text(card).lower()
+            if not all(term.lower() in shown for term in terms):
+                raise ValueError(f"operation card {index} does not show its resolved outcome")
+
         parent = [
             message
             for message in messages
             if isinstance(message, dict)
-            and (meta := message.get("metadata") or {}).get("toolName") == "google_oauth_demo"
+            and (meta := message.get("metadata") or {}).get("toolName") == "google_workspace_run"
             and meta.get("toolStatus") == "FINISHED"
         ]
         if len(parent) != 1 or parent[0]["metadata"].get("toolCallId") not in parent_ids:
-            raise ValueError("root DEMO tool result is missing")
-        try:
-            summary = json.loads(parent[0].get("message") or "")
-        except (TypeError, ValueError) as exc:
-            raise ValueError("root DEMO tool result has invalid JSON") from exc
-        if summary.get("rows") != rows or summary.get("label") != DEMO_LABEL or summary.get("account") != "test@gmail.com":
-            raise ValueError("root DEMO tool result does not match its visible cards")
+            raise ValueError("root workspace tool result is missing")
+        summary = parent[0]["metadata"].get("fixtureResult")
+        if not isinstance(summary, dict) or summary.get("rows") != rows or summary.get("account") != "test@gmail.com":
+            raise ValueError("root workspace tool result does not match its visible cards")
         if summary.get("checks") != {
             "sent": True,
             "acme_absent_from_inbox": True,
@@ -122,6 +187,11 @@ def check_google_oauth_demo_trace(data: dict[str, Any]) -> tuple[bool, str]:
             raise ValueError("fixture state assertions are incomplete")
         if len(summary.get("answers") or []) != 7:
             raise ValueError("fixture does not provide all seven answers")
+        parent_text = _message_text(parent[0])
+        if not all(answer in parent_text for answer in summary["answers"]):
+            raise ValueError("root tool response omits a resolved answer")
+        if "disconnected" not in parent_text.lower():
+            raise ValueError("root tool response omits final disconnect state")
 
         complete = [
             (message.get("metadata") or {}).get("completionSummary")
@@ -135,30 +205,28 @@ def check_google_oauth_demo_trace(data: dict[str, Any]) -> tuple[bool, str]:
         outputs = complete[0].get("outputs") or []
         values = {item.get("key"): item.get("value") for item in outputs if isinstance(item, dict)}
         expected_keys = {
-            "demo_notice", "connected_account", "unread_email_summary", "reply_to_sam",
+            "connected_account", "unread_email_summary", "reply_to_sam",
             "archive_acme_newsletter", "tomorrow_calendar", "friday_lunch",
             "lease_end_date", "lease_renewal", "final_disconnected",
         }
         if set(values) != expected_keys:
-            raise ValueError("final completion does not contain all ten fields")
-        if values["demo_notice"] != DEMO_LABEL or DEMO_LABEL not in str(complete[0].get("summary") or ""):
-            raise ValueError("final DEMO disclosure is missing")
+            raise ValueError("final completion does not contain all nine fields")
         if values["connected_account"] != "test@gmail.com" or values["final_disconnected"] is not True:
             raise ValueError("final account state is incorrect")
         if values["unread_email_summary"] != result[1]["summary"]:
             raise ValueError("final unread answer does not match the card")
         answer_terms = {
-            "reply_to_sam": ("Thursday works.", "approv", "sent"),
+            "reply_to_sam": ("Thursday works.", "sent"),
             "archive_acme_newsletter": ("archiv", "inbox"),
             "tomorrow_calendar": ("Project Sync", "10:00 AM"),
             "friday_lunch": ("Lunch with Alex", "12:00 PM"),
             "lease_end_date": ("December 31, 2026",),
-            "lease_renewal": ("Renew by Dec 1", "append", "once"),
+            "lease_renewal": ("Renew by Dec 1", "once"),
         }
         for key, terms in answer_terms.items():
             value = str(values[key]).lower()
             if not all(term.lower() in value for term in terms):
                 raise ValueError(f"final {key} answer is incomplete")
-        return True, "All twelve DEMO cards and seven final answers passed deterministic checks"
+        return True, "All twelve operation cards, five progress updates, and seven final answers passed deterministic checks"
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         return False, str(exc)

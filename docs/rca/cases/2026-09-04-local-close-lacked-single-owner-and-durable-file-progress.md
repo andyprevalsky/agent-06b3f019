@@ -22,6 +22,7 @@ tags:
 sources:
   - PR #1246
   - PR #1261
+  - PR #1299
 repro: back-end/src/tests/blackbox/claude-code-local-close.blackbox.ts
 status: fixed
 ---
@@ -106,3 +107,24 @@ the prior review cycle found this blocker.
 ## Reusable lesson
 
 Give every retriable side-effect workflow one keyed owner, persist per-item progress, and validate/read untrusted files through one non-following descriptor before treating the aggregate result as complete.
+
+## Darwin descriptor-path recurrence (PR #1299)
+
+Fresh-clone macOS coverage reproduced a regular output file being rejected as
+an escaped symlink. Native `realpath("/dev/fd/<fd>")` returned the synthetic
+`/dev/fd/hello.txt`, which differed from the queried descriptor path and was
+mistakenly accepted as its vnode path. The owning close unit and blackbox
+failed, retaining their real fixture children until explicit cleanup.
+
+Darwin now always uses the existing bounded, PID-and-descriptor-scoped lsof
+lookup. Linux retains `/proc/self/fd`. Canonical root containment, inode/device
+identity, O_NOFOLLOW, and the size bound are unchanged. This adds no external
+provider requests or shared coordination and is limited to local code sessions.
+The regular-file reproducer is recorded in
+`.context/acceptance/darwin-descriptor-repro.log`; existing close tests provide
+the permanent positive and symlink rejection regressions.
+
+After the fix, all 13 existing local-session unit tests and all seven close
+blackbox cases passed on macOS. Evidence:
+`.context/acceptance/darwin-close-unit-fixed.log` and
+`.context/acceptance/darwin-close-blackbox-fixed.log`.

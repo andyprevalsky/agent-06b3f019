@@ -18,11 +18,20 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
+# Own bootstrap as well as the final worker, so failed starts retain their logs.
+if [ "${CLOUDBENCH_WORKER_SUPERVISED:-}" != "1" ]; then
+    exec python3 "${CLOUDBENCH_WORKER_EVIDENCE_HELPER:?worker evidence helper required}" \
+        run --run-token "${CLOUDBENCH_WORKER_RUN_TOKEN:?worker run token required}" \
+        --machine-id "${CLOUDBENCH_WORKER_MACHINE_ID:?worker machine identity required}" \
+        -- bash "${BASH_SOURCE[0]}" "$@"
+fi
+
 REPO_DIR="/data/repo"
 APP_USER="rose"
 CONTROL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 [ -d "$CONTROL_DIR/lib" ] && CONTROL_LIB_DIR="$CONTROL_DIR/lib" || CONTROL_LIB_DIR="$CONTROL_DIR"
 FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$CONTROL_DIR/cloudbench-fetch-ref.sh}"
+ENV_HELPER="${CLOUDBENCH_ENV_HELPER:-$CONTROL_LIB_DIR/cloudbench-env.sh}"
 log() { echo "[cloudbench-worker] $*"; }
 
 cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
@@ -35,7 +44,7 @@ cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
 if [ -n "${REF:-}" ]; then
     log "git-syncing → $REF"
     if [ ! -x "$FETCH_REF_SCRIPT" ]; then
-        log "FATAL: missing executable cloudbench-fetch-ref helper"
+        log "FATAL: missing controller-owned executable cloudbench-fetch-ref helper"
         exit 1
     fi
     if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
@@ -77,7 +86,6 @@ fi
 # Every autoscaled worker clone starts from a volume snapshot that may predate
 # the current run. Refresh from the app-level blobs and verify exact bytes before
 # joining the benchmark queue.
-ENV_HELPER="${CLOUDBENCH_ENV_HELPER:-$CONTROL_LIB_DIR/cloudbench-env.sh}"
 [ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; exit 1; }
 # shellcheck source=lib/cloudbench-env.sh
 source "$ENV_HELPER"

@@ -135,7 +135,6 @@ def run_fixture() -> dict[str, Any]:
         "Renew by Dec 1 appended once to Lease.",
     ]
     return {
-        "label": DEMO_LABEL,
         "account": "test@gmail.com",
         "fixture_date": today.isoformat(),
         "rows": rows,

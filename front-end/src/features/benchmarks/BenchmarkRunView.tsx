@@ -51,7 +51,7 @@ function verdictBadge(detail: HubRunDetail) {
 
 function statusBadge(status: string) {
   const s = status.toLowerCase();
-  if (s === 'running' || s === 'queued')
+  if (['running', 'queued', 'starting', 'ready', 'evaluating'].includes(s))
     return (
       <Badge className="bg-orange-100 text-orange-700 dark:bg-orange-950 dark:text-orange-300">
         {s}
@@ -85,7 +85,17 @@ function usd(n: number | null): string {
  * The fleet dashboard's startup bar, hub edition: concrete dispatch progress
  * while a run spins up, so "queued" is never an opaque wait.
  */
-function DispatchTimeline({ dispatch, running }: { dispatch: HubRunDispatch; running: boolean }) {
+function DispatchTimeline({
+  dispatch,
+  running,
+  started,
+  finished,
+}: {
+  dispatch: HubRunDispatch;
+  running: boolean;
+  started: boolean;
+  finished: boolean;
+}) {
   const now = Date.now();
   const createdMs = new Date(dispatch.created_at).getTime();
   const claimedMs = dispatch.claimed_at === null ? null : new Date(dispatch.claimed_at).getTime();
@@ -108,15 +118,19 @@ function DispatchTimeline({ dispatch, running }: { dispatch: HubRunDispatch; run
       detail:
         claimedMs === null
           ? 'expected ~2–4 min'
-          : running
+          : started || finished
             ? 'done'
             : `${fmtElapsed((now - claimedMs) / 1000)} elapsed · expected ~2–4 min`,
-      state: claimedMs === null ? 'pending' : running ? 'done' : 'active',
+      state: started || finished ? 'done' : claimedMs === null ? 'pending' : 'active',
     },
     {
       label: 'Running',
-      detail: running ? 'benchmark executing — table updates live' : 'expected after stack boot',
-      state: running ? 'active' : 'pending',
+      detail: finished
+        ? 'execution finished — results available'
+        : running
+          ? 'benchmark executing — table updates live'
+          : 'expected after stack boot',
+      state: finished ? 'done' : running ? 'active' : 'pending',
     },
   ];
   return (
@@ -268,7 +282,14 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
           {detail.live && detail.dispatch !== null && (
             <DispatchTimeline
               dispatch={detail.dispatch}
-              running={detail.tasks.some((t) => t.status !== 'queued') || detail.elapsed_s !== null}
+              running={detail.tasks.some((t) => ['running', 'evaluating'].includes(t.status))}
+              started={detail.tasks.some((t) =>
+                ['running', 'evaluating', 'passed', 'failed'].includes(t.status),
+              )}
+              finished={
+                detail.tasks.length > 0 &&
+                detail.tasks.every((t) => ['passed', 'failed', 'error'].includes(t.status))
+              }
             />
           )}
           <div className="flex flex-wrap gap-2 pb-3" data-testid="run-tiles">
@@ -360,7 +381,22 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
                         </div>
                       )}
                     </td>
-                    <td className="px-3 py-2">{statusBadge(task.status)}</td>
+                    <td className="px-3 py-2">
+                      {statusBadge(task.status)}
+                      <div className="text-[11px] text-muted-foreground">
+                        {task.lifecycle_stage === 'teardown'
+                          ? 'Releasing resources'
+                          : task.lifecycle_stage === 'released'
+                            ? 'Resources released'
+                            : task.lifecycle_stage === 'evaluated'
+                              ? 'Evaluated'
+                              : task.lifecycle_stage === 'ready'
+                                ? 'Ready'
+                                : task.lifecycle_stage === 'starting'
+                                  ? (task.startup_label ?? 'Starting')
+                                  : null}
+                      </div>
+                    </td>
                     <td className="px-3 py-2 text-muted-foreground">
                       {task.duration_seconds !== null
                         ? `${Math.round(task.duration_seconds)}s`

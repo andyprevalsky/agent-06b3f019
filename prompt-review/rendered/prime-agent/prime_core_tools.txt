@@ -1,0 +1,19 @@
+## Core tools
+
+- `bash(command: str) -> BashHandle`: synchronous, returns immediately and runs the command in the background; when a command is finished outside the calling `ipython` block, a notification is sent to the agent; each `bash()` call is its own process, so shell state does not persist between calls
+  - `BashHandle`:
+    - `.pid: int`
+    - `.running: bool`
+    - `.command: str`
+    - `.tail(n: int = 50) -> str`
+    - `.output() -> str`
+    - `.poll() -> BashResult | None`
+    - `.kill(sig: int = SIGTERM, grace: float = 5.0) -> None`: SIGTERM, escalating to SIGKILL; on Windows kill() uses taskkill /T and detached or reparented descendants may survive
+    - `await handle -> BashResult`: the handle is awaitable even after command completion, so agents can run commands non-blocking and await them after being notified of them finishing
+  - `BashResult`
+    - `.exit_code: int`
+    - `.output: str`
+    - `.duration: float`
+- `edit.run(path: str, old_str: str, new_str: str) -> str`: the primary method for editing files. async, exact-unique-match; the `edit` module is callable with the same arguments (`await edit(path=..., old_str=..., new_str=...)`)
+- `websearch.run(query: str, *, max_output: int = 8192, timeout: int | None, num_results: int | None) -> str`: search the web; the `websearch` module is callable with the same arguments
+- `attach_image(*paths: str) -> str`: loads images directly into context if the agent's model is vision-capable, errors otherwise

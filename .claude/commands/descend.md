@@ -1,5 +1,5 @@
 ---
-description: "Descend on a benchmark slice to 100% green with zero reward hacks: run all benches and RCAs in parallel, freeze a min-heap of failing tasks by fix complexity, pipeline approve → local-snapshot rerun, and async-deploy confirmed fixes with a second stop only for required admin approval."
+description: "Descend on a benchmark slice to 100% green with zero reward hacks: run all benches and RCAs in parallel on the cloud fleet by default, freeze a min-heap of failing tasks by fix complexity, pipeline approve → cloud-fleet outcome-proof rerun, and async-deploy confirmed fixes with a second stop only for required admin approval."
 argument-hint: "<slice> — daily | pre-deploy | rose-bench | incomplete, or explicit task names"
 ---
 
@@ -89,10 +89,10 @@ Downstream Implications sections.
    the RCA from Causal proof; outcome pending to Complete. After the first
    infra-clean run with causal RCA for every failing task, freeze a min-heap
    over those tasks and pipeline the rest: do not wait for one task's
-   approve → outcome-proof cycle to finish before asking about the next idle
-   task. On approve, immediately apply the fix on a local code snapshot and
-   rerun that task on the cloud fleet; immediately ask about the next idle
-   heap item.
+   approve → outcome-proof rerun cycle to finish before asking about the next
+   idle task. On approve, immediately apply the fix on a local code snapshot
+   and rerun that task on the cloud fleet (default); immediately ask about the
+   next idle heap item.
 12. **Approval format is the ONLY response format — no exceptions.** Every
    response emitted while `/descend` is active MUST consist of exactly: the
    header block (including the approvals counter), the delta rows of the
@@ -172,6 +172,81 @@ slice one task at a time, rerunning a failed subset, or running a diagnostic
 subset does not change the original slice name, task list, or denominator.
 Record and report every executed subset separately from overall slice progress.
 
+## One benchmark command
+
+Use `scripts/run-bench` for every suite, slice, task, bounded-concurrency
+campaign, and repeated isolated trial. Do not invoke `run-bench-fleet`,
+`run-bench-cloud`, or an ad hoc repetition loop directly.
+
+The ordinary CLI automatically reuses verified completed dependency snapshots
+across fresh checkouts. Follow CLAUDE.md's "Cloud startup reuse" guidance and
+`scripts/run-bench --help`; source-only changes do not require dependency rebuilds.
+
+Follow CLAUDE.md's "Monitor every cloud launch" instructions and the exact command
+printed at launch. Poll every 30 seconds, check terminal status on every poll, and
+observe through owned-resource release. A stale observation never authorizes a reset.
+
+~~~text
+/descend or operator
+  → scripts/run-bench <slice-or-task...> [--concurrency N] [-k K|--runs K]
+      → canonical catalog selection
+      → one fleet for the ordinary fully-parallel slice
+      └─ bounded campaign for task × repetition instances
+           → one shared serialized infra-canary stamp transaction
+           → at most N one-task fleet controllers
+           → distinct controller lock + run ID + machine/volume/queue per instance
+  → scripts/run-bench stability-proof -k K --concurrency N --seed S
+      → K sequential random ready-catalog slices, N isolated tasks per slice
+      → terminal _batch/run.json classification
+           ├─ PASSED / FAILED → record and advance
+           └─ SKIPPED / INFRA_ERROR / ERROR / CANCELLED → fail closed and reset the streak
+~~~
+
+Named selections are `daily`, `pre-deploy`, `rose-bench`, `polar-bench`, and
+`incomplete`; explicit task names may be combined. Selection order is preserved,
+group members stay in catalog order, and duplicates are removed. The command
+prints the resolved list and count before any provider action.
+
+With no campaign flags, one isolated fleet runs the resolved tasks concurrently
+and preserves the single batch artifact. `-k K` and `--runs K` are equivalent
+and create K independent runs of every resolved task; `--concurrency N` bounds
+how many of those one-task fleet controllers may be active. Repetitions default
+to sequential when no concurrency is supplied. Every copy remains isolated;
+never implement `-k` by passing duplicate task names to one fleet.
+
+For a consecutive no-INFRA acceptance gate, use
+`scripts/run-bench stability-proof -k K --concurrency N --seed S`. The sampler
+draws every slice from the unified ready catalog (`tasks.json` plus
+`polar_tasks.json`), and every slice runs to a terminal batch projection before
+the next starts. An ordinary benchmark/evaluator failure counts as a completed
+slice; skipped tasks do not prove execution. Missing, malformed, `SKIPPED`,
+`INFRA_ERROR`, `ERROR`, or `CANCELLED` task results
+abort the command so the streak can restart only after RCA and a fix.
+
+The compact benchmark live-result deploy control also verifies that PASS/FAIL
+is projected to the Hub while guest teardown is pending. Keep result visibility
+separate from exact resource-release evidence; follow `/benchmark` for the
+publication lifecycle and compact permanent regression command.
+
+The command contract is exercised end to end with fake provider children inside
+the existing always-run `Descend Command` deploy gate: selection, both `-k`
+spellings, concurrency bounds, per-copy identities, child-failure propagation,
+ready-catalog random slicing, terminal batch classification, and fail-closed
+INFRA reset. This must remain an offline `$0` extension of the existing
+always-run `Descend Command` deploy gate; never add a separate live benchmark
+stage or cloud wait to `/deploy`.
+
+The sequential proof wrapper caps width at 32. That is separate from `/deploy`'s
+20-task selection cap. For an explicitly requested wider parallel slice, resolve
+the concrete names and invoke `scripts/run-bench <task-1> ... <task-N>` once,
+without campaign flags. Retain one batch, verify observed execution concurrency,
+and report provider latency and resource release. Do not split that request into
+smaller slices and label it a wide run. Check current provider capacity, controller
+CPU and disk before allocation; never reclaim another workspace's resources.
+An explicitly infrastructure-only validation accepts terminal task failures under
+the user's contract in `CLAUDE.md`; it does not change this command's default
+task-success goal or the stricter predeploy smoke qualification.
+
 ## Persistent state
 
 Create .context/descend/<run-id>/state.json and update it after every state
@@ -194,7 +269,7 @@ transition. It must contain:
   record ID;
 - the frozen min-heap: each failing task's immutable rank, complexity class,
   issue cluster, and row ID;
-- each heap task's pipeline state: idle | applying | local-rerunning | rca.
+- each heap task's pipeline state: idle | applying | outcome-rerunning | rca.
 
 Compaction, session restart, or a sub-agent response must not erase or recreate
 state from memory.
@@ -329,12 +404,12 @@ RESOLVE_SLICE
                            → RANK_HEAP (freeze 1..N once)                   │
                            → PIPELINE_HEAP                                  │
                                 ├─ ask min idle → HARNESS_FIX_DECISION [STOP 1]
-                                ├─ approve → APPLY_AND_LOCAL_RERUN (sub-agent)
+                                ├─ approve → APPLY_AND_CLOUD_RERUN (sub-agent)
                                 │    ├─ pass → ENQUEUE_DEPLOY_UNIT ─────────┤
                                 │    └─ fail → /rca again, reinsert at rank │
                                 └─ immediately ask next idle ───────────────┘
 
-MAIN:   continue every independent RCA, local rerun, and deploy
+MAIN:   continue every independent RCA, cloud-fleet outcome-proof, and deploy
 
 DEPLOY: prepare isolated fix-only worktree → /deploy
         ├─ no admin approval required → merge → verify production
@@ -347,10 +422,11 @@ FULL_SLICE_ACCEPTANCE
 ~~~
 
 HARNESS_FIX_DECISION pauses only the next ask, not the pipeline. Approved
-workers keep applying and local-rerunning. DEPLOY_ADMIN_APPROVAL pauses only
-the affected deploy unit while the controller continues every independent RCA,
-rerun, and deploy. If no independent work remains, the controller may wait for
-that deploy approval.
+workers keep applying the fix on a local code snapshot and outcome-proof-
+rerunning on the cloud fleet. DEPLOY_ADMIN_APPROVAL pauses only the affected
+deploy unit while the controller continues every independent RCA, rerun, and
+deploy. If no independent work remains, the controller may wait for that
+deploy approval.
 
 User input can be injected at any time and is applied at the next safe boundary,
 but the agent deliberately yields for input only in the two states above.
@@ -359,15 +435,21 @@ but the agent deliberately yields for input only in the two states above.
 
 **Default substrate: cloud fleet.** Every `/descend` benchmark run — the initial
 slice, every infra-epoch rerun, every post-approval outcome-proof, and the final
-full-slice acceptance — goes through `scripts/run-bench` (defaults to
-`run-bench-fleet`, which fail-closes on a stale/missing infra-canary stamp).
-Use `scripts/run-bench --local …` only when Andy explicitly directs a local run.
+full-slice acceptance — goes through the per-bench isolated Fly fleet. Local is
+opt-in only: use `scripts/run-bench --local …` solely when Andy explicitly
+directs a local run for that invocation. Do not infer local from convenience,
+cost, or a single-task subset.
 
 Run only through the isolated entrypoint (cloud fleet by default):
 
 ~~~bash
-scripts/run-bench <resolved task names...>
+scripts/run-bench <resolved slice-or-task names...>
 ~~~
+
+`scripts/run-bench` defaults to `run-bench-fleet` and fail-closes on a stale/missing infra-canary stamp.
+It owns `--concurrency N` plus `-k K`/`--runs K`
+when independent repeated trials are required. Never prepend `--local` unless
+Andy asked for local. Never use `--single-box` (disabled; not parallel-safe).
 
 Capture the controller PID, dashboard, artifact path, actual start/finish
 timestamps, and every agent FE link. Actively monitor until every requested
@@ -449,9 +531,9 @@ Infra and External Blocker never enter this heap.
 
 Same-rank ties break by task name, then row ID.
 
-A task is **idle** when it is not applying, local-rerunning, or in RCA. Ask
+A task is **idle** when it is not applying, outcome-rerunning, or in RCA. Ask
 Andy about `min{ idle tasks that need a fix decision }`. Andy sees a deeper
-bench only if every easier bench is applying, local-rerunning, or in RCA.
+bench only if every easier bench is applying, outcome-rerunning, or in RCA.
 
 Do not yank an in-flight ask if a higher-priority task becomes idle. After
 Andy answers, the next ask is the new min idle.
@@ -498,11 +580,12 @@ admin approval. Those approvals are snapshot-scoped inside /deploy.
 
 ## Rerun and parallel deploy
 
-On each approve, immediately start that task's outcome-proof run on the cloud
-fleet (`scripts/run-bench <task>`; `--local` only if Andy explicitly directed
-it). Do not wait to batch approvals or rerun the whole failed subset first.
+On each approve, immediately start that task's outcome-proof run on the **cloud
+fleet** (apply the fix in a local code snapshot / worktree, then
+`scripts/run-bench <task>` — never `--local` unless Andy opted in). Do not wait
+to batch approvals or rerun the whole failed subset first.
 Run `/sync` before every subset or full-slice rerun. The final acceptance run
-covers the entire original slice.
+covers the entire original slice and also defaults to the cloud fleet.
 
 For each approved HARNESS row, this is `/RCA`'s mandatory exact outcome-proof
 run. Keep the prompt, evaluator, expected tools, fixture, timeout, and pass
@@ -857,3 +940,9 @@ Done requires all of:
 - the full lifecycle ledger and actual benchmark duration were reported.
 
 Only then propose or enable the cron.
+
+For fleet publication/cleanup regressions, follow the canonical benchmark CLI
+and `scripts/tests/benchmark-live-results.test.py`, not a private replacement
+harness. Distinguish an evaluated verdict from resource release: the parent stays
+live through teardown. Follow CLAUDE.md for any explicitly authorized temporary
+execution setting; keep normal defaults and exact ownership cleanup unchanged.

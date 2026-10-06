@@ -1632,6 +1632,78 @@ async def _drain(gen):
     return out
 
 
+async def test_anthropic_transport_accepts_captured_client_version_requirement():
+    """The captured provider rejection must not recur on any direct OAuth request."""
+    from providers.rose.transport import post_anthropic_stream
+
+    captured_rejection = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "Claude Code 2.1.81 does not support this model; version 2.1.251 or newer is required. Run 'claude update', or update the Claude desktop app, then try again.",
+            "details": {"error_code": "claude_code_version_too_old"},
+        },
+        "request_id": "req_011CevmJfH4uoGCZB6RutpU1",
+    }
+    seen_headers: list[dict[str, str]] = []
+
+    def handler(req):
+        assert str(req.url) == "https://api.anthropic.com/v1/messages"
+        assert req.headers["authorization"] == "Bearer version-test-token"
+        assert "oauth-2025-04-20" in req.headers["anthropic-beta"]
+        seen_headers.append(dict(req.headers))
+        advertised = req.headers["user-agent"].split("/", 1)[1].split(" ", 1)[0]
+        version = tuple(int(part) for part in advertised.split("."))
+        if version < (2, 1, 251):
+            return httpx.Response(400, json=captured_rejection)
+        return httpx.Response(200, text='event: message_stop\ndata: {"type":"message_stop"}\n\n')
+
+    set_mock_handler(handler)
+    async with post_anthropic_stream(
+        body={
+            "model": "claude-fable-5-1",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 16,
+            "stream": True,
+        },
+        claude_token="version-test-token",
+        request_id="r-client-version",
+    ) as response:
+        assert response.status_code == 200, (
+            "OAuth transport advertised a client version rejected by the captured provider contract"
+        )
+        assert await response.aread()
+    assert len(seen_headers) == 1
+
+
+async def test_provider_transports_preserve_error_body_for_classification():
+    """Every provider classifier receives the original body after transport reads it."""
+    from providers.rose.transport import (
+        get_error_body,
+        post_anthropic_stream,
+        post_codex_stream,
+        post_openai_responses_stream,
+        post_openrouter_stream,
+    )
+
+    error_body = '{"error":{"message":"provider denied the request"}}'
+    set_mock_handler(lambda request: httpx.Response(400, text=error_body))
+    cases = (
+        (post_anthropic_stream, {"claude_token": "test-token"}),
+        (post_openai_responses_stream, {"openai_key": "test-key"}),
+        (post_openrouter_stream, {"openrouter_key": "test-key"}),
+        (post_codex_stream, {"gpt_token": "test-token"}),
+    )
+    for transport, credentials in cases:
+        async with transport(
+            body={"model": "test-model", "stream": True},
+            request_id="r-error-body",
+            **credentials,
+        ) as response:
+            assert response.status_code == 400
+            assert get_error_body(response) == error_body
+
+
 async def test_claude_auth_400_raises_invalid_request_no_rotation():
     captured: list[str] = []
 
@@ -4944,6 +5016,341 @@ async def test_flash_cerebras_failure_falls_to_openrouter_qwen():
     assert any(c.kind == "content" for c in chunks)
 
 
+def test_cerebras_cooldown_preserves_provider_reset_evidence():
+    from providers.rose.cerebras import _provider_cooldown_seconds
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    cases = [
+        ({}, 60.0),
+        ({"retry-after": "0"}, 0.0),
+        ({"retry-after": "12.5"}, 12.5),
+        ({"retry-after": "invalid"}, 60.0),
+        ({"retry-after": "nan"}, 60.0),
+        ({"retry-after": "1e308"}, 60.0),
+        ({"retry-after": format_datetime(datetime.now(timezone.utc) - timedelta(seconds=30))}, 0.0),
+        ({"x-ratelimit-remaining-tokens-minute": "0", "x-ratelimit-reset-tokens-minute": "23"}, 23.0),
+        (
+            {"retry-after": "10", "x-ratelimit-remaining-tokens-minute": "0", "x-ratelimit-reset-tokens-minute": "25"},
+            25.0,
+        ),
+    ]
+    for headers, expected in cases:
+        assert _provider_cooldown_seconds(httpx.Response(429, headers=headers)) == expected
+    assert _provider_cooldown_seconds(httpx.Response(503)) is None
+    assert (
+        _provider_cooldown_seconds(
+            httpx.Response(
+                200, headers={"x-ratelimit-remaining-tokens-minute": "0", "x-ratelimit-reset-tokens-minute": "7"}
+            )
+        )
+        == 7
+    )
+    assert _provider_cooldown_seconds(httpx.Response(200, headers={"x-ratelimit-remaining-tokens-minute": "3"})) is None
+    assert (
+        _provider_cooldown_seconds(httpx.Response(200, headers={"x-ratelimit-remaining-tokens-minute": "-inf"})) is None
+    )
+
+
+async def test_cerebras_cooldown_skips_known_quota_then_reopens():
+    import providers.rose.cerebras as cb
+    from types import SimpleNamespace
+
+    cb._reset_cerebras_cooldown_cache()
+    clock = SimpleNamespace(now=1000.0)
+    seen = {"cerebras": 0, "fallback": 0}
+    sse = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "fixture-response"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}},
+            ]
+        )
+    )
+
+    def handler(req):
+        body = json.loads(req.content)
+        assert body["messages"][-1]["content"] == "unchanged request"
+        if req.url.host == "api.cerebras.ai":
+            seen["cerebras"] += 1
+            if seen["cerebras"] == 1:
+                return httpx.Response(429, headers={"retry-after": "30"}, text="fixture rate limit")
+        elif req.url.host == "openrouter.ai":
+            seen["fallback"] += 1
+            assert body["model"] == get_pool("rose-1-flash").waterfall[0]
+        else:
+            raise AssertionError(f"unexpected host {req.url.host}")
+        return httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    with (
+        patch("providers.rose.cerebras.load_config", lambda: SimpleNamespace()),
+        patch("providers.rose.cerebras.time", SimpleNamespace(monotonic=lambda: clock.now)),
+        patch.dict(os.environ, {"CEREBRAS_API_KEY": "offline-quota-fixture"}),
+    ):
+        for _ in range(3):
+            response = await RoseClient(openrouter_key="offline-fake").collect(
+                pool="rose-1-flash",
+                messages=[{"role": "user", "content": "unchanged request"}],
+                dump_context=False,
+            )
+            assert response.content == "fixture-response"
+        assert seen == {"cerebras": 1, "fallback": 3}, seen
+        clock.now += 31
+        await RoseClient(openrouter_key="offline-fake").collect(
+            pool="rose-1-flash", messages=[{"role": "user", "content": "unchanged request"}], dump_context=False
+        )
+        assert seen == {"cerebras": 2, "fallback": 3}, seen
+        # Credential rotation cannot inherit the exhausted credential's state.
+        first, _ = cb._cooldown_scope("old-key", "qwen-3.8-27b")
+        second, _ = cb._cooldown_scope("new-key", "qwen-3.8-27b")
+        other_model, _ = cb._cooldown_scope("old-key", "other-model")
+        cb._remember_cooldown(first, 60)
+        assert await cb._cerebras_on_cooldown(first, "") is True
+        assert await cb._cerebras_on_cooldown(second, "") is False
+        assert await cb._cerebras_on_cooldown(other_model, "") is False
+    cb._reset_cerebras_cooldown_cache()
+
+
+async def test_cerebras_shared_cooldown_singleflight_and_failures():
+    import providers.rose.cerebras as cb
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    cb._reset_cerebras_cooldown_cache()
+    requests = []
+    reset = (datetime.now(timezone.utc) + timedelta(seconds=120)).isoformat()
+    mode = {"value": "cooled"}
+
+    async def handler(req):
+        requests.append(req)
+        await asyncio.sleep(0.01)
+        if mode["value"] == "failed":
+            raise httpx.ConnectError("offline backend unavailable")
+        assert req.method == "GET"
+        assert req.url.params["model"] == "qwen-3.8-27b"
+        assert len(req.url.params["credentialId"]) == 64
+        return httpx.Response(200, json={"rateLimitedUntil": reset})
+
+    set_mock_handler(handler)
+    with patch(
+        "providers.rose.cerebras.load_config",
+        lambda: SimpleNamespace(
+            backend=SimpleNamespace(api_url="https://backend.invalid", api_key="offline-backend-key")
+        ),
+    ):
+        scope, key = cb._cooldown_scope("never-serialize-this-provider-key", "qwen-3.8-27b")
+        results = await asyncio.gather(*(cb._cerebras_on_cooldown(scope, key) for _ in range(10)))
+        assert all(results) and len(requests) == 1
+        assert "never-serialize-this-provider-key" not in str(requests[0].url)
+        # A shorter observed reset cannot shorten existing local cooldown.
+        until = cb._cooldowns[scope][0]
+        cb._remember_cooldown(scope, 5)
+        assert cb._cooldowns[scope][0] >= until
+        cb._reset_cerebras_cooldown_cache()
+        mode["value"] = "failed"
+        assert await cb._cerebras_on_cooldown(scope, key) is False
+        await cb._mark_cerebras_cooldown(scope, key, 45)
+        assert await cb._cerebras_on_cooldown(scope, key) is True
+        # Local mark survives a failed backend write, so the hot path has no RPC.
+        assert len(requests) == 3
+    cb._reset_cerebras_cooldown_cache()
+
+
+async def test_cerebras_cooldown_rpc_is_bounded_and_cancellation_isolated():
+    import providers.rose.cerebras as cb
+    from datetime import datetime, timedelta, timezone
+
+    cb._reset_cerebras_cooldown_cache()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    seen = []
+    reset = (datetime.now(timezone.utc) + timedelta(seconds=120)).isoformat()
+
+    async def handler(req):
+        seen.append(req.method)
+        entered.set()
+        await release.wait()
+        return httpx.Response(200, json={"rateLimitedUntil": reset})
+
+    set_mock_handler(handler)
+    scope = ("https://backend.invalid", "a" * 64, "qwen-3.8-27b")
+    real_client = httpx.AsyncClient
+
+    def offline_client(*args, **kwargs):
+        return real_client(transport=httpx.MockTransport(handler), trust_env=False)
+
+    with patch("providers.rose.cerebras.httpx.AsyncClient", offline_client):
+        try:
+            first = asyncio.create_task(cb._cerebras_on_cooldown(scope, "offline-fake"))
+            await entered.wait()
+            sibling = asyncio.create_task(cb._cerebras_on_cooldown(scope, "offline-fake"))
+            first.cancel()
+            try:
+                await first
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("caller cancellation was swallowed")
+            release.set()
+            assert await sibling is True
+            assert seen == ["GET"], seen
+            cb._reset_cerebras_cooldown_cache()
+            release.clear()
+            entered.clear()
+            # Keep the real RPC budget for the cancellation/response handshake.
+            # The short test budget belongs only to requests deliberately held open.
+            with patch("providers.rose.cerebras._COOLDOWN_RPC_TIMEOUT_S", 0.04):
+                # The mocked request has no IO timeout of its own. A whole-RPC
+                # budget must release all ten callers, even with shielded lookup.
+                results = await asyncio.wait_for(
+                    asyncio.gather(*(cb._cerebras_on_cooldown(scope, "offline-fake") for _ in range(10))), timeout=10
+                )
+                assert results == [False] * 10
+                assert seen == ["GET", "GET"]
+                await asyncio.sleep(0)
+                assert not cb._cooldown_reads
+                await asyncio.wait_for(cb._mark_cerebras_cooldown(scope, "offline-fake", 30), timeout=10)
+                assert await cb._cerebras_on_cooldown(scope, "offline-fake") is True
+                assert seen == ["GET", "GET", "POST"]
+        finally:
+            pending = list(cb._cooldown_reads.values())
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            cb._reset_cerebras_cooldown_cache()
+
+
+async def test_cerebras_successful_quota_headers_do_not_wait_for_shared_mark():
+    for finish in ("close", "cancel", "complete"):
+        await _assert_cerebras_successful_quota_headers_do_not_wait_for_shared_mark(finish)
+        await _assert_cerebras_successful_quota_headers_do_not_wait_for_shared_mark(finish, public=True)
+
+
+async def _assert_cerebras_successful_quota_headers_do_not_wait_for_shared_mark(finish, *, public=False):
+    import providers.rose.cerebras as cb
+    from helpers import httpx_capture
+    from types import SimpleNamespace
+
+    cb._reset_cerebras_cooldown_cache()
+    mark_entered = asyncio.Event()
+    mark_release = asyncio.Event()
+    mark_finished = asyncio.Event()
+    mark_tasks = []
+    requests = []
+    sse = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "ready"}, "finish_reason": "stop"}]},
+            ]
+        )
+    )
+
+    async def handler(request):
+        requests.append(request)
+        if request.url.host == "api.cerebras.ai":
+            return httpx.Response(
+                200,
+                text=sse,
+                headers={
+                    "content-type": "text/event-stream",
+                    "x-ratelimit-remaining-tokens-minute": "0",
+                    "x-ratelimit-reset-tokens-minute": "30",
+                },
+            )
+        assert request.url.host == "backend.invalid"
+        if request.method == "GET":
+            return httpx.Response(200, json={"rateLimitedUntil": None})
+        assert request.method == "POST"
+        mark_tasks.append(asyncio.current_task())
+        mark_entered.set()
+        try:
+            await mark_release.wait()
+        finally:
+            mark_finished.set()
+        return httpx.Response(200, json={"ok": True})
+
+    real_client = httpx.AsyncClient
+
+    def offline_client(*args, **kwargs):
+        return real_client(transport=httpx.MockTransport(handler), trust_env=False)
+
+    async def first_content(source):
+        async for chunk in source:
+            if chunk.kind == "content":
+                return chunk
+        raise AssertionError("successful provider response produced no content")
+
+    with (
+        patch.object(real_client, "__init__", httpx_capture._original_init or real_client.__init__),
+        patch("providers.rose.cerebras.httpx.AsyncClient", offline_client),
+        patch(
+            "providers.rose.cerebras.load_config",
+            lambda: SimpleNamespace(
+                backend=SimpleNamespace(api_url="https://backend.invalid", api_key="offline-backend-key")
+            ),
+        ),
+        patch("providers.rose.client.load_config", lambda: SimpleNamespace(anthropic=SimpleNamespace(api_key=""))),
+        patch("providers.rose.client._cerebras_api_key", return_value="offline-provider-key"),
+    ):
+        async with offline_client() as stream_client:
+            with patch("providers.rose.transport.get_streaming_http_client", return_value=stream_client):
+                source = (
+                    RoseClient(openrouter_key="offline-fake").complete(
+                        pool="rose-1-flash",
+                        messages=[{"role": "user", "content": "unchanged request"}],
+                        request_id="offline-success-quota",
+                        dump_context=False,
+                    )
+                    if public
+                    else cb.cerebras_complete(
+                        pool_spec=get_pool("rose-1-flash"),
+                        messages=[{"role": "user", "content": "unchanged request"}],
+                        cerebras_key="offline-provider-key",
+                        request_id="offline-success-quota",
+                    )
+                )
+                next_content = asyncio.create_task(first_content(source))
+                finish_stream = None
+                try:
+                    await asyncio.wait_for(mark_entered.wait(), timeout=10)
+                    chunk = await asyncio.wait_for(asyncio.shield(next_content), timeout=10)
+                    assert chunk.data["text"] == "ready"
+                    scope, key = cb._cooldown_scope("offline-provider-key", get_pool("rose-1-flash").cerebras_model)
+                    assert await cb._cerebras_on_cooldown(scope, key) is True
+                    assert not mark_finished.is_set()
+                    assert [request.method for request in requests] == ["GET", "POST", "POST"]
+                    if finish == "close":
+                        await source.aclose()
+                    else:
+                        finish_stream = asyncio.create_task(_drain(source))
+                        await asyncio.sleep(0)
+                        await asyncio.sleep(0)
+                        assert not finish_stream.done(), "stream exited before joining its shared mark"
+                        if finish == "cancel":
+                            finish_stream.cancel()
+                            await asyncio.gather(finish_stream, return_exceptions=True)
+                            assert finish_stream.cancelled(), "stream cancellation was swallowed"
+                        else:
+                            mark_release.set()
+                            await asyncio.wait_for(finish_stream, timeout=10)
+                    assert mark_finished.is_set(), "stream exit abandoned the shared mark"
+                    assert mark_tasks and all(task.done() for task in mark_tasks)
+                    assert all(task.cancelled() == (finish != "complete") for task in mark_tasks)
+                finally:
+                    mark_release.set()
+                    if not next_content.done():
+                        next_content.cancel()
+                    await asyncio.gather(next_content, return_exceptions=True)
+                    if finish_stream is not None:
+                        if not finish_stream.done():
+                            finish_stream.cancel()
+                        await asyncio.gather(finish_stream, return_exceptions=True)
+                    await source.aclose()
+                    await asyncio.gather(*mark_tasks, return_exceptions=True)
+                    cb._reset_cerebras_cooldown_cache()
+
+
 async def test_client_collect_preserves_multiple_unstructured_text_items():
     async def complete(**_kwargs):
         yield StreamChunk(
@@ -5100,6 +5507,112 @@ async def test_client_falls_through_from_claude_auth_to_waterfall():
         chunks.append(chunk)
     metadata = next(c for c in chunks if c.kind == "metadata")
     assert metadata.data.get("claude_token_error") == "auth_error"
+
+
+async def test_client_foundry_stream_exit_closes_http_owner():
+    """Public close/cancellation joins the real Foundry HTTP context before returning."""
+    from types import SimpleNamespace
+
+    from helpers import httpx_capture
+    import providers.rose.foundry as foundry
+
+    failures = []
+    for finish in ("close", "cancel", "complete"):
+        waiting = asyncio.Event()
+        release = asyncio.Event()
+        closed = asyncio.Event()
+        responses = []
+        clients = []
+        requests = []
+
+        class Body(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"ready"}\n\n'
+                waiting.set()
+                await release.wait()
+                yield (
+                    b'data: {"type":"response.completed","response":{"usage":'
+                    b'{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+                    b"data: [DONE]\n\n"
+                )
+
+            async def aclose(self):
+                closed.set()
+
+        def handler(request):
+            assert request.url.host == "foundry.invalid", "unexpected model route"
+            requests.append(request)
+            response = httpx.Response(200, stream=Body(), headers={"content-type": "text/event-stream"})
+            responses.append(response)
+            return response
+
+        real_client = httpx.AsyncClient
+
+        def offline_client(*args, **kwargs):
+            client = real_client(transport=httpx.MockTransport(handler), trust_env=False)
+            clients.append(client)
+            return client
+
+        with (
+            patch.object(real_client, "__init__", httpx_capture._original_init or real_client.__init__),
+            patch("providers.rose.foundry.httpx.AsyncClient", offline_client),
+            patch("providers.rose.client._openai_api_key", return_value=""),
+            patch("providers.rose.client._cerebras_api_key", return_value=""),
+            patch("providers.rose.client.load_config", lambda: SimpleNamespace(anthropic=SimpleNamespace(api_key=""))),
+            patch.object(foundry, "_auth_cooldown_until", 0.0),
+            patch.object(foundry, "_cooldown_until", {}),
+            patch.dict(
+                os.environ,
+                {
+                    "AZURE_FOUNDRY_ENDPOINT": "https://foundry.invalid",
+                    "AZURE_FOUNDRY_API_KEY": "offline-fake",
+                    "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+                },
+            ),
+        ):
+            source = RoseClient(openrouter_key="offline-fake").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "unchanged request"}],
+                request_id=f"offline-foundry-{finish}",
+                dump_context=False,
+            )
+            consumer = None
+            try:
+                while (chunk := await anext(source)).kind != "content":
+                    pass
+                assert chunk.data["text"] == "ready"
+                assert len(requests) == 1 and not closed.is_set()
+                if finish == "close":
+                    await source.aclose()
+                else:
+                    consumer = asyncio.create_task(_drain(source))
+                    await asyncio.wait_for(waiting.wait(), timeout=10)
+                    if finish == "cancel":
+                        consumer.cancel()
+                        await asyncio.gather(consumer, return_exceptions=True)
+                        assert consumer.cancelled(), "consumer cancellation was swallowed"
+                    else:
+                        release.set()
+                        await asyncio.wait_for(consumer, timeout=10)
+                assert closed.is_set(), f"{finish} returned before closing Foundry response"
+                assert all(response.is_closed for response in responses)
+                assert all(client.is_closed for client in clients), f"{finish} abandoned Foundry HTTP client"
+                assert len(requests) == 1, "stream exit must not fall through to another model"
+            except AssertionError as error:
+                failures.append(str(error))
+            finally:
+                release.set()
+                if consumer is not None:
+                    if not consumer.done():
+                        consumer.cancel()
+                    await asyncio.gather(consumer, return_exceptions=True)
+                await source.aclose()
+                for response in responses:
+                    await response.aclose()
+                for client in clients:
+                    await client.aclose()
+                await asyncio.sleep(0)
+    assert not failures, "; ".join(failures)
 
 
 async def test_client_foundry_server_error_falls_through_to_openrouter():
@@ -6206,6 +6719,66 @@ async def test_client_enforces_idle_timeout_after_first_productive_chunk():
     assert raised, "expected RoseDeadlineError citing idle window"
 
 
+async def test_client_buffered_tool_arguments_keep_real_progress_alive():
+    """Actual parsing must not mistake 150s of incoming tool arguments for silence."""
+    from _rose_stream_progress_fixture import assert_progress_case
+
+    for protocol in ("openai", "anthropic", "responses"):
+        await assert_progress_case(protocol=protocol)
+        await assert_progress_case(protocol=protocol, prelude=0)
+    await assert_progress_case(prelude=0, consumer_pause=100, expected_time=250.0)
+
+
+async def test_client_buffered_progress_keeps_silence_and_outer_bounds():
+    from _rose_stream_progress_fixture import assert_progress_case
+
+    idle = "rose.complete idle for 120.0s (deadline 590.0s)"
+    for mode in ("silence", "metadata", "comments", "empty_tool"):
+        await assert_progress_case(mode=mode, expected_error=idle, expected_time=122.55)
+    for protocol, mode in (
+        ("anthropic", "orphan_anthropic"),
+        ("responses", "orphan_responses"),
+        ("anthropic", "mismatched_anthropic"),
+        ("responses", "completed_responses"),
+    ):
+        await assert_progress_case(protocol=protocol, mode=mode, expected_error=idle, expected_time=122.55)
+    await assert_progress_case(tail_silence=121, expected_error=idle, expected_time=272.55)
+    await assert_progress_case(
+        seconds=600, expected_error="rose.complete deadline exceeded after 590.0s", expected_time=590.0
+    )
+    await assert_progress_case(mode="reasoning")
+
+
+async def test_client_parser_only_progress_preserves_ttft_without_idle_timeout():
+    from _rose_stream_progress_fixture import assert_progress_case
+
+    for protocol in ("openai", "anthropic", "responses"):
+        await assert_progress_case(
+            protocol=protocol,
+            prelude=0,
+            idle_timeout_s=None,
+            expected_error="rose.complete TTFT exceeded 90.0s",
+            expected_time=90.0,
+        )
+    # Once real output reaches the consumer, disabling the idle budget remains
+    # supported; the ordinary whole-call deadline still bounds the stream.
+    await assert_progress_case(idle_timeout_s=None, expected_time=152.55)
+
+
+async def test_client_buffered_progress_resets_for_new_waterfall_attempt():
+    from _rose_stream_progress_fixture import assert_progress_case
+
+    await assert_progress_case(
+        seconds=110, prelude=0, fallback=True, expected_error="rose.complete TTFT exceeded 90.0s", expected_time=200.0
+    )
+
+
+async def test_client_buffered_progress_isolates_siblings_and_cancellation():
+    from _rose_stream_progress_fixture import assert_concurrent_progress_and_cancellation
+
+    await assert_concurrent_progress_and_cancellation()
+
+
 # =====================================================================
 # Cache hit rate smoke tests
 # =====================================================================
@@ -7101,6 +7674,12 @@ async def run_all_tests():
     )
     r.record("anthropic_fast_mode_beta_header", test_anthropic_fast_mode_transport_adds_beta_header)
 
+    await r.record_async(
+        "anthropic_transport_client_version", test_anthropic_transport_accepts_captured_client_version_requirement
+    )
+    await r.record_async(
+        "provider_transport_error_body", test_provider_transports_preserve_error_body_for_classification
+    )
     await r.record_async("claude_auth_400_no_rotate", test_claude_auth_400_raises_invalid_request_no_rotation)
     await r.record_async("claude_auth_5xx_retries", test_claude_auth_5xx_retries_then_raises_server_error)
     await r.record_async("claude_auth_401_rotates", test_claude_auth_401_rotates_and_exhausts)
@@ -7302,6 +7881,23 @@ async def run_all_tests():
         "flash_cerebras_failure_falls_to_openrouter_qwen",
         test_flash_cerebras_failure_falls_to_openrouter_qwen,
     )
+    r.record(
+        "cerebras_cooldown_preserves_provider_reset_evidence", test_cerebras_cooldown_preserves_provider_reset_evidence
+    )
+    await r.record_async(
+        "cerebras_cooldown_skips_known_quota_then_reopens", test_cerebras_cooldown_skips_known_quota_then_reopens
+    )
+    await r.record_async(
+        "cerebras_shared_cooldown_singleflight_and_failures", test_cerebras_shared_cooldown_singleflight_and_failures
+    )
+    await r.record_async(
+        "cerebras_cooldown_rpc_is_bounded_and_cancellation_isolated",
+        test_cerebras_cooldown_rpc_is_bounded_and_cancellation_isolated,
+    )
+    await r.record_async(
+        "cerebras_successful_quota_headers_do_not_wait_for_shared_mark",
+        test_cerebras_successful_quota_headers_do_not_wait_for_shared_mark,
+    )
     await r.record_async(
         "client_collect_multiple_unstructured_items",
         test_client_collect_preserves_multiple_unstructured_text_items,
@@ -7312,6 +7908,10 @@ async def run_all_tests():
     )
     await r.record_async("client_collect_common_timing_logs", test_client_collect_emits_common_rose_timing_logs)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
+    await r.record_async(
+        "client_foundry_stream_exit_closes_http_owner",
+        test_client_foundry_stream_exit_closes_http_owner,
+    )
     await r.record_async(
         "client_foundry_server_error_falls_through_to_openrouter",
         test_client_foundry_server_error_falls_through_to_openrouter,
@@ -7369,6 +7969,26 @@ async def run_all_tests():
     await r.record_async(
         "client_enforces_idle_timeout_after_first_chunk",
         test_client_enforces_idle_timeout_after_first_productive_chunk,
+    )
+    await r.record_async(
+        "client_buffered_tool_arguments_keep_real_progress_alive",
+        test_client_buffered_tool_arguments_keep_real_progress_alive,
+    )
+    await r.record_async(
+        "client_parser_only_progress_preserves_ttft_without_idle_timeout",
+        test_client_parser_only_progress_preserves_ttft_without_idle_timeout,
+    )
+    await r.record_async(
+        "client_buffered_progress_keeps_silence_and_outer_bounds",
+        test_client_buffered_progress_keeps_silence_and_outer_bounds,
+    )
+    await r.record_async(
+        "client_buffered_progress_resets_for_new_waterfall_attempt",
+        test_client_buffered_progress_resets_for_new_waterfall_attempt,
+    )
+    await r.record_async(
+        "client_buffered_progress_isolates_siblings_and_cancellation",
+        test_client_buffered_progress_isolates_siblings_and_cancellation,
     )
 
     r.record(
@@ -7449,6 +8069,8 @@ async def run_all_tests():
         test_build_anthropic_body_omits_effort_for_haiku,
     )
     teardown_mock()
+    r.record("build_anthropic_body_omits_effort_for_haiku", test_build_anthropic_body_omits_effort_for_haiku)
+
     return r.summary()
 
 

@@ -5845,11 +5845,11 @@
   {
     "name": "google-oauth",
     "title": "Google OAuth",
-    "description": "Single root-agent DEMO trajectory for Gmail, Calendar, Drive, and disconnect using only an in-memory fixture.",
-    "prompt": "DEMO FIXTURE ONLY. Produce the Rose agent segment for a Google OAuth review video. Call google_oauth_demo exactly once, then answer from its result. The tool emits twelve visible mock cards in order: google_connection_status, gmail_list_unread, gmail_create_reply_draft, gmail_approve_draft, gmail_send_draft, gmail_archive, calendar_list_tomorrow, calendar_create_event, drive_search, drive_read, drive_append_line, google_disconnect. All operations use in-memory data; the fixture makes no database request. Do not spawn any subagent, coding agent, or browser agent. Do not use a website, real credentials, or a real Google API. The fixed fixture date is 2026-10-01 in America/Los_Angeles; tomorrow and next Friday are both 2026-10-02. Show these seven requests in order: summarize unread email; reply to Sam with \"Thursday works.\" including draft, approval, and Sent verification; archive the Acme newsletter and confirm it left Inbox; show tomorrow's Project Sync; create Lunch with Alex next Friday at noon; find Lease and state its end date; append \"Renew by Dec 1\" once to Lease. Include connected account test@gmail.com, final disconnected state, and the exact label \"DEMO fixture, no live Google data changed\". Ground every answer in the twelve DEMO cards. If the tool fails, report the failure. Fill all required response-schema fields, including the exact unread summary and final_disconnected=true.",
+    "description": "One root-agent Google workspace sequence covering Gmail, Calendar, Drive, and disconnect with an isolated in-memory sample.",
+    "prompt": "Please work through my Google account in this order. Use October 1, 2026 in America/Los_Angeles as the reference date; tomorrow and next Friday are October 2.\n\n1. Check which Google account is connected. Read my unread Gmail and summarize the messages from Sam and Acme.\n2. Draft a reply to Sam saying \"Thursday works.\" Approve the draft, send it, and confirm the reply appears in Sent.\n3. Archive the Acme newsletter and confirm it is no longer in Inbox.\n4. Read my calendar for tomorrow and tell me when Project Sync starts.\n5. Add Lunch with Alex next Friday at noon and confirm the event is on my calendar.\n6. Open Drive, find the Lease document, and tell me its end date.\n7. Add the line \"Renew by Dec 1\" to Lease exactly once, then confirm it appears once.\n8. Disconnect the Google account and confirm it is disconnected.\n\nGive me a concise answer for each request. Complete the work yourself without launching another agent.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["google_oauth_demo"],
+    "expected_tools": ["google_workspace_run"],
     "tags": ["DEMO"],
     "group": "demo",
     "price_limit_cents": 400,
@@ -5859,7 +5859,7 @@
     "approval_handling": null,
     "start_phase": "execute",
     "expected_tool_counts": {
-      "google_oauth_demo": 1
+      "google_workspace_run": 1
     },
     "tool_count_scope": "root",
     "forbidden_tools": [
@@ -5884,14 +5884,14 @@
       "services": [],
       "secrets": [],
       "live_targets": [],
-      "context_notes": "The root-only DEMO tool runs twelve operations against in-memory data. The fixture performs no database or Google API requests; normal agent transcript persistence still applies."
+      "context_notes": "The exact-goal root tool processes twelve operations against in-memory sample data. It performs no database or Google API requests; normal agent transcript persistence still applies."
     },
     "evaluators": [
       {
         "id": "demo-isolation-and-execution",
         "method": "static_check",
         "criteria": [
-          "Root completes after one google_oauth_demo call, zero subagents, zero browser sessions, and no tool failures"
+          "Root completes after one google_workspace_run call, zero subagents, zero browser sessions, and no tool failures"
         ],
         "checks": [
           {
@@ -5912,9 +5912,9 @@
         "id": "google-demo-tool-sequence",
         "method": "static_check",
         "criteria": [
-          "The root tool transcript contains twelve separate DEMO fixture cards in the specified order, with exact args and results for Gmail, Calendar, Drive, and disconnect.",
-          "The Gmail draft is approved before send, the reply appears in fixture Sent, Acme leaves fixture Inbox, Friday lunch is created on 2026-10-02, Lease end date is read, renewal line is appended once, and fixture connection ends false.",
-          "The final completion card has the exact DEMO disclosure plus all seven answer fields and final disconnected state; no subagent, coding agent, browser agent, database request by the fixture, or Google API was used."
+          "The root transcript contains twelve ordered operation cards and short, grounded progress updates between groups.",
+          "The Gmail reply is approved before sending and appears in Sent; Acme leaves Inbox; Friday lunch is on 2026-10-02; Lease end date is read and the renewal line appears once; the sample connection ends false.",
+          "The final completion card has all seven answer fields, connected account and final disconnected state. No subagent, coding agent, browser agent, fixture database request, or Google API is used."
         ],
         "checks": [
           {"type": "google_oauth_demo_trace"},
@@ -5923,16 +5923,10 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "label_eval": "One root-only mock tool emits twelve visible synthetic cards without subagents, coding agents, browser agents, or Google API requests.",
+    "label_eval": "One root-only sample tool emits twelve visible operation cards and progress updates without subagents, browser agents, or Google API requests.",
     "source": ["user-request:google-oauth-video-demo"],
     "response_schema": {
       "fields": [
-        {
-          "name": "demo_notice",
-          "type": "str",
-          "required": true,
-          "description": "The exact text DEMO fixture, no live Google data changed"
-        },
         {
           "name": "connected_account",
           "type": "str",
@@ -5985,7 +5979,7 @@
           "name": "final_disconnected",
           "type": "bool",
           "required": true,
-          "description": "true if the DEMO fixture ended disconnected"
+          "description": "true if the account ended disconnected"
         }
       ]
     }

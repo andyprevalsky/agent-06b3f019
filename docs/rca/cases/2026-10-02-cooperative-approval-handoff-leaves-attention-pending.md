@@ -129,6 +129,67 @@ the late signal on the original id. Post-fix: retry reuses `req-stale-prod`
 and returns `Approved. Go ahead and make the call.` DAG dependents still do
 not start.
 
+### October 2 integration recurrence: cancellation closed the chip before resume identity was saved
+
+The required merge of `fd2427a7347de27cdb9bb4744cf18d2aee37ae9b` with
+`42ffa4d57b8f973ac1f87fb2dc214fc68bd8c9f2` combined this same-attention-ID
+handoff repair with the browser-owned `close_on_cancel` chip closure recorded in
+[the September 11 archive case](2026-09-11-cloud-archive-preceded-browser-cleanup.md).
+The resolved intermediate closed an unanswered chip with its existing neutral
+FINISHED interruption event. The incoming transcript scanner correctly treats
+an ordinary FINISHED chip as completed, so it could no longer recover that
+unanswered row for continuation. Explicit generation-handoff stashing alone did
+not cover cancellation of a sibling approval wait.
+
+One call now saves the original request ID and question before the existing
+no-decision interruption event is delivered. Signal consumption clears that
+resume entry before response-completion awaits. Cancellation after a genuine
+approval or rejection therefore finishes the same known decision event and does
+not re-stash it. The original caller still receives `CancelledError`; this does
+not answer the attention row, create another request or SMS notification, change
+model-visible text, or change generic callers' default cancellation behavior.
+
+The new registered owning case,
+`test_direct_cancel_preserves_unanswered_resume_only`, gates real task
+cancellation after the opening event has been recorded. It requires continuation
+to reuse the original attention ID, one request creation and one SMS notification,
+then clear the resume entry after approval. Its approved and rejected completion
+arms require the consumed signal to remain consumed, no resume entry, and
+identical replayed terminal events.
+
+The identical test failed with `Canceled unanswered approval lost its original
+attention request` in 0.0215 seconds against the preserved resolved intermediate
+module, then passed in 0.0205 seconds with the one-call repair. This is an
+integration-module reproduction, not execution of an unchanged whole commit.
+The executed test SHA256 was
+`ad5e47fd580a2309ad6da2bdb049fccbd586dcbee5fcd8c57f136c290726319a`;
+formatting only that new function produced the AST-identical final fixture
+`c5b63f6d2c1e88431173db5e9f9111eb21f41189db3f59a1fcbdb0dd503a8d8f`.
+An earlier fixture-only dataclass-method error is preserved separately and is
+not counted as causal evidence.
+
+Executed command, from `agents/` with its Python 3.11.9 venv activated:
+
+```sh
+python ../.context/acceptance/proof110-required-main-browser-review/owning-approval-interoperability.private.py <receipt> [preserved-intermediate-module]
+```
+
+The baseline argument loads the actual preserved resolved service module for
+RED; GREEN uses the merged production module. The permanent test is also the
+27th case in the existing `request-user-approval` domain: its complete domain
+passed 27/27 on the final fixture bytes. Seventeen existing browser integration
+controls and 25 credential cases passed, retaining task identity, one terminal,
+rejection feedback, raw-cancellation propagation and task-scoped cooperative
+handoff behavior. The standard agents coverage gate remains a separate required
+result; these focused checks award no benchmark or fleet credit.
+
+Archive searches used both the actual assertion and the behavioral query
+`approval cancellation generation handoff attention resume chip`. This case is
+the owning recurrence; the September 11 chip-closure repair is the interacting
+relative. Search results, preserved modules, unchanged RED/GREEN, formatting
+identity, source hashes and checks are retained under
+`.context/acceptance/proof110-required-main-browser-review/`.
+
 ## Human feedback
 
 The first proposed fix closed the handed-off row with DEPLOY_INTERRUPTED so
@@ -136,6 +197,15 @@ SMS would stop targeting it. The user rejected that class: this is not a
 DAG-only bug, and a live continue_as_new must migrate the original approval
 request the way wait_for already resumes its target. Fencing the row is the
 dead-generation closer; using it on a replacement run drops a real approve.
+
+
+For this integration, the user reiterated that every quick test must be cemented
+in `/deploy`, and that larger additional verification needs approval. The new
+case is registered in the owning domain's `run_all_tests`; `/deploy` Step 4g
+runs it through canonical agents coverage. The existing Step 4s registration
+guard, `python3 agents/tests/structural/structural_test_registration.py`, passed
+all three checks, including discovery of every blackbox test. No new suite or
+deploy stage was added.
 
 ## Reusable lesson
 

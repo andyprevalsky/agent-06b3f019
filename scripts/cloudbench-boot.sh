@@ -29,13 +29,15 @@ set -uo pipefail
 # boot transport before any staged Python helper starts.
 export PYTHONDONTWRITEBYTECODE=1
 
-LOG=/data/bench.log
-REPO=/data/repo
+DATA_DIR="${CLOUDBENCH_DATA_DIR:-/data}"
+LOG="$DATA_DIR/bench.log"
+REPO="${CLOUDBENCH_REPO_DIR:-$DATA_DIR/repo}"
 STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
-DRIVER_PID_FILE=/data/cloudbench-driver.pid
-DRIVER_STATE_FILE=/data/cloudbench-driver.state
-SHUTDOWN_REQUEST_FILE="/data/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
-CLEANUP_ACK_FILE="/data/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot}.ack"
+DRIVER_PID_FILE="$DATA_DIR/cloudbench-driver.pid"
+DRIVER_STATE_FILE="$DATA_DIR/cloudbench-driver.state"
+SHUTDOWN_REQUEST_FILE="$DATA_DIR/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
+CLEANUP_ACK_FILE="$DATA_DIR/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot}.ack"
+INTERRUPT_CLEANUP_STATUS_FILE="$DATA_DIR/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
 
 publish_driver_state() {
     local state="$1" temporary="${DRIVER_STATE_FILE}.tmp.$$"
@@ -75,7 +77,7 @@ fi
 # fails (no set -e here) and the whole run produces an empty log. Wait until /data
 # is actually writable before doing anything that touches it.
 for _w in $(seq 1 120); do
-    if touch /data/.cbwtest 2>/dev/null; then rm -f /data/.cbwtest 2>/dev/null; break; fi
+    if touch "$DATA_DIR/.cbwtest" 2>/dev/null; then rm -f "$DATA_DIR/.cbwtest" 2>/dev/null; break; fi
     sleep 1
 done
 
@@ -88,7 +90,7 @@ publish_driver_state booting || exit 1
 
 # RUNSTAMP first — the controller polls the log for this token to confirm the box
 # actually booted into the driver (replaces the old ssh-written RUNSTAMP).
-rm -f /data/bench.log.generation
+rm -f "$DATA_DIR/bench.log.generation"
 printf 'RUNSTAMP-%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$LOG"
 
 # Data-plane status server: serve /data (which holds bench.log) over HTTP so the
@@ -104,10 +106,21 @@ fi
 pkill -f "cloudbench-status-server.py.*--port $STATUS_PORT" 2>/dev/null || true
 setsid python3 "$STATUS_SERVER_SCRIPT" \
     --port "$STATUS_PORT" \
-    --directory /data \
+    --directory "$DATA_DIR" \
     --barrier "${CLOUDBENCH_START_BARRIER:-}" \
     --run-token "${CLOUDBENCH_RUN_TOKEN:-}" \
     >/dev/null 2>&1 </dev/null &
+
+# Keep the status server outside the compressed envelope so a rejected payload
+# is observable and seals the no-launch cleanup contract. Older SSH launches
+# have no envelope; they retain their individually injected helper paths.
+if [ -n "${CLOUDBENCH_BOOT_PAYLOAD_FILE:-}" ]; then
+    if ! python3 /cloudbench-boot-payload.py unpack "$CLOUDBENCH_BOOT_PAYLOAD_FILE" \
+        "${CLOUDBENCH_BOOT_PAYLOAD_SHA256:-}" / >> "$LOG" 2>&1; then
+        seal_missing_injected_helper boot-payload "$CLOUDBENCH_BOOT_PAYLOAD_FILE" || exit 1
+        exec sleep infinity
+    fi
+fi
 
 # Nothing from the requested checkout may run until the complete bootstrap
 # control pair is present. Missing staged control code means no benchmark or
@@ -167,8 +180,15 @@ if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
     publish_driver_state exited || exit 1
     exec sleep infinity
 fi
+# This supervisor is itself a non-interactive shell. Without monitor mode, Bash
+# starts an asynchronous driver with SIGINT/SIGQUIT ignored; that inherited
+# disposition cannot be reset by the driver's inner heartbeat wrapper, so the
+# benchmark process silently ignores owner cancellation. Give the driver a
+# normal signal disposition before it launches any descendants.
+set -m
 bash "$DRIVER" >> "$LOG" 2>&1 &
 driver_pid=$!
+set +m
 driver_pid_temporary="${DRIVER_PID_FILE}.tmp.$$"
 printf '%s\n' "$driver_pid" > "$driver_pid_temporary" \
     && mv -f "$driver_pid_temporary" "$DRIVER_PID_FILE"
@@ -176,6 +196,12 @@ publish_driver_state running || exit 1
 wait "$driver_pid"
 driver_rc=$?
 rm -f "$DRIVER_PID_FILE"
+interrupt_status_present=0
+cleanup_ack_present=0
+[ -s "$INTERRUPT_CLEANUP_STATUS_FILE" ] && interrupt_status_present=1
+[ -s "$CLEANUP_ACK_FILE" ] && cleanup_ack_present=1
+printf '[boot %s] driver cleanup evidence interrupt_status=%s cleanup_ack=%s\n' \
+    "$(date -u +%H:%M:%S)" "$interrupt_status_present" "$cleanup_ack_present" >> "$LOG"
 printf '[boot %s] driver exited rc=%s; holding for controller collection\n' \
     "$(date -u +%H:%M:%S)" "$driver_rc" >> "$LOG"
 # `exited` is the terminal evidence seal consumed by the controller. Publish it

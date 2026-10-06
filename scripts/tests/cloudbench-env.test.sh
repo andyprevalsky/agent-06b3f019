@@ -18,7 +18,10 @@ require_text() {
 
 [ -f "$HELPER_SRC" ] || fail "cloud benchmark env helper is missing"
 require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
-  'STACK_SEED_DUMP="${CLOUDBENCH_SEED_DUMP_PATH:-/data/cloudbench-cache/victoria-seed.dump}"' \
+  'DATA_DIR="${CLOUDBENCH_DATA_DIR:-/data}"' \
+  "cloud benchmark data root must retain its persistent default"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'STACK_SEED_DUMP="${CLOUDBENCH_SEED_DUMP_PATH:-$DATA_DIR/cloudbench-cache/victoria-seed.dump}"' \
   "cloud benchmark seed-dump freshness proof must retain its persistent default"
 require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
   "export BENCHMARK_SEED_DUMP='\$STACK_SEED_DUMP'" \
@@ -243,6 +246,83 @@ fi
 # only its direct shell reparents that descendant, allowing it to mutate durable
 # ownership after controller cleanup returns. Tree teardown must kill the full
 # captured process forest, including a TERM-resistant leaf.
+# Independent assertion helper: zero means the captured descendant is terminal.
+cloudbench_test_process_terminal() {  # <pid> <native-birth>
+  python3 - "$ROOT_DIR/scripts/process-identity.py" "$1" "$2" <<'PY_TREE_STATE'
+import os
+import re
+import runpy
+import subprocess
+import sys
+
+identity = runpy.run_path(sys.argv[1])["current_identity"]
+pid, expected = int(sys.argv[2]), sys.argv[3]
+unknown = object()
+def observed_identity():
+    try:
+        return identity(pid)
+    except (OSError, ValueError, IndexError):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        return unknown
+try:
+    observed = observed_identity()
+    if observed is not unknown and observed != expected:
+        raise SystemExit(0)
+    probe = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True, timeout=5)
+    observed = observed_identity()
+    if observed is not unknown and observed != expected:
+        raise SystemExit(0)
+    # Darwin cannot read proc_pidinfo for a zombie. A positive native Z state
+    # still proves it cannot execute; live, malformed or unavailable state fails.
+    terminal = probe.returncode == 0 and re.fullmatch(r"Z[<NLSsl+]*", probe.stdout.strip())
+    raise SystemExit(0 if terminal else 1)
+except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+    raise SystemExit(1)
+PY_TREE_STATE
+}
+
+# Keep one exited direct child deliberately unreaped so this predicate control
+# does not depend on how quickly the host's PID1 reaps reparented descendants.
+# The test parent always joins its exact Popen after checking the native state.
+python3 - "$ROOT_DIR" "$(declare -f cloudbench_test_process_terminal)" <<'PY_TREE_TERMINAL' ||
+import pathlib
+import runpy
+import subprocess
+import sys
+import time
+
+root = pathlib.Path(sys.argv[1])
+identity = runpy.run_path(str(root / "scripts/process-identity.py"))["current_identity"]
+command = 'ROOT_DIR="$1"\n' + sys.argv[2] + '\ncloudbench_test_process_terminal "$2" "$3"'
+child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read(1)"], stdin=subprocess.PIPE)
+try:
+    birth = identity(child.pid)
+    def verdict():
+        return subprocess.run(["bash", "-c", command, "terminal-test", str(root), str(child.pid), birth], timeout=10).returncode
+    assert verdict() != 0, "terminal predicate accepted a live exact child"
+    child.stdin.write(b"x")
+    child.stdin.close()
+    deadline = time.monotonic() + 10
+    while True:
+        state = subprocess.check_output(["ps", "-p", str(child.pid), "-o", "stat="], text=True, timeout=5).strip()
+        if state.startswith("Z"):
+            break
+        assert time.monotonic() < deadline, "owned child never reached native zombie state"
+        time.sleep(0.01)
+    # This exact Popen is not reaped, so its PID cannot be recycled. Darwin
+    # may no longer expose proc_pidinfo once the child reaches native Z.
+    assert verdict() == 0, "terminal predicate rejected a non-executing exact zombie"
+finally:
+    if child.poll() is None:
+        child.kill()
+    child.wait(timeout=10)
+assert verdict() == 0, "terminal predicate rejected its reaped child"
+PY_TREE_TERMINAL
+  fail "native descendant terminal-state assertion contract failed"
+
 tree_ready="$TMP_ROOT/tree-ready"
 tree_leaf_pid="$TMP_ROOT/tree-leaf.pid"
 tree_leaked="$TMP_ROOT/tree-leaked"
@@ -264,8 +344,23 @@ for _ in $(seq 1 100); do
 done
 [ -e "$tree_ready" ] || fail "the descendant-tree test child must become ready"
 tree_leaf="$(cat "$tree_leaf_pid")"
+tree_leaf_birth="$(python3 "$ROOT_DIR/scripts/process-identity.py" "$tree_leaf")" ||
+  fail "the descendant-tree test leaf must have a native identity"
+if cloudbench_test_process_terminal "$tree_leaf" "$tree_leaf_birth"; then
+  cloudbench_terminate_tree_and_wait 1 "$tree_root_pid"
+  fail "the terminal assertion accepted an executing exact descendant"
+fi
+mkdir "$TMP_ROOT/tree-state-probe-fails"
+printf '#!/usr/bin/env bash\nexit 2\n' > "$TMP_ROOT/tree-state-probe-fails/ps"
+chmod +x "$TMP_ROOT/tree-state-probe-fails/ps"
+if PATH="$TMP_ROOT/tree-state-probe-fails:$PATH" \
+    cloudbench_test_process_terminal "$tree_leaf" "$tree_leaf_birth"; then
+  cloudbench_terminate_tree_and_wait 1 "$tree_root_pid"
+  fail "the terminal assertion accepted an unavailable native state probe"
+fi
 cloudbench_terminate_tree_and_wait 1 "$tree_root_pid"
-if kill -0 "$tree_root_pid" 2>/dev/null || kill -0 "$tree_leaf" 2>/dev/null; then
+if kill -0 "$tree_root_pid" 2>/dev/null || \
+    ! cloudbench_test_process_terminal "$tree_leaf" "$tree_leaf_birth"; then
   fail "tracked controller descendants must not survive tree cleanup"
 fi
 [ ! -e "$tree_leaked" ] ||
@@ -339,6 +434,14 @@ proxy_function_source="$(awk '
   capture && /^}$/ { exit }
 ' "$ROOT_DIR/scripts/run-bench-cloud")"
 [ -n "$proxy_function_source" ] || fail "could not load the production data-plane proxy function"
+proxy_lifecycle_function_source="$(awk '
+  /^status_proxy_lifecycle_response_accepted\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$proxy_lifecycle_function_source" ] ||
+  fail "could not load the production status-proxy lifecycle contract"
+eval "$proxy_lifecycle_function_source"
 eval "$proxy_function_source"
 APP="cloudbench-proxy-regression"
 CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
@@ -358,6 +461,12 @@ proxy_elapsed=$((SECONDS - proxy_started))
   fail "a bind collision must return the reallocate signal (exit=$proxy_status)"
 [ "$proxy_elapsed" -lt 2 ] ||
   fail "a bind collision must fail fast enough to reallocate (elapsed=${proxy_elapsed}s)"
+curl() {
+  case " $* " in
+    *" -w %{http_code} "*) printf 425 ;;
+  esac
+  return 0
+}
 
 production_function() {
   awk -v function_name="$1" '
@@ -518,7 +627,8 @@ claim_local_port "$overflow_preferred" overflow_port ||
 release_local_port_leases
 [ ! -d "$PORT_LEASE_ROOT/$overflow_port" ] ||
   fail "overflow-regression dashboard lease survived cleanup"
-unset -f flyctl curl start_data_plane_proxy start_leased_data_plane_proxy \
+unset -f flyctl curl status_proxy_lifecycle_response_accepted \
+  start_data_plane_proxy start_leased_data_plane_proxy \
   local_port_is_bindable claim_exact_local_port claim_local_port \
   claim_local_archive_ports release_local_port_lease \
   release_local_port_leases publish_status_proxy_port production_function
@@ -546,7 +656,8 @@ fleet_production_function() {
     capture && /^}$/ { exit }
   ' "$ROOT_DIR/scripts/run-bench-fleet"
 }
-for function_name in worker_ledger_lock_acquire worker_ledger_lock_release; do
+for function_name in worker_ledger_lock_acquire worker_ledger_lock_release \
+  inventory_index_healthy inventory_machine_record_path inventory_machine_field; do
   function_source="$(fleet_production_function "$function_name")"
   [ -n "$function_source" ] || fail "could not load production function $function_name"
   eval "$function_source"
@@ -559,6 +670,15 @@ APP="navi-whisper-lux-bench"
 FLEET_PRIMARY_VM_SIZE="shared-cpu-2x"
 FLEET_PRIMARY_VM_MEMORY="4096"
 clone_args="$TMP_ROOT/primary-clone.args"
+INVENTORY_INDEX="$TMP_ROOT/primary-clone-inventory"
+INVENTORY_CLOCK_EPOCH="$(date +%s)"
+INVENTORY_CLOCK_SECONDS="$SECONDS"
+SNAPSHOT_LOOP_PID=$$
+SNAPSHOT_LOOP_TOKEN=standalone
+printf '%s\n' '[{"id":"warm-source","state":"started","config":{"init":{"cmd":["bash","/cloudbench-boot.sh"]},"mounts":[]}}]' > "$TMP_ROOT/primary-machines.json"
+printf '[]\n' > "$TMP_ROOT/primary-volumes.json"
+python3 "$ROOT_DIR/scripts/cloudbench-machine-readiness.py" --publish-index \
+  "$TMP_ROOT/primary-machines.json" "$TMP_ROOT/primary-volumes.json" "$INVENTORY_INDEX"
 fleet_registry_record_name() { return 0; }
 fleet_registry_record_id() { return 0; }
 fleet_registry_release_name() { return 0; }
@@ -583,7 +703,9 @@ primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE '
   fail "daily fleet primary shape exceeds the observed Fly CPU governor ceiling"
 unset -f clone_machine_target fleet_registry_record_name fleet_registry_record_id \
   fleet_registry_release_name machine_volume_id machine_storage_ready machine_storage_failed fly_with_timeout \
-  worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function
+  worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function \
+  inventory_index_healthy inventory_machine_record_path inventory_machine_field
+unset INVENTORY_INDEX INVENTORY_CLOCK_EPOCH INVENTORY_CLOCK_SECONDS SNAPSHOT_LOOP_PID SNAPSHOT_LOOP_TOKEN
 
 resize_function_source="$(awk '
   /^resize_pool_machine\(\)/ { capture = 1 }
@@ -643,6 +765,140 @@ normalize_current_pool_shape || fail "existing stopped pool shape did not normal
 [ "$(cat "$resize_calls")" = "old-shape" ] ||
   fail "pool normalizer must mutate only the mismatched stopped machine"
 unset -f pool_machine_shape_from_json normalize_current_pool_shape resize_pool_machine FLY
+
+# A second fleet must retain admitted 8GB pool shapes and assign each task a
+# matching stopped Machine before attempting a host-local resize.
+eval "$shape_function_source"
+eval "$normalize_function_source"
+shape_hints_source="$(awk '
+  /^pool_write_shape_hints\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+claim_function_source="$(awk '
+  /^claim_pool_machine\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+[ -n "$shape_hints_source" ] && [ -n "$claim_function_source" ] ||
+  fail "could not load production shape-aware pool claims"
+eval "$shape_hints_source"
+eval "$claim_function_source"
+POOL_IDS_FILE="$TMP_ROOT/mixed-shape-pool.ids"
+printf 'a1\nb2\n' > "$POOL_IDS_FILE"
+FLEET_DIR="$TMP_ROOT/mixed-shape-run"
+mkdir -p "$FLEET_DIR"
+POOL_INVENTORY_JSON='[{"id":"a1","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":2,"memory_mb":4096}}},{"id":"b2","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":4,"memory_mb":8192}}}]'
+FLEET_BUNDLED_FRONTEND_VM_SIZE="shared-cpu-4x"
+FLEET_BUNDLED_FRONTEND_VM_MEMORY="8192"
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1
+resize_pool_machine() { fail "admitted large pool shape was needlessly resized"; }
+normalize_current_pool_shape || fail "mixed stopped pool shapes were not admitted"
+pool_write_shape_hints || fail "mixed pool shape hints were not written"
+require_text "$FLEET_DIR/pool-shapes.tsv" "b2 shared 4 8192" \
+  "large pool shape hint was lost"
+POOL_CLAIMS_DIR="$TMP_ROOT/mixed-shape-claims"
+CLAIMED_POOL_FILE="$FLEET_DIR/claimed.ids"
+UNAVAILABLE_POOL_IDS=()
+: > "$CLAIMED_POOL_FILE"
+machine_volume_id_from_json() { printf 'vol-mixed-shape'; }
+write_pool_claim() { printf 'owned\n' > "$1"; }
+cloudbench_env_sha256() { printf '%064d' 0; }
+fleet_audit_record_pool_machine() { return 0; }
+large_claim="$(claim_pool_machine shared-cpu-4x 8192)"
+[ "$large_claim" = "b2" ] ||
+  fail "large benchmark did not prefer the admitted 8GB Machine"
+small_claim="$(claim_pool_machine shared-cpu-2x 4096)"
+[ "$small_claim" = "a1" ] ||
+  fail "small benchmark did not prefer the admitted 4GB Machine"
+unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+unset -f pool_machine_shape_from_json normalize_current_pool_shape pool_write_shape_hints \
+  claim_pool_machine resize_pool_machine machine_volume_id_from_json write_pool_claim \
+  cloudbench_env_sha256 fleet_audit_record_pool_machine
+
+boot_update_source="$(awk '
+  /^boot_update_with_capacity_recovery\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$boot_update_source" ] || fail "missing production boot update capacity recovery"
+eval "$boot_update_source"
+CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=1
+CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS=10
+CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS=0
+boot_update_calls=0
+_with_timeout() {
+  boot_update_calls=$((boot_update_calls + 1))
+  if [ "$boot_update_calls" = 1 ]; then
+    echo 'Error: insufficient CPUs available to fulfill request on the current host'
+    return 1
+  fi
+  return 0
+}
+sleep() { :; }
+boot_update_with_capacity_recovery "$TMP_ROOT/host-capacity-update.log" fake update ||
+  fail "host-local CPU shortage was not retried as provider capacity"
+[ "$boot_update_calls" = 2 ] ||
+  fail "host-local CPU shortage consumed the ordinary boot retry budget"
+unset -f boot_update_with_capacity_recovery _with_timeout sleep
+unset CLOUDBENCH_BOOT_UPDATE_ATTEMPTS CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS \
+  CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS
+
+# The resize optimization only changes pool admission. A real large-primary
+# task keeps its 8GB request, while the default path still forks a separate
+# large Machine when the opt-in is absent.
+python3 - "$ROOT_DIR" <<'PY_BROWSER_METADATA' || fail "browser metadata must reach the fleet shape selector"
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+from cloudbench_catalog import get_task_metadata
+
+rows = get_task_metadata(
+    root / "agents/benchmarks/tasks.json", ["polar-bu-065", "image-handling"]
+)
+assert rows[0]["requires_browser_agent"] is True
+assert rows[1]["requires_browser_agent"] is not True
+PY_BROWSER_METADATA
+for function_name in bench_needs_large_primary primary_vm_size_for_bench \
+  primary_vm_memory_for_bench bench_uses_default_pool_shape; do
+  function_source="$(awk -v name="$function_name" '
+    $0 ~ ("^" name "\\(\\)") { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-fleet")"
+  [ -n "$function_source" ] || fail "missing production pool shape selector $function_name"
+  eval "$function_source"
+done
+FLEET_BUNDLED_FRONTEND_VM_SIZE="shared-cpu-4x"
+FLEET_BUNDLED_FRONTEND_VM_MEMORY="8192"
+INFRA_PROBE=0
+CATALOG_BROWSER_REQUIRED_TASKS=(polar-bu-065)
+unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+bench_uses_default_pool_shape parallel-tool-calls ||
+  fail "ordinary tasks must retain default pool admission"
+if bench_uses_default_pool_shape polar-bu-065; then
+  fail "catalog browser tasks must request the large primary shape"
+fi
+if bench_uses_default_pool_shape agent-payment-abandonment; then
+  fail "8GB tasks must not claim a 4GB pool without explicit resize"
+fi
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1
+bench_uses_default_pool_shape agent-payment-abandonment ||
+  fail "opted-in 8GB tasks must be able to claim a stopped pool Machine"
+[ "$(primary_vm_memory_for_bench agent-payment-abandonment)" = 8192 ] ||
+  fail "pool resize admission must preserve the large task's requested memory"
+bench_uses_default_pool_shape polar-bu-065 ||
+  fail "opted-in browser tasks must be able to resize a stopped pool Machine"
+INFRA_PROBE=1
+[ "$(primary_vm_memory_for_bench polar-bu-065)" = "${FLEET_PRIMARY_VM_MEMORY}" ] ||
+  fail "task-free infra probes must retain the default primary shape"
+INFRA_PROBE=0
+unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+unset CATALOG_BROWSER_REQUIRED_TASKS
+unset -f bench_needs_large_primary primary_vm_size_for_bench \
+  primary_vm_memory_for_bench bench_uses_default_pool_shape
 
 machine_states="$TMP_ROOT/machine-states"
 printf 'created\ncreated\nstopped\n' > "$machine_states"
@@ -955,11 +1211,11 @@ if grep -Fq 'descend_steps.jsonl' "$prepared_patch"; then
   fail "the shippable patch must still exclude append-only history ledgers"
 fi
 
-# A commit that exists only on a pushed feature branch is NOT guest-fetchable.
-# Fly guests authenticate through the controller token helper; treating any
-# origin/* containment as "already fetchable" made --refresh-deps fetch a
-# feature SHA over unauthenticated HTTPS and abort the fleet
-# (could not read Username for 'https://github.com').
+# A local bare remote is not the canonical private repository fetched by guests.
+# Even a current origin/* tracking ref cannot alone establish delivery authority.
+# Authenticated live-origin admission and stale/deleted-ref controls are exercised
+# by test_boot_payload_fetchable_source_uses_authenticated_live_origin in the
+# owning dependency suite; this local-only fixture must retain complete patches.
 feature_repo="$TMP_ROOT/fetchable-ref"
 git init -q "$feature_repo"
 git -C "$feature_repo" config user.email cloudbench-test@example.com
@@ -980,7 +1236,7 @@ feature_sha="$(git -C "$feature_repo" rev-parse HEAD)"
 git -C "$feature_repo" fetch -q origin
 resolved="$(cloudbench_fetchable_ref "$feature_repo" "$feature_sha" 1)"
 [ "$resolved" = "$main_sha" ] \
-  || fail "fetchable_ref must use origin/main for a feature-only SHA (got $resolved, want $main_sha)"
+  || fail "fetchable_ref must use origin/main for an unverified local-only remote (got $resolved, want $main_sha)"
 if ! cloudbench_fetchable_ref "$feature_repo" "$feature_sha" 1 >/dev/null 2>"$TMP_ROOT/fetchable.err"; then
   fail "allow-local-patch must succeed by falling back to origin/main"
 fi
@@ -1700,6 +1956,79 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'Never stop the warm machine ourselves' \
   "fleet must wait for warm stop without stopping a sibling-owned warm source"
 
+# connect_ex returns errno values for failures, including timeouts; only a
+# refused connection proves a port free. Execute the actual embedded program.
+python3 - "$HELPER_SRC" <<'PY'
+import errno
+from pathlib import Path
+import socket
+import sys
+from unittest.mock import patch
+
+source = Path(sys.argv[1]).read_text()
+function = source.split("cloudbench_tcp_listener_present()", 1)[1]
+program = function.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+compiled = compile(program, f"{sys.argv[1]}:cloudbench_tcp_listener_present", "exec")
+for result, expected in [
+    (0, 0),
+    (errno.ECONNREFUSED, 1),
+    # A full accept backlog remains occupied; these names alias on Linux.
+    (errno.EAGAIN, 0),
+    (errno.EWOULDBLOCK, 0),
+    (errno.ETIMEDOUT, 3),
+    (errno.EHOSTUNREACH, 3),
+    (errno.ENETUNREACH, 3),
+    (errno.EACCES, 3),
+    (socket.timeout("fixture timeout"), 3),
+    (OSError(errno.EMFILE, "fixture socket error"), 3),
+]:
+    with patch.object(sys, "argv", ["-", "19731"]), patch.object(socket, "socket") as make_socket:
+        probe = make_socket.return_value.__enter__.return_value
+        if isinstance(result, Exception):
+            probe.connect_ex.side_effect = result
+        else:
+            probe.connect_ex.return_value = result
+        try:
+            exec(compiled, {"__name__": "__main__"})
+        except SystemExit as exc:
+            assert exc.code == expected, (result, expected, exc.code)
+        else:
+            raise AssertionError("TCP probe must report an explicit exit status")
+        make_socket.assert_called_once_with(socket.AF_INET, socket.SOCK_STREAM)
+        probe.settimeout.assert_called_once_with(0.2)
+        probe.connect_ex.assert_called_once_with(("127.0.0.1", 19731))
+for invalid in ["not-a-port", "", "-1", "0", "65536"]:
+    with patch.object(sys, "argv", ["-", invalid]), patch.object(socket, "socket") as make_socket:
+        try:
+            exec(compiled, {"__name__": "__main__"})
+        except SystemExit as exc:
+            assert exc.code == 2, (invalid, 2, exc.code)
+        else:
+            raise AssertionError("Invalid TCP probe port must fail")
+        make_socket.assert_not_called()
+print("TCP probe errno classification contract ok")
+PY
+(
+  cloudbench_tcp_listener_present() { return 3; }
+  if selected="$(cloudbench_select_central_hub_port 19731 /tmp/no-such-hub-root)"; then
+    fail "TCP probe error must prevent hub port selection"
+  fi
+  [ -z "$selected" ] || fail "TCP probe error must not return a port"
+)
+
+# An occupied foreign hub, including the backlog errno result above, must never
+# be selected as free or reused without the expected runs-root identity.
+(
+  cloudbench_tcp_listener_present() {
+    [ "$1" -ne 19731 ] || return 0
+    return 1
+  }
+  cloudbench_central_hub_matches() { return 1; }
+  selected="$(cloudbench_select_central_hub_port 19731 /tmp/foreign-hub-root)"
+  [ "$selected" = "19732" ] ||
+    fail "an occupied foreign hub must be skipped before selecting a free port"
+)
+
 # Hub port selection must fail closed when the TCP probe errors (not "free").
 require_text "$HELPER_SRC" \
   'refusing fail-open port selection' \
@@ -1715,11 +2044,23 @@ require_text "$HELPER_SRC" \
   # Let the OS assign a port and retain the listener until the probe completes.
   listener_port_file="$TMP_ROOT/tcp-listener-port"
   python3 - "$listener_port_file" <<'PY' &
-import pathlib, socket, sys, time
+import pathlib, socket, sys, threading, time
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("127.0.0.1", 0))
 s.listen(1)
+
+# Each probe opens a connection. Consume it so readiness does not fill the
+# accept queue and make the following assertion time out on macOS.
+def accept_connections():
+    while True:
+        try:
+            connection, _ = s.accept()
+        except OSError:
+            return
+        connection.close()
+
+threading.Thread(target=accept_connections, daemon=True).start()
 pathlib.Path(sys.argv[1]).write_text(str(s.getsockname()[1]))
 while True:
     time.sleep(1)

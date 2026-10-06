@@ -1042,6 +1042,139 @@ async def test_direct_subagent_attention_sms_sends_notify():
     assert notify_call["args"][1] == "agentcard_setup"
 
 
+async def test_direct_cancel_preserves_unanswered_resume_only():
+    """Canceled unanswered chips retain their row; consumed decisions never rearm."""
+    from copy import deepcopy
+
+    from domains.request_user_approval.config import REJECTION_SENTINEL
+    from domains.request_user_approval.service import (
+        request_user_approval_direct,
+        stash_pending_approvals_from_context,
+    )
+    from tools.base import MessageStatus
+
+    class PersistedWF(_WFInstance):
+        def __init__(self, blocked_status):
+            super().__init__()
+            self.blocked_status = blocked_status
+            self.persisted = asyncio.Event()
+            self.blocked_once = False
+
+        async def _handle_tool_event(self, event, tool_call_id, tool_name):
+            await super()._handle_tool_event(deepcopy(event), tool_call_id, tool_name)
+            self.context.append(
+                {
+                    "role": "TOOL",
+                    "text": event.message,
+                    "metadata": {
+                        **(event.metadata or {}),
+                        "toolStatus": event.status.name,
+                    },
+                }
+            )
+            if event.status == self.blocked_status and not self.blocked_once:
+                self.blocked_once = True
+                self.persisted.set()
+                await asyncio.Event().wait()
+
+    for decision in (None, "Approved", REJECTION_SENTINEL):
+        request_id = "req-cancel-resume"
+        question = "Approve the existing request?"
+        wf = PersistedWF(
+            MessageStatus.IN_PROGRESS if decision is None else MessageStatus.FINISHED
+        )
+        if decision is not None:
+            wf._pending_approval_resume = {
+                "request_id": request_id,
+                "question": question,
+            }
+            wf._signal_responses[request_id] = decision
+        fake = _FakeWFModule(
+            activity_results={
+                "create_approval_request_activity": request_id,
+                "notify_sms_event_activity": None,
+            }
+        )
+        restore = _patch_service_workflow(fake)
+        task = asyncio.create_task(
+            request_user_approval_direct(wf, question, close_on_cancel=True)
+        )
+        try:
+            await asyncio.wait_for(wf.persisted.wait(), timeout=10)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("The original caller must remain canceled")
+            stash_pending_approvals_from_context(wf)
+            assert request_id not in wf._signal_responses
+            assert not any(
+                c["name"] == "resolve_attention_request_activity"
+                for c in fake.activity_calls
+            )
+            if decision is None:
+                assert getattr(wf, "_pending_approval_resume", None) == {
+                    "request_id": request_id,
+                    "question": question,
+                }, "Canceled unanswered approval lost its original attention request"
+                closed = wf.handled_events[-1][0]
+                assert closed.title == "Approval interrupted"
+                assert closed.metadata["excludeFromModel"] is True
+                wf._signal_responses[request_id] = "Approved"
+                resumed = await request_user_approval_direct(
+                    wf, question, close_on_cancel=True
+                )
+                assert resumed["attention_request_id"] == request_id
+                assert resumed["response"] == "Approved"
+                assert wf._pending_approval_resume is None
+                assert (
+                    sum(
+                        c["name"] == "create_approval_request_activity"
+                        for c in fake.activity_calls
+                    )
+                    == 1
+                )
+                assert (
+                    sum(
+                        c["name"] == "notify_sms_event_activity"
+                        for c in fake.activity_calls
+                    )
+                    == 1
+                )
+            else:
+                assert wf._pending_approval_resume is None, (
+                    "Consumed decisions must never be re-stashed"
+                )
+                terminal_events = [
+                    e
+                    for e, _, _ in wf.handled_events
+                    if e.status == MessageStatus.FINISHED
+                ]
+                assert len(terminal_events) == 2
+                assert terminal_events[0] == terminal_events[1]
+                expected_title = (
+                    "✗ User rejected action"
+                    if decision == REJECTION_SENTINEL
+                    else "✓ User approval received"
+                )
+                assert terminal_events[-1].title == expected_title
+                assert not any(
+                    c["name"] == "create_approval_request_activity"
+                    for c in fake.activity_calls
+                )
+                assert not any(
+                    c["name"] == "notify_sms_event_activity"
+                    for c in fake.activity_calls
+                )
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            restore()
+
+
 async def run_all_tests():
     print("request-user-approval blackbox tests:")
     r = BlackboxResult()
@@ -1091,6 +1224,10 @@ async def run_all_tests():
     await r.record_async(
         "direct_subagent_attention_sms",
         test_direct_subagent_attention_sms_sends_notify,
+    )
+    await r.record_async(
+        "direct_cancel_preserves_unanswered_resume_only",
+        test_direct_cancel_preserves_unanswered_resume_only,
     )
     await r.record_async(
         "direct_no_reminder",

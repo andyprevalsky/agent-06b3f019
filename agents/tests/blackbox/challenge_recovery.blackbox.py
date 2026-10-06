@@ -89,6 +89,103 @@ async def _run(
     return result, events, committed, config_inputs
 
 
+async def test_config_search_failure_preserves_backend_error_without_selecting_browser():
+    """A real 503 codec result must never become a selected browser config."""
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    import httpx
+    from domains.spawn_browser_agent_v3 import repo
+
+    source = _state(_cookie("authState"))
+    before = copy.deepcopy(source)
+    requests = []
+    error = "No stable browser configuration cleared the challenge"
+    response_body = {
+        "error": "browser_challenge_recovery_failed",
+        "message": error,
+        "failed_config_keys": ["steel_fixed", "kernel_mobile"],
+        "blacklist_expired": True,
+    }
+    status = 503
+    native_client = httpx.AsyncClient
+
+    def respond(request):
+        assert request.method == "POST"
+        assert request.url.path == "/api/browser-session/recover-challenge"
+        body = json.loads(request.content)
+        assert body["task_id"] == "fixture-task"
+        assert body["storage_state"] == source
+        requests.append(request)
+        return httpx.Response(status, json=response_body)
+
+    def client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(respond)
+        return native_client(*args, **kwargs)
+
+    async def no_op(*_args):
+        return None
+
+    async def forbidden(*_args):
+        raise AssertionError("Config search must not probe or mutate live cookies")
+
+    async def search(lanes):
+        return await repo.recover_browser_challenge(
+            SimpleNamespace(
+                backend=SimpleNamespace(api_url="https://offline.invalid", api_key="fixture")
+            ),
+            "fixture-task",
+            "https://order.online/store/blue-bottle",
+            source,
+            storage_lanes=list(lanes),
+        )
+
+    async def recover():
+        return await recover_from_challenge(
+            source_state=source,
+            target_url="https://order.online/store/blue-bottle",
+            wait_for_solver=no_op,
+            probe=forbidden,
+            commit_cookie_removals=forbidden,
+            search_configs=search,
+            progress=no_op,
+            skip_cookie_probes=True,
+        )
+
+    with patch.object(repo.httpx, "AsyncClient", client):
+        try:
+            await recover()
+        except RuntimeError as exc:
+            assert str(exc) == error
+            assert getattr(exc, "result", None) == {
+                "success": False,
+                "error": error,
+                "failed_config_keys": ["steel_fixed", "kernel_mobile"],
+                "blacklist_expired": True,
+                "status_code": 503,
+            }
+        else:
+            raise AssertionError(
+                "Failed backend search was incorrectly represented as config_selected"
+            )
+
+        status = 200
+        response_body = {"ws_url": "wss://winner", "provider": "steel"}
+        winner = await recover()
+        assert winner.recovery == "config_selected"
+        assert winner.config_result == response_body
+
+        # The caller's missing-CDP guard must still receive purported success.
+        response_body = {"success": True, "provider": "steel"}
+        malformed_winner = await recover()
+        assert malformed_winner.recovery == "config_selected"
+        assert malformed_winner.config_result == response_body
+
+    assert len(requests) == 3
+    assert source == before
+
+
 async def test_provider_exit_rejection_skips_cookie_probes_and_searches_configs():
     """A poisoned provider exit must rotate without probing its cookie state."""
     source = _state(_cookie("cf_clearance"), _cookie("authState"))
@@ -997,6 +1094,10 @@ async def test_live_cookie_commit_requires_one_clean_load():
 async def run_all_tests():
     print("challenge-recovery blackbox tests:")
     result = BlackboxResult()
+    await result.record_async(
+        "config_search_failure_preserves_backend_error",
+        test_config_search_failure_preserves_backend_error_without_selecting_browser,
+    )
     await result.record_async(
         "provider_exit_skips_cookie_probes",
         test_provider_exit_rejection_skips_cookie_probes_and_searches_configs,

@@ -1173,7 +1173,10 @@ if [ "$USER_EXISTS" = "0" ]; then
     _seed_ok=0
     for _seed_try in 1 2 3; do
         _seed_rc=0
-        (cd back-end && npx tsx scripts/seed-local.ts) || _seed_rc=$?
+        # Bound V8 old space so a delayed GC cannot retain COPY-stream buffers through
+        # LocalStorage/IndexedDB and spike the cold seed above its RSS ratchet.
+        (cd back-end && NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
+            npx tsx scripts/seed-local.ts) || _seed_rc=$?
         if [ "$_seed_rc" = 0 ]; then _seed_ok=1; break; fi
         _seed_signal=""
         case "$_seed_rc" in
@@ -2026,6 +2029,7 @@ for index, name in enumerate(names):
 
 root = os.getcwd()
 context_dir = os.environ.get("RUN_CONTEXT_DIR") or ".context"
+use_system_postgres = os.environ.get("USE_SYSTEM_PG", "false").lower() == "true"
 data = {
     "schema_version": 1,
     "status": os.environ.get("SERVICE_STATUS", "unknown"),
@@ -2057,14 +2061,18 @@ data = {
     "temporal_task_queue": os.environ.get("TEMPORAL_TASK_QUEUE", ""),
     "wmh_model_name": os.environ.get("WMH_MANIFEST_MODEL_NAME", ""),
         "database": {
-            "container": os.environ.get("DB_CONTAINER", ""),
-            "volume": os.environ.get("DB_VOLUME", ""),
+            "container": ""
+            if use_system_postgres
+            else os.environ.get("DB_CONTAINER", ""),
+            "volume": ""
+            if use_system_postgres
+            else os.environ.get("DB_VOLUME", ""),
             "owned_by_run_sh": os.environ.get("DB_OWNED_BY_US", "false").lower() == "true",
-            "use_system_postgres": os.environ.get("USE_SYSTEM_PG", "false").lower() == "true",
+            "use_system_postgres": use_system_postgres,
             "name": os.environ.get("LOCAL_DB_NAME", "victoria"),
             "port": env_int("LOCAL_DB_ACTUAL_PORT"),
             "runtime_port": 5432
-            if os.environ.get("USE_SYSTEM_PG", "false").lower() == "true"
+            if use_system_postgres
             else env_int("LOCAL_DB_PORT"),
         },
     "env": {
@@ -2290,9 +2298,29 @@ remove_isolated_frontend_build() {
 cleanup() {
     if $SHUTTING_DOWN; then return; fi
     SHUTTING_DOWN=true
+    local cleanup_failed=false
     echo "🛑 Stopping all services... (triggered by: $(caller 0 2>/dev/null || echo 'EXIT trap'), DB_OWNED_BY_US=$DB_OWNED_BY_US)"
+    if ! run_publish_stack_cleanup_status pending; then
+        echo "❌ could not publish pending stack cleanup status; continuing teardown" >&2
+        cleanup_failed=true
+    fi
+    # Workers finalize recordings and close providers through this backend.
+    # Drain their single signal owner while the backend/database remain alive.
+    if ! run_drain_owned_agents; then
+        cleanup_failed=true
+        run_publish_stack_cleanup_status failed || true
+        # A nonzero exit is a failed cleanup receipt, but a reaped worker must
+        # not orphan the rest of the owned stack. Keep services for recovery
+        # only when the supervisor's terminal state remains unproven.
+        if [ "${AGENTS_DRAINED:-false}" != true ]; then
+            SERVICE_STATUS=failed
+            write_services_manifest || true
+            return 1
+        fi
+    fi
     # Kill only the process trees we spawned (SIGTERM then SIGKILL)
     for pid in "${PIDS[@]}"; do
+        [ "$pid" != "${AGENTS_PID:-}" ] || continue
         if [ -n "${BACKEND_PID:-}" ] && [ "$pid" = "$BACKEND_PID" ] \
             && [ -n "${BACKEND_PGID:-}" ]; then
             terminate_backend_group || true
@@ -2320,6 +2348,11 @@ cleanup() {
     [ -n "$FAIL_DIR" ] && rm -rf "$FAIL_DIR"
     remove_isolated_frontend_build
     wait 2>/dev/null
+    if $cleanup_failed; then
+        run_publish_stack_cleanup_status failed
+        return 1
+    fi
+    run_publish_stack_cleanup_status clean
 }
 trap 'release_seed_lock_if_held; cleanup' EXIT
 
@@ -2478,7 +2511,10 @@ terminate_backend_group() {
         sleep 1
     done
     [ "$still_alive" = 0 ] || kill -KILL -- "-$pgid" 2>/dev/null || true
-    for _ in 1 2 3 4 5; do
+    # A TERM-ignoring descendant may take another scheduler turn to disappear
+    # after group KILL on a loaded cloud host. Keep the exact group fence until
+    # it is gone; never start a replacement against a still-live backend.
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         kill -0 -- "-$pgid" 2>/dev/null || { still_alive=0; break; }
         still_alive=1
         sleep 0.2
@@ -2598,18 +2634,30 @@ fi
 FRONTEND_PID=$!
 PIDS+=("$FRONTEND_PID"); NAMES+=("front-end")
 
+# On isolated cloud benches, eight workers and the backend otherwise import at
+# once on a shared-CPU guest. The workers can starve the backend past its
+# readiness bound even though both services are healthy in isolation. Let the
+# backend finish booting before starting workers; the task barrier still waits
+# for the full worker/autoscaler readiness contract below.
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+    wait_for_isolated_backend_ready || {
+        echo "❌ isolated backend failed both supervised startup attempts" >&2
+        exit 1
+    }
+fi
+
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
 if ! $BENCHMARK_MODE && $IS_MAC; then
     run_service "mac-app" bash -c 'set -eo pipefail; cd mac-app && source ~/.nvm/nvm.sh && nvm use 20.10.0 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log' &
     PIDS+=($!); NAMES+=("mac-app")
 fi
 
-if $BENCHMARK_MODE; then
-    run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && ENABLE_BENCHMARK_MEMORY_BASELINE=1 HEALTH_CHECK_PORT=$HEALTH_PORT SDK_METRICS_PORT=$SDK_METRICS_PORT ./scripts/run_local_worker.sh' &
-else
-    run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && HEALTH_CHECK_PORT=$HEALTH_PORT SDK_METRICS_PORT=$SDK_METRICS_PORT ./scripts/run_local_worker.sh' &
-fi
-PIDS+=($!); NAMES+=("agents")
+if $BENCHMARK_MODE; then export ENABLE_BENCHMARK_MEMORY_BASELINE=1; fi
+python3 "$SCRIPT_DIR/run-in-new-session.py" bash -c \
+    'set -eo pipefail; cd agents; source venv/bin/activate; export HEALTH_CHECK_PORT=$HEALTH_PORT; exec ./scripts/run_local_worker.sh' &
+AGENTS_PID=$!
+AGENTS_BIRTH="$(ps -p "$AGENTS_PID" -o lstart= | sed 's/^ *//;s/ *$//')"
+PIDS+=("$AGENTS_PID"); NAMES+=("agents")
 
 # Benchmark Hub poller: claims runs dispatched from the in-app Benchmarks tab
 # and executes them on this machine. Without it a dispatched run sits queued
@@ -2624,13 +2672,6 @@ fi
 # trace corpus and serves on WMH_PORT; sets WMH_BASE_URL/WMH_MODEL_NAME + manifest
 # fields when it comes up. A no-op on plain (non-benchmark) run.sh.
 start_world_model_harness
-
-if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
-    wait_for_isolated_backend_ready || {
-        echo "❌ isolated backend failed both supervised startup attempts" >&2
-        exit 1
-    }
-fi
 
 wait_for_frontend_ready "$FRONTEND_PID" "$FRONTEND_PORT" "$FRONTEND_LOG_FILE" || exit 1
 
@@ -2686,6 +2727,7 @@ while true; do
     # Check if any process has died
     for i in "${!PIDS[@]}"; do
         pid="${PIDS[$i]}"
+        if [ "$pid" = "${AGENTS_PID:-}" ] && [ "${AGENTS_DRAINED:-false}" = true ]; then continue; fi
         if ! kill -0 "$pid" 2>/dev/null; then
             # Process is gone — get its exit code
             # `run.sh` uses `set -e`; a bare non-zero `wait` would trigger the

@@ -1,14 +1,3 @@
-import { CredentialExhaustionSkip } from './codex-credit-skip';
-
-export interface TestResult {
-  name: string;
-  passed: boolean;
-  skipped?: boolean;
-  skipReason?: string;
-  error?: string;
-  duration: number;
-}
-
 export function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
@@ -34,30 +23,4 @@ export async function request(
     ? await response.json()
     : await response.text();
   return { status: response.status, data, headers: response.headers };
-}
-
-export async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    if (error instanceof CredentialExhaustionSkip) {
-      // Not a failure: the third-party account is out of credits/quota. Report
-      // as a loud SKIP so the deploy gate is not blocked by external funding.
-      return {
-        name,
-        passed: true,
-        skipped: true,
-        skipReason: error.message,
-        duration: Date.now() - start,
-      };
-    }
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
 }

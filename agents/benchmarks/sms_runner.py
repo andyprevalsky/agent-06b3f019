@@ -688,12 +688,12 @@ async def evaluate_sms_turns(
                 reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
                 passed = score >= float(evaluator.get("pass_threshold", 1.0))
             else:
-                passed, score = False, 0.0
-                reasoning = f"Unsupported evaluator method for runner='sms': {method}"
+                raise ValueError(f"Unsupported evaluator method for runner='sms': {method}")
         except Exception as exc:  # noqa: BLE001 — fail closed, surface the cause
-            passed, score = False, 0.0
-            reasoning = f"SMS evaluator execution failed: {exc}"
-        results.append({"id": evaluator_id, "method": method, "score": score, "passed": passed, "reasoning": reasoning})
+            raise RuntimeError(f"SMS evaluator {evaluator_id} execution failed: {exc}") from exc
+        results.append(
+            {"id": evaluator_id, "method": method, "score": score, "passed": passed, "reasoning": reasoning}
+        )
         if not passed:
             return False, f"Declared evaluator {evaluator_id} failed: {reasoning}", results
     return True, None, results
@@ -724,6 +724,7 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
     # raised by the very first statement inside must not surface as a NameError
     # that hides the real failure.
     pre_existing_agents: set[str] = set()
+    execution_error = False
     try:
         _apply_web_search_fixture(script.get("web_search_fixture"))
         pre_existing_agents = _live_agent_ids(deps, user_id)
@@ -771,6 +772,7 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
 
         passed, failure_reason, evaluator_results = await evaluate_sms_turns(task, turns, build_judge_scenario(script))
     except Exception as exc:  # noqa: BLE001 — a harness error is a task failure, not a crash
+        execution_error = True
         passed = False
         failure_reason = f"SMS runner error: {exc}"
         evaluator_results = []
@@ -783,6 +785,7 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
         passed=passed,
         agent_id="",
         status="COMPLETED" if passed else "FAILED",
+        benchmark_status="ERROR" if execution_error else "PASSED" if passed else "FAILED",
         progress_score=1.0 if passed else 0.0,
         duration_seconds=round(time.monotonic() - started, 1),
         cost_cents=0.0,
@@ -790,6 +793,7 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
         failure_reason=failure_reason,
         stop_metadata={
             "runner": "sms",
+            "owned_cleanup_verified": True,
             "turns": build_report_transcript(turns),
             "declared_evaluators": evaluator_results,
         },

@@ -11,6 +11,23 @@ import type {
 const router = Router();
 
 router.post(
+  '/artifacts',
+  authenticate,
+  asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
+    try {
+      res.json(await service.storeWorkerArtifacts(req.body));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'invalid archive batch';
+      if (message.startsWith('Archive ') || message.startsWith('Unsupported archive ')) {
+        res.status(400).json({ error: message });
+        return;
+      }
+      throw error;
+    }
+  })
+);
+
+router.post(
   '/artifact',
   authenticate,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {

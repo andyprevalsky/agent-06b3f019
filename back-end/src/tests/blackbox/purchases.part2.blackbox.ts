@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { consumePurchaseWalletFunding } from '../../providers/purchase-wallet-funding';
 import {
   cleanupAgentPurchaseCards,
   reconcileDissolvedPurchaseHolds,
@@ -24,9 +25,11 @@ import * as purchasesService from '../../domains/purchases/service';
 import {
   assert,
   capturedPaymentIntent,
+  createAgent,
   FakeCardProvider,
   FakeWalletFundingProvider,
   StubCardStateProvider,
+  validMintBody,
   withFakeStripe,
 } from './purchases.testkit';
 
@@ -60,27 +63,6 @@ async function createSubscribedUser(label: string): Promise<string> {
     },
   });
   return userId;
-}
-
-async function createAgent(userId: string, label: string): Promise<string> {
-  const agent = await prisma.agent.create({
-    data: { userId, goal: `purchase cleanup test ${label}` },
-    select: { id: true },
-  });
-  return agent.id;
-}
-
-function validMintBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    fingerprint: `fp-${randomUUID()}`,
-    merchant: 'Test Merchant',
-    currency: 'USD',
-    lineItems: [{ label: 'Widget', amountCents: 1000 }],
-    fees: [{ label: 'Tax', amountCents: 80 }],
-    subtotalCents: 1000,
-    totalCents: 1080,
-    ...overrides,
-  };
 }
 
 test('service close refunds the captured charge and voids an un-spent funded purchase', async () => {
@@ -559,11 +541,24 @@ test('dissolved hold after card spend records capture failure for reconciliation
   const fingerprint = `dissolved-spent-${randomUUID()}`;
 
   await withFakeStripe(
-    async () => {
-      await purchasesService.mintPurchaseCard(
+    async (calls) => {
+      const minted = await purchasesService.mintPurchaseCard(
         validMintBody({ userId, agentId, fingerprint, totalCents: 1000 }) as never,
         mintProvider,
         walletFundingProvider
+      );
+      // Model the historical/interrupted projection where confirmed funding consumption
+      // persisted before the HELD purchase projection advanced. CLOSED alone is not spend proof.
+      await consumePurchaseWalletFunding(minted.purchaseId);
+      const interruptedSettlement = await prisma.purchaseSpend.findUniqueOrThrow({
+        where: { id: minted.purchaseId },
+        include: { walletFunding: true },
+      });
+      assert(interruptedSettlement.status === PurchaseSpendStatus.HELD, 'fixture must remain HELD');
+      assert(
+        interruptedSettlement.walletFunding?.status === 'CONSUMED' &&
+          interruptedSettlement.walletFunding.consumedAt !== null,
+        'fixture must have durable funding consumption before reconciliation'
       );
       await reconcileDissolvedPurchaseHolds(spentProvider, walletFundingProvider, { userId });
 
@@ -579,6 +574,12 @@ test('dissolved hold after card spend records capture failure for reconciliation
         funding?.status === 'CONSUMED',
         `expected wallet funding CONSUMED, got ${funding?.status}`
       );
+      assert(
+        walletFundingProvider.reclaimCalls.length === 0,
+        'confirmed spend must not be reclaimed'
+      );
+      assert(calls.refunds.length === 0, 'confirmed spend must not be refunded');
+      assert(calls.cancels.length === 0, 'confirmed spend must not be canceled');
     },
     {
       retrievePaymentIntent: (id) => ({ id, status: 'canceled', amount_capturable: 0 }),

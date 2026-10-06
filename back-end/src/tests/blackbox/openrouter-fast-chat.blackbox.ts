@@ -222,6 +222,11 @@ async function testRoutesEachRequestByLiveLatency(): Promise<void> {
     { p50: 80 },
     'latency ranking must still prefer hosts fast enough to stream the structured reply'
   );
+  assert.deepEqual(
+    provider?.ignore,
+    ['friendli'],
+    'the host that missed the live router completion bound must be excluded'
+  );
   assert.equal(
     provider?.require_parameters,
     true,

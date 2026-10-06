@@ -2640,6 +2640,8 @@ async def run_all_tests():
         test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema,
     )
     teardown_mock()
+    await r.record_async("verifier_infra_soft_fail_trips_circuit_breaker_without_schema", test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema)
+
     return r.summary()
 
 

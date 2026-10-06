@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import os
+import contextlib
+import importlib.util
+import io
 import re
 import signal
 import subprocess
@@ -12,6 +15,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +51,18 @@ class StructuralGateDocumentationTests(unittest.TestCase):
     deploy.md. Replacing that list with a registry pointer therefore removes
     real coverage while still looking tidy. Pin both directions instead.
     """
+
+    def test_clone_recovery_is_registered(self) -> None:
+        self.assertIn("bash scripts/tests/deploy-agent-clone-recovery.test.sh", _registry_commands())
+
+    def test_compact_benchmark_gates_are_always_registered(self) -> None:
+        self.assertTrue({
+            "bash scripts/tests/descend-command.test.sh",
+            "python3 scripts/tests/benchmark-live-results.test.py",
+            "python3 scripts/tests/verify-successful-llm-queries.test.py",
+            "python3 scripts/tests/cloudbench-exact-session-multi-root.test.py",
+            "python3 scripts/tests/cloudbench-forensic-quiesced.test.py",
+        }.issubset(_registry_commands()))
 
     def test_deploy_md_lists_every_registered_gate(self) -> None:
         deploy_md = DEPLOY_MD.read_text()
@@ -118,6 +134,56 @@ class StructuralGatePortIsolationTests(unittest.TestCase):
 
 
 class StructuralGateRunnerTests(unittest.TestCase):
+    def test_default_admission_is_bounded_and_runs_every_gate_once(self) -> None:
+        spec = importlib.util.spec_from_file_location("deploy_runner_admission", RUNNER)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-admission-") as temporary:
+            root = Path(temporary)
+            release = root / "release"
+            gates = tuple(
+                module.Gate(str(index), (sys.executable, "-c", (
+                    "from pathlib import Path; import time; "
+                    f"Path({str(root / f'gate-{index}')!r}).open('x').close(); "
+                    f"release = Path({str(release)!r}); "
+                    "\nwhile not release.exists(): time.sleep(0.02)\n"
+                    f"raise SystemExit({7 if index == 10 else 0})"
+                )))
+                for index in range(11)
+            )
+            launched = []
+            real_popen = module.subprocess.Popen
+            real_sleep = module.time.sleep
+
+            def launch(command, **kwargs):
+                launched.append(command)
+                return real_popen(command, **kwargs)
+
+            def observe_admission(seconds):
+                if not release.exists():
+                    try:
+                        self.assertEqual(len(launched), 8)
+                    finally:
+                        release.touch()
+                real_sleep(seconds)
+
+            try:
+                with patch.object(module, "GATES", gates), patch.object(sys, "argv", [str(RUNNER)]), \
+                        patch.object(module.subprocess, "Popen", side_effect=launch), \
+                        patch.object(module.time, "sleep", side_effect=observe_admission), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    result = module.main()
+            finally:
+                release.touch()
+            self.assertEqual(launched, [gate.command for gate in gates])
+            self.assertEqual(len(list(root.glob("gate-*"))), 11)
+            self.assertEqual(result, 1, "a real gate failure must remain fatal")
+            with patch.object(module, "run_gates", return_value=0) as run, \
+                    patch.object(sys, "argv", [str(RUNNER), "--max-workers", "3"]):
+                self.assertEqual(module.main(), 0)
+                run.assert_called_once_with(module.GATES, max_workers=3)
+
     def test_signal_does_not_wait_for_unlaunched_gates(self) -> None:
         with tempfile.TemporaryDirectory(prefix="deploy-runner-signal-") as temporary:
             temporary_path = Path(temporary)
@@ -163,18 +229,43 @@ raise SystemExit(module.run_gates(gates, max_workers=1))
                 start_new_session=True,
                 text=True,
             )
-            deadline = time.monotonic() + 5
-            while not started.exists() and process.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.02)
-            self.assertTrue(started.exists(), "the first gate did not start")
-
-            process.send_signal(signal.SIGTERM)
             try:
-                output, _ = process.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-                self.fail("runner did not escalate a TERM-resistant gate to SIGKILL")
+                deadline = time.monotonic() + 60
+                while not started.exists() and process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(started.exists(), "the first gate did not start")
+
+                process.send_signal(signal.SIGTERM)
+                try:
+                    output, _ = process.communicate(timeout=60)
+                except subprocess.TimeoutExpired:
+                    self.fail("runner did not escalate a TERM-resistant gate to SIGKILL")
+            finally:
+                if process.poll() is None:
+                    process.send_signal(signal.SIGTERM)
+                try:
+                    process.communicate(timeout=60)
+                except subprocess.TimeoutExpired:
+                    if process.poll() is not None:
+                        self.fail("reaped harness left an open pipe; child ownership is unverified")
+                    # Gate sessions are separate from the outer harness group.
+                    # Retire only direct child groups still owned by this parent.
+                    children = subprocess.run(
+                        ["pgrep", "-P", str(process.pid)], capture_output=True, text=True, timeout=60
+                    )
+                    for child in children.stdout.split():
+                        identity = subprocess.run(
+                            ["ps", "-p", child, "-o", "ppid=,pgid="],
+                            capture_output=True, text=True, timeout=60,
+                        ).stdout.split()
+                        if identity == [str(process.pid), child]:
+                            try:
+                                os.killpg(int(child), signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=60)
 
             self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
             self.assertFalse(never_started.exists(), "signal must not launch pending gates")

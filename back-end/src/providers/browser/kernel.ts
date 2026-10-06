@@ -1,4 +1,3 @@
-import https from 'node:https';
 import { randomUUID } from 'node:crypto';
 import { PermissionDeniedError, RateLimitError } from '@onkernel/sdk';
 import type { Browser } from 'playwright';
@@ -40,6 +39,8 @@ import {
 } from './profileBinding';
 import { kernelTimeoutSeconds, readOnlyLiveView } from './kernelSessionConfig';
 import { kernelClient } from './kernelClient';
+import { releaseKernelRemoteSession } from './kernelSessionDelete';
+export { releaseKernelRemoteSession } from './kernelSessionDelete';
 import {
   captureKernelScreenshot,
   ensureKernelSessionFileDirectories,
@@ -107,44 +108,6 @@ interface KernelRemoteSessionOptions {
   omitManagedProxy?: boolean;
   omitProfile?: boolean;
   boundProfile?: ProviderProfileBinding;
-}
-
-export async function releaseKernelRemoteSession(sessionId: string): Promise<void> {
-  await retryWithBackoff(
-    async () => {
-      const apiKey = process.env.KERNEL_API_KEY?.trim();
-      if (!apiKey) throw new Error('KERNEL_API_KEY is required to delete Kernel sessions');
-      const baseUrl = (process.env.KERNEL_API_BASE_URL ?? 'https://api.onkernel.com').replace(
-        /\/$/,
-        ''
-      );
-      const url = new URL(`${baseUrl}/browsers/${encodeURIComponent(sessionId)}`);
-      const statusCode = await new Promise<number>((resolve, reject) => {
-        const request = https.request(
-          url,
-          { method: 'DELETE', headers: { Authorization: `Bearer ${apiKey}` } },
-          (response) => {
-            response.resume();
-            response.once('end', () => resolve(response.statusCode ?? 0));
-          }
-        );
-        request.setTimeout(10_000, () => {
-          request.destroy(new Error('Kernel session delete timed out'));
-        });
-        request.once('error', reject);
-        request.end();
-      });
-      if (statusCode !== 204 && statusCode !== 404) {
-        throw new Error(`Kernel session delete failed: HTTP ${statusCode}`);
-      }
-    },
-    {
-      maxRetries: 3,
-      fixedDelays: [250, 500],
-      isRetryable: () => true,
-      component: 'Kernel session delete',
-    }
-  );
 }
 
 async function createProfile(
@@ -232,14 +195,22 @@ async function createRemoteSession(
   validationBrowser: Browser;
 }> {
   const client = kernelClient();
+  const profileStartedAt = Date.now();
   const profile = options.omitProfile
     ? { profileId: null, profileSource: 'challenge_candidate_ephemeral' }
     : await createProfile(contextId, agentId, options.boundProfile);
+  log.info('Kernel session profile resolved', {
+    agentId,
+    profileSource: profile.profileSource,
+    durationMs: Date.now() - profileStartedAt,
+  });
   const stealth = browserProviderEnabled('KERNEL_STEALTH_ENABLED', true);
 
   const createValidatedSession = async (proxy: KernelProxySelection) =>
     retryWithBackoff(
       async () => {
+        const createStartedAt = Date.now();
+        log.info('Kernel browser creation requested', { agentId, proxySource: proxy.proxySource });
         const session = await client.browsers.create(
           {
             headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
@@ -260,6 +231,11 @@ async function createRemoteSession(
           },
           KERNEL_CREATE_REQUEST_OPTIONS
         );
+        log.info('Kernel browser creation completed', {
+          agentId,
+          sessionId: session.session_id,
+          durationMs: Date.now() - createStartedAt,
+        });
         const actualProfileId = session.profile?.id ?? null;
         // Only a required authenticated profile (Steel SessionAuth, H-07) fails
         // closed on mismatch. Kernel manages its own profiles and its create

@@ -1,18 +1,343 @@
 #!/usr/bin/env tsx
 
 import { randomUUID } from 'node:crypto';
-import { PurchaseSpendStatus } from '@prisma/client';
+import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import * as purchasesService from '../../domains/purchases/service';
+import { settlePurchaseAfterTransactionCleared } from '../../domains/purchases/repoSettlement';
 import type { CardProvider } from '../../providers/card-provider';
 import { prisma } from '../../providers/database';
-import { reconcileFailedPurchaseFundingReclaims } from '../../providers/purchaseCleanup';
+import {
+  cleanupAgentPurchaseCards,
+  reconcileDissolvedPurchaseHolds,
+  reconcileFailedPurchaseFundingReclaims,
+} from '../../providers/purchaseCleanup';
 import { WalletFundingProviderError } from '../../providers/wallet-funding';
 import {
   assert,
   FakeCardProvider,
   FakeWalletFundingProvider,
+  LifecycleCardProvider,
   withFakeStripe,
 } from './purchases.testkit';
+
+async function unavailableCompanyCardLifecycle(userId: string): Promise<void> {
+  const failures: string[] = [];
+  async function scenario(name: string, run: () => Promise<void>) {
+    try {
+      await run();
+      console.log(`PASS ${name}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(`${name}: ${message}`);
+      console.log(`FAIL ${name}: ${message}`);
+    }
+  }
+  async function fixture() {
+    const agent = await prisma.agent.create({
+      data: { userId, goal: 'company card financial lifecycle regression' },
+    });
+    const card = new LifecycleCardProvider();
+    const funding = new FakeWalletFundingProvider();
+    const body = {
+      userId,
+      agentId: agent.id,
+      fingerprint: `unavailable-company-${randomUUID()}`,
+      merchant: 'Regression Merchant',
+      currency: 'USD',
+      lineItems: [{ label: 'Widget', amountCents: 1000 }],
+      fees: [],
+      subtotalCents: 1000,
+      totalCents: 1000,
+    };
+    const minted = await purchasesService.mintPurchaseCard(body as never, card, funding);
+    return { agent, card, funding, body, minted };
+  }
+  async function purchase(id: string) {
+    return prisma.purchaseSpend.findUniqueOrThrow({
+      where: { id },
+      include: { walletFunding: true },
+    });
+  }
+  await scenario(
+    'closed company card lookup preserves unresolved funding and prevents a second mint',
+    async () => {
+      await withFakeStripe(async (calls) => {
+        const f = await fixture();
+        f.card.closed = true;
+        const found = await purchasesService.lookupPurchase(userId, f.body.fingerprint, f.card);
+        const row = await purchase(f.minted.purchaseId);
+        assert(found.found && !found.reusable, 'closed card must remain found and nonreusable');
+        assert(
+          found.purchase?.status === PurchaseSpendStatus.HELD,
+          'lookup must not call a closed card merchant-cleared'
+        );
+        assert(
+          row.status === PurchaseSpendStatus.HELD &&
+            row.walletFunding?.status === PurchaseWalletFundingStatus.FUNDED,
+          'unconfirmed closure must preserve HELD/FUNDED'
+        );
+        let rejected = false;
+        try {
+          await purchasesService.mintPurchaseCard(f.body as never, f.card, f.funding);
+        } catch (error) {
+          rejected = error instanceof purchasesService.PurchaseError && error.statusCode === 409;
+        }
+        assert(rejected, 'unresolved funding must reject a second same-cart mint');
+        assert(
+          calls.charges.length === 1 && f.card.mintCalls === 1,
+          'nonreuse must not create a second charge or card'
+        );
+      });
+    }
+  );
+  await scenario(
+    'canonical agent cleanup waits for exact unused-card release before refunding',
+    async () => {
+      await withFakeStripe(
+        async (calls) => {
+          const f = await fixture();
+          f.card.closed = true;
+          let entered!: () => void;
+          let release!: () => void;
+          const enteredProvider = new Promise<void>((resolve) => {
+            entered = resolve;
+          });
+          const releasedProvider = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          f.funding.reclaimUserWalletFunding = async (request) => {
+            f.funding.reclaimCalls.push(request);
+            entered();
+            await releasedProvider;
+            return {
+              providerTransferId: request.providerTransferId,
+              metadata: { status: 'release_confirmed' },
+            };
+          };
+          const cleanup = cleanupAgentPurchaseCards(f.agent.id, f.card, f.funding);
+          try {
+            const boundary = await Promise.race([
+              enteredProvider.then(() => 'provider'),
+              cleanup.then(() => 'completed'),
+            ]);
+            assert(
+              boundary === 'provider',
+              'closed funded card must enter canonical reclaim instead of assumed consumption'
+            );
+            const pending = await purchase(f.minted.purchaseId);
+            assert(
+              pending.status === PurchaseSpendStatus.HELD &&
+                pending.walletFunding?.status === PurchaseWalletFundingStatus.RECLAIMING,
+              'pending provider release must preserve purchase/funding ownership'
+            );
+            assert(
+              calls.refunds.length === 0,
+              'Stripe must not refund before exact transfer release'
+            );
+            assert(
+              f.funding.reclaimCalls[0].cardId === f.card.cardId &&
+                f.funding.reclaimCalls[0].providerTransferId === f.card.providerTransferId,
+              'reclaim must retain the exact card and funding identity'
+            );
+          } finally {
+            release();
+            await cleanup;
+          }
+          const terminal = await purchase(f.minted.purchaseId);
+          assert(
+            terminal.status === PurchaseSpendStatus.VOIDED &&
+              terminal.walletFunding?.status === PurchaseWalletFundingStatus.RECLAIMED,
+            'confirmed unused release must reach VOIDED/RECLAIMED'
+          );
+          assert(
+            calls.refunds.length === 1 && f.funding.reclaimCalls.length === 1,
+            'release must refund exactly once'
+          );
+        },
+        { retrievePaymentIntent: (id) => ({ id, status: 'succeeded', amount_received: 1000 }) }
+      );
+    }
+  );
+  await scenario(
+    'unknown card read cannot clear funding or create another same-cart charge',
+    async () => {
+      await withFakeStripe(async (calls) => {
+        const f = await fixture();
+        f.card.readFailure = new Error('provider lookup unavailable');
+        let lookupRejected = false;
+        try {
+          await purchasesService.lookupPurchase(userId, f.body.fingerprint, f.card);
+        } catch (error) {
+          lookupRejected = error === f.card.readFailure;
+        }
+        assert(lookupRejected, 'an unreadable card must preserve its unresolved observation');
+        let mintRejected = false;
+        try {
+          await purchasesService.mintPurchaseCard(f.body as never, f.card, f.funding);
+        } catch (error) {
+          mintRejected = error === f.card.readFailure;
+        }
+        assert(mintRejected, 'unknown liveness must not open a new cart purchase');
+        const row = await purchase(f.minted.purchaseId);
+        assert(
+          row.status === PurchaseSpendStatus.HELD &&
+            row.walletFunding?.status === PurchaseWalletFundingStatus.FUNDED,
+          'read outage must preserve HELD/FUNDED'
+        );
+        assert(
+          calls.charges.length === 1 && f.card.mintCalls === 1,
+          'read outage must not bill or mint again'
+        );
+        await cleanupAgentPurchaseCards(f.agent.id, f.card, f.funding);
+        assert(
+          f.funding.reclaimCalls.length === 0 && calls.refunds.length === 0,
+          'unknown read must not claim financial release'
+        );
+      });
+    }
+  );
+  await scenario(
+    'authoritative merchant clearance preserves consumed funding without a refund',
+    async () => {
+      await withFakeStripe(async (calls) => {
+        const f = await fixture();
+        assert(
+          (await settlePurchaseAfterTransactionCleared(f.minted.purchaseId)).outcome === 'cleared',
+          'canonical settlement must accept merchant clearance'
+        );
+        f.card.closed = true;
+        const found = await purchasesService.lookupPurchase(userId, f.body.fingerprint, f.card);
+        assert(
+          found.purchase?.status === PurchaseSpendStatus.CLEARED && !found.reusable,
+          'confirmed merchant settlement remains cleared and nonreusable'
+        );
+        await cleanupAgentPurchaseCards(f.agent.id, f.card, f.funding);
+        const row = await purchase(f.minted.purchaseId);
+        assert(
+          row.status === PurchaseSpendStatus.CLEARED &&
+            row.walletFunding?.status === PurchaseWalletFundingStatus.CONSUMED,
+          'settlement must remain atomically CLEARED/CONSUMED'
+        );
+        assert(
+          f.funding.reclaimCalls.length === 0 && calls.refunds.length === 0,
+          'confirmed merchant spend cannot be reclaimed or refunded'
+        );
+      });
+    }
+  );
+  if (failures.length) throw new Error(failures.join('; '));
+}
+
+async function dissolvedClosedCompanyCardLifecycle(userId: string): Promise<void> {
+  const card = new FakeCardProvider();
+  const funding = new FakeWalletFundingProvider();
+  await withFakeStripe(
+    async (calls) => {
+      const minted = await purchasesService.mintPurchaseCard(
+        {
+          userId,
+          fingerprint: `dissolved-closed-${randomUUID()}`,
+          merchant: 'Dissolved Hold Merchant',
+          currency: 'USD',
+          lineItems: [{ label: 'Widget', amountCents: 1000 }],
+          fees: [],
+          subtotalCents: 1000,
+          totalCents: 1000,
+        } as never,
+        card,
+        funding
+      );
+      card.getDetails = async (cardId: string) => {
+        assert(cardId === card.cardId, 'read must retain the exact card');
+        card.detailCalls += 1;
+        return {
+          pan: card.pan,
+          cvv: card.cvv,
+          expiry: card.expiry,
+          status: 'CLOSED',
+          balanceCents: 0,
+        };
+      };
+      card.closeCard = async (cardId: string) => {
+        assert(cardId === card.cardId, 'close must retain the exact card');
+        card.closeCalls += 1;
+        throw Object.assign(new Error('card_closed'), { code: 'card_closed' });
+      };
+      let entered!: () => void;
+      let release!: () => void;
+      const enteredProvider = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const releasedProvider = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      funding.reclaimUserWalletFunding = async (request) => {
+        funding.reclaimCalls.push(request);
+        entered();
+        await releasedProvider;
+        return {
+          providerTransferId: request.providerTransferId,
+          metadata: { status: 'release_confirmed' },
+        };
+      };
+      const reconciliation = reconcileDissolvedPurchaseHolds(card, funding, { userId }).then(
+        () => undefined,
+        (error: unknown) => error
+      );
+      try {
+        const boundary = await Promise.race([
+          enteredProvider.then(() => 'provider'),
+          reconciliation.then(() => 'completed'),
+        ]);
+        assert(
+          boundary === 'provider',
+          'already-closed unused card must reach exact funding release'
+        );
+        const pending = await prisma.purchaseSpend.findUniqueOrThrow({
+          where: { id: minted.purchaseId },
+          include: { walletFunding: true },
+        });
+        assert(
+          pending.status === PurchaseSpendStatus.HELD &&
+            pending.walletFunding?.status === 'RECLAIMING',
+          'pending release must remain HELD/RECLAIMING'
+        );
+        assert(
+          funding.reclaimCalls[0].cardId === card.cardId &&
+            funding.reclaimCalls[0].providerTransferId === card.providerTransferId,
+          'release must retain exact card and transfer'
+        );
+        assert(
+          calls.refunds.length === 0 && calls.cancels.length === 0,
+          'pending release must not reverse Stripe'
+        );
+      } finally {
+        release();
+        const error = await reconciliation;
+        assert(error === undefined, 'typed card_closed must not abandon dissolved-hold reclaim');
+      }
+      const terminal = await prisma.purchaseSpend.findUniqueOrThrow({
+        where: { id: minted.purchaseId },
+        include: { walletFunding: true },
+      });
+      assert(
+        terminal.status === PurchaseSpendStatus.VOIDED &&
+          terminal.walletFunding?.status === 'RECLAIMED',
+        'confirmed release must void the dissolved hold without fake consumption'
+      );
+      assert(
+        card.closeCalls === 1 && funding.reclaimCalls.length === 1,
+        'close and exact reclaim must run once'
+      );
+      assert(
+        calls.refunds.length === 0 && calls.cancels.length === 0,
+        'already dissolved Stripe hold must not be reversed twice'
+      );
+    },
+    { retrievePaymentIntent: (id) => ({ id, status: 'canceled', amount_capturable: 0 }) }
+  );
+  console.log('PASS dissolved hold reclaims an already-closed unused company card');
+}
 
 async function main(): Promise<void> {
   const userId = `purchase3-${Date.now()}-${randomUUID()}`;
@@ -49,6 +374,8 @@ async function main(): Promise<void> {
   };
 
   try {
+    await dissolvedClosedCompanyCardLifecycle(userId);
+    await unavailableCompanyCardLifecycle(userId);
     await withFakeStripe(
       async (calls) => {
         const minted = await purchasesService.mintPurchaseCard(
@@ -285,6 +612,7 @@ async function main(): Promise<void> {
     console.log('PASS setup-shaped AgentCard errors stay typed at the purchase boundary');
   } finally {
     await prisma.purchaseSpend.deleteMany({ where: { userId } });
+    await prisma.agent.deleteMany({ where: { userId } });
     await prisma.subscription.deleteMany({ where: { userId } });
     await prisma.user.deleteMany({ where: { userId } });
     await prisma.$disconnect();

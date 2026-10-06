@@ -139,6 +139,31 @@ class Registry:
                 except FileNotFoundError:
                     pass
 
+    def _publish(self, lease: Path, record: dict[str, object]) -> None:
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".claim-", suffix=".tmp", dir=self.root
+        )
+        temp = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(record, handle, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            pause = float(
+                os.environ.get(
+                    "CLOUDBENCH_PORT_LEASE_TEST_PAUSE_BEFORE_PUBLISH", "0"
+                )
+            )
+            if pause > 0:
+                time.sleep(pause)
+            os.replace(temp, lease)
+        finally:
+            try:
+                temp.unlink()
+            except FileNotFoundError:
+                pass
+
     def claim(self, *, owner_pid: int, token: str, start: int) -> int:
         process_start = _process_start_identity(owner_pid)
         if process_start is None:
@@ -153,31 +178,45 @@ class Registry:
             lease = self.root / str(port)
             if lease.exists() or not _port_is_bindable(port):
                 continue
-            fd, temp_name = tempfile.mkstemp(
-                prefix=".claim-", suffix=".tmp", dir=self.root
-            )
-            temp = Path(temp_name)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    json.dump(record, handle, sort_keys=True)
-                    handle.write("\n")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                pause = float(
-                    os.environ.get(
-                        "CLOUDBENCH_PORT_LEASE_TEST_PAUSE_BEFORE_PUBLISH", "0"
-                    )
-                )
-                if pause > 0:
-                    time.sleep(pause)
-                os.replace(temp, lease)
-                return port
-            finally:
-                try:
-                    temp.unlink()
-                except FileNotFoundError:
-                    pass
+            self._publish(lease, record)
+            return port
         raise RuntimeError("could not claim a free local port")
+
+    def claim_batch(
+        self, *, owner_pid: int, token: str, start: int, count: int
+    ) -> list[int]:
+        if count <= 0 or count > 64_512:
+            raise ValueError("batch port count must be between 1 and 64512")
+        process_start = _process_start_identity(owner_pid)
+        if process_start is None:
+            raise RuntimeError(f"owner process {owner_pid} is not alive")
+        self._reap_stale()
+        record = {
+            "pid": owner_pid,
+            "process_start": process_start,
+            "token": token,
+        }
+        claimed: list[int] = []
+        scan_start = start or 10_240
+        try:
+            for port in _candidate_ports(scan_start):
+                lease = self.root / str(port)
+                if lease.exists() or not _port_is_bindable(port):
+                    continue
+                self._publish(lease, record)
+                claimed.append(port)
+                if len(claimed) == count:
+                    return claimed
+        finally:
+            if len(claimed) != count:
+                for port in claimed:
+                    lease = self.root / str(port)
+                    if _read_record(lease) == record:
+                        try:
+                            lease.unlink()
+                        except FileNotFoundError:
+                            pass
+        raise RuntimeError(f"could not claim {count} free local ports")
 
     def release(self, *, port: int, owner_pid: int, token: str) -> None:
         lease = self.root / str(port)
@@ -229,12 +268,14 @@ class Registry:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "action", choices=("claim", "release", "release-owner", "release-prefix")
+        "action",
+        choices=("claim", "claim-batch", "release", "release-owner", "release-prefix"),
     )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--owner-pid", type=int, required=True)
     parser.add_argument("--token", required=True)
     parser.add_argument("--port", type=int)
+    parser.add_argument("--count", type=int)
     parser.add_argument("--start", type=int, default=0)
     args = parser.parse_args()
 
@@ -244,6 +285,18 @@ def main() -> int:
                 registry.claim(
                     owner_pid=args.owner_pid, token=args.token, start=args.start
                 )
+            )
+        elif args.action == "claim-batch":
+            if args.count is None:
+                parser.error("claim-batch requires --count")
+            print(
+                *registry.claim_batch(
+                    owner_pid=args.owner_pid,
+                    token=args.token,
+                    start=args.start,
+                    count=args.count,
+                ),
+                sep="\n",
             )
         elif args.action == "release":
             if args.port is None:

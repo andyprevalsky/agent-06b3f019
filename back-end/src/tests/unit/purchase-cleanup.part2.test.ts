@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { consumePurchaseWalletFunding } from '../../providers/purchase-wallet-funding';
 import {
   cleanupAgentPurchaseCards,
   reconcileAbandonedPurchaseFunding,
@@ -195,13 +196,23 @@ async function main(): Promise<void> {
     const userId = await seedUser();
     const purchaseId = await seedHeld(userId);
     await seedFunding(purchaseId, userId, PurchaseWalletFundingStatus.FUNDED);
+    // Model persisted consumption with an interrupted HELD purchase projection, not spend
+    // inferred from CLOSED/0 alone. The dissolved billing hold still needs reconciliation.
+    await consumePurchaseWalletFunding(purchaseId);
+    const interrupted = await prisma.purchaseSpend.findUniqueOrThrow({
+      where: { id: purchaseId },
+      include: { walletFunding: true },
+    });
+    assert.equal(interrupted.status, PurchaseSpendStatus.HELD);
+    assert.equal(interrupted.walletFunding?.status, PurchaseWalletFundingStatus.CONSUMED);
+    assert.ok(interrupted.walletFunding?.consumedAt);
+    const card = new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 });
+    const wallet = new FakeWalletFundingProvider();
     await withFakeStripe(
-      async () => {
-        await reconcileDissolvedPurchaseHolds(
-          new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 }),
-          new FakeWalletFundingProvider(),
-          { userId }
-        );
+      async (calls) => {
+        await reconcileDissolvedPurchaseHolds(card, wallet, { userId });
+        assert.equal(calls.refunds.length, 0, 'confirmed spend must not be refunded');
+        assert.equal(calls.cancels.length, 0, 'confirmed spend must not be canceled');
       },
       // status is neither capturable nor succeeded and nothing is capturable => dissolved.
       {
@@ -213,6 +224,10 @@ async function main(): Promise<void> {
       }
     );
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.CAPTURE_FAILED);
+    assert.equal(card.getDetailsCalls, 1, 'reconciler must exercise the closed-card observation');
+    assert.equal(wallet.reclaimCalls.length, 0, 'confirmed spend must not be reclaimed');
+    const funding = await prisma.purchaseWalletFunding.findUniqueOrThrow({ where: { purchaseId } });
+    assert.equal(funding.status, PurchaseWalletFundingStatus.CONSUMED);
   });
 
   await test('reconcileDissolvedPurchaseHolds records FUNDING_RECLAIM_FAILED on a reclaim error', async () => {
