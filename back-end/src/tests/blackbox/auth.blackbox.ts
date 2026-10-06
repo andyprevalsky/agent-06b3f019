@@ -45,7 +45,7 @@
 
 import { config } from 'dotenv';
 import { z } from 'zod';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { retryWithBackoff } from '../../providers/retry';
 config();
 
@@ -118,6 +118,7 @@ interface CapturedCall {
   responseBody: string | null;
   durationMs: number;
   error: string | null;
+  cached?: boolean;
 }
 
 // ==================== TEST INFRASTRUCTURE ====================
@@ -986,7 +987,7 @@ async function testBoundary_sendOtpTwilioCall() {
     console.log('    [skipped] Twilio not configured — cannot test boundary');
     return;
   }
-  if (!seedTwilioVerifySend(BOUNDARY_TWILIO_PHONE, { httpStatus: 201 })) {
+  if (!(await seedTwilioVerifySend(BOUNDARY_TWILIO_PHONE, { httpStatus: 201 }))) {
     console.log('    [skipped] Could not seed Twilio send response');
     return;
   }
@@ -1047,6 +1048,42 @@ async function testBoundary_sendOtpTwilioCall() {
 }
 
 /**
+ * An unseeded OTP send in a test stack is answered by the fetch-boundary fake:
+ * the synthetic SID is derived from the request body, so a live Twilio reply
+ * (or a live rejection) cannot satisfy this assertion.
+ */
+async function testBoundary_unseededSendOtpNeverReachesTwilio() {
+  if (TWILIO_VERIFY_SERVICE_SID === '') {
+    console.log('    [skipped] Twilio not configured — cannot test boundary');
+    return;
+  }
+  const phone = `+1555${String(Date.now()).slice(-7)}`;
+  const token = captureToken('send-otp-unseeded');
+
+  const res = await request(`${BASE_URL}/api/auth/send-otp`, {
+    method: 'POST',
+    headers: { 'X-Capture-Token': token },
+    body: JSON.stringify({ phone }),
+  });
+  assertStatus(res.status, 200, res.data);
+
+  const calls = (await readCapturesForToken(token)).filter((c) =>
+    c.url.includes('verify.twilio.com')
+  );
+  assert(calls.length === 1, `Expected exactly 1 Twilio Verify call, got ${calls.length}`);
+  const [call] = calls;
+  const expectedSid = `VE${createHash('sha256')
+    .update(`capture:${call.requestBody ?? ''}`)
+    .digest('hex')
+    .slice(0, 32)}`;
+  const body = JSON.parse(call.responseBody ?? '{}') as { sid?: string; to?: string };
+  assert(call.responseStatus === 201, `Expected faked 201, got ${call.responseStatus}`);
+  assert(call.cached === false, 'Unseeded send must not come from a replay fixture');
+  assert(body.sid === expectedSid, `Twilio Verify send was not faked: sid=${body.sid}`);
+  assert(body.to === phone, `Faked Twilio response lost To: ${body.to}`);
+}
+
+/**
  * POST /api/auth/verify-otp calls Twilio Verify VerificationCheck with exact params.
  * Uses a synthetic phone + seeded VerificationCheck so we never hit live Twilio
  * for the admin/test phone.
@@ -1056,7 +1093,7 @@ async function testBoundary_verifyOtpTwilioCall() {
     console.log('    [skipped] Twilio not configured — cannot test boundary');
     return;
   }
-  if (!seedTwilioVerifyCheck(BOUNDARY_TWILIO_PHONE, BOUNDARY_TWILIO_OTP, true)) {
+  if (!(await seedTwilioVerifyCheck(BOUNDARY_TWILIO_PHONE, BOUNDARY_TWILIO_OTP, true))) {
     console.log('    [skipped] Could not seed Twilio check response');
     return;
   }
@@ -1298,7 +1335,7 @@ async function testSendOtp_reviewBypassHappyPath() {
 }
 
 async function testSendOtp_invalidPhoneFormat() {
-  seedTwilioVerifySend('not-a-phone', {
+  await seedTwilioVerifySend('not-a-phone', {
     httpStatus: 400,
     twilioCode: 60200,
     twilioMessage: 'Invalid parameter `To`',
@@ -1648,7 +1685,7 @@ async function testCompleteOnboarding_viaApiKey() {
 // 9. send-otp with valid E.164 international format
 async function testSendOtp_validE164() {
   const phone = '+447911123456';
-  seedTwilioVerifySend(phone, { httpStatus: 201 });
+  await seedTwilioVerifySend(phone, { httpStatus: 201 });
   const res = await request(`${BASE_URL}/api/auth/send-otp`, {
     method: 'POST',
     body: JSON.stringify({ phone }),
@@ -2646,6 +2683,10 @@ async function runAll() {
       {
         name: 'boundary -- send-otp calls Twilio Verify with exact params',
         fn: testBoundary_sendOtpTwilioCall,
+      },
+      {
+        name: 'boundary -- unseeded send-otp is faked, never live Twilio',
+        fn: testBoundary_unseededSendOtpNeverReachesTwilio,
       },
       {
         name: 'boundary -- verify-otp calls Twilio VerificationCheck with exact params',

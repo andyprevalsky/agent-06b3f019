@@ -1,5 +1,8 @@
 #!/usr/bin/env tsx
-/** Cold Hub readers must observe a committed index or a durable failure. */
+/**
+ * Cold Hub readers must observe a committed index or a durable failure, and a
+ * fleet's queued live snapshots must not delay a final upload behind them.
+ */
 import assert from 'node:assert/strict';
 import { mock } from 'node:test';
 import { S3Client } from '@aws-sdk/client-s3';
@@ -109,6 +112,72 @@ async function publicationRead(failIndexWrite: boolean): Promise<void> {
   }
 }
 
+async function finalAheadOfQueuedSnapshots(): Promise<void> {
+  const sender = S3Client.prototype as unknown as {
+    send: (command: unknown) => Promise<unknown>;
+  };
+  const originalSend = sender.send;
+  const objects = new Map<string, string>([
+    ['benchmark-hub/index.json', '[]'],
+    ['benchmark-hub/agent-run-index-revision.json', JSON.stringify({ version: 1, revision: 1 })],
+    [
+      'benchmark-hub/agent-run-index.json',
+      JSON.stringify({ version: 1, revision: 1, complete: true, agents: {} }),
+    ],
+  ]);
+  const prefix = `admission-${process.pid}`;
+  const holderWriting = deferred();
+  const releaseHolder = deferred();
+  const bundleWrites: string[] = [];
+  sender.send = async (command) => {
+    const input = (command as { input: { Bucket: string; Key: string; Body?: string } }).input;
+    assert.equal(input.Bucket, 'offline');
+    if (command?.constructor?.name === 'GetObjectCommand') {
+      const value = objects.get(input.Key);
+      if (value === undefined)
+        throw Object.assign(new Error('fixture absent'), { name: 'NoSuchKey' });
+      return { Body: Buffer.from(value) };
+    }
+    assert.equal(command?.constructor?.name, 'PutObjectCommand');
+    const runId = /^benchmark-hub\/runs\/(.+)\.json$/.exec(input.Key)?.[1];
+    if (runId !== undefined) {
+      bundleWrites.push(runId.slice(prefix.length + 1));
+      if (runId === `${prefix}-holder`) {
+        holderWriting.resolve();
+        await releaseHolder.promise;
+      }
+    }
+    objects.set(input.Key, input.Body!);
+    return {};
+  };
+  const upload = (name: string, live: boolean) =>
+    putRun({ run_id: `${prefix}-${name}`, tasks: [] }, { live });
+  let uploads: Promise<unknown> | undefined;
+  try {
+    const holder = upload('holder', true);
+    await holderWriting.promise;
+    uploads = Promise.all([
+      holder,
+      upload('snapshot-a', true),
+      upload('snapshot-b', true),
+      upload('final', false),
+    ]);
+    releaseHolder.resolve();
+    await uploads;
+    assert.deepEqual(bundleWrites, ['holder', 'final', 'snapshot-a', 'snapshot-b']);
+    const index = JSON.parse(objects.get('benchmark-hub/index.json')!) as Array<{
+      run_id: string;
+      live: boolean;
+    }>;
+    assert.equal(index.find((run) => run.run_id === `${prefix}-final`)?.live, false);
+  } finally {
+    releaseHolder.resolve();
+    await Promise.allSettled([uploads]);
+    sender.send = originalSend;
+    _resetForTests();
+  }
+}
+
 async function failedReadBackoff(mode: 'error' | 'legacy' | 'stale'): Promise<void> {
   const sender = S3Client.prototype as unknown as { send: (command: unknown) => Promise<unknown> };
   let reads = 0;
@@ -193,6 +262,13 @@ async function main(): Promise<void> {
         failures.push(`${label}: ${String(error)}`);
         console.error(`FAIL: ${failures.at(-1)}`);
       }
+    }
+    try {
+      await finalAheadOfQueuedSnapshots();
+      console.log('PASS: a final upload is admitted ahead of queued live snapshots');
+    } catch (error: unknown) {
+      failures.push(`final upload admission: ${String(error)}`);
+      console.error(`FAIL: ${failures.at(-1)}`);
     }
     for (const mode of ['error', 'legacy', 'stale'] as const) {
       try {

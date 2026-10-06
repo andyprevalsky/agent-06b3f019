@@ -7,13 +7,15 @@ import ts from 'typescript';
 import { coalesceHubRunPuts } from '../../providers/benchmarkHubInFlight';
 
 type Operation = () => Promise<unknown>;
+type Admission = 'foreground' | 'snapshot';
+type Owner = (operation: Operation, admission?: Admission) => Promise<unknown>;
 type Transaction = { $executeRaw: (sql: TemplateStringsArray, key: string) => Promise<void> };
 type Prisma = {
   $transaction: (body: (tx: Transaction) => Promise<unknown>, options: unknown) => Promise<unknown>;
 };
 
 /** Execute the actual storage owner's admission and transaction boundary. */
-function loadOwner(prisma: Prisma): (operation: Operation) => Promise<unknown> {
+function loadOwner(prisma: Prisma): Owner {
   return loadDeclaration('withIndexLock', { prisma, Promise });
 }
 
@@ -172,6 +174,35 @@ test('50 Hub mutations wait for process admission before borrowing SQL connectio
   assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
 });
 
+test('queued foreground Hub work is admitted ahead of queued live snapshots', async () => {
+  const database = databaseBoundary(4);
+  const owner = loadOwner(database.prisma);
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const admitted: string[] = [];
+  const run = (label: string, admission?: Admission) =>
+    owner(async () => {
+      admitted.push(label);
+      if (label === 'holder') await gate;
+      return label;
+    }, admission);
+  const outcomes = Promise.all([
+    run('holder', 'snapshot'),
+    run('snapshot-1', 'snapshot'),
+    run('snapshot-2', 'snapshot'),
+    run('final-1', 'foreground'),
+    run('index-read'),
+  ]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(admitted, ['holder']);
+  release?.();
+  assert.deepEqual(await outcomes, ['holder', 'snapshot-1', 'snapshot-2', 'final-1', 'index-read']);
+  assert.deepEqual(admitted, ['holder', 'final-1', 'index-read', 'snapshot-1', 'snapshot-2']);
+  assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
+});
+
 test('a failed Hub mutation releases admission and preserves its rejection', async () => {
   const database = databaseBoundary(4);
   const owner = loadOwner(database.prisma);
@@ -266,15 +297,19 @@ test('50 identical pending Hub packets share one publication before SQL admissio
 
 test('distinct packet content, run, source and live mode retain publication order', async () => {
   const boundary = putBoundary();
-  const requests = [
+  const results = await Promise.all([
     boundary.putRun(packet, { live: true, source: 'fixture' }),
     boundary.putRun({ ...packet, marker: 'changed' }, { live: true, source: 'fixture' }),
     boundary.putRun({ ...packet, run_id: 'fixture-other' }, { live: true, source: 'fixture' }),
     boundary.putRun(packet, { live: true, source: 'other-source' }),
+  ]);
+  // A final is admitted ahead of queued snapshots and absorbs its run's later
+  // ones, so live mode is distinguished against one pending identical snapshot.
+  const modes = await Promise.all([
+    boundary.putRun(packet, { live: true, source: 'fixture' }),
     boundary.putRun(packet, { live: false, source: 'fixture' }),
-  ];
-  const results = await Promise.all(requests);
-  assert.equal(boundary.stats().transactions, 5);
+  ]);
+  assert.equal(boundary.stats().transactions, 6);
   assert.deepEqual(
     boundary.runWrites().map(({ value }) => JSON.parse(value)),
     [
@@ -283,10 +318,14 @@ test('distinct packet content, run, source and live mode retain publication orde
       { ...packet, run_id: 'fixture-other' },
       packet,
       packet,
+      packet,
     ]
   );
   assert.equal(results[3].source, 'other-source');
-  assert.equal(results[4].live, false);
+  assert.deepEqual(
+    modes.map((mode) => mode.live),
+    [true, false]
+  );
 });
 
 test('failed identical publication rejects every waiter and permits an unchanged retry', async () => {

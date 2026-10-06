@@ -15,7 +15,12 @@ import { createHmac, timingSafeEqual } from './crypto';
 import { createLogger } from './logger';
 import { logTruncate } from '../utils/log';
 import { archiveJson } from './traceArchive';
-import { buildMockWhatsAppSendResult, shouldMockBenchmarkWhatsAppSend } from './smsTransportMock';
+import {
+  buildMockWhatsAppSendResult,
+  shouldMockMessagingSend,
+  transportMockArchiveContext,
+  type MessagingMockReason,
+} from './smsTransportMock';
 
 const log = createLogger('WhatsApp');
 
@@ -187,9 +192,9 @@ async function postWhatsAppMessage(
   options: WhatsAppArchiveOptions
 ): Promise<WhatsAppSendResult> {
   const mockSeed = `${options.archiveRootAgentId ?? 'no-agent'}:${JSON.stringify(requestBody)}`;
-  let shouldMockWhatsApp = false;
+  let mockReason: MessagingMockReason | null = null;
   try {
-    shouldMockWhatsApp = await shouldMockBenchmarkWhatsAppSend(options.archiveRootAgentId);
+    mockReason = await shouldMockMessagingSend('whatsapp', options.archiveRootAgentId);
   } catch (error) {
     const messageText = error instanceof Error ? error.message : String(error);
     log.error('Benchmark WhatsApp mock eligibility lookup failed', { error: messageText });
@@ -199,10 +204,11 @@ async function postWhatsAppMessage(
       definitiveFailure: true,
     };
   }
-  if (shouldMockWhatsApp) {
+  if (mockReason !== null) {
     const mocked = await buildMockWhatsAppSendResult({
       phoneNumber,
       seed: mockSeed,
+      reason: mockReason,
     });
     await archiveWhatsAppTransportBoundary({
       rootAgentId: options.archiveRootAgentId,
@@ -213,7 +219,7 @@ async function postWhatsAppMessage(
       context: {
         ...(options.archiveContext ?? {}),
         message_id: mocked.messageSid,
-        benchmark_transport_mock: true,
+        ...transportMockArchiveContext(mockReason),
       },
     });
     return { success: true, messageSid: mocked.messageSid };

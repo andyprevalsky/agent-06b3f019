@@ -306,8 +306,10 @@ if printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | grep -Fq 'Cannot find module'; then
   fail "/deploy live Amplitude probe could not start (install back-end workspace deps before this gate)"
 fi
 printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | grep -Fq \
-  'ADMIN_HEALTH_LIVE_ONLY=1 requires AMPLITUDE_API_KEY and AMPLITUDE_SECRET_KEY' || \
+  'ADMIN_HEALTH_LIVE_ONLY=1 requires AMPLITUDE_API_KEY and AMPLITUDE_SECRET_KEY' || {
+  printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | tail -n 40 >&2
   fail "/deploy live Amplitude probe must explain its fail-closed credential contract"
+}
 require_text "$DEPLOY_COMMAND" 'Do not start the Group 4 semantic/smoke' "/deploy must not oversubscribe Group 3 with Group 4 worker pools"
 for stage in backend frontend agents mac; do
   require_text "$DEPLOY_COMMAND" "run-deploy-stage ${stage}-coverage-blackbox" "/deploy must run ${stage} coverage and blackbox behavior once in a combined gate"

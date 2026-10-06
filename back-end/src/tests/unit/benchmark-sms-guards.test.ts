@@ -24,6 +24,14 @@ const whatsappCloudSource = readFileSync(
   resolve(repoRoot, 'back-end/src/providers/whatsappCloud.ts'),
   'utf8'
 );
+const agentPhoneServiceSource = readFileSync(
+  resolve(repoRoot, 'back-end/src/domains/agent-phone/service.ts'),
+  'utf8'
+);
+const twilioServiceSource = readFileSync(
+  resolve(repoRoot, 'back-end/src/domains/auth/service.twilio.ts'),
+  'utf8'
+);
 const runSh = readFileSync(resolve(repoRoot, 'scripts/run.sh'), 'utf8');
 
 requireText(
@@ -38,15 +46,25 @@ requireText(
 );
 requireText(
   smsQueueSource,
-  'shouldMockBenchmarkSmsSend',
-  'Surge transport must consult benchmark SMS mock gate'
+  "shouldMockMessagingSend('surge'",
+  'Surge transport must consult the live-messaging mock gate'
 );
 requireText(
   whatsappCloudSource,
-  'shouldMockBenchmarkWhatsAppSend',
-  'WhatsApp transport must consult benchmark WhatsApp mock gate'
+  "shouldMockMessagingSend('whatsapp'",
+  'WhatsApp transport must consult the live-messaging mock gate'
+);
+requireText(
+  agentPhoneServiceSource,
+  "shouldMockMessagingSend('agentphone'",
+  'AgentPhone transport must consult the live-messaging mock gate'
+);
+requireText(
+  twilioServiceSource,
+  "shouldMockMessagingSend('twilio-verify')",
+  'Twilio Verify OTP send must consult the live-messaging mock gate'
 );
 requireText(runSh, 'BLACKBOX_TEST_FAKE_AGENTPHONE', 'benchmark stacks must fake AgentPhone sends');
 requireText(runSh, 'BLACKBOX_TEST_FAKE_WHATSAPP', 'benchmark stacks must fake WhatsApp sends');
 
-process.stdout.write('benchmark-sms-guards: 5 passed, 0 failed\n');
+process.stdout.write('benchmark-sms-guards: 7 passed, 0 failed\n');
