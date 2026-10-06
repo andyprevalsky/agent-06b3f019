@@ -308,7 +308,7 @@ if CLOUDBENCH_BARRIER_TOKEN="$auth_token" \
         --run-token 'invalid/token' >"$tmp/invalid-token.log" 2>&1; then
     fail "status service accepted an unsafe run token"
 fi
-rg -q 'invalid run token' "$tmp/invalid-token.log" \
+grep -q 'invalid run token' "$tmp/invalid-token.log" \
     || fail "unsafe run token did not fail at the owned validation boundary"
 
 echo "PASS: status service enforces authenticated run-scoped shutdown and cleanup acknowledgement"
