@@ -19,8 +19,13 @@ tags:
 sources:
   - PR #1341
   - PR #1401
+  - PR #1416
+  - PR #1418
   - agent 75ea1c1e-0b2a-49f5-b6f5-6fb2a67f5346
   - agent 536786c2-3213-4ffd-99d8-8853b9908bcb
+  - agent 102b1ebe-c0da-48bb-a8f8-bb3ac91cbcb4
+  - agent 8b054756-bf09-43b9-ab3a-8a6c782e15e8
+  - agent d60c486a-4d41-43b1-bee5-487f59ce1f2a
   - task agent-payment-abandonment
 repro: bash scripts/run-bench --local agent-payment-abandonment (provider-dependent); AgentCard list_transfers / list_recoveries read in /opt/cursor/artifacts/rca_evidence/agentcard-abandonment-ledger.txt
 status: open
@@ -119,10 +124,94 @@ task on the same HEAD passed.
   concurrent use of the shared sandbox cardholder. The attempts ledger has none
   in about 200 runs from 2026-09-20 until then.
 
+### Recurrence on 2026-10-06
+
+`/deploy` Step 6a for PR #1416 (deploy run `20261006-025038-30459`, HEAD
+`d9d8996be`, stack `1791314763-1931596-30657`) failed `agent-payment-abandonment`
+(agent `102b1ebe-c0da-48bb-a8f8-bb3ac91cbcb4`) the same way. The other three
+lifecycle tasks in the lane passed, and the same task passed in this deploy's
+previous 6a run at 18:24 on HEAD `89a09930a`.
+
+- Transfer `owt_…6bfce1` (card `card_f…8f8a92`, $43.96 mint, 4396
+  transferred) was created at 19:34:10. `close_card` succeeded at 19:34:18. The
+  stale-lease retry re-closed the card at 19:37, 19:40 and 19:42 and called
+  `recover_funds` each time. All 24 release reads through 19:43:22 returned
+  `consumed`, `released_cents=0`.
+- In the passing 18:24 run, the transfer also read `consumed` with 0 released
+  for the first minute. The 18:27 stale retry then read `reclaimed` with 4396
+  released, about 2 minutes 15 seconds after close.
+- A read-only `list_transfers` / `list_recoveries` read at about 19:46
+  (`/opt/cursor/artifacts/rca_evidence/agentcard-abandonment-ledger-20261006.txt`)
+  shows eight mints on the shared sandbox cardholder between 19:21 and 19:38.
+  Four were spent $43.96 mints, each with 3721 released, and one was a spent
+  $19.60 mint with 1285 released. Another
+  consumer's $13 mint at 19:38:18, four minutes after our close, was reclaimed
+  in full, and recovery `rcv_c0…f1dc97` pulled exactly 1300 at 19:40:55. Our
+  4396 was never released or recovered.
+
+This repeats the 2026-10-03 shape: AgentCard released nothing for the closed,
+unused card while the same cardholder's later mints settled normally.
+
+The unchanged lane rerun at 20:07 on HEAD `585fac704` (runtime identical;
+docs and benchmark history only since `d9d8996be`) passed all four tasks.
+`agent-payment-abandonment` (agent `cff60cf0-2953-4efd-9c5d-37212338bd20`)
+passed in 205 seconds, with both owned-cleanup receipts clean. The stall is
+intermittent on AgentCard's side, not deterministic in our reclaim path.
+
+`/deploy` Step 6a for PR #1418 (deploy run `20261006-171736-24512`, HEAD
+`db9a99795`, stack `1791321484-1169503-38469`) failed `agent-payment-abandonment`
+(agent `8b054756-bf09-43b9-ab3a-8a6c782e15e8`) the same way at 21:34. The other
+three lifecycle tasks passed. The same task passed in 206 seconds in this
+deploy's previous 6a run at 20:44, on HEAD `f0e48ae67`. The only runtime change
+between the two was the merge of `main`. That merge does not touch the reclaim,
+release-observation or cleanup code.
+
+- Transfer `owt_…ed2cc2` (card `card_89cb339d5e85f43880ff1e5a`, $43.96 mint)
+  was created at 21:26:03 with 675 transferred. `close_card` succeeded and the
+  first release read came at 21:26:12. The stale-lease retry requested the
+  release again every two to three minutes from 21:29 to 21:40. All 36 release
+  reads through 21:40:58 returned `consumed`, `released_cents=0`.
+- A read-only `list_transfers` / `list_recoveries` read at about 21:39
+  (`/opt/cursor/artifacts/rca_evidence/agentcard-abandonment-ledger-20261006-r2.txt`)
+  shows ten other $43.96 mints on the shared cardholder between 21:19 and
+  21:38. Nine had released 3721, including `owt_…e0ce9e`, which also
+  transferred 675. The tenth was created at 21:38:53, under a minute before
+  the read.
+  Recoveries `rcv_…800dc2` (21:36) and `rcv_…515e45` (21:38) each pulled 3721.
+  Our transfer released nothing.
+
+The unchanged lane rerun at 22:00 on HEAD `e93e406e5` (runtime identical to
+`db9a99795`; docs and benchmark history only) failed the same task the same way
+(agent `d60c486a-4d41-43b1-bee5-487f59ce1f2a`, stack
+`1791324058-1288564-59300`). The other three tasks passed again.
+
+- Transfer `owt_…f4112b` (card `card_0d8d820f72e50b35fd394b93`, $43.96 mint,
+  4396 transferred) was created at 22:08:51. `close_card` succeeded at
+  22:09:00. The stale-lease retry re-closed the card at 22:11 and 22:14 and
+  called `recover_funds` after each close. None of those calls created a
+  recovery. All 28 release reads through 22:17:48 returned `consumed`,
+  `released_cents=0`.
+- A read-only ledger read at about 22:19
+  (`/opt/cursor/artifacts/rca_evidence/agentcard-abandonment-ledger-20261006-r3.txt`)
+  shows seven spent mints on the shared benchmark cardholder between 22:02 and
+  22:17. Each released its unspent remainder (3721, 1285 or 1448 cents), and a
+  later recovery pulled exactly that amount. Our transfer released nothing, and
+  neither had another consumer's unused $43.96 mint (`owt_…07d222`, created at
+  22:17:48) when the read was taken.
+- In the same window, three closed, unused $13 mints on a different,
+  lightly used cardholder (`owt_…1fff43`, `owt_…f0bde2` and `owt_…9f3607`)
+  were each reclaimed in full. These match the treasury-rails proof's mints,
+  which `selectTreasuryRailCardholder` now steers away from the shared
+  benchmark cardholder. So AgentCard does release unused cards in this window;
+  the stall is confined to the busy shared cardholder. This supports the
+  exclusive-cardholder remedy below.
+
 Still open:
 
-- Report the stuck transfer (`owt_…8ce5`, card `card_cb91b224db24a8dd6f1448c0`)
-  to AgentCard with the ledger read.
+- Report the stuck transfers (`owt_…8ce5`, card `card_cb91b224db24a8dd6f1448c0`;
+  `owt_…6bfce1`, card `card_f…8f8a92`; `owt_…ed2cc2`, card
+  `card_89cb339d5e85f43880ff1e5a`; `owt_…f4112b`, card
+  `card_0d8d820f72e50b35fd394b93`) to AgentCard with the ledger reads.
 - If AgentCard confirms that netting suppresses the release, give each payment
   benchmark run an exclusive sandbox cardholder, or serialize payment benchmarks
   across machines on the shared one.

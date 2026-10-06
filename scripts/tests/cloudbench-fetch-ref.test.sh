@@ -5,6 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FETCH_SCRIPT="$ROOT_DIR/scripts/cloudbench-fetch-ref.sh"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
+# Host url.*.insteadOf rules (for example a cloud VM's token-embedding GitHub
+# rewrite) change what `git remote get-url` reports and where fetches go.
+: > "$TMP_ROOT/gitconfig"
+export GIT_CONFIG_GLOBAL="$TMP_ROOT/gitconfig" GIT_CONFIG_NOSYSTEM=1
 
 fail() {
   echo "FAIL: $1" >&2
@@ -114,7 +118,8 @@ CLOUDBENCH_FRESH_VOLUME=1 CLOUDBENCH_GIT_MIN_FREE_KB=1 \
   || fail "empty REAL-primary volume did not bootstrap its exact checkout"
 [ "$(git -C "$fresh_checkout" rev-parse HEAD)" = "$next_target" ] \
   || fail "fresh checkout did not verify the requested commit"
-[ "$(git -C "$fresh_checkout" remote get-url origin)" = https://github.com/Rose-Ai-Labs/rose.git ] \
+# Read the stored key: `remote get-url` applies the host's own insteadOf rules.
+[ "$(git -C "$fresh_checkout" config --get remote.origin.url)" = https://github.com/Rose-Ai-Labs/rose.git ] \
   || fail "fresh checkout persisted a rewritten or authenticated origin"
 assert_lock_released "$fresh_checkout/.git/cloudbench-fetch.lock"
 if CLOUDBENCH_GIT_MIN_FREE_KB=1 bash "$FETCH_SCRIPT" "$TMP_ROOT/not-authorized" "$next_target" >/dev/null 2>&1; then

@@ -193,6 +193,7 @@ ChunkKind = Literal[
     "reasoning",  # reasoning_content delta (extended thinking models)
     "codex_reasoning_item",  # GPT Responses reasoning item with encrypted_content
     "usage",  # final chunk: token counts + cache stats
+    "restart",  # the attempt so far was abandoned (see truncation.py); drop accumulated output
     "done",  # stream finished cleanly
 ]
 
@@ -204,7 +205,8 @@ class StreamChunk:
     The order is always: one `metadata` chunk first, then any number of
     `content` / `tool_call` / `reasoning` chunks, then exactly one `usage`
     chunk, then exactly one `done` chunk. Failures raise instead of
-    yielding an error chunk.
+    yielding an error chunk. Callers that opt into cut-off recovery may also
+    see `restart` chunks, each followed by a fresh attempt in the same order.
     """
 
     kind: ChunkKind

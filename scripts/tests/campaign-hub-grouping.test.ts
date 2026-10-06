@@ -68,6 +68,28 @@ function owningBoundary() {
         ).statements
       : []),
   ];
+  // Follow the facade's actual detail-owner re-export after module extraction.
+  const detailOwner = tree.statements.find(
+    (node) =>
+      ts.isExportDeclaration(node) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      node.moduleSpecifier.text === "./benchmarkHubRunDetail",
+  );
+  if (detailOwner) {
+    const detailFilename = path.join(
+      path.dirname(filename),
+      "benchmarkHubRunDetail.ts",
+    );
+    declarations.push(
+      ...ts.createSourceFile(
+        detailFilename,
+        readFileSync(detailFilename, "utf8"),
+        ts.ScriptTarget.Latest,
+        true,
+      ).statements,
+    );
+  }
   const named = new Map<string, TypeScript.Statement>();
   for (const node of declarations) {
     if (ts.isFunctionDeclaration(node) && node.name)
@@ -197,6 +219,7 @@ async function apiBoundary(boundary: ReturnType<typeof owningBoundary>) {
   const serviceContext = vm.createContext({
     exports: {},
     hubStore: boundary.owner,
+    getRunDetail: boundary.owner.getRunDetail,
     repo: { findRunRequestByRunId: async () => null },
   });
   vm.runInContext(

@@ -57,12 +57,7 @@ import {
   putObject,
   resetHubObjectStorageForTests,
 } from './benchmarkHubStorage';
-import type {
-  HubRunCost,
-  HubRunDetail,
-  HubRunSummary,
-  HubRunTaskDetail,
-} from './benchmarkHubTypes';
+import type { HubRunSummary } from './benchmarkHubTypes';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -94,6 +89,7 @@ export {
   type HubAgentRunIndexSnapshot,
 } from './benchmarkHubAgentIndex';
 export { canonicalAgentTree, getRunAgent, subtreeAgentsForBus } from './benchmarkHubView';
+export { getRunDetail } from './benchmarkHubRunDetail';
 export type {
   HubAgentView,
   HubRunCost,
@@ -238,7 +234,12 @@ export async function isHubRunVisible(runId: string): Promise<boolean | null> {
 }
 
 const INDEX_LOCK_KEY = 'benchmark-hub:index';
-let indexAdmissionTail: Promise<void> = Promise.resolve();
+type IndexAdmission = 'foreground' | 'snapshot';
+const indexAdmissionWaiters: Record<IndexAdmission, Array<() => void>> = {
+  foreground: [],
+  snapshot: [],
+};
+let indexAdmissionHeld = false;
 
 /**
  * Serialize the shared index read-modify-write across every backend process.
@@ -246,12 +247,24 @@ let indexAdmissionTail: Promise<void> = Promise.resolve();
  * local workspace processes from reading the same version and losing one
  * another's update. The transaction-scoped Postgres lock is released even
  * when an R2 operation throws.
+ *
+ * Live snapshots are superseded by the run's next snapshot, while a final
+ * bundle, delete or index read is one-shot. Queued foreground work is admitted
+ * ahead of queued snapshots, so a fleet's snapshot stream saturating this
+ * single writer cannot starve the final upload behind every pending snapshot.
  */
-async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
+async function withIndexLock<T>(
+  operation: () => Promise<T>,
+  admission: IndexAdmission = 'foreground'
+): Promise<T> {
   // Wait before borrowing a connection. Otherwise concurrent uploads occupy
   // the SQL pool while waiting for the same cross-process advisory lock.
-  const pending = indexAdmissionTail.then(() =>
-    prisma.$transaction(
+  if (indexAdmissionHeld) {
+    await new Promise<void>((resolve) => indexAdmissionWaiters[admission].push(resolve));
+  }
+  indexAdmissionHeld = true;
+  try {
+    return await prisma.$transaction(
       async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${INDEX_LOCK_KEY}))`;
         return operation();
@@ -260,12 +273,14 @@ async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
       // holding this cross-process lock. Normal writes remain small, but the rare
       // repair must finish atomically rather than timing out at the old 30s limit.
       { maxWait: 30_000, timeout: 5 * 60_000 }
-    )
-  );
-  // A rejected mutation remains rejected for its caller and releases the next
-  // admission, just as PostgreSQL releases the transaction-scoped lock.
-  indexAdmissionTail = pending.then(() => undefined).catch(() => undefined);
-  return pending;
+    );
+  } finally {
+    // A rejected mutation remains rejected for its caller and hands admission
+    // to the next waiter, just as PostgreSQL releases the transaction lock.
+    const next = indexAdmissionWaiters.foreground.shift() ?? indexAdmissionWaiters.snapshot.shift();
+    if (next === undefined) indexAdmissionHeld = false;
+    else next();
+  }
 }
 
 /** Upsert a run bundle (live snapshot or final), returning the stored summary. */
@@ -295,123 +310,126 @@ async function storeRun(
 
   let storedSummary = summary;
   let storedAgentIndexRevision: number | null = null;
-  await withIndexLock(async () => {
-    const index = await listRunsStrict();
-    const existing = index.find((run) => run.run_id === runId);
-    if (existing?.run_group || summary.run_group) {
-      if ((existing && !existing.run_group) || (existing?.run_group && !summary.run_group)) {
-        throw new Error('Benchmark Hub group ID collides with a physical run');
-      }
-      if (
-        existing?.run_group &&
-        JSON.stringify(existing.run_group.members) !== JSON.stringify(summary.run_group!.members)
-      ) {
-        throw new Error('Benchmark Hub group schedule changed');
-      }
-      if (summary.run_group) {
-        const scheduled = new Map(
-          summary.run_group.members.map((member) => [member.member_id, member])
-        );
-        for (const child of index.filter((run) => run.group_run_id === runId)) {
-          const member = scheduled.get(child.group_member_id!);
-          if (
-            !member ||
-            member.run_number !== child.group_run_number ||
-            child.tasks.length !== 1 ||
-            child.tasks[0]?.name !== member.name ||
-            summary.run_group.members.length !== child.group_total
-          ) {
-            throw new Error('Existing Benchmark Hub child differs from its group schedule');
+  await withIndexLock(
+    async () => {
+      const index = await listRunsStrict();
+      const existing = index.find((run) => run.run_id === runId);
+      if (existing?.run_group || summary.run_group) {
+        if ((existing && !existing.run_group) || (existing?.run_group && !summary.run_group)) {
+          throw new Error('Benchmark Hub group ID collides with a physical run');
+        }
+        if (
+          existing?.run_group &&
+          JSON.stringify(existing.run_group.members) !== JSON.stringify(summary.run_group!.members)
+        ) {
+          throw new Error('Benchmark Hub group schedule changed');
+        }
+        if (summary.run_group) {
+          const scheduled = new Map(
+            summary.run_group.members.map((member) => [member.member_id, member])
+          );
+          for (const child of index.filter((run) => run.group_run_id === runId)) {
+            const member = scheduled.get(child.group_member_id!);
+            if (
+              !member ||
+              member.run_number !== child.group_run_number ||
+              child.tasks.length !== 1 ||
+              child.tasks[0]?.name !== member.name ||
+              summary.run_group.members.length !== child.group_total
+            ) {
+              throw new Error('Existing Benchmark Hub child differs from its group schedule');
+            }
           }
         }
       }
-    }
-    if (existing?.group_run_id) {
-      for (const field of HUB_GROUP_FIELDS) {
-        if (summary[field] !== undefined && summary[field] !== existing[field]) {
-          throw new Error('Benchmark Hub group membership changed');
+      if (existing?.group_run_id) {
+        for (const field of HUB_GROUP_FIELDS) {
+          if (summary[field] !== undefined && summary[field] !== existing[field]) {
+            throw new Error('Benchmark Hub group membership changed');
+          }
         }
+        Object.assign(summary, runGroupFields({ ...existing, run_id: runId }));
       }
-      Object.assign(summary, runGroupFields({ ...existing, run_id: runId }));
-    }
-    if (summary.group_run_id) {
-      const owner = index.find((run) => run.run_id === summary.group_run_id);
-      if (owner && !owner.run_group)
-        throw new Error('Benchmark Hub group ID collides with a physical run');
-      if (
-        index.some(
-          (run) =>
-            run.run_id !== runId &&
-            run.group_run_id === summary.group_run_id &&
-            run.group_member_id === summary.group_member_id
-        )
-      ) {
-        throw new Error('Benchmark Hub group member already belongs to another run');
-      }
-      if (owner?.run_group) {
-        const member = owner.run_group.members.find(
-          (item) => item.member_id === summary.group_member_id
-        );
+      if (summary.group_run_id) {
+        const owner = index.find((run) => run.run_id === summary.group_run_id);
+        if (owner && !owner.run_group)
+          throw new Error('Benchmark Hub group ID collides with a physical run');
         if (
-          !member ||
-          member.run_number !== summary.group_run_number ||
-          tasks.length !== 1 ||
-          tasks[0]?.name !== member.name ||
-          owner.run_group.members.length !== summary.group_total
+          index.some(
+            (run) =>
+              run.run_id !== runId &&
+              run.group_run_id === summary.group_run_id &&
+              run.group_member_id === summary.group_member_id
+          )
         ) {
-          throw new Error('Benchmark Hub group member differs from its schedule');
+          throw new Error('Benchmark Hub group member already belongs to another run');
         }
+        if (owner?.run_group) {
+          const member = owner.run_group.members.find(
+            (item) => item.member_id === summary.group_member_id
+          );
+          if (
+            !member ||
+            member.run_number !== summary.group_run_number ||
+            tasks.length !== 1 ||
+            tasks[0]?.name !== member.name ||
+            owner.run_group.members.length !== summary.group_total
+          ) {
+            throw new Error('Benchmark Hub group member differs from its schedule');
+          }
+        }
+        summary.tasks = tasks.map((task) => ({
+          ...taskSummary(task),
+          cost_cents: finiteMetric(task.cost_cents),
+          duration_seconds: finiteMetric(task.duration_seconds),
+          tree_agent_count: finiteMetric(task.tree_agent_count),
+          tokens_in: finiteMetric(task.tokens_in),
+          tokens_out: finiteMetric(task.tokens_out),
+          cache_hit_pct: finiteMetric(task.cache_hit_pct),
+          llm_call_count: finiteMetric(task.llm_call_count),
+          message_count: finiteMetric(task.message_count),
+        }));
+        summary.code =
+          typeof bundle.code === 'string' && bundle.code.length <= 128 ? bundle.code : null;
+        summary.elapsed_s = finiteMetric(bundle.elapsed_s);
+        summary.cost =
+          typeof bundle.cost === 'object' && bundle.cost !== null
+            ? Object.fromEntries(
+                [
+                  'agents_llm_usd',
+                  'wmh_grounding_usd',
+                  'infra_usd',
+                  'total_usd',
+                  'fast_cache_hit_rate',
+                ].map((field) => [
+                  field,
+                  finiteMetric((bundle.cost as Record<string, unknown>)[field]),
+                ])
+              )
+            : null;
       }
-      summary.tasks = tasks.map((task) => ({
-        ...taskSummary(task),
-        cost_cents: finiteMetric(task.cost_cents),
-        duration_seconds: finiteMetric(task.duration_seconds),
-        tree_agent_count: finiteMetric(task.tree_agent_count),
-        tokens_in: finiteMetric(task.tokens_in),
-        tokens_out: finiteMetric(task.tokens_out),
-        cache_hit_pct: finiteMetric(task.cache_hit_pct),
-        llm_call_count: finiteMetric(task.llm_call_count),
-        message_count: finiteMetric(task.message_count),
-      }));
-      summary.code =
-        typeof bundle.code === 'string' && bundle.code.length <= 128 ? bundle.code : null;
-      summary.elapsed_s = finiteMetric(bundle.elapsed_s);
-      summary.cost =
-        typeof bundle.cost === 'object' && bundle.cost !== null
-          ? Object.fromEntries(
-              [
-                'agents_llm_usd',
-                'wmh_grounding_usd',
-                'infra_usd',
-                'total_usd',
-                'fast_cache_hit_rate',
-              ].map((field) => [
-                field,
-                finiteMetric((bundle.cost as Record<string, unknown>)[field]),
-              ])
-            )
-          : null;
-    }
-    // Final is an absorbing state. A snapshot loop already in flight may
-    // arrive after completion; it must not regress either the bundle or index
-    // back to live/running.
-    if (existing !== undefined && !existing.live && summary.live) {
-      storedSummary = existing;
-      return;
-    }
-    const persisted = await readAgentRunIndexForMutation(index);
-    const agentIndex = hubAgentIndexAfterPut(persisted, index.length === 0, runId, agentIds);
-    await putObject(
-      `runs/${runId}.json`,
-      JSON.stringify({ ...bundle, ...runGroupFields({ ...summary, run_id: runId }) })
-    );
-    const next = [summary, ...index.filter((r) => r.run_id !== runId)];
-    next.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
-    await putObject('index.json', JSON.stringify(next));
-    await writeAgentRunIndex(agentIndex);
-    await putObject(`visibility/${runId}.json`, 'true');
-    storedAgentIndexRevision = agentIndex.revision;
-  });
+      // Final is an absorbing state. A snapshot loop already in flight may
+      // arrive after completion; it must not regress either the bundle or index
+      // back to live/running.
+      if (existing !== undefined && !existing.live && summary.live) {
+        storedSummary = existing;
+        return;
+      }
+      const persisted = await readAgentRunIndexForMutation(index);
+      const agentIndex = hubAgentIndexAfterPut(persisted, index.length === 0, runId, agentIds);
+      await putObject(
+        `runs/${runId}.json`,
+        JSON.stringify({ ...bundle, ...runGroupFields({ ...summary, run_id: runId }) })
+      );
+      const next = [summary, ...index.filter((r) => r.run_id !== runId)];
+      next.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+      await putObject('index.json', JSON.stringify(next));
+      await writeAgentRunIndex(agentIndex);
+      await putObject(`visibility/${runId}.json`, 'true');
+      storedAgentIndexRevision = agentIndex.revision;
+    },
+    summary.live ? 'snapshot' : 'foreground'
+  );
   log.info('Stored benchmark run bundle', {
     runId,
     live: storedSummary.live,
@@ -554,79 +572,6 @@ export async function getRunBundleStrict(runId: string): Promise<Record<string, 
   const raw = await getObjectStrict(`runs/${runId}.json`);
   if (raw === null) throw new Error(`Missing Hub run bundle: ${runId}`);
   return parseHubRunBundle(raw);
-}
-
-/**
- * The run view's data: index summary enriched per-task from the stored bundle
- * (tokens, cache hit, call/message counts — the report-card fields the fleet
- * dashboard showed) plus run-level totals. Falls back to summary-only fields
- * when the bundle is gone or live-thin.
- */
-export async function getRunDetail(
-  runId: string,
-  page: { offset?: number; limit?: number } = {}
-): Promise<HubRunDetail | null> {
-  const index = await listRuns({ grouped: false });
-  const summary =
-    groupedRunCatalog(index, false).find((r) => r.run_id === runId) ??
-    index.find((r) => r.run_id === runId);
-  if (!summary) return null;
-  const bundle = summary.is_group ? null : await getRunBundle(runId);
-  const bundleTasks = new Map<string, Record<string, unknown>>();
-  if (bundle && Array.isArray(bundle.tasks)) {
-    for (const task of bundle.tasks as Array<Record<string, unknown>>) {
-      if (typeof task.name === 'string') bundleTasks.set(task.name, task);
-    }
-  }
-  const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
-  const tasks: HubRunTaskDetail[] = summary.tasks.map((t) => {
-    const raw = bundleTasks.get(t.name) ?? t;
-    return {
-      ...t,
-      tokens_in: num(raw.tokens_in),
-      tokens_out: num(raw.tokens_out),
-      cache_hit_pct: num(raw.cache_hit_pct),
-      llm_call_count: num(raw.llm_call_count),
-      message_count: num(raw.message_count),
-    };
-  });
-  const totals = {
-    passed: tasks.filter((t) => t.passed === true).length,
-    failed: tasks.filter((t) => t.passed === false).length,
-    running: tasks.filter(
-      (t) => t.passed === null && !['INFRA_ERROR', 'error', 'cancelled'].includes(t.status)
-    ).length,
-    cost_cents: tasks.reduce((s, t) => s + (t.cost_cents ?? 0), 0),
-    tokens_in: tasks.reduce((s, t) => s + (t.tokens_in ?? 0), 0),
-    tokens_out: tasks.reduce((s, t) => s + (t.tokens_out ?? 0), 0),
-    agents: tasks.reduce((s, t) => s + (t.tree_agent_count ?? 0), 0),
-  };
-  const rawCost = (bundle?.cost ?? summary.cost ?? null) as Record<string, unknown> | null;
-  const cost: HubRunCost | null =
-    rawCost === null
-      ? null
-      : {
-          agents_llm_usd: num(rawCost.agents_llm_usd),
-          wmh_grounding_usd: num(rawCost.wmh_grounding_usd),
-          infra_usd: num(rawCost.infra_usd),
-          total_usd: num(rawCost.total_usd),
-          fast_cache_hit_rate: num(rawCost.fast_cache_hit_rate),
-        };
-  const offset = Number.isInteger(page.offset) && page.offset! >= 0 ? page.offset! : 0;
-  const limit =
-    Number.isInteger(page.limit) && page.limit! > 0
-      ? Math.min(page.limit!, HUB_GROUP_PAGE_SIZE)
-      : HUB_GROUP_PAGE_SIZE;
-  return {
-    ...summary,
-    tasks: summary.is_group ? tasks.slice(offset, offset + limit) : tasks,
-    ...(summary.is_group ? { pagination: { offset, limit, total: tasks.length } } : {}),
-    totals,
-    code:
-      typeof bundle?.code === 'string' && bundle.code !== '' ? bundle.code : (summary.code ?? null),
-    elapsed_s: num(bundle?.elapsed_s ?? summary.elapsed_s),
-    cost,
-  };
 }
 
 /**
