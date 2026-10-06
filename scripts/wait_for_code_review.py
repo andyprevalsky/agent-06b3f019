@@ -418,16 +418,26 @@ def _enrich_coderabbit_description(
     return payload
 
 
-def _push_auto_skip_awaiting_command(
+def _is_push_auto_skip(status: ReviewStatus) -> bool:
+    """Whether a skip is the push's own rather than the result of a command."""
+    description = str(status.raw.get("description") or "").lower()
+    return status.state == "REVIEW_SKIPPED" and PUSH_AUTO_SKIP in description
+
+
+def _awaiting_triggered_review(
     status: ReviewStatus, triggered_at: datetime, now: datetime
 ) -> bool:
-    """Whether a skip is the push's own, with the commanded review still due."""
-    description = str(status.raw.get("description") or "").lower()
-    return (
-        status.state == "REVIEW_SKIPPED"
-        and PUSH_AUTO_SKIP in description
-        and (now - triggered_at).total_seconds() < TRIGGER_GRACE_SECONDS
-    )
+    """Whether a terminal non-success still predates the commanded review.
+
+    The push's auto-skip is judged by the command's age alone: its own
+    timestamp can fall on either side of the command, or be missing, and none
+    of those says whether the commanded review is still coming. Any other
+    result counts only if it was posted after the command.
+    """
+    if _is_push_auto_skip(status):
+        return (now - triggered_at).total_seconds() < TRIGGER_GRACE_SECONDS
+    started = parse_github_time(status.raw.get("startedAt"))
+    return started is None or started < triggered_at
 
 
 def wait_for_review(
@@ -495,16 +505,15 @@ def wait_for_review(
             if entry is not None
             else ReviewStatus("MISSING", False, False, "missing", {})
         )
-        if triggered_at is not None and status.terminal and not status.successful:
-            started = parse_github_time(status.raw.get("startedAt"))
-            if (
-                started is None
-                or started < triggered_at
-                or _push_auto_skip_awaiting_command(status, triggered_at, clock())
-            ):
-                status = ReviewStatus(
-                    "AWAITING_TRIGGERED_REVIEW", False, False, status.kind, status.raw
-                )
+        if (
+            triggered_at is not None
+            and status.terminal
+            and not status.successful
+            and _awaiting_triggered_review(status, triggered_at, clock())
+        ):
+            status = ReviewStatus(
+                "AWAITING_TRIGGERED_REVIEW", False, False, status.kind, status.raw
+            )
         last_state = status.state
         _report(f"CodeRabbit {status.state} on {expected_head[:12]}")
         if status.terminal:

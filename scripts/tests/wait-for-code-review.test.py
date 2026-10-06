@@ -428,6 +428,7 @@ class ReviewWaitTest(unittest.TestCase):
             sleeper=lambda _seconds: None,
             progress=progress.append,
             triggered_at=MODULE.parse_github_time("2026-10-01T23:54:31Z"),
+            clock=lambda: MODULE.parse_github_time("2026-10-01T23:55:00Z"),
         )
 
         self.assertEqual(status.state, "SUCCESS")
@@ -460,6 +461,7 @@ class ReviewWaitTest(unittest.TestCase):
                 loader=lambda _pr, _repo: payload,
                 sleeper=lambda _seconds: None,
                 triggered_at=MODULE.parse_github_time("2026-10-01T23:54:31Z"),
+                clock=lambda: MODULE.parse_github_time("2026-10-01T23:55:00Z"),
             )
 
     def test_budget_exhausted_inside_gh_reports_the_review_timeout(self) -> None:
@@ -559,6 +561,28 @@ class ReviewWaitTest(unittest.TestCase):
 
         self.assertEqual(ignored.state, "REVIEW_SKIPPED")
         self.assertFalse(ignored.successful)
+
+        # Its timestamp does not matter: a push skip with none, or one posted
+        # before the command, also stands once the grace window has passed.
+        for started in (None, "2026-10-06T02:27:00Z"):
+            undated = rollup("SUCCESS", "", "Review skipped: incremental reviews are disabled")
+            entry = undated["statusCheckRollup"][0]
+            if started is None:
+                del entry["startedAt"]
+            else:
+                entry["startedAt"] = started
+            late = MODULE.wait_for_review(
+                pr="1415",
+                expected_head=head,
+                repo=None,
+                timeout_seconds=1,
+                poll_seconds=0,
+                loader=lambda _pr, _repo, payload=undated: payload,
+                sleeper=lambda _seconds: None,
+                triggered_at=triggered_at,
+                clock=lambda: MODULE.parse_github_time("2026-10-06T02:30:33Z"),
+            )
+            self.assertEqual(late.state, "REVIEW_SKIPPED", started)
 
     def test_skip_posted_after_the_trigger_is_terminal(self) -> None:
         head = "1" * 40
