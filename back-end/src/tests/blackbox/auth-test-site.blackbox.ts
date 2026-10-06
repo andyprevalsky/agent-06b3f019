@@ -125,8 +125,8 @@ test('fixture rejects a public host that cannot carry an authRealm override', as
 
 test('dev tunnel hosts honor authRealm overrides; ordinary hosts do not', async () => {
   for (const host of ['abc.trycloudflare.com', 'abc.ngrok-free.app', 'abc.ngrok-free.dev']) {
-    const realm = canonicalAuthRealm(`https://${host}/x/?authRealm=rose-shop-1.com`);
-    assert(realm === 'rose-shop-1.com', `${host} must honor override, got ${realm}`);
+    const realm = canonicalAuthRealm(`https://${host}/x/?authRealm=rose-shop-1a2b3c`);
+    assert(realm === 'rose-shop-1a2b3c', `${host} must honor override, got ${realm}`);
   }
   const spoofed = canonicalAuthRealm('https://shop.example.com/?authRealm=amazon.com');
   assert(spoofed === 'example.com', `public hosts must ignore override, got ${spoofed}`);

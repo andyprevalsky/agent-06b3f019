@@ -411,7 +411,11 @@ def extract_email_links(email: Dict) -> List[str]:
     """Distinct http(s) links of a mail, in reading order (anchors first, then plain text)."""
     body_html = str(email.get("bodyHtml") or "")
     body_text = str(email.get("bodyText") or "")
-    found = [html.unescape(url) for url in re.findall(r"href=[\"'](https?://[^\"']+)[\"']", body_html)]
+    # Attribute spelling and spacing vary across mailers (`HREF = "..."`).
+    found = [
+        html.unescape(url)
+        for url in re.findall(r"href\s*=\s*[\"'](https?://[^\"']+)[\"']", body_html, flags=re.IGNORECASE)
+    ]
     found += [url.rstrip(".,;)") for url in re.findall(r"https?://[^\s<>\"']+", body_text)]
     return list(dict.fromkeys(found))[:MAX_EMAIL_LINKS]
 
@@ -628,7 +632,7 @@ def mask_secret_values(value: Any, secret_refs: Optional[Dict[str, str]]) -> Any
 # override their realm with ?authRealm=. Keep in sync with the backend's
 # canonicalAuthRealm (back-end/src/providers/authRealm.ts).
 # Hosted benchmark fixture realms (back-end/src/domains/auth-test-site).
-FIXTURE_REALM_PATTERN = re.compile(r"^rose-shop-[0-9a-z]+(?:\.[a-z]+)?$")
+FIXTURE_REALM_PATTERN = re.compile(r"^rose-shop-[0-9a-z]+$")
 
 AUTH_REALM_OVERRIDE_HOST_SUFFIXES = (
     ".ngrok-free.dev",

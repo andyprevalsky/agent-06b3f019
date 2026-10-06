@@ -36,8 +36,8 @@ export function hostnameFromRealmInput(input: string): string {
  * in for a real site without any public host being able to claim another
  * site's credentials. Keep in sync with agents' auth_realm_from_url.
  */
-/** Hosted benchmark fixture realms (domains/auth-test-site); the only realms a tunnel may claim. */
-const FIXTURE_REALM_PATTERN = /^rose-shop-[0-9a-z]+(?:\.[a-z]+)?$/;
+/** Hosted fixture realms (domains/auth-test-site): no TLD, so none can also name a real site. */
+const FIXTURE_REALM_PATTERN = /^rose-shop-[0-9a-z]+$/;
 
 const AUTH_REALM_OVERRIDE_HOST_SUFFIXES = [
   '.ngrok-free.dev',

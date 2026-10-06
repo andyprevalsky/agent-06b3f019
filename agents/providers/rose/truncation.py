@@ -54,7 +54,7 @@ def escalated_max_tokens(max_tokens: Optional[int]) -> Optional[int]:
 def model_key(model: Optional[str]) -> str:
     """One key per model across routes: ``qwen/qwen3.8-27b`` and ``qwen-3.8-27b`` match."""
     name = str(model or "").split("/")[-1].lower()
-    for suffix in ("-claude", "-gpt", "-foundry", "-anthropic"):
+    for suffix in ("-claude", "-gpt", "-foundry", "-anthropic", "-openai"):
         if name.endswith(suffix):
             name = name[: -len(suffix)]
     return re.sub(r"[^a-z0-9]", "", name)
@@ -65,6 +65,16 @@ def needs_result(*, tools: Any, tool_choice: Any, response_model: Any) -> bool:
     if response_model is not None:
         return True
     return bool(tools) and tool_choice != "none"
+
+
+# Token counters an abandoned attempt still spent; the cache counters are kept
+# separate from prompt tokens by the cost accounting in client.py.
+USAGE_COUNTERS = (
+    "prompt_tokens",
+    "completion_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
 
 
 async def recover_truncated(
@@ -100,6 +110,7 @@ async def recover_truncated(
         finish_reason = ""
         completion_tokens = 0
         prompt_tokens = 0
+        usage_data: Dict[str, Any] = {}
         saw_tool_call = False
         async with aclosing(attempt(**current)) as stream:
             async for chunk in stream:
@@ -111,6 +122,7 @@ async def recover_truncated(
                     finish_reason = str(chunk.data.get("finish_reason") or "")
                     completion_tokens = int(chunk.data.get("completion_tokens") or 0)
                     prompt_tokens = int(chunk.data.get("prompt_tokens") or 0)
+                    usage_data = dict(chunk.data)
                 if chunk.kind in ("usage", "done"):
                     held.append(chunk)
                     continue
@@ -131,25 +143,20 @@ async def recover_truncated(
                 )
             for chunk in held:
                 if chunk.kind == "usage" and abandoned:
-                    chunk = StreamChunk(
-                        kind="usage",
-                        data={
-                            **chunk.data,
-                            "prompt_tokens": int(chunk.data.get("prompt_tokens") or 0)
-                            + sum(item["prompt_tokens"] for item in abandoned),
-                            "completion_tokens": int(chunk.data.get("completion_tokens") or 0)
-                            + sum(item["completion_tokens"] for item in abandoned),
-                            "abandoned_attempts": list(abandoned),
-                        },
-                    )
+                    merged = dict(chunk.data)
+                    for counter in USAGE_COUNTERS:
+                        extra = sum(int(item.get(counter) or 0) for item in abandoned)
+                        if extra or counter in merged:
+                            merged[counter] = int(merged.get(counter) or 0) + extra
+                    merged["abandoned_attempts"] = list(abandoned)
+                    chunk = StreamChunk(kind="usage", data=merged)
                 yield chunk
             return
 
         abandoned.append(
             {
                 "model": actual_model,
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
+                **{counter: int(usage_data.get(counter) or 0) for counter in USAGE_COUNTERS},
             }
         )
         # Codex-style Responses routes (direct GPT, the funded OpenAI key,

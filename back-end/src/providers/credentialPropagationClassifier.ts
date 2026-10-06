@@ -527,11 +527,12 @@ export async function classifyCredentialOutcomesBestEffort(
   credentialRefs: CredentialRef[] = []
 ): Promise<CredentialClassificationResult> {
   const fallback = heuristicDecision(agent, messages, credentialRefs.length > 0);
-  // A run-level failure verdict names the run, not a credential. With several
+  // A run-level verdict names the run, not a credential. With several
   // credentials in play and no judge, copying it onto each of them would
-  // disable the one that actually worked; those credentials stay unknown.
+  // disable the one that worked (failure) or re-enable the one the site
+  // rejected (success); those credentials stay unknown.
   const perCredentialFallback: PropagationDecision =
-    credentialRefs.length > 1 && fallback.outcome !== 'success' && fallback.outcome !== 'unknown'
+    credentialRefs.length > 1 && fallback.outcome !== 'unknown'
       ? {
           ...fallback,
           outcome: 'unknown',

@@ -290,9 +290,9 @@ def test_worker_and_backend_use_the_same_canonical_auth_realms() -> None:
     )
     # Hosted benchmark sign-in sites sit behind whichever dev tunnel run.sh opened.
     for tunnel_host in ("abc.trycloudflare.com", "abc.ngrok-free.app", "abc.ngrok-free.dev"):
-        site_url = f"https://{tunnel_host}/api/test-sites/rose-shop/abc/login?authRealm=rose-shop-abc.test"
-        assert auth_realm_from_url(site_url) == "rose-shop-abc.test"
-        assert auth_realm_matches_url("rose-shop-abc.test", site_url)
+        site_url = f"https://{tunnel_host}/api/test-sites/rose-shop/abc/login?authRealm=rose-shop-abc"
+        assert auth_realm_from_url(site_url) == "rose-shop-abc"
+        assert auth_realm_matches_url("rose-shop-abc", site_url)
     assert auth_realm_from_url("https://shop.example.com/?authRealm=amazon.com") == "shop.example.com"
     # A tunnel anyone can open may stand in for a hosted fixture, never for a real site.
     assert auth_realm_from_url("https://abc.trycloudflare.com/?authRealm=bank.com") != "bank.com"

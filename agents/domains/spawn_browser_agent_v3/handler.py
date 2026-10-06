@@ -2288,14 +2288,18 @@ async def _append_new_otp_user_messages(
             task_elapsed_seconds is not None
             and otp.age_seconds > task_elapsed_seconds + OTP_TASK_START_SLACK_SECONDS
         ):
-            logger.info(
-                "Skipping OTP that predates this browser task",
-                agent_id=agent_id,
-                source_message_id=otp.source_message_id,
-                age_seconds=otp.age_seconds,
-                task_elapsed_seconds=int(task_elapsed_seconds),
-            )
-            seen_otp_codes.add(otp.code)
+            # Remember the stale MESSAGE, not its code: a site may reissue the
+            # same code for this sign-in, and that fresh mail must still arrive.
+            stale_marker = f"stale-message:{otp.source_message_id or otp.code}"
+            if stale_marker not in seen_otp_codes:
+                seen_otp_codes.add(stale_marker)
+                logger.info(
+                    "Skipping OTP that predates this browser task",
+                    agent_id=agent_id,
+                    source_message_id=otp.source_message_id,
+                    age_seconds=otp.age_seconds,
+                    task_elapsed_seconds=int(task_elapsed_seconds),
+                )
             continue
 
         if otp.code in seen_otp_codes:

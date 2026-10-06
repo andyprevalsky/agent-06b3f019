@@ -8,6 +8,7 @@ and handler (ClaudeTokenState, get_manager, workflow helper static bits).
 import ast
 import warnings
 import asyncio
+import dataclasses
 import base64
 import contextlib
 import copy
@@ -19237,7 +19238,36 @@ async def test_otp_received_before_the_task_started_is_not_handed_to_the_agent()
         )
     assert count == 1 and [m["content"] for m in messages if "778899" in m["content"]], messages
     assert not any("646055" in m["content"] for m in messages), "the earlier task's code leaked"
-    assert "646055" in seen, "a pre-task code is never reconsidered on a later poll"
+    # The stale MESSAGE is remembered, not its code: the same mail stays
+    # skipped on a later poll, while a fresh mail reissuing that code for this
+    # sign-in still reaches the agent.
+    assert "stale-message:m-646055" in seen and "646055" not in seen, seen
+    messages.clear()
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.save_browser_credential_ref_message",
+        AsyncMock(),
+    ):
+        count = await _append_new_otp_user_messages(
+            otps=[otp("646055", age_seconds=150)],
+            seen_otp_codes=seen,
+            otp_user_messages=messages,
+            credential_refs_by_secret_ref={},
+            agent_id="ag1",
+            task_id="task-1",
+            task_elapsed_seconds=50.0,
+        )
+        assert count == 0 and not messages, "the stale mail was handed over on a later poll"
+        fresh = dataclasses.replace(otp("646055", age_seconds=5), source_message_id="m-fresh-646055")
+        count = await _append_new_otp_user_messages(
+            otps=[fresh],
+            seen_otp_codes=seen,
+            otp_user_messages=messages,
+            credential_refs_by_secret_ref={},
+            agent_id="ag1",
+            task_id="task-1",
+            task_elapsed_seconds=60.0,
+        )
+    assert count == 1 and any("646055" in m["content"] for m in messages), "a reissued code was suppressed"
 
     # Without a task clock (older call sites) nothing changes.
     messages.clear()
