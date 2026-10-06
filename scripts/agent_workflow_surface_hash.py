@@ -44,9 +44,19 @@ def _default_agents_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "agents"
 
 
-def _resolve_local_module(
-    module: str, agents_dir: Path
-) -> list[Path]:
+def _exact_case_file(path: Path, agents_dir: Path) -> bool:
+    """Require Linux-compatible spelling for every local path component."""
+    if not path.is_file():
+        return False
+    current = path
+    while current != agents_dir:
+        if current.name not in {entry.name for entry in current.parent.iterdir()}:
+            return False
+        current = current.parent
+    return True
+
+
+def _resolve_local_module(module: str, agents_dir: Path) -> list[Path]:
     """Resolve a dotted module name to local file(s) under `agents/`.
 
     `helpers.llm`  -> agents/helpers/llm.py  (and agents/helpers/llm/__init__.py)
@@ -58,11 +68,11 @@ def _resolve_local_module(
     candidates: list[Path] = []
     # module as a .py file: agents/<parts>.py
     py_file = agents_dir.joinpath(*parts).with_suffix(".py")
-    if py_file.is_file():
+    if _exact_case_file(py_file, agents_dir):
         candidates.append(py_file)
     # module as a package: agents/<parts>/__init__.py
     pkg_init = agents_dir.joinpath(*parts) / "__init__.py"
-    if pkg_init.is_file():
+    if _exact_case_file(pkg_init, agents_dir):
         candidates.append(pkg_init)
     return candidates
 
@@ -158,7 +168,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=None, help="entry workflow module")
     parser.add_argument("--agents-dir", type=Path, default=None, help="agents/ root")
-    parser.add_argument("--full", action="store_true", help="print the full 64-char hash")
+    parser.add_argument(
+        "--full", action="store_true", help="print the full 64-char hash"
+    )
     parser.add_argument("--list", action="store_true", help="print surface files")
     parser.add_argument("--json", action="store_true", help="print JSON {hash, files}")
     args = parser.parse_args(argv)

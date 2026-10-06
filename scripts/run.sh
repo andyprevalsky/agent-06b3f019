@@ -1510,12 +1510,24 @@ CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS="${CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECON
 supervised_edge_probe() {
     local url="$1"
     shift
+    local provider=cloudflare expected_origin_port="" local_body_target=""
+    case "${1:-}" in
+        --ngrok-provider)
+            provider=ngrok; expected_origin_port="${2:-}"; shift 2
+            [[ "$expected_origin_port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$expected_origin_port" -le 65535 ] || { printf '000'; return; }
+            ;;
+        --ngrok-local-origin)
+            provider=local-origin; local_body_target="${2:-}"; shift 2
+            [[ "$url" == http://127.0.0.1:*/ ]] && [ -f "$local_body_target" ] && [ ! -L "$local_body_target" ] || { printf '000'; return; }
+            ;;
+    esac
     local curl_timeout="${CLOUDFLARE_TUNNEL_CURL_TIMEOUT_SECONDS:-5}"
     [[ "$curl_timeout" =~ ^[1-9][0-9]*$ ]] || curl_timeout=5
-    local status_file headers_file probe_pid probe_deadline status
+    local status_file headers_file probe_body_file probe_pid probe_deadline status
     status_file="$(mktemp "${TMPDIR:-/tmp}/rose-cloudflare-edge.XXXXXX")"
     headers_file="$(mktemp "${TMPDIR:-/tmp}/rose-cloudflare-edge-headers.XXXXXX")"
-    curl "$@" -s -o /dev/null -D "$headers_file" -w '%{http_code}' \
+    probe_body_file="$(mktemp "${TMPDIR:-/tmp}/rose-public-edge-body.XXXXXX")"
+    curl "$@" -s -o "$probe_body_file" -D "$headers_file" -w '%{http_code}' \
         --connect-timeout "$curl_timeout" --max-time "$curl_timeout" "$url" \
         >"$status_file" 2>/dev/null &
     probe_pid=$!
@@ -1533,7 +1545,37 @@ supervised_edge_probe() {
     status="$(cat "$status_file" 2>/dev/null || true)"
     # A configured proxy can answer with its own block page. Only the final
     # HTTP response identifies the edge; a proxy CONNECT response is earlier.
-    if [ -n "$status" ] && [ "$status" != "000" ] && ! awk -v expected_status="$status" '
+    if [ "$provider" = ngrok ]; then
+        if [ "$status" = "400" ] && awk '
+            {
+                line = tolower($0); sub(/\r$/, "", line)
+                if (line ~ /^http\/[0-9.]+[ \t]+[0-9][0-9][0-9]([ \t]|$)/) {
+                    split(line, fields, /[ \t]+/); response_status = fields[2]; code = server = ""; in_headers = 1
+                } else if (line == "") { in_headers = 0 }
+                else if (in_headers && line ~ /^ngrok-error-code:[ \t]*err_ngrok_8012[ \t]*$/) { code = "err_ngrok_8012" }
+                else if (in_headers && line ~ /^server:/) { server = line; sub(/^server:[ \t]*/, "", server) }
+            }
+            END { exit !(response_status == "400" && code == "err_ngrok_8012" && (server == "" || server == "ngrok")) }
+        ' "$headers_file"; then
+            : # Actual provider response: this owned agent received traffic before its origin starts.
+        elif [ "$status" = "200" ] && grep -qF '<div id="root">' "$probe_body_file"; then
+            local origin_body_file origin_status
+            origin_body_file="$(mktemp "${TMPDIR:-/tmp}/rose-local-origin-body.XXXXXX")"
+            origin_status="$(supervised_edge_probe "http://127.0.0.1:$expected_origin_port/" --ngrok-local-origin "$origin_body_file" -4)"
+            if [ "$origin_status" != "200" ] || ! cmp -s "$probe_body_file" "$origin_body_file"; then
+                status=000
+            fi
+            rm -f "$origin_body_file"
+        else
+            status=000
+        fi
+    elif [ "$provider" = local-origin ]; then
+        if [ "$status" = "200" ] && grep -qF '<div id="root">' "$probe_body_file"; then
+            cp "$probe_body_file" "$local_body_target"
+        else
+            status=000
+        fi
+    elif [ -n "$status" ] && [ "$status" != "000" ] && ! awk -v expected_status="$status" '
         {
             line = tolower($0)
             sub(/\r$/, "", line)
@@ -1554,7 +1596,7 @@ supervised_edge_probe() {
     ' "$headers_file"; then
         status=000
     fi
-    rm -f "$status_file" "$headers_file"
+    rm -f "$status_file" "$headers_file" "$probe_body_file"
     printf '%s' "$status"
 }
 
@@ -1579,6 +1621,60 @@ cloudflare_tunnel_edge_is_routing() {
             status="$(supervised_edge_probe "$url")"
         fi
         if [ -n "$status" ] && [ "$status" != "000" ] && [ "$status" != "530" ]; then
+            return 0
+        fi
+        sleep "$retry_seconds"
+    done
+    return 1
+}
+
+ngrok_reported_owned_origin() {
+    local log_file="$1" expected_url="$2" expected_port="$3"
+    python3 - "$log_file" "$expected_url" "$expected_port" <<'PY'
+import json
+import sys
+from pathlib import Path
+from urllib.parse import urlsplit
+
+path, expected_url, expected_port = sys.argv[1:]
+try:
+    port = int(expected_port)
+    parsed = urlsplit(expected_url)
+    if not 1 <= port <= 65535 or parsed.scheme != "https" or not parsed.hostname or parsed.netloc != parsed.hostname or parsed.path or parsed.query or parsed.fragment:
+        raise ValueError("invalid requested endpoint")
+    data = Path(path).read_text()
+    events = []
+    for line in data.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("msg") == "started tunnel":
+            events.append(event)
+    if not events:
+        raise SystemExit(1)
+    if len(events) != 1:
+        raise ValueError("ambiguous emitted endpoints")
+    event = events[0]
+    if event.get("obj") != "tunnels" or event.get("name") != "command_line" or event.get("url") != expected_url or event.get("addr") != f"http://localhost:{port}":
+        raise ValueError("emitted endpoint does not belong to requested upstream")
+except FileNotFoundError:
+    raise SystemExit(1)
+except (OSError, ValueError):
+    raise SystemExit(2)
+print(expected_url)
+PY
+}
+
+ngrok_tunnel_edge_is_routing() {
+    local url="$1" expected_port="$2" deadline=$((SECONDS + CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS)) status
+    local retry_seconds="${CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS:-2}"
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        status="$(supervised_edge_probe "$url" --ngrok-provider "$expected_port" -4)"
+        if [ -z "$status" ] || [ "$status" = "000" ]; then
+            status="$(supervised_edge_probe "$url" --ngrok-provider "$expected_port")"
+        fi
+        if [ "$status" = "400" ] || [ "$status" = "200" ]; then
             return 0
         fi
         sleep "$retry_seconds"
@@ -1727,8 +1823,12 @@ start_ngrok_ephemeral_tunnel() {
             tail -20 "$ngrok_log" || true
             return 1
         fi
-        ngrok_url="$(grep -oE '"url":"https://[^"]+"' "$ngrok_log" 2>/dev/null |
-            head -1 | sed 's/"url":"//; s/"$//')"
+        local reported_status=0
+        ngrok_url="$(ngrok_reported_owned_origin "$ngrok_log" "https://$fallback_domain" "$FRONTEND_PORT")" || reported_status=$?
+        if [ "$reported_status" = "2" ]; then
+            echo "❌ ngrok emitted an endpoint that does not match this run's requested origin/upstream."
+            return 1
+        fi
         [ -n "$ngrok_url" ] && break
         sleep 1
     done
@@ -1744,7 +1844,7 @@ start_ngrok_ephemeral_tunnel() {
     }
 
     echo "🔎 Verifying the ngrok edge routes: $PUBLIC_BASE_URL"
-    cloudflare_tunnel_edge_is_routing "$PUBLIC_BASE_URL" || {
+    ngrok_tunnel_edge_is_routing "$PUBLIC_BASE_URL" "$FRONTEND_PORT" || {
         echo "❌ $PUBLIC_BASE_URL never routed."
         return 1
     }

@@ -57,6 +57,17 @@ own run. Poll that command every 30 seconds; its `--controller-status` marker
 reports the actual controller exit independently of card freshness and cleanup.
 Follow CLAUDE.md's "Monitor every cloud launch" guidance through resource release.
 
+Standard boot-launched REAL tasks use fresh volumes for both primaries and
+workers, with verified image dependencies, an authenticated exact-ref Git
+checkout and the same canonical isolated database fixture. SIM tasks and
+`--sim-on` keep snapshots and World Model assets. Use `--snapshot-volumes` for
+a restore diagnostic; generic `--provision-pool` and legacy startup retain
+their snapshot path. Source-only bootstrap changes reuse the verified image.
+Continue monitoring through exact resource release: an accepted delete plus an
+exact owned-volume `pending_destroy` or `destroyed` terminal receipt qualifies
+release even when the provider retains that object; request acceptance alone
+does not.
+
 Ordinary source-only runs reuse verified dependency images and completed
 snapshots. For an explicitly requested cold build/push measurement, use
 `scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`
@@ -94,6 +105,32 @@ normal 7,200-second defaults remain unchanged. A task verdict does not establish
 resource release. On a cutoff, signal only the exact owned controller, let its
 cleanup traps run, audit its resources, and grant no acceptance credit.
 
+An exact fresh infra canary canceled during database/dependency bootstrap may
+have no service PID ledger, backend log, or driver cleanup ACK. Preserve its
+stopped Machine and volume while capturing the original files through an inert
+boot and restoring its exact original config. This is a pre-service case:
+`run.sh` and an isolated database may already have run. The source-specific
+archival validator supports only the attested task-free infra recipe and checks
+the original owner/slot, complete original logs, missing service files, clean
+source hashes, and current stopped native Machine/attached-volume config:
+
+```bash
+python3 scripts/cloudbench-prestack-recovery.py \
+  --registry <absolute-exact-owner-directory> --bench <exact-canary-task> \
+  --capture-dir <absolute-private-original-capture-directory> \
+  --machines-json <private-current-native-Machines-json> \
+  --volumes-json <private-current-native-volumes-json> --publish
+scripts/run-bench-fleet --recover-stale-owner <exact-owner-token>
+```
+
+The capture directory retains `<machine>.originals.private.tar.gz`,
+`<machine>.provenance.safe.json`, and `<machine>.original-config.private.json`.
+The distinct `guest-bootstrap.confirmed` receipt reports isolated DB creation,
+zero provider allocation and zero benchmark credit. It creates no standard
+provider manifest or guest shutdown ACK. Exact recovery rechecks the original
+capture and fresh native inventory before its existing fresh-resource reaper;
+unknown source recipes, service launch, incomplete capture and foreign owners
+stay quarantined. Continue monitoring through exact Machine/volume release.
 
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 

@@ -125,3 +125,136 @@ def test_campaign_start_barrier_bounds_and_releases_each_complete_cohort(tmp_pat
         ready = [event["at"] for event in events if event["job"] in ids and event["event"] == "ready"]
         executed = [event["at"] for event in events if event["job"] in ids and event["event"] == "execute"]
         assert min(executed) > max(ready)
+
+
+def test_campaign_start_barrier_failed_infra_canary_runs_once_per_cohort_and_next_cohort_can_retry(tmp_path):
+    canary = tmp_path / "canary.sh"
+    calls = tmp_path / "canary-calls"
+    canary.write_text('printf "called\\n" >> "$FIXTURE_CANARY_CALLS"\nexit 7\n')
+    stamp = tmp_path / "passed"
+    lock = tmp_path / "transaction.lock"
+    cohort = tmp_path / "cohort-one"
+    cohort.mkdir()
+    env = dict(os.environ, RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(cohort), FIXTURE_CANARY_CALLS=str(calls))
+    command = [
+        sys.executable,
+        str(ROOT / "scripts/cloudbench-infra-canary-preflight.py"),
+        "--stamp",
+        str(stamp),
+        "--lock",
+        str(lock),
+        "--ttl-seconds",
+        "300",
+        "--width",
+        "2",
+        "--canary",
+        str(canary),
+        "--nested-controller-lock",
+        "fixture-only",
+    ]
+    peers = [subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(4)]
+    try:
+        for peer in peers:
+            peer.communicate(timeout=30)
+        assert all(peer.returncode != 0 for peer in peers)
+        assert calls.read_text().splitlines() == ["called"]
+        assert not stamp.exists()
+
+        next_cohort = tmp_path / "cohort-two"
+        next_cohort.mkdir()
+        env["RUN_BENCH_CAMPAIGN_BARRIER_DIR"] = str(next_cohort)
+        retry = subprocess.run(command, env=env, capture_output=True, timeout=30)
+        assert retry.returncode == 7
+        assert calls.read_text().splitlines() == ["called", "called"]
+        assert not stamp.exists()
+    finally:
+        for peer in peers:
+            if peer.poll() is None:
+                peer.terminate()
+                try:
+                    peer.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    peer.kill()
+                    peer.wait(timeout=5)
+
+
+def test_campaign_start_barrier_aborted_cohort_does_not_reuse_a_successful_infra_canary(tmp_path):
+    cohort = tmp_path / "cohort"
+    cohort.mkdir()
+    (cohort / "abort.json").write_text('{"reason":"controller failed"}')
+    stamp = tmp_path / "passed"
+    stamp.write_text("actual previous canary success\n")
+    canary = tmp_path / "canary.sh"
+    canary.write_text("exit 0\n")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/cloudbench-infra-canary-preflight.py"),
+            "--stamp",
+            str(stamp),
+            "--lock",
+            str(tmp_path / "transaction.lock"),
+            "--ttl-seconds",
+            "300",
+            "--width",
+            "2",
+            "--canary",
+            str(canary),
+            "--nested-controller-lock",
+            "fixture-only",
+        ],
+        env=dict(os.environ, RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(cohort)),
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+
+
+def test_campaign_start_barrier_infra_canary_caller_checks_aborted_cohort_before_fresh_cache(tmp_path):
+    source = (ROOT / "scripts/run-bench-fleet").read_text()
+    start = source.index("fleet_infra_canary_preflight() {")
+    function = source[start : source.index("\n}\n", start) + 3]
+    stamp = tmp_path / "passed"
+    stamp.write_text("actual fixture canary success\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    calls = tmp_path / "canary-calls"
+    (scripts / "run-fleet-infra-canary").write_text('printf "called\\n" >> "$FIXTURE_CANARY_CALLS"\nexit 97\n')
+    runner = tmp_path / "caller.sh"
+    runner.write_text(
+        "set -eu\n"
+        # Supply GNU stat's file metadata on both supported host platforms.
+        "stat() {\n"
+        ' [ "$#" -eq 3 ] && [ "$1" = "-c" ] && [ "$2" = "%Y" ] || return 99\n'
+        f" {shlex.quote(sys.executable)} -c "
+        "'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' \"$3\"\n"
+        "}\n"
+        f"{function}\nfleet_infra_canary_preflight\n"
+    )
+    env = dict(os.environ)
+    env.pop("RUN_BENCH_CAMPAIGN_BARRIER_DIR", None)
+    env.update(
+        ROOT_DIR=str(tmp_path),
+        CLOUDBENCH_SCRIPT_SNAPSHOT=str(scripts),
+        INFRA_CANARY_PREFLIGHT_SCRIPT=str(ROOT / "scripts/cloudbench-infra-canary-preflight.py"),
+        FLEET_INFRA_CANARY_STAMP=str(stamp),
+        FLEET_INFRA_CANARY_TTL_SECONDS="300",
+        FIXTURE_CANARY_CALLS=str(calls),
+        INFRA_PROBE="0",
+        CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT="0",
+        CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE="0",
+        CLOUDBENCH_FAKE_DIR="",
+        RECOVER_STALE_ONLY="0",
+        PROVISION_POOL="",
+    )
+    standalone = subprocess.run(["bash", str(runner)], env=env, capture_output=True, timeout=30)
+    assert standalone.returncode == 0, standalone.stdout + standalone.stderr
+    assert not calls.exists()
+
+    cohort = tmp_path / "cohort"
+    cohort.mkdir()
+    (cohort / "abort.json").write_text('{"reason":"controller failed"}')
+    env["RUN_BENCH_CAMPAIGN_BARRIER_DIR"] = str(cohort)
+    aborted = subprocess.run(["bash", str(runner)], env=env, capture_output=True, timeout=30)
+    assert aborted.returncode != 0, aborted.stdout + aborted.stderr
+    assert not calls.exists()

@@ -700,6 +700,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-exact-session-cleanup.py" \
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestart-recovery.py" \
+       "$ROOT_DIR/scripts/cloudbench-prestack-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-barrier.py" \
        "$ROOT_DIR/scripts/cloudbench-forensic-retirement.py" \
@@ -758,6 +759,7 @@ CONTROLLER_SNAPSHOT_MANIFEST="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-controller-
 CLOUDBENCH_RESULT_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_result.py"
 EXACT_SESSION_CLEANUP_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-exact-session-cleanup.py"
 GUEST_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-guest-recovery.py"
+PRESTACK_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestack-recovery.py"
 VOLUME_MIGRATION_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-volume-migration.py"
 FORENSIC_RETIREMENT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-forensic-retirement.py"
 RUNTIME_EVIDENCE_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-collect-runtime-evidence.py"
@@ -935,6 +937,8 @@ AUTOSCALER_FINALIZATION_WAIT_SECONDS="${CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_
 SYNCHRONIZED_START="${CLOUDBENCH_SYNCHRONIZED_START:-1}"
 CONTROLLER_RETRY_SECONDS="${CLOUDBENCH_CONTROLLER_RETRY_SECONDS:-10}"
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
+FRESH_VOLUMES="${CLOUDBENCH_FRESH_VOLUMES:-1}"
+FRESH_VOLUMES_REQUESTED=0
 INFRA_PROBE="${CLOUDBENCH_INFRA_PROBE:-0}"
 SKIP_AUTOSCALER="${CLOUDBENCH_SKIP_AUTOSCALER:-0}"
 STRICT_BARRIER="${CLOUDBENCH_STRICT_BARRIER:-0}"
@@ -1090,6 +1094,8 @@ while [ $# -gt 0 ]; do
             if [ "$#" -ge 2 ]; then shift 2; else shift; fi
             ;;
         --provision-pool) PROVISION_POOL="${2:-}"; shift 2 ;;   # one-time: create N stopped clones, then exit
+        --fresh-volumes) FRESH_VOLUMES=1; FRESH_VOLUMES_REQUESTED=1; shift ;;
+        --snapshot-volumes) FRESH_VOLUMES=0; FRESH_VOLUMES_REQUESTED=0; shift ;;
         --infra-probe)    INFRA_PROBE="1"; STRICT_BARRIER="1"; shift ;;
         --skip-autoscaler) SKIP_AUTOSCALER="1"; shift ;;
         --strict-barrier) STRICT_BARRIER="1"; shift ;;
@@ -1106,6 +1112,14 @@ while [ $# -gt 0 ]; do
                           shift ;;
     esac
 done
+case "$FRESH_VOLUMES" in 0|1) ;; *) echo "❌ invalid fresh-volume mode" >&2; exit 2 ;; esac
+if [ -n "$PROVISION_POOL" ] || [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" != 1 ]; then
+    [ "$FRESH_VOLUMES_REQUESTED" = 0 ] || {
+        echo "❌ --fresh-volumes requires task-specific boot launch, not a generic pool" >&2; exit 2;
+    }
+    FRESH_VOLUMES=0
+fi
+export CLOUDBENCH_FRESH_VOLUMES="$FRESH_VOLUMES"
 if [ "${CLOUDBENCH_TEST_FLEET_OWNER_TOKEN+x}" != "x" ]; then
     case "$FLEET_OWNER_TOKEN" in
         [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
@@ -1461,6 +1475,21 @@ private_source_allows_provider_call() {
 FLY() { private_source_allows_provider_call "$@" && flyctl "$@"; }
 
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
+primary_clone_storage_mode() {
+    local bench="$1" index
+    [ "$FRESH_VOLUMES" = 1 ] || { printf snapshot; return; }
+    is_sim_on "$bench" && { printf snapshot; return; }
+    for index in "${!BENCHES[@]}"; do
+        [ "${BENCHES[$index]}" = "$bench" ] || continue
+        case "${CATALOG_MODES[$index]}" in
+            real) printf fresh ;;
+            simulate) printf snapshot ;;
+            *) return 1 ;;
+        esac
+        return
+    done
+    return 1
+}
 
 # Print EXACTLY what code the run will execute on the box: the ref (HEAD), whether
 # it is on origin (unpushed commits never reach the box), and the uncommitted diff
@@ -5047,7 +5076,8 @@ PYCOHORT
             fi
         fi
     done
-    for reap_pid in "${reap_pids[@]}"; do
+    # An empty join has no work; preserve zero arguments under nounset too.
+    for reap_pid in ${reap_pids[@]+"${reap_pids[@]}"}; do
         wait "$reap_pid" || unresolved=1
     done
     unset -f reap_one_registry_record
@@ -6716,6 +6746,89 @@ finally:
 PY
 }
 
+cloudbench_archive_bound_child_shutdown_confirmation() {  # <registry> <bench> <machine-id> <output> <guest-token>
+    # The old child wrote its guest token even when an infra probe was canceled
+    # before completion. Preserve that exact, mapped artifact; it is never an
+    # acknowledgement and must not bypass stopped-state/provider recovery.
+    python3 - "$1" "$2" "$3" "$4" "$5" "${RUN_ID:-}" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+registry, bench, machine, output, guest_token, run_id = sys.argv[1:]
+registry, output = Path(registry), Path(output)
+
+def regular_bytes(path, maximum):
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        metadata = os.fstat(fd)
+        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            raise ValueError("unsafe child confirmation input")
+        payload = os.read(fd, maximum + 1)
+        if len(payload) > maximum:
+            raise ValueError("oversized child confirmation input")
+        return payload, metadata
+    finally:
+        os.close(fd)
+
+if (registry.is_symlink() or output.is_symlink()
+        or registry.resolve() != registry or output.resolve() != output
+        or not registry.is_dir() or not output.is_dir()
+        or re.fullmatch(r"[0-9a-f]{32}", registry.name) is None
+        or re.fullmatch(r"[0-9a-f]{14}", machine) is None):
+    raise ValueError("unsafe child confirmation identity")
+meta = {}
+for line in regular_bytes(registry / "meta", 65536)[0].decode().splitlines():
+    key, value = line.split("=", 1)
+    if key in meta:
+        raise ValueError("duplicate child confirmation metadata")
+    meta[key] = value
+owner = registry.name
+run = Path(meta["runs_root"]) / run_id
+if (meta.get("fleet_owner_token") != owner or meta.get("run_id") != run_id
+        or run.resolve() != run or output != run / bench):
+    raise ValueError("child confirmation does not belong to this fleet")
+catalog = json.loads(regular_bytes(run / "_batch" / "benches.json", 1048576)[0])
+if not isinstance(catalog, list) or any(not isinstance(row, dict) for row in catalog):
+    raise ValueError("unsafe child confirmation catalog")
+names = [row.get("name") for row in catalog]
+if (len(names) != len(set(names)) or bench not in names
+        or guest_token != f"{owner}-{names.index(bench)}"):
+    raise ValueError("child confirmation does not match the exact catalog slot")
+cid = regular_bytes(output / ".cid", 256)[0].decode().split()
+if len(cid) != 2 or cid[0] not in {"clone", "pool"} or cid[1] != machine:
+    raise ValueError("child confirmation does not match the exact Machine")
+marker = output / "guest-shutdown.confirmed"
+payload, original = regular_bytes(marker, 256)
+if payload != (guest_token + "\n").encode():
+    raise ValueError("child confirmation token does not match the exact guest")
+retained = output / "guest-shutdown.child-confirmation"
+try:
+    fd = os.open(retained, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+except FileExistsError:
+    if regular_bytes(retained, 256)[0] != payload:
+        raise ValueError("original child confirmation conflicts with retained bytes")
+else:
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+directory = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(directory)
+    current = marker.lstat()
+    if current.st_dev != original.st_dev or current.st_ino != original.st_ino or regular_bytes(marker, 256)[0] != payload:
+        raise ValueError("original child confirmation changed during retention")
+    marker.unlink()
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
 cloudbench_guest_shutdown_status() {  # <status-proxy-port>
     curl --noproxy '*' -sS --max-time 2 -o /dev/null -w '%{http_code}' \
         -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
@@ -6877,6 +6990,44 @@ cloudbench_confirm_guest_shutdowns() {
     return "$failed"
 }
 
+cloudbench_validate_bootstrap_retirement() {  # <registry-dir> <bench> <output>
+    local registry="$1" bench="$2" output="$3" capture_dir machines volumes status=1
+    [ -f "$PRESTACK_RECOVERY_HELPER" ] && [ ! -L "$PRESTACK_RECOVERY_HELPER" ] || return 1
+    capture_dir="$(python3 - "$output/guest-bootstrap.confirmed" <<'PY'
+import json, os, stat, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 1048576:
+        raise ValueError("unsafe bootstrap retirement receipt")
+    with os.fdopen(fd, "rb", closefd=False) as stream:
+        receipt = json.load(stream)
+    if receipt.get("kind") != "fresh-infra-bootstrap-zero-provider":
+        raise ValueError("wrong bootstrap retirement family")
+    path = receipt.get("capture_dir")
+    if not isinstance(path, str) or not path.startswith("/") or "\n" in path:
+        raise ValueError("unsafe bootstrap capture path")
+    print(path)
+finally:
+    os.close(fd)
+PY
+)" || return 1
+    machines="$(mktemp "${TMPDIR:-/tmp}/cloudbench-bootstrap-machines.XXXXXX")" || return 1
+    volumes="$(mktemp "${TMPDIR:-/tmp}/cloudbench-bootstrap-volumes.XXXXXX")" \
+        || { rm -f "$machines"; return 1; }
+    if fly_with_timeout 30 machines list -a "$APP" --json > "$machines" \
+            2>> "$output/guest-bootstrap.validation.log" \
+        && fly_with_timeout 30 volumes list -a "$APP" --json > "$volumes" \
+            2>> "$output/guest-bootstrap.validation.log" \
+        && python3 "$PRESTACK_RECOVERY_HELPER" --registry "$registry" --bench "$bench" \
+            --capture-dir "$capture_dir" --machines-json "$machines" --volumes-json "$volumes" \
+            --validate-published-bootstrap >> "$output/guest-bootstrap.validation.log" 2>&1; then
+        status=0
+    fi
+    rm -f "$machines" "$volumes" || status=1
+    return "$status"
+}
+
 cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
     local registry="${1%/}" owner="${1%/}" recovered=0 failed=0 recovery_index
     local bench clone_name machine_id machine_state guest_run_token proxy_port output
@@ -6945,6 +7096,17 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
             --receipt "$receipt"
         )
 
+        if [ -e "$output/guest-bootstrap.confirmed" ] || [ -L "$output/guest-bootstrap.confirmed" ]; then
+            if cloudbench_validate_bootstrap_retirement "$registry" "$bench" "$output"; then
+                echo "✅ [$bench] exact original infra bootstrap canceled before service/provider launch; isolated DB remains on owned volume"
+                recovered=$((recovered + 1))
+                continue
+            fi
+            echo "❌ [$bench] original bootstrap retirement proof is incomplete or mismatched" >&2
+            failed=1
+            continue
+        fi
+
         if [ -e "$output/guest-shutdown.confirmed" ] \
             || [ -L "$output/guest-shutdown.confirmed" ]; then
             if [ -f "$output/guest-shutdown.confirmed" ] \
@@ -6953,9 +7115,13 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
                 recovered=$((recovered + 1))
                 continue
             fi
-            echo "❌ [$bench] existing guest cleanup confirmation is unsafe" >&2
-            failed=1
-            continue
+            if ! cloudbench_archive_bound_child_shutdown_confirmation \
+                    "$registry" "$bench" "$machine_id" "$output" "$guest_run_token"; then
+                echo "❌ [$bench] existing guest cleanup confirmation is unsafe" >&2
+                failed=1
+                continue
+            fi
+            echo "🧭 [$bench] original child token retained; exact guest/provider cleanup still required"
         fi
 
         if [ -e "$receipt" ] || [ -L "$receipt" ]; then
@@ -8541,10 +8707,17 @@ worker_ledger_lock_release() {  # worker_ledger_lock_release <bench-output-dir>
     WORKER_LEDGER_LOCK_TOKEN=""
 }
 
-clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] [vm-size] [memory-mb] [snapshot-id]
+clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] [memory-mb] [snapshot-id] [snapshot|fresh]
     local ledger="$1" source_id="${2:-$WARM_ID}"
     local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
     local clone_snapshot="${5:-$SNAP_ID}"
+    local storage_mode="${6:-snapshot}"
+    local -a snapshot_args=()
+    case "$storage_mode" in
+        snapshot) snapshot_args=(--from-snapshot "$clone_snapshot") ;;
+        fresh) [ "${FRESH_VOLUMES:-0}" = 1 ] || return 2 ;;
+        *) return 2 ;;
+    esac
     local clone_out clone_status target_id target_name target_volume diagnostic_log names_ledger deadline
     local storage_deadline preallocation_failure reap_status terminal_disposition
     local attempt max_attempts retry_delay clone_timeout
@@ -8594,7 +8767,7 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
         fi
         printf '%s\n' "$target_name" >> "$names_ledger"
         clone_out="$(fly_with_timeout "$clone_timeout" machine clone "$source_id" -a "$APP" \
-            --from-snapshot "$clone_snapshot" --region "$REGION" --name "$target_name" \
+            "${snapshot_args[@]}" --region "$REGION" --name "$target_name" \
             --vm-size "$vm_size" --vm-memory "$vm_memory" \
             --override-cmd "sleep infinity" --detach 2>&1)"
         clone_status=$?
@@ -9825,12 +9998,15 @@ require_in_app_hub_visibility() {
         python3 "$HUB_UPLOAD_HELPER" --verify-visible "$active_run_id" || return 1
     else
         active_run_id="$RUN_ID"
-        python3 "$HUB_UPLOAD_HELPER" \
-            --require-visible "$FLEET_DIR/_batch/report-card.json" \
-            --run-id "$active_run_id" --source direct-cloud-fleet || return 1
+        # Retain terminal publication authority even if the starting POST is
+        # still queued when its transport response times out.
         SELF_MANAGED_HUB_RUN="1"
+        export BENCHMARK_HUB_PARENT_RUN_ID="$active_run_id"
+        python3 "$HUB_UPLOAD_HELPER" \
+            --register-starting "$FLEET_DIR/_batch/report-card.json" \
+            --run-id "$active_run_id" --source direct-cloud-fleet || return 1
     fi
-    # Every per-machine run belongs to this already-visible aggregate. Child
+    # Every per-machine run belongs to this owned aggregate. Child
     # run_benchmark.py processes must not create duplicate one-task Hub rows.
     export BENCHMARK_HUB_PARENT_RUN_ID="$active_run_id"
     echo "📊 Mac app Benchmark Hub: run=$active_run_id"
@@ -10030,7 +10206,7 @@ finalize_terminal_projection() {  # finalize_terminal_projection <controller-exi
 
 
 cleanup() {
-    local result_ec=$? ec teardown_failed="${LOCAL_PROCESS_TEARDOWN_FAILED:-0}"
+    local result_ec=$? ec teardown_failed="${LOCAL_PROCESS_TEARDOWN_FAILED:-0}" publication_failed=0
     local id i out claim_path st presence machines round stop_pid pool_volume_id guest_shutdown_failed=0
     local claim_digest machine_reap_status runtime_evidence_failed=0
     local -a claimed_pool_ids pending_pool_ids next_pending_pool_ids stop_pids
@@ -10350,20 +10526,41 @@ cleanup() {
             fi
         done
     fi
-    # Task failure and infrastructure failure both use exit 1. Seal their
-    # independent lifecycle verdict only after provider audit publication AND
-    # removal of the exact recovery registry, which can itself still fail.
+    # Keep the parent live while releasing resources. Only this post-release
+    # projection closes dashboard polling and publishes the final transcripts.
+    if ! finalize_terminal_projection "$ec"; then
+        ec=1
+    elif [ "${SELF_MANAGED_HUB_RUN:-0}" = "1" ]; then
+        local hub_final_action=--upload-live
+        if [ "$teardown_failed" = "0" ] && [ "$KEEP_CLONES" != "1" ] \
+            && [ ! -e "$FLEET_REGISTRY_DIR" ] && [ ! -L "$FLEET_REGISTRY_DIR" ]; then
+            hub_final_action=--upload-final
+        fi
+        if ! python3 "$HUB_UPLOAD_HELPER" "$hub_final_action" "$FLEET_DIR/_batch/run.json" \
+            --run-id "$BENCHMARK_HUB_PARENT_RUN_ID" --source direct-cloud-fleet; then
+            if [ "$hub_final_action" = --upload-final ]; then
+                echo "❌ terminal Hub publication failed after resource release" >&2
+                publication_failed=1
+                ec=1
+            else
+                echo "⚠️ final live Hub update failed; canonical outcome and cleanup status are preserved" >&2
+            fi
+        fi
+    fi
+    # Seal the lifecycle after provider audit, exact registry retirement and
+    # required terminal publication. A publication failure does not change the
+    # recorded physical resource disposition or the benchmark verdict.
     if [ -d "$FLEET_DIR/_batch" ]; then
         if ! python3 - "$FLEET_DIR" "$FLEET_OWNER_TOKEN" "$RUN_ID" "$ROOT_DIR" \
             "$ec" "$teardown_failed" "$KEEP_CLONES" \
             "$FLEET_EXECUTION_COMPLETED" "${AUTOSCALER_FAILURE:-1}" \
-            "$FLEET_REGISTRY_DIR" <<'PY'
+            "$FLEET_REGISTRY_DIR" "$publication_failed" <<'PY'
 import json
 import os
 import sys
 from pathlib import Path
 
-directory, owner, run_id, workspace, exit_code, teardown, retained, completed, autoscaler, registry = sys.argv[1:]
+directory, owner, run_id, workspace, exit_code, teardown, retained, completed, autoscaler, registry, publication_failed = sys.argv[1:]
 root = Path(directory)
 audit_digest = ""
 try:
@@ -10374,7 +10571,7 @@ except (OSError, ValueError, KeyError):
 verified = (
     teardown == "0" and retained != "1" and completed == "1"
     and autoscaler == "0" and len(audit_digest) == 64
-    and exit_code in ("0", "1")
+    and publication_failed == "0" and exit_code in ("0", "1")
     and bool(registry) and not Path(registry).exists() and not Path(registry).is_symlink()
 )
 target = root / "_batch/lifecycle.json"
@@ -10383,6 +10580,7 @@ payload = {
     "version": 1, "fleet_owner_token": owner, "run_id": run_id,
     "workspace_root": workspace, "status": "verified" if verified else "failed",
     "controller_exit_code": int(exit_code), "audit_sha256": audit_digest,
+    "hub_publication_failed": publication_failed != "0",
 }
 try:
     with temporary.open("x") as handle:
@@ -10404,19 +10602,8 @@ PY
             ec=1
         fi
     fi
-    # Keep the parent live while releasing resources. Only this post-release
-    # projection closes dashboard polling and publishes the final transcripts.
-    if ! finalize_terminal_projection "$ec"; then
-        ec=1
-    elif [ "${SELF_MANAGED_HUB_RUN:-0}" = "1" ]; then
-        local hub_final_action=--upload-live
-        if [ "$teardown_failed" = "0" ] && [ "$KEEP_CLONES" != "1" ] \
-            && [ ! -e "$FLEET_REGISTRY_DIR" ] && [ ! -L "$FLEET_REGISTRY_DIR" ]; then
-            hub_final_action=--upload-final
-        fi
-        python3 "$HUB_UPLOAD_HELPER" "$hub_final_action" "$FLEET_DIR/_batch/run.json" \
-            --run-id "$BENCHMARK_HUB_PARENT_RUN_ID" --source direct-cloud-fleet \
-            || echo "⚠️ final Hub publication failed; canonical outcome and cleanup status are preserved" >&2
+    if [ "$publication_failed" = "1" ]; then
+        finalize_terminal_projection "$ec" || ec=1
     fi
     # Teardown and final publication both need the snapshotted helpers.
     cleanup_owned_script_snapshot || ec=1
@@ -11910,6 +12097,12 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         && [ ! -e "$out/autoscaler.runtime-completed" ] || return 0
     local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file stage_log failure_reason
     local primary_volume_size worker_snapshot
+    local worker_storage
+    worker_storage=snapshot
+    [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && worker_storage=fresh
+    if [ "$worker_storage" = fresh ]; then
+        worker_snapshot="$SNAP_ID"  # unused: fresh workers retain no donor storage
+    else
     primary_volume_size="$(machine_volume_size_gb "$primary_id")" || primary_volume_size=""
     if [ "$primary_volume_size" = "$WARM_SOURCE_SIZE_GB" ]; then
         worker_snapshot="$SNAP_ID"
@@ -11920,6 +12113,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         printf '%s\n' "primary volume size has no proven matching worker snapshot" > "$out/autoscaler.failed"
         echo "  ❌ [$bench] mandatory autoscaler: no exact-size worker snapshot for primary" >&2
         return 1
+    fi
     fi
     worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     local worker_capacity_status=0
@@ -11938,7 +12132,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     fi
     local worker_clone_status=0
     wid="$(clone_machine_target "$out/worker-clones.ids" "$primary_id" \
-        "$FLEET_WORKER_VM_SIZE" "$FLEET_WORKER_VM_MEMORY" "$worker_snapshot")" \
+        "$FLEET_WORKER_VM_SIZE" "$FLEET_WORKER_VM_MEMORY" "$worker_snapshot" "$worker_storage")" \
         || worker_clone_status=$?
     if [ "$worker_clone_status" -eq 75 ]; then
         capacity_release_reservation "$worker_capacity_token"
@@ -12032,6 +12226,9 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         echo 'fi'
         echo "export REF=$(printf '%q' "$BENCH_REF")"
         echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
+        echo "export CLOUDBENCH_FRESH_VOLUME=$([ "$worker_storage" = fresh ] && printf 1 || printf 0)"
+        echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
+        echo "export CLOUDBENCH_SYNC_PRISMA_SCRIPT=/data/cloudbench-sync-prisma-client.sh"
         echo "export CLOUDBENCH_ENV_HELPER=/data/cloudbench-env.sh"
         echo "export CLOUDBENCH_WORKER_EVIDENCE_HELPER=/data/cloudbench-worker-evidence.py"
         echo "export CLOUDBENCH_WORKER_RUN_TOKEN=$(printf '%q' "$runtime_run_token")"
@@ -12135,7 +12332,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
             fly_with_timeout 20 machine start "$wid" -a "$APP" || true
         if ! run_worker_stage_cmd "clear stale worker stage files" \
             fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
-            -C "rm -f /data/cloudbench-worker.sh /data/cloudbench-worker-evidence.py /data/cloudbench-fetch-ref.sh /data/cloudbench-env.sh /tmp/rbw.env /tmp/rbw.sh /tmp/cloudbench-local.patch"; then
+            -C "rm -f /data/cloudbench-worker.sh /data/cloudbench-worker-evidence.py /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-env.sh /tmp/rbw.env /tmp/rbw.sh /tmp/cloudbench-local.patch"; then
             sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
             continue
         fi
@@ -12145,6 +12342,12 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-evidence.py" /data/cloudbench-worker-evidence.py \
              && run_worker_stage_cmd "upload cloudbench-fetch-ref.sh" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh \
+             && { [ "$worker_storage" != fresh ] || {
+                    run_worker_stage_cmd "upload cloudbench-sync-deps.sh" \
+                        fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-sync-deps.sh" /data/cloudbench-sync-deps.sh \
+                    && run_worker_stage_cmd "upload cloudbench-sync-prisma-client.sh" \
+                        fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-sync-prisma-client.sh" /data/cloudbench-sync-prisma-client.sh
+                }; } \
              && run_worker_stage_cmd "upload cloudbench-env.sh" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-env.sh" /data/cloudbench-env.sh \
              && run_worker_stage_cmd "upload worker environment" \
@@ -12699,7 +12902,9 @@ fleet_infra_canary_preflight() {
     case "$ttl" in
         ''|*[!0-9]*|0) ttl=3600 ;;
     esac
-    if [ -f "$stamp" ]; then
+    # A campaign must check its own abort/failure even when another cohort has
+    # a fresh global PASS. The transaction helper owns that check.
+    if [ -z "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ] && [ -f "$stamp" ]; then
         age=$(( $(date +%s) - $(stat -c %Y "$stamp" 2>/dev/null || echo 0) ))
         if [ "$age" -ge 0 ] && [ "$age" -lt "$ttl" ]; then
             echo "🛡  infra canary preflight: stamp fresh (${age}s < ${ttl}s) — $stamp"
@@ -12951,7 +13156,8 @@ for bench in "${BENCHES[@]}"; do
         fi
         if [ -n "$pcid" ]; then
             printf 'pool %s\n' "$pcid" > "$out/.cid"
-        elif pcid="$(clone_machine_target "$out/primary.ids" "$WARM_ID" "$bench_vm_size" "$bench_vm_memory")"; then
+        elif pcid="$(clone_machine_target "$out/primary.ids" "$WARM_ID" "$bench_vm_size" "$bench_vm_memory" \
+            "$SNAP_ID" "$(primary_clone_storage_mode "$bench")")"; then
             printf 'clone %s\n' "$pcid" > "$out/.cid"
         fi
     ) &
@@ -13031,6 +13237,7 @@ for bench in "${BENCHES[@]}"; do
     # and its descendants have exited, including on controller cancellation.
     CLOUDBENCH_WORKSPACE_NAME="$local_ws" \
     CLOUDBENCH_FLEET_RUN_TOKEN="$FLEET_OWNER_TOKEN-$i" \
+    CLOUDBENCH_FLEET_RUN_ID="$RUN_ID" \
     CLOUDBENCH_ENV_VERIFIED=1 \
     CLOUDBENCH_STORAGE_READY="$([ "$src" = "pool" ] && printf 1 || printf 0)" \
     CLOUDBENCH_MACHINE_RECORD="$INVENTORY_INDEX/current/machines/$cid" \
@@ -13048,6 +13255,7 @@ for bench in "${BENCHES[@]}"; do
     CLOUDBENCH_LOCAL_PATCH_SOURCE="$FLEET_PATCH_FILE" \
     CLOUDBENCH_LOCAL_PATCH_SHA256="$FLEET_PATCH_SHA256" \
     CLOUDBENCH_INFRA_PROBE="${INFRA_PROBE:-0}" \
+    CLOUDBENCH_FRESH_VOLUME="$([ "$src" != pool ] && [ "$(primary_clone_storage_mode "$bench")" = fresh ] && printf 1 || printf 0)" \
     CLOUDBENCH_POOL_BOOT_VM_SIZE="$pool_boot_vm_size" \
     CLOUDBENCH_POOL_BOOT_VM_MEMORY="$pool_boot_vm_memory" \
     CLOUDBENCH_SKIP_AUTOSCALER="${SKIP_AUTOSCALER:-0}" \

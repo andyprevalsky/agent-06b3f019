@@ -41,7 +41,7 @@ Downstream Implications sections.
 4. **Actively drive asynchronous work.** Poll benchmark controllers and deploy
    workers on the CLAUDE.md cadence. Check both output growth and liveness.
    Never fire and passively wait.
-4a. **Zero started tasks after 5 minutes is a fault, not a slow start.** A
+   4a. **Zero started tasks after 5 minutes is a fault, not a slow start.** A
    generous configured budget is never evidence of progress. If a run has
    produced no task in a started/running state 5 minutes after launch, stop
    treating elapsed time as normal: poll every 60 seconds and, on every poll,
@@ -81,36 +81,36 @@ Downstream Implications sections.
     only active clocks. A state transition is incomplete if its timing command
     did not succeed.
 11. **RCA before benchmark rerun.** Every failed task must enter its own `/RCA`
-   cycle before any benchmark rerun. Gather the runtime evidence, identify the
-   first-bad boundary, run the unchanged owning-boundary repro red then green,
-   and cement it first. A HARNESS fix must then have Andy's fix approval before
-   the exact post-fix benchmark rerun; an INFRA fix does not require approval.
-   That exact rerun supplies `/RCA`'s benchmark outcome proof and is what moves
-   the RCA from Causal proof; outcome pending to Complete. After the first
-   infra-clean run with causal RCA for every failing task, freeze a min-heap
-   over those tasks and pipeline the rest: do not wait for one task's
-   approve → outcome-proof rerun cycle to finish before asking about the next
-   idle task. On approve, immediately apply the fix on a local code snapshot
-   and rerun that task on the cloud fleet (default); immediately ask about the
-   next idle heap item.
+    cycle before any benchmark rerun. Gather the runtime evidence, identify the
+    first-bad boundary, run the unchanged owning-boundary repro red then green,
+    and cement it first. A HARNESS fix must then have Andy's fix approval before
+    the exact post-fix benchmark rerun; an INFRA fix does not require approval.
+    That exact rerun supplies `/RCA`'s benchmark outcome proof and is what moves
+    the RCA from Causal proof; outcome pending to Complete. After the first
+    infra-clean run with causal RCA for every failing task, freeze a min-heap
+    over those tasks and pipeline the rest: do not wait for one task's
+    approve → outcome-proof rerun cycle to finish before asking about the next
+    idle task. On approve, immediately apply the fix on a local code snapshot
+    and rerun that task on the cloud fleet (default); immediately ask about the
+    next idle heap item.
 12. **Approval format is the ONLY response format — no exceptions.** Every
-   response emitted while `/descend` is active MUST consist of exactly: the
-   header block (including the approvals counter), the delta rows of the
-   lifecycle table, and — only at a stop — the ONE approval section for the
-   highest-priority pending row. Never re-render the full ledger; never batch
-   two approval requests into one response. Nothing else may appear. No
-   free-form prose report, no narrative of what you did, no "what I found"
-   essay, no recap of completed work, no bulleted list of open items outside
-   the table, no explanation of a fix outside its own approval section, no
-   commentary on sub-agent results. If a fact does not fit in the header, a
-   table cell, or a required approval section, it is not said in chat —
-   evidence belongs in the RCA and the commit message.
-   **Single exception:** inside a deploy approval gate you may additionally show
-   the exact file diff or file content under review, because a human cannot
-   approve a snapshot they cannot see.
-   Be as concise as possible without losing critical information: preserve the
-   measurement, the wrong value, the expected value, and the file link; cut
-   everything else. Never pad.
+    response emitted while `/descend` is active MUST consist of exactly: the
+    header block (including the approvals counter), the delta rows of the
+    lifecycle table, and — only at a stop — the ONE approval section for the
+    highest-priority pending row. Never re-render the full ledger; never batch
+    two approval requests into one response. Nothing else may appear. No
+    free-form prose report, no narrative of what you did, no "what I found"
+    essay, no recap of completed work, no bulleted list of open items outside
+    the table, no explanation of a fix outside its own approval section, no
+    commentary on sub-agent results. If a fact does not fit in the header, a
+    table cell, or a required approval section, it is not said in chat —
+    evidence belongs in the RCA and the commit message.
+    **Single exception:** inside a deploy approval gate you may additionally show
+    the exact file diff or file content under review, because a human cannot
+    approve a snapshot they cannot see.
+    Be as concise as possible without losing critical information: preserve the
+    measurement, the wrong value, the expected value, and the file link; cut
+    everything else. Never pad.
 
 ## Issue clusters
 
@@ -118,22 +118,22 @@ Every lifecycle row has exactly one `issue_cluster`, rendered verbatim in the
 Cluster column. This is the user-facing core claim; the deeper RCA problem
 bucket may remain more technical.
 
-| Issue cluster | Use when the proven first-bad boundary is… |
-|---|---|
-| **Faulty Evaluator** | Evaluator code, checks, criteria, rubric, or verifier-scoring instructions disagree with the authoritative task contract—including task-versus-evaluator conflicts—or accept an outcome that contract forbids. |
-| **Prompting Inconsistency** | Two instructions governing the acting agent before evaluation—task, system/tool prompt, or tool/response schema—contradict each other. Evaluator-only scoring conflicts are excluded. |
-| **Underspecified Task** | A requirement or preference needed for a unique correct outcome is absent from the task contract. |
-| **Context Drift** | Relevant context becomes stale, truncated, overwritten, cross-contaminated, or detached from the action it should govern. |
-| **Lacking Tool** | No available tool or capability can observe or perform a required action. |
-| **Broken Tool** | The required tool exists, but errors, stalls, returns invalid data, or violates its contract. |
-| **Product Defect** | Owned application, service, workflow, or state-transition logic violates a valid contract after inputs and tool delivery are correct. |
-| **Agent Reasoning Failure** | Prompt, context, tools, data, and evaluator are valid, but the agent chooses or reports the wrong action or result. |
-| **Fixture/Data Mismatch** | Seed data, identity, account state, credentials, or the benchmark environment contradicts the task contract. |
-| **Resource/Performance Failure** | Owned context growth, cost, memory, concurrency, or timeout policy prevents otherwise valid progress. |
-| **External Blocker** | A third-party outage, policy block, CAPTCHA, or rate limit prevents completion after owned recovery behavior works correctly. |
-| **Infrastructure Failure** | Fleet, queue, port, build, credential plumbing, teardown, or control-plane behavior prevents a trustworthy verdict. |
-| **Observability Gap** | Required evidence is not captured, so no deeper completed classification is yet supportable. |
-| **Other** | None fits after proof; name the proposed new reusable cluster in the RCA so this taxonomy can be extended. |
+| Issue cluster                    | Use when the proven first-bad boundary is…                                                                                                                                                                     |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Faulty Evaluator**             | Evaluator code, checks, criteria, rubric, or verifier-scoring instructions disagree with the authoritative task contract—including task-versus-evaluator conflicts—or accept an outcome that contract forbids. |
+| **Prompting Inconsistency**      | Two instructions governing the acting agent before evaluation—task, system/tool prompt, or tool/response schema—contradict each other. Evaluator-only scoring conflicts are excluded.                          |
+| **Underspecified Task**          | A requirement or preference needed for a unique correct outcome is absent from the task contract.                                                                                                              |
+| **Context Drift**                | Relevant context becomes stale, truncated, overwritten, cross-contaminated, or detached from the action it should govern.                                                                                      |
+| **Lacking Tool**                 | No available tool or capability can observe or perform a required action.                                                                                                                                      |
+| **Broken Tool**                  | The required tool exists, but errors, stalls, returns invalid data, or violates its contract.                                                                                                                  |
+| **Product Defect**               | Owned application, service, workflow, or state-transition logic violates a valid contract after inputs and tool delivery are correct.                                                                          |
+| **Agent Reasoning Failure**      | Prompt, context, tools, data, and evaluator are valid, but the agent chooses or reports the wrong action or result.                                                                                            |
+| **Fixture/Data Mismatch**        | Seed data, identity, account state, credentials, or the benchmark environment contradicts the task contract.                                                                                                   |
+| **Resource/Performance Failure** | Owned context growth, cost, memory, concurrency, or timeout policy prevents otherwise valid progress.                                                                                                          |
+| **External Blocker**             | A third-party outage, policy block, CAPTCHA, or rate limit prevents completion after owned recovery behavior works correctly.                                                                                  |
+| **Infrastructure Failure**       | Fleet, queue, port, build, credential plumbing, teardown, or control-plane behavior prevents a trustworthy verdict.                                                                                            |
+| **Observability Gap**            | Required evidence is not captured, so no deeper completed classification is yet supportable.                                                                                                                   |
+| **Other**                        | None fits after proof; name the proposed new reusable cluster in the RCA so this taxonomy can be extended.                                                                                                     |
 
 Boundary rules resolve overlaps: every evaluator-side disagreement with the
 authoritative task—including criteria later injected into a verifier prompt—is
@@ -147,16 +147,16 @@ merely because a third party triggered it.
 
 Map the deeper `/rca` problem buckets into the one-glance clusters as follows:
 
-| `/rca` problem bucket | `/descend` issue cluster |
-|---|---|
-| Timeout too aggressive | Resource/Performance Failure |
-| Logical inconsistency in harness prompts/contracts | Faulty Evaluator for every evaluator-versus-task scoring conflict; Prompting Inconsistency only for contradictory instructions governing the acting agent before evaluation |
-| Uncaptured user preference/spec | Underspecified Task |
-| New tool/capability required | Lacking Tool |
-| Concurrency inefficiency | Resource/Performance Failure |
-| Fixture/environment/data mismatch | Fixture/Data Mismatch, or Infrastructure Failure when no trustworthy task verdict exists |
-| Observability/trace capture gap | Observability Gap |
-| Other | Reclassify from the proven first-bad boundary, normally Product Defect, Broken Tool, Agent Reasoning Failure, External Blocker, or Infrastructure Failure; retain Other only when proposing a new reusable cluster |
+| `/rca` problem bucket                              | `/descend` issue cluster                                                                                                                                                                                           |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Timeout too aggressive                             | Resource/Performance Failure                                                                                                                                                                                       |
+| Logical inconsistency in harness prompts/contracts | Faulty Evaluator for every evaluator-versus-task scoring conflict; Prompting Inconsistency only for contradictory instructions governing the acting agent before evaluation                                        |
+| Uncaptured user preference/spec                    | Underspecified Task                                                                                                                                                                                                |
+| New tool/capability required                       | Lacking Tool                                                                                                                                                                                                       |
+| Concurrency inefficiency                           | Resource/Performance Failure                                                                                                                                                                                       |
+| Fixture/environment/data mismatch                  | Fixture/Data Mismatch, or Infrastructure Failure when no trustworthy task verdict exists                                                                                                                           |
+| Observability/trace capture gap                    | Observability Gap                                                                                                                                                                                                  |
+| Other                                              | Reclassify from the proven first-bad boundary, normally Product Defect, Broken Tool, Agent Reasoning Failure, External Blocker, or Infrastructure Failure; retain Other only when proposing a new reusable cluster |
 
 ## Resolve the slice
 
@@ -233,12 +233,11 @@ seconds, then follow each job log's exact printed fleet-monitor handle through
 controller exit and owned teardown. The campaign directory itself is not a
 fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
 
-
 Follow CLAUDE.md's "Monitor every cloud launch" instructions and the exact command
 printed at launch. Poll every 30 seconds, check terminal status on every poll, and
 observe through owned-resource release. A stale observation never authorizes a reset.
 
-~~~text
+```text
 /descend or operator
   → scripts/run-bench <slice-or-task...> [--concurrency N] [-k K|--runs K]
       → canonical catalog selection
@@ -252,7 +251,7 @@ observe through owned-resource release. A stale observation never authorizes a r
       → terminal _batch/run.json classification
            ├─ PASSED / FAILED → record and advance
            └─ SKIPPED / INFRA_ERROR / ERROR / CANCELLED → fail closed and reset the streak
-~~~
+```
 
 Named selections are `daily`, `pre-deploy`, `rose-bench`, `polar-bench`, and
 `incomplete`; explicit task names may be combined. Selection order is preserved,
@@ -346,21 +345,21 @@ dimensions such as run, slice, epoch, lane, task count, status, and duration.
 Allocate the run ID, then start the main clock immediately before doing
 `RESOLVE_SLICE` work:
 
-~~~bash
+```bash
 python3 scripts/descend_step_log.py start \
   --run-id "$RUN_ID" --slice "$SLICE" \
   --lane main --step RESOLVE_SLICE --epoch "$EPOCH"
-~~~
+```
 
 At every main state boundary, close the old state and start the new state with
 one command. Use the exact state-machine label, including repeated states in a
 new epoch:
 
-~~~bash
+```bash
 python3 scripts/descend_step_log.py transition \
   --run-id "$RUN_ID" --lane main \
   --step SYNC_CHECKPOINT --epoch "$EPOCH" --task-count "$TASK_COUNT"
-~~~
+```
 
 The first transition supplies `--task-count` because resolving the slice is
 what discovers it. Later transitions inherit the resolved count.
@@ -375,25 +374,25 @@ Parallel RCA and deploy work gets an independent stable lane such as
 `rca-I-03` or `deploy-H-02`. Start that lane before its first state, transition
 it independently, and close it when its work ends:
 
-~~~bash
+```bash
 python3 scripts/descend_step_log.py start \
   --run-id "$RUN_ID" --slice "$SLICE" --task-count "$TASK_COUNT" \
   --lane rca-I-03 --step RCA_INFRA_FIX --epoch "$EPOCH"
 python3 scripts/descend_step_log.py finish \
   --run-id "$RUN_ID" --lane rca-I-03 --status completed
-~~~
+```
 
 When the controller reaches `DONE` or `BLOCKED`, transition into that terminal
 state first so it gets its own row, then close the main lane with
 `--run-terminal` so wall-clock trends include the run. Use `--status completed`
 for `DONE` and `--status blocked` for `BLOCKED`:
 
-~~~bash
+```bash
 python3 scripts/descend_step_log.py transition \
   --run-id "$RUN_ID" --lane main --step DONE --epoch "$EPOCH"
 python3 scripts/descend_step_log.py finish \
   --run-id "$RUN_ID" --lane main --status completed --run-terminal
-~~~
+```
 
 Before every `/sync`, commit any newly appended ledger rows in a log-only
 commit so merging cannot discard them. Commit only the ledger path; never fold
@@ -405,11 +404,11 @@ After each full-slice acceptance attempt and at the terminal boundary, analyze
 the recent window against the preceding window. Negative change is faster;
 positive change is a regression to investigate:
 
-~~~bash
+```bash
 python3 scripts/descend_step_log.py report \
   --slice "$SLICE" --task-count "$TASK_COUNT" \
   --lane main --status completed --window 5
-~~~
+```
 
 The completed-only default keeps a quick failed step or blocked run from
 looking like a speed improvement. Use `--status all` only when investigating
@@ -444,7 +443,7 @@ incomplete `/sync` blocks that RCA, rerun, or handoff—not unrelated active wor
 
 ## State machine
 
-~~~text
+```text
 RESOLVE_SLICE
   → SYNC_CHECKPOINT → RUN_SLICE
   → CLASSIFY_RESULTS
@@ -471,7 +470,7 @@ DEPLOY: prepare isolated fix-only worktree → /deploy
 FULL_SLICE_ACCEPTANCE
   ├─ any non-pass → CLASSIFY_RESULTS
   └─ all pass + every deploy merged → DONE → propose/enable cron
-~~~
+```
 
 HARNESS_FIX_DECISION pauses only the next ask, not the pipeline. Approved
 workers keep applying the fix on a local code snapshot and outcome-proof-
@@ -494,14 +493,25 @@ cost, or a single-task subset.
 
 Run only through the isolated entrypoint (cloud fleet by default):
 
-~~~bash
+```bash
 scripts/run-bench <resolved slice-or-task names...>
-~~~
+```
 
 `scripts/run-bench` defaults to `run-bench-fleet` and fail-closes on a stale/missing infra-canary stamp.
 It owns `--concurrency N` plus `-k K`/`--runs K`
 when independent repeated trials are required. Never prepend `--local` unless
 Andy asked for local. Never use `--single-box` (disabled; not parallel-safe).
+
+Standard boot-launched REAL tasks use fresh volumes for both primaries and
+workers, with verified image dependencies, an authenticated exact-ref Git
+checkout and the same canonical isolated database fixture. SIM tasks and
+`--sim-on` keep snapshots and World Model assets. Use `--snapshot-volumes` for
+a restore diagnostic; generic `--provision-pool` and legacy startup retain
+their snapshot path. Source-only bootstrap changes reuse the verified image.
+Continue monitoring through exact resource release: an accepted delete plus an
+exact owned-volume `pending_destroy` or `destroyed` terminal receipt qualifies
+release even when the provider retains that object; request acceptance alone
+does not.
 
 Capture the controller PID, dashboard, artifact path, actual start/finish
 timestamps, and every agent FE link. Actively monitor until every requested
@@ -517,7 +527,7 @@ Classify every non-pass as exactly one of:
 
 The infra loop is strict:
 
-~~~text
+```text
 while the latest run contains any INFRA result:
     run /sync immediately before each distinct /RCA
     RCA every distinct infra issue
@@ -528,7 +538,7 @@ while the latest run contains any INFRA result:
     append/update its lifecycle row
     run /sync before rerunning the slice
     rerun the slice
-~~~
+```
 
 Do not stop for Andy, issue harness verdicts, or present fix decisions from an
 infra-dirty run. A newly discovered infra failure begins another infra epoch.
@@ -574,12 +584,12 @@ complexity of the current proven issue, easiest first, then freeze immutable
 ranks 1..N for the entire descent. A later RCA never re-ranks that task.
 Infra and External Blocker never enter this heap.
 
-| Rank | Class | Clusters |
-|---|---|---|
-| 1 | Evaluator / task contract | Faulty Evaluator, Underspecified Task |
-| 2 | Fixture / data | Fixture/Data Mismatch |
-| 3 | Product / tool | Product Defect, Broken Tool, Lacking Tool, Context Drift |
-| 4 | Harness | Prompting Inconsistency, Agent Reasoning Failure, Resource/Performance Failure |
+| Rank | Class                     | Clusters                                                                       |
+| ---- | ------------------------- | ------------------------------------------------------------------------------ |
+| 1    | Evaluator / task contract | Faulty Evaluator, Underspecified Task                                          |
+| 2    | Fixture / data            | Fixture/Data Mismatch                                                          |
+| 3    | Product / tool            | Product Defect, Broken Tool, Lacking Tool, Context Drift                       |
+| 4    | Harness                   | Prompting Inconsistency, Agent Reasoning Failure, Resource/Performance Failure |
 
 Same-rank ties break by task name, then row ID.
 
@@ -664,11 +674,11 @@ the controller. This creates a persistent child identity and collision-free
 port range, links the controller's local credential files, installs missing
 dependencies, and starts a Postgres container owned by the child worktree:
 
-~~~bash
+```bash
 bash scripts/prepare-deploy-worktree.sh \
   --worktree "$DEPLOY_WORKTREE" \
   --source "$(git rev-parse --show-toplevel)"
-~~~
+```
 
 Require this command to pass before the worker starts. Never run the controller's
 `scripts/setup-db.sh` from the child: an inherited Conductor identity can reset
@@ -719,6 +729,7 @@ wrong value, the expected value, and the file link.
 ### Header
 
 Use a Markdown heading and a human-readable status. The only status labels are:
+
 - 🟢 Descending
 - 🟡 Fix approval needed
 - 🟠 Deploy approval needed
@@ -746,6 +757,7 @@ Latest run: **<passed_run>/<total_run> passed** · **<actual duration>**
 For a completed run:
 
 ## /descend daily
+
 ### 🟡 Fix approval needed
 
 **Epoch 3**
@@ -817,8 +829,8 @@ such as "Browser agent failed to start because proxy generation returned HTTP
 400." Render the ledger as a real Markdown table. Andy and Admin are the same
 person, so there is exactly one Approval column.
 
-| ID | Kind | Cluster | Issue (≤100 chars) | RCA | Fix | Test | Approval | Real rerun | Deploy |
-|---|---|---|---|---|---|---|---|---|---|
+| ID   | Kind    | Cluster     | Issue (≤100 chars)                                                       | RCA         | Fix       | Test        | Approval        | Real rerun | Deploy       |
+| ---- | ------- | ----------- | ------------------------------------------------------------------------ | ----------- | --------- | ----------- | --------------- | ---------- | ------------ |
 | H-01 | HARNESS | Broken Tool | Browser agent failed to start because proxy generation returned HTTP 400 | ✅ Complete | ✅ Passes | ✅ Cemented | ⏳ Fix approval | ⏳ Pending | — Not queued |
 
 Lifecycle values:
@@ -853,7 +865,7 @@ summarize, or paraphrase `task.prompt`, even when it is long or multiline:
 
 **What failed:** When <the agent doing the task goal>, <it reached this step or site>, the LLM called `<tool>` to <attempt>, and <this broke, with the measured result>.
 
-**FE link:** [Open agent](<frontend-agent-url>) — <verification status>
+**FE link:** [Open agent](frontend-agent-url) — <verification status>
 
 **LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`
 
@@ -929,9 +941,9 @@ After the affected lifecycle rows, include:
 
 **What failed:** When <the agent doing the task goal>, <it reached this step or site>, the LLM called `<tool>` to <attempt>, and <this broke, with the measured result>.
 
-**FE link:** [Open agent](<frontend-agent-url>) — <verification status>
+**FE link:** [Open agent](frontend-agent-url) — <verification status>
 
-**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`
+**LLM dump:** [Open rendered dump](rendered-html-url) — last call `<call_site>` on `<agent_id>`
 
 **Local repro (<wall-clock>):**
 

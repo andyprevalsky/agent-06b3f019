@@ -55,6 +55,7 @@ GATES = (
     ),
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
+    Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
@@ -115,6 +116,10 @@ GATES = (
     Gate(
         "cloudbench-prestack-recovery",
         ("python3", "scripts/tests/cloudbench-prestack-recovery.test.py"),
+    ),
+    Gate(
+        "cloudbench-bootstrap-recovery",
+        ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"),
     ),
     Gate("wait-for-code-review", ("python3", "scripts/tests/wait-for-code-review.test.py")),
     Gate("deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")),

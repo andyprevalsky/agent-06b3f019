@@ -12,6 +12,7 @@ symptoms:
   - "driver cleanup evidence interrupt_status=1 cleanup_ack=0"
   - "guest cleanup request failed (HTTP 500)"
   - "terminal runtime evidence deadline expired"
+  - "stack worker cleanup was not confirmed; refusing guest cleanup acknowledgement"
 tags:
   - cloudbench
   - fleet
@@ -23,6 +24,8 @@ sources:
   - fleet run 20260929-161610-10375
   - fleet run 20260929-183257-2121
   - fleet run 20260930-033934-26671
+  - fleet run 20261006-115614-55990
+  - commit e33e3c94e285c5665f77b198c25e7bca3f1ac9c6
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: open
 ---
@@ -258,6 +261,93 @@ its existing terminal bound. The focused prestack, quiesced, prestart and
 rejected-start controls pass 24 tests in total. All 18 existing prestack class
 methods and all unrelated verifier functions remain unchanged. The final diff
 preserves existing formatting outside the actual helper and call-site changes.
+
+### Fresh infra cancellation before backend/worker launch
+
+The October 6 fifty-copy cached diagnostic never released its strict start
+cohort and receives zero benchmark credit. Its task-free infrastructure canary
+allocated two fresh Machine/volume pairs. Both original drivers were canceled
+with exit143 before stack readiness and correctly refused their cleanup ACK:
+the original stack cleanup status did not exist. Exact recovery then required
+the ordinary provider manifest, backend log and guest state, which could not
+exist at this earlier service boundary. Stopping a Machine alone still did not
+justify dropping a possible external provider cleanup obligation.
+
+Archive searches were `stack worker cleanup was not confirmed before service
+bootstrap` and `could not publish guest cleanup acknowledgement stack worker
+cleanup failed`. This is a sibling of the existing recovery contract, with a
+different absence proof. The old Mac-only prestack route requires a clean
+driver ACK and no stack log; the rejected-start route requires every provider
+start to have been rejected. Neither applies to an accepted fresh guest that
+already started `run.sh` and created an isolated database.
+
+The original stopped volumes were read through native inert sleep boots,
+without starting a backend, browser, model or task. The original configs,
+including all env/proxy values, were restored with skip-start and compared to
+native STOPPED inventory afterward. The four captured runtime files are the
+complete driver/stack logs, original `exited` state and exact shutdown request.
+Service PID ledger, backend/worker logs, benchmark run record and clean ACK
+were genuinely absent, rather than synthesized. A further native read proved
+both tracked trees clean at original `e33e3c94`, with 21 driver/bootstrap/helper
+and package hashes matching that immutable source. The canonical source-recipe
+digest is `44e814acf5773835107e1886bdb72d1339b6aa99bc716feceb03defa83a50459`.
+
+Both stack logs prove isolated database creation and restore. One ends after
+the agent-network index bootstrap; the other ends while installing frontend
+dependencies. Those occur at `run.sh:1131` and `run.sh:1269`, before its full
+EXIT cleanup trap at 2340 and before tunnel/backend/worker launch afterward.
+The early EXIT trap only released the seed lock. Consequently the driver’s
+strict stack-status check at `cloudbench-run.sh:200` rejected ACK publication.
+This is pre-service cancellation, not zero stack allocation or an evaluated
+task failure.
+
+Before production edits, the existing public prestack validator failed on the
+actual original capture and stopped native inventories with
+`unsupported prestack owner or task`. The permanent owning regression had two
+positive errors and nine adverse passes on that source. The exact consumer
+regression separately failed before its branch was added. Unchanged assertions
+then passed all 13 controls; the existing 13 prestack/failed-stack tests also
+passed. Controls reject another owner or volume, unknown/modified source,
+dirty tracked files, incomplete capture/absence evidence, service or task
+launch, live Machine, completed or noninfra child, altered config, linked
+archive and altered published receipt. Fixture serialization was corrected
+before production edits to match the native config snapshot bytes; no
+acceptance assertion was relaxed.
+
+Independent review found that fixture setup read the historical Git object for
+its source hashes. The fixture now freezes the independently native-captured
+hash map, so fresh/shallow deploy clones can run all 13 unchanged assertions
+without that historical object. The recipe digest and production verifier are
+unchanged. The compact deploy structural registry and its documentation/pinning
+test include this family.
+
+The narrow route adds a distinct `fresh-infra-bootstrap-zero-provider`
+archival receipt through `cloudbench-prestack-recovery.py`. It is admitted
+only for this independently source-attested recipe and exact failed fresh
+infra owner. It explicitly reports isolated DB creation, zero external
+provider allocation and zero proof credit. It does not create a standard
+provider manifest, guest state or shutdown ACK. Exact stale-owner recovery
+rechecks the original source/config/capture and current native stopped Machine
+and attached volume before discharging its cleanup latch and using the
+existing exact fresh Machine/volume/claim reaper. Any owner/source/phase gap
+retains quarantine; generic cancellation is never sufficient.
+
+After independent source review and the 13 owning controls, native exact-owner
+recovery exited 0 in approximately 59 seconds. Independent native inventory at
+epoch 1791291257.561 proved both owned Machines and volumes absent, the exact
+owner registry retired, and the ownership audit `provider-teardown-verified`.
+The independently reviewed native retirement helper hash was
+`303d4c7e6ae9e689add5e0d4e873007fdc86fbb735ca0795713a172b7bdbb055`,
+fleet hash was
+`6ed1b82c98614dc0ea27d996b58dfbad9e1e4f66d2518e00558d22363ed40bc8`,
+and portable frozen test hash was
+`61236fb966e00056f89a33a25b240fbb19233fd3305421bac0971075b1a4ecfb`.
+All 35 baseline Machine IDs and all unrelated native volume IDs were preserved.
+Observed allocation-to-verified-release times were 3458.56 and 3457.56 seconds,
+so the original 1200-second diagnostic cutoff was breached and its credit
+remains zero. Original captured bytes and the failed terminal were preserved.
+This boundary repair supplies no new task execution, replay-cache or
+judge-latency proof and does not mark the larger fleet capability issue fixed.
 Private exact-source red/green,
 controls and source receipts are under
 `.context/acceptance/proof85-forensic-stopped-receipt-rca/`. Independent review

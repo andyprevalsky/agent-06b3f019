@@ -23,6 +23,7 @@ sources:
   - commit c59ee25a8
   - memory:project_trycloudflare_quick_tunnel_flakiness
   - PR #1419
+  - PR #1420
 repro: scripts/tests/run-public-tunnel-routing.test.sh
 status: fixed
 ---
@@ -125,6 +126,104 @@ agent-wide scan, shared locks, new provider/model probes or network-policy
 overrides at ten thousand agents. The early probe cannot reuse the later app
 shell assertion because the frontend is not started yet; verifying the
 existing response's identity preserves the two phases' distinct contracts.
+
+### 2026-10-06: the Cloudflare identity check was also applied to ngrok
+
+The required PR #1420 smoke and AgentCard gates both stopped before task
+execution on immutable `795cb6773b28898b6d50fbfafdda283c867e99c2`. Their
+normal documented concurrent commands selected eight smoke tasks and four
+sequential payment tasks, but exited 1 after **45.191s** and **48.841s**.
+Neither produced a task report card, benchmark result, evaluator outcome or
+agent ID. Both created isolated Postgres databases; this was not zero stack
+allocation. Exact run owner/token/birth cleanup receipts matched, and native
+checks found both owned stack PIDs, ports, Docker containers and volumes gone.
+These rejected gates must be rerun; infrastructure reproduction earns no
+benchmark, cache, judge or payment lifecycle acceptance credit.
+
+The first bad boundary was `start_ngrok_ephemeral_tunnel` calling
+`cloudflare_tunnel_edge_is_routing`. The tightened final-response identity
+check required Cloudflare's server and ray headers for every provider. The
+original native JSON logs show both unique ngrok endpoints started with their
+correct distinct loopback frontend ports. Connection refusal before the
+frontend starts is expected. After the authentic ngrok response was rejected,
+the last-resort stable worktree endpoint collided with the unrelated shared
+semantic stack (`ERR_NGROK_334`); that collision was downstream. An earlier
+source-qualified deploy accepted three simultaneous independent endpoints
+with the same isolated naming setup. No endpoint pooling, provider credentials,
+proxy, Freedom configuration or frontend allowed-host changes were needed.
+
+An unchanged native full-fallback driver executed the actual shipped functions
+on the captured original source and candidate. With the original owned
+frontend port closed, both versions received **HTTP 400** with final
+`Ngrok-Error-Code: ERR_NGROK_8012` and a current-child `started tunnel` JSON event
+binding the exact requested HTTPS URL and `http://localhost:28021`. Original
+source failed in **5.378s**; the candidate passed in **2.357s**. The same driver
+bytes were used for both, including identical fixture-only Host-header rewriting
+and `exec` custody. The rewriting represents an already-running origin's
+allowed-host setup in the separate healthy-origin check; it is absent from
+production launch commands. Current-child PIDs were absent after join and each
+rebind waited for the exact owned endpoint's native **404/ERR_NGROK_3200**
+retirement proof. Earlier rejected attempts, including an immediate rebind
+before asynchronous provider retirement, remain preserved.
+
+Healthy-origin coverage stayed distinct: the actual existing shared local and
+public frontend both answered 200 with the app mount marker and identical
+5,015-byte bodies. The actual full caller on original source rejected that
+healthy ngrok route in **7.541s**; the candidate accepted it in **3.366s** using
+the unchanged healthy driver. The shared stack and endpoint were never modified.
+No backend, worker, browser, model or task was launched by these native proofs.
+
+The fix keeps the Cloudflare final-header guard intact. Ngrok first requires
+its own fresh native JSON event to match the requested URL and upstream before
+publishing an origin; foreign URL or port fails closed. Initial log absence
+remains pending, while invalid observed ownership fails. Its explicit provider
+probe accepts the captured 400/8012 pre-origin response, or a healthy 200 only
+with the app marker and byte-identical body from the expected local frontend.
+Offline 404/3200, unmarked errors, proxy block pages, earlier CONNECT identity,
+and another origin's body are rejected. Both curl children retain the existing
+watchdog and inherited proxy aliases, join before return, and remove private
+body/header files. No global ngrok API port is used as ownership authority.
+
+The existing case-10 fixture had replaced the real routing helper with
+unconditional success, masking this cross-provider regression. It now executes
+the actual fallback and actual route helpers using source-derived native event
+and response fixtures. Frozen compact assertions first failed on original
+source in **3.204s**, then passed unchanged in **21.595s** (12 fallback
+invocations, seven PASS markers), including delayed publication, foreign
+URL/upstream, offline/unmarked/proxy/CONNECT/wrong-body rejection and all proxy
+aliases. The complete existing routing family passed **28 PASS markers in
+63.815s**. Test relocation changes only the fixture's repository-root wiring;
+production retains its normal relative root. Reviewed `run.sh` SHA-256 is
+`8515e835a33ae5830a75b2963746e45ee02e54d9631ee2cadc84d85c6675d23c`.
+
+Private source, headers, native logs, unchanged drivers, rejected controls and
+sanitized receipts are preserved under
+`.context/basic-cli-native-validation-20261006T112941Z/group4-live/tunnel-rca/`.
+The full-caller pre-origin receipt is
+`private-overlay/native-preorigin-full-final/native-preorigin-final-red-green.safe.json`;
+healthy-origin qualification is
+`private-overlay/native-healthy-final-after-release/native-healthy-green.safe.json`.
+The independent reviewer checked the final source, frozen assertions and both
+native outcomes before production application. The normal routing family
+remains registered in the compact deploy gate. Required normal smoke/payment
+workloads remain separate gates with their task, model, evaluator and timeout
+contracts unchanged.
+
+The subsequent actual normal invocations on `729ffeab` passed the repaired
+provider boundary and executed every selected task. The original smoke batch
+ran seven tasks (six PASS, one genuine new-user payment evaluator FAIL) and
+exited 1 in 744.075 seconds. Its unexecuted cached selection ran once separately:
+PASS in 215.3 seconds of execution, 300.430 seconds for the complete CLI. The
+four unchanged AgentCard cases all passed in 957.005 seconds. The user's explicit
+infrastructure criteria accept genuine task FAILURE, so the original grading
+FAIL remains visible and unregraded. All twelve durable evidence publications
+verified. Native seals found all three owned stacks, ports, databases and volumes
+released, all three queues with zero Running workflows, eight exact browser
+sessions absent and the exact E2B sandbox absent. The cached nonbrowser stack
+allocated no public tunnel. Private receipts remain in
+`.context/basic-cli-native-validation-20261006T112941Z/group4-relaunch-20261006T141856Z/`.
+These executions close the provider-readiness recurrence; later reporting
+producer coverage and the independent fifty-copy campaign remain separate.
 
 ## Human feedback
 

@@ -957,6 +957,11 @@ attempt; exact-image activation took 158.6 seconds (7 minutes 24 seconds of
 combined CLI stage time, excluding the gap between commands and fleet startup).
 These are measured invocations, not a guaranteed latency. Activate the exact receipt image
 and verify guest digest/runtime consumption before the benchmark cohort.
+A later independent instructions-only cold run measured 383 seconds for build/push
+and 158 seconds for exact-image activation (9 minutes 1 second of stage work;
+9 minutes 29 seconds including the handoff). Its fifty-copy campaign stopped
+before execution during initial Hub registration, so those image timings do not
+establish whole-fleet startup or teardown performance.
 Image publication automatically caches the checksum-verified pinned Fly client
 in the Git common directory. Native publishing uses child-only
 `DOCKER_BUILDKIT=0` and `--wg=false` for classic Docker over HTTPS; the shared
@@ -992,6 +997,23 @@ scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse H
 ```
 
 `image-activate` uses the existing app environment lock and owned warm-source setup. It strictly stops the exact existing donor before environment activation, activates the published image on the donor and this workspace's stopped pool members, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
+
+REAL tasks now use fresh primary and worker volumes by default with the verified dependency image, exact authenticated Git checkout and the same canonical isolated database fixture. SIM tasks, including `--sim-on` overrides, retain their snapshot and cached World Model assets. `--snapshot-volumes` forces the historical restored-volume path for a provider diagnostic; generic `--provision-pool` and legacy startup keep compatible snapshot storage. Source-only changes reuse the pinned image and inject current bootstrap helpers. A successful clone command precedes storage readiness: inspect its exact owned IDs and keyed volume state when preflight waits; retain the original failed receipt and let the owning CLI finish cleanup.
+
+Cloud fleets retain the aggregate progress/final publisher before the starting
+Hub write. They attempt that write once with a 120-second transport budget;
+transient transport or retryable server delays warn and allow startup to continue.
+Missing credentials and nonretryable client errors still stop startup. Follow the
+printed monitor through terminal publication and resource release; a starting
+HTTP response or a task verdict alone does not establish final acceptance.
+
+Bootstrap preserves both hoisted and workspace-local baked dependencies and uses the installed Prisma CLI; do not repair a missing CLI by downloading a floating version. If a strict campaign's infrastructure canary fails, its waiting copies observe the same cohort failure instead of launching another canary each. A new CLI invocation creates a fresh cohort automatically. Genuine benchmark task failure is still a valid terminal outcome for an infrastructure/speed run; a preflight failure has no task execution credit. The compact deploy gate owns the dependency-layout, schema-cache and failed-cohort regressions.
+
+Image installation loads the actual Vite configuration and compiles a small entry with its installed SWC, Rollup and esbuild dependencies before readiness. A missing declared native binding is repaired at the requesting package's exact installed version, without changing manifests or locks; healthy compilers need no extra install. Broken binaries, incorrect versions and unrelated configuration errors fail the build. Use the normal image CLI instead of ad hoc package upgrades. Matching fresh Linux dependency trees use a private writable overlay with metadata copy-up; unsupported kernels or mount permissions use the existing copy path. Checkout source, generated Prisma clients and activated Python remain isolated from the image donor. `CLOUDBENCH_DEPENDENCY_OVERLAY=0` selects the original copy path for a scoped diagnostic. Exact-owner recovery handles an empty cleanup join without weakening ownership checks. Preserve original failure receipts and use `--recover-stale-owner`; do not delete claims manually or stop a pre-existing shared Hub. These regressions remain in the normal compact deploy gate.
+
+An accepted delete plus an exact owned-volume `pending_destroy` or `destroyed`
+terminal receipt qualifies release even when Fly retains the object. Request
+acceptance alone does not establish release.
 
 Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
 
@@ -1060,11 +1082,18 @@ until the controller exits and exact owned resources are released. Stale or
 missing observations are warnings: reconcile exact owner liveness and private
 diagnostics, never reset a run based on an observation timeout. The compact
 monitor controls run in the existing `benchmark-live-results.test.py` deploy gate.
+Live task rows use actual executor admission after scheduler and payment guards;
+waiting copies remain queued even before any agent ID exists. Repeated names keep
+separate root links, and evaluated PASS/FAIL stays visible during cleanup. Display
+state never replaces lifetime ownership of every created root. The three compact
+producer, early-outcome and exception/cancellation/composite-cleanup controls run
+in the existing agents benchmark blackbox domain and ordinary `/deploy` Step 4g.
+
 The startup tracker recognizes both legacy SSH and current boot-launch producer
 messages. An accepted boot start displays stack booting; a provider-rejected
 start does not advance it. These compact regressions run in that same gate.
 
-To skip fresh volume restoration on repeated runs, prepare an explicitly sized
+To reuse already bootstrapped storage on repeated runs, prepare an explicitly sized
 workspace pool with `scripts/run-bench --provision-pool N --wait`. Ordinary runs
 automatically claim and return its stopped Machines. Retained volumes incur
 storage cost; do not automatically retain every fresh task clone. A dependency
@@ -1220,6 +1249,17 @@ A silent startup recurrence can use temporary `NODE_DEBUG=esm`, with all output
 redirected to private `.context` artifacts. Keep those diagnostics out of git.
 Semantic readiness checks session state and visible behavior; never add a
 network-idle prerequisite to the realtime app's authenticated test helper.
+
+### Worker generation verification
+
+If `monitor-cooperative-cutover.ts --verify` reports a generation mismatch
+after an exact-SHA CI success, compare the CLI's surface file list with that
+same merged generation before treating the deploy as stalled. The generation
+walker must use exact-case module paths on both Mac and Linux; class re-exports
+must not create case-folded file aliases. Preserve the failed receipt, bind the
+actual CI generation to the exact merged bytes, and use the normal monitor and
+existing `scripts/tests/agent-surface-hash.test.sh` owner; do not force a rollover
+or alter deployment deadlines to resolve a host-only hash mismatch.
 
 ## Factory Workflow Review
 

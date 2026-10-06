@@ -75,15 +75,9 @@ def test_warm_deps_preflight_pgvector_build_preserves_installed_server(
     installer = ROOT / "scripts" / "cloudbench-install-pgvector.sh"
     for image in ("Dockerfile.cloudbench", "Dockerfile.cloudbench-warm"):
         text = (ROOT / image).read_text()
-        assert (
-            "COPY scripts/cloudbench-install-pgvector.sh /tmp/rose-cloudbench-install-pgvector.sh"
-            in text
-        )
+        assert "COPY scripts/cloudbench-install-pgvector.sh /tmp/rose-cloudbench-install-pgvector.sh" in text
         assert "RUN bash /tmp/rose-cloudbench-install-pgvector.sh" in text
-    assert (
-        'bash "$ROOT/scripts/cloudbench-install-pgvector.sh"'
-        in (ROOT / "scripts/cloud-build.sh").read_text()
-    )
+    assert 'bash "$ROOT/scripts/cloudbench-install-pgvector.sh"' in (ROOT / "scripts/cloud-build.sh").read_text()
     harness = r"""set -euo pipefail
 source "$1"
 fixture="$2"
@@ -166,14 +160,10 @@ cloudbench_install_pgvector
             check=False,
             timeout=5,
         )
-        assert not (fixture / "temporary").exists(), (
-            "source-build cleanup was abandoned"
-        )
+        assert not (fixture / "temporary").exists(), "source-build cleanup was abandoned"
         if mode != "complete":
             assert result.returncode != 0, mode
-            assert not (
-                (fixture / "control").exists() and (fixture / "library").exists()
-            )
+            assert not ((fixture / "control").exists() and (fixture / "library").exists())
             continue
         assert result.returncode == 0, result.stdout + result.stderr
         assert (fixture / "apt-calls").read_text().splitlines() == [
@@ -200,18 +190,29 @@ def test_prestart_provider_recovery_requires_exact_closed_guest_and_zero_externa
     )
     state = tmp_path / "state.json"
     original_state = {
-        "schema_version": "cloudbench-guest-state-v1", "version": 1,
-        "machine_id": machine, "guest_run_token": token,
-        "state": "exited", "driver_state": "exited", "driver_pid": None,
-        "driver_descendants": [], "services_status": "stopped",
-        "live_service_pids": [], "backend_closed": True,
+        "schema_version": "cloudbench-guest-state-v1",
+        "version": 1,
+        "machine_id": machine,
+        "guest_run_token": token,
+        "state": "exited",
+        "driver_state": "exited",
+        "driver_pid": None,
+        "driver_descendants": [],
+        "services_status": "stopped",
+        "live_service_pids": [],
+        "backend_closed": True,
         "run_json": {"exists": False, "symlink": False},
     }
     state.write_text(json.dumps(original_state))
     args = SimpleNamespace(
-        owner=owner, fleet_run_id="fixture-run", bench="fixture-bench",
-        machine_id=machine, output_dir=str(tmp_path.resolve()),
-        guest_run_token=token, backend_log=str(backend), state_receipt=str(state),
+        owner=owner,
+        fleet_run_id="fixture-run",
+        bench="fixture-bench",
+        machine_id=machine,
+        output_dir=str(tmp_path.resolve()),
+        guest_run_token=token,
+        backend_log=str(backend),
+        state_receipt=str(state),
     )
     manifest = module.active_provider_manifest(args)
     assert manifest["kind"] == "provider-prestart-zero-manifest"
@@ -231,8 +232,7 @@ def test_prestart_provider_recovery_requires_exact_closed_guest_and_zero_externa
         "Created Steel session: abc123\n",
         "model=Purchase operation=create\n",
     ):
-        backend.write_text("[Server] Server started\n" + extra +
-                           "[Server] SIGTERM received, closing server...\n")
+        backend.write_text("[Server] Server started\n" + extra + "[Server] SIGTERM received, closing server...\n")
         with pytest.raises(module.CleanupEvidenceError):
             module.active_provider_manifest(args)
 
@@ -243,8 +243,9 @@ def test_forensic_clean_stack_status_is_bound_to_exact_run_token() -> None:
     module = importlib.util.module_from_spec(verifier)
     verifier.loader.exec_module(module)
     token = "a" * 32 + "-0"
-    original = (f"version=1\ntoken={token}\nstate=clean\n"
-                "stack_pid=979\nstack_birth=Tue Sep 29 17:33:56 2026\n").encode()
+    original = (
+        f"version=1\ntoken={token}\nstate=clean\nstack_pid=979\nstack_birth=Tue Sep 29 17:33:56 2026\n"
+    ).encode()
     module.verify_clean_stack_status(original, token)
     for bad in (
         original.replace(b"state=clean", b"state=failed"),
@@ -283,31 +284,43 @@ def test_failed_started_pool_forensics_preserve_originals_without_proof_credit(t
         "cleanup_policy=reap\n"
     )
     (registry / "runtime-evidence-unconfirmed").touch()
-    (audit / "meta").write_text(
-        f"fleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n"
-    )
+    (audit / "meta").write_text(f"fleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n")
     (audit / "pool" / machine).write_text(
         f"fleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n"
         f"machine_id={machine}\nvolume_id={volume}\nsource=borrowed-pool\n"
         "disposition=claimed\n"
     )
     (run / "_batch/benches.json").write_text(json.dumps([{"name": task}]))
-    (run / "_batch/lifecycle.json").write_text(json.dumps({
-        "status": "failed", "controller_exit_code": 1, "fleet_owner_token": owner,
-    }))
+    (run / "_batch/lifecycle.json").write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "controller_exit_code": 1,
+                "fleet_owner_token": owner,
+            }
+        )
+    )
     (out / ".cid").write_text(f"pool {machine}\n")
     (out / "guest-shutdown.confirmed").write_text(run_id + "\n")
-    (out / "runtime-evidence.owner.json").write_text(json.dumps({
-        "version": 1, "machine_id": machine, "run_token": f"{owner}-0",
-    }))
+    (out / "runtime-evidence.owner.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "machine_id": machine,
+                "run_token": f"{owner}-0",
+            }
+        )
+    )
     files = {
         "bench.log": b"original failed driver log\n",
         "repo/.context/cloudbench/services.json": b'{"status":"stopped"}',
         "repo/.context/cloudbench/stack.log": b"original stack log\n",
         "repo/.context/cloudbench/logs/backend.log": b"original backend log\n",
-        "repo/.context/cloudbench/run.json": json.dumps({
-            "tasks": [{"name": task, "benchmark_status": "ERROR"}],
-        }).encode(),
+        "repo/.context/cloudbench/run.json": json.dumps(
+            {
+                "tasks": [{"name": task, "benchmark_status": "ERROR"}],
+            }
+        ).encode(),
     }
     archive_path = forensic / "originals.tar.gz"
     with tarfile.open(archive_path, "w:gz") as archive:
@@ -316,29 +329,44 @@ def test_failed_started_pool_forensics_preserve_originals_without_proof_credit(t
             info.size = len(payload)
             archive.addfile(info, io.BytesIO(payload))
     manifest_path = forensic / "manifest.json"
-    manifest_path.write_text(json.dumps({
-        "schema": "cloudbench-started-evidence-v1", "owner": owner,
-        "run_id": run_id, "proof_credit": 0,
-        "archive_bytes": archive_path.stat().st_size,
-        "archive_sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
-        "tasks": [{
-            "task": task, "ordinal": 0, "kind": "pool", "machine_id": machine,
-            "volume_id": volume, "run_token": f"{owner}-0", "proof_credit": 0,
-            "files": {relative: {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
-                      for relative, payload in files.items()},
-        }],
-    }))
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "cloudbench-started-evidence-v1",
+                "owner": owner,
+                "run_id": run_id,
+                "proof_credit": 0,
+                "archive_bytes": archive_path.stat().st_size,
+                "archive_sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+                "tasks": [
+                    {
+                        "task": task,
+                        "ordinal": 0,
+                        "kind": "pool",
+                        "machine_id": machine,
+                        "volume_id": volume,
+                        "run_token": f"{owner}-0",
+                        "proof_credit": 0,
+                        "files": {
+                            relative: {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+                            for relative, payload in files.items()
+                        },
+                    }
+                ],
+            }
+        )
+    )
     machines_path = tmp_path / "machines.json"
     volumes_path = tmp_path / "volumes.json"
     machines_path.write_text(json.dumps([{"id": machine, "state": "stopped"}]))
     volumes_path.write_text(json.dumps([{"id": volume, "attached_machine_id": machine}]))
     receipt = module.verify_started_pool_evidence(
-        registry, run, manifest_path, archive_path, machines_path, volumes_path)
+        registry, run, manifest_path, archive_path, machines_path, volumes_path
+    )
     assert receipt["proof_credit"] == 0 and receipt["tasks"] == 1
     (out / "guest-shutdown.confirmed").unlink()
     with pytest.raises((AssertionError, OSError)):
-        module.verify_started_pool_evidence(
-            registry, run, manifest_path, archive_path, machines_path, volumes_path)
+        module.verify_started_pool_evidence(registry, run, manifest_path, archive_path, machines_path, volumes_path)
 
 
 def _write_manifests(root: Path, *, lock: str = "same", requirements: str = "same") -> None:
@@ -372,13 +400,19 @@ def _write_prisma_fixture(root: Path) -> tuple[Path, Path, dict[str, str]]:
     gosu = bin_dir / "gosu"
     gosu.write_text('#!/usr/bin/env bash\nset -eu\nshift\nexec "$@"\n')
     gosu.chmod(0o755)
-    npx = bin_dir / "npx"
-    npx.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -eu\n"
-        'printf \'%s\\n\' "$*" >> "$PRISMA_GENERATE_LOG"\n'
-        '[ "${PRISMA_GENERATE_FAIL:-0}" != 1 ]\n'
+    # The real Node resolver must find and execute this installed package.
+    package = repo / "node_modules/prisma"
+    package.mkdir()
+    (package / "package.json").write_text(
+        json.dumps({"name": "prisma", "version": "5.22.0", "bin": {"prisma": "cli.js"}})
     )
+    (package / "cli.js").write_text(
+        'const fs = require("node:fs");\n'
+        'fs.appendFileSync(process.env.PRISMA_GENERATE_LOG, process.argv.slice(2).join(" ") + "\\n");\n'
+        'process.exit(process.env.PRISMA_GENERATE_FAIL === "1" ? 1 : 0);\n'
+    )
+    npx = bin_dir / "npx"
+    npx.write_text("#!/usr/bin/env bash\nexit 97\n")
     npx.chmod(0o755)
 
     generate_log = root / "prisma-generate.log"
@@ -406,9 +440,7 @@ def test_prisma_client_regenerates_only_when_schema_fingerprint_changes(
 
     first = _run_prisma_sync(repo, env)
     assert first.returncode == 0, first.stderr
-    assert generate_log.read_text().splitlines() == [
-        f"--no-install prisma generate --schema {repo / 'back-end/prisma/schema.prisma'}"
-    ]
+    assert generate_log.read_text().splitlines() == [f"generate --schema {repo / 'back-end/prisma/schema.prisma'}"]
     first_fingerprint = marker.read_text()
 
     unchanged = _run_prisma_sync(repo, env)
@@ -483,6 +515,178 @@ def test_refreshes_stale_volume_dependency_trees(tmp_path: Path) -> None:
     assert (repo / "agents/venv/bin/python").read_text() == "current"
     assert (repo / "node_modules/.cloudbench-deps-fingerprint").is_file()
     assert (repo / "agents/venv/.cloudbench-deps-fingerprint").is_file()
+
+
+@pytest.mark.parametrize("fault", ["", "unsupported", "denied", "mismatch", "interrupt"])
+def test_fresh_dependency_overlay_prisma_client_preserves_checkout_and_copy_boundaries(
+    tmp_path: Path, fault: str
+) -> None:
+    """Exercise the actual hydration owner with a bounded mount transport.
+
+    Kernel copy-up is verified separately with the real image; this compact
+    deploy control owns admission, isolation, fallback and cancellation.
+    """
+    donor, repo, commands = (tmp_path / name for name in ("donor", "repo", "commands"))
+    _write_manifests(donor)
+    _write_manifests(repo, lock="different" if fault == "mismatch" else "same")
+    commands.mkdir()
+    root_tree = donor / "node_modules"
+    root_tree.mkdir()
+    (root_tree / "backend-workspace").symlink_to("../back-end")
+    for checkout, value in ((donor, "donor-source"), (repo, "current-source")):
+        (checkout / "back-end/source.js").write_text(value)
+    (donor / "back-end/node_modules/@prisma/client").mkdir(parents=True)
+    (donor / "back-end/node_modules/@prisma/client/generated").write_text("donor-schema")
+    python = donor / "agents/venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    python.chmod(0o755)
+    (python.parent / "activate").write_text(f'VIRTUAL_ENV="{python.parent.parent}"\n')
+    mounts, calls = tmp_path / "mounts.json", tmp_path / "calls.jsonl"
+    mounts.write_text("{}")
+    calls.write_text("")
+    real_rsync = shutil.which("rsync")
+    assert real_rsync
+    transport = f"""#!{sys.executable}
+import json, os, pathlib, shutil, signal, sys
+name = pathlib.Path(sys.argv[0]).name
+state = pathlib.Path({str(mounts)!r}); calls = pathlib.Path({str(calls)!r})
+fault = {fault!r}; args = sys.argv[1:]; mounted = json.loads(state.read_text())
+with calls.open('a') as log: log.write(json.dumps([name, args]) + '\\n')
+if name == 'uname': print('Darwin' if fault == 'unsupported' else 'Linux')
+elif name == 'id': print('0')
+elif name == 'mount':
+    if fault == 'denied': raise SystemExit(32)
+    options = args[args.index('-o') + 1]; target = args[-1]
+    lower = dict(part.split('=', 1) for part in options.split(',') if '=' in part)['lowerdir']
+    shutil.copytree(lower, target, symlinks=True, dirs_exist_ok=True)
+    mounted[target] = options; state.write_text(json.dumps(mounted))
+    if fault == 'interrupt': os.kill(os.getppid(), signal.SIGTERM)
+elif name == 'findmnt':
+    target = args[-1]
+    if target not in mounted: raise SystemExit(1)
+    print('overlay ' + mounted[target])
+elif name == 'umount':
+    target = args[-1]; mounted.pop(target, None); state.write_text(json.dumps(mounted))
+    shutil.rmtree(target); pathlib.Path(target).mkdir()
+elif name == 'rsync':
+    if os.environ.get('UNREADABLE_SOURCE') == args[-2]: raise SystemExit(5)
+    os.execv({real_rsync!r}, [{real_rsync!r}, *args])
+"""
+    for name in ("uname", "id", "mount", "findmnt", "umount", "rsync"):
+        command = commands / name
+        command.write_text(transport)
+        command.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}", CLOUDBENCH_DEPENDENCY_OVERLAY="1"),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    operations = [json.loads(line) for line in calls.read_text().splitlines()]
+    if fault == "mismatch":
+        assert result.returncode != 0
+        assert not any(name in ("mount", "rsync") for name, _ in operations)
+        return
+    if fault == "interrupt":
+        assert result.returncode == 143
+        assert json.loads(mounts.read_text()) == {}
+        assert not (repo / "node_modules/.cloudbench-deps-fingerprint").exists()
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    mounted = [args for name, args in operations if name == "mount"]
+    copies = [args for name, args in operations if name == "rsync"]
+    if not fault:
+        assert len(mounted) == 3 and not copies, "matching fresh dependencies were copied instead of overlaid"
+        assert all("metacopy=on" in args[args.index("-o") + 1] for args in mounted)
+        assert (repo / ".cloudbench-deps-overlays").stat().st_mode & 0o777 == 0o700
+    else:
+        assert copies and (fault != "unsupported" or not mounted)
+    assert (repo / "node_modules/backend-workspace/source.js").read_text() == "current-source"
+    assert str(repo / "agents/venv") in (repo / "agents/venv/bin/activate").read_text()
+    generated = repo / "back-end/node_modules/@prisma/client/generated"
+    generated.write_text("checkout-schema")
+    assert (donor / "back-end/node_modules/@prisma/client/generated").read_text() == "donor-schema"
+    assert str(donor / "agents/venv") in (donor / "agents/venv/bin/activate").read_text()
+    if not fault:
+        operations_before = len(operations)
+        cached = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)],
+            env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}"),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert cached.returncode == 0, cached.stdout + cached.stderr
+        later = [json.loads(line) for line in calls.read_text().splitlines()][operations_before:]
+        assert not any(name in ("mount", "rsync") for name, _ in later)
+        assert generated.read_text() == "checkout-schema"
+        cached_python = repo / "agents/venv/bin/python"
+        cached_python.write_text("#!/usr/bin/env bash\nexit 5\n")
+        repaired = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)],
+            env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}", UNREADABLE_SOURCE=f"{repo}/agents/venv/"),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert repaired.returncode == 0, "immutable donor repair attempted to read the unhealthy cached tree"
+        assert cached_python.read_text() == python.read_text()
+        shutil.rmtree(repo / "agents/venv")
+        remounted = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)],
+            env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}", CLOUDBENCH_DEPENDENCY_OVERLAY="1"),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert remounted.returncode == 0, remounted.stdout + remounted.stderr
+        old_python_marker = (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text()
+        _write_manifests(repo, requirements="replacement-requirement")
+        _write_fake_python_with_venv(commands / "python3", fail_pip=True)
+        rebuild_env = dict(
+            os.environ,
+            PATH=f"{commands}:{os.environ['PATH']}",
+            CLOUDBENCH_REBUILD_DEPS="1",
+            INSTALL_LOG=str(tmp_path / "install.log"),
+        )
+        failed_python = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)],
+            env=rebuild_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert failed_python.returncode != 0
+        assert (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text() == old_python_marker
+        assert str(repo / "agents/venv") in (repo / "agents/venv/bin/activate").read_text()
+        (commands / "python3").unlink()
+        _write_manifests(repo)
+        (repo / "back-end/package-lock.json").write_text("different revision")
+        rejected = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)],
+            env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}"),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert rejected.returncode != 0
+        assert generated.read_text() == "checkout-schema"
+        assert len(json.loads(mounts.read_text())) == 2, "new revision detached prior successful dependencies"
+        npm = commands / "npm"
+        npm.write_text("#!/usr/bin/env bash\nexit 9\n")
+        npm.chmod(0o755)
+        failed_node = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)],
+            env=rebuild_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert failed_node.returncode == 9
+        assert generated.read_text() == "checkout-schema"
+        assert not (repo / "node_modules/.cloudbench-deps-fingerprint").exists()
 
 
 def test_refreshes_fingerprinted_venv_when_runtime_files_are_unreadable(
@@ -1263,7 +1467,9 @@ def test_predeploy_local_runner_selects_via_predeploy_selector() -> None:
 def test_boot_terminal_result_preserves_sealed_capture_when_stream_is_truncated(tmp_path: Path, fault: str) -> None:
     """Run the actual artifact selection and identity checks after collection."""
     source = CLOUD_SCRIPT.read_text()
-    start = source.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then', source.index('# ── 5. Retrieve report-card.json'))
+    start = source.index(
+        'if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then', source.index("# ── 5. Retrieve report-card.json")
+    )
     end = source.index('\necho ""\necho "════════════════════ REPORT CARD', start)
     block = source[start:end]
     token, machine = "owned-terminal-0", "abcdef12345678"
@@ -1273,16 +1479,24 @@ def test_boot_terminal_result_preserves_sealed_capture_when_stream_is_truncated(
     document = {
         "timestamp": "2026-09-30T14:00:00+00:00",
         "summary": {"total": 1, "passed": 0, "failed": 1, "pass_rate": 0},
-        "tasks": [{"name": "owned-bench", "world_model_mode": "real", "passed": False,
-                   "benchmark_status": "FAILED", "messages": [{"message": "x" * (13 * 1024 * 1024)}]}],
+        "tasks": [
+            {
+                "name": "owned-bench",
+                "world_model_mode": "real",
+                "passed": False,
+                "benchmark_status": "FAILED",
+                "messages": [{"message": "x" * (13 * 1024 * 1024)}],
+            }
+        ],
     }
     raw = json.dumps(document, indent=2) + "\n"
     if fault != "missing-capture":
         (capture / "run.json").write_text(raw)
     owner = {"version": 1, "run_token": token, "machine_id": machine}
     (output / "runtime-evidence.pending").write_text(json.dumps(owner))
-    (output / "runtime-evidence.owner.json").write_text(json.dumps(
-        owner | ({"run_token": "foreign-terminal-0"} if fault == "foreign-owner" else {})))
+    (output / "runtime-evidence.owner.json").write_text(
+        json.dumps(owner | ({"run_token": "foreign-terminal-0"} if fault == "foreign-owner" else {}))
+    )
     if fault == "foreign-task":
         document["tasks"][0]["name"] = "foreign-bench"
         raw = json.dumps(document, indent=2) + "\n"
@@ -1290,27 +1504,43 @@ def test_boot_terminal_result_preserves_sealed_capture_when_stream_is_truncated(
     streamed = raw
     if fault == "truncated-stream":
         offset = raw.index('"message": "') + len('"message": "')
-        streamed = raw[:offset + 4 * 1024 * 1024] + "\n" + raw[offset + 11 * 1024 * 1024:]
+        streamed = raw[: offset + 4 * 1024 * 1024] + "\n" + raw[offset + 11 * 1024 * 1024 :]
         with pytest.raises(json.JSONDecodeError):
             json.loads(streamed)
     log = tmp_path / "driver.log"
     log.write_text(f"RESULT-BEGIN\n{streamed}RESULT-END\n")
     selected = tmp_path / "selected.json"
-    setup = '\n'.join([
-        'cloudbench_skip_held_driver_teardown_race() { return 1; }',
-        'CLOUDBENCH_BOOT_LAUNCH=1', 'BENCH_SIMULATE=0',
-        'CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=0',
-        'REPORT_BEGIN=REPORT-BEGIN', 'REPORT_END=REPORT-END',
-        'RESULT_BEGIN=RESULT-BEGIN', 'RESULT_END=RESULT-END',
-        'BENCH_TASKS=(owned-bench)',
-        'SSH_LOG=' + shlex.quote(str(log)),
-        'OUT_DIR=' + shlex.quote(str(output)),
-        'RUN_LOG_TOKEN=' + shlex.quote(token), 'mid=' + shlex.quote(machine),
-        'CLOUDBENCH_RESULT_SCRIPT=' + shlex.quote(str(CLOUDBENCH_RESULT_SCRIPT)),
-    ])
+    setup = "\n".join(
+        [
+            "cloudbench_skip_held_driver_teardown_race() { return 1; }",
+            "CLOUDBENCH_BOOT_LAUNCH=1",
+            "BENCH_SIMULATE=0",
+            "CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=0",
+            "REPORT_BEGIN=REPORT-BEGIN",
+            "REPORT_END=REPORT-END",
+            "RESULT_BEGIN=RESULT-BEGIN",
+            "RESULT_END=RESULT-END",
+            "BENCH_TASKS=(owned-bench)",
+            "SSH_LOG=" + shlex.quote(str(log)),
+            "OUT_DIR=" + shlex.quote(str(output)),
+            "RUN_LOG_TOKEN=" + shlex.quote(token),
+            "mid=" + shlex.quote(machine),
+            "CLOUDBENCH_RESULT_SCRIPT=" + shlex.quote(str(CLOUDBENCH_RESULT_SCRIPT)),
+        ]
+    )
     result = subprocess.run(
-        ['bash', '-c', setup + '\n' + block + '\n[ "$RUN_IDENTITY_OK" = "1" ] || exit 70\nprintf "%s\\n" "$RUN_JSON" > ' + shlex.quote(str(selected))],
-        capture_output=True, text=True, timeout=20,
+        [
+            "bash",
+            "-c",
+            setup
+            + "\n"
+            + block
+            + '\n[ "$RUN_IDENTITY_OK" = "1" ] || exit 70\nprintf "%s\\n" "$RUN_JSON" > '
+            + shlex.quote(str(selected)),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
     )
     if fault == "truncated-stream":
         assert result.returncode == 0, result.stdout[-600:] + result.stderr[-600:]
@@ -1958,7 +2188,9 @@ exec "$@"
         repo / "scripts/run.sh",
         """#!/usr/bin/env bash
 set -u
-source """ + shlex.quote(str(ROOT / "scripts/lib/run-process-cleanup.sh")) + """
+source """
+        + shlex.quote(str(ROOT / "scripts/lib/run-process-cleanup.sh"))
+        + """
 mkdir -p "$BENCHMARK_CONTEXT_DIR"
 printf '{"status":"running"}\n' > "$BENCHMARK_CONTEXT_DIR/services.json"
 trap 'run_publish_stack_cleanup_status clean; exit 0' TERM INT
@@ -2219,7 +2451,9 @@ cloudbench_env_value() { return 0; }
         assert "state=clean" in cleanup_status
         assert (data_dir / f"cloudbench-driver-clean-{run_token}.ack").read_text() == f"{run_token}\n"
         assert (data_dir / "cloudbench-driver.state").read_text() == "exited\n"
-        assert log_text.index("benchmark cancellation signal dispatched") < log_text.index("Verified cloud root provider cleanup")
+        assert log_text.index("benchmark cancellation signal dispatched") < log_text.index(
+            "Verified cloud root provider cleanup"
+        )
         assert log_text.index("Verified cloud root provider cleanup") < log_text.index(
             "benchmark root cleanup evidence: state=clean"
         )
@@ -2409,21 +2643,50 @@ def test_boot_launch_stages_and_exports_complete_local_patch() -> None:
     assert cloud.index('LOCAL_PATCH_FILE=""') < cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]')
 
 
-@pytest.mark.parametrize("mode", ["published", "published_no_patch", "unpublished", "stale_tracking", "denied", "missing_token", "read_failure", "wrong_origin", "main", "local_edit", "stalled_origin", "config_rewrite", "annotated_tag", "unicode_ref"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "published",
+        "published_no_patch",
+        "unpublished",
+        "stale_tracking",
+        "denied",
+        "missing_token",
+        "read_failure",
+        "wrong_origin",
+        "main",
+        "local_edit",
+        "stalled_origin",
+        "config_rewrite",
+        "annotated_tag",
+        "unicode_ref",
+    ],
+)
 def test_boot_payload_fetchable_source_uses_authenticated_live_origin(tmp_path: Path, mode: str) -> None:
     """Use actual auth-required HTTP Git and the unchanged exact guest fetcher."""
     seed, remote, controller, guest = (tmp_path / name for name in ("seed", "rose.git", "controller", "guest"))
-    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
-           "CLOUDBENCH_GITHUB_TOKEN_B64": base64.b64encode(b"fixture-only-token").decode(),
-           "GITHUB_TOKEN": "", "GH_TOKEN": "", "CLOUDBENCH_APP_USER": "", "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "CLOUDBENCH_GITHUB_TOKEN_B64": base64.b64encode(b"fixture-only-token").decode(),
+        "GITHUB_TOKEN": "",
+        "GH_TOKEN": "",
+        "CLOUDBENCH_APP_USER": "",
+        "NO_PROXY": "127.0.0.1",
+        "no_proxy": "127.0.0.1",
+    }
     # No real credentials or external provider are used by this fixture.
     for key in tuple(env):
         if key.startswith("GIT_CONFIG_KEY_") or key.startswith("GIT_CONFIG_VALUE_") or key == "GIT_CONFIG_COUNT":
             del env[key]
+
     def git(*args: str) -> str:
         result = subprocess.run(["git", *args], env=env, capture_output=True, text=True, timeout=10)
         assert result.returncode == 0, result.stderr
         return result.stdout.strip()
+
     git("init", "-q", "-b", "main", str(seed))
     git("-C", str(seed), "config", "user.name", "Fixture")
     git("-C", str(seed), "config", "user.email", "fixture@example.invalid")
@@ -2451,6 +2714,7 @@ def test_boot_payload_fetchable_source_uses_authenticated_live_origin(tmp_path: 
     git("--git-dir", str(remote), "update-server-info")
     auth = "Basic " + base64.b64encode(b"x-access-token:fixture-only-token").decode()
     observed_auth: list[bool] = []
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             accepted = self.headers.get("Authorization") == auth
@@ -2473,8 +2737,10 @@ def test_boot_payload_fetchable_source_uses_authenticated_live_origin(tmp_path: 
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
         def log_message(self, *_args) -> None:
             return
+
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -2505,10 +2771,10 @@ def test_boot_payload_fetchable_source_uses_authenticated_live_origin(tmp_path: 
             '  [ -z "${GIT_CONFIG_PARAMETERS:-}${GIT_DIR:-}${GIT_WORK_TREE:-}${GIT_TRACE_CURL:-}${GIT_TRACE:-}${GIT_CURL_VERBOSE:-}" ]\n'
             '  [ "$GIT_CONFIG_KEY_0" = http.https://github.com/Rose-Ai-Labs/rose.git.extraheader ]\n'
             '  [ "$GIT_CONFIG_KEY_2" = http.followRedirects ] && [ "$GIT_CONFIG_VALUE_2" = false ]\n'
-            f'  printf verified > {shlex.quote(str(network_receipt))}\n'
+            f"  printf verified > {shlex.quote(str(network_receipt))}\n"
             f'  printf "%s" "$$" > {shlex.quote(str(query_pid))}\n'
-            f'  export GIT_CONFIG_KEY_0={shlex.quote("http." + local_url + ".extraheader")}\n'
-            f'  exec {shlex.quote(real_git)} ls-remote --heads --tags {shlex.quote(local_url)}\n'
+            f"  export GIT_CONFIG_KEY_0={shlex.quote('http.' + local_url + '.extraheader')}\n"
+            f"  exec {shlex.quote(real_git)} ls-remote --heads --tags {shlex.quote(local_url)}\n"
             "fi\n"
             'if [ "${3:-}" = remote ] && [ "${4:-}" = get-url ]; then\n'
             f'  exec {shlex.quote(real_git)} "$1" "$2" config --get remote.origin.url\n'
@@ -2516,13 +2782,25 @@ def test_boot_payload_fetchable_source_uses_authenticated_live_origin(tmp_path: 
         )
         (wrapper / "git").chmod(0o755)
         env["PATH"] = str(wrapper) + os.pathsep + env["PATH"]
-        expected_published = mode in {"published", "published_no_patch", "local_edit", "config_rewrite", "annotated_tag", "unicode_ref"}
+        expected_published = mode in {
+            "published",
+            "published_no_patch",
+            "local_edit",
+            "config_rewrite",
+            "annotated_tag",
+            "unicode_ref",
+        }
         if expected_published:
             # This unchanged guest helper must actually fetch the feature SHA
             # using the supplied token before testing controller admission.
             fetch_env = env
-            fetched = subprocess.run(["bash", str(FETCH_SCRIPT), str(guest), candidate], env=fetch_env,
-                                     text=True, capture_output=True, timeout=20)
+            fetched = subprocess.run(
+                ["bash", str(FETCH_SCRIPT), str(guest), candidate],
+                env=fetch_env,
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
             assert fetched.returncode == 0, fetched.stdout + fetched.stderr
             assert git("-C", str(guest), "rev-parse", "HEAD") == candidate
             assert (guest / "value").read_text() == "candidate\n"
@@ -2544,16 +2822,30 @@ def test_boot_payload_fetchable_source_uses_authenticated_live_origin(tmp_path: 
         allow_patch = "0" if mode == "published_no_patch" else "1"
         missing_override = "cloudbench_controller_github_token() { return 1; }" if mode == "missing_token" else ""
         started = time.monotonic()
-        result = subprocess.run(["bash", "-c", f'''set -euo pipefail
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -euo pipefail
 source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 {missing_override}
 cloudbench_fetchable_ref "$1" "$2" "$3"
-''', "fixture", str(controller), requested, allow_patch], env=env, text=True, capture_output=True, timeout=20)
+""",
+                "fixture",
+                str(controller),
+                requested,
+                allow_patch,
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
         assert result.returncode == 0, result.stderr
         if mode == "stalled_origin":
             if not (9 <= time.monotonic() - started < 15):
                 warnings.warn(
-                    'Intermediate timing diagnostic: 9 <= time.monotonic() - started < 15',
+                    "Intermediate timing diagnostic: 9 <= time.monotonic() - started < 15",
                     RuntimeWarning,
                     stacklevel=2,
                 )
@@ -2569,8 +2861,13 @@ cloudbench_fetchable_ref "$1" "$2" "$3"
         assert result.stdout.strip() == expected, result.stderr
         if expected_published:
             assert network_receipt.read_text() == "verified"
-        patch = subprocess.run(["bash", str(WORKTREE_PATCH_SCRIPT), str(controller), expected], env=env,
-                               text=True, capture_output=True, timeout=10)
+        patch = subprocess.run(
+            ["bash", str(WORKTREE_PATCH_SCRIPT), str(controller), expected],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
         assert patch.returncode == 0, patch.stderr
         if expected_published and mode != "local_edit":
             assert not patch.stdout
@@ -2598,7 +2895,7 @@ def test_boot_launch_compresses_complete_payload_under_provider_ceiling(tmp_path
     cannot pass merely by double-compressing an already compressed patch.
     """
     cloud = CLOUD_SCRIPT.read_text()
-    block = cloud[cloud.index('    _boot_file_args=('):cloud.index('    boot_config_payload_guard() {')]
+    block = cloud[cloud.index("    _boot_file_args=(") : cloud.index("    boot_config_payload_guard() {")]
     guard = _extract_fleet_function(cloud, "boot_config_payload_guard() {")
     patch = tmp_path / "workspace.patch"
     patch.write_bytes(random.Random(1299).randbytes(365691))
@@ -2607,17 +2904,23 @@ def test_boot_launch_compresses_complete_payload_under_provider_ceiling(tmp_path
     env = os.environ.copy()
     for name, kind, path in re.findall(
         r'^(CLOUDBENCH_GUEST_\w+)="\$CLOUDBENCH_RUNTIME_(SCRIPT|LIB)_ROOT/([^"\n]+)"',
-        cloud, re.MULTILINE,
+        cloud,
+        re.MULTILINE,
     ):
         env[name] = str(ROOT / "scripts" / ("lib" if kind == "LIB" else "") / path)
     env.update(
-        OUT_DIR=str(tmp_path), LOCAL_PATCH_FILE=str(patch),
+        OUT_DIR=str(tmp_path),
+        LOCAL_PATCH_FILE=str(patch),
         LOCAL_PATCH_SHA256=hashlib.sha256(patch.read_bytes()).hexdigest(),
-        CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE="1", DASHBOARD="0",
+        CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE="1",
+        DASHBOARD="0",
         CLOUDBENCH_EXECUTION_PROVENANCE_FILE=str(provenance),
     )
     result = subprocess.run(
-        ["bash", "-c", f'''set -euo pipefail
+        [
+            "bash",
+            "-c",
+            f"""set -euo pipefail
 source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 _envargs=()
 {block}
@@ -2628,10 +2931,19 @@ import json,sys
 from pathlib import Path
 Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))
 PY
-'''], env=env, capture_output=True, text=True, timeout=15,
+""",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    pairs = [value.split("=", 1) for value in json.loads((tmp_path / "transport.json").read_text()) if value != "--file-local"]
+    pairs = [
+        value.split("=", 1)
+        for value in json.loads((tmp_path / "transport.json").read_text())
+        if value != "--file-local"
+    ]
     encoded = sum((Path(local).stat().st_size + 2) // 3 * 4 for _, local in pairs)
     assert encoded <= 900000
     payload = dict(pairs)["/cloudbench-boot-payload.json.gz"]
@@ -2639,16 +2951,30 @@ PY
     guest = tmp_path / "guest"
     guest.mkdir()
     unpack = subprocess.run(
-        [sys.executable, str(helper), "unpack", payload,
-         hashlib.sha256(Path(payload).read_bytes()).hexdigest(), str(guest)],
-        capture_output=True, text=True, timeout=10,
+        [
+            sys.executable,
+            str(helper),
+            "unpack",
+            payload,
+            hashlib.sha256(Path(payload).read_bytes()).hexdigest(),
+            str(guest),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     assert unpack.returncode == 0, unpack.stderr
     for name, kind, path in re.findall(
         r'^(CLOUDBENCH_GUEST_\w+)="\$CLOUDBENCH_RUNTIME_(SCRIPT|LIB)_ROOT/([^"\n]+)"',
-        cloud, re.MULTILINE,
+        cloud,
+        re.MULTILINE,
     ):
-        if name in {"CLOUDBENCH_GUEST_BOOT_SCRIPT", "CLOUDBENCH_GUEST_STATUS_SERVER", "CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT", "CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT"}:
+        if name in {
+            "CLOUDBENCH_GUEST_BOOT_SCRIPT",
+            "CLOUDBENCH_GUEST_STATUS_SERVER",
+            "CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT",
+            "CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT",
+        }:
             continue
         original = ROOT / "scripts" / ("lib" if kind == "LIB" else "") / path
         assert (guest / Path(path).name).read_bytes() == original.read_bytes()
@@ -2676,7 +3002,12 @@ def test_boot_payload_rejects_corruption_before_replacing_helpers(tmp_path: Path
     source = tmp_path / "payload.gz"
     source.write_bytes(wire)
     digest = "0" * 64 if mode == "checksum" else hashlib.sha256(wire).hexdigest()
-    result = subprocess.run([sys.executable, str(helper), "unpack", str(source), digest, str(guest)], capture_output=True, text=True, timeout=5)
+    result = subprocess.run(
+        [sys.executable, str(helper), "unpack", str(source), digest, str(guest)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
     assert result.returncode == 1
     assert current.read_bytes() == b"old driver"
     assert sorted(p.name for p in guest.iterdir()) == ["cloudbench-run.sh"]
@@ -2693,26 +3024,45 @@ def test_boot_payload_failure_seals_no_launch_and_uses_sealed_helper(tmp_path: P
     assert start < boot.index('if [ ! -s "$DRIVER" ]; then')
     assert '"$ROOT_DIR/scripts/cloudbench-boot-payload.py"' in fleet_source_text()
     assert 'CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/' in cloud
-    functions = "\n".join(_extract_fleet_function(boot, f"{name}() {{") for name in (
-        "publish_driver_state", "publish_cleanup_ack", "seal_missing_injected_helper",
-    ))
+    functions = "\n".join(
+        _extract_fleet_function(boot, f"{name}() {{")
+        for name in (
+            "publish_driver_state",
+            "publish_cleanup_ack",
+            "seal_missing_injected_helper",
+        )
+    )
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     sleep = fake_bin / "sleep"
     sleep.write_text("#!/bin/sh\nexit 0\n")
     sleep.chmod(0o755)
     env = os.environ.copy()
-    env.update(PATH=str(fake_bin) + os.pathsep + env["PATH"],
+    env.update(
+        PATH=str(fake_bin) + os.pathsep + env["PATH"],
         CLOUDBENCH_BOOT_PAYLOAD_FILE=str(tmp_path / "missing.gz"),
-        CLOUDBENCH_BOOT_PAYLOAD_SHA256="0" * 64, CLOUDBENCH_RUN_TOKEN="current-token",
-        DRIVER_STATE_FILE=str(tmp_path / "state"), CLEANUP_ACK_FILE=str(tmp_path / "ack"),
-        LOG=str(tmp_path / "boot.log"))
-    result = subprocess.run(["bash", "-c", f'''set -uo pipefail
+        CLOUDBENCH_BOOT_PAYLOAD_SHA256="0" * 64,
+        CLOUDBENCH_RUN_TOKEN="current-token",
+        DRIVER_STATE_FILE=str(tmp_path / "state"),
+        CLEANUP_ACK_FILE=str(tmp_path / "ack"),
+        LOG=str(tmp_path / "boot.log"),
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
 {functions}
-python3() {{ {shlex.quote(sys.executable)} {shlex.quote(str(ROOT / 'scripts/cloudbench-boot-payload.py'))} "${{@:2}}"; }}
+python3() {{ {shlex.quote(sys.executable)} {shlex.quote(str(ROOT / "scripts/cloudbench-boot-payload.py"))} "${{@:2}}"; }}
 {boot[start:end]}
-printf launched > {shlex.quote(str(tmp_path / 'launched'))}
-'''], env=env, capture_output=True, text=True, timeout=5)
+printf launched > {shlex.quote(str(tmp_path / "launched"))}
+""",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "state").read_text() == "exited\n"
     assert (tmp_path / "ack").read_text() == "current-token\n"
@@ -3055,12 +3405,19 @@ def test_boot_launch_delivers_the_exact_worktree_patch_to_every_guest() -> None:
 def test_boot_driver_state_write_failure_is_not_masked_by_logging(tmp_path: Path) -> None:
     publish = _extract_fleet_function(BOOT_SCRIPT.read_text(), "publish_driver_state() {")
     result = subprocess.run(
-        ["bash", "-c", f'''set -uo pipefail
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
 {publish}
-DRIVER_STATE_FILE={shlex.quote(str(tmp_path / 'absent' / 'state'))}
-CLEANUP_ACK_FILE={shlex.quote(str(tmp_path / 'ack'))}
+DRIVER_STATE_FILE={shlex.quote(str(tmp_path / "absent" / "state"))}
+CLEANUP_ACK_FILE={shlex.quote(str(tmp_path / "ack"))}
 publish_driver_state running
-'''], text=True, capture_output=True, check=False,
+""",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert result.returncode != 0, "failed state publication must stop its caller"
 
@@ -3071,38 +3428,56 @@ def test_driver_cleanup_persists_evidence_in_fresh_data_directory(tmp_path: Path
     receipt = tmp_path / "runner.status"
     receipt.write_text(f"state={state}\ntoken=fixture\n")
     data = tmp_path / "fresh-data"
-    result = subprocess.run(["bash", "-c", f'''set -uo pipefail
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
 log() {{ :; }}
 {publish}
 CLOUDBENCH_RUN_TOKEN=fixture
 ACTIVE_COMMAND_SIGNALLED=1
 RUNNER_INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(receipt))}
-INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(data / 'interrupt.status'))}
-CLEANUP_ACK_FILE={shlex.quote(str(data / 'cleanup.ack'))}
+INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(data / "interrupt.status"))}
+CLEANUP_ACK_FILE={shlex.quote(str(data / "cleanup.ack"))}
 publish_cleanup_ack
-'''], text=True, capture_output=True, check=False)
+""",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     assert (data / "interrupt.status").read_bytes() == receipt.read_bytes()
     assert (result.returncode == 0) == (state == "clean")
     assert (data / "cleanup.ack").exists() == (state == "clean")
 
 
-@pytest.mark.parametrize("state,token,pid,birth,expected", [
-    ("clean", "fixture", "42", "this-start", True),
-    ("pending", "fixture", "42", "this-start", False),
-    ("failed", "fixture", "42", "this-start", False),
-    ("clean", "foreign", "42", "this-start", False),
-    ("clean", "fixture", "41", "this-start", False),
-    ("clean", "fixture", "42", "old-start", False),
-    ("missing", "fixture", "42", "this-start", False),
-])
-def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion(tmp_path, state, token, pid, birth, expected):
+@pytest.mark.parametrize(
+    "state,token,pid,birth,expected",
+    [
+        ("clean", "fixture", "42", "this-start", True),
+        ("pending", "fixture", "42", "this-start", False),
+        ("failed", "fixture", "42", "this-start", False),
+        ("clean", "foreign", "42", "this-start", False),
+        ("clean", "fixture", "41", "this-start", False),
+        ("clean", "fixture", "42", "old-start", False),
+        ("missing", "fixture", "42", "this-start", False),
+    ],
+)
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion(
+    tmp_path, state, token, pid, birth, expected
+):
     publish = _extract_fleet_function(DRIVER_SCRIPT.read_text(), "publish_cleanup_ack() {")
     stack = tmp_path / "stack.status"
     if state != "missing":
         stack.write_text(f"version=1\nstate={state}\ntoken={token}\nstack_pid={pid}\nstack_birth={birth}\n")
     root = tmp_path / "root.status"
     root.write_text("version=1\nstate=clean\ntoken=fixture\n")
-    result = subprocess.run(["bash", "-c", f'''set -uo pipefail
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
 log() {{ :; }}
 {publish}
 CLOUDBENCH_RUN_TOKEN=fixture
@@ -3111,10 +3486,15 @@ STACK_PID=42
 STACK_BIRTH=this-start
 STACK_CLEANUP_STATUS_FILE={shlex.quote(str(stack))}
 RUNNER_INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(root))}
-INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(tmp_path / 'data/root.status'))}
-CLEANUP_ACK_FILE={shlex.quote(str(tmp_path / 'data/cleanup.ack'))}
+INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(tmp_path / "data/root.status"))}
+CLEANUP_ACK_FILE={shlex.quote(str(tmp_path / "data/cleanup.ack"))}
 publish_cleanup_ack
-'''], text=True, capture_output=True, check=False)
+""",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     assert (tmp_path / "data/root.status").exists(), result.stderr
     assert (tmp_path / "data/root.status").read_bytes() == root.read_bytes()
     assert (result.returncode == 0) == expected, result.stderr
@@ -4043,7 +4423,6 @@ def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:
     assert after == before
 
 
-
 @pytest.mark.parametrize("scenario", ["clean", "unstaged", "staged", "mixed", "index_only", "snapshot_replay"])
 def test_fetch_ref_restores_dirty_exact_sha_before_patch_replay(tmp_path: Path, scenario: str) -> None:
     """A matching HEAD can still contain a prior patch from the warm snapshot."""
@@ -4059,8 +4438,11 @@ def test_fetch_ref_restores_dirty_exact_sha_before_patch_replay(tmp_path: Path, 
     git("config", "user.email", "fixture@example.com")
     git("config", "user.name", "Fixture")
     base_files = {
-        "tracked.txt": "base\n", "deleted.txt": "keep\n", "rename-source.txt": "rename\n",
-        "literal[1].txt": "literal\n", "line\nbreak.txt": "newline path\n",
+        "tracked.txt": "base\n",
+        "deleted.txt": "keep\n",
+        "rename-source.txt": "rename\n",
+        "literal[1].txt": "literal\n",
+        "line\nbreak.txt": "newline path\n",
         ".gitignore": "venv/\n.env\n",
     }
     for name, data in base_files.items():
@@ -4105,13 +4487,24 @@ def test_fetch_ref_restores_dirty_exact_sha_before_patch_replay(tmp_path: Path, 
     )
     wrapper.chmod(0o755)
     result = subprocess.run(
-        ["bash", str(FETCH_SCRIPT), str(repo), base], cwd=repo,
-        env={"PATH": f"{bin_dir}:{os.environ['PATH']}", "GIT_CALLS": str(calls), "CLOUDBENCH_GIT_MIN_FREE_KB": "999999999999"},
-        capture_output=True, text=True, timeout=15,
+        ["bash", str(FETCH_SCRIPT), str(repo), base],
+        cwd=repo,
+        env={
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "GIT_CALLS": str(calls),
+            "CLOUDBENCH_GIT_MIN_FREE_KB": "999999999999",
+        },
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert git("diff", "--quiet", "HEAD", "--", check=False).returncode == 0, "matching HEAD left tracked workspace changes from the prior warm patch"
-    assert git("diff", "--cached", "--quiet", "HEAD", "--", check=False).returncode == 0, "matching working files hid staged changes"
+    assert git("diff", "--quiet", "HEAD", "--", check=False).returncode == 0, (
+        "matching HEAD left tracked workspace changes from the prior warm patch"
+    )
+    assert git("diff", "--cached", "--quiet", "HEAD", "--", check=False).returncode == 0, (
+        "matching working files hid staged changes"
+    )
     assert git("rev-parse", "HEAD").stdout.strip() == base
     for name, data in base_files.items():
         assert (repo / name).read_text() == data
@@ -4127,6 +4520,7 @@ def test_fetch_ref_restores_dirty_exact_sha_before_patch_replay(tmp_path: Path, 
         git("apply", str(patch))
         assert (repo / "tracked.txt").read_text() == "branch version\n"
         assert (repo / "branch-created.txt").read_text() == "incoming created file\n"
+
 
 def test_fetch_ref_keeps_auth_header_out_of_git_argv() -> None:
     fetch = FETCH_SCRIPT.read_text()
@@ -5127,7 +5521,10 @@ def test_worker_health_distinguishes_candidate_standby_from_production_running()
     assert transition.returncode == 0, transition.stderr
 
 
-def test_autoscaled_worker_uses_authenticated_fetch_ref_helper(tmp_path: Path) -> None:
+@pytest.mark.parametrize("fresh_volumes,simulate", [(0, 0), (1, 0), (1, 1)])
+def test_autoscaled_worker_uses_authenticated_fetch_ref_helper(
+    tmp_path: Path, fresh_volumes: int, simulate: int
+) -> None:
     """Worker clones start from a warm snapshot, not the patched primary volume.
 
     They must use the same authenticated exact-ref helper as primaries before
@@ -5160,11 +5557,14 @@ def test_autoscaled_worker_uses_authenticated_fetch_ref_helper(tmp_path: Path) -
     captured_wrapper = tmp_path / "rbw.sh"
     captured_env = tmp_path / "rbw.env"
     captured_env_mode = tmp_path / "rbw.env.mode"
+    clone_mode = tmp_path / "clone-mode"
     encoded_token = base64.b64encode(b"secret-token").decode()
     script = f"""set +e
 ROOT_DIR={shlex.quote(str(ROOT))}
 CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / "scripts"))}
 APP=bench-app
+FRESH_VOLUMES={fresh_volumes}
+CLONE_MODE={shlex.quote(str(clone_mode))}
 FLEET_OWNER_TOKEN=test-owner
 BENCH_REF=test-ref
 FLEET_WORKER_VM_SIZE=performance-1x
@@ -5186,7 +5586,7 @@ machine_volume_size_gb() {{ printf 20; }}
 inventory_machine_field() {{ [ "$2" = "clone_cmd_inert" ] && printf 1; }}
 reserve_worker_machine_slot() {{ return 0; }}
 capacity_release_reservation() {{ return 0; }}
-clone_machine_target() {{ printf 'feedface000001'; }}
+clone_machine_target() {{ printf '%s' "${{6:-snapshot}}" > "$CLONE_MODE"; printf 'feedface000001'; }}
 machine_storage_ready() {{ return 0; }}
 worker_operational() {{ return 0; }}
 fly_with_timeout() {{
@@ -5215,7 +5615,7 @@ sleep() {{ :; }}
 {provision}
 cloudbench_record_worker_evidence_owner() {{ :; }}
 cloudbench_capture_worker_runtime_evidence() {{ :; }}
-provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))} exact-run-token
+provision_worker task workspace primary-id fdaa::1 {simulate} {shlex.quote(str(output))} exact-run-token
 deadline=$((SECONDS + 5))
 while [ ! -e {shlex.quote(str(output / "worker-feedface000001.ready"))} ] && [ "$SECONDS" -lt "$deadline" ]; do
   sleep 0.05
@@ -5226,8 +5626,16 @@ done
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10)
 
     assert result.returncode == 0, result.stderr + result.stdout
+    expected_storage = "fresh" if fresh_volumes and not simulate else "snapshot"
+    assert clone_mode.read_text() == expected_storage
     assert captured_env_mode.read_text().strip() == "0600"
     wrapper_text = captured_wrapper.read_text()
+    assert f"export CLOUDBENCH_FRESH_VOLUME={int(expected_storage == 'fresh')}" in wrapper_text
+    for helper in ("cloudbench-sync-deps.sh", "cloudbench-sync-prisma-client.sh"):
+        uploaded = any(
+            "ssh sftp put" in call and call.endswith("/data/" + helper) for call in calls.read_text().splitlines()
+        )
+        assert uploaded == (expected_storage == "fresh")
     env_text = captured_env.read_text()
     assert "secret-token" not in wrapper_text
     assert encoded_token not in wrapper_text
@@ -6517,13 +6925,19 @@ def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
     function_start = fleet.index("machine_id_for_clone_name() {")
     clone_start = fleet.index("clone_machine_target() {", function_start)
     function_end = fleet.index("\n}\n", clone_start) + 3
-    clone_function = _worker_ledger_lock_bundle(fleet) + "\n" + "\n".join(
-        _extract_fleet_function(fleet, signature)
-        for signature in (
-            "clone_failure_definitively_unallocated() {",
-            "clone_failure_owned_volume_id() {",
+    clone_function = (
+        _worker_ledger_lock_bundle(fleet)
+        + "\n"
+        + "\n".join(
+            _extract_fleet_function(fleet, signature)
+            for signature in (
+                "clone_failure_definitively_unallocated() {",
+                "clone_failure_owned_volume_id() {",
+            )
         )
-    ) + "\n" + fleet[function_start:function_end]
+        + "\n"
+        + fleet[function_start:function_end]
+    )
     source_id = "6834251fe05798"
     target_id = "d895d2efe7d418"
 
@@ -7486,7 +7900,9 @@ def test_fleet_terminal_projection_empty_tasks_cannot_pass(tmp_path: Path) -> No
     (batch / "benches.json").write_text("[]")
     result = subprocess.run(
         [sys.executable, str(AGGREGATE_SCRIPT), str(tmp_path), str(batch / "run.json")],
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     assert json.loads((batch / "run.json").read_text())["status"] == "failed"
@@ -7494,7 +7910,9 @@ def test_fleet_terminal_projection_empty_tasks_cannot_pass(tmp_path: Path) -> No
 
 @pytest.mark.parametrize("failure", ["aggregate", "report-card.json", "llm-usage.json", "fsync", "invalid-controller"])
 def test_fleet_terminal_projection_rejection_removes_all_artifacts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
     module = _load_reviewed_cloudbench_module(AGGREGATE_SCRIPT)
     batch = tmp_path / "_batch"
@@ -7535,7 +7953,9 @@ def test_fleet_terminal_projection_rejection_removes_all_artifacts(
 
 @pytest.mark.parametrize("failure", ["headers", "fstat"])
 def test_status_recovery_read_closes_descriptor_on_response_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
     from types import SimpleNamespace
 
@@ -7550,9 +7970,18 @@ def test_status_recovery_read_closes_descriptor_on_response_failure(
             pass
 
     monkeypatch.setattr(module, "ThreadingHTTPServer", Server)
-    monkeypatch.setattr(module, "parse_args", lambda: SimpleNamespace(
-        directory=str(tmp_path), port=0, bind="127.0.0.1", barrier="", run_token="fixture", ready_file="",
-    ))
+    monkeypatch.setattr(
+        module,
+        "parse_args",
+        lambda: SimpleNamespace(
+            directory=str(tmp_path),
+            port=0,
+            bind="127.0.0.1",
+            barrier="",
+            run_token="fixture",
+            ready_file="",
+        ),
+    )
     assert module.main() == 0
     handler = object.__new__(captured["handler"])
     handler.send_response = lambda *args: None
@@ -7605,7 +8034,9 @@ def test_fleet_terminal_projection_preserves_benchmark_outcome(tmp_path: Path, o
     (child / "cloudbench-run.json").write_text(json.dumps({"tasks": [task]}))
     result = subprocess.run(
         [sys.executable, str(AGGREGATE_SCRIPT), str(fleet), str(batch / "run.json")],
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     run = json.loads((batch / "run.json").read_text())
@@ -7676,9 +8107,14 @@ def test_fleet_lifecycle_receipt_requires_final_registry_retirement(tmp_path: Pa
         "raise SystemExit(1 if os.environ.get('UPLOAD_WARNING') == '1' else 0)\n"
     )
     fleet_source = fleet_source_text()
-    cleanup = "\n".join(_extract_fleet_function(fleet_source, signature) for signature in (
-        "cloudbench_fsync_directory() {", "cloudbench_collect_remaining_runtime_evidence() {", "cleanup() {",
-    ))
+    cleanup = "\n".join(
+        _extract_fleet_function(fleet_source, signature)
+        for signature in (
+            "cloudbench_fsync_directory() {",
+            "cloudbench_collect_remaining_runtime_evidence() {",
+            "cleanup() {",
+        )
+    )
     for removal in ("removed", "failed", "retained", "upload-warning"):
         fleet = tmp_path / removal
         (fleet / "_batch").mkdir(parents=True)
@@ -7738,10 +8174,10 @@ exit 0
             "--upload-final" if removal in ("removed", "upload-warning") else "--upload-live"
         ), "unreleased resources falsely stopped frontend polling"
         receipt = json.loads((fleet / "_batch/lifecycle.json").read_text())
-        assert receipt["status"] == ("verified" if removal in ("removed", "upload-warning") else "failed"), result.stderr
+        assert receipt["status"] == ("verified" if removal == "removed" else "failed"), result.stderr
         assert receipt["fleet_owner_token"] == "a" * 32
         assert receipt["run_id"] == removal
-        if removal == "failed":
+        if removal in ("failed", "upload-warning"):
             assert result.returncode != 0, result.stderr
         else:
             assert result.returncode == 0, result.stderr
@@ -7821,6 +8257,8 @@ def test_execution_provenance_binds_immutable_snapshot_not_mutable_checkout(
         "region": "iad",
         "run_timeout_seconds": "7200",
         "benchmark_wall_clock_backstop_seconds": "300",
+        "benchmark_demo_cache_read_only": "1",
+        "fast_mode_cache_disable_write_through": "1",
     }
 
     # Editing the checkout after snapshot creation cannot alter the attested
@@ -8388,7 +8826,7 @@ def test_cloud_fleet_provenance_is_staged_stamped_aggregated_and_validated() -> 
     final_upload = fleet.index('python3 "$HUB_UPLOAD_HELPER" --upload-live', aggregate_acceptance)
     assert aggregate_acceptance < final_upload
     cleanup = _extract_fleet_function(fleet, "cleanup() {")
-    assert cleanup.index('"$out/bench-e2e.finished-epoch"') < cleanup.index('hub_final_action=--upload-final')
+    assert cleanup.index('"$out/bench-e2e.finished-epoch"') < cleanup.index("hub_final_action=--upload-final")
 
     assert "CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT=" in cloud
     assert '--file-local "/cloudbench-execution-provenance.py=' in cloud
@@ -8466,8 +8904,7 @@ def test_extracted_fleet_pid_identity_callers_include_birth_helpers() -> None:
     load the birth-identity helpers, or its owner proofs pass vacuously."""
     fleet = fleet_source_text()
     starts = [
-        (match.start(), match.group(1))
-        for match in re.finditer(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{", fleet, re.M)
+        (match.start(), match.group(1)) for match in re.finditer(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{", fleet, re.M)
     ]
     helper_names = {
         "fleet_pid_start_time",
@@ -8489,10 +8926,7 @@ def test_extracted_fleet_pid_identity_callers_include_birth_helpers() -> None:
     assert "campaign_inventory_borrow" in callers
 
     module = Path(__file__).read_text()
-    tests = [
-        (match.start(), match.group(1))
-        for match in re.finditer(r"^def (test_\w+)\(", module, re.M)
-    ]
+    tests = [(match.start(), match.group(1)) for match in re.finditer(r"^def (test_\w+)\(", module, re.M)]
     missing = {}
     for index, (start, name) in enumerate(tests):
         body = module[start : tests[index + 1][0] if index + 1 < len(tests) else len(module)]
@@ -8759,17 +9193,28 @@ def test_clone_creation_cannot_start_copied_primary(tmp_path: Path, init_overrid
     if init_override:
         init[init_override] = boot
     machines = tmp_path / "machines.json"
-    machines.write_text(json.dumps([{
-        "id": "feedface000001", "name": "primary", "state": "started",
-        "config": {"init": init, "mounts": []},
-    }]))
+    machines.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "feedface000001",
+                    "name": "primary",
+                    "state": "started",
+                    "config": {"init": init, "mounts": []},
+                }
+            ]
+        )
+    )
     volumes = tmp_path / "volumes.json"
     volumes.write_text("[]")
     index = tmp_path / "inventory"
-    subprocess.run([sys.executable, str(MACHINE_READINESS_SCRIPT), "--publish-index",
-                    str(machines), str(volumes), str(index)], check=True, capture_output=True)
+    subprocess.run(
+        [sys.executable, str(MACHINE_READINESS_SCRIPT), "--publish-index", str(machines), str(volumes), str(index)],
+        check=True,
+        capture_output=True,
+    )
     provider = tmp_path / "provider.py"
-    provider.write_text('''import json,os,shlex,subprocess,sys
+    provider.write_text("""import json,os,shlex,subprocess,sys
 from pathlib import Path
 args=sys.argv[1:]
 Path(os.environ['ALLOCATED']).touch()
@@ -8781,11 +9226,15 @@ command=init.get('exec') or (init.get('entrypoint',[])+cmd)
 if command==['sleep','infinity']:command=['sleep','0.01']
 subprocess.run(command,check=True)
 print('Machine feedface000002 has been created...')
-''')
-    funcs = "\n".join(_extract_fleet_function(source, name + "() {") for name in [
-        "inventory_machine_record_path", "inventory_machine_field",
-    ])
-    script = f'''set -uo pipefail
+""")
+    funcs = "\n".join(
+        _extract_fleet_function(source, name + "() {")
+        for name in [
+            "inventory_machine_record_path",
+            "inventory_machine_field",
+        ]
+    )
+    script = f"""set -uo pipefail
 APP=fixture-app
 REGION=iad
 WARM_ID=feedface000001
@@ -8800,11 +9249,10 @@ machine_storage_failed() {{ return 1; }}
 fly_with_timeout() {{ shift; {shlex.quote(sys.executable)} {shlex.quote(str(provider))} "$@"; }}
 {_clone_machine_bundle(source)}
 {funcs}
-clone_machine_target {shlex.quote(str(tmp_path / 'owned.ids'))}
-'''
+clone_machine_target {shlex.quote(str(tmp_path / "owned.ids"))}
+"""
     env = dict(os.environ, ALLOCATED=str(tmp_path / "allocated"), MACHINES=str(machines))
-    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True,
-                            text=True, timeout=5)
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=5)
     assert not booted.exists(), "clone executed primary work before worker staging"
     if init_override:
         assert result.returncode != 0
@@ -8903,9 +9351,16 @@ clone_machine_target "$LEDGER"
     )
     worker_result = subprocess.run(
         ["bash", "-c", worker_script],
-        env={"PATH": os.environ["PATH"], "ATTEMPT_FILE": str(attempt_file),
-             "MACHINES_FILE": str(machines_file), "LEDGER": str(worker_ledger)},
-        text=True, capture_output=True, check=False, timeout=30,
+        env={
+            "PATH": os.environ["PATH"],
+            "ATTEMPT_FILE": str(attempt_file),
+            "MACHINES_FILE": str(machines_file),
+            "LEDGER": str(worker_ledger),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
     )
     assert worker_result.returncode == 75, worker_result.stderr
     assert attempt_file.read_text().strip() == "1", "terminal worker issued a fresh clone retry"
@@ -8918,9 +9373,16 @@ clone_machine_target "$LEDGER"
     (tmp_path / "benchmark-child.finished").unlink()
     ambiguous = subprocess.run(
         ["bash", "-c", worker_script],
-        env={"PATH": os.environ["PATH"], "ATTEMPT_FILE": str(attempt_file),
-             "MACHINES_FILE": str(machines_file), "LEDGER": str(worker_ledger)},
-        text=True, capture_output=True, check=False, timeout=30,
+        env={
+            "PATH": os.environ["PATH"],
+            "ATTEMPT_FILE": str(attempt_file),
+            "MACHINES_FILE": str(machines_file),
+            "LEDGER": str(worker_ledger),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
     )
     assert ambiguous.returncode == 1, ambiguous.stderr
     assert attempt_file.read_text().strip() == "1"
@@ -9111,11 +9573,16 @@ def test_large_primary_provisioning_uses_only_a_matching_pool_shape() -> None:
     assert 'bench_uses_default_pool_shape "$bench"' in phase1
     assert 'pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory")"' in phase1
     assert 'clone_machine_target "$out/primary.ids" "$WARM_ID" "$bench_vm_size" "$bench_vm_memory"' in phase1
-    assert phase1.index('bench_uses_default_pool_shape "$bench"') < phase1.index('pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory")"')
+    assert phase1.index('bench_uses_default_pool_shape "$bench"') < phase1.index(
+        'pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory")"'
+    )
 
     shape_helpers = _fleet_primary_shape_helpers(fleet)
     result = subprocess.run(
-        ["bash", "-c", f'''set -u
+        [
+            "bash",
+            "-c",
+            f"""set -u
 FLEET_BUNDLED_FRONTEND_VM_SIZE=shared-cpu-4x
 FLEET_BUNDLED_FRONTEND_VM_MEMORY=8192
 {shape_helpers}
@@ -9127,8 +9594,12 @@ FLEET_PRIMARY_VM_SIZE=shared-cpu-4x
 FLEET_PRIMARY_VM_MEMORY=8192
 bench_uses_default_pool_shape browser-biometrics-webdecoy || exit 3
 bench_uses_default_pool_shape agent-payment-setup-resume || exit 4
-'''],
-        text=True, capture_output=True, check=False, timeout=5,
+""",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
     )
     assert result.returncode == 0, result.stderr
 
@@ -9155,7 +9626,10 @@ for task in planner-memory-blue-bottle-on image-handling wait-for-trigger; do
 done
 """
     result = subprocess.run(
-        ["bash", "-c", script], text=True, capture_output=True, check=False,
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
         timeout=5,
     )
     assert result.returncode == 0, result.stderr + result.stdout
@@ -9250,7 +9724,12 @@ reap_volume vol_warm && echo "warm_guard=missing" || echo "warm_guard=held"
     ],
 )
 def test_stale_provider_detach_does_not_block_unrelated_fleet_but_retains_owner(
-    tmp_path: Path, state: str, attached: str, machine_state: str, has_claim: bool, expected: bool,
+    tmp_path: Path,
+    state: str,
+    attached: str,
+    machine_state: str,
+    has_claim: bool,
+    expected: bool,
 ) -> None:
     registry = tmp_path / "ownership" / ("ab" * 16)
     clone = registry / "clones" / "cloudbench-one"
@@ -9264,9 +9743,7 @@ def test_stale_provider_detach_does_not_block_unrelated_fleet_but_retains_owner(
     )
     helper = _extract_fleet_function(fleet, "stale_registry_only_waits_for_provider_detach() {")
     claim_result = "printf 'deadbeef\\n'" if has_claim else ":"
-    machine_result = (
-        "return 1" if machine_state == "absent" else f"printf '{machine_state} cloudbench-one\\n'"
-    )
+    machine_result = "return 1" if machine_state == "absent" else f"printf '{machine_state} cloudbench-one\\n'"
     script = f'''set -u
 APP=bench-app
 WARM_VOLUME_ID=vol_warm
@@ -9382,12 +9859,8 @@ def test_accepted_pending_volume_does_not_block_later_exact_owner_records(
     second_machine = "deadbeef000002"
     first_record = clones / first_name
     second_record = clones / second_name
-    first_record.write_text(
-        f"name={first_name}\nid={first_machine}\nvolume_id=vol_first\n"
-    )
-    second_record.write_text(
-        f"name={second_name}\nid={second_machine}\nvolume_id=vol_second\n"
-    )
+    first_record.write_text(f"name={first_name}\nid={first_machine}\nvolume_id=vol_first\n")
+    second_record.write_text(f"name={second_name}\nid={second_machine}\nvolume_id=vol_second\n")
     calls = tmp_path / "calls"
     script = f"""set -uo pipefail
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
@@ -9442,9 +9915,67 @@ rc=$?
     ]
 
 
+@pytest.mark.parametrize(
+    "mode,record_count", [("forced", 0), ("forced", 1), ("current", 0), ("current", 2), ("current", 3)]
+)
+def test_fleet_lifecycle_receipt_requires_final_registry_retirement_empty_pid_join(
+    tmp_path: Path,
+    mode: str,
+    record_count: int,
+) -> None:
+    """An exact retirement must join every submitted PID, including zero PIDs."""
+    reaper = _extract_fleet_function(fleet_source_text(), "reap_registry_clones() {")
+    selected_bash = shutil.which("bash")
+    assert selected_bash is not None, "Bash is a controller prerequisite"
+    interpreters = [Path(selected_bash)]
+    system_bash = Path("/bin/bash")
+    if system_bash.is_file() and system_bash.resolve() != interpreters[0].resolve():
+        interpreters.append(system_bash)
+    for index, interpreter in enumerate(interpreters):
+        root = tmp_path / str(index)
+        ownership = root / "ownership"
+        registry = ownership / ("6d" * 16)
+        clones = registry / "clones"
+        clones.mkdir(parents=True)
+        (registry / "meta").write_text("version=2\n")
+        machines = [f"{number + 1:014x}" for number in range(record_count)]
+        for machine in machines:
+            (clones / f"cloudbench-{machine}").write_text(
+                f"name=cloudbench-{machine}\nid={machine}\nvolume_id=vol_{machine}\n"
+            )
+        script = f"""set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership))}
+REGISTRY={shlex.quote(str(registry))}
+TEST_ROOT={shlex.quote(str(root))}
+CLOUDBENCH_REAP_MAX_IN_FLIGHT=2
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_machine_details() {{ printf 'stopped cloudbench-%s\\n' "$1"; }}
+fleet_registry_reconcile_mounted_volume() {{ printf 'vol_%s\\n' "$3"; }}
+reap_machine() {{ printf '%s\\n' "$1" > "$TEST_ROOT/native-$1"; }}
+fleet_audit_update_registry_clone() {{ printf '%s\\n' "$2" > "$TEST_ROOT/audit-$2"; }}
+{reaper}
+reap_registry_clones "$REGISTRY" {mode}
+rc=$?
+printf '%s\\n' "$BASH_VERSION" > "$TEST_ROOT/bash-version"
+exit "$rc"
+"""
+        result = subprocess.run(
+            [str(interpreter), "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 0, (str(interpreter), mode, record_count, result.stderr)
+        assert list(clones.iterdir()) == []
+        assert sorted(path.name.removeprefix("native-") for path in root.glob("native-*")) == machines
+        assert sorted(path.name.removeprefix("audit-cloudbench-") for path in root.glob("audit-*")) == machines
+
+
 @pytest.mark.parametrize("failed_disposition", [0, 75])
 def test_current_registry_retirement_is_bounded_parallel_and_joins_receipts(
-    tmp_path: Path, failed_disposition: int,
+    tmp_path: Path,
+    failed_disposition: int,
 ) -> None:
     """Slow independent exact native receipts overlap, and failures stay owned."""
     fleet = fleet_source_text()
@@ -9459,7 +9990,7 @@ def test_current_registry_retirement_is_bounded_parallel_and_joins_receipts(
             f"name=cloudbench-{machine}\nid={machine}\nvolume_id=vol_{machine}\n"
         )
     provider = tmp_path / "provider.py"
-    provider.write_text('''import fcntl,json,sys,time
+    provider.write_text("""import fcntl,json,sys,time
 from pathlib import Path
 root=Path(sys.argv[1]); stage=sys.argv[2]; machine=sys.argv[3]
 def update():
@@ -9480,9 +10011,9 @@ if stage=='enter':
         if time.monotonic()>=deadline: raise SystemExit(90)
         time.sleep(.01)
     time.sleep(.05)
-''')
+""")
     reaper = _extract_fleet_function(fleet, "reap_registry_clones() {")
-    script = f'''set -uo pipefail
+    script = f"""set -uo pipefail
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership))}
 REGISTRY={shlex.quote(str(registry))}
 TEST_ROOT={shlex.quote(str(tmp_path))}
@@ -9499,10 +10030,14 @@ reap_machine() {{
 fleet_audit_update_registry_clone() {{ printf '%s\\n' "$2" >> "$TEST_ROOT/audits"; }}
 {reaper}
 reap_registry_clones "$REGISTRY" current
-'''
+"""
     started = time.monotonic()
     result = subprocess.run(
-        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=60,
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
     )
     elapsed = time.monotonic() - started
     (tmp_path / "duration.json").write_text(json.dumps({"elapsed_seconds": elapsed}))
@@ -9514,12 +10049,15 @@ reap_registry_clones "$REGISTRY" current
     expected = [] if failed_disposition == 0 else [f"cloudbench-{machines[0]}"]
     assert sorted(path.name for path in clones.iterdir()) == expected
     audits = (tmp_path / "audits").read_text().splitlines()
-    assert sorted(audits) == [f"cloudbench-{machine}" for machine in machines if failed_disposition == 0 or machine != machines[0]]
+    assert sorted(audits) == [
+        f"cloudbench-{machine}" for machine in machines if failed_disposition == 0 or machine != machines[0]
+    ]
 
 
 @pytest.mark.parametrize("unsafe_record", ["symlink", "duplicate-machine", "warm-machine"])
 def test_current_registry_retirement_validates_cohort_before_native_mutations(
-    tmp_path: Path, unsafe_record: str,
+    tmp_path: Path,
+    unsafe_record: str,
 ) -> None:
     fleet = fleet_source_text()
     ownership = tmp_path / "ownership"
@@ -9541,7 +10079,7 @@ def test_current_registry_retirement_validates_cohort_before_native_mutations(
     before = {path.name: path.read_bytes() for path in clones.iterdir()}
     reaper = _extract_fleet_function(fleet, "reap_registry_clones() {")
     native_calls = tmp_path / "native-calls"
-    script = f'''set -uo pipefail
+    script = f"""set -uo pipefail
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership))}
 REGISTRY={shlex.quote(str(registry))}
 WARM_ID=feedface000001
@@ -9549,9 +10087,13 @@ registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
 registry_machine_details() {{ touch {shlex.quote(str(native_calls))}; return 99; }}
 {reaper}
 reap_registry_clones "$REGISTRY" current
-'''
+"""
     result = subprocess.run(
-        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10,
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
     )
     assert result.returncode != 0
     assert not native_calls.exists(), "unsafe cohort must reject before native provider mutations"
@@ -9584,9 +10126,7 @@ def test_exact_owner_recovery_records_provider_retained_terminal_volume(
         machine_id = "deadbeef000001"
         volume_id = f"vol_{state}"
         record = clones / clone_name
-        record.write_text(
-            f"name={clone_name}\nid={machine_id}\nvolume_id={volume_id}\n"
-        )
+        record.write_text(f"name={clone_name}\nid={machine_id}\nvolume_id={volume_id}\n")
         calls = tmp_path / state / "provider.calls"
         audit = tmp_path / state / "audit.calls"
         script = f"""set -uo pipefail
@@ -9638,9 +10178,7 @@ reap_registry_clones "$REGISTRY" forced
             result.stdout,
         )
         assert not record.exists()
-        assert audit.read_text().strip().endswith(
-            f"{clone_name} {machine_id} {volume_id} destroyed-provider-retained"
-        )
+        assert audit.read_text().strip().endswith(f"{clone_name} {machine_id} {volume_id} destroyed-provider-retained")
         assert calls.read_text().splitlines() == [
             f"volumes destroy {volume_id} -a bench-app --yes",
             f"volumes show {volume_id} -a bench-app --json",
@@ -10192,9 +10730,7 @@ def test_interrupted_archive_routes_exact_pool_stop_before_evidence_release(
     run = tmp_path / "runs" / "failed-run"
     forensic = run / "_forensic"
     forensic.mkdir(parents=True)
-    (forensic / "manifest.json").write_text(
-        json.dumps({"schema": "cloudbench-interrupted-pool-evidence-v1"})
-    )
+    (forensic / "manifest.json").write_text(json.dumps({"schema": "cloudbench-interrupted-pool-evidence-v1"}))
     (registry / "meta").write_text(
         "version=2\napp=bench-app\n"
         f"fleet_owner_token={owner}\nhost=test-host\n"
@@ -10208,7 +10744,7 @@ def test_interrupted_archive_routes_exact_pool_stop_before_evidence_release(
 APP=bench-app
 FLEET_OWNER_HOST=test-host
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
-FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / 'audits'))}
+FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / "audits"))}
 RECONNECT_CALLED={shlex.quote(str(reconnect_called))}
 registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
 fleet_registry_cleanup_state() {{ printf 'quarantined\\n'; }}
@@ -10222,7 +10758,10 @@ if recover_exact_stale_fleet_owner {owner}; then exit 90; fi
 [ -e "$FLEET_OWNERSHIP_ROOT/{owner}/runtime-evidence-unconfirmed" ] || exit 92
 """
     result = subprocess.run(
-        ["bash", "-c", script], text=True, capture_output=True, check=False,
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
         timeout=10,
     )
     assert result.returncode == 0, result.stderr + result.stdout
@@ -10571,11 +11110,7 @@ def test_pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper(
         "acquire_registry_recovery_lock() {",
         "recover_exact_stale_fleet_owner() {",
     )
-    functions = "\n".join(
-        _extract_fleet_function(fleet, signature)
-        for signature in signatures
-        if signature in fleet
-    )
+    functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in signatures if signature in fleet)
     owner = "6a" * 16
     run_id = "fixture-pre-fix-run"
     guest_token = "pre-fix-guest-token"
@@ -10749,12 +11284,8 @@ def test_exact_recovery_seals_actual_retained_owner_remote_evidence_paths(
     output.mkdir(parents=True)
     (output / ".cid").write_text(f"clone {machine_id}\n")
     (output / "status-proxy.port").write_text("19813\n")
-    (clones / clone_name).write_text(
-        f"name={clone_name}\nid={machine_id}\nvolume_id=vol_retained_owner\n"
-    )
-    (clones / "cloudbench-volume-only").write_text(
-        "name=cloudbench-volume-only\nvolume_id=vol_retained_only\n"
-    )
+    (clones / clone_name).write_text(f"name={clone_name}\nid={machine_id}\nvolume_id=vol_retained_owner\n")
+    (clones / "cloudbench-volume-only").write_text("name=cloudbench-volume-only\nvolume_id=vol_retained_only\n")
     (registry / "meta").write_text(
         "version=2\n"
         "app=bench-app\n"
@@ -10845,7 +11376,7 @@ else:
     script = f"""set -uo pipefail
 APP=bench-app
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
-FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / 'audits'))}
+FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / "audits"))}
 FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 FLEET_REGISTRY_PUBLISHED=0
 KEEP_CLONES=0
@@ -10933,7 +11464,7 @@ curl() {{
   esac
 }}
 fleet_registry_confirm_guest_teardown() {{
-  [ "$(cat {shlex.quote(str(output / 'guest-shutdown.confirmed'))})" = {retained_run_id} ] || return 96
+  [ "$(cat {shlex.quote(str(output / "guest-shutdown.confirmed"))})" = {retained_run_id} ] || return 96
   touch "$AUTHORIZED"
 }}
 {functions}
@@ -10955,17 +11486,10 @@ fleet_recovery_reconnect_guest_shutdowns {shlex.quote(str(registry))}
     assert (output / "guest-cleanup.backend.log").is_file()
     assert not list(output.glob("guest-cleanup.*.tmp.*"))
     call_lines = calls.read_text().splitlines()
-    assert any(
-        line.endswith(f"/cloudbench-interrupt-cleanup-{guest_token}.status")
-        for line in call_lines
-    )
-    assert any(
-        line.endswith(f"/cloudbench-guest-quiescence-{guest_token}.json")
-        for line in call_lines
-    )
+    assert any(line.endswith(f"/cloudbench-interrupt-cleanup-{guest_token}.status") for line in call_lines)
+    assert any(line.endswith(f"/cloudbench-guest-quiescence-{guest_token}.json") for line in call_lines)
     assert all(
-        f"/repo/.context/cloudbench/cloudbench-interrupt-cleanup-{guest_token}.status"
-        not in line
+        f"/repo/.context/cloudbench/cloudbench-interrupt-cleanup-{guest_token}.status" not in line
         for line in call_lines
     )
     assert any(
@@ -10978,16 +11502,9 @@ fleet_recovery_reconnect_guest_shutdowns {shlex.quote(str(registry))}
         for line in call_lines
         if line.startswith("curl ")
     )
-    evidence_fetches = [
-        line
-        for line in call_lines
-        if line.startswith("curl ") and "/shutdown" not in line
-    ]
+    evidence_fetches = [line for line in call_lines if line.startswith("curl ") and "/shutdown" not in line]
     assert evidence_fetches
-    assert all(
-        "auth=Authorization: Bearer retained-barrier-token" in line
-        for line in evidence_fetches
-    )
+    assert all("auth=Authorization: Bearer retained-barrier-token" in line for line in evidence_fetches)
     assert call_lines[-1] == "release"
 
 
@@ -11088,23 +11605,19 @@ def test_runner_cleanup_lifecycle_classifier_preserves_negative_states(
 
 
 def _exercise_runner_receipt_recovery(
-    tmp_path: Path, runner_state: str, guest_status: int = 500,
+    tmp_path: Path,
+    runner_state: str,
+    guest_status: int = 500,
     preexisting_runner_receipt: bool = False,
 ) -> None:
     """A runner receipt only short-circuits recovery with a guest stack ACK."""
     fleet = fleet_source_text()
-    recover = _extract_fleet_function(
-        fleet, "cloudbench_recover_guest_cleanup_receipts() {"
-    )
-    shutdown_status = _extract_fleet_function(
-        fleet, "cloudbench_guest_shutdown_status() {"
-    )
+    recover = _extract_fleet_function(fleet, "cloudbench_recover_guest_cleanup_receipts() {")
+    shutdown_status = _extract_fleet_function(fleet, "cloudbench_guest_shutdown_status() {")
     output = tmp_path / "bench-output"
     output.mkdir()
     if preexisting_runner_receipt:
-        (output / "guest-cleanup.recovery-receipt.json").write_text(
-            json.dumps({"kind": "runner-cleanup"}) + "\n"
-        )
+        (output / "guest-cleanup.recovery-receipt.json").write_text(json.dumps({"kind": "runner-cleanup"}) + "\n")
     exact_helper = tmp_path / "exact-helper"
     exact_helper.write_text(
         """#!/usr/bin/env python3
@@ -11217,10 +11730,7 @@ cloudbench_recover_guest_cleanup_receipts \
 
     assert result.returncode == 0, result.stderr + result.stdout
     call_lines = calls.read_text().splitlines()
-    assert call_lines[0] == (
-        "validate-recovery-receipt" if preexisting_runner_receipt
-        else "classify-runner-receipt"
-    )
+    assert call_lines[0] == ("validate-recovery-receipt" if preexisting_runner_receipt else "classify-runner-receipt")
     if guest_status == 204 and runner_state == "clean":
         assert "recover-runner-receipt" in call_lines
         assert "cleanup-provider-sessions" not in call_lines
@@ -11233,9 +11743,7 @@ cloudbench_recover_guest_cleanup_receipts \
     assert not unexpected_ack.exists()
     assert (output / "guest-shutdown.confirmed").read_text() == "fixture-run\n"
     if preexisting_runner_receipt:
-        assert json.loads(
-            (output / "guest-cleanup.runner-receipt.json").read_text()
-        )["kind"] == "runner-cleanup"
+        assert json.loads((output / "guest-cleanup.runner-receipt.json").read_text())["kind"] == "runner-cleanup"
 
 
 def test_failed_runner_receipt_enters_exact_cleanup_without_authorizing_ack(
@@ -11259,9 +11767,7 @@ def test_clean_runner_receipt_uses_verified_guest_stack_ack(
 def test_preexisting_runner_receipt_cannot_ack_failed_guest_stack(
     tmp_path: Path,
 ) -> None:
-    _exercise_runner_receipt_recovery(
-        tmp_path, "clean", preexisting_runner_receipt=True
-    )
+    _exercise_runner_receipt_recovery(tmp_path, "clean", preexisting_runner_receipt=True)
 
 
 def test_exact_provider_cleanup_uses_only_manifest_sessions_and_is_idempotent(
@@ -11474,10 +11980,7 @@ def test_unquiesced_guest_seals_sessions_then_stops_exact_machine_before_cleanup
     elif guest_state == "exited-no-run":
         state_fields = {
             "state": "exited",
-            "reason": (
-                "missing regular exact guest evidence: "
-                "/data/repo/.context/cloudbench/run.json"
-            ),
+            "reason": ("missing regular exact guest evidence: /data/repo/.context/cloudbench/run.json"),
             "driver_state": "exited",
             "driver_pid": None,
             "driver_process_state": None,
@@ -11690,10 +12193,7 @@ def test_exited_runless_subtype_requires_complete_process_and_service_fence(
         "state": "exited",
         "machine_id": machine_id,
         "guest_run_token": guest_token,
-        "reason": (
-            "missing regular exact guest evidence: "
-            "/data/repo/.context/cloudbench/run.json"
-        ),
+        "reason": ("missing regular exact guest evidence: /data/repo/.context/cloudbench/run.json"),
         "driver_state": "exited",
         "driver_pid": None,
         "driver_process_state": None,
@@ -11792,9 +12292,7 @@ def test_quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt(
     manifest = output / "manifest.json"
     receipt = output / "receipt.json"
     database_name = "victoria_bench_exact_zero"
-    run_json.write_text(
-        json.dumps({"tasks": [{"name": bench, "agent_id": root_agent}]}) + "\n"
-    )
+    run_json.write_text(json.dumps({"tasks": [{"name": bench, "agent_id": root_agent}]}) + "\n")
     backend_log.write_text(
         "[Server] Server started mode=fixture port=3001\n"
         "[HTTP] POST /api/agents -> 201 method=POST path=/api/agents status=201\n"
@@ -11962,23 +12460,24 @@ case "$*" in *'UPDATE "Agent"'*) touch {shlex.quote(str(tmp_path / "deleted"))} 
         (receipt, output / "guest-cleanup.recovery-receipt.json"),
     ):
         target.write_bytes(source.read_bytes())
-    verifier_spec = importlib.util.spec_from_file_location(
-        "cloudbench_forensic_retirement", FORENSIC_RETIREMENT_SCRIPT
-    )
+    verifier_spec = importlib.util.spec_from_file_location("cloudbench_forensic_retirement", FORENSIC_RETIREMENT_SCRIPT)
     assert verifier_spec is not None and verifier_spec.loader is not None
     verifier = importlib.util.module_from_spec(verifier_spec)
     verifier_spec.loader.exec_module(verifier)
     row = {
-        "task": bench, "machine_id": machine_id, "run_token": guest_token,
+        "task": bench,
+        "machine_id": machine_id,
+        "run_token": guest_token,
         "files": {
-            "original/repo/.context/cloudbench/run.json": {
-                "sha256": hashlib.sha256(run_json.read_bytes()).hexdigest()},
+            "original/repo/.context/cloudbench/run.json": {"sha256": hashlib.sha256(run_json.read_bytes()).hexdigest()},
             "original/repo/.context/cloudbench/logs/backend.log": {
-                "sha256": hashlib.sha256(backend_log.read_bytes()).hexdigest()},
+                "sha256": hashlib.sha256(backend_log.read_bytes()).hexdigest()
+            },
         },
     }
-    assert verifier.verify_quiesced_provider_archive(output, row, owner, "fixture-run")[
-        "kind"] == "provider-zero-manifest"
+    assert (
+        verifier.verify_quiesced_provider_archive(output, row, owner, "fixture-run")["kind"] == "provider-zero-manifest"
+    )
     (output / "guest-cleanup.zero-allocation.json").write_text("{}\n")
     with pytest.raises((AssertionError, ValueError, RuntimeError)):
         verifier.verify_quiesced_provider_archive(output, row, owner, "fixture-run")
@@ -12057,10 +12556,7 @@ def test_zero_allocation_rejects_ambiguous_legacy_database_identity(
         check=False,
     )
     assert result.returncode != 0
-    assert (
-        result.stderr
-        == "ERROR: services evidence has no exact isolated stopped database identity\n"
-    )
+    assert result.stderr == "ERROR: services evidence has no exact isolated stopped database identity\n"
     assert not receipt.exists()
 
 
@@ -12126,9 +12622,7 @@ def test_zero_allocated_receipt_rejects_incomplete_or_nonzero_evidence(
     output = tmp_path / "output"
     output.mkdir()
     run_json = tmp_path / "run.json"
-    run_json.write_text(
-        json.dumps({"tasks": [{"name": bench, "agent_id": root_agent}]}) + "\n"
-    )
+    run_json.write_text(json.dumps({"tasks": [{"name": bench, "agent_id": root_agent}]}) + "\n")
     quiescence = tmp_path / "quiescence.json"
     command_prefix = [
         sys.executable,
@@ -12153,8 +12647,7 @@ def test_zero_allocated_receipt_rejects_incomplete_or_nonzero_evidence(
     ]
     cases = {
         "missing-terminal-boundary": (
-            "[Server] Server started mode=fixture\n"
-            f"[HTTP] GET /api/agents/{root_agent} -> 200 agent_id={root_agent}\n"
+            f"[Server] Server started mode=fixture\n[HTTP] GET /api/agents/{root_agent} -> 200 agent_id={root_agent}\n"
         ),
         "provider-allocation": (
             "[Server] Server started mode=fixture\n"
@@ -12213,9 +12706,7 @@ def test_zero_allocated_receipt_rejects_incomplete_or_nonzero_evidence(
                     "services_sha256": "1" * 64,
                     "run_json_sha256": hashlib.sha256(run_json.read_bytes()).hexdigest(),
                     "backend_log_sha256": hashlib.sha256(backend_log.read_bytes()).hexdigest(),
-                    "quiescence_receipt_sha256": hashlib.sha256(
-                        quiescence.read_bytes()
-                    ).hexdigest(),
+                    "quiescence_receipt_sha256": hashlib.sha256(quiescence.read_bytes()).hexdigest(),
                 }
             )
             + "\n"
@@ -12570,9 +13061,7 @@ def test_exact_guest_recovery_maps_only_bound_pool_claims(tmp_path: Path) -> Non
         f"run_id={run_id}\nruns_root={root / 'runs'}\n"
         f"audit_dir={audit_root / owner}\ncleanup_policy=retain\n"
     )
-    (audit_root / owner / "meta").write_text(
-        f"fleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n"
-    )
+    (audit_root / owner / "meta").write_text(f"fleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n")
     (pool_audit / machine_id).write_text(
         "version=1\n"
         f"fleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n"
@@ -12582,8 +13071,7 @@ def test_exact_guest_recovery_maps_only_bound_pool_claims(tmp_path: Path) -> Non
     )
     claim = claims / machine_id
     claim.write_text(
-        f"host=fixture-host\npid=1234\npid_start=fixture-start\n"
-        f"fleet_owner_token={owner}\ncleanup_state=unconfirmed\n"
+        f"host=fixture-host\npid=1234\npid_start=fixture-start\nfleet_owner_token={owner}\ncleanup_state=unconfirmed\n"
     )
     (output / ".cid").write_text(f"pool {machine_id}\n")
     (output / "status-proxy.port").write_text("61001\n")
@@ -12591,14 +13079,24 @@ def test_exact_guest_recovery_maps_only_bound_pool_claims(tmp_path: Path) -> Non
 
     def build() -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", "-c", f"""set -uo pipefail
+            [
+                "bash",
+                "-c",
+                f"""set -uo pipefail
 APP=bench-app
 FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
 POOL_CLAIMS_DIR={shlex.quote(str(claims))}
 {build_plan}
 fleet_registry_build_guest_recovery_plan "$1" "$2"
-""", "pool-recovery-plan", str(registry), str(plan)],
-            text=True, capture_output=True, check=False, timeout=10,
+""",
+                "pool-recovery-plan",
+                str(registry),
+                str(plan),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
         )
 
     result = build()
@@ -12648,8 +13146,7 @@ def test_exact_pool_claim_confirmation_requires_guest_receipt(tmp_path: Path) ->
         "disposition=claimed\n"
     )
     (claims / machine).write_text(
-        "host=fixture-host\npid=1234\npid_start=fixture-start\n"
-        f"fleet_owner_token={owner}\ncleanup_state=unconfirmed\n"
+        f"host=fixture-host\npid=1234\npid_start=fixture-start\nfleet_owner_token={owner}\ncleanup_state=unconfirmed\n"
     )
     (run / "_batch").mkdir()
     (run / "_batch/benches.json").write_text('[{"name":"bench-owned"}]\n')
@@ -12670,7 +13167,10 @@ fleet_recovery_confirm_pool_claims "$1"
     def confirm() -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", "-c", script, "confirm-pool", str(registry)],
-            capture_output=True, text=True, check=False, timeout=10,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
         )
 
     receipt.write_text("wrong-run\n")
@@ -12734,22 +13234,14 @@ def test_exact_guest_recovery_maps_autoscaler_workers_without_guest_ack(
         f"audit_dir={audit}\n"
         "cleanup_policy=retain\n"
     )
-    (audit / "meta").write_text(
-        f"fleet_owner_token={owner}\n"
-        f"run_id={run_id}\n"
-        f"app={app}\n"
-    )
+    (audit / "meta").write_text(f"fleet_owner_token={owner}\nrun_id={run_id}\napp={app}\n")
     records = (
         (primary_name, warm_id, primary_id, "vol_primary"),
         (worker_name, primary_id, worker_id, "vol_worker"),
     )
     for clone_name, source_id, machine_id, volume_id in records:
-        (clones / clone_name).write_text(
-            f"name={clone_name}\nid={machine_id}\nvolume_id={volume_id}\n"
-        )
-        (audit / "expected-fresh" / clone_name).write_text(
-            f"clone_name={clone_name}\nsource_machine_id={source_id}\n"
-        )
+        (clones / clone_name).write_text(f"name={clone_name}\nid={machine_id}\nvolume_id={volume_id}\n")
+        (audit / "expected-fresh" / clone_name).write_text(f"clone_name={clone_name}\nsource_machine_id={source_id}\n")
         (audit / "fresh" / clone_name).write_text(
             "version=1\n"
             f"fleet_owner_token={owner}\n"
@@ -12851,19 +13343,13 @@ def test_exact_guest_recovery_rejects_unsafe_autoscaler_worker_mappings(
             f"audit_dir={audit}\n"
             "cleanup_policy=retain\n"
         )
-        (audit / "meta").write_text(
-            f"fleet_owner_token={owner}\n"
-            f"run_id={run_id}\n"
-            f"app={app}\n"
-        )
+        (audit / "meta").write_text(f"fleet_owner_token={owner}\nrun_id={run_id}\napp={app}\n")
         for clone_name, source_id, machine_id, volume_id in records:
             if label == "worker-audit-parent-mismatch" and machine_id == worker_id:
                 source_id = primary_b
             if label == "primary-audit-root-mismatch" and machine_id == primary_b:
                 source_id = "feedface000002"
-            (clones / clone_name).write_text(
-                f"name={clone_name}\nid={machine_id}\nvolume_id={volume_id}\n"
-            )
+            (clones / clone_name).write_text(f"name={clone_name}\nid={machine_id}\nvolume_id={volume_id}\n")
             (audit / "expected-fresh" / clone_name).write_text(
                 f"clone_name={clone_name}\nsource_machine_id={source_id}\n"
             )
@@ -12879,13 +13365,8 @@ def test_exact_guest_recovery_rejects_unsafe_autoscaler_worker_mappings(
                 f"volume_id={volume_id}\n"
                 "disposition=owned\n"
             )
-            if not (
-                label == "missing-worker-audit-index"
-                and machine_id == worker_id
-            ):
-                (audit / "by-machine-id" / machine_id).write_text(
-                    f"{clone_name}\n"
-                )
+            if not (label == "missing-worker-audit-index" and machine_id == worker_id):
+                (audit / "by-machine-id" / machine_id).write_text(f"{clone_name}\n")
         (output_a / ".cid").write_text(f"clone {primary_a}\n")
         (output_a / "status-proxy.port").write_text("61001\n")
         (output_b / ".cid").write_text(f"clone {primary_b}\n")
@@ -13196,9 +13677,7 @@ def test_exact_guest_cleanup_latch_survives_separate_runtime_capture_failure(
     output = run / "interrupted-bench"
     output.mkdir(parents=True)
     (tmp_path / "audits" / owner).mkdir(parents=True)
-    (registry / "meta").write_text(
-        f"run_id=failed-run\nruns_root={run.parent}\ncleanup_policy=retain\n"
-    )
+    (registry / "meta").write_text(f"run_id=failed-run\nruns_root={run.parent}\ncleanup_policy=retain\n")
     (registry / "guest-cleanup-unconfirmed").touch()
     (registry / "runtime-evidence-unconfirmed").touch()
     (output / "guest-shutdown.confirmed").write_text("failed-run\n")
@@ -13209,7 +13688,7 @@ def test_exact_guest_cleanup_latch_survives_separate_runtime_capture_failure(
 APP=bench-app
 REGISTRY={shlex.quote(str(registry))}
 OUTPUT={shlex.quote(str(output))}
-FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / 'audits'))}
+FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / "audits"))}
 FLEET_REGISTRY_DIR=""
 FLEET_REGISTRY_PUBLISHED=0
 KEEP_CLONES=0
@@ -13248,7 +13727,10 @@ if fleet_recovery_reconnect_guest_shutdowns "$REGISTRY"; then exit 90; fi
 [ "$(registry_meta_value "$REGISTRY/meta" cleanup_policy)" = reap ] || exit 94
 """
     result = subprocess.run(
-        ["bash", "-c", script], text=True, capture_output=True, check=False,
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
         timeout=10,
     )
     assert result.returncode == 0, result.stderr + result.stdout
@@ -13362,7 +13844,8 @@ release_recovery_status_proxy_ports exact-token
 
 @pytest.mark.parametrize("corruption", ["symlink", "foreign-birth", "duplicate-key"])
 def test_exact_recovery_validates_complete_capacity_cohort_before_release(
-    tmp_path: Path, corruption: str,
+    tmp_path: Path,
+    corruption: str,
 ) -> None:
     fleet = fleet_source_text()
     owner = "5d" * 16
@@ -13375,10 +13858,7 @@ def test_exact_recovery_validates_complete_capacity_cohort_before_release(
     worker_token = f"{owner}-worker-{'7d' * 16}"
 
     def record(token: str) -> str:
-        return (
-            "version=1\napp=bench-app\n" + identity
-            + f"fleet_owner_token={owner}\ntoken={token}\n"
-        )
+        return "version=1\napp=bench-app\n" + identity + f"fleet_owner_token={owner}\ntoken={token}\n"
 
     primary = reservations / primary_token
     primary.write_text(record(primary_token))
@@ -13399,12 +13879,20 @@ def test_exact_recovery_validates_complete_capacity_cohort_before_release(
     )
     result = subprocess.run(
         [
-            "bash", "-c",
-            "set -uo pipefail\nAPP=bench-app\nCAPACITY_RESERVATION_ROOT=\"$1\"\n"
-            + helpers + '\ncapacity_release_stale_owner_reservations "$2" "$3"\n',
-            "complete-capacity-cohort", str(tmp_path / "capacity"), str(owner_meta), primary_token,
+            "bash",
+            "-c",
+            'set -uo pipefail\nAPP=bench-app\nCAPACITY_RESERVATION_ROOT="$1"\n'
+            + helpers
+            + '\ncapacity_release_stale_owner_reservations "$2" "$3"\n',
+            "complete-capacity-cohort",
+            str(tmp_path / "capacity"),
+            str(owner_meta),
+            primary_token,
         ],
-        text=True, capture_output=True, check=False, timeout=10,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
     )
     assert result.returncode != 0, "unsafe cohort must reject the entire release"
     assert {path.name: path.read_bytes() for path in reservations.iterdir()} == before
@@ -13522,7 +14010,8 @@ def test_recovery_proxy_batch_claim_rolls_back_partial_publication(
 
 @pytest.mark.parametrize("terminal", [False, True])
 def test_forced_exact_reaper_uses_only_owned_machine_ids_and_exact_volume_ids(
-    tmp_path: Path, terminal: bool,
+    tmp_path: Path,
+    terminal: bool,
 ) -> None:
     """Exact stale-owner cleanup must never inventory or resolve neighboring Machines."""
     fleet = fleet_source_text()
@@ -13688,17 +14177,11 @@ def test_exact_recovery_pool_only_skips_nonexistent_warm_source(tmp_path: Path) 
     for name in ("expected-fresh", "fresh", "by-machine-id", "pool"):
         (audit / name).mkdir(parents=True)
     (registry / "meta").write_text(
-        f"version=2\napp={app}\nfleet_owner_token={owner}\n"
-        f"run_id={run_id}\naudit_dir={audit}\n"
+        f"version=2\napp={app}\nfleet_owner_token={owner}\nrun_id={run_id}\naudit_dir={audit}\n"
     )
-    (audit / "meta").write_text(
-        f"fleet_owner_token={owner}\nrun_id={run_id}\napp={app}\n"
-    )
+    (audit / "meta").write_text(f"fleet_owner_token={owner}\nrun_id={run_id}\napp={app}\n")
     pool = audit / "pool" / "deadbeef001122"
-    pool.write_text(
-        f"fleet_owner_token={owner}\nrun_id={run_id}\napp={app}\n"
-        "source=borrowed-pool\n"
-    )
+    pool.write_text(f"fleet_owner_token={owner}\nrun_id={run_id}\napp={app}\nsource=borrowed-pool\n")
     script = (
         "set -uo pipefail\n"
         f"APP={app}\n"
@@ -13709,7 +14192,11 @@ def test_exact_recovery_pool_only_skips_nonexistent_warm_source(tmp_path: Path) 
 
     def check() -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10,
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
         )
 
     assert check().returncode == 0
@@ -13752,27 +14239,16 @@ def test_exact_recovery_resolves_warm_root_from_autoscaler_clone_graph(
     for directory in (audit / "fresh", audit / "expected-fresh", audit / "by-machine-id"):
         directory.mkdir(parents=True)
     (registry / "meta").write_text(
-        "version=2\n"
-        f"app={app}\n"
-        f"fleet_owner_token={owner}\n"
-        f"run_id={run_id}\n"
-        f"audit_dir={audit}\n"
-        "cleanup_policy=retain\n"
+        f"version=2\napp={app}\nfleet_owner_token={owner}\nrun_id={run_id}\naudit_dir={audit}\ncleanup_policy=retain\n"
     )
     (registry / "guest-cleanup-unconfirmed").touch()
-    (audit / "meta").write_text(
-        f"fleet_owner_token={owner}\n"
-        f"run_id={run_id}\n"
-        f"app={app}\n"
-    )
+    (audit / "meta").write_text(f"fleet_owner_token={owner}\nrun_id={run_id}\napp={app}\n")
     records = (
         ("cloudbench-primary", warm_id, primary_id, "vol_primary"),
         ("cloudbench-worker", primary_id, worker_id, "vol_worker"),
     )
     for clone_name, source_id, machine_id, volume_id in records:
-        (audit / "expected-fresh" / clone_name).write_text(
-            f"clone_name={clone_name}\nsource_machine_id={source_id}\n"
-        )
+        (audit / "expected-fresh" / clone_name).write_text(f"clone_name={clone_name}\nsource_machine_id={source_id}\n")
         (audit / "fresh" / clone_name).write_text(
             "version=1\n"
             f"fleet_owner_token={owner}\n"
@@ -13899,21 +14375,12 @@ def test_exact_recovery_rejects_unsafe_hierarchical_clone_topologies(
         ):
             directory.mkdir(parents=True)
         (registry / "meta").write_text(
-            "version=2\n"
-            f"app={app}\n"
-            f"fleet_owner_token={owner}\n"
-            f"run_id={run_id}\n"
-            f"audit_dir={audit}\n"
+            f"version=2\napp={app}\nfleet_owner_token={owner}\nrun_id={run_id}\naudit_dir={audit}\n"
         )
-        (audit / "meta").write_text(
-            f"fleet_owner_token={owner}\n"
-            f"run_id={run_id}\n"
-            f"app={app}\n"
-        )
+        (audit / "meta").write_text(f"fleet_owner_token={owner}\nrun_id={run_id}\napp={app}\n")
         for clone_name, expected_source, fresh_source, machine_id, volume_id in records:
             (audit / "expected-fresh" / clone_name).write_text(
-                f"clone_name={clone_name}\n"
-                f"source_machine_id={expected_source}\n"
+                f"clone_name={clone_name}\nsource_machine_id={expected_source}\n"
             )
             if clone_name == missing_fresh:
                 continue
@@ -13929,11 +14396,7 @@ def test_exact_recovery_rejects_unsafe_hierarchical_clone_topologies(
                 f"volume_id={volume_id}\n"
                 "disposition=owned\n"
             )
-            indexed_name = (
-                "cloudbench-primary"
-                if mismatched_index == machine_id
-                else clone_name
-            )
+            indexed_name = "cloudbench-primary" if mismatched_index == machine_id else clone_name
             (audit / "by-machine-id" / machine_id).write_text(f"{indexed_name}\n")
         provider_call = case_root / "unexpected-provider-call"
         script = f"""set -uo pipefail
@@ -14697,10 +15160,7 @@ def test_detach_reexec_closes_inherited_launcher_pipe(tmp_path: Path) -> None:
     helper = env_lib[start:end]
     launcher = tmp_path / "launcher.sh"
     launcher.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -uo pipefail\n"
-        f"{helper}\n"
-        'cloudbench_detach_reexec "$LOG" bash -c "sleep 3"\n'
+        f'#!/usr/bin/env bash\nset -uo pipefail\n{helper}\ncloudbench_detach_reexec "$LOG" bash -c "sleep 3"\n'
     )
     launcher.chmod(0o755)
     read_fd, write_fd = os.pipe()
@@ -14829,9 +15289,7 @@ fleet_machines_json
     # bounded attempt can recover; no permanent mkdir-lock wedge is allowed.
     identity = _extract_fleet_function(fleet, "machines_snapshot_identity() {")
     registry_value = _extract_fleet_function(fleet, "registry_meta_value() {")
-    registry_alive = _fleet_pid_identity_helpers(fleet) + _extract_fleet_function(
-        fleet, "registry_owner_alive() {"
-    )
+    registry_alive = _fleet_pid_identity_helpers(fleet) + _extract_fleet_function(fleet, "registry_owner_alive() {")
     lock_acquire = _extract_fleet_function(fleet, "inventory_refresh_lock_acquire() {")
     lock_release = _extract_fleet_function(fleet, "inventory_refresh_lock_release() {")
     lock_script = f"""set -uo pipefail
@@ -14875,10 +15333,11 @@ def test_inventory_refresh_failure_preserves_provider_phase_and_private_response
     fleet = fleet_source_text()
     diagnostic = (
         _extract_fleet_function(fleet, "inventory_refresh_diagnostic() {")
-        if "inventory_refresh_diagnostic() {" in fleet else ""
+        if "inventory_refresh_diagnostic() {" in fleet
+        else ""
     )
     refresh = _extract_fleet_function(fleet, "_refresh_inventory_snapshot_unlocked() {")
-    script = f'''set -uo pipefail
+    script = f"""set -uo pipefail
 FLEET_DIR="$ROOT"
 INVENTORY_INDEX="$ROOT/inventory"
 MACHINES_SNAPSHOT="$ROOT/machines.json"
@@ -14891,9 +15350,14 @@ fly_with_timeout() {{ printf 'synthetic Fly rate limit\\n'; return 42; }}
 {diagnostic}
 {refresh}
 _refresh_inventory_snapshot_unlocked
-'''
-    result = subprocess.run(["bash", "-c", script], env={"ROOT": str(tmp_path), "PATH": os.environ["PATH"]},
-                            text=True, capture_output=True, check=False)
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"ROOT": str(tmp_path), "PATH": os.environ["PATH"]},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     assert result.returncode == 1 and result.stdout == "", result.stdout + result.stderr
     diagnostics = tmp_path / "inventory-refresh-diagnostics"
     latest = dict(line.split("=", 1) for line in (diagnostics / "latest").read_text().splitlines())
@@ -15339,7 +15803,7 @@ def test_inventory_existence_distinguishes_missing_machine_from_unhealthy_index(
     (index / "machines").mkdir(parents=True)
     (index / "machines/owned-primary").write_text("state=started\n")
     (index / "health").write_text(f"publisher_token=test-token\nvalid_until={int(time.time()) + 60}\n")
-    script = f'''set -uo pipefail
+    script = f"""set -uo pipefail
 INVENTORY_INDEX="$ROOT/inventory"
 INVENTORY_CLOCK_EPOCH="$(date +%s)"
 INVENTORY_CLOCK_SECONDS="$SECONDS"
@@ -15352,9 +15816,14 @@ inventory_machine_exists owned-primary; test "$?" -eq 0
 inventory_machine_exists missing-primary; test "$?" -eq 1
 printf 'publisher_token=test-token\\nvalid_until=%s\\n' "$((INVENTORY_CLOCK_EPOCH - 1))" > "$INVENTORY_INDEX/current/health"
 inventory_machine_exists owned-primary; test "$?" -eq 2
-'''
-    result = subprocess.run(["bash", "-c", script], env={"ROOT": str(tmp_path), "PATH": os.environ["PATH"]},
-                            text=True, capture_output=True, check=False)
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"ROOT": str(tmp_path), "PATH": os.environ["PATH"]},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     assert result.returncode == 0, result.stderr
 
 
@@ -15411,8 +15880,10 @@ def _preflight_harness(
     calls = tmp_path / "calls"
     calls.write_text("")
 
-    interleaving = "" if state_after_hydrate is None else (
-        'printf "%s\\n" ' + shlex.quote(state_after_hydrate) + ' > "$WARM_DEPS_STATE_FILE"'
+    interleaving = (
+        ""
+        if state_after_hydrate is None
+        else ('printf "%s\\n" ' + shlex.quote(state_after_hydrate) + ' > "$WARM_DEPS_STATE_FILE"')
     )
     script = f"""set -uo pipefail
 source {shlex.quote(str(ENV_HELPER_SCRIPT))}
@@ -15450,7 +15921,7 @@ cloudbench_publish_warm_deps_state() {{ echo "publish-proof $*" >> "$CALLS_FILE"
 CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)
 git() {{ [ "{int(dirty)}" = "1" ] && return 1 || return 0; }}
 {helpers}
-{'' if pinned_snapshot else 'SNAPSHOTS_JSON="$(FLY volume snapshots list)"'}
+{"" if pinned_snapshot else 'SNAPSHOTS_JSON="$(FLY volume snapshots list)"'}
 if [ "{int(pinned_snapshot)}" = "0" ] && declare -F hydrate_warm_deps_state >/dev/null; then hydrate_warm_deps_state; fi
 {interleaving}
 if declare -F warm_deps_recorded_state >/dev/null; then
@@ -15521,7 +15992,9 @@ def test_warm_deps_preflight_requires_live_verification_after_a_new_refresh(tmp_
     assert int((tmp_path / "common/snapshot-read-count").read_text()) > 1
 
 
-@pytest.mark.parametrize("scenario", ["fresh", "interleaved", "volume-mismatch", "donor-mismatch", "deps-mismatch", "pending", "expired"])
+@pytest.mark.parametrize(
+    "scenario", ["fresh", "interleaved", "volume-mismatch", "donor-mismatch", "deps-mismatch", "pending", "expired"]
+)
 def test_fresh_controller_reuses_only_proven_donor_dependencies(tmp_path: Path, scenario: str) -> None:
     node, python = "1" * 64, "2" * 64
     key = "rose_cloudbench_deps_" + hashlib.sha256(f"{node}\0{python}".encode()).hexdigest()[:32]
@@ -15532,14 +16005,25 @@ def test_fresh_controller_reuses_only_proven_donor_dependencies(tmp_path: Path, 
         proof[5] = "another-machine"
     elif scenario == "deps-mismatch":
         proof[0] = "3" * 64
-    inventory = [{"id": "warm-machine", "config": {
-        "mounts": [{"volume": "vol_warm"}], "metadata": {key: " ".join(proof)},
-    }}]
+    inventory = [
+        {
+            "id": "warm-machine",
+            "config": {
+                "mounts": [{"volume": "vol_warm"}],
+                "metadata": {key: " ".join(proof)},
+            },
+        }
+    ]
     result, calls = _preflight_harness(
-        tmp_path, state_line=None, dirty=False, autorefresh="1",
+        tmp_path,
+        state_line=None,
+        dirty=False,
+        autorefresh="1",
         snap_epoch=1 if scenario == "expired" else 2000,
         snapshot_status="running" if scenario == "pending" else "created",
-        warm_inventory=inventory, node_fp=node, python_fp=python,
+        warm_inventory=inventory,
+        node_fp=node,
+        python_fp=python,
         state_after_hydrate=f"{'3' * 64} {'4' * 64} 1000 snap-other" if scenario == "interleaved" else None,
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -15554,16 +16038,26 @@ def test_fresh_controller_reuses_only_proven_donor_dependencies(tmp_path: Path, 
 
 
 @pytest.mark.parametrize("publish_status", [0, 1])
-def test_verified_legacy_snapshot_is_shared_without_rebuild_or_run_rejection(tmp_path: Path, publish_status: int) -> None:
+def test_verified_legacy_snapshot_is_shared_without_rebuild_or_run_rejection(
+    tmp_path: Path, publish_status: int
+) -> None:
     node, python = "1" * 64, "2" * 64
     inventory = [{"id": "warm-machine", "config": {"mounts": [{"volume": "vol_warm"}]}}]
     result, calls = _preflight_harness(
-        tmp_path, state_line=f"{node} {python} 1000 snap-current", dirty=False,
-        autorefresh="1", snap_epoch=2000, warm_inventory=inventory,
-        node_fp=node, python_fp=python, publish_status=publish_status,
+        tmp_path,
+        state_line=f"{node} {python} 1000 snap-current",
+        dirty=False,
+        autorefresh="1",
+        snap_epoch=2000,
+        warm_inventory=inventory,
+        node_fp=node,
+        python_fp=python,
+        publish_status=publish_status,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert calls.read_text().splitlines() == [f"publish-proof bench-app warm-machine vol_warm {node} {python} 1000 snap-current"]
+    assert calls.read_text().splitlines() == [
+        f"publish-proof bench-app warm-machine vol_warm {node} {python} 1000 snap-current"
+    ]
     assert "SNAP_AFTER=snap-current" in result.stdout
     if publish_status:
         assert "publication failed" in result.stderr
@@ -15573,9 +16067,15 @@ def test_pinned_warm_deps_preflight_keeps_verified_snapshot_without_unlisted_inv
     node, python = "1" * 64, "2" * 64
     inventory = [{"id": "warm-machine", "config": {"mounts": [{"volume": "vol_warm"}]}}]
     result, calls = _preflight_harness(
-        tmp_path, state_line=f"{node} {python} 1000 snap-current", dirty=False,
-        autorefresh="1", snap_epoch=2000, warm_inventory=inventory,
-        node_fp=node, python_fp=python, pinned_snapshot=True,
+        tmp_path,
+        state_line=f"{node} {python} 1000 snap-current",
+        dirty=False,
+        autorefresh="1",
+        snap_epoch=2000,
+        warm_inventory=inventory,
+        node_fp=node,
+        python_fp=python,
+        pinned_snapshot=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "unbound variable" not in result.stderr
@@ -15592,7 +16092,8 @@ def test_dependency_proof_publication_uses_only_machine_metadata(tmp_path: Path)
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append((self.path, body, self.headers.get("Authorization")))
             authorized = self.headers.get("Authorization") in {
-                "Bearer fixture-token", "FlyV1 fm2_refreshed_fixture",
+                "Bearer fixture-token",
+                "FlyV1 fm2_refreshed_fixture",
             }
             self.send_response(response_status[0] if authorized else 403)
             self.end_headers()
@@ -15606,17 +16107,32 @@ def test_dependency_proof_publication_uses_only_machine_metadata(tmp_path: Path)
     node, python = "1" * 64, "2" * 64
     key = "rose_cloudbench_deps_" + hashlib.sha256(f"{node}\0{python}".encode()).hexdigest()[:32]
     try:
-        env = {"PATH": os.environ["PATH"], "FLY_API_TOKEN": "fixture-token",
-               "FLY_API_HOSTNAME": f"http://127.0.0.1:{server.server_port}"}
-        command = ["bash", "-c", f'source {shlex.quote(str(ENV_HELPER_SCRIPT))}; cloudbench_publish_warm_deps_state bench-app warm-machine vol_warm {node} {python} 1000 snap-current']
+        env = {
+            "PATH": os.environ["PATH"],
+            "FLY_API_TOKEN": "fixture-token",
+            "FLY_API_HOSTNAME": f"http://127.0.0.1:{server.server_port}",
+        }
+        command = [
+            "bash",
+            "-c",
+            f"source {shlex.quote(str(ENV_HELPER_SCRIPT))}; cloudbench_publish_warm_deps_state bench-app warm-machine vol_warm {node} {python} 1000 snap-current",
+        ]
         for expected in (0, 1):
             response_status[0] = 204 if expected == 0 else 503
             result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=10)
             assert result.returncode == expected, result.stdout + result.stderr
             assert "fixture-token" not in result.stdout + result.stderr
-        assert requests == [(f"/v1/apps/bench-app/machines/warm-machine/metadata/{key}",
-                             {"value": f"{node} {python} 1000 snap-current vol_warm warm-machine bench-app"},
-                             "Bearer fixture-token")] * 2
+        assert (
+            requests
+            == [
+                (
+                    f"/v1/apps/bench-app/machines/warm-machine/metadata/{key}",
+                    {"value": f"{node} {python} 1000 snap-current vol_warm warm-machine bench-app"},
+                    "Bearer fixture-token",
+                )
+            ]
+            * 2
+        )
         broker_dir = tmp_path / "bin"
         broker_dir.mkdir()
         broker = broker_dir / "flyctl"
@@ -15638,32 +16154,37 @@ def test_dependency_proof_publication_uses_only_machine_metadata(tmp_path: Path)
         broker.chmod(0o755)
         receipt = tmp_path / "broker.json"
         selected_session = "fm1r_selected_fixture,fm2_discharge_one_fixture,fm2_discharge_two_fixture"
-        refresh_env = {**env, "PATH": f"{broker_dir}:{env['PATH']}",
-                       "FLY_API_TOKEN": selected_session,
-                       "FLY_ACCESS_TOKEN": "different-fixture-session",
-                       "BROKER_RECEIPT": str(receipt)}
+        refresh_env = {
+            **env,
+            "PATH": f"{broker_dir}:{env['PATH']}",
+            "FLY_API_TOKEN": selected_session,
+            "FLY_ACCESS_TOKEN": "different-fixture-session",
+            "BROKER_RECEIPT": str(receipt),
+        }
         response_status[0] = 204
         refreshed = subprocess.run(command, env=refresh_env, text=True, capture_output=True, timeout=10)
         assert refreshed.returncode == 0, refreshed.stdout + refreshed.stderr
         assert refreshed.stdout + refreshed.stderr == ""
         assert json.loads(receipt.read_text()) == {
             "argv": ["auth", "token", "--json", "--quiet"],
-            "selected": selected_session, "access_override": None,
+            "selected": selected_session,
+            "access_override": None,
         }
         assert requests[-1] == (requests[0][0], requests[0][1], "FlyV1 fm2_refreshed_fixture")
         request_count = len(requests)
         for mode in ("fail", "malformed", "empty", "bad-header"):
-            rejected = subprocess.run(command, env={**refresh_env, "BROKER_MODE": mode},
-                                      text=True, capture_output=True, timeout=10)
+            rejected = subprocess.run(
+                command, env={**refresh_env, "BROKER_MODE": mode}, text=True, capture_output=True, timeout=10
+            )
             assert rejected.returncode == 1
             assert rejected.stdout + rejected.stderr == ""
             assert len(requests) == request_count
         probe = tmp_path / "transport"
         probe.mkdir()
         (probe / "sitecustomize.py").write_text(
-            'import urllib.request\ndef unexpected(*args, **kwargs):\n'
+            "import urllib.request\ndef unexpected(*args, **kwargs):\n"
             '    raise RuntimeError("remote HTTP reached transport")\n'
-            'urllib.request.urlopen = unexpected\n'
+            "urllib.request.urlopen = unexpected\n"
         )
         remote_env = {**env, "FLY_API_HOSTNAME": "http://machines.example.invalid", "PYTHONPATH": str(probe)}
         rejected = subprocess.run(command, env=remote_env, text=True, capture_output=True, timeout=10)
@@ -15674,7 +16195,7 @@ def test_dependency_proof_publication_uses_only_machine_metadata(tmp_path: Path)
         server.server_close()
         thread.join(timeout=10)
     fleet = fleet_source_text()
-    assert fleet.index("    hydrate_warm_deps_state\n") < fleet.index('    RECORDED_SNAP_ID=')
+    assert fleet.index("    hydrate_warm_deps_state\n") < fleet.index("    RECORDED_SNAP_ID=")
     assert 'exec bash "$ROOT_DIR/scripts/run-bench-fleet"' in RUN_BENCH_SCRIPT.read_text()
 
 
@@ -15730,24 +16251,32 @@ def test_warm_deps_preflight_fast_path_and_central_heal(tmp_path: Path) -> None:
 def test_alternate_warm_donor_cannot_borrow_legacy_snapshot_proof(tmp_path: Path) -> None:
     alternate = "cloudbench-warm-deps.cloudbench-warm-proof20.fp"
     legacy, _ = _preflight_harness(
-        tmp_path / "legacy", state_line="NODEFP PYFP 1000 snap-current",
-        dirty=False, autorefresh="0", snap_epoch=2000,
+        tmp_path / "legacy",
+        state_line="NODEFP PYFP 1000 snap-current",
+        dirty=False,
+        autorefresh="0",
+        snap_epoch=2000,
         selected_state_name=alternate,
     )
     assert legacy.returncode != 0
 
     qualified, calls = _preflight_harness(
-        tmp_path / "qualified", state_line="NODEFP PYFP 1000 snap-current",
-        dirty=False, autorefresh="0", snap_epoch=2000,
-        state_filename=alternate, selected_state_name=alternate,
+        tmp_path / "qualified",
+        state_line="NODEFP PYFP 1000 snap-current",
+        dirty=False,
+        autorefresh="0",
+        snap_epoch=2000,
+        state_filename=alternate,
+        selected_state_name=alternate,
     )
     assert qualified.returncode == 0, qualified.stderr
     assert "fast bring-up" in qualified.stdout
     assert calls.read_text() == ""
 
 
-
-@pytest.mark.parametrize("scenario", ["pinned", "direct", "bad_digest", "tampered_upload", "fetch_failure", "patch_conflict", "no_delta"])
+@pytest.mark.parametrize(
+    "scenario", ["pinned", "direct", "bad_digest", "tampered_upload", "fetch_failure", "patch_conflict", "no_delta"]
+)
 def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, scenario: str) -> None:
     """Execute maintenance with real git/patches and a local transport boundary.
 
@@ -15784,7 +16313,7 @@ def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, sce
         subprocess.run(["bash", str(WORKTREE_PATCH_SCRIPT), str(repo), base], cwd=repo, stdout=out, check=True)
     digest = hashlib.sha256(patch.read_bytes()).hexdigest()
     cloud = CLOUD_SCRIPT.read_text()
-    mode = cloud[cloud.index('if [ "$MODE" = "refresh-deps" ]; then'):cloud.index("# MODE: --refresh-wmh")]
+    mode = cloud[cloud.index('if [ "$MODE" = "refresh-deps" ]; then') : cloud.index("# MODE: --refresh-wmh")]
     apply_helper = ""
     if "warm_source_apply_patch() {" in cloud:
         apply_helper = _extract_fleet_function(cloud, "warm_source_apply_patch() {")
@@ -15796,9 +16325,9 @@ def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, sce
     bin_dir.mkdir()
     (bin_dir / "gosu").write_text('#!/usr/bin/env bash\nshift\nexec "$@"\n')
     (bin_dir / "gosu").chmod(0o755)
-    (bin_dir / "chown").write_text('#!/usr/bin/env bash\nexit 0\n')
+    (bin_dir / "chown").write_text("#!/usr/bin/env bash\nexit 0\n")
     (bin_dir / "chown").chmod(0o755)
-    script = f'''set -euo pipefail
+    script = f"""set -euo pipefail
 source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 MODE=refresh-deps
 ROOT_DIR={shlex.quote(str(repo))}
@@ -15844,14 +16373,19 @@ stop_machine_strict() {{ echo stopped >> "$CALLS"; }}
 create_volume_snapshot_exact() {{ echo snapshot >> "$CALLS"; CREATED_SNAPSHOT_ID=snap-exact; }}
 {apply_helper}
 {mode}
-'''
+"""
     env = {
-        "PATH": f"{bin_dir}:{os.environ['PATH']}", "CALLS": str(calls),
-        "SCENARIO": scenario, "BUILT_REQUIREMENTS": str(built),
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "CALLS": str(calls),
+        "SCENARIO": scenario,
+        "BUILT_REQUIREMENTS": str(built),
         "METADATA_ARGS": str(tmp_path / "metadata-args"),
     }
     if scenario not in ("direct", "no_delta"):
-        env.update(CLOUDBENCH_LOCAL_PATCH_SOURCE=str(patch), CLOUDBENCH_LOCAL_PATCH_SHA256=("0" * 64 if scenario == "bad_digest" else digest))
+        env.update(
+            CLOUDBENCH_LOCAL_PATCH_SOURCE=str(patch),
+            CLOUDBENCH_LOCAL_PATCH_SHA256=("0" * 64 if scenario == "bad_digest" else digest),
+        )
     result = subprocess.run(["bash", "-c", script], cwd=repo, env=env, text=True, capture_output=True, timeout=20)
     success = scenario in ("pinned", "direct", "no_delta")
     assert (result.returncode == 0) == success, result.stdout + result.stderr
@@ -15872,6 +16406,7 @@ create_volume_snapshot_exact() {{ echo snapshot >> "$CALLS"; CREATED_SNAPSHOT_ID
         assert "snapshot" not in (calls.read_text() if calls.exists() else "")
         if scenario == "bad_digest":
             assert not calls.exists(), "reject mutated controller patch before provider maintenance"
+
 
 def test_refresh_deps_is_a_validated_maintenance_transaction() -> None:
     cloud = CLOUD_SCRIPT.read_text()
@@ -16594,8 +17129,8 @@ def test_refresh_deps_mode_contract() -> None:
     # bounded wait for a COMPLETE fresh snapshot
     assert "CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-90" in snapshot_helper
     # shared freshness state recorded for fleet preflights
-    assert 'WARM_DEPS_STATE_FILE' in mode
-    assert 'cloudbench-warm-deps.fp' in cloud
+    assert "WARM_DEPS_STATE_FILE" in mode
+    assert "cloudbench-warm-deps.fp" in cloud
     assert "cloudbench_node_dependency_fingerprint" in mode
     assert "cloudbench_manifest_fingerprint" in mode
     # flag is wired
@@ -17854,9 +18389,7 @@ def test_script_snapshot_handoff_refuses_a_mismatched_process_group_identity(
             f"pgid={unrelated.pid}\n"
             f"group_token={'e' * 32}\n"
         )
-        fleet_function = _extract_fleet_function(
-            fleet_source_text(), "terminate_script_snapshot_handoff_group() {"
-        )
+        fleet_function = _extract_fleet_function(fleet_source_text(), "terminate_script_snapshot_handoff_group() {")
         attempted = subprocess.run(
             [
                 "bash",
@@ -18862,7 +19395,7 @@ def test_refresh_wmh_publishes_the_rebuilt_volume_as_the_proven_fleet_snapshot()
 def test_fleet_retained_resources_do_not_claim_release(tmp_path: Path) -> None:
     fleet = fleet_source_text()
     start = fleet.index("    # Report each bench's end-to-end duration")
-    end = fleet.index("    # Task failure and infrastructure failure", start)
+    end = fleet.index("    # Keep the parent live while releasing resources.", start)
     fallback = fleet[start:end]
     for keep, failed, already_released in ((0, 0, False), (1, 0, False), (1, 0, True), (0, 1, False)):
         out = tmp_path / f"{keep}-{failed}-{already_released}"
@@ -18880,8 +19413,9 @@ CHILD_OUT=({shlex.quote(str(out))})
 """
         result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
-        assert marker.exists() == (already_released or (not keep and not failed)), \
+        assert marker.exists() == (already_released or (not keep and not failed)), (
             "retained resources falsely reported release"
+        )
         if already_released:
             assert marker.read_text() == "2\n", "actual per-pool release receipt was overwritten"
 
@@ -19287,8 +19821,9 @@ release_start_barrier
             timeout=subprocess_timeout_seconds,
         )
         assert failed.returncode == 1
-        assert (roots[-1] / "barrier.ready.observed").exists(), \
+        assert (roots[-1] / "barrier.ready.observed").exists(), (
             "accepted log readiness never reached the phase publisher"
+        )
         assert "could not release synchronized start barrier" in failed.stderr
     finally:
         for server in servers:
@@ -20415,7 +20950,7 @@ test "$(sort -nr {shlex.quote(str(observed))} | head -1 | tr -d ' ')" -le 4
 def test_capacity_admission_retries_live_reservation_and_refreshes_inventory() -> None:
     fleet = fleet_source_text()
     wrapper = _extract_fleet_function(fleet, "admit_app_capacity_with_wait() {")
-    script = f'''set -u
+    script = f"""set -u
 APP=fixture-bench-app
 warm_json=old-inventory
 CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=30
@@ -20437,7 +20972,7 @@ FLY() {{ printf '%s' new-inventory; }}
 {wrapper}
 admit_app_capacity_with_wait
 printf 'attempts=%s sleeps=%s inventory=%s\\n' "$attempts" "$sleep_calls" "$warm_json"
-'''
+"""
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, result.stderr
     assert "attempts=2 sleeps=1 inventory=new-inventory" in result.stdout
@@ -20446,7 +20981,7 @@ printf 'attempts=%s sleeps=%s inventory=%s\\n' "$attempts" "$sleep_calls" "$warm
 def test_capacity_admission_does_not_retry_non_capacity_failure() -> None:
     fleet = fleet_source_text()
     wrapper = _extract_fleet_function(fleet, "admit_app_capacity_with_wait() {")
-    script = f'''set -u
+    script = f"""set -u
 CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=30
 attempts=0
 enforce_app_capacity_guard() {{
@@ -20457,7 +20992,7 @@ enforce_app_capacity_guard() {{
 sleep() {{ exit 90; }}
 {wrapper}
 admit_app_capacity_with_wait
-'''
+"""
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=5)
     assert result.returncode == 1
 
@@ -20469,7 +21004,7 @@ def test_capacity_admission_follows_nested_canary_and_precedes_provisioning() ->
     admission = fleet.index("admit_app_capacity_with_wait || exit 1", canary)
     provision = fleet.index("# ── Phase 1: provision every bench", canary)
     assert canary < refresh < admission < provision
-    pool = fleet[fleet.index('if [ -n "$PROVISION_POOL" ]; then'):canary]
+    pool = fleet[fleet.index('if [ -n "$PROVISION_POOL" ]; then') : canary]
     assert pool.index("admit_app_capacity_with_wait || exit 1") < pool.index('provision_pool "$PROVISION_POOL"')
 
 
@@ -21300,7 +21835,38 @@ def test_boot_launch_collects_terminal_artifacts_without_post_done_ssh() -> None
     assert "Never re-enter Machines-API SSH after DONE" in collection
 
 
-@pytest.mark.parametrize("fault", ["none", "missing-worker", "missing-backend", "auth", "run", "machine", "unsealed", "symlink", "oversize", "fifo", "stack-token", "stack-state", "extra-worker", "hash", "length", "manifest-drift", "short-read", "early-driver", "driver-exited-no-request", "missing-owner", "wrong-owner", "result-mismatch", "standalone", "durability", "directory-fsync", "infra-probe", "held-demo"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "none",
+        "missing-worker",
+        "missing-backend",
+        "auth",
+        "run",
+        "machine",
+        "unsealed",
+        "symlink",
+        "oversize",
+        "fifo",
+        "stack-token",
+        "stack-state",
+        "extra-worker",
+        "hash",
+        "length",
+        "manifest-drift",
+        "short-read",
+        "early-driver",
+        "driver-exited-no-request",
+        "missing-owner",
+        "wrong-owner",
+        "result-mismatch",
+        "standalone",
+        "durability",
+        "directory-fsync",
+        "infra-probe",
+        "held-demo",
+    ],
+)
 def test_boot_terminal_runtime_evidence_collects_complete_logs(tmp_path: Path, fault: str) -> None:
     """A terminal FAILED task still needs every raw worker/backend log before destruction."""
     guest = tmp_path / "guest"
@@ -21308,12 +21874,25 @@ def test_boot_terminal_runtime_evidence_collects_complete_logs(tmp_path: Path, f
     logs = context / "logs"
     logs.mkdir(parents=True)
     (context / "services.json").write_text(json.dumps({"status": "stopped", "env": {"worker_processes": 2}}))
-    (context / "run.json").write_text(json.dumps({"run_id": "fixture-run", "tasks": [{"name": "fixture", "agent_id": "fixture-root", "benchmark_status": "FAILED", "passed": False}]}))
+    (context / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "fixture-run",
+                "tasks": [
+                    {"name": "fixture", "agent_id": "fixture-root", "benchmark_status": "FAILED", "passed": False}
+                ],
+            }
+        )
+    )
     (context / "stack.log").write_text("services stopped\n")
     (context / "cloudbench-stack-cleanup-run-token.status").write_text("state=clean\ntoken=run-token\n")
     (guest / "cloudbench-driver-clean-run-token.ack").write_text("run-token\n")
     (guest / "cloudbench-driver.state").write_text("exited\n")
-    original = {"backend.log": b"backend complete\n", "worker.log": b"normal cancellation acknowledged\n", "worker.1.log": "last worker — complete\n".encode()}
+    original = {
+        "backend.log": b"backend complete\n",
+        "worker.log": b"normal cancellation acknowledged\n",
+        "worker.1.log": "last worker — complete\n".encode(),
+    }
     for name, data in original.items():
         (logs / name).write_bytes(data)
     if fault == "early-driver":
@@ -21372,12 +21951,18 @@ def observed_fsync(descriptor):
     return original_fsync(descriptor)
 os.open, os.close, os.fsync = observed_open, observed_close, observed_fsync
 """)
-        environment.update(PYTHONPATH=str(injection), SYNC_EVENTS=str(tmp_path / "sync-events"),
-                           SYNC_FAILURE=str(int(fault == "directory-fsync")))
+        environment.update(
+            PYTHONPATH=str(injection),
+            SYNC_EVENTS=str(tmp_path / "sync-events"),
+            SYNC_FAILURE=str(int(fault == "directory-fsync")),
+        )
     launcher = [sys.executable, str(STATUS_SERVER_SCRIPT)]
     if fault in {"hash", "length", "manifest-drift", "short-read"}:
         # Keep the real status server; alter only its outgoing response boundary.
-        launcher = [sys.executable, "-c", f'''
+        launcher = [
+            sys.executable,
+            "-c",
+            f"""
 import importlib.util
 spec = importlib.util.spec_from_file_location("status", {str(STATUS_SERVER_SCRIPT)!r})
 module = importlib.util.module_from_spec(spec)
@@ -21407,9 +21992,27 @@ def create_server(address, handler):
     return server(address, Partial)
 module.ThreadingHTTPServer = create_server
 raise SystemExit(module.main())
-''']
+""",
+        ]
     with (tmp_path / "server.log").open("w") as server_log:
-        process = subprocess.Popen([*launcher, "--directory", str(guest), "--port", "0", "--bind", "127.0.0.1", "--run-token", "run-token", "--ready-file", str(ready)], env=environment, stdout=server_log, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(
+            [
+                *launcher,
+                "--directory",
+                str(guest),
+                "--port",
+                "0",
+                "--bind",
+                "127.0.0.1",
+                "--run-token",
+                "run-token",
+                "--ready-file",
+                str(ready),
+            ],
+            env=environment,
+            stdout=server_log,
+            stderr=subprocess.STDOUT,
+        )
         try:
             deadline = time.monotonic() + 5
             while not ready.exists():
@@ -21417,43 +22020,61 @@ raise SystemExit(module.main())
                 assert time.monotonic() < deadline, "status server readiness timeout"
                 time.sleep(0.01)
             cloud = CLOUD_SCRIPT.read_text()
-            block = cloud[cloud.index("# Preserve the complete remote driver") : cloud.index("# ── 5. Retrieve report-card.json")]
+            block = cloud[
+                cloud.index("# Preserve the complete remote driver") : cloud.index("# ── 5. Retrieve report-card.json")
+            ]
             binding = ""
             if fault in {"none", "standalone", "durability", "result-mismatch"}:
                 begin = cloud.index('    if python3 "$CLOUDBENCH_RESULT_SCRIPT" "$candidate_run"')
-                binding = cloud[cloud.index('        if [ "${CLOUDBENCH_BOOT_LAUNCH', begin) : cloud.index('        RUN_IDENTITY_OK="1"', begin)] if 'raw runtime evidence does not match' in cloud else ""
+                binding = (
+                    cloud[
+                        cloud.index('        if [ "${CLOUDBENCH_BOOT_LAUNCH', begin) : cloud.index(
+                            '        RUN_IDENTITY_OK="1"', begin
+                        )
+                    ]
+                    if "raw runtime evidence does not match" in cloud
+                    else ""
+                )
                 candidate = output / "candidate.json"
-                candidate.write_bytes((context / "run.json").read_bytes() if fault in {"none", "standalone", "durability"} else b'{"run_id":"wrong"}')
+                candidate.write_bytes(
+                    (context / "run.json").read_bytes()
+                    if fault in {"none", "standalone", "durability"}
+                    else b'{"run_id":"wrong"}'
+                )
             owner_fault = ""
             if fault == "missing-owner":
                 owner_fault = 'rm -f "$OUT_DIR/runtime-evidence.owner.json"'
             elif fault == "wrong-owner":
-                owner_fault = "printf '%s' '" + json.dumps({"version": 1, "run_token": "foreign", "machine_id": "fixture-machine"}) + "' > \"$OUT_DIR/runtime-evidence.owner.json\""
-            script = f'''set -euo pipefail
+                owner_fault = (
+                    "printf '%s' '"
+                    + json.dumps({"version": 1, "run_token": "foreign", "machine_id": "fixture-machine"})
+                    + '\' > "$OUT_DIR/runtime-evidence.owner.json"'
+                )
+            script = f"""set -euo pipefail
 OUT_DIR={shlex.quote(str(output))}
 SSH_LOG={shlex.quote(str(driver))}
 CLOUDBENCH_BOOT_LAUNCH=1
 CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS=3
-CLOUDBENCH_INFRA_PROBE={int(fault == 'infra-probe')}
-CLOUDBENCH_SKIP_AUTOSCALER={int(fault == 'held-demo')}
+CLOUDBENCH_INFRA_PROBE={int(fault == "infra-probe")}
+CLOUDBENCH_SKIP_AUTOSCALER={int(fault == "held-demo")}
 TIMED_OUT=0
 FINISHED=1
 BENCH_EXIT=1
-RUN_LOG_TOKEN={'wrong-run' if fault == 'run' else 'run-token'}
-FLEET_MACHINE_ID={'wrong-machine' if fault == 'machine' else ('' if fault == 'standalone' else 'fixture-machine')}
+RUN_LOG_TOKEN={"wrong-run" if fault == "run" else "run-token"}
+FLEET_MACHINE_ID={"wrong-machine" if fault == "machine" else ("" if fault == "standalone" else "fixture-machine")}
 mid=fixture-machine
 LOCAL_STATUS_PORT={int(ready.read_text())}
-export CLOUDBENCH_BARRIER_TOKEN={'wrong-secret' if fault == 'auth' else 'secret-fixture'}
+export CLOUDBENCH_BARRIER_TOKEN={"wrong-secret" if fault == "auth" else "secret-fixture"}
 ssh_read() {{ echo 'unexpected SSH' >&2; return 99; }}
-{_extract_fleet_function(cloud, 'cloudbench_skip_held_driver_teardown_race() {')}
-{_extract_fleet_function(cloud, 'cloudbench_collect_runtime_evidence() {') if 'cloudbench_collect_runtime_evidence() {' in cloud else ''}
-{_extract_fleet_function(cloud, 'cloudbench_prepare_runtime_evidence() {') if 'cloudbench_prepare_runtime_evidence() {' in cloud else 'cloudbench_prepare_runtime_evidence() { return 0; }'}
+{_extract_fleet_function(cloud, "cloudbench_skip_held_driver_teardown_race() {")}
+{_extract_fleet_function(cloud, "cloudbench_collect_runtime_evidence() {") if "cloudbench_collect_runtime_evidence() {" in cloud else ""}
+{_extract_fleet_function(cloud, "cloudbench_prepare_runtime_evidence() {") if "cloudbench_prepare_runtime_evidence() {" in cloud else "cloudbench_prepare_runtime_evidence() { return 0; }"}
 cloudbench_prepare_runtime_evidence
 {owner_fault}
 {block}
 candidate_run="$OUT_DIR/candidate.json"
 {binding}
-'''
+"""
             started_at = time.monotonic()
             result = subprocess.run(["bash", "-c", script], env=environment, text=True, capture_output=True, timeout=15)
             if fault == "driver-exited-no-request":
@@ -21466,15 +22087,24 @@ candidate_run="$OUT_DIR/candidate.json"
                 assert "driver exited without cleanup acknowledgement" in result.stderr
                 helper_started = time.monotonic()
                 helper = subprocess.run(
-                    [sys.executable, str(CLOUD_SCRIPT.parent / "cloudbench-collect-runtime-evidence.py"),
-                     str(output / "remote-logs"), str(int(ready.read_text())),
-                     "run-token", "fixture-machine", "3"],
-                    env=environment, text=True, capture_output=True, timeout=5,
+                    [
+                        sys.executable,
+                        str(CLOUD_SCRIPT.parent / "cloudbench-collect-runtime-evidence.py"),
+                        str(output / "remote-logs"),
+                        str(int(ready.read_text())),
+                        "run-token",
+                        "fixture-machine",
+                        "3",
+                    ],
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
                 )
                 assert helper.returncode != 0
                 if not (time.monotonic() - helper_started < 2):
                     warnings.warn(
-                        'Intermediate timing diagnostic: time.monotonic() - helper_started < 2',
+                        "Intermediate timing diagnostic: time.monotonic() - helper_started < 2",
                         RuntimeWarning,
                         stacklevel=2,
                     )
@@ -21492,7 +22122,11 @@ candidate_run="$OUT_DIR/candidate.json"
                 else:
                     assert not manifest_path.exists(), "failed capture published a complete manifest"
                 intent = json.loads((output / "runtime-evidence.pending").read_text())
-                assert intent == {"version": 1, "run_token": "wrong-run" if fault == "run" else "run-token", "machine_id": "wrong-machine" if fault == "machine" else "fixture-machine"}
+                assert intent == {
+                    "version": 1,
+                    "run_token": "wrong-run" if fault == "run" else "run-token",
+                    "machine_id": "wrong-machine" if fault == "machine" else "fixture-machine",
+                }
                 return
             assert result.returncode == 0, result.stderr
             if fault == "durability":
@@ -21501,15 +22135,24 @@ candidate_run="$OUT_DIR/candidate.json"
                 assert "logs" in synced and staged, "capture directories were not made durable before acknowledgement"
                 assert synced.index("logs") < synced.index(staged[0]) < synced.index("remote-logs")
             assert not (output / "runtime-evidence.pending").exists()
-            assert json.loads((output / "runtime-evidence.owner.json").read_text()) == {"version": 1, "run_token": "run-token", "machine_id": "fixture-machine"}
+            assert json.loads((output / "runtime-evidence.owner.json").read_text()) == {
+                "version": 1,
+                "run_token": "run-token",
+                "machine_id": "fixture-machine",
+            }
             assert manifest_path.is_file(), "boot collector omitted complete runtime evidence"
             manifest = json.loads(manifest_path.read_text())
             assert manifest["run_token"] == "run-token" and manifest["machine_id"] == "fixture-machine"
             for name, data in original.items():
                 copied = manifest_path.parent / "logs" / name
                 assert copied.read_bytes() == data
-                assert manifest["files"]["logs/" + name] == {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-            assert json.loads((manifest_path.parent / "run.json").read_text())["tasks"][0]["benchmark_status"] == "FAILED"
+                assert manifest["files"]["logs/" + name] == {
+                    "bytes": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+            assert (
+                json.loads((manifest_path.parent / "run.json").read_text())["tasks"][0]["benchmark_status"] == "FAILED"
+            )
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -21527,12 +22170,18 @@ def test_controller_term_collects_original_runtime_evidence_before_proxy_retirem
     logs = context / "logs"
     logs.mkdir(parents=True)
     (context / "services.json").write_text(json.dumps({"status": "stopped", "env": {"worker_processes": 2}}))
-    (context / "run.json").write_text(json.dumps({"run_id": "fixture", "tasks": [{"name": "fixture", "benchmark_status": "FAILED", "passed": False}]}))
+    (context / "run.json").write_text(
+        json.dumps({"run_id": "fixture", "tasks": [{"name": "fixture", "benchmark_status": "FAILED", "passed": False}]})
+    )
     (context / "stack.log").write_text("stack stopped\n")
     (context / "cloudbench-stack-cleanup-run-token.status").write_text("state=clean\ntoken=run-token\n")
     (guest / "cloudbench-driver-clean-run-token.ack").write_text("run-token\n")
     (guest / "cloudbench-driver.state").write_text("exited\n")
-    original = {"backend.log": b"backend complete\n", "worker.log": b"worker complete\n", "worker.1.log": b"second worker complete\n"}
+    original = {
+        "backend.log": b"backend complete\n",
+        "worker.log": b"worker complete\n",
+        "worker.1.log": b"second worker complete\n",
+    }
     for name, data in original.items():
         (logs / name).write_bytes(data)
     output = tmp_path / "out"
@@ -21543,9 +22192,23 @@ def test_controller_term_collects_original_runtime_evidence_before_proxy_retirem
     environment = {**os.environ, "CLOUDBENCH_BARRIER_TOKEN": "fixture-secret", "FLY_MACHINE_ID": "fixture-machine"}
     with (tmp_path / "status.log").open("w") as status_log:
         server = subprocess.Popen(
-            [sys.executable, str(STATUS_SERVER_SCRIPT), "--directory", str(guest), "--port", "0",
-             "--bind", "127.0.0.1", "--run-token", "run-token", "--ready-file", str(ready)],
-            env=environment, stdout=status_log, stderr=subprocess.STDOUT,
+            [
+                sys.executable,
+                str(STATUS_SERVER_SCRIPT),
+                "--directory",
+                str(guest),
+                "--port",
+                "0",
+                "--bind",
+                "127.0.0.1",
+                "--run-token",
+                "run-token",
+                "--ready-file",
+                str(ready),
+            ],
+            env=environment,
+            stdout=status_log,
+            stderr=subprocess.STDOUT,
         )
         try:
             deadline = time.monotonic() + 5
@@ -21554,7 +22217,7 @@ def test_controller_term_collects_original_runtime_evidence_before_proxy_retirem
                 assert time.monotonic() < deadline, "fixture status server did not bind"
                 time.sleep(0.01)
             cloud = CLOUD_SCRIPT.read_text()
-            script = f'''set -euo pipefail
+            script = f"""set -euo pipefail
 OUT_DIR={shlex.quote(str(output))}
 SSH_LOG={shlex.quote(str(driver))}
 CLOUDBENCH_BOOT_LAUNCH=1
@@ -21566,11 +22229,11 @@ FLEET_MACHINE_ID=fixture-machine
 mid=fixture-machine
 LOCAL_STATUS_PORT={int(ready.read_text())}
 export CLOUDBENCH_BARRIER_TOKEN=fixture-secret
-{_extract_fleet_function(cloud, 'cloudbench_skip_held_driver_teardown_race() {')}
-{_extract_fleet_function(cloud, 'cloudbench_collect_runtime_evidence() {')}
-{_extract_fleet_function(cloud, 'cloudbench_prepare_runtime_evidence() {')}
+{_extract_fleet_function(cloud, "cloudbench_skip_held_driver_teardown_race() {")}
+{_extract_fleet_function(cloud, "cloudbench_collect_runtime_evidence() {")}
+{_extract_fleet_function(cloud, "cloudbench_prepare_runtime_evidence() {")}
 cloudbench_prepare_runtime_evidence
-{_extract_fleet_function(cloud, 'stop_on_exit() {')}
+{_extract_fleet_function(cloud, "stop_on_exit() {")}
 release_boot_config_update_slot() {{ :; }}
 confirm_guest_shutdown() {{ return 0; }}
 stop_proxy() {{ kill -TERM {server.pid}; printf '%s\\n' retired > "$OUT_DIR/proxy-retired"; }}
@@ -21581,7 +22244,7 @@ STOP_DONE=0
 trap stop_on_exit EXIT
 trap 'exit 143' TERM
 kill -TERM "$$"
-'''
+"""
             result = subprocess.run(["bash", "-c", script], env=environment, text=True, capture_output=True, timeout=15)
             assert result.returncode == 143, result.stderr
             assert (output / "proxy-retired").is_file()
@@ -21591,10 +22254,15 @@ kill -TERM "$$"
             assert manifest["run_token"] == "run-token" and manifest["machine_id"] == "fixture-machine"
             for name, data in original.items():
                 assert (root / "logs" / name).read_bytes() == data
-                assert manifest["files"]["logs/" + name] == {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                assert manifest["files"]["logs/" + name] == {
+                    "bytes": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
             assert json.loads((root / "run.json").read_text())["tasks"][0]["benchmark_status"] == "FAILED"
             assert json.loads((output / "runtime-evidence.pending").read_text()) == {
-                "version": 1, "run_token": "run-token", "machine_id": "fixture-machine",
+                "version": 1,
+                "run_token": "run-token",
+                "machine_id": "fixture-machine",
             }
         finally:
             if server.poll() is None:
@@ -21625,7 +22293,7 @@ RUN_LOG_TOKEN=run-token
 FLEET_MACHINE_ID=fixture-machine
 CLOUDBENCH_BOOT_LAUNCH=1
 unset CLOUDBENCH_BARRIER_TOKEN
-{_extract_fleet_function(cloud, 'cloudbench_skip_held_driver_teardown_race() {')}
+{_extract_fleet_function(cloud, "cloudbench_skip_held_driver_teardown_race() {")}
 {prepare}
 cloudbench_prepare_runtime_evidence || exit 70
 python3 -c 'import os,re; assert re.fullmatch("[0-9a-f]{{64}}", os.environ.get("CLOUDBENCH_BARRIER_TOKEN", ""))'
@@ -21641,8 +22309,8 @@ touch "$OUT_DIR/guest-started"
     assert json.loads(marker.read_text()) == {"version": 1, "run_token": "run-token", "machine_id": "fixture-machine"}
     assert json.loads(owner.read_text()) == json.loads(marker.read_text())
     assert (tmp_path / "guest-started").exists()
-    call = cloud.index('cloudbench_prepare_runtime_evidence ||')
-    assert call < cloud.index('POST_CONFIG_START_MARKER=', call)
+    call = cloud.index("cloudbench_prepare_runtime_evidence ||")
+    assert call < cloud.index("POST_CONFIG_START_MARKER=", call)
 
 
 def test_boot_launch_dashboard_card_mirror_uses_data_plane() -> None:
@@ -21828,8 +22496,16 @@ if mode == 'fsync_failure':
     os.fsync = failed_fsync
 """)
     for mode in (
-        "allocated", "unsupported", "missing", "nonlinux", "enospc",
-        "io_failure", "fsync_failure", "sparse", "short", "fallback_failure",
+        "allocated",
+        "unsupported",
+        "missing",
+        "nonlinux",
+        "enospc",
+        "io_failure",
+        "fsync_failure",
+        "sparse",
+        "short",
+        "fallback_failure",
     ):
         exact = tmp_path / f"reserve-{mode}"
         calls = tmp_path / f"allocator-{mode}"
@@ -21851,9 +22527,17 @@ reserve_cleanup_disk_space
 """
         result = subprocess.run(
             ["bash", "-c", controlled, "reserve", str(exact)],
-            env={**os.environ, "PYTHONPATH": str(fault_dir), "RESERVE_FAULT": mode,
-                 "ALLOCATOR_CALLS": str(calls), "DD_CALLS": str(writes)},
-            text=True, capture_output=True, check=False, timeout=10,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(fault_dir),
+                "RESERVE_FAULT": mode,
+                "ALLOCATOR_CALLS": str(calls),
+                "DD_CALLS": str(writes),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
         )
         expected_success = mode in ("allocated", "unsupported", "missing", "nonlinux")
         assert (result.returncode == 0) is expected_success, (mode, result.stderr)
@@ -22169,8 +22853,8 @@ def test_cloud_driver_exports_reachable_public_frontend_before_start_barrier() -
     driver = DRIVER_SCRIPT.read_text()
 
     assert "manifest_public_frontend_url()" in driver
-    assert 'curl --parallel --parallel-immediate --fail-early' in driver
-    assert '--location --max-time 5' in driver
+    assert "curl --parallel --parallel-immediate --fail-early" in driver
+    assert "--location --max-time 5" in driver
     assert 'cmp -s "$probe_dir/origin" "$probe_dir/public"' in driver
     assert 'BENCHMARK_FRONTEND_URL="$public_url"' in driver
     assert "export BENCHMARK_FRONTEND_URL" in driver
@@ -22181,7 +22865,20 @@ def test_cloud_driver_exports_reachable_public_frontend_before_start_barrier() -
 
 @pytest.mark.parametrize(
     "scenario",
-    ["missing", "existing", "curl_error", "archive_invalid", "binary_invalid", "arm64", "unsupported", "production", "simulate", "historical", "existing_hangs", "downloaded_hangs"],
+    [
+        "missing",
+        "existing",
+        "curl_error",
+        "archive_invalid",
+        "binary_invalid",
+        "arm64",
+        "unsupported",
+        "production",
+        "simulate",
+        "historical",
+        "existing_hangs",
+        "downloaded_hangs",
+    ],
 )
 def test_cloud_bundled_frontend_ngrok_bootstrap(tmp_path: Path, scenario: str) -> None:
     """Execute the real stack-selection boundary with the observed missing tool."""
@@ -22190,7 +22887,13 @@ def test_cloud_bundled_frontend_ngrok_bootstrap(tmp_path: Path, scenario: str) -
     binaries = tmp_path / "bin"
     binaries.mkdir()
     payload = tmp_path / "ngrok"
-    behavior = "exit 1\n" if scenario == "binary_invalid" else "exec sleep 20\n" if scenario == "downloaded_hangs" else "echo 'ngrok version fixture'\n"
+    behavior = (
+        "exit 1\n"
+        if scenario == "binary_invalid"
+        else "exec sleep 20\n"
+        if scenario == "downloaded_hangs"
+        else "echo 'ngrok version fixture'\n"
+    )
     payload.write_text("#!/bin/sh\n" + behavior)
     payload.chmod(0o755)
     archive = tmp_path / "ngrok.tgz"
@@ -22202,15 +22905,15 @@ def test_cloud_bundled_frontend_ngrok_bootstrap(tmp_path: Path, scenario: str) -
             (binaries / "ngrok").write_text("#!/bin/sh\nexec sleep 20\n")
     architecture = "aarch64" if scenario == "arm64" else "riscv64" if scenario == "unsupported" else "x86_64"
     (binaries / "uname").write_text(
-        f"#!/bin/sh\nif [ \"${{1:-}}\" = -s ]; then echo Linux; else echo {architecture}; fi\n"
+        f'#!/bin/sh\nif [ "${{1:-}}" = -s ]; then echo Linux; else echo {architecture}; fi\n'
     )
     (binaries / "curl").write_text(
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$DOWNLOAD_LEDGER\"\n"
-        "[ \"$SCENARIO\" != curl_error ] || exit 22\n"
+        '#!/bin/sh\nprintf \'%s\\n\' "$@" >> "$DOWNLOAD_LEDGER"\n'
+        '[ "$SCENARIO" != curl_error ] || exit 22\n'
         "while [ $# -gt 0 ]; do\n"
-        "  if [ \"$1\" = -o ]; then\n"
-        "    if [ \"$SCENARIO\" = archive_invalid ]; then printf invalid > \"$2\"; "
-        "else cp \"$NGROK_FIXTURE_ARCHIVE\" \"$2\"; fi\n"
+        '  if [ "$1" = -o ]; then\n'
+        '    if [ "$SCENARIO" = archive_invalid ]; then printf invalid > "$2"; '
+        'else cp "$NGROK_FIXTURE_ARCHIVE" "$2"; fi\n'
         "    exit 0\n"
         "  fi\n  shift\ndone\nexit 2\n"
     )
@@ -22238,10 +22941,22 @@ def test_cloud_bundled_frontend_ngrok_bootstrap(tmp_path: Path, scenario: str) -
     if scenario not in {"production", "simulate"}:
         command += "ngrok version\n"
     ledger = tmp_path / "downloads"
-    env = dict(os.environ, PATH=f"{binaries}:/usr/bin:/bin", NGROK_INSTALL_DIR=str(binaries),
-               NGROK_FIXTURE_ARCHIVE=str(archive), DOWNLOAD_LEDGER=str(ledger), SCENARIO=scenario)
-    with subprocess.Popen(["/bin/bash", "-c", command], env=env, text=True, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, start_new_session=True) as process:
+    env = dict(
+        os.environ,
+        PATH=f"{binaries}:/usr/bin:/bin",
+        NGROK_INSTALL_DIR=str(binaries),
+        NGROK_FIXTURE_ARCHIVE=str(archive),
+        DOWNLOAD_LEDGER=str(ledger),
+        SCENARIO=scenario,
+    )
+    with subprocess.Popen(
+        ["/bin/bash", "-c", command],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    ) as process:
         try:
             stdout, stderr = process.communicate(timeout=10)
         except subprocess.TimeoutExpired:
@@ -22263,7 +22978,9 @@ def test_cloud_bundled_frontend_ngrok_bootstrap(tmp_path: Path, scenario: str) -
         assert not (binaries / "ngrok").exists()
 
 
-@pytest.mark.parametrize("scenario", ["healthy", "http511", "redirect511", "interstitial200", "redirecthealthy", "wrong_html"])
+@pytest.mark.parametrize(
+    "scenario", ["healthy", "http511", "redirect511", "interstitial200", "redirecthealthy", "wrong_html"]
+)
 def test_cloud_bundled_frontend_readiness_uses_browser_identity(tmp_path: Path, scenario: str) -> None:
     """Only the browser-visible response matching this origin admits a task."""
     seen = []
@@ -22306,9 +23023,16 @@ def test_cloud_bundled_frontend_readiness_uses_browser_identity(tmp_path: Path, 
             + driver[start:end]
             + "wait_for_benchmark_frontend_url\n"
         )
-        result = subprocess.run(["/bin/bash", "-c", command], text=True, capture_output=True, timeout=10,
-                                env=dict(os.environ, NO_PROXY="localhost,127.0.0.1", no_proxy="localhost,127.0.0.1"))
-        assert result.returncode == (0 if scenario in {"healthy", "redirecthealthy"} else 1), result.stdout + result.stderr
+        result = subprocess.run(
+            ["/bin/bash", "-c", command],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            env=dict(os.environ, NO_PROXY="localhost,127.0.0.1", no_proxy="localhost,127.0.0.1"),
+        )
+        assert result.returncode == (0 if scenario in {"healthy", "redirecthealthy"} else 1), (
+            result.stdout + result.stderr
+        )
         assert any(origin and path == "/test_payment" for origin, path, _ in seen)
         assert any(not origin and path == "/test_payment" for origin, path, _ in seen)
         assert all("Mozilla/5.0" in user_agent for _, _, user_agent in seen)
@@ -23077,11 +23801,25 @@ fleet_registry_volume_for_id {machine}
     assert receipt["new_attached_machine_id"] == machine
 
 
-def _migration_command(registry: Path, audit: Path, clone: str, machine: str, *, action: str = "reconcile") -> list[str]:
+def _migration_command(
+    registry: Path, audit: Path, clone: str, machine: str, *, action: str = "reconcile"
+) -> list[str]:
     return [
-        sys.executable, str(ROOT / "scripts/cloudbench-volume-migration.py"), action,
-        "--registry", str(registry), "--audit-root", str(audit.parent), "--app", "bench-app",
-        "--clone", clone, "--machine", machine, "--protected-volume", "vol_warm",
+        sys.executable,
+        str(ROOT / "scripts/cloudbench-volume-migration.py"),
+        action,
+        "--registry",
+        str(registry),
+        "--audit-root",
+        str(audit.parent),
+        "--app",
+        "bench-app",
+        "--clone",
+        clone,
+        "--machine",
+        machine,
+        "--protected-volume",
+        "vol_warm",
     ]
 
 
@@ -23099,8 +23837,12 @@ def test_volume_migration_journal_recovers_interrupted_publication(tmp_path: Pat
     environment = os.environ.copy()
     environment.update(CLOUDBENCH_TEST_MODE="1", CLOUDBENCH_TEST_MIGRATION_CRASH=crash_window)
     interrupted = subprocess.run(
-        _migration_command(registry, audit, clone, machine), input=json.dumps(_migration_evidence(machine)),
-        text=True, capture_output=True, timeout=10, env=environment,
+        _migration_command(registry, audit, clone, machine),
+        input=json.dumps(_migration_evidence(machine)),
+        text=True,
+        capture_output=True,
+        timeout=10,
+        env=environment,
     )
     assert interrupted.returncode != 0
     journal = audit / "volume-migrations" / machine / "vol_old.json"
@@ -23109,22 +23851,50 @@ def test_volume_migration_journal_recovers_interrupted_publication(tmp_path: Pat
     expected_audit_volume = "vol_new" if crash_window == "audit" else "vol_old"
     assert f"volume_id={expected_audit_volume}\n" in (audit / "fresh" / clone).read_text()
     for _ in range(2):
-        resumed = subprocess.run(_migration_command(registry, audit, clone, machine, action="resume"), text=True, capture_output=True, timeout=10)
+        resumed = subprocess.run(
+            _migration_command(registry, audit, clone, machine, action="resume"),
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
         assert resumed.returncode == 0, resumed.stderr
         assert "volume_id=vol_new\n" in (registry / "clones" / clone).read_text()
         assert "volume_id=vol_new\n" in (audit / "fresh" / clone).read_text()
         assert journal.read_bytes() == immutable_receipt
     # A second host migration appends a new terminal-volume receipt; it cannot
     # rewrite the first receipt or lose the original volume in the final audit.
-    second = subprocess.run(_migration_command(registry, audit, clone, machine), input=json.dumps(_migration_evidence(machine, "vol_new", "vol_newer")), text=True, capture_output=True, timeout=10)
+    second = subprocess.run(
+        _migration_command(registry, audit, clone, machine),
+        input=json.dumps(_migration_evidence(machine, "vol_new", "vol_newer")),
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
     assert second.returncode == 0, second.stderr
     assert journal.read_bytes() == immutable_receipt
-    verify = [sys.executable, str(ROOT / "scripts/cloudbench-volume-migration.py"), "verify", "--audit", str(audit), "--owner", registry.name, "--run-id", "fixture-run", "--app", "bench-app"]
+    verify = [
+        sys.executable,
+        str(ROOT / "scripts/cloudbench-volume-migration.py"),
+        "verify",
+        "--audit",
+        str(audit),
+        "--owner",
+        registry.name,
+        "--run-id",
+        "fixture-run",
+        "--app",
+        "bench-app",
+    ]
     assert subprocess.run(verify, capture_output=True, timeout=10).returncode == 0
     fresh = audit / "fresh" / clone
     fresh.write_text(fresh.read_text().replace("disposition=owned", "disposition=destroyed-provider-retained"))
     (registry / "clones" / clone).unlink()
-    assert subprocess.run(_migration_command(registry, audit, clone, machine, action="resume"), capture_output=True, timeout=10).returncode == 0
+    assert (
+        subprocess.run(
+            _migration_command(registry, audit, clone, machine, action="resume"), capture_output=True, timeout=10
+        ).returncode
+        == 0
+    )
     assert subprocess.run(verify, capture_output=True, timeout=10).returncode == 0
     # Corrupt terminal evidence must prevent sealing a teardown audit.
     invalid = json.loads(journal.read_text())
@@ -23133,11 +23903,24 @@ def test_volume_migration_journal_recovers_interrupted_publication(tmp_path: Pat
     assert subprocess.run(verify, capture_output=True, timeout=10).returncode != 0
 
 
-@pytest.mark.parametrize("fault", [
-    "live-old", "attached-old", "missing-old-attachment", "foreign-new", "wrong-old-id",
-    "multiple-mounts", "warm-volume", "foreign-owner", "registry-conflict", "registry-symlink",
-    "audit-symlink", "journal-symlink", "duplicate-provider-key",
-])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "live-old",
+        "attached-old",
+        "missing-old-attachment",
+        "foreign-new",
+        "wrong-old-id",
+        "multiple-mounts",
+        "warm-volume",
+        "foreign-owner",
+        "registry-conflict",
+        "registry-symlink",
+        "audit-symlink",
+        "journal-symlink",
+        "duplicate-provider-key",
+    ],
+)
 def test_volume_migration_rejects_ambiguous_or_foreign_authority(tmp_path: Path, fault: str) -> None:
     registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
     evidence = _migration_evidence(machine)
@@ -23175,7 +23958,9 @@ def test_volume_migration_rejects_ambiguous_or_foreign_authority(tmp_path: Path,
     request = json.dumps(evidence)
     if fault == "duplicate-provider-key":
         request = request.replace('"state": "pending_destroy"', '"state": "created", "state": "pending_destroy"')
-    result = subprocess.run(_migration_command(registry, audit, clone, machine), input=request, text=True, capture_output=True, timeout=10)
+    result = subprocess.run(
+        _migration_command(registry, audit, clone, machine), input=request, text=True, capture_output=True, timeout=10
+    )
     assert result.returncode != 0, f"unsafe {fault} migration was accepted"
     assert record.read_bytes() == before_record
     assert fresh.read_bytes() == before_fresh
@@ -23184,13 +23969,23 @@ def test_volume_migration_rejects_ambiguous_or_foreign_authority(tmp_path: Path,
 def test_guest_recovery_accepts_proven_migration_before_authenticated_shutdown(tmp_path: Path) -> None:
     registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
     fleet = fleet_source_text()
-    functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
-        "registry_meta_value() {", "fleet_registry_resume_volume_migrations() {",
-        "fleet_registry_reconcile_mounted_volume() {", "machine_guest_recovery_configuration() {",
-    ))
-    config = {"mounts": [{"volume": "vol_new", "path": "/data"}], "env": {
-        "CLOUDBENCH_BARRIER_TOKEN": "fixture-barrier", "CLOUDBENCH_RUN_TOKEN": "fixture-run-token", "CLOUDBENCH_STATUS_PORT": "43127",
-    }}
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "fleet_registry_resume_volume_migrations() {",
+            "fleet_registry_reconcile_mounted_volume() {",
+            "machine_guest_recovery_configuration() {",
+        )
+    )
+    config = {
+        "mounts": [{"volume": "vol_new", "path": "/data"}],
+        "env": {
+            "CLOUDBENCH_BARRIER_TOKEN": "fixture-barrier",
+            "CLOUDBENCH_RUN_TOKEN": "fixture-run-token",
+            "CLOUDBENCH_STATUS_PORT": "43127",
+        },
+    }
     script = f'''set -eu
 ROOT_DIR={shlex.quote(str(ROOT))}
 VOLUME_MIGRATION_HELPER="$ROOT_DIR/scripts/cloudbench-volume-migration.py"
@@ -23216,24 +24011,36 @@ machine_guest_recovery_configuration {machine} vol_old {shlex.quote(str(registry
 
 
 @pytest.mark.parametrize("cleanup_exit", [None, 0, 143])
-def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(tmp_path: Path, cleanup_exit: int | None) -> None:
+def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(
+    tmp_path: Path, cleanup_exit: int | None
+) -> None:
     registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
     fleet = fleet_source_text()
-    functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
-        "registry_meta_value() {", "fleet_registry_resume_volume_migrations() {",
-        "fleet_registry_reconcile_mounted_volume() {", "reap_registry_clones() {",
-        "fleet_audit_update_registry_clone() {", "fleet_registry_remove_if_empty() {",
-        "fleet_audit_finalize_provider_teardown() {", "reap_machine() {",
-        "reap_volume() {", "volume_inventory_contains_id() {", "cleanup() {",
-        "cloudbench_fsync_directory() {", "cloudbench_collect_remaining_runtime_evidence() {",
-    ))
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "fleet_registry_resume_volume_migrations() {",
+            "fleet_registry_reconcile_mounted_volume() {",
+            "reap_registry_clones() {",
+            "fleet_audit_update_registry_clone() {",
+            "fleet_registry_remove_if_empty() {",
+            "fleet_audit_finalize_provider_teardown() {",
+            "reap_machine() {",
+            "reap_volume() {",
+            "volume_inventory_contains_id() {",
+            "cleanup() {",
+            "cloudbench_fsync_directory() {",
+            "cloudbench_collect_remaining_runtime_evidence() {",
+        )
+    )
     workspace = tmp_path / "workspace"
     runs = workspace / ".context/fleet/runs"
     calls = tmp_path / "calls"
     destroyed = tmp_path / "destroyed"
     script = f'''set -uo pipefail
 ROOT_DIR={shlex.quote(str(workspace))}
-VOLUME_MIGRATION_HELPER={shlex.quote(str(ROOT / 'scripts/cloudbench-volume-migration.py'))}
+VOLUME_MIGRATION_HELPER={shlex.quote(str(ROOT / "scripts/cloudbench-volume-migration.py"))}
 APP=bench-app
 FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
@@ -23245,7 +24052,7 @@ FLEET_OWNER_TOKEN={registry.name}
 RUN_ID=fixture-run
 RUNS_ROOT={shlex.quote(str(runs))}
 FLEET_DIR="$RUNS_ROOT/$RUN_ID"
-GIT_COMMON_DIR={shlex.quote(str(tmp_path / 'common'))}
+GIT_COMMON_DIR={shlex.quote(str(tmp_path / "common"))}
 POOL_CLAIMS_DIR="$GIT_COMMON_DIR/claims"
 PROVISION_POOL=1
 CALLS={shlex.quote(str(calls))}
@@ -23282,9 +24089,9 @@ fleet_registry_remove_if_empty "$REGISTRY" || exit 85
         snapshot = tmp_path / "owned-snapshot"
         snapshot.mkdir()
         shutil.copy2(ROOT / "scripts/cloudbench-volume-migration.py", snapshot)
-        script = script[:script.index('reap_registry_clones "$REGISTRY" forced || exit 81')]
+        script = script[: script.index('reap_registry_clones "$REGISTRY" forced || exit 81')]
         script += f"""
-VOLUME_MIGRATION_HELPER={shlex.quote(str(snapshot / 'cloudbench-volume-migration.py'))}
+VOLUME_MIGRATION_HELPER={shlex.quote(str(snapshot / "cloudbench-volume-migration.py"))}
 FLEET_REGISTRY_DIR="$REGISTRY"
 FLEET_REGISTRY_PUBLISHED=1
 FLEET_EXECUTION_COMPLETED=1
@@ -23309,7 +24116,7 @@ cleanup_owned_script_snapshot() {{{{ rm -r {shlex.quote(str(snapshot))}; }}}}
 trap cleanup EXIT
 trap 'exit 143' TERM
 """.replace("{{", "{").replace("}}", "}")
-        script += 'kill -TERM "$$"\n' if cleanup_exit == 143 else 'exit 0\n'
+        script += 'kill -TERM "$$"\n' if cleanup_exit == 143 else "exit 0\n"
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=20)
     assert result.returncode == (cleanup_exit or 0), result.stderr + result.stdout
     if cleanup_exit is not None:
@@ -23323,7 +24130,9 @@ trap 'exit 143' TERM
     assert "volume_id=vol_new\n" in (audit / "fresh" / clone).read_text()
     journal = audit / "volume-migrations" / machine / "vol_old.json"
     assert journal.is_file()
-    assert (runs / "fixture-run/teardown-ownership/volume-migrations" / machine / "vol_old.json").read_bytes() == journal.read_bytes()
+    assert (
+        runs / "fixture-run/teardown-ownership/volume-migrations" / machine / "vol_old.json"
+    ).read_bytes() == journal.read_bytes()
     assert "volumes destroy vol_old" not in calls.read_text()
     assert "volumes destroy vol_new" in calls.read_text()
 
@@ -23331,7 +24140,13 @@ trap 'exit 143' TERM
 @pytest.mark.parametrize("registry_present", [True, False])
 def test_migration_resume_preserves_interrupted_pool_handoff(tmp_path: Path, registry_present: bool) -> None:
     registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
-    first = subprocess.run(_migration_command(registry, audit, clone, machine), input=json.dumps(_migration_evidence(machine)), text=True, capture_output=True, timeout=10)
+    first = subprocess.run(
+        _migration_command(registry, audit, clone, machine),
+        input=json.dumps(_migration_evidence(machine)),
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
     assert first.returncode == 0, first.stderr
     fresh = audit / "fresh" / clone
     fresh.write_text(fresh.read_text().replace("disposition=owned", "disposition=transfer-pending-stopped"))
@@ -23340,7 +24155,9 @@ def test_migration_resume_preserves_interrupted_pool_handoff(tmp_path: Path, reg
     before_record = record.read_bytes()
     if not registry_present:
         record.unlink()
-    result = subprocess.run(_migration_command(registry, audit, clone, machine, action="resume"), text=True, capture_output=True, timeout=10)
+    result = subprocess.run(
+        _migration_command(registry, audit, clone, machine, action="resume"), text=True, capture_output=True, timeout=10
+    )
     assert result.returncode == 0, result.stderr
     assert fresh.read_bytes() == before_audit
     assert record.exists() is registry_present
@@ -23790,7 +24607,7 @@ def test_private_fleet_source_recovery_requires_bound_manifest_without_env(tmp_p
     guard = _extract_fleet_function(fleet, "private_source_allows_provider_call() {")
     meta = _extract_fleet_function(fleet, "registry_meta_value() {")
     start = fleet.index('    recovery_registry="$FLEET_OWNERSHIP_ROOT/$RECOVER_OWNER_TOKEN"')
-    end = fleet.index('    if exact_recovery_is_pool_only', start)
+    end = fleet.index("    if exact_recovery_is_pool_only", start)
     script = f"""set -uo pipefail
 APP=navi-whisper-lux-bench
 FLEET_OWNERSHIP_ROOT="$FIXTURE/registries"
@@ -23838,7 +24655,12 @@ def _private_source_identity_fixture(tmp_path: Path, *, private: bool = True):
     (audit / "by-machine-id" / machine).unlink()
     (registry / "clones" / clone).write_text(f"name={clone}\n")
     fresh = audit / "fresh" / clone
-    fresh.write_text(fresh.read_text().replace(f"machine_id={machine}\n", "machine_id=\n").replace("volume_id=vol_old\n", "volume_id=\n").replace("disposition=owned", "disposition=ownership-pending"))
+    fresh.write_text(
+        fresh.read_text()
+        .replace(f"machine_id={machine}\n", "machine_id=\n")
+        .replace("volume_id=vol_old\n", "volume_id=\n")
+        .replace("disposition=owned", "disposition=ownership-pending")
+    )
     digest = ""
     if private:
         result, _ = _private_source_preflight_fixture(tmp_path / "capture")
@@ -23854,14 +24676,19 @@ def _private_source_identity_fixture(tmp_path: Path, *, private: bool = True):
 
 def _private_source_identity_command(registry: Path, audit: Path, body: str):
     fleet = fleet_source_text()
-    functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
-        "registry_meta_value() {", "fleet_audit_update_registry_clone() {",
-        "registry_record_machine_identity() {", "fleet_registry_record_id() {",
-        "fleet_audit_finalize_provider_teardown() {",
-    ))
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "fleet_audit_update_registry_clone() {",
+            "registry_record_machine_identity() {",
+            "fleet_registry_record_id() {",
+            "fleet_audit_finalize_provider_teardown() {",
+        )
+    )
     workspace = registry.parent.parent / "workspace"
-    script = f'''set -eu
-SOURCE_HELPER={shlex.quote(str(ROOT / 'scripts/cloudbench-source.py'))}
+    script = f"""set -eu
+SOURCE_HELPER={shlex.quote(str(ROOT / "scripts/cloudbench-source.py"))}
 FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
 FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
@@ -23874,38 +24701,54 @@ FLEET_DIR="$RUNS_ROOT/$RUN_ID"
 APP=navi-whisper-lux-bench
 OWNED_CLONES_FILE="$FLEET_TEARDOWN_OWNERSHIP_DIR/owned-clones.ids"
 OWNED_CLONE_NAMES_FILE="$FLEET_TEARDOWN_OWNERSHIP_DIR/owned-clones.names"
-POOL_CLAIMS_DIR={shlex.quote(str(registry.parent.parent / 'claims'))}
-GIT_COMMON_DIR={shlex.quote(str(registry.parent.parent / 'common'))}
+POOL_CLAIMS_DIR={shlex.quote(str(registry.parent.parent / "claims"))}
+GIT_COMMON_DIR={shlex.quote(str(registry.parent.parent / "common"))}
 PROVISION_POOL=1
 FLY() {{ printf unexpected-provider-call >&2; return 99; }}
 {functions}
 {body}
-'''
+"""
     return subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=10, check=False)
 
 
 @pytest.mark.parametrize("private", [False, True])
 @pytest.mark.parametrize("source_kind", ["base", "owned-primary"])
-def test_private_fleet_source_identity_promotion_preserves_original_owner(tmp_path: Path, private: bool, source_kind: str) -> None:
+def test_private_fleet_source_identity_promotion_preserves_original_owner(
+    tmp_path: Path, private: bool, source_kind: str
+) -> None:
     registry, audit, clone, machine, digest = _private_source_identity_fixture(tmp_path, private=private)
     if source_kind == "owned-primary":
         parent_clone, parent_id = "cloudbench-primary", "feedface000002"
-        (audit / "expected-fresh" / parent_clone).write_text(f"clone_name={parent_clone}\nsource_machine_id=feedface000001\n")
+        (audit / "expected-fresh" / parent_clone).write_text(
+            f"clone_name={parent_clone}\nsource_machine_id=feedface000001\n"
+        )
         child = audit / "fresh" / clone
-        (audit / "fresh" / parent_clone).write_text(child.read_text().replace(f"clone_name={clone}", f"clone_name={parent_clone}").replace("machine_id=\n", f"machine_id={parent_id}\n").replace("volume_id=\n", "volume_id=vol_parent\n").replace("disposition=ownership-pending", "disposition=owned"))
+        (audit / "fresh" / parent_clone).write_text(
+            child.read_text()
+            .replace(f"clone_name={clone}", f"clone_name={parent_clone}")
+            .replace("machine_id=\n", f"machine_id={parent_id}\n")
+            .replace("volume_id=\n", "volume_id=vol_parent\n")
+            .replace("disposition=ownership-pending", "disposition=owned")
+        )
         (audit / "by-machine-id" / parent_id).write_text(parent_clone + "\n")
         (registry / "clones" / parent_clone).write_text(f"name={parent_clone}\nid={parent_id}\nvolume_id=vol_parent\n")
         for path in (child, audit / "expected-fresh" / clone):
-            path.write_text(path.read_text().replace("source_machine_id=feedface000001", f"source_machine_id={parent_id}"))
+            path.write_text(
+                path.read_text().replace("source_machine_id=feedface000001", f"source_machine_id={parent_id}")
+            )
     before_meta = (audit / "meta").read_bytes()
-    result = _private_source_identity_command(registry, audit, f'''
+    result = _private_source_identity_command(
+        registry,
+        audit,
+        f"""
 # Recovery must use the original owner records, never the successor's source.
-PRIVATE_SOURCE_SHA256={'e' * 64}
+PRIVATE_SOURCE_SHA256={"e" * 64}
 PRIVATE_SOURCE_FILE=/does-not-exist
-FLEET_OWNER_TOKEN={'b' * 32}
+FLEET_OWNER_TOKEN={"b" * 32}
 RUN_ID=successor-run
 fleet_registry_record_id {clone} {machine} vol_child
-''')
+""",
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     assert (registry / "clones" / clone).read_text() == f"name={clone}\nid={machine}\nvolume_id=vol_child\n"
     assert (audit / "by-machine-id" / machine).read_text() == clone + "\n"
@@ -23917,13 +24760,28 @@ fleet_registry_record_id {clone} {machine} vol_child
         assert hashlib.sha256((audit / "source-manifest.json").read_bytes()).hexdigest() == digest
 
 
-@pytest.mark.parametrize("corrupt", [
-    "unknown-key", "duplicate-key", "invalid-digest", "audit-digest-mismatch",
-    "registry-digest-missing", "audit-digest-missing", "registry-file-missing", "audit-file-missing",
-    "registry-file-changed", "audit-file-changed", "registry-file-symlink", "audit-file-symlink",
-    "registry-file-fifo", "audit-file-fifo",
-    "invalid-schema", "invalid-app", "manifest-oversized",
-])
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        "unknown-key",
+        "duplicate-key",
+        "invalid-digest",
+        "audit-digest-mismatch",
+        "registry-digest-missing",
+        "audit-digest-missing",
+        "registry-file-missing",
+        "audit-file-missing",
+        "registry-file-changed",
+        "audit-file-changed",
+        "registry-file-symlink",
+        "audit-file-symlink",
+        "registry-file-fifo",
+        "audit-file-fifo",
+        "invalid-schema",
+        "invalid-app",
+        "manifest-oversized",
+    ],
+)
 def test_private_fleet_source_identity_rejects_unbound_metadata(tmp_path: Path, corrupt: str) -> None:
     registry, audit, clone, machine, digest = _private_source_identity_fixture(tmp_path)
     target = registry if corrupt.startswith("registry-") else audit
@@ -23962,8 +24820,15 @@ def test_private_fleet_source_identity_rejects_unbound_metadata(tmp_path: Path, 
         for directory in (registry, audit):
             (directory / "source-manifest.json").write_bytes(payload)
             (directory / "meta").write_text((directory / "meta").read_text().replace(digest, new_digest))
+
     def snapshot():
-        return {str(path): ("symlink", str(path.readlink())) if path.is_symlink() else ("file", path.read_bytes()) for directory in (registry, audit) for path in directory.rglob("*") if path.is_file() or path.is_symlink()}
+        return {
+            str(path): ("symlink", str(path.readlink())) if path.is_symlink() else ("file", path.read_bytes())
+            for directory in (registry, audit)
+            for path in directory.rglob("*")
+            if path.is_file() or path.is_symlink()
+        }
+
     before = snapshot()
     result = _private_source_identity_command(registry, audit, f"fleet_registry_record_id {clone} {machine} vol_child")
     assert result.returncode != 0, f"accepted {corrupt}"
@@ -23973,19 +24838,27 @@ def test_private_fleet_source_identity_rejects_unbound_metadata(tmp_path: Path, 
 
 @pytest.mark.parametrize("private", [False, True])
 @pytest.mark.parametrize("successor_source", ["unset", "different"])
-def test_private_fleet_source_terminal_audit_preserves_digest(tmp_path: Path, private: bool, successor_source: str) -> None:
+def test_private_fleet_source_terminal_audit_preserves_digest(
+    tmp_path: Path, private: bool, successor_source: str
+) -> None:
     registry, audit, clone, _, digest = _private_source_identity_fixture(tmp_path, private=private)
     fresh = audit / "fresh" / clone
     fresh.write_text(fresh.read_text().replace("disposition=ownership-pending", "disposition=not-allocated-verified"))
     original_manifest = (audit / "source-manifest.json").read_bytes() if private else None
-    setup = "unset PRIVATE_SOURCE_SHA256 PRIVATE_SOURCE_FILE" if successor_source == "unset" else f"PRIVATE_SOURCE_SHA256={'e' * 64}\nPRIVATE_SOURCE_FILE=/does-not-exist"
+    setup = (
+        "unset PRIVATE_SOURCE_SHA256 PRIVATE_SOURCE_FILE"
+        if successor_source == "unset"
+        else f"PRIVATE_SOURCE_SHA256={'e' * 64}\nPRIVATE_SOURCE_FILE=/does-not-exist"
+    )
     result = _private_source_identity_command(registry, audit, setup + "\nfleet_audit_finalize_provider_teardown\n")
     assert result.returncode == 0, result.stdout + result.stderr
     published = tmp_path / "workspace/.context/fleet/runs/fixture-run/teardown-ownership"
     assert "status=provider-teardown-verified\n" in (audit / "meta").read_text()
     assert (published / "meta").read_bytes() == (audit / "meta").read_bytes()
     if private:
-        assert f"source_manifest_sha256={digest}\n" in (audit / "meta").read_text(), "terminal audit lost original source identity"
+        assert f"source_manifest_sha256={digest}\n" in (audit / "meta").read_text(), (
+            "terminal audit lost original source identity"
+        )
         assert (audit / "source-manifest.json").read_bytes() == original_manifest
         assert (published / "source-manifest.json").read_bytes() == original_manifest
     else:
@@ -23995,7 +24868,12 @@ def test_private_fleet_source_terminal_audit_preserves_digest(tmp_path: Path, pr
 def _private_source_guest_plan_fixture(tmp_path: Path, *, private: bool = True, worker: bool = False):
     registry, audit, clone, machine, digest = _private_source_identity_fixture(tmp_path, private=private)
     fresh = audit / "fresh" / clone
-    fresh.write_text(fresh.read_text().replace("machine_id=\n", f"machine_id={machine}\n").replace("volume_id=\n", "volume_id=vol_child\n").replace("disposition=ownership-pending", "disposition=owned"))
+    fresh.write_text(
+        fresh.read_text()
+        .replace("machine_id=\n", f"machine_id={machine}\n")
+        .replace("volume_id=\n", "volume_id=vol_child\n")
+        .replace("disposition=ownership-pending", "disposition=owned")
+    )
     (registry / "clones" / clone).write_text(f"name={clone}\nid={machine}\nvolume_id=vol_child\n")
     (audit / "by-machine-id" / machine).write_text(clone + "\n")
     output = tmp_path / "workspace/.context/fleet/runs/fixture-run/bench-owned"
@@ -24007,7 +24885,13 @@ def _private_source_guest_plan_fixture(tmp_path: Path, *, private: bool = True, 
         worker_name, worker_id = "cloudbench-worker", "deadbeef000002"
         (registry / "clones" / worker_name).write_text(f"name={worker_name}\nid={worker_id}\nvolume_id=vol_worker\n")
         (audit / "expected-fresh" / worker_name).write_text(f"clone_name={worker_name}\nsource_machine_id={machine}\n")
-        (audit / "fresh" / worker_name).write_text(fresh.read_text().replace(f"clone_name={clone}", f"clone_name={worker_name}").replace("source_machine_id=feedface000001", f"source_machine_id={machine}").replace(f"\nmachine_id={machine}\n", f"\nmachine_id={worker_id}\n").replace("vol_child", "vol_worker"))
+        (audit / "fresh" / worker_name).write_text(
+            fresh.read_text()
+            .replace(f"clone_name={clone}", f"clone_name={worker_name}")
+            .replace("source_machine_id=feedface000001", f"source_machine_id={machine}")
+            .replace(f"\nmachine_id={machine}\n", f"\nmachine_id={worker_id}\n")
+            .replace("vol_child", "vol_worker")
+        )
         (audit / "by-machine-id" / worker_id).write_text(worker_name + "\n")
         (output / "worker-clones.ids").write_text(worker_id + "\n")
         expected.append(f"worker\tbench-owned\t{worker_name}\t{worker_id}\tvol_worker\t{output}\t61001")
@@ -24017,24 +24901,36 @@ def _private_source_guest_plan_fixture(tmp_path: Path, *, private: bool = True, 
 def _private_source_guest_plan_command(registry: Path, audit: Path, plan: Path):
     build = _extract_fleet_function(fleet_source_text(), "fleet_registry_build_guest_recovery_plan() {")
     return subprocess.run(
-        ["bash", "-c", f'''set -eu
+        [
+            "bash",
+            "-c",
+            f"""set -eu
 APP=navi-whisper-lux-bench
 FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
-SOURCE_HELPER={shlex.quote(str(ROOT / 'scripts/cloudbench-source.py'))}
+SOURCE_HELPER={shlex.quote(str(ROOT / "scripts/cloudbench-source.py"))}
 # A successor's environment cannot replace the original owner's captured source.
-PRIVATE_SOURCE_SHA256={'e' * 64}
+PRIVATE_SOURCE_SHA256={"e" * 64}
 PRIVATE_SOURCE_FILE=/does-not-exist
 FLY() {{ printf unexpected-provider-call >&2; return 99; }}
 {build}
 fleet_registry_build_guest_recovery_plan "$1" "$2"
-''', "private-source-recovery-plan", str(registry), str(plan)],
-        text=True, capture_output=True, check=False, timeout=10,
+""",
+            "private-source-recovery-plan",
+            str(registry),
+            str(plan),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
     )
 
 
 @pytest.mark.parametrize("private", [False, True])
 @pytest.mark.parametrize("worker", [False, True])
-def test_private_fleet_source_guest_recovery_plan_keeps_exact_mapping(tmp_path: Path, private: bool, worker: bool) -> None:
+def test_private_fleet_source_guest_recovery_plan_keeps_exact_mapping(
+    tmp_path: Path, private: bool, worker: bool
+) -> None:
     registry, audit, _, expected = _private_source_guest_plan_fixture(tmp_path, private=private, worker=worker)
     before = {str(p): p.read_bytes() for d in (registry, audit) for p in d.rglob("*") if p.is_file()}
     plan = tmp_path / "plan"
@@ -24055,9 +24951,7 @@ def test_capacity_rejected_guest_without_proxy_remains_mapped_for_exact_recovery
     if invalid == "accepted-start":
         (output / "post-config-start.accepted").write_text("feedface000001\n")
     if invalid != "missing-start-log":
-        (output / "cloudbench-boot-start.log").write_text(
-            "Error: could not start machine due to lack of capacity\n"
-        )
+        (output / "cloudbench-boot-start.log").write_text("Error: could not start machine due to lack of capacity\n")
     plan = tmp_path / "plan"
     result = _private_source_guest_plan_command(registry, audit, plan)
     if invalid is None:
@@ -24068,7 +24962,19 @@ def test_capacity_rejected_guest_without_proxy_remains_mapped_for_exact_recovery
         assert not plan.exists()
 
 
-@pytest.mark.parametrize("corrupt", [None, "wrong-owner", "wrong-volume", "wrong-shutdown", "changed-log", "accepted-start", "worker-clone", "missing-receipt"])
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        None,
+        "wrong-owner",
+        "wrong-volume",
+        "wrong-shutdown",
+        "changed-log",
+        "accepted-start",
+        "worker-clone",
+        "missing-receipt",
+    ],
+)
 def test_published_rejected_start_receipt_maps_only_exact_zero_credit_guest(
     tmp_path: Path, corrupt: str | None
 ) -> None:
@@ -24080,11 +24986,16 @@ def test_published_rejected_start_receipt_maps_only_exact_zero_credit_guest(
     start_log = b"Error: could not start machine due to lack of capacity\n"
     (output / "cloudbench-boot-start.log").write_bytes(start_log)
     receipt = {
-        "version": 1, "kind": "provider-rejected-no-guest-start",
-        "fleet_owner_token": registry.name, "run_id": "fixture-run",
-        "bench": "bench-owned", "machine_id": machine,
-        "volume_id": "vol_child", "run_token": registry.name + "-0",
-        "provider_state": "stopped", "proof_credit": 0,
+        "version": 1,
+        "kind": "provider-rejected-no-guest-start",
+        "fleet_owner_token": registry.name,
+        "run_id": "fixture-run",
+        "bench": "bench-owned",
+        "machine_id": machine,
+        "volume_id": "vol_child",
+        "run_token": registry.name + "-0",
+        "provider_state": "stopped",
+        "proof_credit": 0,
         "start_log_sha256": hashlib.sha256(start_log).hexdigest(),
     }
     if corrupt == "wrong-owner":
@@ -24093,9 +25004,7 @@ def test_published_rejected_start_receipt_maps_only_exact_zero_credit_guest(
         receipt["volume_id"] = "vol_other"
     if corrupt != "missing-receipt":
         (output / "guest-start-rejected.confirmed").write_text(json.dumps(receipt) + "\n")
-    (output / "guest-shutdown.confirmed").write_text(
-        "other-run\n" if corrupt == "wrong-shutdown" else "fixture-run\n"
-    )
+    (output / "guest-shutdown.confirmed").write_text("other-run\n" if corrupt == "wrong-shutdown" else "fixture-run\n")
     if corrupt == "changed-log":
         (output / "cloudbench-boot-start.log").write_bytes(start_log + b"changed\n")
     elif corrupt == "accepted-start":
@@ -24112,14 +25021,34 @@ def test_published_rejected_start_receipt_maps_only_exact_zero_credit_guest(
         assert not plan.exists()
 
 
-@pytest.mark.parametrize("corrupt", [
-    "unknown-key", "duplicate-key", "invalid-digest", "audit-digest-mismatch",
-    "registry-digest-missing", "audit-digest-missing", "both-digests-missing",
-    "registry-file-missing", "audit-file-missing", "registry-file-changed", "audit-file-changed",
-    "registry-file-symlink", "audit-file-symlink", "registry-file-fifo", "audit-file-fifo",
-    "invalid-schema", "invalid-app", "manifest-oversized", "audit-owner", "audit-run",
-    "audit-app", "audit-directory-symlink", "wrong-audit-root",
-])
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        "unknown-key",
+        "duplicate-key",
+        "invalid-digest",
+        "audit-digest-mismatch",
+        "registry-digest-missing",
+        "audit-digest-missing",
+        "both-digests-missing",
+        "registry-file-missing",
+        "audit-file-missing",
+        "registry-file-changed",
+        "audit-file-changed",
+        "registry-file-symlink",
+        "audit-file-symlink",
+        "registry-file-fifo",
+        "audit-file-fifo",
+        "invalid-schema",
+        "invalid-app",
+        "manifest-oversized",
+        "audit-owner",
+        "audit-run",
+        "audit-app",
+        "audit-directory-symlink",
+        "wrong-audit-root",
+    ],
+)
 def test_private_fleet_source_guest_recovery_plan_rejects_unbound_source(tmp_path: Path, corrupt: str) -> None:
     registry, audit, digest, _ = _private_source_guest_plan_fixture(tmp_path)
     target = registry if corrupt.startswith("registry-") else audit
@@ -24131,10 +25060,14 @@ def test_private_fleet_source_guest_recovery_plan_rejects_unbound_source(tmp_pat
             handle.write(f"source_manifest_sha256={digest}\n")
     elif corrupt in {"invalid-digest", "audit-digest-mismatch"}:
         target = registry if corrupt == "invalid-digest" else audit
-        (target / "meta").write_text((target / "meta").read_text().replace(digest, "invalid" if corrupt == "invalid-digest" else "e" * 64))
+        (target / "meta").write_text(
+            (target / "meta").read_text().replace(digest, "invalid" if corrupt == "invalid-digest" else "e" * 64)
+        )
     elif corrupt.endswith("digests-missing"):
         for directory in (registry, audit):
-            (directory / "meta").write_text((directory / "meta").read_text().replace(f"source_manifest_sha256={digest}\n", ""))
+            (directory / "meta").write_text(
+                (directory / "meta").read_text().replace(f"source_manifest_sha256={digest}\n", "")
+            )
     elif corrupt.endswith("digest-missing"):
         (target / "meta").write_text((target / "meta").read_text().replace(f"source_manifest_sha256={digest}\n", ""))
     elif corrupt.endswith("file-missing"):
@@ -24150,14 +25083,22 @@ def test_private_fleet_source_guest_recovery_plan_rejects_unbound_source(tmp_pat
         (target / "source-manifest.json").unlink()
         os.mkfifo(target / "source-manifest.json")
     elif corrupt in {"audit-owner", "audit-run", "audit-app"}:
-        old, new = {"audit-owner": (registry.name, "a" * 32), "audit-run": ("fixture-run", "other-run"), "audit-app": ("navi-whisper-lux-bench", "other-app")}[corrupt]
+        old, new = {
+            "audit-owner": (registry.name, "a" * 32),
+            "audit-run": ("fixture-run", "other-run"),
+            "audit-app": ("navi-whisper-lux-bench", "other-app"),
+        }[corrupt]
         (audit / "meta").write_text((audit / "meta").read_text().replace(old, new))
     elif corrupt == "audit-directory-symlink":
         outside = tmp_path / "outside-audit"
         audit.rename(outside)
         audit.symlink_to(outside, target_is_directory=True)
     elif corrupt == "wrong-audit-root":
-        (registry / "meta").write_text((registry / "meta").read_text().replace(f"audit_dir={audit}", f"audit_dir={tmp_path / 'foreign' / registry.name}"))
+        (registry / "meta").write_text(
+            (registry / "meta")
+            .read_text()
+            .replace(f"audit_dir={audit}", f"audit_dir={tmp_path / 'foreign' / registry.name}")
+        )
     else:
         value = json.loads((registry / "source-manifest.json").read_bytes())
         if corrupt == "invalid-schema":
@@ -24169,8 +25110,15 @@ def test_private_fleet_source_guest_recovery_plan_rejects_unbound_source(tmp_pat
         for directory in (registry, audit):
             (directory / "source-manifest.json").write_bytes(payload)
             (directory / "meta").write_text((directory / "meta").read_text().replace(digest, new_digest))
+
     def snapshot():
-        return {str(p): ("symlink", str(p.readlink())) if p.is_symlink() else ("file", p.read_bytes()) for d in (registry, audit) for p in d.rglob("*") if p.is_file() or p.is_symlink()}
+        return {
+            str(p): ("symlink", str(p.readlink())) if p.is_symlink() else ("file", p.read_bytes())
+            for d in (registry, audit)
+            for p in d.rglob("*")
+            if p.is_file() or p.is_symlink()
+        }
+
     before = snapshot()
     plan = tmp_path / "plan"
     result = _private_source_guest_plan_command(registry, audit, plan)
@@ -24197,10 +25145,23 @@ def autoscaler_runtime_handoff_fixture(tmp_path):
     (guest / "cloudbench-driver.state").write_text("booting\n")
     with (tmp_path / "status.log").open("w") as log:
         server = subprocess.Popen(
-            [sys.executable, str(STATUS_SERVER_SCRIPT), "--directory", str(guest),
-             "--port", "0", "--bind", "127.0.0.1", "--run-token", token,
-             "--ready-file", str(ready)],
-            env=env, stdout=log, stderr=subprocess.STDOUT,
+            [
+                sys.executable,
+                str(STATUS_SERVER_SCRIPT),
+                "--directory",
+                str(guest),
+                "--port",
+                "0",
+                "--bind",
+                "127.0.0.1",
+                "--run-token",
+                token,
+                "--ready-file",
+                str(ready),
+            ],
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
         )
         try:
             deadline = time.monotonic() + 5
@@ -24213,7 +25174,8 @@ def autoscaler_runtime_handoff_fixture(tmp_path):
 
             def query(headers):
                 request = urllib.request.Request(
-                    f"http://127.0.0.1:{port}/shutdown-health", headers=headers,
+                    f"http://127.0.0.1:{port}/shutdown-health",
+                    headers=headers,
                 )
                 try:
                     with opener.open(request, timeout=10) as response:
@@ -24221,8 +25183,7 @@ def autoscaler_runtime_handoff_fixture(tmp_path):
                 except urllib.error.HTTPError as error:
                     return error.code
 
-            yield dict(guest=guest, token=token, machine=machine, auth=auth, port=port,
-                       query=query, env=env)
+            yield dict(guest=guest, token=token, machine=machine, auth=auth, port=port, query=query, env=env)
         finally:
             if server.poll() is None:
                 server.terminate()
@@ -24233,20 +25194,36 @@ def autoscaler_runtime_handoff_fixture(tmp_path):
                 server.wait(timeout=5)
 
 
-@pytest.mark.parametrize("variant", [
-    "matched", "legacy", "missing_run", "missing_machine", "wrong_run",
-    "wrong_owner", "same_bearer_sibling", "malformed_run", "malformed_machine",
-    "wrong_auth", "missing_ack", "wrong_ack", "running", "unknown_state",
-])
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "matched",
+        "legacy",
+        "missing_run",
+        "missing_machine",
+        "wrong_run",
+        "wrong_owner",
+        "same_bearer_sibling",
+        "malformed_run",
+        "malformed_machine",
+        "wrong_auth",
+        "missing_ack",
+        "wrong_ack",
+        "running",
+        "unknown_state",
+    ],
+)
 def test_autoscaler_runtime_handoff_status_identity(autoscaler_runtime_handoff_fixture, variant):
     f = autoscaler_runtime_handoff_fixture
     guest = f["guest"]
     (guest / "cloudbench-driver.state").write_text("exited\n")
     ack = guest / f"cloudbench-driver-clean-{f['token']}.ack"
     ack.write_text(f["token"] + "\n")
-    headers = {"Authorization": "Bearer " + f["auth"],
-               "X-Cloudbench-Run-Token": f["token"],
-               "X-Cloudbench-Machine-Id": f["machine"]}
+    headers = {
+        "Authorization": "Bearer " + f["auth"],
+        "X-Cloudbench-Run-Token": f["token"],
+        "X-Cloudbench-Machine-Id": f["machine"],
+    }
     if variant == "legacy":
         del headers["X-Cloudbench-Run-Token"]
         del headers["X-Cloudbench-Machine-Id"]
@@ -24274,15 +25251,31 @@ def test_autoscaler_runtime_handoff_status_identity(autoscaler_runtime_handoff_f
     assert (status == 204) is (variant in {"matched", "legacy"}), (variant, status)
 
 
-@pytest.mark.parametrize("variant,child_exit", [
-    ("terminal", 0), ("terminal", 1), ("pending_ready", 1),
-    ("pending_failed", 1), ("pending_stuck", 1), ("pending_removed", 1), ("missing_child", 1),
-    ("missing_ack", 1), ("wrong_ack", 1), ("running", 1),
-    ("wrong_run", 1), ("wrong_owner", 1), ("same_bearer_sibling", 1),
-    ("wrong_auth", 1), ("prior_failure", 1),
-])
+@pytest.mark.parametrize(
+    "variant,child_exit",
+    [
+        ("terminal", 0),
+        ("terminal", 1),
+        ("pending_ready", 1),
+        ("pending_failed", 1),
+        ("pending_stuck", 1),
+        ("pending_removed", 1),
+        ("missing_child", 1),
+        ("missing_ack", 1),
+        ("wrong_ack", 1),
+        ("running", 1),
+        ("wrong_run", 1),
+        ("wrong_owner", 1),
+        ("same_bearer_sibling", 1),
+        ("wrong_auth", 1),
+        ("prior_failure", 1),
+    ],
+)
 def test_autoscaler_runtime_handoff_preserves_collection_and_capacity(
-    tmp_path, autoscaler_runtime_handoff_fixture, variant, child_exit,
+    tmp_path,
+    autoscaler_runtime_handoff_fixture,
+    variant,
+    child_exit,
 ):
     f = autoscaler_runtime_handoff_fixture
     out = tmp_path / "bench"
@@ -24305,23 +25298,34 @@ def test_autoscaler_runtime_handoff_preserves_collection_and_capacity(
     if variant == "missing_ack":
         ack_path = f["guest"] / "unrelated-file"
     child_script = tmp_path / "collector.sh"
-    child_script.write_text(f'''set -eu
-while [ ! -f {q(str(out / 'autoscaler.ready'))} ]; do sleep .01; done
+    child_script.write_text(f"""set -eu
+while [ ! -f {q(str(out / "autoscaler.ready"))} ]; do sleep .01; done
 printf '%s\\n' {q(ack_content)} > {q(str(ack_path))}
-printf '%s\\n' {'running' if variant == 'running' else 'exited'} > {q(str(f['guest'] / 'cloudbench-driver.state'))}
-{('printf prior-failure > ' + q(str(out / 'autoscaler.failed'))) if variant == 'prior_failure' else ':'}
+printf '%s\\n' {"running" if variant == "running" else "exited"} > {q(str(f["guest"] / "cloudbench-driver.state"))}
+{("printf prior-failure > " + q(str(out / "autoscaler.failed"))) if variant == "prior_failure" else ":"}
 : > {q(str(sealed))}
 while [ ! -f {q(str(release))} ]; do sleep .01; done
 exit {child_exit}
-''')
-    funcs = "\n".join(_extract_fleet_function(source, name + "() {") for name in [
-        "fleet_job_running", "_box_desired", "_pool_ids", "_ready_pool_ids", "bench_autoscaler",
-    ])
-    supervisor = "\n".join(_extract_fleet_function(source, name + "() {") for name in [
-        "terminate_fleet_runner_group", "run_fleet_child_supervised",
-    ])
+""")
+    funcs = "\n".join(
+        _extract_fleet_function(source, name + "() {")
+        for name in [
+            "fleet_job_running",
+            "_box_desired",
+            "_pool_ids",
+            "_ready_pool_ids",
+            "bench_autoscaler",
+        ]
+    )
+    supervisor = "\n".join(
+        _extract_fleet_function(source, name + "() {")
+        for name in [
+            "terminate_fleet_runner_group",
+            "run_fleet_child_supervised",
+        ]
+    )
     desired = 2 if variant.startswith("pending_") else 1
-    script = f'''set -uo pipefail
+    script = f"""set -uo pipefail
 APP=fixture-app
 RUN_ID=fixture-fleet
 AUTOSCALE_POLL=.05
@@ -24329,7 +25333,7 @@ AUTOSCALE_MAX=2
 AUTOSCALER_FINALIZATION_WAIT_SECONDS={30 if variant == "pending_removed" else 2}
 BOX_HEALTH_PORT=3003
 CLOUDBENCH_BOOT_LAUNCH=0
-CLOUDBENCH_BARRIER_TOKEN={q('wrong' if variant == 'wrong_auth' else f['auth'])}
+CLOUDBENCH_BARRIER_TOKEN={q("wrong" if variant == "wrong_auth" else f["auth"])}
 _machine_priv_ip() {{ printf 'fdaa::1'; }}
 inventory_machine_exists() {{ return 0; }}
 release_autoscaler_metrics_owner() {{ return 0; }}
@@ -24347,10 +25351,10 @@ curl() {{
     case "$*" in *'/shutdown-health'*) command curl "$@"; return $? ;; esac
     case " $* " in *' -o /dev/null '*) return 0 ;; esac
     if [ -f {q(str(sealed))} ]; then
-        printf 'missing\\n' >> {q(str(tmp_path / 'metrics-polls'))}
+        printf 'missing\\n' >> {q(str(tmp_path / "metrics-polls"))}
         return 7
     fi
-    printf 'valid\\n' >> {q(str(tmp_path / 'metrics-polls'))}
+    printf 'valid\\n' >> {q(str(tmp_path / "metrics-polls"))}
     printf 'desired_machine_count {desired}\\n'
 }}
 provision_worker() {{
@@ -24372,16 +25376,24 @@ reconcile_worker_failure_outcomes() {{
 }}
 {funcs}
 bench_autoscaler fixture-task {q(expected_machine)} fixture-workspace 0 {q(str(out))} 61000 {q(expected_token)}
-'''
+"""
     env = dict(f["env"])
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
     with (tmp_path / "collector.log").open("w") as child_log, (tmp_path / "autoscaler.log").open("w") as scaler_log:
         processes = []
         try:
             child = subprocess.Popen(
-                ["bash", "-c", supervisor + '\nrun_fleet_child_supervised "$1" bash "$2"',
-                 "fixture-supervisor", str(out / "benchmark-child.finished"), str(child_script)],
-                env=env, stdout=child_log, stderr=subprocess.STDOUT,
+                [
+                    "bash",
+                    "-c",
+                    supervisor + '\nrun_fleet_child_supervised "$1" bash "$2"',
+                    "fixture-supervisor",
+                    str(out / "benchmark-child.finished"),
+                    str(child_script),
+                ],
+                env=env,
+                stdout=child_log,
+                stderr=subprocess.STDOUT,
             )
             processes.append(child)
             scaler = subprocess.Popen(["bash", "-c", script], env=env, stdout=scaler_log, stderr=subprocess.STDOUT)
@@ -24469,8 +25481,13 @@ def test_autoscaler_runtime_handoff_uses_one_owner_bound_token():
     assert '"$out" "$port" "$FLEET_OWNER_TOKEN-$i"' in fleet
     token_line = next(line for line in cloud.splitlines() if line.startswith("RUN_LOG_TOKEN="))
     shell = token_line + '\nprintf "%s" "$RUN_LOG_TOKEN"'
-    result = subprocess.run(["bash", "-c", shell], text=True, capture_output=True, check=False,
-                            env={"PATH": os.environ["PATH"], "CLOUDBENCH_FLEET_RUN_TOKEN": "exact-owner-1"})
+    result = subprocess.run(
+        ["bash", "-c", shell],
+        text=True,
+        capture_output=True,
+        check=False,
+        env={"PATH": os.environ["PATH"], "CLOUDBENCH_FLEET_RUN_TOKEN": "exact-owner-1"},
+    )
     assert result.returncode == 0 and result.stdout == "exact-owner-1"
 
 
@@ -24521,9 +25538,14 @@ def test_autoscaler_runtime_handoff_fixture_cleanup_survives_faults(tmp_path, mo
     monkeypatch.setattr(Path, "touch", touch)
     guest = tmp_path / "guest"
     guest.mkdir()
-    fixture = dict(guest=guest, token="0123456789abcdef0123456789abcdef-0",
-                   machine="feedface000001", auth="fixture", port=12345,
-                   env={"PATH": os.environ["PATH"]})
+    fixture = dict(
+        guest=guest,
+        token="0123456789abcdef0123456789abcdef-0",
+        machine="feedface000001",
+        auth="fixture",
+        port=12345,
+        env={"PATH": os.environ["PATH"]},
+    )
     error = OSError if fault == "second_spawn" else AssertionError
     message = "injected second spawn" if fault == "second_spawn" else "original fixture failure"
     with pytest.raises(error, match=message):
@@ -24531,6 +25553,7 @@ def test_autoscaler_runtime_handoff_fixture_cleanup_survives_faults(tmp_path, mo
     assert child.terminated == 1 and child.joined == 1
     if fault != "second_spawn":
         assert scaler.terminated == 1 and scaler.joined == 1
+
 
 def _fly_with_timeout_test_source():
     return 'mktemp() { command mktemp "$TMPDIR/timeout.XXXXXXXX"; }\n' + _extract_fleet_function(
@@ -24588,7 +25611,7 @@ def test_fly_with_timeout_hung_child_keeps_native_timeout_and_is_joined(tmp_path
     assert r.returncode == 142, (r.stdout, r.stderr)
     if not (elapsed < 5):
         warnings.warn(
-            'Intermediate timing diagnostic: elapsed < 5',
+            "Intermediate timing diagnostic: elapsed < 5",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -24665,7 +25688,7 @@ def test_fly_with_timeout_dead_child_without_completion_notification_is_joined(t
     assert r.stdout == "before-signal\n"
     if not (time.monotonic() - start < 0.5):
         warnings.warn(
-            'Intermediate timing diagnostic: time.monotonic() - start < 0.5',
+            "Intermediate timing diagnostic: time.monotonic() - start < 0.5",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -24682,7 +25705,7 @@ def test_fly_with_timeout_deadline_includes_exit_handler_and_exec_lifetime(tmp_p
     assert r.returncode == 142, (r.stdout, r.stderr, time.monotonic() - start)
     if not (time.monotonic() - start < 5):
         warnings.warn(
-            'Intermediate timing diagnostic: time.monotonic() - start < 5',
+            "Intermediate timing diagnostic: time.monotonic() - start < 5",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -24707,7 +25730,7 @@ def test_fly_with_timeout_invalid_or_zero_deadline_never_admits_child(tmp_path, 
     assert r.returncode == (142 if budget and set(budget) == {"0"} else 2), (r.stdout, r.stderr)
     if not (time.monotonic() - start < 0.5):
         warnings.warn(
-            'Intermediate timing diagnostic: time.monotonic() - start < 0.5',
+            "Intermediate timing diagnostic: time.monotonic() - start < 0.5",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -24727,7 +25750,7 @@ def test_fly_with_timeout_read_error_fails_and_joins_owned_child(tmp_path):
     assert r.returncode == 0, (r.stdout, r.stderr)
     if not (time.monotonic() - start < 4):
         warnings.warn(
-            'Intermediate timing diagnostic: time.monotonic() - start < 4',
+            "Intermediate timing diagnostic: time.monotonic() - start < 4",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -24795,7 +25818,34 @@ wait "$signaller"
     assert not list(scratch.iterdir())
 
 
-@pytest.mark.parametrize("fault", ["none", "archive", "live-machine", "live-volume", "pending", "collected", "collected-mismatch", "shutdown", "audit", "unadmitted-absent", "unadmitted-live", "unallocated-absent", "unallocated-name-live", "unstarted-worker-absent", "unstarted-worker-live", "unstarted-worker-stage-launch", "unstarted-worker-owner-mismatch", "unstarted-worker-proof-mismatch", "started-worker-absent", "started-worker-live", "started-worker-terminal-bad", "missing-worker-log-verified", "missing-worker-log-unverified"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "none",
+        "archive",
+        "live-machine",
+        "live-volume",
+        "pending",
+        "collected",
+        "collected-mismatch",
+        "shutdown",
+        "audit",
+        "unadmitted-absent",
+        "unadmitted-live",
+        "unallocated-absent",
+        "unallocated-name-live",
+        "unstarted-worker-absent",
+        "unstarted-worker-live",
+        "unstarted-worker-stage-launch",
+        "unstarted-worker-owner-mismatch",
+        "unstarted-worker-proof-mismatch",
+        "started-worker-absent",
+        "started-worker-live",
+        "started-worker-terminal-bad",
+        "missing-worker-log-verified",
+        "missing-worker-log-unverified",
+    ],
+)
 def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence(tmp_path: Path, fault: str) -> None:
     owner = "a" * 32
     run_id = "fixture-run"
@@ -24813,10 +25863,17 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
     (run / "_batch").mkdir()
     (run / "_forensic").mkdir()
     (run / "_batch/benches.json").write_text(json.dumps([{"name": task}]))
-    (run / "_batch/lifecycle.json").write_text(json.dumps({
-        "version": 1, "status": "failed", "fleet_owner_token": owner,
-        "run_id": run_id, "controller_exit_code": 1,
-    }))
+    (run / "_batch/lifecycle.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "status": "failed",
+                "fleet_owner_token": owner,
+                "run_id": run_id,
+                "controller_exit_code": 1,
+            }
+        )
+    )
     (registry / "meta").write_text(
         f"version=2\nfleet_owner_token={owner}\napp=bench-app\nrun_id={run_id}\n"
         f"runs_root={run.parent}\naudit_dir={audit}\ncleanup_policy=reap\n"
@@ -24834,9 +25891,7 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
             f"clone_name=unadmitted\nsource=fresh-clone\nsource_machine_id={'c' * 14}\n"
             f"machine_id=\nvolume_id={unadmitted_volume}\ndisposition=owned\n"
         )
-        (registry / "clones" / "unadmitted").write_text(
-            f"name=unadmitted\nvolume_id={unadmitted_volume}\n"
-        )
+        (registry / "clones" / "unadmitted").write_text(f"name=unadmitted\nvolume_id={unadmitted_volume}\n")
     if fault.startswith("unallocated-"):
         (audit / "fresh" / "unallocated").write_text(
             f"version=1\nfleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n"
@@ -24855,11 +25910,16 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
             f"name=unstarted-worker\nid={worker_machine}\nvolume_id={worker_volume}\n"
         )
         (out / "worker-runtime-evidence" / worker_machine).mkdir(parents=True)
-        (out / "worker-runtime-evidence" / worker_machine / "owner.json").write_text(json.dumps({
-            "version": 1, "machine_id": worker_machine,
-            "primary_machine_id": machine if fault != "unstarted-worker-owner-mismatch" else "c" * 14,
-            "run_token": token,
-        }))
+        (out / "worker-runtime-evidence" / worker_machine / "owner.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "machine_id": worker_machine,
+                    "primary_machine_id": machine if fault != "unstarted-worker-owner-mismatch" else "c" * 14,
+                    "run_token": token,
+                }
+            )
+        )
         (out / f"worker-{worker_machine}.pending").touch()
         (out / "worker-ready.ids").write_text("")
         stage = b"stage failed before wrapper launch\n"
@@ -24876,10 +25936,16 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
             f"name=started-worker\nid={worker_machine}\nvolume_id={worker_volume}\n"
         )
         (out / "worker-runtime-evidence" / worker_machine).mkdir(parents=True)
-        (out / "worker-runtime-evidence" / worker_machine / "owner.json").write_text(json.dumps({
-            "version": 1, "machine_id": worker_machine,
-            "primary_machine_id": machine, "run_token": token,
-        }))
+        (out / "worker-runtime-evidence" / worker_machine / "owner.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "machine_id": worker_machine,
+                    "primary_machine_id": machine,
+                    "run_token": token,
+                }
+            )
+        )
         (out / "worker-ready.ids").write_text(worker_machine + "\n")
         stage = b"launch worker wrapper succeeded\n"
         (out / f"worker-{worker_machine}.stage.log").write_bytes(stage)
@@ -24891,31 +25957,49 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
     (out / "runtime-evidence.pending").write_text(json.dumps(evidence_owner))
     originals = {
         "bench.log": b"original partial benchmark log\n",
-        "repo/.context/cloudbench/services.json": json.dumps({"status": "running", "env": {"worker_processes": 2 if fault.startswith("missing-worker-log-") else 1}}).encode(),
+        "repo/.context/cloudbench/services.json": json.dumps(
+            {"status": "running", "env": {"worker_processes": 2 if fault.startswith("missing-worker-log-") else 1}}
+        ).encode(),
         "repo/.context/cloudbench/stack.log": b"original stack log\n",
         "repo/.context/cloudbench/logs/backend.log": b"original backend log\n",
         "repo/.context/cloudbench/logs/worker.log": b"original worker log\n",
     }
     if fault == "missing-worker-log-verified":
-        originals["worker-log-absence-original.json"] = json.dumps({
-            "version": 1, "machine_id": machine, "services_status": "running",
-            "missing": ["repo/.context/cloudbench/logs/worker.1.log"],
-        }).encode()
+        originals["worker-log-absence-original.json"] = json.dumps(
+            {
+                "version": 1,
+                "machine_id": machine,
+                "services_status": "running",
+                "missing": ["repo/.context/cloudbench/logs/worker.1.log"],
+            }
+        ).encode()
     worker_proof = None
     started_files = None
     if fault.startswith("unstarted-worker-"):
-        worker_proof = json.dumps({
-            "version": 1, "machine_id": worker_machine, "run_token": token,
-            "worker_started": fault == "unstarted-worker-proof-mismatch",
-            "worker_supervisor_present": False, "worker_script_present": False,
-            "worker_helper_present": False, "worker_log_present": False,
-            "worker_started_at_present": False,
-        }).encode()
+        worker_proof = json.dumps(
+            {
+                "version": 1,
+                "machine_id": worker_machine,
+                "run_token": token,
+                "worker_started": fault == "unstarted-worker-proof-mismatch",
+                "worker_supervisor_present": False,
+                "worker_script_present": False,
+                "worker_helper_present": False,
+                "worker_log_present": False,
+                "worker_started_at_present": False,
+            }
+        ).encode()
     if fault.startswith("started-worker-"):
         worker_identity = {"machine_id": worker_machine, "run_token": token}
-        terminal = {**worker_identity, "worker_started": True, "quiescent": True,
-                    "stop_requested": True, "children_reaped": True,
-                    "streams_closed": fault != "started-worker-terminal-bad", "exit_code": 0}
+        terminal = {
+            **worker_identity,
+            "worker_started": True,
+            "quiescent": True,
+            "stop_requested": True,
+            "children_reaped": True,
+            "streams_closed": fault != "started-worker-terminal-bad",
+            "exit_code": 0,
+        }
         started_files = {
             "cloudbench-worker-evidence/owner.json": json.dumps(worker_identity).encode(),
             "cloudbench-worker-evidence/terminal.json": json.dumps(terminal).encode(),
@@ -24940,52 +26024,97 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
                 info.size = len(content)
                 stream.addfile(info, io.BytesIO(content))
     manifest = {
-        "schema": "cloudbench-forensic-retirement-v1", "owner": owner,
-        "run_id": run_id, "proof_credit": 0, "archive_bytes": archive.stat().st_size,
+        "schema": "cloudbench-forensic-retirement-v1",
+        "owner": owner,
+        "run_id": run_id,
+        "proof_credit": 0,
+        "archive_bytes": archive.stat().st_size,
         "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-        "uncompressed_bytes": sum(map(len, originals.values())) + (len(worker_proof) if worker_proof else 0)
+        "uncompressed_bytes": sum(map(len, originals.values()))
+        + (len(worker_proof) if worker_proof else 0)
         + (sum(map(len, started_files.values())) if started_files else 0),
-        "tasks": [{"task": task, "ordinal": 0, "machine_id": machine,
-                   "volume_id": volume, "run_token": token, "proof_credit": 0,
-                   "runtime_evidence_complete": False, "services_status": "running",
-                   "missing": [f"cloudbench-driver-clean-{token}.ack", "repo/.context/cloudbench/run.json"]
-                   + (["repo/.context/cloudbench/logs/worker.1.log"] if fault.startswith("missing-worker-log-") else []),
-                   "files": {relative: {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
-                             for relative, content in originals.items()}}],
+        "tasks": [
+            {
+                "task": task,
+                "ordinal": 0,
+                "machine_id": machine,
+                "volume_id": volume,
+                "run_token": token,
+                "proof_credit": 0,
+                "runtime_evidence_complete": False,
+                "services_status": "running",
+                "missing": [f"cloudbench-driver-clean-{token}.ack", "repo/.context/cloudbench/run.json"]
+                + (["repo/.context/cloudbench/logs/worker.1.log"] if fault.startswith("missing-worker-log-") else []),
+                "files": {
+                    relative: {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+                    for relative, content in originals.items()
+                },
+            }
+        ],
     }
     if worker_proof is not None:
-        manifest["unstarted_workers"] = [{
-            "machine_id": worker_machine, "volume_id": worker_volume,
-            "primary_machine_id": machine, "task": task, "run_token": token,
-            "proof_credit": 0, "worker_started": False,
-            "stage_log_sha256": hashlib.sha256(stage).hexdigest(),
-            "files": {"worker-original.json": {"bytes": len(worker_proof),
-                      "sha256": hashlib.sha256(worker_proof).hexdigest()}},
-        }]
+        manifest["unstarted_workers"] = [
+            {
+                "machine_id": worker_machine,
+                "volume_id": worker_volume,
+                "primary_machine_id": machine,
+                "task": task,
+                "run_token": token,
+                "proof_credit": 0,
+                "worker_started": False,
+                "stage_log_sha256": hashlib.sha256(stage).hexdigest(),
+                "files": {
+                    "worker-original.json": {
+                        "bytes": len(worker_proof),
+                        "sha256": hashlib.sha256(worker_proof).hexdigest(),
+                    }
+                },
+            }
+        ]
     if started_files is not None:
-        manifest["started_workers"] = [{
-            "machine_id": worker_machine, "volume_id": worker_volume,
-            "primary_machine_id": machine, "task": task, "run_token": token,
-            "proof_credit": 0, "worker_started": True,
-            "stage_log_sha256": hashlib.sha256(stage).hexdigest(),
-            "missing": [],
-            "files": {relative: {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
-                      for relative, content in started_files.items()},
-        }]
+        manifest["started_workers"] = [
+            {
+                "machine_id": worker_machine,
+                "volume_id": worker_volume,
+                "primary_machine_id": machine,
+                "task": task,
+                "run_token": token,
+                "proof_credit": 0,
+                "worker_started": True,
+                "stage_log_sha256": hashlib.sha256(stage).hexdigest(),
+                "missing": [],
+                "files": {
+                    relative: {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+                    for relative, content in started_files.items()
+                },
+            }
+        ]
     manifest_path = run / "_forensic/manifest.json"
     manifest_path.write_text(json.dumps(manifest))
     machines = tmp_path / "machines.json"
     volumes = tmp_path / "volumes.json"
-    machines.write_text(json.dumps(
-        [{"id": machine}] if fault == "live-machine" else
-        [{"id": worker_machine}] if fault == "unstarted-worker-live" else
-        [{"id": worker_machine}] if fault == "started-worker-live" else
-        [{"id": "c" * 14, "name": "unallocated"}] if fault == "unallocated-name-live" else []
-    ))
-    volumes.write_text(json.dumps(
-        [{"id": volume}] if fault == "live-volume" else
-        [{"id": unadmitted_volume}] if fault == "unadmitted-live" else []
-    ))
+    machines.write_text(
+        json.dumps(
+            [{"id": machine}]
+            if fault == "live-machine"
+            else [{"id": worker_machine}]
+            if fault == "unstarted-worker-live"
+            else [{"id": worker_machine}]
+            if fault == "started-worker-live"
+            else [{"id": "c" * 14, "name": "unallocated"}]
+            if fault == "unallocated-name-live"
+            else []
+        )
+    )
+    volumes.write_text(
+        json.dumps(
+            [{"id": volume}]
+            if fault == "live-volume"
+            else [{"id": unadmitted_volume}]
+            if fault == "unadmitted-live"
+            else []
+        )
+    )
     if fault == "archive":
         archive.write_bytes(archive.read_bytes() + b"corrupt")
     elif fault == "pending":
@@ -24994,18 +26123,39 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
         (out / "runtime-evidence.pending").unlink()
         (out / "remote-logs/runtime-evidence").mkdir(parents=True)
         (out / "cloudbench-run.json").write_text(json.dumps({"task": task, "result": "failure"}))
-        (out / "remote-logs/runtime-evidence/run.json").write_text(json.dumps({
-            "task": task, "result": "failure" if fault == "collected" else "altered"
-        }))
+        (out / "remote-logs/runtime-evidence/run.json").write_text(
+            json.dumps({"task": task, "result": "failure" if fault == "collected" else "altered"})
+        )
     elif fault == "shutdown":
         (out / "guest-shutdown.confirmed").write_text("foreign-run\n")
     elif fault == "audit":
         (audit / "fresh" / "clone").write_text((audit / "fresh" / "clone").read_text().replace(volume, "vol_foreign"))
-    command = [sys.executable, str(FORENSIC_RETIREMENT_SCRIPT), "--registry", str(registry),
-               "--run", str(run), "--manifest", str(manifest_path), "--archive", str(archive),
-               "--machines", str(machines), "--volumes", str(volumes)]
+    command = [
+        sys.executable,
+        str(FORENSIC_RETIREMENT_SCRIPT),
+        "--registry",
+        str(registry),
+        "--run",
+        str(run),
+        "--manifest",
+        str(manifest_path),
+        "--archive",
+        str(archive),
+        "--machines",
+        str(machines),
+        "--volumes",
+        str(volumes),
+    ]
     result = subprocess.run(command, capture_output=True, text=True, timeout=10)
-    if fault in ("none", "unadmitted-absent", "unallocated-absent", "collected", "unstarted-worker-absent", "started-worker-absent", "missing-worker-log-verified"):
+    if fault in (
+        "none",
+        "unadmitted-absent",
+        "unallocated-absent",
+        "collected",
+        "unstarted-worker-absent",
+        "started-worker-absent",
+        "missing-worker-log-verified",
+    ):
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout)["proof_credit"] == 0
         assert json.loads(result.stdout)["unadmitted_clones"] == (fault == "unadmitted-absent")
@@ -25017,10 +26167,14 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
     assert (out / "runtime-evidence.pending").exists() == (fault not in ("pending", "collected", "collected-mismatch"))
     assert (registry / "runtime-evidence-unconfirmed").exists()
     fleet = fleet_source_text()
-    functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
-        "registry_meta_value() {", "fleet_recovery_confirm_forensic_retirement() {",
-    ))
-    script = f'''set -u
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "fleet_recovery_confirm_forensic_retirement() {",
+        )
+    )
+    script = f"""set -u
 APP=bench-app
 FORENSIC_RETIREMENT_HELPER={shlex.quote(str(FORENSIC_RETIREMENT_SCRIPT))}
 MACHINES_FIXTURE={shlex.quote(str(machines))}
@@ -25035,9 +26189,17 @@ fly_with_timeout() {{
     esac
 }}
 fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
-'''
+"""
     recovery = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
-    if fault in ("none", "unadmitted-absent", "unallocated-absent", "collected", "unstarted-worker-absent", "started-worker-absent", "missing-worker-log-verified"):
+    if fault in (
+        "none",
+        "unadmitted-absent",
+        "unallocated-absent",
+        "collected",
+        "unstarted-worker-absent",
+        "started-worker-absent",
+        "missing-worker-log-verified",
+    ):
         assert recovery.returncode == 0, recovery.stderr
         receipt = json.loads((run / "_forensic/retirement-verified.json").read_text())
         assert receipt["proof_credit"] == 0 and receipt["tasks"] == 1
@@ -25069,7 +26231,9 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
                 raw = gzip.decompress(raw)
             bundle = json.loads(raw)
             received.append((self.path, bundle))
-            response = json.dumps({"run": {"run_id": bundle["run_id"], "live": True, "tasks": bundle.get("tasks", [])}}).encode()
+            response = json.dumps(
+                {"run": {"run_id": bundle["run_id"], "live": True, "tasks": bundle.get("tasks", [])}}
+            ).encode()
             self.send_response(201)
             self.send_header("Content-Length", str(len(response)))
             self.end_headers()
@@ -25108,7 +26272,9 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         )
     source = fleet_source_text().split("# ── ONE aggregated batch dashboard", 1)[1]
     aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
-    assert fleet_source_text().index('# ── ONE aggregated batch dashboard') < fleet_source_text().index('# ── Phase 1: provision'), 'live publisher begins after allocation'
+    assert fleet_source_text().index("# ── ONE aggregated batch dashboard") < fleet_source_text().index(
+        "# ── Phase 1: provision"
+    ), "live publisher begins after allocation"
     server = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -25165,14 +26331,26 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         assert len(received) == count + 1, "a failure must publish immediately, before teardown"
         assert [(t["status"], t["passed"]) for t in received[-1][1]["tasks"]] == [("failed", False), ("passed", True)]
         (tmp_path / "alpha" / "guest-shutdown.confirmed").touch()
-        command = subprocess.run([sys.executable, '-c', aggregate, str(batch / 'report-card.json')], env=env, capture_output=True, text=True, timeout=30)
+        command = subprocess.run(
+            [sys.executable, "-c", aggregate, str(batch / "report-card.json")],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
         assert command.returncode == 0
-        assert received[-1][1]['tasks'][0]['status'] == 'failed'
-        assert received[-1][1]['tasks'][0]['lifecycle_stage'] == 'teardown'
-        (tmp_path / "alpha" / "bench-e2e.finished-epoch").write_text('1')
-        command = subprocess.run([sys.executable, '-c', aggregate, str(batch / 'report-card.json')], env=env, capture_output=True, text=True, timeout=30)
+        assert received[-1][1]["tasks"][0]["status"] == "failed"
+        assert received[-1][1]["tasks"][0]["lifecycle_stage"] == "teardown"
+        (tmp_path / "alpha" / "bench-e2e.finished-epoch").write_text("1")
+        command = subprocess.run(
+            [sys.executable, "-c", aggregate, str(batch / "report-card.json")],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
         assert command.returncode == 0
-        assert received[-1][1]['tasks'][0]['lifecycle_stage'] == 'released'
+        assert received[-1][1]["tasks"][0]["lifecycle_stage"] == "released"
 
     finally:
         server.shutdown()
@@ -25181,25 +26359,45 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         assert not thread.is_alive()
 
 
-@pytest.mark.parametrize("inventory,provider_rc,expected", [
-    (None, 1, 75), ("malformed", 0, 75), (87, 1, 75), (88, 0, 1), (87, 0, 0),
-])
+@pytest.mark.parametrize(
+    "inventory,provider_rc,expected",
+    [
+        (None, 1, 75),
+        ("malformed", 0, 75),
+        (87, 1, 75),
+        (88, 0, 1),
+        (87, 0, 0),
+    ],
+)
 def test_autoscaler_runtime_handoff_capacity_observation_pending(
-    tmp_path: Path, inventory, provider_rc, expected,
+    tmp_path: Path,
+    inventory,
+    provider_rc,
+    expected,
 ) -> None:
     """Unknown observations allocate nothing; real serialized ceiling remains hard."""
     fleet = fleet_source_text()
-    functions = "\n".join(_extract_fleet_function(fleet, name + "() {") for name in (
-        "capacity_reserve_slots", "reserve_worker_machine_slot", "provision_worker",
-    ))
+    functions = "\n".join(
+        _extract_fleet_function(fleet, name + "() {")
+        for name in (
+            "capacity_reserve_slots",
+            "reserve_worker_machine_slot",
+            "provision_worker",
+        )
+    )
     payload = tmp_path / "inventory.json"
-    payload.write_text(json.dumps([{"id": str(i)} for i in range(inventory)])
-                       if isinstance(inventory, int) else "{" if inventory else "")
-    script = f'''set -uo pipefail
+    payload.write_text(
+        json.dumps([{"id": str(i)} for i in range(inventory)])
+        if isinstance(inventory, int)
+        else "{"
+        if inventory
+        else ""
+    )
+    script = f"""set -uo pipefail
 CASE={shlex.quote(str(tmp_path))}
 APP=fixture-app
 RUN_ID=fixture-run
-FLEET_OWNER_TOKEN={'a' * 32}
+FLEET_OWNER_TOKEN={"a" * 32}
 FLEET_OWNER_HOST="$(hostname)"
 FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
 FLEET_OWNERSHIP_ROOT="$CASE/ownership"
@@ -25229,6 +26427,541 @@ else
   test ! -e "$CASE/clone-called" || exit 16
   if [ "$status" = 75 ]; then test ! -e "$CASE/autoscaler.failed" || exit 17; fi
 fi
-'''
+"""
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("storage_mode", ["fresh", "snapshot"])
+def test_prebuilt_real_clone_avoids_snapshot_restore_with_exact_ownership(tmp_path: Path, storage_mode: str) -> None:
+    source = fleet_source_text()
+    provider = tmp_path / "provider.py"
+    args_path = tmp_path / "provider-args.json"
+    provider.write_text(
+        "import json,sys\nfrom pathlib import Path\nPath(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))\nprint('Machine feedface000002 has been created...')\n"
+    )
+    script = f"""set -uo pipefail
+APP=fixture-app
+REGION=iad
+WARM_ID=feedface000001
+SNAP_ID=vs_fixture
+FRESH_VOLUMES=1
+CLOUDBENCH_CLONE_STORAGE_READY_SECONDS=0
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
+fleet_registry_release_name() {{ return 0; }}
+machine_storage_failed() {{ return 1; }}
+machine_storage_ready() {{ ! {shlex.quote(sys.executable)} -c 'import json,sys;sys.exit(0 if "--from-snapshot" in json.load(open(sys.argv[1])) else 1)' {shlex.quote(str(args_path))}; }}
+{_clone_machine_bundle(source)}
+fly_with_timeout() {{ shift; {shlex.quote(sys.executable)} {shlex.quote(str(provider))} {shlex.quote(str(args_path))} "$@"; }}
+clone_machine_target {shlex.quote(str(tmp_path / "owned.ids"))} "$WARM_ID" shared-cpu-2x 4096 "$SNAP_ID" {storage_mode}
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env=dict(os.environ),
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    args = json.loads(args_path.read_text())
+    assert args[:3] == ["machine", "clone", "feedface000001"]
+    assert args[args.index("--override-cmd") + 1] == "sleep infinity"
+    assert "--detach" in args
+    assert (tmp_path / "owned.ids").read_text().split() == ["feedface000002"]
+    assert (tmp_path / "owned.names").read_text() == ""
+    if storage_mode == "fresh":
+        assert "--from-snapshot" not in args
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "feedface000002"
+    else:
+        assert args[args.index("--from-snapshot") + 1] == "vs_fixture"
+        assert result.returncode == 1
+        assert "storage was not mountable" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "enabled,catalog,sim_on,allocated_source,expected",
+    [
+        ("1", "real", "", "clone", "fresh"),
+        ("1", "simulate", "", "clone", "snapshot"),
+        ("1", "real", "other,alpha", "clone", "snapshot"),
+        ("0", "real", "", "clone", "snapshot"),
+        ("1", "real", "", "pool", "fresh"),
+        ("0", "real", "", "pool", "snapshot"),
+    ],
+)
+def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
+    tmp_path: Path, enabled: str, catalog: str, sim_on: str, allocated_source: str, expected: str
+) -> None:
+    source = fleet_source_text()
+    functions = "\n".join(
+        _extract_fleet_function(source, name + "() {") for name in ["is_sim_on", "primary_clone_storage_mode"]
+    )
+    script = f"FRESH_VOLUMES={enabled}; BENCHES=(alpha); CATALOG_MODES=({catalog}); SIM_ON_CSV={shlex.quote(sim_on)}\n{functions}\nprimary_clone_storage_mode alpha"
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env=dict(os.environ),
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected
+
+    # Allocation can reuse snapshot-backed pool storage even when a new REAL
+    # clone would be fresh. Observe the actual child handoff, not just policy.
+    out = tmp_path / "alpha"
+    out.mkdir()
+    (out / ".cid").write_text(f"{allocated_source} feedface000001\n")
+    capture = tmp_path / "child-env.json"
+    child = tmp_path / "offline-child.sh"
+    child.write_text(
+        "#!/usr/bin/env bash\nexec "
+        + shlex.quote(sys.executable)
+        + " -c "
+        + shlex.quote(
+            "import json,os;from pathlib import Path;"
+            "Path(os.environ['ENV_CAPTURE']).write_text(json.dumps({"
+            "k:os.environ.get(k) for k in ['CLOUDBENCH_FRESH_VOLUME','CLOUDBENCH_STORAGE_READY']}))"
+        )
+        + "\n"
+    )
+    launch = source.split("# ── Phase 2: launch each provisioned bench", 1)[1]
+    launch = launch.split('for bench in "${BENCHES[@]}"; do', 1)[1].split("    CHILD_PIDS+=(", 1)[0]
+    supervisor = "\n".join(
+        _extract_fleet_function(source, name + "() {")
+        for name in ("terminate_fleet_runner_group", "run_fleet_child_supervised")
+    )
+    parameters = {
+        "FLEET_DIR": str(tmp_path),
+        "DASH_BASE": "41000",
+        "FLEET_OWNER_TOKEN": "fixture-owner",
+        "INVENTORY_INDEX": str(tmp_path / "inventory"),
+        "SNAPSHOT_LOOP_PID": "0",
+        "SNAPSHOT_LOOP_TOKEN": "fixture-publisher",
+        "SYNCHRONIZED_START": "0",
+        "RUN_ID": "fixture-run",
+        "BARRIER_RELEASE_TOKEN": "fixture-barrier",
+        "START_BARRIER_WAIT_SECONDS": "60",
+        "FIRST_RUN_STACK_WAIT_SECONDS": "60",
+        "BOOT_CONFIG_BARRIER": str(tmp_path / "barrier"),
+        "BOOT_UPDATE_CAPACITY_WAIT_SECONDS": "30",
+        "BOOT_CONFIG_BARRIER_WAIT_SECONDS": "30",
+        "FLEET_PATCH_FILE": "",
+        "FLEET_PATCH_SHA256": "",
+        "INFRA_PROBE": "0",
+        "SKIP_AUTOSCALER": "0",
+        "CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE": "0",
+        "EXECUTION_PROVENANCE_FILE": str(tmp_path / "fixture-provenance"),
+        "BENCH_REF": "fixture-ref",
+        "CHILD_RUN_TIMEOUT": "10",
+        "RUN_BENCH_CLOUD_BIN": str(child),
+        "ENV_CAPTURE": str(capture),
+    }
+    assignments = "\n".join(f"{key}={shlex.quote(value)}" for key, value in parameters.items())
+    script = f"""set -uo pipefail
+FRESH_VOLUMES={enabled}; BENCHES=(alpha); CATALOG_MODES=({catalog}); SIM_ON_CSV={shlex.quote(sim_on)}
+CHILD_MACHINE=(); i=0
+{assignments}
+export ENV_CAPTURE
+cloudbench_fleet_workspace_name() {{ printf fixture-workspace; }}
+{functions}
+{supervisor}
+for bench in "${{BENCHES[@]}}"; do
+{launch}
+wait
+done
+"""
+    result = subprocess.run(["bash", "-c", script], env=dict(os.environ), text=True, capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert (out / "benchmark-child.finished").read_text().strip() == "0"
+    emitted = json.loads(capture.read_text())
+    assert emitted["CLOUDBENCH_STORAGE_READY"] == str(int(allocated_source == "pool"))
+    assert emitted["CLOUDBENCH_FRESH_VOLUME"] == str(int(allocated_source == "clone" and expected == "fresh"))
+
+
+@pytest.mark.parametrize("transport,allowed", [("timeout", True), ("server", True), ("auth", False)])
+def test_hub_transport_starting_snapshot_preserves_terminal_publication_owner(
+    tmp_path: Path, transport: str, allowed: bool
+) -> None:
+    """A transient starting write cannot abort work or lose its terminal writer."""
+    helper = tmp_path / "hub-helper.py"
+    helper.write_text(
+        "import sys,urllib.error\n"
+        f"sys.path.insert(0, {str(FLEET_SCRIPT.parents[1] / 'agents')!r})\n"
+        "from benchmarks import hub_upload\n"
+        "class Opener:\n"
+        " def open(self, request, timeout):\n"
+        + (
+            "  raise TimeoutError('controlled pending starting write')\n"
+            if transport == "timeout"
+            else "  raise urllib.error.HTTPError(request.full_url, "
+            + ("503" if transport == "server" else "403")
+            + ", 'controlled response', {}, None)\n"
+        )
+        + "hub_upload._hub_opener=lambda base: Opener()\n"
+        "hub_upload.time.sleep=lambda seconds: None\n"
+        "raise SystemExit(hub_upload._main())\n"
+    )
+    batch = tmp_path / "_batch"
+    batch.mkdir()
+    (batch / "report-card.json").write_text(
+        json.dumps({"run_id": "fixture-starting", "tasks": [{"name": "fixture", "status": "starting"}]})
+    )
+    function = _extract_fleet_function(fleet_source_text(), "require_in_app_hub_visibility() {")
+    script = f"""set -uo pipefail
+ROOT_DIR={shlex.quote(str(tmp_path))}
+FLEET_DIR={shlex.quote(str(tmp_path))}
+HUB_UPLOAD_HELPER={shlex.quote(str(helper))}
+INHERITED_HUB_RUN_ID=
+SELF_MANAGED_HUB_RUN=0
+RUN_ID=fixture-starting
+{function}
+if require_in_app_hub_visibility; then accepted=1; else accepted=0; fi
+printf '\\nOBSERVED=%s,%s,%s\\n' "$accepted" "$SELF_MANAGED_HUB_RUN" "${{BENCHMARK_HUB_PARENT_RUN_ID:-}}"
+"""
+    env = {**os.environ, "BENCHMARK_HUB_API_KEY": "fixture-key", "BENCHMARK_HUB_UPLOAD_URL": "https://fixture.invalid"}
+    result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert f"OBSERVED={int(allowed)},1,fixture-starting" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "role,rejected",
+    [("primary", ""), ("worker", ""), ("worker", "deps"), ("worker", "prisma")],
+)
+def test_fresh_role_bootstraps_before_repo_writes_and_ready_work(tmp_path: Path, role: str, rejected: str) -> None:
+    origin = tmp_path / "origin.git"
+    author = tmp_path / "author"
+    for args in (["git", "init", "--bare", str(origin)], ["git", "init", str(author)]):
+        subprocess.run(args, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(author), "config", "user.email", "fixture@example.com"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(author), "config", "user.name", "fixture"], check=True)
+    (author / "value").write_text("exact source")
+    subprocess.run(["git", "-C", str(author), "add", "value"], check=True)
+    subprocess.run(["git", "-C", str(author), "commit", "-qm", "fixture"], check=True)
+    subprocess.run(["git", "-C", str(author), "remote", "add", "origin", str(origin)], check=True)
+    subprocess.run(
+        ["git", "-C", str(author), "push", "origin", "HEAD:main"],
+        check=True,
+        capture_output=True,
+    )
+    ref = subprocess.check_output(["git", "-C", str(author), "rev-parse", "HEAD"], text=True).strip()
+    repo = tmp_path / "repo"
+    if role == "primary":
+        source = DRIVER_SCRIPT.read_text()
+        body = source[source.index("# ── 0. Sanity:") : source.index("# ── 1. git-sync")]
+    else:
+        source = WORKER_SCRIPT.read_text()
+        body = source[source.index("# ── Sync the exact ref") : source.index("# Every autoscaled worker clone")]
+        # The unchanged original puts this precondition immediately above that
+        # section. Include it so the exact old failure remains represented.
+        prefix = source[: source.index("# ── Sync the exact ref")]
+        if 'cd "$REPO_DIR" 2>/dev/null' in prefix:
+            body = 'cd "$REPO_DIR" 2>/dev/null || exit 1\n' + body
+    patch = tmp_path / "patch"
+    patch.write_text(
+        "diff --git a/value b/value\nindex 1111111..2222222 100644\n--- a/value\n+++ b/value\n@@ -1 +1 @@\n-exact source\n\\ No newline at end of file\n+patched source\n\\ No newline at end of file\n"
+    )
+    dependency_calls = tmp_path / "dependency-calls"
+    helper = tmp_path / "dep-helper.sh"
+    helper.write_text(
+        '#!/usr/bin/env bash\nset -e\nprintf "%s\\n" "$*" >> "$DEPENDENCY_CALLS"\n[ "$(cat "$REPO/value")" = "patched source" ]\nkind=deps; [ "$1" = /app ] || kind=prisma\n[ "$REJECTED" != "$kind" ] || exit 1\nmkdir -p "$REPO/node_modules" "$REPO/back-end/node_modules" "$REPO/agents/venv"\n'
+    )
+    helper.chmod(0o755)
+    header = f"""set -uo pipefail
+REPO_DIR={shlex.quote(str(repo))}
+REPO="$REPO_DIR"
+CONTEXT_DIR="$REPO_DIR/.context/cloudbench"
+DATA_DIR={shlex.quote(str(tmp_path))}
+RUN_OUTPUT_MARKER="$DATA_DIR/output-marker"
+CLOUDBENCH_START_BARRIER=""
+APP_USER=""
+REF={ref}
+BENCH_SIMULATE=0
+FETCH_REF_SCRIPT={shlex.quote(str(FETCH_SCRIPT))}
+CLOUDBENCH_FRESH_VOLUME=1
+CLOUDBENCH_GIT_MIN_FREE_KB=1
+export CLOUDBENCH_FRESH_VOLUME CLOUDBENCH_GIT_MIN_FREE_KB
+CLOUDBENCH_SYNC_DEPS_SCRIPT={shlex.quote(str(helper))}
+CLOUDBENCH_SYNC_PRISMA_SCRIPT={shlex.quote(str(helper))}
+LOCAL_PATCH_FILE={shlex.quote(str(patch))}
+LOCAL_PATCH_SHA256={hashlib.sha256(patch.read_bytes()).hexdigest()}
+log() {{ :; }}
+finish() {{ exit "$1"; }}
+chown() {{ return 0; }}
+gosu() {{ shift; "$@"; }}
+# Do not remove any global worker handoff during this owned reduction.
+rm() {{ [ "$*" = '-f /tmp/rbw.env' ] || command rm "$@"; }}
+{body}
+printf ready > "$REPO_DIR/ready"
+"""
+    env = dict(
+        os.environ,
+        GITHUB_TOKEN="local-fixture-only",
+        GIT_CONFIG_COUNT="1",
+        GIT_CONFIG_KEY_0=f"url.file://{origin}.insteadOf",
+        GIT_CONFIG_VALUE_0="https://github.com/Rose-Ai-Labs/rose.git",
+        DEPENDENCY_CALLS=str(dependency_calls),
+        REPO=str(repo),
+        REJECTED=rejected,
+    )
+    result = subprocess.run(["bash", "-c", header], env=env, capture_output=True, text=True, timeout=10)
+    if rejected:
+        assert result.returncode == 1
+        assert not (repo / "ready").exists()
+        assert len(dependency_calls.read_text().splitlines()) == (1 if rejected == "deps" else 2)
+        return
+    assert result.returncode == 0, result.stderr
+    assert subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip() == ref
+    if role == "primary":
+        assert (repo / ".context/cloudbench").is_dir()
+    else:
+        assert (repo / "value").read_text() == "patched source"
+        assert len(dependency_calls.read_text().splitlines()) == 2
+
+
+@pytest.mark.parametrize(
+    "args,expected,status",
+    [
+        ([], "1", 0),
+        (["--provision-pool", "3"], "0", 0),
+        (["--fresh-volumes", "--snapshot-volumes", "--provision-pool", "3"], "0", 0),
+        (["--fresh-volumes", "--provision-pool", "3"], "", 2),
+    ],
+)
+def test_prebuilt_volume_cli_keeps_pool_and_last_override_contract(args: list[str], expected: str, status: int) -> None:
+    source = fleet_source_text()
+    initialize = source[source.index('FRESH_VOLUMES="') : source.index("\n", source.index("FRESH_VOLUMES_REQUESTED=0"))]
+    start = source.index("while [ $# -gt 0 ]; do")
+    end = source.index('export CLOUDBENCH_FRESH_VOLUMES="$FRESH_VOLUMES"', start)
+    parse = source[start:end] + 'export CLOUDBENCH_FRESH_VOLUMES="$FRESH_VOLUMES"'
+    script = f'set -uo pipefail\nPROVISION_POOL=""\n{initialize}\nset -- {shlex.join(args)}\n{parse}\nprintf "%s" "$CLOUDBENCH_FRESH_VOLUMES"'
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env=dict(os.environ, CLOUDBENCH_BOOT_LAUNCH="1", CLOUDBENCH_FRESH_VOLUMES="1"),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == status, result.stderr
+    assert result.stdout == expected
+
+
+@pytest.mark.parametrize("layout", ["hoisted", "workspace-local"])
+def test_prebuilt_prisma_client_sync_preserves_donor_workspace_layout(tmp_path: Path, layout: str) -> None:
+    donor = tmp_path / "donor"
+    repo = tmp_path / "repo"
+    _write_manifests(donor)
+    _write_manifests(repo)
+    schema = repo / "back-end/prisma/schema.prisma"
+    schema.parent.mkdir(parents=True)
+    schema.write_text("model Alpha { id String @id }\n")
+    root_tree = donor / "node_modules"
+    root_tree.mkdir()
+    tree = root_tree if layout == "hoisted" else donor / "back-end/node_modules"
+    package = tree / "prisma"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(
+        json.dumps({"name": "prisma", "version": "5.22.0", "bin": {"prisma": "cli.js"}})
+    )
+    (package / "cli.js").write_text(
+        '#!/usr/bin/env node\nconst fs = require("node:fs");\n'
+        'fs.writeFileSync(process.env.GENERATED_CLIENT, fs.readFileSync(process.argv[process.argv.indexOf("--schema") + 1], "utf8"));\n'
+    )
+    (package / "cli.js").chmod(0o755)
+    (tree / ".bin").mkdir()
+    (tree / ".bin/prisma").symlink_to("../prisma/cli.js")
+    # The client is a required runtime asset, separate from the CLI.
+    client = tree / "@prisma/client"
+    client.mkdir(parents=True)
+    (client / "package.json").write_text('{"name":"@prisma/client","version":"5.22.0"}')
+    (client / "generated-schema").write_text("older donor schema")
+    if layout == "workspace-local":
+        (root_tree / "fixture-backend").symlink_to("../back-end")
+    python = donor / "agents/venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    python.chmod(0o755)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gosu").write_text('#!/usr/bin/env bash\nshift\nexec "$@"\n')
+    (bin_dir / "gosu").chmod(0o755)
+    copied_tree = repo / "node_modules" if layout == "hoisted" else repo / "back-end/node_modules"
+    generated = copied_tree / "@prisma/client/generated-schema"
+    env = dict(
+        os.environ,
+        PATH=f"{bin_dir}:{os.environ['PATH']}",
+        GENERATED_CLIENT=str(generated),
+        npm_config_offline="true",
+        npm_config_cache=str(tmp_path / "npm-cache"),
+    )
+    for attempt in range(2):
+        if attempt and layout == "workspace-local":
+            # An old root-only receipt and current schema marker cannot hide a
+            # missing workspace client that must be copied and regenerated.
+            shutil.rmtree(repo / "back-end/node_modules")
+        sync = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)], env=env, text=True, capture_output=True, timeout=30
+        )
+        assert sync.returncode == 0, sync.stdout + sync.stderr
+        result = _run_prisma_sync(repo, env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert generated.read_text() == schema.read_text()
+        copied_tree = repo / "node_modules" if layout == "hoisted" else repo / "back-end/node_modules"
+        assert json.loads((copied_tree / "@prisma/client/package.json").read_text())["version"] == "5.22.0"
+        assert (repo / "node_modules/.prisma/.rose-schema-fingerprint").read_text().strip() == hashlib.sha256(
+            schema.read_bytes()
+        ).hexdigest()
+
+
+def test_prebuilt_prisma_client_sync_rejects_a_cli_outside_the_checkout(tmp_path: Path) -> None:
+    repo, generate_log, env = _write_prisma_fixture(tmp_path)
+    package = repo / "node_modules/prisma"
+    outside = tmp_path / "ambient-prisma"
+    package.rename(outside)
+    package.symlink_to(outside, target_is_directory=True)
+    result = _run_prisma_sync(repo, env)
+    assert result.returncode != 0
+    assert "Prisma CLI must belong to this checkout" in result.stderr
+    assert not generate_log.exists()
+    assert not (repo / "node_modules/.prisma/.rose-schema-fingerprint").exists()
+
+
+@pytest.mark.parametrize("case", ["completed-probe", "interrupted-probe", "foreign-marker", "symlink-marker"])
+def test_guest_shutdown_child_confirmation_uses_fleet_identity_only_after_completion(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    """The real child producer must not turn an interrupted probe into an ACK."""
+    source = CLOUD_SCRIPT.read_text()
+    producer = _extract_fleet_function(source, "confirm_guest_shutdown() {")
+    marker = tmp_path / "guest-shutdown.confirmed"
+    if case == "foreign-marker":
+        marker.write_text("foreign-run\n")
+    elif case == "symlink-marker":
+        target = tmp_path / "foreign-marker"
+        target.write_text("fixture-fleet\n")
+        marker.symlink_to(target)
+    original = marker.read_bytes() if marker.exists() else None
+    calls = tmp_path / "calls"
+    script = f"""set -uo pipefail
+OUT_DIR={shlex.quote(str(tmp_path))}
+FLEET_MACHINE_ID=deadbeef000001
+RUN_LOG_TOKEN={"6e24d19a05a94cc39402dd06db3b454e-0"}
+CLOUDBENCH_FLEET_RUN_ID=fixture-fleet
+CLOUDBENCH_INFRA_PROBE=1
+FINISHED={"1" if case == "completed-probe" else "0"}
+LOCAL_STATUS_PORT=61001
+STATUS_PROXY_PID=$$
+CLOUDBENCH_BARRIER_TOKEN=fixture-barrier
+cloudbench_skip_held_driver_teardown_race() {{ return 0; }}
+curl() {{ printf 'shutdown-request\n' >> {shlex.quote(str(calls))}; printf 500; }}
+{producer}
+confirm_guest_shutdown
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    if case == "completed-probe":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.read_bytes() == b"fixture-fleet\n"
+        assert not calls.exists()
+    else:
+        assert result.returncode != 0, "unconfirmed or foreign cleanup marker authorized release"
+        if original is None:
+            assert not marker.exists()
+            assert calls.read_text().splitlines() == ["shutdown-request"]
+        else:
+            assert marker.read_bytes() == original
+            assert not calls.exists()
+
+
+@pytest.mark.parametrize("fault", ["none", "foreign-owner", "wrong-slot", "wrong-machine", "wrong-run", "symlink"])
+def test_exact_guest_recovery_archives_bound_child_token_without_treating_it_as_ack(
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    """Original infra-probe markers require exact mapping and provider cleanup."""
+    owner = "6e24d19a05a94cc39402dd06db3b454e"
+    run_id = "20261006-115614-55990"
+    token = owner + "-0"
+    machine = "89599db6ee3418"
+    registry = tmp_path / "ownership" / owner
+    registry.mkdir(parents=True)
+    run = tmp_path / "runs" / run_id
+    output = run / "agent-payment-idempotent-abandonment"
+    output.mkdir(parents=True)
+    (run / "_batch").mkdir()
+    (run / "_batch/benches.json").write_text(
+        json.dumps(
+            [
+                {"name": output.name, "mode": "REAL"},
+                {"name": "browser-event-ticket", "mode": "REAL"},
+            ]
+        )
+    )
+    (registry / "meta").write_text(
+        f"fleet_owner_token={owner}\nrun_id={'wrong-run' if fault == 'wrong-run' else run_id}\nruns_root={run.parent}\n"
+    )
+    (output / ".cid").write_text(f"clone {'deadbeef000001' if fault == 'wrong-machine' else machine}\n")
+    marker = output / "guest-shutdown.confirmed"
+    marker_token = "a" * 32 + "-0" if fault == "foreign-owner" else owner + "-1" if fault == "wrong-slot" else token
+    marker.write_text(marker_token + "\n")
+    if fault == "symlink":
+        marker.rename(output / "foreign-marker")
+        marker.symlink_to(output / "foreign-marker")
+    original = marker.read_bytes()
+    calls = tmp_path / "calls"
+    helper = tmp_path / "provider-helper"
+    helper.write_text("import os,sys\nwith open(os.environ['CALLS'], 'a') as f: f.write(sys.argv[1] + '\\n')\n")
+    helper.chmod(0o755)
+    fleet = fleet_source_text()
+    signatures = [
+        "cloudbench_archive_bound_child_shutdown_confirmation() {",
+        "cloudbench_recover_guest_cleanup_receipts() {",
+    ]
+    functions = "\n".join(_extract_fleet_function(fleet, s) for s in signatures if s in fleet)
+    script = f"""set -uo pipefail
+APP=bench-app
+ROOT_DIR=/workspace
+RUN_ID={run_id}
+EXACT_SESSION_CLEANUP_HELPER={shlex.quote(str(helper))}
+CALLS={shlex.quote(str(calls))}
+export CALLS
+recovery_benches=({output.name})
+recovery_clone_names=(cloudbench-17ca25229017468a817f129d)
+recovery_machine_ids=({machine})
+recovery_machine_states=(stopped)
+recovery_guest_tokens=({token})
+recovery_proxy_ports=(61001)
+recovery_outputs=({shlex.quote(str(output))})
+cloudbench_seal_guest_evidence_file() {{ mv "$1" "$2"; }}
+cloudbench_fetch_guest_evidence() {{ printf -v "$1" '%s' 404; }}
+machine_status_exact_read() {{ printf 'stopped cloudbench-17ca25229017468a817f129d\n'; }}
+cloudbench_publish_guest_shutdown_confirmation() {{
+  [ ! -e "$1/guest-shutdown.confirmed" ] || return 91
+  printf '%s\n' "$2" > "$1/guest-shutdown.confirmed"
+  printf 'publish-confirmation\n' >> "$CALLS"
+}}
+{functions}
+cloudbench_recover_guest_cleanup_receipts {shlex.quote(str(registry))}
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    retained = output / "guest-shutdown.child-confirmation"
+    if fault == "none":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert retained.read_bytes() == original
+        assert marker.read_bytes() == (run_id + "\n").encode()
+        assert calls.read_text().splitlines() == [
+            "publish-stopped-machine-proof",
+            "cleanup-sealed-provider-sessions",
+            "validate-recovery-receipt",
+            "publish-confirmation",
+        ], "child marker bypassed exact stopped/provider cleanup"
+    else:
+        assert result.returncode != 0, "unbound child marker was accepted"
+        assert marker.read_bytes() == original
+        assert not retained.exists()
+        assert not calls.exists()
