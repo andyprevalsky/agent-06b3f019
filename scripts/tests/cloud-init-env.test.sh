@@ -32,6 +32,12 @@ fail() {
   exit 1
 }
 
+# `env -i` drops the caller's PATH, and macOS has no /usr/bin/timeout (it is
+# Homebrew coreutils' timeout/gtimeout), so every bounded child uses this
+# absolute path instead of relying on the sanitized PATH.
+TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
+[ -n "$TIMEOUT_BIN" ] || fail "no timeout/gtimeout binary on PATH"
+
 # run_cloud_init <case> <stale-value> [VAR=value ...]
 run_cloud_init() {
   local name="$1" stale="$2"
@@ -93,7 +99,7 @@ printf '#!/usr/bin/env bash\nexit 1\n' >"$seed_repo/back-end/scripts/apply-local
 : >"$seed_repo/agents/.env"
 : >"$seed_repo/back-end/.env"
 if ! env -i HOME="$TMP_ROOT/home" PATH="$NPX_STUB_BIN:$STUB_BIN:/usr/bin:/bin" BROWSER_PROVIDER=kernel \
-  timeout 60 "$BASH" "$seed_repo/scripts/cloud-init.sh" >"$seed_repo/cloud-init.log" 2>&1; then
+  "$TIMEOUT_BIN" 60 "$BASH" "$seed_repo/scripts/cloud-init.sh" >"$seed_repo/cloud-init.log" 2>&1; then
   cat "$seed_repo/cloud-init.log" >&2
   fail "unseeded-without-deps: cloud-init.sh did not finish (npx install prompt?)"
 fi
@@ -163,7 +169,7 @@ run_cloud_build() {
   if ! env -i HOME="$TMP_ROOT/home" PATH="$BUILD_STUB_BIN:/usr/bin:/bin" CALLS_LOG="$repo/calls.log" \
     CONDUCTOR_PORT=3001 CONDUCTOR_WORKSPACE_NAME="$name" DOCKER_UP=1 PG_LS_MAJOR=99 \
     PG_INSTALLED_VERSION=99.1-1 PG_ARCHIVE_VERSION=99.1-1 PG_REFRESH_RC=0 "$@" \
-    timeout 60 "$BASH" "$repo/scripts/cloud-build.sh" >"$repo/cloud-build.log" 2>&1; then
+    "$TIMEOUT_BIN" 60 "$BASH" "$repo/scripts/cloud-build.sh" >"$repo/cloud-build.log" 2>&1; then
     cat "$repo/cloud-build.log" >&2
     fail "$name: cloud-build.sh exited non-zero"
   fi
