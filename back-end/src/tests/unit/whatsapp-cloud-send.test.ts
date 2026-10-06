@@ -40,7 +40,16 @@ async function withMockedFetch(
   return calls;
 }
 
+// The fetch stub stands in for Meta, so these cases opt into the live transport.
+const LIVE_RUNTIME = {
+  ALLOW_LIVE_MESSAGING: '1',
+  BENCHMARK_MODE: undefined,
+  BENCHMARK_ISOLATED_RUN: undefined,
+  IS_PULL_REQUEST: undefined,
+};
+
 const CONFIGURED = {
+  ...LIVE_RUNTIME,
   WHATSAPP_PHONE_NUMBER_ID: '111222333',
   WHATSAPP_ACCESS_TOKEN: 'tok_test',
   WHATSAPP_GRAPH_API_VERSION: 'v21.0',
@@ -131,7 +140,7 @@ async function testTransientNotDefinitive(): Promise<void> {
 async function testNotConfigured(): Promise<void> {
   const calls = await withMockedFetch(
     () => new Response('{}', { status: 200 }),
-    { WHATSAPP_PHONE_NUMBER_ID: undefined, WHATSAPP_ACCESS_TOKEN: undefined },
+    { ...LIVE_RUNTIME, WHATSAPP_PHONE_NUMBER_ID: undefined, WHATSAPP_ACCESS_TOKEN: undefined },
     async () => {
       const result = await sendWhatsAppMessage('+15551234567', 'hi');
       assert.strictEqual(result.success, false, 'missing creds -> failure');

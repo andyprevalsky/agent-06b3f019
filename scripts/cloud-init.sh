@@ -360,18 +360,20 @@ elif ! pg_isready -h localhost -p 5432 -q 2>/dev/null; then
     log "WARN: no Postgres is reachable at localhost:5432 — skipping the seed. DB is empty."
 else
     log "seeding local DB (schema + prod data)…"
+    # --no-install: when dependency setup failed, npx would otherwise wait on a
+    # hidden "Ok to proceed?" install prompt (output is discarded) forever.
     ( cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
-        npx prisma db push --skip-generate --accept-data-loss >/dev/null 2>&1 ) \
+        npx --no-install prisma db push --skip-generate --accept-data-loss >/dev/null 2>&1 ) \
         || log "WARN: prisma db push failed"
     ( cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
         LOCAL_DB_NAME=victoria bash scripts/apply-local-workflow-ddl.sh >/dev/null 2>&1 ) \
         || log "WARN: apply-local-workflow-ddl.sh skipped/failed"
     ( cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
-        npx tsx scripts/ensure-agent-network-grep-indexes.ts >/dev/null 2>&1 ) \
+        npx --no-install tsx scripts/ensure-agent-network-grep-indexes.ts >/dev/null 2>&1 ) \
         || log "WARN: ensure-agent-network-grep-indexes.ts skipped/failed"
     if ( cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
             NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=96" \
-            npx tsx scripts/seed-local.ts ); then
+            npx --no-install tsx scripts/seed-local.ts ); then
         log "DB seeded from prod"
     else
         log "WARN: seed-local.ts failed — prod DATABASE_URL must be present in back-end/.env (BACKEND_ENV_B64). DB has schema only."

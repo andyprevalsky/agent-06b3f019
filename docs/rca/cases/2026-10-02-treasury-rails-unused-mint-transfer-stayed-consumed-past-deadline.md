@@ -18,8 +18,9 @@ tags:
   - deploy-gate
 sources:
   - PR #1341
+  - PR #1416
 repro: bash back-end/scripts/run-blackbox-tests.sh treasury-rails
-status: open
+status: mitigated
 ---
 
 ## Problem
@@ -173,6 +174,40 @@ sandbox KYC and payment-method setup are documented as instant, so a
 dedicated cardholder may not need an operator after all. That is untested.
 Adding one changes the shared org, and callers that pick `cardholders[0]`
 (newest first), including this test, would start using it.
+
+### 2026-10-06: the reclaim proof moves off the payment-benchmark cardholder
+
+`/deploy` Step 4a on PR #1416 (commit `db6426820`, 04:46Z) failed
+`treasury-rails` the same way. The unused $13.00 card's transfer stayed
+`consumed` with `released_cents: 0` through 27 attempts, while the test's own
+sweep recovered $37.21 from the same cardholder.
+
+- The sandbox org has two cardholders. Payment benchmarks in every workspace
+  mint on the KYC-verified one, resolved by `resolveBenchmarkCardholderId`.
+  This test took the first cardholder with no OPEN card, which was that same
+  holder.
+- $37.21 is the $43.96 payment-lifecycle card minus `test_charge`'s simulated
+  $6.75: another workspace's lifecycle residual. The 2026-10-04 stall on
+  `card_01c6aabfe93b113e8c84f4b6` also returned $37.21.
+- A sandbox-only simulator ran that 4396-cent lifecycle (mint, `test_charge`,
+  close, recover) on the verified holder 20 seconds after the treasury card
+  closed. The unchanged test then failed the same way after 25 attempts.
+- Control: the same run pointed at the other cardholder (KYC pending;
+  `company_flow` mints still succeed) passed, reclaiming $13.00 on attempt 17.
+  That cardholder's recent transfers were all 1300-cent treasury mints, every
+  one reclaimed in full.
+
+`selectTreasuryRailCardholder` now checks every other idle cardholder before
+the payment-benchmark one. It falls back to the shared cardholder only when
+that is the sole idle choice, and it never picks a cardholder with an OPEN
+card. With the simulator still running a foreign lifecycle on the verified
+holder, the fixed test reclaimed $13.00 on attempt 15.
+`treasury-rails-cardholder.blackbox.ts` covers the order, the fallback and
+OPEN-card exclusion as a backend blackbox domain. The deferred day-long ledger
+check and the 240-second wait are unchanged. The change is test-only.
+
+Status is `mitigated`: runs that fall back to the shared cardholder can still
+contend, and the first 2026-10-02 stall had no observed foreign mint.
 
 ## Human feedback
 

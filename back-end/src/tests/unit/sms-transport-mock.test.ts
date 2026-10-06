@@ -9,9 +9,14 @@ import {
   isLocalBenchmarkAgentPhoneMockEnabled,
   isLocalBenchmarkSmsTransportMockEnabled,
   isLocalBenchmarkWhatsAppTransportMockEnabled,
+  isLiveMessagingRuntime,
+  isMessagingTransportFakedAtFetchBoundary,
+  markMessagingFetchFakesInstalled,
   mockAgentPhoneMessageId,
   mockSurgeMessageId,
   mockWhatsAppMessageId,
+  shouldMockMessagingSend,
+  transportMockArchiveContext,
 } from '../../providers/smsTransportMock';
 
 async function run() {
@@ -78,16 +83,18 @@ async function run() {
     phoneNumber: '+19729777432',
     message: 'Started: "Find coffee"',
     seed: 'bench-send',
+    reason: 'benchmark_agent',
   });
   assert.equal(mockSurge.success, true);
   assert.equal(mockSurge.mocked, true);
-  assert.equal(mockSurge.reason, 'benchmark_transport_mock');
+  assert.equal(mockSurge.reason, 'benchmark_agent');
   assert.equal(mockSurge.messageSid, mockSurgeMessageId('bench-send'));
 
   const mockAgentPhone = buildMockAgentPhoneSendResult({
     fromNumber: '+19125550100',
     toNumber: '+19729777432',
     seed: 'agent-phone-send',
+    reason: 'benchmark_agent',
   });
   assert.equal(mockAgentPhone.status, 'sent');
   assert.equal(mockAgentPhone.channel, 'sms');
@@ -96,9 +103,92 @@ async function run() {
   const mockWhatsApp = await buildMockWhatsAppSendResult({
     phoneNumber: '+19729777432',
     seed: 'whatsapp-send',
+    reason: 'non_production_runtime',
   });
   assert.equal(mockWhatsApp.success, true);
+  assert.equal(mockWhatsApp.reason, 'non_production_runtime');
   assert.equal(mockWhatsApp.messageSid, mockWhatsAppMessageId('whatsapp-send'));
+
+  assert.deepEqual(transportMockArchiveContext('benchmark_agent'), {
+    benchmark_transport_mock: true,
+    transport_mock_reason: 'benchmark_agent',
+  });
+  assert.deepEqual(transportMockArchiveContext('non_production_runtime'), {
+    benchmark_transport_mock: false,
+    transport_mock_reason: 'non_production_runtime',
+  });
+
+  const liveRuntimeCases: Array<[string, NodeJS.ProcessEnv, boolean]> = [
+    ['production', { NODE_ENV: 'production' }, true],
+    ['test NODE_ENV', { NODE_ENV: 'test' }, false],
+    ['unset NODE_ENV', {}, false],
+    ['test capture', { NODE_ENV: 'production', BLACKBOX_TEST_CAPTURE_OUTBOUND: '1' }, false],
+    ['PR preview', { NODE_ENV: 'production', IS_PULL_REQUEST: 'true' }, false],
+    ['local benchmark', { NODE_ENV: 'production', BENCHMARK_MODE: 'true' }, false],
+    ['isolated benchmark', { NODE_ENV: 'production', BENCHMARK_ISOLATED_RUN: 'true' }, false],
+    ['run.sh non-benchmark stack', { NODE_ENV: 'production', BENCHMARK_MODE: 'false' }, true],
+    ['dev opt-in', { NODE_ENV: 'test', ALLOW_LIVE_MESSAGING: '1' }, true],
+    [
+      'opt-in under capture',
+      { BLACKBOX_TEST_CAPTURE_OUTBOUND: '1', ALLOW_LIVE_MESSAGING: '1' },
+      true,
+    ],
+    [
+      'opt-in cannot override a benchmark',
+      { BENCHMARK_MODE: '1', ALLOW_LIVE_MESSAGING: '1' },
+      false,
+    ],
+    [
+      'opt-in cannot override a PR preview',
+      { IS_PULL_REQUEST: 'true', ALLOW_LIVE_MESSAGING: '1' },
+      false,
+    ],
+    ['only the exact opt-in value counts', { ALLOW_LIVE_MESSAGING: 'true' }, false],
+  ];
+  for (const [label, env, expected] of liveRuntimeCases) {
+    assert.equal(isLiveMessagingRuntime(env), expected, `isLiveMessagingRuntime: ${label}`);
+  }
+
+  const fakedEnv = { BLACKBOX_TEST_FAKE_TWILIO: '1', BLACKBOX_TEST_FAKE_SURGE: '1' };
+  assert.equal(
+    isMessagingTransportFakedAtFetchBoundary('twilio-verify', fakedEnv),
+    false,
+    'a fake flag means nothing until fetch capture is installed'
+  );
+  const policyKeys = [
+    'NODE_ENV',
+    'ALLOW_LIVE_MESSAGING',
+    'IS_PULL_REQUEST',
+    'BENCHMARK_MODE',
+    'BENCHMARK_ISOLATED_RUN',
+    'BLACKBOX_TEST_CAPTURE_OUTBOUND',
+    'BLACKBOX_TEST_FAKE_TWILIO',
+    'BLACKBOX_TEST_FAKE_AGENTPHONE',
+  ];
+  const savedPolicyEnv = policyKeys.map((key) => [key, process.env[key]] as const);
+  for (const key of policyKeys) delete process.env[key];
+  process.env.NODE_ENV = 'test';
+  assert.equal(await shouldMockMessagingSend('twilio-verify'), 'non_production_runtime');
+  assert.equal(await shouldMockMessagingSend('surge', '   '), 'non_production_runtime');
+  process.env.NODE_ENV = 'production';
+  assert.equal(await shouldMockMessagingSend('twilio-verify'), null);
+
+  markMessagingFetchFakesInstalled();
+  assert.equal(isMessagingTransportFakedAtFetchBoundary('twilio-verify', fakedEnv), true);
+  assert.equal(isMessagingTransportFakedAtFetchBoundary('whatsapp', fakedEnv), false);
+  process.env.NODE_ENV = 'test';
+  process.env.BLACKBOX_TEST_FAKE_TWILIO = '1';
+  assert.equal(
+    await shouldMockMessagingSend('twilio-verify'),
+    null,
+    'an installed fetch-boundary fake owns the request'
+  );
+  assert.equal(await shouldMockMessagingSend('agentphone'), 'non_production_runtime');
+
+  for (const [key, value] of savedPolicyEnv) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 
   // Shape mirrors captured supervisor provider ids (msg_01…).
   assert.equal(
@@ -117,7 +207,7 @@ async function run() {
   if (oldBenchmarkIsolatedRun === undefined) delete process.env.BENCHMARK_ISOLATED_RUN;
   else process.env.BENCHMARK_ISOLATED_RUN = oldBenchmarkIsolatedRun;
 
-  process.stdout.write('sms-transport-mock: 18 passed, 0 failed\n');
+  process.stdout.write('sms-transport-mock: 42 passed, 0 failed\n');
 }
 
 run().catch((error) => {

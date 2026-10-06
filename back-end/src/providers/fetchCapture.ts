@@ -27,9 +27,14 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { resolve } from 'path';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 import { fastForward as ff } from '@with-logic/fast-forward';
 import { NonBlockingFileCache } from './nonBlockingFetchCache';
-import { mockAgentPhoneMessageId, mockSurgeMessageId } from './smsTransportMock';
+import {
+  markMessagingFetchFakesInstalled,
+  mockAgentPhoneMessageId,
+  mockSurgeMessageId,
+} from './smsTransportMock';
 
 /**
  * AsyncLocalStorage for propagating a capture token from inbound HTTP requests
@@ -286,6 +291,7 @@ export function installFetchCapture(): Router {
 
   const cachedClient = ff(rawClient, { cache: fsCache, key: keyTransformer });
 
+  markMessagingFetchFakesInstalled();
   globalThis.fetch = async (
     input: string | URL | globalThis.Request,
     init?: RequestInit
@@ -567,6 +573,42 @@ export function installFetchCapture(): Router {
       return new globalThis.Response(body, {
         status: 200,
         statusText: 'OK',
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    // Twilio Verify sends a real OTP SMS. Seeded replay fixtures keep their
+    // exact provider shape; anything unseeded gets a pending verification.
+    if (
+      process.env.BLACKBOX_TEST_FAKE_TWILIO === '1' &&
+      new URL(url).hostname === 'verify.twilio.com' &&
+      new URL(url).pathname.endsWith('/Verifications') &&
+      method.toUpperCase() === 'POST' &&
+      !(
+        replayEnabled &&
+        fsCache !== null &&
+        (await fsCache.has(outboundReplayCacheKey(url, method, requestBody)))
+      )
+    ) {
+      const to = new URLSearchParams(requestBody ?? '').get('To') ?? '';
+      const body = JSON.stringify({
+        sid: `VE${createHash('sha256')
+          .update(`capture:${requestBody ?? ''}`)
+          .digest('hex')
+          .slice(0, 32)}`,
+        status: 'pending',
+        to,
+        channel: 'sms',
+        valid: false,
+      });
+      entry.durationMs = Date.now() - start;
+      entry.responseStatus = 201;
+      entry.responseBody = body;
+      captures.push(entry);
+
+      return new globalThis.Response(body, {
+        status: 201,
+        statusText: 'Created',
         headers: { 'content-type': 'application/json' },
       });
     }

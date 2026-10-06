@@ -523,12 +523,16 @@ case "$1" in
       foreign-url) domain=foreign.ngrok.app ;;
       wrong-upstream) upstream=3999 ;;
     esac
+    addr="\"http://localhost:$upstream\""
+    # ngrok 3.39 logs the upstream as a serialized Go url.URL, not a string.
+    [ "${NGROK_ADDR_FORMAT:-string}" = url-object ] &&
+      addr="{\"Scheme\":\"http\",\"Opaque\":\"\",\"User\":null,\"Host\":\"localhost:$upstream\",\"Path\":\"\",\"RawPath\":\"\",\"OmitHost\":false,\"ForceQuery\":false,\"RawQuery\":\"\",\"Fragment\":\"\",\"RawFragment\":\"\"}"
     if [ "${NGROK_EVENT_KIND:-}" = delayed ]; then
       rm -f "$RUN_CONTEXT_DIR/ngrok-fallback.log"
       sleep 1
-      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":"http://localhost:%s"}\n' "${domain:-free.ngrok-free.dev}" "$upstream" > "$RUN_CONTEXT_DIR/ngrok-fallback.log"
+      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":%s}\n' "${domain:-free.ngrok-free.dev}" "$addr" > "$RUN_CONTEXT_DIR/ngrok-fallback.log"
     else
-      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":"http://localhost:%s"}\n' "${domain:-free.ngrok-free.dev}" "$upstream"
+      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":%s}\n' "${domain:-free.ngrok-free.dev}" "$addr"
     fi
     exec sleep 30
     ;;
@@ -552,6 +556,9 @@ while [ "$#" -gt 0 ]; do
 done
 case "${NGROK_RESPONSE_KIND:-pre-origin}" in
   pre-origin) status=400; printf 'HTTP/2 400\r\nNgrok-Error-Code: ERR_NGROK_8012\r\nContent-Type: text/html\r\n\r\n' > "$headers"; printf '<html>upstream not started</html>' > "$body" ;;
+  # The live ngrok edge answers 502 for ERR_NGROK_8012 before the origin listens.
+  pre-origin-502) status=502; printf 'HTTP/2 502\r\nContent-Type: text/html\r\nNgrok-Error-Code: ERR_NGROK_8012\r\nReferrer-Policy: no-referrer\r\n\r\n' > "$headers"; printf '<html>upstream not started</html>' > "$body" ;;
+  unmarked-502) status=502; printf 'HTTP/2 502\r\nContent-Type: text/html\r\n\r\n' > "$headers" ;;
   healthy|wrong-body)
     status=200; printf 'HTTP/2 200\r\nContent-Type: text/html\r\n\r\n' > "$headers"
     printf '<div id="root">own-app</div>' > "$body"
@@ -608,6 +615,9 @@ echo "PASS: the per-worktree ngrok fallback domain is still reserved and bound"
 NGROK_RESPONSE_KIND=healthy run_ngrok_fallback krakow-bench-healthy-origin \
   || fail "case 10: authentic healthy app must pass ngrok route proof"
 echo "PASS: ngrok healthy200 matches its owned local app origin"
+NGROK_RESPONSE_KIND=pre-origin-502 run_ngrok_fallback krakow-bench-pre-origin-502 \
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: the edge's 502 ERR_NGROK_8012 before the origin listens must prove routing"; }
+echo "PASS: ngrok's 502 ERR_NGROK_8012 before the origin listens proves the owned route"
 NGROK_EVENT_KIND=delayed run_ngrok_fallback krakow-bench-delayed-publication \
   || fail "case 10: initial log absence must remain pending until the current child publishes"
 echo "PASS: delayed current-child log publication remains pending then routes"
@@ -618,7 +628,16 @@ for event in foreign-url wrong-upstream; do
   [ ! -e "$TMP/ngrok-published" ] || fail "case 10: $event was published before ownership rejection"
 done
 echo "PASS: foreign ngrok endpoint and wrong upstream are rejected before publication"
-for response in offline unmarked proxy proxy-after-connect wrong-body; do
+NGROK_ADDR_FORMAT=url-object NGROK_RESPONSE_KIND=healthy run_ngrok_fallback krakow-bench-url-object-origin \
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: ngrok's structured upstream address must identify its owned origin"; }
+for event in foreign-url wrong-upstream; do
+  if NGROK_ADDR_FORMAT=url-object NGROK_EVENT_KIND="$event" run_ngrok_fallback krakow-bench-url-object-negative; then
+    fail "case 10: $event with a structured upstream address must be rejected"
+  fi
+  [ ! -e "$TMP/ngrok-published" ] || fail "case 10: structured $event was published before ownership rejection"
+done
+echo "PASS: ngrok's structured upstream address is owned only for the requested origin and port"
+for response in offline unmarked unmarked-502 proxy proxy-after-connect wrong-body; do
   if NGROK_RESPONSE_KIND="$response" run_ngrok_fallback krakow-bench-route-negative; then
     fail "case 10: ngrok $response must not certify routing"
   fi
