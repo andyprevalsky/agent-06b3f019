@@ -9,7 +9,7 @@ import {
   proveArchiveCannotTakeOverForeignRow,
   proveLiveMessageBackfill,
 } from './agent-trajectories.live-backfill';
-import { proveTreeRolesAndPaging } from './agent-trajectories.paging';
+import { proveCharacterBoundedPaging, proveTreeRolesAndPaging } from './agent-trajectories.paging';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import { archiveJson } from '../../providers/traceArchive';
@@ -498,6 +498,7 @@ async function run(): Promise<void> {
       throw new Error('Typed trajectory parameters did not resolve the original USER message');
     }
     await proveTreeRolesAndPaging(grep, ownerId, otherId, prior.id, priorChild.id, current.id);
+    await proveCharacterBoundedPaging(grep, ownerId);
     const [mixedUserMessage] = requireResult(
       await grep(ownerId, {
         sources: ['agent_network', 'agent_trajectories'],

@@ -1,4 +1,3 @@
-/* eslint-disable max-lines-per-function */
 /**
  * Data domain service — business logic for grep and summary operations.
  */
@@ -6,25 +5,20 @@
 import { MAX_RESULT_CHARS } from './config';
 import { boundMatchesByChars } from './grepPageBounds';
 import { isPostgresRegexError } from './regexSafety';
-import { buildAgentNetworkMatch, buildDocumentMatch, buildTransactionMatch } from './format';
 import { formatTimeAgo } from './format.snippets';
 import { sortMatches } from './grepSort';
+import { InvalidPatternError } from './errors';
+import { searchSource } from './sourceSearchService';
+import { transactionGrepSummary } from './transactionGrepSummary';
 import {
   isMessageFamilySource,
-  type GrepMatch,
   type GrepParams,
   type GrepResult,
   type SummaryResult,
-  type ValidSource,
-  type ValidatedGrepInput,
 } from './types';
-import { AgentNotFoundError, InvalidPatternError, MissingAgentIdError } from './errors';
 import { validateGrepInput } from './validate';
 import * as repo from './repo';
 import * as grepRepo from './grepRepo';
-import { searchTrajectorySource } from './trajectorySearchService';
-import { searchMessageSource } from './messageSearchService';
-import { searchNetworkSource } from './networkSearchService';
 import { createLogger } from '../../providers/logger';
 
 // Per-source connectivity lives in a dedicated file; re-export so routes can
@@ -42,132 +36,6 @@ export {
   MissingAgentIdError,
   SourceNotFoundError,
 } from './errors';
-
-async function agentTreeIdsForGrep(userId: string, agentId: string | undefined): Promise<string[]> {
-  if (agentId === undefined || agentId === '') throw new MissingAgentIdError();
-  const agent = await repo.findAgentByIdAndUser(agentId, userId);
-  if (agent === null) throw new AgentNotFoundError(agentId);
-  const rootId = await repo.findRootAgentId(agentId, userId);
-  return repo.findAgentTreeIds(rootId, userId);
-}
-
-async function searchSource(
-  userId: string,
-  input: ValidatedGrepInput,
-  source: ValidSource,
-  agentId: string | undefined
-): Promise<{
-  total: number;
-  matches: GrepMatch[];
-  hasMore?: boolean;
-  nextPageAfter?: string | null;
-}> {
-  if (isMessageFamilySource(source)) {
-    return searchMessageSource({ userId, input, source });
-  }
-
-  if (source === 'network') {
-    return searchNetworkSource({ userId, input });
-  }
-
-  if (source === 'transactions') {
-    const filters = input.filters.transactions;
-    const [total, rows] = await Promise.all([
-      grepRepo.countTransactionGrepRows({
-        userId,
-        pattern: input.dbPattern,
-        caseInsensitive: input.caseInsensitive,
-        since: filters?.since,
-        until: filters?.until,
-        account: filters?.account,
-        minAmount: filters?.minAmount,
-        maxAmount: filters?.maxAmount,
-        status: filters?.status,
-        pathInstitution: filters?.pathInstitution,
-        pathAccount: filters?.pathAccount,
-        pathTransactionId: filters?.pathTransactionId,
-      }),
-      grepRepo.searchTransactionGrepRows({
-        userId,
-        pattern: input.dbPattern,
-        caseInsensitive: input.caseInsensitive,
-        limit: input.headLimit,
-        offset: input.offset,
-        since: filters?.since,
-        until: filters?.until,
-        account: filters?.account,
-        minAmount: filters?.minAmount,
-        maxAmount: filters?.maxAmount,
-        status: filters?.status,
-        pathInstitution: filters?.pathInstitution,
-        pathAccount: filters?.pathAccount,
-        pathTransactionId: filters?.pathTransactionId,
-      }),
-    ]);
-    return { total, matches: rows.map((row) => buildTransactionMatch(row, input)) };
-  }
-
-  if (source === 'documents') {
-    const filters = input.filters.documents;
-    const [total, rows] = await Promise.all([
-      grepRepo.countDocumentGrepRows({
-        userId,
-        pattern: input.dbPattern,
-        caseInsensitive: input.caseInsensitive,
-        documentSource: filters?.documentSource,
-        since: filters?.since,
-        until: filters?.until,
-        path: filters?.path,
-        pathDocumentSource: filters?.pathDocumentSource,
-        pathRest: filters?.pathRest,
-        tag: filters?.tag,
-      }),
-      grepRepo.searchDocumentGrepRows({
-        userId,
-        pattern: input.dbPattern,
-        caseInsensitive: input.caseInsensitive,
-        limit: input.headLimit,
-        offset: input.offset,
-        documentSource: filters?.documentSource,
-        since: filters?.since,
-        until: filters?.until,
-        path: filters?.path,
-        pathDocumentSource: filters?.pathDocumentSource,
-        pathRest: filters?.pathRest,
-        tag: filters?.tag,
-      }),
-    ]);
-    return { total, matches: rows.map((row) => buildDocumentMatch(row, input)) };
-  }
-
-  if (source === 'agent_trajectories') return searchTrajectorySource(userId, input, agentId);
-
-  const agentIds = await agentTreeIdsForGrep(userId, agentId);
-  const agentNetworkFilters = input.filters.agentNetwork;
-  const [total, rows] = await Promise.all([
-    grepRepo.countAgentNetworkGrepRows({
-      agentIds,
-      pattern: input.dbPattern,
-      caseInsensitive: input.caseInsensitive,
-      pathAgentId: agentNetworkFilters?.pathAgentId,
-      pathRole: agentNetworkFilters?.pathRole,
-      pathMessageId: agentNetworkFilters?.pathMessageId,
-      role: agentNetworkFilters?.role,
-    }),
-    grepRepo.searchAgentNetworkGrepRows({
-      agentIds,
-      pattern: input.dbPattern,
-      caseInsensitive: input.caseInsensitive,
-      limit: input.headLimit,
-      offset: input.offset,
-      pathAgentId: agentNetworkFilters?.pathAgentId,
-      pathRole: agentNetworkFilters?.pathRole,
-      pathMessageId: agentNetworkFilters?.pathMessageId,
-      role: agentNetworkFilters?.role,
-    }),
-  ]);
-  return { total, matches: rows.map((row) => buildAgentNetworkMatch(row, input)) };
-}
 
 // ---------------------------------------------------------------------------
 // Grep — main entry point
@@ -212,29 +80,7 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
   const summaries: GrepResult['summaries'] = {};
 
   if (input.sources.includes('transactions')) {
-    const filters = input.filters.transactions;
-    const aggregateRows = await grepRepo.aggregateTransactionGrepRows({
-      userId,
-      pattern: input.dbPattern,
-      caseInsensitive: input.caseInsensitive,
-      since: filters?.since,
-      until: filters?.until,
-      account: filters?.account,
-      minAmount: filters?.minAmount,
-      maxAmount: filters?.maxAmount,
-      status: filters?.status,
-      includePendingInTotals: filters?.includePendingInTotals,
-    });
-    summaries.transactions = {
-      totals_include_pending: filters?.includePendingInTotals === true,
-      currencies: aggregateRows.map((row) => ({
-        currency: row.currency,
-        outflow: row.outflow?.toString() ?? '0',
-        inflow: row.inflow?.toString() ?? '0',
-        net: row.net?.toString() ?? '0',
-        count: Number(row.count),
-      })),
-    };
+    summaries.transactions = await transactionGrepSummary(userId, input);
   }
 
   log.info(
@@ -253,9 +99,7 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
     has_more: hasMore,
     next_offset:
       hasMore && input.pageAfterMessageId === undefined ? input.offset + matches.length : null,
-    ...(keysetPage
-      ? { next_page_after: hasMore ? matches.at(-1)?.path ?? null : null }
-      : {}),
+    ...(keysetPage ? { next_page_after: hasMore ? (matches.at(-1)?.path ?? null) : null } : {}),
     applied_char_limit: MAX_RESULT_CHARS,
     ...(charTruncated ? { char_truncated: true } : {}),
     display_order: oldestFirst ? 'oldest_first' : 'newest_first',
