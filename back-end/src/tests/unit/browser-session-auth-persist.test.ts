@@ -17,6 +17,8 @@ import {
 import {
   completeCloudBrowserSignIn,
   deleteCloudBrowserSignInEvidence,
+  holdSiblingCloseLock,
+  waitForAbandonedWrite,
 } from '../helpers/browser-sign-in-evidence';
 
 type FakeCookie = {
@@ -116,6 +118,17 @@ async function signedInKernelSession(userId: string, authRealm = 'https://exampl
     authRealm,
   });
   return session;
+}
+
+async function withPersistTimeoutMs<T>(timeoutMs: number, fn: () => Promise<T>): Promise<T> {
+  const previous = process.env.BROWSER_SESSION_AUTH_PERSIST_TIMEOUT_MS;
+  process.env.BROWSER_SESSION_AUTH_PERSIST_TIMEOUT_MS = String(timeoutMs);
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) delete process.env.BROWSER_SESSION_AUTH_PERSIST_TIMEOUT_MS;
+    else process.env.BROWSER_SESSION_AUTH_PERSIST_TIMEOUT_MS = previous;
+  }
 }
 
 async function realmRows(userId: string, authRealm: string) {
@@ -382,10 +395,8 @@ async function partitionedDuplicatesAndConcurrentClosesPersist(): Promise<void> 
 }
 
 async function localStorageTimeoutKeepsCookiesAndClosesProbe(): Promise<void> {
-  const previous = process.env.BROWSER_SESSION_AUTH_PERSIST_TIMEOUT_MS;
-  process.env.BROWSER_SESSION_AUTH_PERSIST_TIMEOUT_MS = '600';
-  try {
-    await withUser(async (userId) => {
+  await withPersistTimeoutMs(600, () =>
+    withUser(async (userId) => {
       const session = await signedInKernelSession(userId);
       let probeClosed = false;
       const bypass: unknown[] = [];
@@ -426,11 +437,74 @@ async function localStorageTimeoutKeepsCookiesAndClosesProbe(): Promise<void> {
       assert.deepEqual(bypass, [
         { method: 'Network.setBypassServiceWorker', params: { bypass: true } },
       ]);
-    });
-  } finally {
-    if (previous === undefined) delete process.env.BROWSER_SESSION_AUTH_PERSIST_TIMEOUT_MS;
-    else process.env.BROWSER_SESSION_AUTH_PERSIST_TIMEOUT_MS = previous;
-  }
+    })
+  );
+}
+
+const SIGNED_IN_EXAMPLE_TAB = () =>
+  fakeBrowser({
+    cookies: [
+      { name: 'session', value: 'kernel-auth', domain: '.example.com', expires: LIVE_EXPIRY() },
+    ],
+    pages: [openPage('https://example.com/app', [{ name: 'rose_handoff', value: 'signed-in' }])],
+  });
+
+async function heldCookieLockCannotStallClose(): Promise<void> {
+  await withPersistTimeoutMs(800, () =>
+    withUser(async (userId) => {
+      const session = await signedInKernelSession(userId);
+      const lock = await holdSiblingCloseLock(
+        `browser-auth-persist:cookies:${userId}:kernel:example.com`
+      );
+      try {
+        await assert.rejects(
+          persistSignedInBrowserState(session.sessionId, { browser: SIGNED_IN_EXAMPLE_TAB() }),
+          /Timed out persisting signed-in browser cookies/
+        );
+        assert.equal(lock.valveFired(), false, 'close waited on a sibling cookie lock');
+      } finally {
+        await lock.release();
+      }
+      await waitForAbandonedWrite(
+        async () => (await realmRows(userId, 'example.com')).bundle !== null,
+        'the abandoned cookie write never committed'
+      );
+      assert.equal(
+        await prisma.localStorageOrigin.count({ where: { userId } }),
+        0,
+        'no write may start once the budget is spent'
+      );
+    })
+  );
+}
+
+async function heldStorageLockKeepsCookiesWithinBudget(): Promise<void> {
+  await withPersistTimeoutMs(800, () =>
+    withUser(async (userId) => {
+      const session = await signedInKernelSession(userId);
+      const lock = await holdSiblingCloseLock(
+        `browser-auth-persist:storage:${userId}:https://example.com`
+      );
+      let result: Awaited<ReturnType<typeof persistSignedInBrowserState>>;
+      try {
+        result = await persistSignedInBrowserState(session.sessionId, {
+          browser: SIGNED_IN_EXAMPLE_TAB(),
+        });
+        assert.equal(lock.valveFired(), false, 'close waited on a sibling storage lock');
+      } finally {
+        await lock.release();
+      }
+      assert.equal(result.persisted, true);
+      assert.equal(result.realmCount, 1);
+      assert.equal(result.localStorageOriginCount, 0);
+      assert.match(result.warning ?? '', /Timed out persisting signed-in browser localStorage/);
+      assert.equal((await realmRows(userId, 'example.com')).cookies.length, 1);
+      await waitForAbandonedWrite(
+        async () => (await prisma.localStorageOrigin.count({ where: { userId } })) === 1,
+        'the abandoned localStorage write never committed'
+      );
+    })
+  );
 }
 
 async function probeReadsBlankTabOriginsThroughSyntheticDocument(): Promise<void> {
@@ -514,6 +588,8 @@ async function main(): Promise<void> {
   await mergesExistingKeysAndReEnablesBundle();
   await partitionedDuplicatesAndConcurrentClosesPersist();
   await localStorageTimeoutKeepsCookiesAndClosesProbe();
+  await heldCookieLockCannotStallClose();
+  await heldStorageLockKeepsCookiesWithinBudget();
   await probeReadsBlankTabOriginsThroughSyntheticDocument();
   await collectHelpersCoverReconnectOrigins();
   await fixtureWsUrlDoesNotHangClosePath();

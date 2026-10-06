@@ -22,14 +22,14 @@ import { prisma, runTransactionWithRetry } from '../database';
 import { createLogger } from '../logger';
 import { createOriginPayloadWriter } from '../steel/injectionOriginPage';
 import { steelCdpConnectionUrl } from '../steel/urls';
-import { withTimeout } from '../steel/injectionTimeouts';
+import { BrowserStateInjectionTimeout, withTimeout } from '../steel/injectionTimeouts';
 import { benchmarkIsolatedBrowserProfilesEnabled } from './benchmarkProfileIsolation';
 import { storedBrowserProvider } from './types';
 
 const log = createLogger('BrowserSessionAuthPersist');
 const CHROME_EPOCH_OFFSET_MICROSECONDS = 11_644_473_600n * 1_000_000n;
-// One budget covers connect + cookie read + localStorage read: the worker gives
-// the whole close request 10s and the provider release still follows harvest.
+// One budget covers connect, reads and writes: the worker gives the whole close
+// request 10s and the provider release still follows harvest.
 const DEFAULT_PERSIST_TIMEOUT_MS = 6_000;
 const MAX_COOKIES_PER_REALM = 400;
 const MAX_ORIGINS = 40;
@@ -50,6 +50,7 @@ export const CLOUD_PERSISTENT_BROWSER_PROFILE = 'cloud_persistent';
 type LocalStorageEntry = { name: string; value: string };
 type OriginLocalStorage = { origin: string; localStorage: LocalStorageEntry[] };
 type HarvestContext = Pick<BrowserContext, 'pages' | 'newPage' | 'newCDPSession'>;
+type HarvestBudget = { remainingMs: () => number; spent: () => boolean };
 
 export type PersistSignedInBrowserStateResult = {
   persisted: boolean;
@@ -155,11 +156,25 @@ export async function signedInRealmsForBrowserSession(params: {
   ];
 }
 
+/**
+ * A sibling close can hold a realm's advisory lock. `withTimeout` abandons the
+ * wait but not the transaction, so a spent budget also refuses the next write.
+ */
+async function writeWithinBudget(
+  budget: HarvestBudget,
+  message: string,
+  write: () => Promise<unknown>
+): Promise<void> {
+  if (budget.spent()) throw new BrowserStateInjectionTimeout(message);
+  await withTimeout(write(), budget.remainingMs(), message);
+}
+
 async function persistHarvestedCookies(
   userId: string,
   browserSource: string,
   cookies: Cookie[],
-  signedInRealms: ReadonlySet<string>
+  signedInRealms: ReadonlySet<string>,
+  budget: HarvestBudget
 ): Promise<{ cookieCount: number; realmCount: number }> {
   const now = nowChromeEpochMicroseconds();
   const byRealm = new Map<string, Cookie[]>();
@@ -178,60 +193,62 @@ async function persistHarvestedCookies(
     // selectTopCookieBundle never injects a bundle without an auth-looking
     // cookie, while an enabled bundle still hides the minted-account option.
     if (!realmCookies.some((cookie) => isAuthCredentialCookieName(cookie.name))) continue;
-    await runTransactionWithRetry(async (tx) => {
-      // Sibling browser sessions of one user can close on the same realm at once.
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`browser-auth-persist:cookies:${userId}:${browserSource}:${authRealm}`}))`;
-      await tx.cookie.deleteMany({
-        where: {
-          userId,
-          browserSource,
-          browserProfile: CLOUD_PERSISTENT_BROWSER_PROFILE,
-          OR: domainVariants(authRealm),
-        },
-      });
-      await tx.cookie.createMany({
-        data: realmCookies.map((cookie) => {
-          const expiresUtc = chromeEpochMicroseconds(cookie.expires);
-          return {
-            id: randomUUID(),
+    await writeWithinBudget(budget, 'Timed out persisting signed-in browser cookies', () =>
+      runTransactionWithRetry(async (tx) => {
+        // Sibling browser sessions of one user can close on the same realm at once.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`browser-auth-persist:cookies:${userId}:${browserSource}:${authRealm}`}))`;
+        await tx.cookie.deleteMany({
+          where: {
             userId,
-            domain: cookie.domain,
-            name: cookie.name,
-            path: cookie.path || '/',
-            value: cookie.value,
-            expiresUtc,
-            isSecure: cookie.secure,
-            isHttpOnly: cookie.httpOnly,
             browserSource,
             browserProfile: CLOUD_PERSISTENT_BROWSER_PROFILE,
-            creationUtc: now,
-            hasExpires: expiresUtc !== null,
-            isPersistent: expiresUtc !== null,
-            sameSite: cookie.sameSite === 'Strict' ? 2 : cookie.sameSite === 'None' ? 0 : 1,
-          };
-        }),
-        // Partitioned (CHIPS) copies share domain/name/path; the row key has no
-        // partition, and injection never sets one.
-        skipDuplicates: true,
-      });
-      await tx.cookieBundle.upsert({
-        where: {
-          userId_authRealm_browserSource_browserProfile: {
+            OR: domainVariants(authRealm),
+          },
+        });
+        await tx.cookie.createMany({
+          data: realmCookies.map((cookie) => {
+            const expiresUtc = chromeEpochMicroseconds(cookie.expires);
+            return {
+              id: randomUUID(),
+              userId,
+              domain: cookie.domain,
+              name: cookie.name,
+              path: cookie.path || '/',
+              value: cookie.value,
+              expiresUtc,
+              isSecure: cookie.secure,
+              isHttpOnly: cookie.httpOnly,
+              browserSource,
+              browserProfile: CLOUD_PERSISTENT_BROWSER_PROFILE,
+              creationUtc: now,
+              hasExpires: expiresUtc !== null,
+              isPersistent: expiresUtc !== null,
+              sameSite: cookie.sameSite === 'Strict' ? 2 : cookie.sameSite === 'None' ? 0 : 1,
+            };
+          }),
+          // Partitioned (CHIPS) copies share domain/name/path; the row key has no
+          // partition, and injection never sets one.
+          skipDuplicates: true,
+        });
+        await tx.cookieBundle.upsert({
+          where: {
+            userId_authRealm_browserSource_browserProfile: {
+              userId,
+              authRealm,
+              browserSource,
+              browserProfile: CLOUD_PERSISTENT_BROWSER_PROFILE,
+            },
+          },
+          create: {
             userId,
             authRealm,
             browserSource,
             browserProfile: CLOUD_PERSISTENT_BROWSER_PROFILE,
           },
-        },
-        create: {
-          userId,
-          authRealm,
-          browserSource,
-          browserProfile: CLOUD_PERSISTENT_BROWSER_PROFILE,
-        },
-        update: { disabledAt: null, disabledReason: null },
-      });
-    });
+          update: { disabledAt: null, disabledReason: null },
+        });
+      })
+    );
     cookieCount += realmCookies.length;
     realmCount += 1;
   }
@@ -240,31 +257,39 @@ async function persistHarvestedCookies(
 
 async function persistHarvestedLocalStorage(
   userId: string,
-  origins: OriginLocalStorage[]
-): Promise<number> {
+  origins: OriginLocalStorage[],
+  budget: HarvestBudget
+): Promise<{ written: number; warning?: string }> {
   let written = 0;
   for (const originState of origins.slice(0, MAX_ORIGINS)) {
     const incoming = originState.localStorage
       .filter((entry) => entry.name !== '')
       .map((entry) => ({ key: entry.name, value: entry.value }));
     if (incoming.length === 0) continue;
-    await runTransactionWithRetry(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`browser-auth-persist:storage:${userId}:${originState.origin}`}))`;
-      const existing = await tx.localStorageOrigin.findUnique({
-        where: { userId_origin: { userId, origin: originState.origin } },
-      });
-      const entries = mergeLocalStorageEntries(existing?.entries, incoming);
-      const hash = hashLocalStorageEntries(entries);
-      if (existing !== null && existing.hash === hash) return;
-      await tx.localStorageOrigin.upsert({
-        where: { userId_origin: { userId, origin: originState.origin } },
-        create: { userId, origin: originState.origin, entries, hash },
-        update: { entries, hash },
-      });
-    });
+    try {
+      await writeWithinBudget(budget, 'Timed out persisting signed-in browser localStorage', () =>
+        runTransactionWithRetry(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`browser-auth-persist:storage:${userId}:${originState.origin}`}))`;
+          const existing = await tx.localStorageOrigin.findUnique({
+            where: { userId_origin: { userId, origin: originState.origin } },
+          });
+          const entries = mergeLocalStorageEntries(existing?.entries, incoming);
+          const hash = hashLocalStorageEntries(entries);
+          if (existing !== null && existing.hash === hash) return;
+          await tx.localStorageOrigin.upsert({
+            where: { userId_origin: { userId, origin: originState.origin } },
+            create: { userId, origin: originState.origin, entries, hash },
+            update: { entries, hash },
+          });
+        })
+      );
+    } catch (error) {
+      if (!(error instanceof BrowserStateInjectionTimeout)) throw error;
+      return { written, warning: error.message };
+    }
     written += 1;
   }
-  return written;
+  return { written };
 }
 
 export function httpOriginFromUrl(value: string | null | undefined): string | null {
@@ -394,6 +419,7 @@ export async function persistSignedInBrowserState(
 
   const deadline = Date.now() + persistSignedInBrowserStateTimeoutMs();
   const remainingMs = () => Math.max(1, deadline - Date.now());
+  const budget: HarvestBudget = { remainingMs, spent: () => Date.now() >= deadline };
   const closeBrowserWhenDone = providedBrowser === undefined;
   let browser = providedBrowser;
   try {
@@ -423,7 +449,8 @@ export async function persistSignedInBrowserState(
       userId,
       browserSource,
       cookies,
-      signedInRealms
+      signedInRealms,
+      budget
     );
 
     const inSignedInRealm = (origin: string) => signedInRealms.has(canonicalAuthRealm(origin));
@@ -456,10 +483,17 @@ export async function persistSignedInBrowserState(
         error: warning,
       });
     }
-    const localStorageOriginCount = await persistHarvestedLocalStorage(
-      userId,
-      originStates(byOrigin)
-    );
+    const storageWrite = await persistHarvestedLocalStorage(userId, originStates(byOrigin), budget);
+    const localStorageOriginCount = storageWrite.written;
+    if (storageWrite.warning !== undefined) {
+      warning =
+        warning === undefined ? storageWrite.warning : `${warning}; ${storageWrite.warning}`;
+      log.warn('Signed-in localStorage persist incomplete; cookies already persisted', {
+        sessionId,
+        provider: browserSource,
+        error: storageWrite.warning,
+      });
+    }
     if (cookieResult.realmCount === 0 && localStorageOriginCount === 0) {
       return { ...skipped, reason: 'no_signed_in_state', ...(warning ? { warning } : {}) };
     }
