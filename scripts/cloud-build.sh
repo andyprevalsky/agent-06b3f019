@@ -87,10 +87,11 @@ if ! $IS_MAC; then
         # pinned build needs server headers at the exact installed version, which
         # the archive drops once a newer patch ships; that must never abort the
         # npm/venv provisioning below.
+        PG_FALLBACK_ERROR=""
         if ! $SUDO bash "$ROOT/scripts/cloudbench-install-pgvector.sh"; then
             echo "⚠️  Pinned pgvector build failed — installing postgresql-$PG_VER-pgvector"
             $SUDO apt-get install -y -qq "postgresql-$PG_VER-pgvector" \
-                || echo "❌ pgvector unavailable — prisma db push needs the vector extension"
+                || PG_FALLBACK_ERROR="pgvector unavailable — prisma db push needs the vector extension"
         fi
         # Start the cluster
         $SUDO pg_ctlcluster "$PG_VER" main start 2>/dev/null || $SUDO service postgresql start 2>/dev/null || true
@@ -117,7 +118,9 @@ if ! $IS_MAC; then
               || $SUDO service postgresql restart 2>/dev/null \
               || true
         fi
-        if pg_isready -U postgres -q 2>/dev/null; then
+        if [ -n "$PG_FALLBACK_ERROR" ]; then
+            echo "❌ System Postgres fallback unusable: $PG_FALLBACK_ERROR"
+        elif pg_isready -U postgres -q 2>/dev/null; then
             echo "✅ System Postgres running (fallback — no Docker)"
         else
             echo "❌ Failed to start system Postgres"
@@ -174,6 +177,7 @@ cat "$PY_LOG"
 
 [ $JS_RC -eq 0 ] || { echo "❌ JS setup failed"; exit $JS_RC; }
 [ $PY_RC -eq 0 ] || { echo "❌ Python setup failed"; exit $PY_RC; }
+[ -z "${PG_FALLBACK_ERROR:-}" ] || { echo "❌ Database setup failed: $PG_FALLBACK_ERROR"; exit 1; }
 
 echo ""
 echo "✅ Cloud build complete"
