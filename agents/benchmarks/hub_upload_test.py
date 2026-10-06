@@ -1,12 +1,15 @@
 """Tests for hub_upload — env-gated, best-effort run-bundle upload."""
 
 import gzip
+import io
 import json
 import socket
 import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
 
 from benchmarks.hub_upload import (
     DEFAULT_HUB_URL,
@@ -149,6 +152,51 @@ def test_oversized_bundle_is_fitted_by_dropping_oldest_worker_logs():
     assert fit_bundle_to_upload_limit(bundle, max_bytes=10_000_000) is bundle, "a bundle that fits is sent as is"
 
 
+def test_hub_requests_preserve_external_proxy_routing(monkeypatch):
+    """Both publication and visibility use the user's route outside loopback."""
+    from benchmarks.hub_upload import verify_run_visible
+
+    calls = []
+
+    class Response:
+        status = 201
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def read(self, *_args):
+            return b'{"run":{"run_id":"fixture-route"}}'
+
+    class Opener:
+        def open(self, request, **_kwargs):
+            calls[-1][1].append(request.get_method())
+            return Response()
+
+    def build_opener(*handlers):
+        calls.append((handlers, []))
+        return Opener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+    for base in ("https://hub.example", "http://localhost.example", "http://127.0.0.1.example"):
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", base)
+        assert upload_run_bundle({"run_id": "fixture-route"}, required=True)
+        verify_run_visible("fixture-route")
+        assert calls[-2:] == [((), ["POST"]), ((), ["GET"])]
+    for base in ("http://localhost:8767", "http://127.0.0.1:8767", "http://[::1]:8767"):
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", base)
+        assert upload_run_bundle({"run_id": "fixture-route"}, required=True)
+        verify_run_visible("fixture-route")
+        for handlers, methods in calls[-2:]:
+            assert len(handlers) == 1
+            assert isinstance(handlers[0], urllib.request.ProxyHandler)
+            assert handlers[0].proxies == {}
+            assert methods in (["POST"], ["GET"])
+
+
 def test_disabled_without_env(monkeypatch):
     monkeypatch.delenv("BENCHMARK_HUB_UPLOAD_URL", raising=False)
     assert hub_upload_enabled() is False
@@ -286,6 +334,28 @@ def test_required_upload_retries_transient_disconnect(monkeypatch):
         assert len(attempts) == 2
     finally:
         server.shutdown()
+
+
+def test_hub_transport_starting_upload_cannot_reconcile_a_programming_error_as_success(monkeypatch):
+    from benchmarks import hub_upload
+
+    methods = []
+
+    class Opener:
+        def open(self, request, timeout):
+            methods.append(request.get_method())
+            if request.get_method() == "POST":
+                raise ValueError("controlled invalid transport invocation")
+            return io.BytesIO(b'{"run":{"run_id":"fixture-programming-error"}}')
+
+    monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", "https://fixture.invalid")
+    monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+    monkeypatch.setattr(hub_upload, "_hub_opener", lambda base: Opener())
+    monkeypatch.setattr(hub_upload.time, "sleep", lambda seconds: None)
+    with pytest.raises(HubVisibilityError) as failure:
+        hub_upload.register_starting_run({"run_id": "fixture-programming-error", "tasks": []})
+    assert isinstance(failure.value.__cause__, ValueError)
+    assert methods == ["POST"], "programming errors must not be acknowledged by an unrelated visible row"
 
 
 def test_prepare_run_bundle_strips_tool_usage_tree_and_keeps_child_transcripts():

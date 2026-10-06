@@ -119,6 +119,165 @@ then
 fi
 pass "refresh-deps no longer depends solely on box-side GITHUB_TOKEN"
 
+# Concurrent controllers must preserve full dotenvs and publish complete reads.
+python3 - "$ROOT_DIR/scripts/lib/cloudbench-env.sh" "$TMP/env-upsert" <<'PY'
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+library, root = Path(sys.argv[1]), Path(sys.argv[2])
+root.mkdir()
+hooks = root / "hooks"
+hooks.mkdir()
+(hooks / "sitecustomize.py").write_text('''
+import fcntl
+import io
+import os
+from pathlib import Path
+import time
+
+root = Path(os.environ["ENV_RACE_ROOT"])
+dest = Path(os.environ["ENV_RACE_DEST"]).resolve()
+role = os.environ.get("ENV_RACE_ROLE", "")
+read_text, open_file, flock = Path.read_text, io.open, fcntl.flock
+
+def mark(name):
+    (root / name).write_text(str(os.getpid()))
+
+def await_file(name):
+    deadline = time.monotonic() + 15
+    while not (root / name).exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("fixture barrier did not settle")
+        time.sleep(0.01)
+
+def controlled_read(path, *args, **kwargs):
+    result = read_text(path, *args, **kwargs)
+    if path.resolve() == dest and role in {"first", "second", "empty-reader"}:
+        mark(role + "-read")
+        if role == "first":
+            await_file("release-first")
+        elif role == "empty-reader":
+            await_file("first-done")
+    return result
+
+def controlled_open(path, mode="r", *args, **kwargs):
+    handle = open_file(path, mode, *args, **kwargs)
+    if isinstance(path, (str, Path)) and Path(path).resolve() == dest and "w" in mode and role == "truncate":
+        mark("target-truncated")
+        await_file("release-truncate")
+    return handle
+
+def controlled_flock(fd, operation):
+    if role == "second" and operation == fcntl.LOCK_EX:
+        mark("second-lock-attempt")
+    return flock(fd, operation)
+
+Path.read_text, io.open, fcntl.flock = controlled_read, controlled_open, controlled_flock
+''')
+processes = []
+
+def start(case, role="", key="GITHUB_TOKEN", value="fixture-controller-token"):
+    env = {**os.environ, "PYTHONPATH": str(hooks), "ENV_RACE_ROOT": str(case),
+           "ENV_RACE_DEST": str(case / ".env"), "ENV_RACE_ROLE": role}
+    command = 'source "$1"; cloudbench_upsert_env_key "$2" "$3" "$4"'
+    process = subprocess.Popen(["bash", "-c", command, "fixture", str(library),
+                                str(case / ".env"), key, value], env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    processes.append(process)
+    return process
+
+def wait_for(predicate):
+    deadline = time.monotonic() + 15
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError("controlled env-upsert boundary did not settle")
+        time.sleep(0.01)
+
+def joined(process, success=True):
+    process.communicate(timeout=15)
+    assert (process.returncode == 0) == success, "env-upsert exit status was unexpected"
+
+def case(name):
+    path = root / name
+    path.mkdir()
+    (path / ".env").write_text("FLY_API_TOKEN=fixture-fly\nBACKEND_KEY=fixture-backend\n")
+    (path / ".env").chmod(0o600)
+    return path
+
+failures = []
+try:
+    torn = case("atomic-read")
+    first = start(torn, "truncate")
+    wait_for(lambda: (torn / "target-truncated").exists() or first.poll() is not None)
+    complete_read = "FLY_API_TOKEN=" in (torn / ".env").read_text()
+    second = start(torn, "empty-reader")
+    wait_for(lambda: (torn / "empty-reader-read").exists())
+    (torn / "release-truncate").touch()
+    joined(first)
+    (torn / "first-done").touch()
+    joined(second)
+    if not complete_read or "BACKEND_KEY=" not in (torn / ".env").read_text():
+        failures.append("concurrent export exposed a partial dotenv or discarded unrelated keys")
+
+    sibling = case("serialized-update")
+    first = start(sibling, "first", "FIRST_KEY", "fixture-first")
+    wait_for(lambda: (sibling / "first-read").exists())
+    second = start(sibling, "second", "SECOND_KEY", "fixture-second")
+    wait_for(lambda: (sibling / "second-read").exists() or (sibling / "second-lock-attempt").exists())
+    if (sibling / "second-read").exists():
+        joined(second)
+    (sibling / "release-first").touch()
+    joined(first)
+    joined(second)
+    content = (sibling / ".env").read_text()
+    if "FIRST_KEY=" not in content or "SECOND_KEY=" not in content:
+        failures.append("concurrent env upserts discarded a sibling update")
+
+    canceled = case("canceled-writer")
+    first = start(canceled, "first")
+    wait_for(lambda: (canceled / "first-read").exists())
+    # The barrier records only the exact Python child created by this fixture.
+    os.kill(int((canceled / "first-read").read_text()), signal.SIGTERM)
+    joined(first, success=False)
+    joined(start(canceled))
+    assert "BACKEND_KEY=" in (canceled / ".env").read_text(), "cancellation damaged the full dotenv"
+
+    stable = case("matching-export")
+    env = {**os.environ, "FIXTURE_TOKEN": 'fixture token with "quotes" and \\slashes'}
+    command = ('source "$1"; cloudbench_controller_github_token() { printf %s "$FIXTURE_TOKEN"; }; '
+               'cloudbench_export_controller_github_token "$2"; '
+               '[ "$GITHUB_TOKEN" = "$FIXTURE_TOKEN" ]')
+    argv = ["bash", "-c", command, "fixture", str(library), str(stable / ".env")]
+    result = subprocess.run(argv, env=env, capture_output=True, timeout=15)
+    assert result.returncode == 0, "controller export did not preserve its process token"
+    before = (stable / ".env").stat()
+    result = subprocess.run(argv, env=env, capture_output=True, timeout=15)
+    assert result.returncode == 0, "matching controller export failed"
+    after = (stable / ".env").stat()
+    if (before.st_ino, before.st_mtime_ns) != (after.st_ino, after.st_mtime_ns):
+        failures.append("matching controller token rewrote its dotenv")
+    assert after.st_mode & 0o777 == 0o600, "dotenv mode changed"
+    alias = stable / "alias.env"
+    alias.symlink_to(".env")
+    result = subprocess.run(["bash", "-c", command, "fixture", str(library), str(alias)],
+                            env=env, capture_output=True, timeout=15)
+    assert result.returncode == 0 and alias.is_symlink(), "controller export replaced a dotenv symlink"
+finally:
+    # Release every fixture barrier before joining, including failed assertions.
+    for directory in root.iterdir():
+        if directory.is_dir() and directory != hooks:
+            for marker in ("release-first", "release-truncate", "first-done"):
+                (directory / marker).touch()
+    for process in processes:
+        process.communicate(timeout=15)
+assert not failures, "; ".join(failures)
+PY
+pass "concurrent controller exports preserve complete dotenvs, sibling updates, token handoff, mode and cancellation"
+
 # ── 4. Live resolver when the Cloud Agent supplies DISPATCH ──────────────────
 unset CLOUDBENCH_GITHUB_REPO_API
 if [ -n "$LIVE_DISPATCH" ]; then

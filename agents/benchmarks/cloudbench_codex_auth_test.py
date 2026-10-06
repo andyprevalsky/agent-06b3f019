@@ -634,6 +634,7 @@ def test_explicit_codex_shell_launch_precedes_upload_and_requires_cleanup():
                     "CODEX_AUTH_SHA256": explicit,
                     "LOCAL_STATUS_PORT": "",
                     "RUN_LOG_TOKEN": "exact-run",
+                    "FINISHED": "1",
                 },
                 capture_output=True,
                 text=True,
@@ -770,7 +771,7 @@ if args[1]=='console' and ' stage ' in shlex.split(args[-1])[-1]:
     script = "set -eu\n" + timeout.replace("_with_timeout()", "_actual_with_timeout()", 1) + stage
     script += f"""
 _with_timeout() {{
-  printf '%s\\n' "$1" >> {shlex.quote(str(tmp_path / 'budgets'))}
+  printf '%s\\n' "$1" >> {shlex.quote(str(tmp_path / "budgets"))}
   local status=0
   _actual_with_timeout "$@" || status=$?
   [ "$status" = 0 ] || exit "$status"
@@ -780,12 +781,16 @@ mid=abcdef12345678
 RUN_LOG_TOKEN=owned-fixture-run
 OUT_DIR={shlex.quote(str(tmp_path))}
 CODEX_AUTH_SOURCE={shlex.quote(str(auth))}
-CODEX_AUTH_SHA256={'a' * 64}
+CODEX_AUTH_SHA256={"a" * 64}
 stage_explicit_codex_auth /cloudbench-codex-auth.py
 """
     process = subprocess.Popen(
-        ["bash", "-c", script], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, start_new_session=True,
+        ["bash", "-c", script],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
     )
     try:
         stdout, stderr = process.communicate(timeout=10)
@@ -860,7 +865,7 @@ ssh_read() {{ {shlex.quote(sys.executable)} {shlex.quote(str(fake))} read "$@"; 
 sleep() {{ :; }}
 trap 'rm -f "${{stage_err:-}}"' EXIT
 {staging}
-cp "$stage_err" {shlex.quote(str(tmp_path / 'stage-errors.private.log'))}
+cp "$stage_err" {shlex.quote(str(tmp_path / "stage-errors.private.log"))}
 [ "$_ok" = 1 ]
 """
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=10)

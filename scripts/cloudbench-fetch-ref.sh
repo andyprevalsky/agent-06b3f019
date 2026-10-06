@@ -12,6 +12,27 @@ fetch_lock_kind=""
 fetch_lock_fd=""
 fetch_lock_path="$REPO_DIR/.git/cloudbench-fetch.lock"
 
+# Empty Fly volumes carry no Git metadata. Only an explicit REAL-primary
+# handoff may initialize a blank checkout; retained non-Git data stays intact.
+if [ ! -d "$REPO_DIR/.git" ]; then
+    [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] || {
+        echo "[cloudbench] FATAL: checkout missing and fresh-volume bootstrap was not requested" >&2
+        exit 1
+    }
+    [ ! -L "$REPO_DIR" ] && { [ ! -e "$REPO_DIR" ] || {
+        [ -d "$REPO_DIR" ] && [ -z "$(find "$REPO_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ];
+    }; } || {
+        echo "[cloudbench] FATAL: fresh-volume checkout must be absent or empty" >&2
+        exit 1
+    }
+    git init -q "$REPO_DIR"
+    git -C "$REPO_DIR" remote add origin https://github.com/Rose-Ai-Labs/rose.git
+    if [ -n "$APP_USER" ]; then
+        chown "$APP_USER" "$REPO_DIR"
+        chown -R "$APP_USER" "$REPO_DIR/.git"
+    fi
+fi
+
 cleanup() {
     [ -n "$auth_config" ] && rm -f "$auth_config" 2>/dev/null || true
     [ -n "$tracked_paths" ] && rm -f "$tracked_paths" 2>/dev/null || true
@@ -165,7 +186,18 @@ stage_started="$(date +%s)"
 # historic detached ref wastes negotiation on persistent pool volumes. Object
 # maintenance already ran above under our exact lock, so do not repeat Git's
 # opportunistic auto-maintenance on every fresh-code boot.
-git_cmd fetch --no-tags --no-auto-gc --negotiation-tip=HEAD origin "$REF" || fetch_status=$?
+fetch_args=(--no-tags --no-auto-gc)
+if git_cmd rev-parse --verify HEAD >/dev/null 2>&1; then
+    fetch_args+=(--negotiation-tip=HEAD)
+elif [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ]; then
+    # The first exact checkout has no HEAD to advertise. Keep ordinary full
+    # history fetch semantics without an invalid negotiation tip.
+    :
+else
+    echo "[cloudbench] FATAL: retained checkout has no verified HEAD" >&2
+    exit 1
+fi
+git_cmd fetch "${fetch_args[@]}" origin "$REF" || fetch_status=$?
 echo "[cloudbench] git-fetch $(( $(date +%s) - stage_started ))s"
 if [ "${fetch_status:-0}" -ne 0 ]; then
     echo "[cloudbench] FATAL: could not fetch requested ref $REF" >&2

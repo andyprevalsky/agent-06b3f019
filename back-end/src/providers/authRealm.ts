@@ -44,7 +44,6 @@ const AUTH_REALM_OVERRIDE_HOST_SUFFIXES = [
   '.ngrok-free.app',
   '.ngrok.app',
   '.ngrok.io',
-  '.loca.lt',
   '.trycloudflare.com',
 ];
 

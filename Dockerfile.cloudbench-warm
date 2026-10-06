@@ -25,7 +25,7 @@
 # Postgres server + client here so that path just works.
 
 # ── Base: Node 20 + Debian bookworm (ships Python 3.11.2) ──────────────────
-FROM node:20-bookworm
+FROM node:20-bookworm AS native-base
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -91,38 +91,27 @@ RUN useradd --create-home --shell /bin/bash rose \
 
 WORKDIR /app
 
-# ── Copy the repo (root build context) ────────────────────────────────────
-# .dockerignore trims node_modules/venv/.context/.git-heavy dirs so the build
-# context stays small; deps are installed fresh below. This baked /app is the
-# DEPENDENCY DONOR — the per-run script rsyncs node_modules + venv from here into
-# the volume checkout at /data/repo so branch code runs with baked deps.
-COPY --chown=rose:rose . /app
-
-# ── Bake dependencies (JS + Python) ────────────────────────────────────────
+# Install directly in the final dependency layer. The shared Bash helper runs
+# the unchanged JavaScript/Prisma and Python installers concurrently, joins both,
+# and removes only npm package-download caches/logs before distribution. No large
+# dependency or home trees are copied between stages.
+FROM native-base AS runtime
 USER rose
+RUN mkdir -p back-end/prisma front-end agents
+COPY --chown=rose:rose package*.json /app/
+COPY --chown=rose:rose back-end/package.json back-end/package-lock.json /app/back-end/
+COPY --chown=rose:rose front-end/package.json front-end/package-lock.json /app/front-end/
+COPY --chown=rose:rose back-end/prisma /app/back-end/prisma
+COPY --chown=rose:rose agents/requirements.txt /app/agents/requirements.txt
+COPY --chown=rose:rose scripts/cloudbench-install-image-deps.sh /tmp/rose-cloudbench-install-image-deps.sh
+RUN bash /tmp/rose-cloudbench-install-image-deps.sh
 
-# JS: root npm install covers back-end/front-end/agents (workspaces); back-end
-# postinstall runs `prisma generate`. Belt-and-suspenders explicit generate too.
-RUN npm config set fetch-retries 5 \
-    && npm config set fetch-retry-mintimeout 20000 \
-    && npm config set fetch-retry-maxtimeout 120000 \
-    && npm config set fetch-timeout 600000 \
-    && npm install --no-audit --no-fund \
-    && (cd back-end && npx prisma generate)
-
-# npm workspaces HOIST all deps into /app/node_modules, so back-end/ and agents/
-# get no local node_modules dir. run.sh's pre-flight then re-runs `npm install`
-# per service on the box unless a marker dir exists — satisfy the check.
-RUN mkdir -p back-end/node_modules agents/node_modules \
-    && touch back-end/node_modules/.hoisted-to-root agents/node_modules/.hoisted-to-root
-
-# Python: agents venv + pip install. Installs the git+https WMH dep (public repo,
-# no auth needed) and playwright. Skip playwright browser download — simulate
-# routes browser boundaries through the WMH, so no real Chromium is launched.
+# Keep manifests/schema before installation and source last, so source-only
+# changes do not invalidate installed dependencies. Local deps/secrets remain
+# excluded by .dockerignore; the complete source still supplies donor fingerprints.
+COPY --chown=rose:rose . /app
+RUN bash /tmp/rose-cloudbench-install-image-deps.sh --verify-frontend
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-RUN python3 -m venv agents/venv \
-    && agents/venv/bin/pip install --upgrade pip \
-    && agents/venv/bin/pip install -r agents/requirements.txt
 
 # ── Keep-alive CMD ─────────────────────────────────────────────────────────
 # The persistent machine boots IDLE and waits for SSH-triggered runs. Deps stay

@@ -68,17 +68,16 @@ for (const variable of [
   'SLACK_ERROR_CHANNEL_ID',
   'GITHUB_DISPATCH_TOKEN',
   'STRIPE_SECRET_KEY',
-  'BENCHMARK_SHARE_SECRET',
   'WHATSAPP_PHONE_NUMBER_ID',
   'WHATSAPP_ACCESS_TOKEN',
   'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
-  'BENCHMARK_SHARE_SECRET',
   'BLACKBOX_TEST_FAKE_WHATSAPP',
+  'BENCHMARK_SHARE_SECRET',
 ]) {
-  assert.match(
-    autoRcaEnv,
-    new RegExp(`export ${variable}=`),
-    `shared auto-RCA environment is missing ${variable}`
+  assert.equal(
+    autoRcaEnv.match(new RegExp(`^export ${variable}=`, 'gm'))?.length ?? 0,
+    1,
+    `shared auto-RCA environment must export ${variable} exactly once`
   );
 }
 assert.match(

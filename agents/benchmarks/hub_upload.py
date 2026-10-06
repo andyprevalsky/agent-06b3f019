@@ -7,9 +7,10 @@ drivers) land in the in-app hub without the dispatch poller:
     BENCHMARK_HUB_API_KEY      internal backend key (falls back to BACKEND_API_KEY)
     BENCHMARK_HUB_USER_ID      attribution (defaults to the benchmark runner user)
 
-Actual benchmark entrypoints register fail-closed before execution. Completed
-bundle uploads remain best-effort only for library callers that did not opt in
-to the required runner contract.
+Cloud fleets retain their publication owner before attempting an early status
+write; transient transport delays warn while execution can continue. Other
+entrypoints retain fail-closed registration. Required terminal uploads and
+their durable verification remain part of the runner contract.
 """
 
 from __future__ import annotations
@@ -201,6 +202,13 @@ def _auth_headers(*, required: bool) -> dict[str, str] | None:
     }
 
 
+def _hub_opener(url: str):
+    """Keep loopback local and preserve configured routing for external Hubs."""
+    if urlparse(url).hostname in {"localhost", "127.0.0.1", "::1"}:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener()
+
+
 _TOOL_USAGE_TREE_KEYS = frozenset(
     {
         "root_agent_id",
@@ -320,6 +328,7 @@ def _post_run_bundle(
     required: bool,
     label: str,
     verify_live_response: bool = False,
+    max_attempts: int | None = None,
 ) -> bool:
     headers = _auth_headers(required=required)
     if headers is None:
@@ -338,10 +347,10 @@ def _post_run_bundle(
         headers=headers,
         method="POST",
     )
-    # Localhost hub URLs must never route through an ambient HTTP proxy
-    # (e.g. the fast-mode proxy) — same trap as archive_api's _direct_opener.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    max_attempts = 4 if required else 1
+    opener = _hub_opener(base)
+    max_attempts = max_attempts if max_attempts is not None else (4 if required else 1)
+    if max_attempts < 1:
+        raise ValueError("Hub upload attempts must be positive")
     for attempt in range(1, max_attempts + 1):
         try:
             with opener.open(request, timeout=effective_timeout) as response:
@@ -362,14 +371,9 @@ def _post_run_bundle(
             else:
                 failure = str(exc)
             retryable = (
-                not isinstance(exc, urllib.error.HTTPError)
-                or exc.code
-                in {
-                    408,
-                    425,
-                    429,
-                }
-                or exc.code >= 500
+                exc.code in {408, 425, 429} or exc.code >= 500
+                if isinstance(exc, urllib.error.HTTPError)
+                else isinstance(exc, (urllib.error.URLError, TimeoutError, OSError))
             )
             recovered_visible_run = False
             run_id = str(body.get("run_id") or "")
@@ -407,6 +411,7 @@ def upload_run_bundle(
     live: bool = False,
     required: bool = False,
     verify_live_response: bool = False,
+    max_attempts: int | None = None,
 ) -> bool:
     """POST the bundle to the hub. Returns True on success, False otherwise."""
     base = _hub_url(required=required)
@@ -420,6 +425,7 @@ def upload_run_bundle(
         required=required,
         label="hub",
         verify_live_response=verify_live_response,
+        max_attempts=max_attempts,
     )
 
 
@@ -605,7 +611,7 @@ def verify_run_visible(run_id: str, *, timeout: float = 30.0) -> None:
         headers=headers,
         method="GET",
     )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = _hub_opener(base)
     try:
         with opener.open(request, timeout=timeout) as response:
             payload = json.loads(response.read() or b"{}")
@@ -626,10 +632,29 @@ def require_run_visible(bundle: dict, *, timeout: float = 30.0) -> None:
     verify_run_visible(run_id, timeout=timeout)
 
 
+def register_starting_run(bundle: dict, *, timeout: float = 120.0) -> bool:
+    """Attempt one early status write; transient delay does not abort work."""
+    if not str(bundle.get("run_id") or ""):
+        raise HubVisibilityError("benchmark run_id is required for Hub registration")
+    try:
+        return upload_run_bundle(bundle, timeout=timeout, live=True, required=True, max_attempts=1)
+    except HubVisibilityError as error:
+        cause = error.__cause__
+        if isinstance(cause, urllib.error.HTTPError):
+            retryable = cause.code in {408, 425, 429} or cause.code >= 500
+        else:
+            retryable = isinstance(cause, (urllib.error.URLError, TimeoutError, OSError))
+        if not retryable:
+            raise
+        print("⚠️ initial Hub publication is pending; continuing with owned progress and terminal publication")
+        return False
+
+
 def _main() -> int:
     parser = argparse.ArgumentParser()
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--require-visible", metavar="BUNDLE_JSON")
+    action.add_argument("--register-starting", metavar="BUNDLE_JSON")
     action.add_argument("--upload-final", metavar="BUNDLE_JSON")
     action.add_argument("--upload-live", metavar="BUNDLE_JSON")
     action.add_argument("--verify-visible", metavar="RUN_ID")
@@ -639,13 +664,15 @@ def _main() -> int:
     if args.verify_visible:
         verify_run_visible(args.verify_visible)
         return 0
-    path = Path(args.require_visible or args.upload_final or args.upload_live)
+    path = Path(args.require_visible or args.register_starting or args.upload_final or args.upload_live)
     bundle = json.loads(path.read_text())
     if args.run_id:
         bundle["run_id"] = args.run_id
     bundle.setdefault("source", args.source)
     if args.require_visible:
         require_run_visible(bundle)
+    elif args.register_starting:
+        register_starting_run(bundle)
     else:
         upload_run_bundle(bundle, live=bool(args.upload_live), required=True)
     return 0

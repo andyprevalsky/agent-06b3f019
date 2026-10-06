@@ -62,6 +62,33 @@ harmless today because the ephemeral path uses the authtoken in
 `~/Library/Application Support/ngrok/ngrok.yml`, but
 `ensure_ngrok_domain_reserved` would fail on a fresh workspace.
 
+## Recurrence (2026-10-01) — the per-worktree `-bench` domain is still one endpoint
+
+The 2026-07 mitigation gave every isolated stack of a worktree the same reserved
+`rose-<worktree>-bench.ngrok.app` fallback. That is still a single-instance resource.
+
+During PR #1341's `/deploy` on a Cursor Cloud VM:
+
+- The smoke and AgentCard lanes both lost their quick tunnels to a DNS-probe bug.
+  See `2026-10-01-quick-tunnel-probe-cached-pre-publication-nxdomain`.
+- Both then fell back to ngrok. The AgentCard stack bound
+  `rose-cloud-44cb5599-bench.ngrok.app` first.
+- The smoke stack got `ERR_NGROK_334`, and so did the worktree domain
+  (`rose-cloud-44cb5599.ngrok.app`). Cloud VMs booted from one environment snapshot
+  share the `.cloud-env` workspace name; the holder of that domain was not
+  identified.
+- The smoke stack ended on localtunnel.
+
+The probe fix makes Cloudflare quick tunnels usable on Cloud VMs again, so each lane
+normally gets its own origin. The ngrok fallback is still contended whenever
+trycloudflare is genuinely unavailable (rate limits, HTTP 530).
+
+A real fix needs one of:
+
+- a per-lane domain, which requires freeing roster space: the account holds 85
+  leaked one-off `-bench-<run id>-bench` domains;
+- a VM-unique `.cloud-env` identity.
+
 ## Human feedback
 
 The recorded judgment rejects the fix ngrok's own error message suggests:

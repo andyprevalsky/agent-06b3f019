@@ -646,11 +646,16 @@ class RoseClient:
         agent_id = kwargs.get("agent_id")
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
+        probe_read_only = os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1" and os.environ.get(
+            "BENCHMARK_ISOLATED_RUN", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         exclude_anthropic_family = anthropic_family_excluded(bool(kwargs.get("_exclude_anthropic_family", False)))
         if exclude_anthropic_family != bool(kwargs.get("_exclude_anthropic_family", False)):
             kwargs = {**kwargs, "_exclude_anthropic_family": exclude_anthropic_family}
 
         if pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
+            if probe_read_only:
+                raise FastCacheLookupError("DEMO replay probe forbids live browser LLM calls")
             async with aclosing(self._complete_impl(**kwargs)) as live_stream:
                 async for chunk in live_stream:
                     yield chunk
@@ -672,6 +677,8 @@ class RoseClient:
                 }
 
         if ctx is None or not ctx.active or messages is None:
+            if probe_read_only:
+                raise FastCacheLookupError("DEMO replay probe has no usable cache context; live fallback is disabled")
             async with aclosing(self._complete_impl(**kwargs)) as live_stream:
                 async for chunk in live_stream:
                     yield chunk
@@ -857,6 +864,8 @@ class RoseClient:
             # loops with cache-status stubs instead of substantive tool evidence.
             logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
+        if probe_read_only:
+            raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
         if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled():
             raise FastCacheLookupError(
                 f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"

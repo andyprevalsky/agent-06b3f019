@@ -89,14 +89,7 @@ cleanup_all() {
 }
 trap cleanup_all EXIT INT TERM
 
-# macOS distraction-blockers (e.g. Freedom) install a system HTTP(S) proxy that
-# silently intercepts Node/Prisma outbound and breaks the prod read — it
-# surfaces as a phantom "Can't reach database server" even though raw TCP to the
-# same host succeeds. benchmarks/local.py neutralises it the same way for every
-# isolated run; do it here too or every measurement is a proxy failure, not a
-# footprint. Never disables the app itself.
-export NO_PROXY="*" no_proxy="*"
-unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+# Preserve inherited proxy settings, including Freedom's blocking configuration.
 
 # A deploy box that has not run a benchmark yet has no cached dump. Measure the
 # same reviewed canonical base an isolated benchmark restores. System Postgres

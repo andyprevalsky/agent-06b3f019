@@ -34,8 +34,6 @@ FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$CONTROL_DIR/cloudbench-fetch-r
 ENV_HELPER="${CLOUDBENCH_ENV_HELPER:-$CONTROL_LIB_DIR/cloudbench-env.sh}"
 log() { echo "[cloudbench-worker] $*"; }
 
-cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
-
 # ── Sync the exact ref + local patch the primary box is running ─────────────
 # Fail CLOSED: a worker on the wrong code would silently pull this bench's
 # queue and run activities against stale sources — worse than no worker at
@@ -52,6 +50,7 @@ if [ -n "${REF:-}" ]; then
         exit 1
     fi
 fi
+cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
 # The controller credential is needed only for the exact ref fetch. Do not let
 # it flow into the benchmark worker or agent subprocess environments.
 unset CLOUDBENCH_GITHUB_TOKEN_B64
@@ -81,6 +80,23 @@ if [ -n "${LOCAL_PATCH_FILE:-}" ]; then
         exit 1
     fi
     log "verified local workspace patch $_actual_patch_sha"
+fi
+
+# REAL workers on fresh storage reuse the same verified image dependency donor
+# as the primary. Ref/patch verification precedes these manifest-bound helpers.
+if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ]; then
+    [ "${BENCH_SIMULATE:-0}" = 0 ] || { log "FATAL: fresh worker requires REAL mode"; exit 1; }
+    SYNC_DEPS_SCRIPT="${CLOUDBENCH_SYNC_DEPS_SCRIPT:?fresh worker dependency helper required}"
+    SYNC_PRISMA_SCRIPT="${CLOUDBENCH_SYNC_PRISMA_SCRIPT:?fresh worker Prisma helper required}"
+    if ! bash "$SYNC_DEPS_SCRIPT" /app "$REPO_DIR"; then
+        log "FATAL: could not synchronize verified image dependencies"
+        exit 1
+    fi
+    chown -R "$APP_USER:$APP_USER" "$REPO_DIR/node_modules" "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/venv" || exit 1
+    if ! bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"; then
+        log "FATAL: could not synchronize verified Prisma client"
+        exit 1
+    fi
 fi
 
 # Every autoscaled worker clone starts from a volume snapshot that may predate

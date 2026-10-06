@@ -1008,6 +1008,49 @@ def _port_listener_pids(port: int) -> set[int]:
     return pids
 
 
+def _environment_entry_pids(entry: str) -> set[int]:
+    """PIDs whose launch environment contains exactly ``entry`` (``NAME=value``)."""
+    pids: set[int] = set()
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        wanted = entry.encode()
+        for proc_dir in proc_root.iterdir():
+            if not proc_dir.name.isdigit():
+                continue
+            with contextlib.suppress(OSError):
+                if wanted in (proc_dir / "environ").read_bytes().split(b"\0"):
+                    pids.add(int(proc_dir.name))
+        return pids
+    # macOS has no /proc; `ps -E` appends each process's launch environment.
+    with contextlib.suppress(Exception):
+        out = subprocess.run(
+            ["ps", "-axwwE", "-o", "pid=,command="], capture_output=True, text=True, timeout=5, check=False
+        ).stdout
+        for line in out.splitlines():
+            pid_text, _, command = line.strip().partition(" ")
+            if entry in command.split():
+                with contextlib.suppress(ValueError):
+                    pids.add(int(pid_text))
+    return pids
+
+
+def _ancestor_pids() -> set[int]:
+    """This process and every ancestor: the controller that is tearing the run down."""
+    pids: set[int] = set()
+    pid = os.getpid()
+    while pid > 1 and pid not in pids:
+        pids.add(pid)
+        try:
+            pid = int(
+                subprocess.run(
+                    ["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True, timeout=2, check=False
+                ).stdout.strip()
+            )
+        except (ValueError, OSError, subprocess.SubprocessError):
+            break
+    return pids
+
+
 def _pid_cwd_under_worktree(pid: int) -> bool:
     """True iff pid's cwd is inside this worktree. Safety gate: guarantees the
     isolated teardown can never reach a process owned by a sibling worktree,
@@ -1033,11 +1076,14 @@ def _pid_cwd_under_worktree(pid: int) -> bool:
 def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
     """Reap an isolated stack's processes scoped strictly to THIS run.
 
-    Use the manifest's recorded services and their descendants, plus listeners
-    on its service ports for reparented backend/vite processes. A command merely
-    mentioning the run ID may be an observer or the caller waiting for our exit;
-    it is never evidence that the process belongs to this stack. Gate candidates
-    on cwd-under-this-worktree so a sibling worktree's stack is never touched.
+    Use the manifest's recorded services and their descendants, listeners on
+    its service ports for reparented backend/vite processes, and an exact
+    ``BENCHMARK_RUN_ID=<run_id>`` launch-environment entry (the only signal left
+    for a reparented worker that binds no port). A command merely mentioning the
+    run ID may be an observer or the caller waiting for our exit; it is never
+    evidence that the process belongs to this stack. Gate candidates on
+    cwd-under-this-worktree so a sibling worktree's stack is never touched, and
+    never signal the controller doing the teardown.
     """
     if not stack.isolated or not stack.run_id or stack.run_id == "existing":
         return
@@ -1065,8 +1111,10 @@ def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
                 if isinstance(port, int) and port > 0:
                     targets |= _port_listener_pids(port)
 
-    current_pid = os.getpid()
-    targets.discard(current_pid)
+    # Exact run-scoped launch environment (reparented, portless workers).
+    targets |= _environment_entry_pids(f"BENCHMARK_RUN_ID={stack.run_id}")
+
+    targets -= _ancestor_pids()
     # Safety gate: only reap processes whose cwd is inside THIS worktree.
     scoped = {pid for pid in targets if _pid_cwd_under_worktree(pid)}
     if not scoped:
@@ -1629,28 +1677,9 @@ def apply_isolated_postgres_default(
         env.setdefault("ROSE_USE_SYSTEM_PG", "true")
 
 
-_HOST_PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
-
-
-def bypass_host_http_proxy(env: dict[str, str]) -> dict[str, str]:
-    """Keep a benchmark subprocess off the macOS system HTTP(S) proxy.
-
-    With no proxy variables set, Python's urllib/requests/httpx read the macOS
-    system proxy, and Freedom's proxy (127.0.0.1:7769) can hold their TLS
-    tunnels open forever: the runner stalls with live but idle proxy sockets
-    and never reaches its task timeout. Setting NO_PROXY makes every client use
-    the environment instead of the system settings.
-    """
-    env.setdefault("NO_PROXY", "*")
-    env.setdefault("no_proxy", "*")
-    for proxy_var in _HOST_PROXY_VARS:
-        env.pop(proxy_var, None)
-    return env
-
-
 def benchmark_runner_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """Environment for the run_benchmark.py process a local run launches."""
-    env = bypass_host_http_proxy({**(os.environ if base is None else base), "PYTHONUNBUFFERED": "1"})
+    env = {**(os.environ if base is None else base), "PYTHONUNBUFFERED": "1"}
     # Disable fast-cache for local benchmark runs so trajectories are actually executed
     # rather than replayed from cache. This is required for payment-lifecycle tasks (real
     # side effects must not be cache-replayed) and also ensures the world model is exercised
@@ -1700,12 +1729,6 @@ def start_services(
         # isolate each stack in Docker; forcing every stack onto the 100-client
         # host Postgres starves concurrent mass-agent benchmarks.
         apply_isolated_postgres_default(env, use_system_postgres=stack.use_system_postgres)
-        # macOS distraction-blockers (e.g. Freedom) install a system HTTP(S) proxy
-        # that silently intercepts Node/Prisma outbound and breaks the prod cold-sync
-        # + compute-token fetch — it surfaces as a phantom "Can't reach database
-        # server" even though raw psql/TCP to the same host succeeds. Neutralize the
-        # proxy for every isolated-run subprocess (never disable the app itself).
-        bypass_host_http_proxy(env)
         env["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
         env["BENCHMARK_RUN_ID"] = stack.run_id
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
@@ -1747,10 +1770,10 @@ def start_services(
         # isolated stack a provider-assigned quick tunnel instead; the shared
         # dev stack keeps its stable ngrok domain.
         env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0" if skip_public_tunnel else "1"
-        # trycloudflare quick tunnels often never route from cloud VMs (edge
-        # probe stays at curl status 000 for the full timeout). Fail the CF
-        # provider after one short attempt so the existing ngrok fallback can
-        # take over without burning ~3 minutes of stack startup.
+        # One short attempt bounds how long a quick tunnel that cannot route
+        # delays the ngrok fallback (the run.sh default is ~3 minutes). Quick
+        # tunnels on Cloud VMs began routing 4-10s after their hostname printed
+        # (measured 2026-10-01), so this deadline leaves little margin.
         env.setdefault("CLOUDFLARE_TUNNEL_MAX_ATTEMPTS", "1")
         env.setdefault("CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS", "10")
         # Every isolated run starts with an empty per-run database and restores
@@ -2112,7 +2135,7 @@ def run_streamed_command(
     process = subprocess.Popen(
         list(command),
         cwd=cwd,
-        env=bypass_host_http_proxy(dict(os.environ if env is None else env)),
+        env=dict(os.environ if env is None else env),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

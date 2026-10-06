@@ -318,8 +318,8 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
 **Execution model for Steps 1–4a (run in this order):**
 
 1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them, then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
-1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
-1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them, then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
+   1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
+   1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them, then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
 2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 3. **Parallel Group 3** (all read-only after the mutators; start every applicable
    lane in one assistant message with separate Bash tool calls, using the worker
@@ -489,12 +489,15 @@ their assertions or test counts:
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `bash scripts/tests/descend-command.test.sh`,
 `python3 scripts/tests/benchmark-live-results.test.py`,
+`bash scripts/tests/cloudbench-fetch-ref.test.sh`,
 `python3 scripts/tests/verify-successful-llm-queries.test.py`,
 `python3 scripts/tests/cloudbench-exact-session-multi-root.test.py`,
 `python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
+`python3 scripts/tests/cloudbench-controller-linux.test.py`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
 `python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
+`python3 scripts/tests/cloudbench-bootstrap-recovery.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
@@ -522,6 +525,67 @@ one 50-task dispatch and production-only routing), completed LIVE-query evidence
 exact composite-root cleanup, and quiesced resource retirement offline. Larger
 paid fleet campaigns remain explicit human-requested validation; they are not
 added to this automatic gate.
+
+The same compact `benchmark-live-results.test.py` gate also covers cold-image
+CLI context/provenance, joined image installers and retained artifacts, actual
+Vite/SWC/Rollup/esbuild native readiness, isolated dependency overlay/copy fallback
+and Prisma freshness, immutable read-only cache receipts, explicit DEMO replay
+admission, task-only read-only guards, genuine replay hits, ordinary flag-off
+behavior and pooled/worker handoff. It calls the owning controls through
+the supported scripts; it adds no paid fleet stage. Explicit cold/cached startup
+experiments use `/benchmark` and CLAUDE.md's commands, without replacing deploy
+smoke outcomes. The mass-demo `-k 50 --concurrency 50 --strict-barrier` diagnostic
+means 50 controllers and 2,500 first-level children; task replay has zero LIVE proof
+credit and its unchanged declared judges may make provider calls. Ordinary
+source-only deploy benchmarks reuse the pinned dependency image and exact source
+checkout; REAL runs use fresh volumes by default.
+Cold `image-build` defaults to Fly-integrated Depot (app scope, zstd level 3,
+`linux/amd64`); explicit `--builder native` remains available for diagnostics.
+The independent `807edee9f` no-cache build/push completed in 493.6 seconds in one attempt,
+excluding activation/fleet startup. Retain its receipt, activate the exact image
+and verify guest digest/runtime consumption before the benchmark cohort.
+Image publication automatically caches its checksum-verified pinned Fly client
+in the Git common directory; native uses child-only classic Docker over HTTPS
+(`DOCKER_BUILDKIT=0`, `--wg=false`). Shared Fly/PATH and runtime remain unchanged.
+The 31.6-second tiny CLI control is not full cold-image timing. Strict repeated
+campaigns also have compact cohort readiness/abort/inverse controls here, with
+the existing startup budget and normal owned cleanup. Controller count alone
+does not prove execution overlap; ordinary non-strict scheduling is unchanged.
+
+For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
+
+```bash
+scripts/run-bench image-build --builder depot --no-cache --build-context <committed-checkout> --out-dir .context/image-build
+benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/image-build/cloudbench-image-build.json"))["image_ref"])')
+scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
+```
+
+`image-activate` uses the existing app environment lock and owned warm-source setup, activates the published image on the donor and this workspace's pool, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
+
+Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
+
+The existing recorded mass-demo diagnostic, when explicitly requested:
+
+```bash
+CLOUDBENCH_APP_MACHINE_CEILING=138 \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  scripts/run-bench test-mass-agent-run-0 --demo-cache \
+  -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
+```
+
+For this explicitly requested 50-copy cached stress run, use the command-scoped
+Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
+Machines plus 50 primaries, up to 50 optional autoscaler workers and two transient
+slots. Inspect native app inventory and headroom again before a future run;
+ordinary ceiling 56 cannot hold this current cohort, and ceiling 88 leaves only
+two worker slots. This profile creates no idle resources and changes no default
+ceiling, shared-CPU governor or production headroom. `--strict-barrier` keeps all
+50 copies in one ready cohort; controller occupancy does not prove execution overlap.
+
+Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
+seconds, then follow each job log's exact printed fleet-monitor handle through
+controller exit and owned teardown. The campaign directory itself is not a
+fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
 
 During deploy benchmarks, follow CLAUDE.md's "Monitor every cloud launch"
 instructions and the exact metrics command in the printed controller log.
@@ -661,7 +725,12 @@ bash scripts/tests/cloudbench-status-service-shutdown.test.sh
 bash scripts/tests/fleet-infra-canary.test.sh
 bash scripts/tests/fleet-infra-stability-proof.test.sh
 python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py
+# Linux Python3.11.9/Node22.13.0; Mac dispatches this same suite to an offline container.
+# It reuses the recipe-fingerprinted local image, building the small committed
+# scripts/tests/cloudbench-controller-linux.Dockerfile once if absent. An existing
+# verified local image may be selected with CLOUDBENCH_CONTROLLER_TEST_IMAGE.
 bash scripts/tests/cloudbench-multi-workstream.test.sh
+python3 scripts/tests/cloudbench-controller-linux.test.py
 bash scripts/tests/cloudbench-github-token.test.sh
 bash scripts/tests/seed-dump-toolchain.test.sh
 agents/venv/bin/python -m pytest -q agents/benchmarks/wall_clock_backstop_test.py
@@ -670,7 +739,7 @@ agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync
   agents/benchmarks/cloudbench_recovery_review_test.py \
   agents/benchmarks/cloudbench_codex_auth_test.py \
   agents/benchmarks/cloud_batch_cleanup_test.py \
-  -k 'fly_with_timeout or test_clone_retries_transient_volume_not_found or test_clone_gives_up_after_max_attempts or test_clone_times_out_and_retries_a_hung_clone or clone_creation_cannot_start_copied_primary or cloudbench_codex_auth or autoscaler_runtime_handoff or prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or boot_payload or boot_launch_compresses_complete_payload or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or refresh_deps_applies_exact_workspace_before_rebuild or fetch_ref_restores_dirty_exact_sha or warm_deps_preflight or fresh_controller_reuses_only_proven_donor_dependencies or verified_legacy_snapshot or dependency_proof_publication or exact_volume_ownership_survives_delayed_visibility_and_failed_delete or exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers or pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper or exact_recovery_seals_actual_retained_owner_remote_evidence_paths or fleet_lifecycle_receipt_requires_final_registry_retirement or watchdog_collects_cancelled_artifact_after_bounded_shutdown or terminal_projection_preserves_benchmark_outcome or boot_driver_state_write_failure or driver_cleanup_persists_evidence_in_fresh_data_directory or terminal_projection_empty_tasks or terminal_projection_rejection_removes_all_artifacts or status_recovery_read_closes_descriptor or cloudbench_recovery_review or migration or migrated_registry or owned_worker_volume or composite_result_finalizes_each_exact_root or minted_dispatch_preserves_live_root_observer or boot_terminal_runtime_evidence_collects_complete_logs or cloudbench_worker_snapshot or quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt'
+  -k 'fly_with_timeout or test_clone_retries_transient_volume_not_found or test_clone_gives_up_after_max_attempts or test_clone_times_out_and_retries_a_hung_clone or clone_creation_cannot_start_copied_primary or cloudbench_codex_auth or autoscaler_runtime_handoff or prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or boot_payload or boot_launch_compresses_complete_payload or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or refresh_deps_applies_exact_workspace_before_rebuild or fetch_ref_restores_dirty_exact_sha or warm_deps_preflight or fresh_controller_reuses_only_proven_donor_dependencies or verified_legacy_snapshot or dependency_proof_publication or exact_volume_ownership_survives_delayed_visibility_and_failed_delete or exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers or pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper or exact_recovery_seals_actual_retained_owner_remote_evidence_paths or hub_transport or guest_shutdown_child_confirmation or exact_guest_recovery_archives_bound_child_token or fleet_lifecycle_receipt_requires_final_registry_retirement or watchdog_collects_cancelled_artifact_after_bounded_shutdown or terminal_projection_preserves_benchmark_outcome or boot_driver_state_write_failure or driver_cleanup_persists_evidence_in_fresh_data_directory or driver_cleanup_requires_current_stack_receipt_on_normal_completion or autoscaled_worker_uses_authenticated_fetch_ref_helper or terminal_projection_empty_tasks or terminal_projection_rejection_removes_all_artifacts or status_recovery_read_closes_descriptor or cloudbench_recovery_review or migration or migrated_registry or owned_worker_volume or composite_result_finalizes_each_exact_root or minted_dispatch_preserves_live_root_observer or boot_terminal_runtime_evidence_collects_complete_logs or cloudbench_worker_snapshot or quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt'
 if [ -z "$CHANGED_AGENTS" ]; then
   cd agents && ./venv/bin/python scripts/run_blackbox_tests.py benchmark
 fi
@@ -1373,7 +1442,7 @@ bash scripts/run-deploy-stage --finish
 
 # ║ Includes four concurrent chat paths × five full-lifecycle samples, ║
 
-# ║ with every sample below the six-second ratchet.  ║
+# ║ with every sample below the six-second ratchet. ║
 
 # ║ 6c. Claude Code E2B sandbox smoke: PASS on every /deploy; never ║
 
@@ -1397,7 +1466,7 @@ bash scripts/run-deploy-stage --finish
 
 # ║ - "The code changes don't touch agent/Temporal code" (check the ║
 
-# ║ Step 6 table — back-end/ changes ALSO require              ║
+# ║ Step 6 table — back-end/ changes ALSO require ║
 
 # ║ smoke, not just agents/) ║
 
@@ -1425,7 +1494,7 @@ bash scripts/run-deploy-stage --finish
    git commit -m "$(cat <<'EOF'
    <concise description of changes>
 
-## Test Report
+   ## Test Report
 
    | Step | Status | Summary |
    |------|--------|---------|

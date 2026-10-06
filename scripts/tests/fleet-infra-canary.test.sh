@@ -170,6 +170,85 @@ grep -Fq 'stamp fresh' "$PREFLIGHT_REPRO/concurrent-a.out" \
   || grep -Fq 'stamp fresh' "$PREFLIGHT_REPRO/concurrent-b.out" \
   || fail "serialized follower must consume the first controller's fresh stamp"
 
+# A substrate canary owns a nested controller, not its caller's campaign slot.
+# Exercise the real rendezvous helper so inherited campaign identity rejects
+# the distinct nested PID before this boundary is isolated in the preflight.
+python3 - "$PREFLIGHT_HELPER" "$ROOT_DIR/scripts/cloudbench-campaign-barrier.py" \
+  "$PREFLIGHT_REPRO" <<'PY' || fail "nested canary consumed its parent's campaign rendezvous"
+import fcntl
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import time
+
+helper, rendezvous, root = map(Path, sys.argv[1:])
+directory = root / "campaign-boundary" / "c001"
+(directory / "ready").mkdir(parents=True)
+identity = {
+    "RUN_BENCH_CAMPAIGN_BARRIER_DIR": str(directory),
+    "RUN_BENCH_CAMPAIGN_COHORT": "c001",
+    "RUN_BENCH_CAMPAIGN_JOB_ID": "parent-job",
+}
+environment = os.environ.copy()
+environment.update(identity)
+environment["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"] = str(root / "shared-inventory")
+environment["CLOUDBENCH_FLEET_OWNER_TOKEN"] = "a" * 32
+preserved = {
+    key: value
+    for key, value in environment.items()
+    if key == "CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"
+    or key.lower() in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+}
+expected = root / "nested-preserved-environment.json"
+expected.write_text(json.dumps(preserved))
+canary = root / "nested-campaign-canary.sh"
+canary.write_text(
+    "#!/usr/bin/env bash\nset -euo pipefail\n"
+    + shlex.quote(sys.executable) + " " + shlex.quote(str(rendezvous))
+    + ' --deadline "' + str(time.time() + 60) + '" --controller-pid "$$"\n'
+    + shlex.quote(sys.executable) + " - " + shlex.quote(str(expected)) + " <<'INNER'\n"
+    + "import json, os, sys\n"
+    + "from pathlib import Path\n"
+    + "expected = json.loads(Path(sys.argv[1]).read_text())\n"
+    + "assert all(os.environ.get(k) == v for k, v in expected.items())\n"
+    + "assert os.environ['CLOUDBENCH_CONTROLLER_LOCK_NAME'] == 'nested-canary.lock'\n"
+    + "assert os.environ['CLOUDBENCH_FLEET_OWNER_TOKEN'] != 'a' * 32\n"
+    + "INNER\n"
+)
+(directory / "manifest.json").write_text(json.dumps({
+    "cohort_id": "c001", "jobs": {"parent-job": os.getpid()},
+}))
+(directory / "release.json").write_text(json.dumps({"cohort_id": "c001"}))
+with (directory.parent / "parent.lock").open("w") as parent_lock:
+    fcntl.flock(parent_lock, fcntl.LOCK_EX)
+    for campaign in (True, False):
+        child_environment = environment.copy()
+        if not campaign:
+            for key in identity:
+                child_environment.pop(key)
+        stamp = root / f"nested-campaign-{campaign}.stamp"
+        completed = subprocess.run([
+            sys.executable, str(helper), "--stamp", str(stamp),
+            "--lock", str(root / f"nested-campaign-{campaign}.lock"),
+            "--ttl-seconds", "3600", "--width", "2", "--canary", str(canary),
+            "--nested-controller-lock", "nested-canary.lock",
+        ], env=child_environment, capture_output=True, timeout=15)
+        assert completed.returncode == 0, "nested controller rejected outer campaign identity"
+        assert stamp.is_file()
+        assert not (directory / "ready" / "parent-job.json").exists()
+    assert all(environment[key] == value for key, value in identity.items())
+    command = [sys.executable, str(rendezvous), "--deadline", str(time.time() + 60),
+               "--controller-pid"]
+    assert subprocess.run(command + [str(os.getpid() + 1000000)], env=environment,
+                          capture_output=True).returncode != 0
+    assert subprocess.run(command + [str(os.getpid())], env=environment,
+                          capture_output=True).returncode == 0
+    assert (directory / "ready" / "parent-job.json").is_file()
+PY
+
 # A killed lock-helper process must not orphan or prematurely release its lock.
 # The canary inherits the descriptor, so a follower blocks until the in-flight
 # nested canary exits, then rechecks the still-missing stamp and runs safely.
