@@ -523,12 +523,17 @@ case "$1" in
       foreign-url) domain=foreign.ngrok.app ;;
       wrong-upstream) upstream=3999 ;;
     esac
+    addr="\"http://localhost:$upstream\""
+    case "${NGROK_ADDR_FORM:-string}" in
+      struct) addr="{\"Scheme\":\"http\",\"Opaque\":\"\",\"User\":null,\"Host\":\"localhost:$upstream\",\"Path\":\"\",\"Fragment\":\"\",\"RawQuery\":\"\",\"RawPath\":\"\",\"RawFragment\":\"\",\"ForceQuery\":false,\"OmitHost\":false}" ;;
+      struct-path) addr="{\"Scheme\":\"http\",\"Opaque\":\"\",\"User\":null,\"Host\":\"localhost:$upstream\",\"Path\":\"/other\",\"Fragment\":\"\",\"RawQuery\":\"\",\"RawPath\":\"\",\"RawFragment\":\"\",\"ForceQuery\":false,\"OmitHost\":false}" ;;
+    esac
     if [ "${NGROK_EVENT_KIND:-}" = delayed ]; then
       rm -f "$RUN_CONTEXT_DIR/ngrok-fallback.log"
       sleep 1
-      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":"http://localhost:%s"}\n' "${domain:-free.ngrok-free.dev}" "$upstream" > "$RUN_CONTEXT_DIR/ngrok-fallback.log"
+      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":%s}\n' "${domain:-free.ngrok-free.dev}" "$addr" > "$RUN_CONTEXT_DIR/ngrok-fallback.log"
     else
-      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":"http://localhost:%s"}\n' "${domain:-free.ngrok-free.dev}" "$upstream"
+      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":%s}\n' "${domain:-free.ngrok-free.dev}" "$addr"
     fi
     exec sleep 30
     ;;
@@ -618,6 +623,21 @@ for event in foreign-url wrong-upstream; do
   [ ! -e "$TMP/ngrok-published" ] || fail "case 10: $event was published before ownership rejection"
 done
 echo "PASS: foreign ngrok endpoint and wrong upstream are rejected before publication"
+# ngrok 3.39 logs the upstream as a URL struct. Rejecting it sent every isolated
+# stack to the one per-worktree domain, so a second concurrent stack could not start.
+NGROK_ADDR_FORM=struct NGROK_RESPONSE_KIND=healthy run_ngrok_fallback krakow-bench-struct-addr \
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: a struct-form upstream for the owned port must be accepted"; }
+[ "$(cat "$TMP/ngrok-published")" = "https://rose-krakow-bench-struct-addr-bench.ngrok.app" ] \
+  || fail "case 10: the struct-form upstream must publish the run-scoped domain"
+for form in struct struct-path; do
+  event=wrong-upstream
+  [ "$form" = struct-path ] && event=owned
+  if NGROK_ADDR_FORM="$form" NGROK_EVENT_KIND="$event" run_ngrok_fallback krakow-bench-struct-negative; then
+    fail "case 10: struct-form upstream ($form, $event) must be rejected"
+  fi
+  [ ! -e "$TMP/ngrok-published" ] || fail "case 10: struct-form $form was published before ownership rejection"
+done
+echo "PASS: a struct-form ngrok upstream is accepted only for the owned local port"
 for response in offline unmarked proxy proxy-after-connect wrong-body; do
   if NGROK_RESPONSE_KIND="$response" run_ngrok_fallback krakow-bench-route-negative; then
     fail "case 10: ngrok $response must not certify routing"
