@@ -8306,7 +8306,12 @@ async def _release_auth_test_site(base_url: str, manifest: Optional[dict]) -> No
     if (manifest.get("authOptionsPreview") or {}).get("emailOtpInboxes"):
         _connected_inbox_released_at = time.monotonic()
     try:
-        await auth_test_site.delete_site(base_url, await _api_headers(), str(manifest["siteId"]))
+        await auth_test_site.delete_site(
+            base_url,
+            await _api_headers(),
+            str(manifest["siteId"]),
+            user_id=_current_benchmark_user_id(),
+        )
     except Exception as exc:
         print(f"    ⚠ Failed to delete Rose Shop site {manifest.get('siteId')}: {exc}")
 

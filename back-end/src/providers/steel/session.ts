@@ -363,6 +363,9 @@ export async function createSessionWithContext(
         providerProfilePersist: profile.persistProfile,
         releaseRemoteSession: releaseSteelRemoteSession,
       });
+      // The row now protects the session from the reaper; the in-flight entry
+      // would otherwise shield an orphan whose cleanup skipped the release.
+      unregisterInFlightSteelSession(session.id);
 
       log.info(`✓ Created Steel session: ${session.id}`);
       log.info(`  Context (DB): ${dbContextId}`);

@@ -107,7 +107,10 @@ router.delete(
   requireFixtureApiKey,
   asyncHandler(async (req: Request, res: Response) => {
     try {
-      res.json(await deleteAuthTestSite(req.params.siteId));
+      const userId = req.query.userId;
+      res.json(
+        await deleteAuthTestSite(req.params.siteId, typeof userId === 'string' ? userId : null)
+      );
     } catch (error) {
       respondError(res, error, { site_id: req.params.siteId });
     }

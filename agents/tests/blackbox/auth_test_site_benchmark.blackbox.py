@@ -622,7 +622,7 @@ async def test_runner_seeds_grades_and_deletes_the_site() -> None:
             assert ok, f"the completion card's structured outputs are part of the final answer: {detail}"
 
             await rb._release_auth_test_site(backend.base_url, manifest)
-            assert backend.requests[2][:2] == ("DELETE", "/api/rose-shop/fixtures/abc123")
+            assert backend.requests[2][:2] == ("DELETE", "/api/rose-shop/fixtures/abc123?userId=user-1")
             assert auth_test_site.active_manifest() is None
 
         unrelated = get_task_by_name("whatsapp-history-recall")
@@ -838,7 +838,11 @@ async def test_goal_names_the_account_and_first_run_precedes_the_graded_run() ->
                 assert "first run did not complete" in str(exc)
             else:
                 raise AssertionError("a failed first run was allowed to continue into the graded run")
-            assert backend.requests[-1][:2] == ("DELETE", "/api/rose-shop/fixtures/abc123"), backend.requests
+            # Teardown names the benchmark user so the backend can remove the rows
+            # even when it no longer holds the site in memory.
+            assert backend.requests[-1][:2] == ("DELETE", "/api/rose-shop/fixtures/abc123?userId=user-1"), (
+                backend.requests
+            )
             assert auth_test_site.active_manifest() is None
     finally:
         auth_test_site.set_active_manifest(None)
@@ -860,7 +864,7 @@ async def test_lane_after_a_connected_inbox_waits_out_the_cached_user_context() 
     async def fake_sleep(seconds):
         slept.append(seconds)
 
-    async def fake_delete(base_url, headers, site_id):
+    async def fake_delete(base_url, headers, site_id, user_id=None):
         return None
 
     async def fake_headers():

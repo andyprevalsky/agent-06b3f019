@@ -1,5 +1,10 @@
 import { prisma } from '../../providers/database';
-import { FIXTURE_INBOX_TOKEN, SAVED_PASSWORD_BROWSER_SOURCE } from './config';
+import {
+  AUTH_TEST_SITE_BASE_PATH,
+  AUTH_TEST_SITE_REALM_PREFIX,
+  FIXTURE_INBOX_TOKEN,
+  SAVED_PASSWORD_BROWSER_SOURCE,
+} from './config';
 
 /** Chrome stores cookie times as microseconds since 1601-01-01. */
 const CHROMIUM_EPOCH_OFFSET_MS = 11644473600000n;
@@ -184,6 +189,16 @@ export async function findPasskeyState(id: string | null) {
   return prisma.passkeyCredential.findUnique({
     where: { id },
     select: { disabledAt: true, signCount: true },
+  });
+}
+
+/** Every row a site seeds is scoped by its siteId, so teardown needs no in-memory record. */
+export function deleteFixtureRows(userId: string, siteId: string) {
+  return deleteFixtureCredentials({
+    userId,
+    sitePath: `${AUTH_TEST_SITE_BASE_PATH}/${siteId}/`,
+    realm: `${AUTH_TEST_SITE_REALM_PREFIX}${siteId}`,
+    siteId,
   });
 }
 

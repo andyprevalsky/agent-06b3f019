@@ -413,9 +413,18 @@ async def mark_run(base_url: str, headers: dict, site_id: str, label: str) -> No
         )
 
 
-async def delete_site(base_url: str, headers: dict, site_id: str) -> None:
+async def delete_site(base_url: str, headers: dict, site_id: str, user_id: str | None = None) -> None:
+    """Remove the site and every row it seeded.
+
+    ``user_id`` lets the backend tear the rows down even when it no longer holds
+    the site in memory (restart, eviction, expiry); only the rows of this exact
+    siteId are touched.
+    """
+    params = {"userId": user_id} if user_id else None
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.delete(f"{base_url.rstrip('/')}{FIXTURES_PATH}/{site_id}", headers=headers)
+        response = await client.delete(
+            f"{base_url.rstrip('/')}{FIXTURES_PATH}/{site_id}", headers=headers, params=params
+        )
     if response.status_code not in (200, 204, 404):
         raise AuthTestSiteFixtureError(
             f"auth test site delete failed {response.status_code}: {response.text[:300]}"

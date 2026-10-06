@@ -72,6 +72,7 @@ def needs_result(*, tools: Any, tool_choice: Any, response_model: Any) -> bool:
 USAGE_COUNTERS = (
     "prompt_tokens",
     "completion_tokens",
+    "total_tokens",
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )

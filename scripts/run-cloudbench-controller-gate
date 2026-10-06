@@ -23,8 +23,18 @@
 # Env: CLOUDBENCH_GATE_TIMEOUT_S (default 2400), WARM_IMAGE_REF (default: newest
 # cloudbench-warm image on the fleet), CLOUDBENCH_GATE_VM_SIZE / _VM_MEMORY.
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+ROOT_DIR="${CLOUDBENCH_GATE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 cd "$ROOT_DIR"
+# Bash reads a script incrementally. A fix landing in this file while a gate is
+# running (2026-10-06) made the running controller resume at a shifted offset
+# and die with a syntax error after GATE_RESULT, before it could fetch the
+# failed suites' logs. Run from a private copy so the worktree can change.
+if [ -z "${CLOUDBENCH_GATE_SELF_COPY:-}" ]; then
+  CLOUDBENCH_GATE_SELF_COPY="$(mktemp -t cloudbench-gate-self.XXXXXX)"
+  cat "${BASH_SOURCE[0]}" > "$CLOUDBENCH_GATE_SELF_COPY"
+  export CLOUDBENCH_GATE_SELF_COPY CLOUDBENCH_GATE_ROOT_DIR="$ROOT_DIR"
+  exec bash "$CLOUDBENCH_GATE_SELF_COPY" "$@"
+fi
 
 APP="${CLOUDBENCH_APP:-navi-whisper-lux-bench}"
 REGION="${CLOUDBENCH_REGION:-iad}"
@@ -50,10 +60,11 @@ DEFAULT_SUITES=(
 SUITES=()
 if [ "${1:-}" = "--" ]; then
   shift
+  [ "$#" -gt 0 ] || { echo "usage: scripts/run-cloudbench-controller-gate -- <command to run in the repo on the machine>" >&2; exit 2; }
   # One remote command; each argument stays a separate word on the machine.
   SUITES=("$(printf '%q ' "$@")")
 elif [ "$#" -gt 0 ]; then
-  echo "usage: $0 [-- <command to run in the repo on the machine>]" >&2
+  echo "usage: scripts/run-cloudbench-controller-gate [-- <command to run in the repo on the machine>]" >&2
   exit 2
 else
   SUITES=("${DEFAULT_SUITES[@]}")
@@ -114,10 +125,16 @@ GATE_NODE_VERSION="${GATE_NODE_VERSION:-v24.21.0}"
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 MACHINE_NAME="cloudbench-gate-${GATE_REF:0:8}-${STAMP}"
+# Repeated log pulls overlap; drop repeats but keep arrival order so each
+# suite's GATE_FAIL_TAIL section stays readable (sort -u interleaved them).
+dedupe_machine_log() {
+  awk '!seen[$0]++' "$MACHINE_LOG" > "$MACHINE_LOG.dedupe" && mv "$MACHINE_LOG.dedupe" "$MACHINE_LOG"
+}
+
 GATE_SCRIPT="$(mktemp -t cloudbench-gate.XXXXXX)"
 MACHINE_ID=""
 cleanup() {
-  rm -f "$GATE_SCRIPT"
+  rm -f "$GATE_SCRIPT" "${CLOUDBENCH_GATE_SELF_COPY:-}"
   if [ -n "$MACHINE_ID" ]; then
     # A destroy of a machine still pulling its image can hang; bound it so an
     # interrupted gate exits promptly (the machine is --rm and times out anyway).
@@ -127,7 +144,10 @@ cleanup() {
     kill "$destroy_pid" 2>/dev/null || true
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# A signal must end the run (EXIT then cleans up), not return into the launch.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 {
   echo '#!/usr/bin/env bash'
@@ -203,7 +223,7 @@ while [ $SECONDS -lt $deadline ]; do
   sleep 20
   # Fly returns about the last 100 lines per call; merge every poll into one file.
   flyctl logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
-  sort -u -o "$MACHINE_LOG" "$MACHINE_LOG"
+  dedupe_machine_log
   logs="$(cat "$MACHINE_LOG")"
   steps="$(printf '%s\n' "$logs" | grep -oE 'GATE_(START|STEP|STEP_START|RESULT)[^"]*' | sed 's/\\n$//' || true)"
   count="$(printf '%s\n' "$steps" | grep -c . || true)"
@@ -223,7 +243,7 @@ print(next((m.get("state", "") for m in machines if m.get("id") == os.environ["M
     # The command exited before its result line reached the log stream; read once more.
     sleep 10
     flyctl logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
-    sort -u -o "$MACHINE_LOG" "$MACHINE_LOG"
+    dedupe_machine_log
     logs="$(cat "$MACHINE_LOG")"
     result="$(printf '%s\n' "$logs" | grep -oE 'GATE_RESULT exit=[0-9]+' | tail -1 || true)"
     [ -n "$result" ] || { echo "❌ gate machine ended ($state) without a GATE_RESULT line" >&2; exit 1; }

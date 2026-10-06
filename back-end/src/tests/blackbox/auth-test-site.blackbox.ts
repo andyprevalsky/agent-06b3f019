@@ -36,6 +36,7 @@ import {
 import './auth-test-site.signin.cases';
 import './auth-test-site.codes.cases';
 import './auth-test-site.signup-shop.cases';
+import './auth-test-site.lifecycle.cases';
 
 test('fixture management requires the internal API key and unknown sites 404', async () => {
   const forbidden = await fetch(`${BASE_URL}${AUTH_TEST_SITE_BASE_PATH}/fixtures`, {

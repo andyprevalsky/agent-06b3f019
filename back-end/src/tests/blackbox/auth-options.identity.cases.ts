@@ -102,7 +102,18 @@ export const identityCases: Array<{ name: string; fn: () => Promise<void> }> = [
             after.passwords.length === 1 && after.passwords[0]?.username === before.minted.email,
             'the next run is offered the saved login'
           );
-          assert(after.minted === null, 'a saved login takes the place of the minted offer');
+          // The row was saved when pwd:new was typed, before the site confirmed the
+          // signup, so it must not hide the minted offer: a failed signup has to be
+          // retryable on the next run with the same email and pwd:new.
+          assert(
+            after.minted?.email === before.minted.email &&
+              after.minted?.newPassword?.ref === 'pwd:new',
+            `the minted offer stays beside the agent's own saved login: ${JSON.stringify(after.minted)}`
+          );
+          assert(
+            after.passwords[0]?.browserSource === 'agent_signup',
+            'the saved login is marked as the agent signup'
+          );
           const elsewhere = await saveMintedAccountPassword(
             userId,
             'https://never-visited.example/'

@@ -11,7 +11,7 @@ import { benchmarkSavedBrowserAuthDisabled } from './benchmarkBrowserAuth';
 import { primitiveDomain, createMintedInbox, findMintedInbox } from './primitive';
 import { createAgentPhoneNumber, isAgentPhoneEmailFallbackSafe } from './agentPhone';
 import { createLogger } from './logger';
-import { mintedNewPasswordOption } from './mintedAccountPassword';
+import { MINTED_PASSWORD_BROWSER_SOURCE, mintedNewPasswordOption } from './mintedAccountPassword';
 import * as repo from './authOptionsStore';
 import type { AuthOptionsResponse } from './authOptionsTypes';
 
@@ -104,10 +104,17 @@ export async function getAuthOptions(
   const enabledCookieBundles = cookieBundles.filter((bundle) => !bundle.disabled);
   const enabledPasswordOptions = passwordOptions.filter((password) => !password.disabled);
   const enabledPasskeys = passkeyOptions.filter((pk) => !pk.disabled);
+  // A login the agent saved while typing pwd:new on a sign-up form is the minted
+  // account itself, recorded before the site confirmed the signup. It is offered
+  // as a saved login, but it must not hide the minted email and pwd:new: if that
+  // signup failed, the next run has to be able to sign up again.
+  const confirmedPasswordOptions = enabledPasswordOptions.filter(
+    (password) => password.browserSource !== MINTED_PASSWORD_BROWSER_SOURCE
+  );
   const shouldExposeMinted =
     !enabledSteelSession &&
     enabledCookieBundles.length === 0 &&
-    enabledPasswordOptions.length === 0 &&
+    confirmedPasswordOptions.length === 0 &&
     enabledPasskeys.length === 0;
   const mintedIdentity = shouldExposeMinted
     ? await ensureMintedIdentity(userId, agentIdentity, minted)
@@ -229,6 +236,7 @@ function resolvePasswordOptions(
     username: password.username,
     ref: passwordRefWithCollisionSuffix(baseRefs[index], password.id, baseRefCounts),
     disabled: password.disabledAt !== null,
+    browserSource: password.browserSource,
     dateLastUsed: serializeBigInt(password.dateLastUsed),
   }));
 }

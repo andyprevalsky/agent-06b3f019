@@ -184,18 +184,34 @@ export async function createAuthTestSite(
     );
   }
 
-  const ctx = await resolvePlanContext(input, siteId, realm, holderName);
-  const plan = planScenario(input.scenario, ctx);
-  const site = newSite(input, plan, ctx, {
-    realm,
-    entryUrl,
-    publicOrigin: publicBase.origin,
-    nowMs,
-  });
-  site.savedPasswords = await seedSavedPasswords(site, plan, nowMs);
-  await seedSavedSession(site, plan, nowMs);
-  await seedPasskey(site, plan);
-  const preview = await previewAuthOptions(site);
+  let site: AuthTestSite;
+  let plan: ScenarioPlan;
+  let preview: AuthOptionsPreview;
+  try {
+    const ctx = await resolvePlanContext(input, siteId, realm, holderName);
+    plan = planScenario(input.scenario, ctx);
+    site = newSite(input, plan, ctx, {
+      realm,
+      entryUrl,
+      publicOrigin: publicBase.origin,
+      nowMs,
+    });
+    site.savedPasswords = await seedSavedPasswords(site, plan, nowMs);
+    await seedSavedSession(site, plan, nowMs);
+    await seedPasskey(site, plan);
+    preview = await previewAuthOptions(site);
+  } catch (error) {
+    // The caller never learns this siteId, so nothing else can tear down the
+    // rows already seeded for it — a leaked fixture inbox would change the auth
+    // options of every later run for this benchmark user.
+    await repo.deleteFixtureRows(input.userId, siteId).catch((cleanupError: unknown) => {
+      log.error('Failed to remove the rows of a fixture that did not finish', {
+        site_id: siteId,
+        error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+      });
+    });
+    throw error;
+  }
   if (site.mintedEmail === null) site.mintedEmail = preview.mintedEmail?.toLowerCase() ?? null;
 
   sites.putSite(site);
@@ -294,15 +310,20 @@ export async function buildReport(siteId: string): Promise<AuthTestSiteReport> {
   };
 }
 
-export async function deleteAuthTestSite(siteId: string) {
-  const site = requireSite(siteId);
-  const deleted = await repo.deleteFixtureCredentials({
-    userId: site.userId,
-    sitePath: `${AUTH_TEST_SITE_BASE_PATH}/${site.siteId}/`,
-    realm: site.realm,
-    siteId: site.siteId,
-  });
+/**
+ * `userId` lets a caller tear down a site this process no longer holds (evicted,
+ * expired, or created before a restart); without it an unknown site is a 404.
+ */
+export async function deleteAuthTestSite(siteId: string, userId: string | null = null) {
+  const site = sites.getSite(siteId);
+  if (site === null && userId === null) {
+    throw new AuthTestSiteError('Auth test site not found', 404);
+  }
+  if (site !== null && userId !== null && site.userId !== userId) {
+    throw new AuthTestSiteError('Auth test site belongs to another user', 403);
+  }
+  const deleted = await repo.deleteFixtureRows(site?.userId ?? (userId as string), siteId);
   sites.deleteSite(siteId);
-  log.info('Deleted auth test site', { site_id: siteId, ...deleted });
+  log.info('Deleted auth test site', { site_id: siteId, in_memory: site !== null, ...deleted });
   return { siteId, deleted };
 }

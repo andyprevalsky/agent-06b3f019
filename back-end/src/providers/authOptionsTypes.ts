@@ -19,6 +19,8 @@ export interface AuthOptionsResponse {
     username: string;
     ref: string;
     disabled: boolean;
+    /** Where the login came from; `agent_signup` rows are the minted account's own password. */
+    browserSource: string;
     dateLastUsed: number | null;
   }>;
   // Cloud-custody passkeys (Model A). Metadata only — the encrypted private key
