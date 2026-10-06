@@ -913,8 +913,26 @@ selected Fly session through `flyctl auth token --json --quiet`; do not copy its
 short-lived output into env files. A raw env token returning HTTP 403 while the
 same selected session works through `flyctl` indicates stale session discharges,
 not a reason to rotate keys or rebuild the image. Use `scripts/run-bench
---help` for current flags. `--timeout 1200` is a per-run twenty-minute task
-execution override; the normal timeout remains unchanged.
+--help` for current flags. For a per-run twenty-minute task execution window,
+set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=1200` and pass `--timeout 1200`.
+The CLI flag alone sets the orchestration budget; the normal timeout remains unchanged.
+
+**Monitor every cloud launch:** the detached launcher prints the private log
+and exact controller exit marker. Its controller log's "Monitor this exact fleet"
+section prints the complete metrics command; retain it:
+`scripts/run-bench monitor <run-directory> --controller-status <exit-marker>`
+(the exit marker is available with or without `--wait`). Poll every 30 seconds and inspect
+terminal status on every observation, even when the progress card stops changing.
+The read-only command reports exclusive stage counts, card age, task outcomes,
+final lifecycle cleanup and controller exit separately, without dumping private
+trajectories. An early task PASS/FAIL does not mean teardown finished. Continue
+until the controller exits and exact owned resources are released. Stale or
+missing observations are warnings: reconcile exact owner liveness and private
+diagnostics, never reset a run based on an observation timeout. The compact
+monitor controls run in the existing `benchmark-live-results.test.py` deploy gate.
+The startup tracker recognizes both legacy SSH and current boot-launch producer
+messages. An accepted boot start displays stack booting; a provider-rejected
+start does not advance it. These compact regressions run in that same gate.
 
 To skip fresh volume restoration on repeated runs, prepare an explicitly sized
 workspace pool with `scripts/run-bench --provision-pool N --wait`. Ordinary runs
