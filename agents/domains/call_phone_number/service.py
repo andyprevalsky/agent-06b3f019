@@ -11,8 +11,10 @@ from typing import Any
 
 from domains.call_phone_number.config import (
     ACTIVE_POLL_INTERVAL_SECONDS,
+    CALL_HOLD_PROVIDER,
     CALL_PROVIDER,
     COST_CENTS_PER_MINUTE,
+    HOLD_COST_CENTS_PER_MINUTE,
     INITIAL_POLL_INTERVAL_SECONDS,
     LONG_HOLD_POLL_AFTER_POLLS,
     LONG_HOLD_POLL_INTERVAL_SECONDS,
@@ -62,9 +64,65 @@ def compute_call_cost_cents(duration_seconds: int) -> int:
     return int(duration_minutes * COST_CENTS_PER_MINUTE)
 
 
-def compute_service_usage(duration_seconds: int) -> list[dict[str, Any]]:
-    """Compute phone call service usage costs."""
-    return [{"cost_cents": compute_call_cost_cents(duration_seconds), "provider": CALL_PROVIDER}]
+def compute_service_usage(duration_seconds: int, hold_seconds: int = 0) -> list[dict[str, Any]]:
+    """Compute phone call service usage costs; parked hold time bills at the hold-line rate."""
+    hold_seconds = max(0, min(hold_seconds, duration_seconds))
+    usage = [{"cost_cents": compute_call_cost_cents(duration_seconds - hold_seconds), "provider": CALL_PROVIDER}]
+    if hold_seconds > 0:
+        usage.append(
+            {"cost_cents": int(hold_seconds / 60 * HOLD_COST_CENTS_PER_MINUTE), "provider": CALL_HOLD_PROVIDER}
+        )
+    return usage
+
+
+def format_hold_duration(seconds: int) -> str:
+    """Format a hold as '2h 30m', '4m 5s', or '40s'."""
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def phone_hold_info(poll_result: dict[str, Any]) -> dict[str, Any]:
+    """The backend's `phoneHold` block for hold-capable calls ({} for plain Vapi calls)."""
+    hold = poll_result.get("phoneHold")
+    return hold if isinstance(hold, dict) else {}
+
+
+def live_call_update(
+    poll_result: dict[str, Any],
+    *,
+    last_hold_state: str | None,
+    last_listen_url: str | None,
+    formatted_phone: str,
+    call_id: str,
+) -> dict[str, Any] | None:
+    """Phone-card metadata to post when a live call goes on or off hold, else None.
+
+    connected ──wait_for_human──▶ on_hold ──live person──▶ reconnecting ──▶ connected
+    (in-progress, listenUrl)      (on-hold card)                      (in-progress, new listenUrl)
+    """
+    hold = phone_hold_info(poll_result)
+    state = hold.get("state")
+    base = {"to": formatted_phone, "callId": call_id, "startedAt": poll_result.get("startedAt")}
+    if state == "on_hold":
+        if last_hold_state == "on_hold":
+            return None
+        holds = hold.get("holds") if isinstance(hold.get("holds"), list) else []
+        current = holds[-1] if holds and isinstance(holds[-1], dict) else {}
+        return {**base, "status": "on-hold", "holdStartedAt": current.get("startedAt")}
+    if poll_result.get("status") != "in-progress" or state not in (None, "connected"):
+        return None
+    monitor = poll_result.get("monitor") if isinstance(poll_result.get("monitor"), dict) else {}
+    listen_url = monitor.get("listenUrl")
+    resumed = last_hold_state in ("on_hold", "reconnecting")
+    if resumed or (listen_url and listen_url != last_listen_url):
+        return {**base, "status": "in-progress", "listenUrl": listen_url}
+    return None
 
 
 def build_completion_message(
@@ -73,9 +131,11 @@ def build_completion_message(
     summary: str,
     structured_data: dict[str, Any],
     transcript: str,
+    hold_seconds: int = 0,
 ) -> str:
     """Build a human-readable completion message for the LLM context."""
-    parts = [f"Call to {formatted_phone} completed ({duration}s)."]
+    hold_note = f", including {format_hold_duration(hold_seconds)} on hold" if hold_seconds > 0 else ""
+    parts = [f"Call to {formatted_phone} completed ({duration}s{hold_note})."]
     if summary:
         parts.append(f"\n\nSummary: {summary}")
     if structured_data:

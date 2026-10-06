@@ -22,18 +22,21 @@ def _mock_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"call_id": "call-test-123"})
 
     if "/api/vapi/call/call-test-123" in url and request.method == "GET":
-        return httpx.Response(200, json={
-            "status": "ended",
-            "analysis": {
-                "summary": "Called and discussed project details",
-                "structuredData": {"sentiment": "positive"},
+        return httpx.Response(
+            200,
+            json={
+                "status": "ended",
+                "analysis": {
+                    "summary": "Called and discussed project details",
+                    "structuredData": {"sentiment": "positive"},
+                },
+                "transcript": "Hello, this is a test call.",
+                "endedReason": "hangup",
+                "recordingUrl": "https://recordings.test/abc.mp3",
+                "startedAt": "2026-01-01T00:00:00Z",
+                "endedAt": "2026-01-01T00:02:30Z",
             },
-            "transcript": "Hello, this is a test call.",
-            "endedReason": "hangup",
-            "recordingUrl": "https://recordings.test/abc.mp3",
-            "startedAt": "2026-01-01T00:00:00Z",
-            "endedAt": "2026-01-01T00:02:30Z",
-        })
+        )
 
     # Catch-all for messages endpoint and other calls
     if "/api/agents/" in url and "/messages" in url:
@@ -179,9 +182,7 @@ async def test_finished_message_contains_call_evidence_for_verifier():
     assert result["summary"] == "Called and discussed project details"
     captures = get_captured_requests()
     message_posts = [
-        capture
-        for capture in captures
-        if "/api/agents/a-1/messages" in capture["url"] and capture["method"] == "POST"
+        capture for capture in captures if "/api/agents/a-1/messages" in capture["url"] and capture["method"] == "POST"
     ]
     assert message_posts, "Expected call completion to persist a TOOL message"
 
@@ -198,27 +199,32 @@ async def test_finished_message_contains_call_evidence_for_verifier():
 
 def test_format_phone_number_e164():
     from domains.call_phone_number.service import format_phone_number
+
     assert format_phone_number("+19729777432") == "+1 (972) 977-7432"
 
 
 def test_format_phone_number_ten_digits():
     from domains.call_phone_number.service import format_phone_number
+
     assert format_phone_number("9729777432") == "+1 (972) 977-7432"
 
 
 def test_format_phone_number_with_formatting():
     from domains.call_phone_number.service import format_phone_number
+
     assert format_phone_number("(972) 977-7432") == "+1 (972) 977-7432"
 
 
 def test_format_phone_number_unparseable():
     from domains.call_phone_number.service import format_phone_number
+
     assert format_phone_number("not-a-number") == "not-a-number"
 
 
 def test_compute_call_cost_cents_min_billing():
     from domains.call_phone_number.service import compute_call_cost_cents
     from domains.call_phone_number.config import COST_CENTS_PER_MINUTE, MINIMUM_BILLED_MINUTES
+
     # 30s call is bumped to MINIMUM_BILLED_MINUTES
     cost = compute_call_cost_cents(30)
     assert cost == int(MINIMUM_BILLED_MINUTES * COST_CENTS_PER_MINUTE)
@@ -227,6 +233,7 @@ def test_compute_call_cost_cents_min_billing():
 def test_compute_call_cost_cents_actual_duration():
     from domains.call_phone_number.service import compute_call_cost_cents
     from domains.call_phone_number.config import COST_CENTS_PER_MINUTE, MINIMUM_BILLED_MINUTES
+
     # Long call
     seconds = 600  # 10 minutes
     minutes_billed = max(MINIMUM_BILLED_MINUTES, seconds / 60)
@@ -237,6 +244,7 @@ def test_compute_call_cost_cents_actual_duration():
 def test_compute_service_usage():
     from domains.call_phone_number.service import compute_service_usage
     from domains.call_phone_number.config import CALL_PROVIDER
+
     usage = compute_service_usage(120)
     assert len(usage) == 1
     assert usage[0]["provider"] == CALL_PROVIDER
@@ -245,6 +253,7 @@ def test_compute_service_usage():
 
 def test_build_completion_message_full():
     from domains.call_phone_number.service import build_completion_message
+
     out = build_completion_message(
         formatted_phone="+1 (555) 123-4567",
         duration=120,
@@ -262,6 +271,7 @@ def test_build_completion_message_full():
 
 def test_build_completion_message_minimal():
     from domains.call_phone_number.service import build_completion_message
+
     out = build_completion_message(
         formatted_phone="+1 (555) 123-4567",
         duration=5,
@@ -277,11 +287,7 @@ def test_build_completion_message_minimal():
 def test_enrich_transcript_with_dtmf_marks_keypresses_inline():
     from domains.call_phone_number.service import enrich_transcript_with_dtmf
 
-    speech = (
-        "User: Press two to track a package.\n"
-        "User: Enter your tracking number.\n"
-        "AI: Thank you. Goodbye."
-    )
+    speech = "User: Press two to track a package.\nUser: Enter your tracking number.\nAI: Thank you. Goodbye."
     messages = [
         {"role": "user", "message": "Press two to track a package."},
         {
@@ -327,20 +333,21 @@ def test_enrich_transcript_with_dtmf_noop_without_keypresses():
 
 def test_calculate_duration_from_timestamps_valid():
     from domains.call_phone_number.service import calculate_duration_from_timestamps
-    d = calculate_duration_from_timestamps(
-        "2026-01-01T00:00:00Z", "2026-01-01T00:01:30Z"
-    )
+
+    d = calculate_duration_from_timestamps("2026-01-01T00:00:00Z", "2026-01-01T00:01:30Z")
     assert d == 90
 
 
 def test_calculate_duration_from_timestamps_missing():
     from domains.call_phone_number.service import calculate_duration_from_timestamps
+
     assert calculate_duration_from_timestamps(None, None) == 0
     assert calculate_duration_from_timestamps("2026-01-01T00:00:00Z", None) == 0
 
 
 def test_calculate_duration_from_timestamps_invalid():
     from domains.call_phone_number.service import calculate_duration_from_timestamps
+
     assert calculate_duration_from_timestamps("not-a-time", "also-not") == 0
 
 
@@ -349,17 +356,21 @@ def test_calculate_duration_from_timestamps_invalid():
 
 def test_manager_get_approval_question():
     from domains.call_phone_number.handler import CallPhoneNumberManager
+
     manager = CallPhoneNumberManager()
-    q = manager.get_approval_question({
-        "to": "+19729777432",
-        "system_prompt": "Be polite",
-    })
+    q = manager.get_approval_question(
+        {
+            "to": "+19729777432",
+            "system_prompt": "Be polite",
+        }
+    )
     assert "+1 (972) 977-7432" in q
     assert "Be polite" in q
 
 
 def test_manager_get_approval_question_defaults():
     from domains.call_phone_number.handler import CallPhoneNumberManager
+
     manager = CallPhoneNumberManager()
     q = manager.get_approval_question({})
     # Defaults: to="unknown", system_prompt=""
@@ -485,6 +496,94 @@ async def test_call_phone_number_entry_point():
     assert out["success"] is True
 
 
+def _hold_poll(state, status="in-progress", listen_url=None, hold_seconds=0, **extra):
+    holds = [{"startedAt": "2026-01-01T00:01:00Z", "endedAt": None}] if state != "connected" or hold_seconds else []
+    body = {
+        "status": status,
+        "startedAt": "2026-01-01T00:00:00Z",
+        "phoneHold": {"state": state, "holds": holds, "holdSeconds": hold_seconds},
+        **extra,
+    }
+    if listen_url:
+        body["monitor"] = {"listenUrl": listen_url}
+    return body
+
+
+async def test_wait_for_human_hold_updates_card_and_cost():
+    """A parked call shows on-hold, resumes with the new segment's audio, and bills hold time separately."""
+    sequence = [
+        _hold_poll("connected", listen_url="wss://listen/a"),
+        _hold_poll("on_hold"),
+        _hold_poll("on_hold"),
+        _hold_poll("reconnecting"),
+        _hold_poll("connected", listen_url="wss://listen/b", hold_seconds=9000),
+        _hold_poll(
+            "ended",
+            status="ended",
+            hold_seconds=9000,
+            transcript="AI: Hi\n[On hold for 2h 30m]\nUser: Air Canada, Jordan speaking.",
+            analysis={"summary": "Claimed the credit", "structuredData": {"credit_claimed": True}},
+            endedReason="customer-ended-call",
+            endedAt="2026-01-01T02:36:00Z",
+        ),
+    ]
+    polls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/api/vapi/call" in url and request.method == "POST" and "/call/" not in url.split("/api/vapi/call")[1]:
+            return httpx.Response(200, json={"call_id": "call-hold-1"})
+        if "/api/vapi/call/call-hold-1" in url and request.method == "GET":
+            body = sequence[min(polls["n"], len(sequence) - 1)]
+            polls["n"] += 1
+            return httpx.Response(200, json=body)
+        return httpx.Response(404)
+
+    setup_mock_fn(handler)
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("tools.call_phone_number.asyncio.sleep", side_effect=_noop_sleep),
+    ):
+        from tools.call_phone_number import call_phone_number_activity
+
+        result = await call_phone_number_activity(
+            to="+18885550100",
+            system_prompt="Claim the flight credit",
+            output_schema={},
+            agent_id="a-1",
+            tool_call_id="tc-1",
+        )
+
+    cards = [
+        json.loads(capture["requestBody"])["metadata"]["phoneCall"]
+        for capture in get_captured_requests()
+        if "/api/agents/a-1/messages" in capture["url"] and capture["method"] == "POST"
+    ]
+    assert [card["status"] for card in cards] == ["in-progress", "on-hold", "in-progress", "ended"], cards
+    assert cards[0]["listenUrl"] == "wss://listen/a"
+    assert cards[1]["holdStartedAt"] == "2026-01-01T00:01:00Z"
+    assert cards[2]["listenUrl"] == "wss://listen/b"
+    assert cards[3]["holdSeconds"] == 9000
+    assert result["hold_seconds"] == 9000
+    assert "including 2h 30m on hold" in result["message"]
+
+    from domains.call_phone_number.config import CALL_HOLD_PROVIDER, CALL_PROVIDER
+    from domains.call_phone_number.service import compute_service_usage
+
+    usage = compute_service_usage(result["duration"], result["hold_seconds"])
+    assert [item["provider"] for item in usage] == [CALL_PROVIDER, CALL_HOLD_PROVIDER]
+    # 6 assistant minutes at 5c + 150 hold minutes at 2c, vs 780c if the hold billed as Vapi time.
+    assert usage[0]["cost_cents"] == 30
+    assert usage[1]["cost_cents"] == 300
+
+
+def test_compute_service_usage_without_hold_is_unchanged():
+    from domains.call_phone_number.service import compute_service_usage
+
+    assert compute_service_usage(120) == compute_service_usage(120, 0)
+    assert len(compute_service_usage(120, 0)) == 1
+
+
 async def run_all_tests():
     print("call-phone-number blackbox tests:")
     r = BlackboxResult()
@@ -525,6 +624,11 @@ async def run_all_tests():
     )
     await r.record_async("manager_execute_tool_error", test_manager_execute_tool_error)
     await r.record_async("call_phone_number_entry_point", test_call_phone_number_entry_point)
+    await r.record_async(
+        "wait_for_human_hold_updates_card_and_cost",
+        test_wait_for_human_hold_updates_card_and_cost,
+    )
+    r.record("compute_service_usage_without_hold_is_unchanged", test_compute_service_usage_without_hold_is_unchanged)
     teardown_mock()
     return r.all_passed
 

@@ -13,10 +13,13 @@ MAX_POLL_ATTEMPTS = 2600
 
 # Cost estimation
 COST_CENTS_PER_MINUTE = 5  # ~$0.05/min estimate
+# Parked on hold (wait_for_human): Twilio line + realtime STT, no Vapi minutes.
+HOLD_COST_CENTS_PER_MINUTE = 2
 MINIMUM_BILLED_MINUTES = 1
 
 # Provider name for usage tracking
 CALL_PROVIDER = "Vapi Voice Call"
+CALL_HOLD_PROVIDER = "Phone Hold Line"
 
 # Retry policy
 # The backend uses the tool_call_id-derived idempotency key to return the same

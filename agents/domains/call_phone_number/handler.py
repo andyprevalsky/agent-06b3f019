@@ -37,7 +37,9 @@ from domains.call_phone_number.service import (
     compute_service_usage,
     enrich_transcript_with_dtmf,
     format_phone_number,
+    live_call_update,
     max_poll_coverage_seconds,
+    phone_hold_info,
     poll_interval_seconds,
     save_phone_call_message,
 )
@@ -131,7 +133,12 @@ class CallPhoneNumberManager(ToolManager):
 
             # 3. Report usage based on call duration
             duration_seconds = result.get("duration", 0)
-            usage_items = [] if result.get("world_model_simulated") else compute_service_usage(duration_seconds)
+            hold_seconds = result.get("hold_seconds", 0)
+            usage_items = (
+                []
+                if result.get("world_model_simulated")
+                else compute_service_usage(duration_seconds, hold_seconds if isinstance(hold_seconds, int) else 0)
+            )
 
             await handle_tool_event(
                 event=ToolEvent(
@@ -331,6 +338,8 @@ async def _call_phone_number_activity_real(
     poll_interval = INITIAL_POLL_INTERVAL_SECONDS
     polls = 0
     call_started = False
+    last_hold_state: str | None = None
+    last_listen_url: str | None = None
 
     while polls < MAX_POLL_ATTEMPTS:
         activity.heartbeat(f"Polling call status (attempt {polls + 1})...")
@@ -373,6 +382,7 @@ async def _call_phone_number_activity_real(
 
             monitor = poll_result.get("monitor", {})
             listen_url = monitor.get("listenUrl")
+            last_listen_url = listen_url
             started_at = poll_result.get("startedAt")
 
             await save_phone_call_message(
@@ -389,6 +399,31 @@ async def _call_phone_number_activity_real(
                     "startedAt": started_at,
                 },
             )
+
+        # wait_for_human: the backend parks the line on hold and re-enters
+        # with a new Vapi segment (new listenUrl) when a live person answers.
+        hold_update = live_call_update(
+            poll_result,
+            last_hold_state=last_hold_state,
+            last_listen_url=last_listen_url,
+            formatted_phone=formatted_phone,
+            call_id=call_id,
+        )
+        if hold_update is not None and call_started:
+            on_hold = hold_update["status"] == "on-hold"
+            await save_phone_call_message(
+                agent_id=agent_id,
+                title="\u23f8\ufe0f On hold, waiting for a live person" if on_hold else "\U0001f4de Call in progress",
+                message=f"**Calling:** {formatted_phone}",
+                status=MessageStatus.IN_PROGRESS,
+                tool_call_id=tool_call_id,
+                phone_metadata=hold_update,
+            )
+            if not on_hold:
+                last_listen_url = hold_update.get("listenUrl")
+        hold_info = phone_hold_info(poll_result)
+        if isinstance(hold_info.get("state"), str):
+            last_hold_state = hold_info["state"]
 
         if status == "ended":
             # Call completed - extract all results
@@ -412,8 +447,10 @@ async def _call_phone_number_activity_real(
             )
 
             structured_data = analysis.get("structuredData", {})
+            hold_seconds = hold_info.get("holdSeconds")
+            hold_seconds = hold_seconds if isinstance(hold_seconds, int) and hold_seconds > 0 else 0
             completion_message = build_completion_message(
-                formatted_phone, duration, summary, structured_data, transcript
+                formatted_phone, duration, summary, structured_data, transcript, hold_seconds
             )
 
             logger.info(
@@ -443,6 +480,7 @@ async def _call_phone_number_activity_real(
                     "transcript": transcript,
                     "summary": summary,
                     "structuredData": structured_data,
+                    **({"holdSeconds": hold_seconds} if hold_seconds else {}),
                 },
             )
 
@@ -457,6 +495,7 @@ async def _call_phone_number_activity_real(
                 "summary": summary,
                 "recording_url": recording_url,
                 "to": to,
+                "hold_seconds": hold_seconds,
             }
 
         poll_interval = poll_interval_seconds(polls, call_started=call_started)
