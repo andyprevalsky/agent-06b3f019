@@ -57,6 +57,10 @@ CALLEE_SESSION_NUMBER_TTL = timedelta(hours=2)
 # keep a small propagation margin so benchmark calls never race that boundary.
 CALLEE_SESSION_NUMBER_ACTIVATION_DELAY = timedelta(minutes=3)
 VAPI_PHONE_NUMBER_NAME_MAX_LENGTH = 40
+# Hold-queue benches announce a multi-hour wait, then compress it. Never honor
+# a real 3-hour hold_seconds — that would burn Vapi minutes and the 10-minute
+# benchmark budget. 25s stays under the outbound silenceTimeout of 30s.
+HOLD_SUCCESS_MAX_SECONDS = 25.0
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BACKEND_ENV = str(_REPO_ROOT / "back-end" / ".env")
@@ -241,6 +245,10 @@ def phone_payment_audit_path() -> Path:
     return Path(override).expanduser().resolve() if override else _PAYMENT_AUDIT_JSONL
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _parse_audit_timestamp(value: object) -> Optional[datetime]:
     if not isinstance(value, str) or not value:
         return None
@@ -324,6 +332,8 @@ class PhoneCalleeSession:
         self.started_at: Optional[datetime] = None
         self._keypad_success_task: Optional[asyncio.Task] = None
         self._keypad_success_announced = False
+        self._hold_success_task: Optional[asyncio.Task] = None
+        self._hold_success_announced = False
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
@@ -345,6 +355,48 @@ class PhoneCalleeSession:
             return None
         return {"tracking_number": tracking_number, "say": say}
 
+    def _hold_success_config(self) -> Optional[dict]:
+        """Optional compressed hold-queue: announce a long wait, then connect a rep.
+
+        Production hold queues can last hours. Benchmarks cannot. When
+        phone_persona.hold_success is set, the callee first_message tells the
+        caller the wait is ~3 hours; a watcher then injects the representative
+        after hold_seconds of the live call (capped at HOLD_SUCCESS_MAX_SECONDS).
+
+            call connects
+              -> first_message: "estimated wait is 3 hours, stay on the line"
+              -> compressed hold (hold_seconds)
+              -> live-control say: representative + confirmation facts
+              -> endCall
+        """
+        config = self.persona.get("hold_success")
+        if not isinstance(config, dict):
+            return None
+        hold_seconds = config.get("hold_seconds")
+        say = str(config.get("say") or "").strip()
+        if isinstance(hold_seconds, bool) or not isinstance(hold_seconds, (int, float)) or hold_seconds <= 0 or not say:
+            return None
+        hold_seconds = float(hold_seconds)
+        if hold_seconds > HOLD_SUCCESS_MAX_SECONDS:
+            raise ValueError(
+                f"phone_persona.hold_success.hold_seconds={hold_seconds} exceeds "
+                f"the {HOLD_SUCCESS_MAX_SECONDS:.0f}s compressed-hold cap; do not "
+                "simulate a real multi-hour wait on a live Vapi call"
+            )
+        return {"hold_seconds": hold_seconds, "say": say}
+
+    def _live_control_enabled(self) -> bool:
+        return self._keypad_success_config() is not None or self._hold_success_config() is not None
+
+    def _hold_elapsed_seconds(self, call: dict) -> Optional[float]:
+        """Seconds since this session's inbound call was created, or None if foreign/unknown."""
+        created = _parse_audit_timestamp(call.get("createdAt"))
+        if created is None:
+            return None
+        if self.started_at and created < self.started_at:
+            return None
+        return (_utcnow() - created).total_seconds()
+
     async def setup(self) -> None:
         try:
             async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=45) as client:
@@ -352,11 +404,16 @@ class PhoneCalleeSession:
                 await self._create_persona_tools(client)
                 await self._create_persona_assistant(client)
                 await self._attach_assistant(client, self.assistant_id)
-            self.started_at = datetime.now(timezone.utc)
+            self.started_at = _utcnow()
             if self._keypad_success_config() is not None:
                 self._keypad_success_task = asyncio.create_task(
                     self._watch_keypad_success_announcement(),
                     name=f"keypad-success-{self.task_name}",
+                )
+            if self._hold_success_config() is not None:
+                self._hold_success_task = asyncio.create_task(
+                    self._watch_hold_success_announcement(),
+                    name=f"hold-success-{self.task_name}",
                 )
         except BaseException:
             await self.cleanup()
@@ -516,8 +573,8 @@ class PhoneCalleeSession:
                 "schema": self.persona["structured_data_schema"],
             }
         config["analysisPlan"] = analysis_plan
-        # Live call control is required for deterministic keypad_success injection.
-        if self._keypad_success_config() is not None:
+        # Live call control is required for keypad_success / hold_success injection.
+        if self._live_control_enabled():
             config["monitorPlan"] = {"listenEnabled": True, "controlEnabled": True}
         resp = await client.post("/assistant", json=config)
         if resp.status_code not in (200, 201):
@@ -568,22 +625,8 @@ class PhoneCalleeSession:
                         if not control_url:
                             # controlUrl can lag a moment after the call becomes in-progress
                             continue
-                        async with httpx.AsyncClient(timeout=30) as control_client:
-                            say_resp = await control_client.post(
-                                control_url,
-                                json={
-                                    "type": "say",
-                                    "content": say,
-                                    "endCallAfterSpoken": True,
-                                },
-                            )
-                            if say_resp.status_code >= 300:
-                                print(
-                                    f"    ⚠ keypad_success say failed for call "
-                                    f"{call_id[:8]}: "
-                                    f"{say_resp.status_code} {say_resp.text[:200]}"
-                                )
-                                continue
+                        if not await self._inject_control_say(control_url, say, call_id, "keypad_success"):
+                            continue
                         self._keypad_success_announced = True
                         print(
                             f"    ✓ Injected keypad_success announcement for tracking "
@@ -595,6 +638,78 @@ class PhoneCalleeSession:
             raise
         except Exception as exc:
             print(f"    ⚠ keypad_success watcher error: {exc}")
+
+    async def _inject_control_say(self, control_url: str, say: str, call_id: str, label: str) -> bool:
+        """Speak a canned line on a live call and hang up after it finishes."""
+        async with httpx.AsyncClient(timeout=30) as control_client:
+            say_resp = await control_client.post(
+                control_url,
+                json={
+                    "type": "say",
+                    "content": say,
+                    "endCallAfterSpoken": True,
+                },
+            )
+            if say_resp.status_code >= 300:
+                print(
+                    f"    ⚠ {label} say failed for call "
+                    f"{call_id[:8]}: "
+                    f"{say_resp.status_code} {say_resp.text[:200]}"
+                )
+                return False
+        return True
+
+    async def _watch_hold_success_announcement(self) -> None:
+        """Connect the representative after the compressed hold elapses."""
+        success = self._hold_success_config()
+        if success is None:
+            return
+        hold_seconds = success["hold_seconds"]
+        say = success["say"]
+        deadline = asyncio.get_event_loop().time() + float(
+            self.persona.get("max_duration_seconds") or _CALLEE_ASSISTANT_BASE["maxDurationSeconds"]
+        )
+        try:
+            async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=30) as client:
+                while asyncio.get_event_loop().time() < deadline and not self._hold_success_announced:
+                    if not (self.phone_number_id and self.assistant_id):
+                        return
+                    resp = await client.get(
+                        "/call", params={"phoneNumberId": self.phone_number_id, "limit": 10}
+                    )
+                    resp.raise_for_status()
+                    for call in resp.json() or []:
+                        if call.get("assistantId") != self.assistant_id:
+                            continue
+                        if call.get("status") not in {"queued", "ringing", "in-progress"}:
+                            continue
+                        elapsed = self._hold_elapsed_seconds(call)
+                        if elapsed is None or elapsed < hold_seconds:
+                            continue
+                        call_id = str(call.get("id") or "")
+                        detailed = call
+                        if call_id:
+                            detail_resp = await client.get(f"/call/{call_id}")
+                            if detail_resp.status_code == 200:
+                                detailed = detail_resp.json() or call
+                        control_url = (
+                            ((detailed.get("monitor") or call.get("monitor") or {}).get("controlUrl") or "")
+                        ).strip()
+                        if not control_url:
+                            continue
+                        if not await self._inject_control_say(control_url, say, call_id, "hold_success"):
+                            continue
+                        self._hold_success_announced = True
+                        print(
+                            f"    ✓ Injected hold_success representative after "
+                            f"{elapsed:.0f}s on call {call_id[:8]}"
+                        )
+                        return
+                    await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"    ⚠ hold_success watcher error: {exc}")
 
     @staticmethod
     def _call_messages_contain_keypad_tracking(call: dict, tracking_number: str) -> bool:
@@ -700,17 +815,23 @@ class PhoneCalleeSession:
         self.phone_number_id = ""
         self.phone_number = ""
 
+    async def _cancel_background_task(self, task: Optional[asyncio.Task], label: str) -> None:
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"    ⚠ {label} watcher cleanup error: {exc}")
+
     async def cleanup(self) -> None:
         """Best-effort: detach and delete every resource owned by this session."""
-        if self._keypad_success_task is not None and not self._keypad_success_task.done():
-            self._keypad_success_task.cancel()
-            try:
-                await self._keypad_success_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                print(f"    ⚠ keypad_success watcher cleanup error: {exc}")
-            self._keypad_success_task = None
+        await self._cancel_background_task(self._keypad_success_task, "keypad_success")
+        self._keypad_success_task = None
+        await self._cancel_background_task(self._hold_success_task, "hold_success")
+        self._hold_success_task = None
         try:
             async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=30) as client:
                 try:

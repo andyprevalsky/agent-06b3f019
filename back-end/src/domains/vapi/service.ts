@@ -4,6 +4,7 @@ import {
   OUTBOUND_PHONE_NUMBER_POOL,
   BASE_SYSTEM_PROMPT,
   buildCallAssistantConfig,
+  isHoldQueuePrompt,
   isIvrNavigationPrompt,
 } from './config';
 import type { CreateCallRequest, VapiCallResponse } from './types';
@@ -164,7 +165,8 @@ function buildCreateCallBody(call: PreparedCall): string {
       call.normalizedSchema,
       call.voiceId,
       {
-        calleeSpeaksFirst: isIvrNavigationPrompt(call.userSystemPrompt),
+        calleeSpeaksFirst:
+          isIvrNavigationPrompt(call.userSystemPrompt) || isHoldQueuePrompt(call.userSystemPrompt),
       }
     ),
   });

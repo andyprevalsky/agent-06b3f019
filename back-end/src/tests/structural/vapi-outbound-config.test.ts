@@ -5,6 +5,7 @@ import {
   BASE_SYSTEM_PROMPT,
   DEFAULT_CALL_ASSISTANT_CONFIG,
   buildCallAssistantConfig,
+  isHoldQueuePrompt,
   isIvrNavigationPrompt,
 } from '../../domains/vapi/config';
 
@@ -61,6 +62,25 @@ test('buildCallAssistantConfig waits for IVR callee to speak first', () => {
     { status: 'string' },
     undefined,
     { calleeSpeaksFirst: true }
+  );
+  assert.equal(assistant.firstMessage, '');
+  assert.equal(assistant.firstMessageMode, 'assistant-waits-for-user');
+});
+
+test('isHoldQueuePrompt ignores base prompt alone but matches hold-queue briefs', () => {
+  assert.equal(isHoldQueuePrompt(BASE_SYSTEM_PROMPT), false);
+  assert.equal(isHoldQueuePrompt('Call Jordan and collect their mailing address.'), false);
+  assert.equal(
+    isHoldQueuePrompt('Stay on the line through the hold queue until a representative answers.'),
+    true
+  );
+  assert.equal(isHoldQueuePrompt('Please hold. Estimated wait is 3 hours.'), true);
+});
+
+test('buildCallAssistantConfig waits for hold-queue callee to speak first', () => {
+  const assistant = buildCallAssistantConfig(
+    'Stay on the line. The automated hold queue will say the estimated wait is 3 hours.',
+    { confirmation_code: 'string' }
   );
   assert.equal(assistant.firstMessage, '');
   assert.equal(assistant.firstMessageMode, 'assistant-waits-for-user');

@@ -16391,6 +16391,61 @@ def test_phone_call_ivr_dtmf_task_defines_call_tree_verification():
     assert any("308c7437-b205-45ca-aa47-0a9c6a5c5f0a" in entry for entry in ivr.source)
 
 
+def test_phone_call_hold_queue_task_compresses_three_hour_wait():
+    """Hold-queue bench announces a 3-hour wait, then connects a rep after a compressed hold."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.phone_callee import HOLD_SUCCESS_MAX_SECONDS
+
+    hold = get_task_by_name("phone-call-hold-queue")
+    assert hold.expected_tools == ["call_phone_number"]
+    assert hold.forbidden_tools == ["wait_for"]
+    assert hold.expected_tool_counts == {"call_phone_number": 1}
+    assert hold.approval_handling == "auto_approve"
+    assert hold.group == "daily"
+    assert "phone" in hold.tags
+    assert "{callee_phone_number}" in hold.prompt
+    assert "exactly once" in hold.prompt
+    assert "3 hours" in hold.prompt
+    assert "do not use wait_for" in hold.prompt
+    assert hold.pinned_facts == {
+        "confirmation_code": "HOLD-3300",
+        "restoration_window": "tomorrow between 9 and 11 AM",
+        "outage_address": "4821 Maplewood Drive",
+    }
+    persona = hold.phone_persona
+    assert persona["first_message"]
+    assert "3 hours" in persona["first_message"]
+    assert "stay on the line" in persona["first_message"].lower()
+    assert persona["hold_success"]["hold_seconds"] == 20
+    assert persona["hold_success"]["hold_seconds"] <= HOLD_SUCCESS_MAX_SECONDS
+    assert "HOLD-3300" in persona["hold_success"]["say"]
+    assert "9 and 11" in persona["hold_success"]["say"]
+    assert "remain completely silent" in persona["system_prompt"]
+    assert hold.callee_checks["confirmation_code"] == "HOLD-3300"
+    assert hold.callee_checks["confirmation_code_given"] is True
+    assert "HOLD-3300" in hold.expected_call_findings
+    assert "HOLD-3300" in hold.expected_final_findings
+    assert "tomorrow between 9 and 11 AM" in hold.expected_final_findings
+    assert "20 seconds" in hold.environment["context_notes"]
+    assert "Do not wait 3 real hours" in hold.environment["context_notes"]
+    from benchmarks.phone_callee import PhoneCalleeSession
+
+    session = PhoneCalleeSession(hold.name, hold.phone_persona, api_key="test-key")
+    assert session._hold_success_config() == {
+        "hold_seconds": 20.0,
+        "say": persona["hold_success"]["say"],
+    }
+    assert session._live_control_enabled() is True
+    oversized = dict(hold.phone_persona)
+    oversized["hold_success"] = {"hold_seconds": 10800, "say": persona["hold_success"]["say"]}
+    try:
+        PhoneCalleeSession(hold.name, oversized, api_key="test-key")._hold_success_config()
+    except ValueError as exc:
+        assert "compressed-hold cap" in str(exc)
+    else:
+        raise AssertionError("expected multi-hour hold_seconds to fail closed")
+
+
 def test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap():
     """Benchmark callees can end completed calls instead of waiting for max duration."""
     from benchmarks.phone_callee import _CALLEE_ASSISTANT_BASE
@@ -17955,6 +18010,7 @@ def test_suite_selection_excludes_incomplete_entries():
         "phone-call-client-intake",
         "phone-call-payment",
         "phone-call-ivr-dtmf",
+        "phone-call-hold-queue",
         "response-schema-non-goal-feedback",
     } <= suite_names
     # This branch added four ready gate benchmarks (subscription free-credit,
@@ -19805,6 +19861,7 @@ async def run_all_tests():
     )
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
     r.record("phone_call_ivr_dtmf_task", test_phone_call_ivr_dtmf_task_defines_call_tree_verification)
+    r.record("phone_call_hold_queue_task", test_phone_call_hold_queue_task_compresses_three_hour_wait)
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
     r.record(
         "phone_callee_session_number_name_contract",

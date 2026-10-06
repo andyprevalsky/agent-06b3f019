@@ -4624,6 +4624,95 @@
     ]
   },
   {
+    "name": "phone-call-hold-queue",
+    "title": "Stay On A Long Hold Queue Then Talk To A Rep",
+    "prompt": "Call Rose Test Utilities at {callee_phone_number} exactly once to report a power outage at 4821 Maplewood Drive, Austin, Texas 78731. The automated hold queue speaks first and will say the estimated wait is about 3 hours. Stay on that single call until a representative answers; do not hang up, do not call back, and do not use wait_for to skip the hold. When the representative answers, report the outage and collect the confirmation code and the restoration window. Report those exact details back to me.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": ["call_phone_number"],
+    "forbidden_tools": ["wait_for"],
+    "tags": ["phone"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "execute",
+    "expected_tool_counts": {
+      "call_phone_number": 1
+    },
+    "pinned_facts": {
+      "confirmation_code": "HOLD-3300",
+      "restoration_window": "tomorrow between 9 and 11 AM",
+      "outage_address": "4821 Maplewood Drive"
+    },
+    "phone_persona": {
+      "first_message": "Thank you for calling Rose Test Utilities. All representatives are currently assisting other customers. Estimated wait time is 3 hours. Please stay on the line.",
+      "end_call_message": "Thank you for holding. This is Riley in customer service. I can help you now. I have your outage report for 4821 Maplewood Drive. Your confirmation code is spelled letter H, letter O, letter L, letter D, dash, digit 3, digit 3, digit 0, digit 0. Your scheduled restoration window is tomorrow between 9 and 11 AM. Goodbye.",
+      "hold_success": {
+        "hold_seconds": 20,
+        "say": "Thank you for holding. This is Riley in customer service. I can help you now. I have your outage report for 4821 Maplewood Drive. Your confirmation code is spelled letter H, letter O, letter L, letter D, dash, digit 3, digit 3, digit 0, digit 0. Your scheduled restoration window is tomorrow between 9 and 11 AM. Goodbye."
+      },
+      "silence_timeout_seconds": 60,
+      "max_duration_seconds": 180,
+      "system_prompt": "You are a non-conversational hold queue for Rose Test Utilities (fictional sandbox utility). Your first message already told the caller the estimated wait is 3 hours and asked them to stay on the line. After that first message, remain completely silent. Do not speak. Do not apologize. Do not recap the wait. Do not call endCall. A live-control injection will connect the representative and end the call. If the caller speaks while on hold, stay silent.",
+      "structured_data_schema": {
+        "type": "object",
+        "properties": {
+          "caller_stayed_on_hold": {
+            "type": "boolean",
+            "description": "Did the caller remain on the line through the hold announcement until a representative connected?"
+          },
+          "caller_reported_outage": {
+            "type": "boolean",
+            "description": "Did the caller mention a power outage or the Maplewood address?"
+          },
+          "confirmation_code_given": {
+            "type": "boolean",
+            "description": "Did the representative give the caller confirmation code HOLD-3300?"
+          },
+          "confirmation_code": {
+            "type": "string",
+            "description": "Confirmation code announced after the hold, empty if none."
+          },
+          "restoration_window": {
+            "type": "string",
+            "description": "Restoration window announced after the hold, empty if none."
+          }
+        }
+      }
+    },
+    "expected_call_findings": ["HOLD-3300", "9", "11"],
+    "expected_final_findings": ["HOLD-3300", "tomorrow between 9 and 11 AM"],
+    "callee_checks": {
+      "confirmation_code_given": true,
+      "confirmation_code": "HOLD-3300",
+      "restoration_window": "tomorrow between 9 and 11"
+    },
+    "description": "Real outbound phone call to a controlled hold-queue callee. The queue announces a 3-hour wait; the harness compresses that wait to 20 seconds, then injects a representative with the confirmation code.",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["vapi"],
+      "secrets": ["VAPI_PRIVATE_KEY"],
+      "live_targets": ["vapi"],
+      "context_notes": "Do not wait 3 real hours. phone_persona.hold_success injects the representative after 20 seconds of the live call (capped at 25s). Cloud fleet requires a BENCHMARK_CALLEE_PHONE_NUMBER_IDS assignment for phone-call-hold-queue. Pass when the single call stays connected through the compressed hold and the final answer reports HOLD-3300 plus the restoration window."
+    },
+    "group": "daily",
+    "human_time": "10min",
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "no",
+    "label_eval": "Root completes; calls the controlled hold queue exactly once; stays on the line through the compressed hold; final answer reports HOLD-3300 and tomorrow between 9 and 11 AM.",
+    "label_notes": "Phone hold-queue harness. The 3-hour wait is announced, then compressed to 20s via live-call control. Do not raise hold_seconds toward wall-clock hours.",
+    "bench": "pipeline-e2e",
+    "source": [
+      "phone-benchmark:hold-queue",
+      "user-label:daily-phone-hold-queue"
+    ]
+  },
+  {
     "name": "browser-rotate-ip-escalation",
     "title": "Browser rotate_ip recovery ladder (Kernel residential \u2192 Kernel mobile \u2192 Steel)",
     "prompt": "Run a controlled browser-tool benchmark of the rotate_ip recovery ladder. Spawn exactly ONE browser task starting at https://api.ipify.org?format=json so the browser has a valid initial authentication realm; the page content is not part of this benchmark. Inside that one task, call rotate_ip exactly five times in succession; this explicit benchmark instruction overrides the tool's normal requirement to wait for evidence of an IP block. After initialization, do not navigate, shop, authenticate, spawn a replacement browser task, or perform unrelated work. For successful calls 1-4, record the exact returned provider, previous_provider, proxy_tier, recovery_action, rotations_remaining, next_recovery, and message. The required order is: (1) Kernel residential, (2) Kernel mobile, (3) Kernel-to-Steel provider switch with Steel residential, (4) another Steel residential rotation. Call 5 must return PROXY_ROTATION_EXHAUSTED. Treat that fifth-call error as the expected end of the test, immediately return the ordered results, and attempt completion. Do not take any action after the ordered summary.",

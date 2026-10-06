@@ -41,6 +41,17 @@ export function isIvrNavigationPrompt(systemPrompt: string): boolean {
   return hasMenuNav && hasDigitEntryGoal;
 }
 
+/**
+ * True when the caller-provided brief is waiting on a hold queue.
+ * Must NOT match {@link BASE_SYSTEM_PROMPT} alone — that text says
+ * "stay silent" / "do not hang up" for IVR retries, not hold queues.
+ */
+export function isHoldQueuePrompt(systemPrompt: string): boolean {
+  return /\b(on hold|hold queue|stay on the line|estimated wait|please hold)\b/i.test(
+    systemPrompt
+  );
+}
+
 export const DEFAULT_CALL_ASSISTANT_CONFIG: JsonObject = {
   name: 'Rose Outbound Call Agent',
   model: {
@@ -110,7 +121,9 @@ export function buildCallAssistantConfig(
   // turn and makes the outbound agent less likely to send DTMF immediately.
   // Detect from the caller-provided brief only (see isIvrNavigationPrompt).
   const calleeSpeaksFirst =
-    options?.calleeSpeaksFirst === true || isIvrNavigationPrompt(systemPrompt);
+    options?.calleeSpeaksFirst === true ||
+    isIvrNavigationPrompt(systemPrompt) ||
+    isHoldQueuePrompt(systemPrompt);
 
   return {
     ...configuredAssistant,
