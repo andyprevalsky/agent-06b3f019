@@ -13102,7 +13102,7 @@ for bench in "${BENCHES[@]}"; do
     CLOUDBENCH_LOCAL_PATCH_SOURCE="$FLEET_PATCH_FILE" \
     CLOUDBENCH_LOCAL_PATCH_SHA256="$FLEET_PATCH_SHA256" \
     CLOUDBENCH_INFRA_PROBE="${INFRA_PROBE:-0}" \
-    CLOUDBENCH_FRESH_VOLUME="$([ "$(primary_clone_storage_mode "$bench")" = fresh ] && printf 1 || printf 0)" \
+    CLOUDBENCH_FRESH_VOLUME="$([ "$src" != pool ] && [ "$(primary_clone_storage_mode "$bench")" = fresh ] && printf 1 || printf 0)" \
     CLOUDBENCH_POOL_BOOT_VM_SIZE="$pool_boot_vm_size" \
     CLOUDBENCH_POOL_BOOT_VM_MEMORY="$pool_boot_vm_memory" \
     CLOUDBENCH_SKIP_AUTOSCALER="${SKIP_AUTOSCALER:-0}" \

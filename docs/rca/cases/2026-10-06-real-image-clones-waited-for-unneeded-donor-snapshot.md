@@ -68,6 +68,20 @@ SIM tasks keep their snapshot/World Model path. `--snapshot-volumes` retains an
 explicit provider diagnostic, while generic pre-provisioned pools and legacy
 startup retain their compatible snapshot path. Pool reuse remains available.
 
+Independent source review then found that a primary borrowed from the existing
+pool still received the fresh-storage flag derived from the policy for a new
+clone. The actual Phase 2 launcher reproduced `CLOUDBENCH_STORAGE_READY=1` and
+`CLOUDBENCH_FRESH_VOLUME=1` together on that snapshot-backed allocation. This is
+incorrect bootstrap permission; it does not establish a failed live pool run or
+an effect on separately configured workers. The handoff now requires both an
+allocation outside the pool and fresh clone policy. The existing selector owner
+observes the real supervised child's environment for six pool, clone and SIM
+configurations: unchanged controls failed one case and passed five on captured
+source in 1.96 seconds, then passed all six after the one-line correction in
+1.75 seconds. It remains selected by the ordinary compact deploy gate, with no
+provider or model calls. Original and qualified private receipts are retained
+under `.context/frontend-overlay-final-20261006/review-final-52bb/pool-storage-review/`.
+
 The fresh handoff initializes only an absent or empty Git checkout, authenticates
 to the normal fixed origin, fetches ordinary history, and verifies the requested
 ref using the existing helper and lock. Primary bootstrap precedes sanity checks

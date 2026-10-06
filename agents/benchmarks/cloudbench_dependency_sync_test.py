@@ -26482,16 +26482,18 @@ clone_machine_target {shlex.quote(str(tmp_path / "owned.ids"))} "$WARM_ID" share
 
 
 @pytest.mark.parametrize(
-    "enabled,catalog,sim_on,expected",
+    "enabled,catalog,sim_on,allocated_source,expected",
     [
-        ("1", "real", "", "fresh"),
-        ("1", "simulate", "", "snapshot"),
-        ("1", "real", "other,alpha", "snapshot"),
-        ("0", "real", "", "snapshot"),
+        ("1", "real", "", "clone", "fresh"),
+        ("1", "simulate", "", "clone", "snapshot"),
+        ("1", "real", "other,alpha", "clone", "snapshot"),
+        ("0", "real", "", "clone", "snapshot"),
+        ("1", "real", "", "pool", "fresh"),
+        ("0", "real", "", "pool", "snapshot"),
     ],
 )
 def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
-    enabled: str, catalog: str, sim_on: str, expected: str
+    tmp_path: Path, enabled: str, catalog: str, sim_on: str, allocated_source: str, expected: str
 ) -> None:
     source = fleet_source_text()
     functions = "\n".join(
@@ -26507,6 +26509,77 @@ def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == expected
+
+    # Allocation can reuse snapshot-backed pool storage even when a new REAL
+    # clone would be fresh. Observe the actual child handoff, not just policy.
+    out = tmp_path / "alpha"
+    out.mkdir()
+    (out / ".cid").write_text(f"{allocated_source} feedface000001\n")
+    capture = tmp_path / "child-env.json"
+    child = tmp_path / "offline-child.sh"
+    child.write_text(
+        "#!/usr/bin/env bash\nexec "
+        + shlex.quote(sys.executable)
+        + " -c "
+        + shlex.quote(
+            "import json,os;from pathlib import Path;"
+            "Path(os.environ['ENV_CAPTURE']).write_text(json.dumps({"
+            "k:os.environ.get(k) for k in ['CLOUDBENCH_FRESH_VOLUME','CLOUDBENCH_STORAGE_READY']}))"
+        )
+        + "\n"
+    )
+    launch = source.split("# ── Phase 2: launch each provisioned bench", 1)[1]
+    launch = launch.split('for bench in "${BENCHES[@]}"; do', 1)[1].split("    CHILD_PIDS+=(", 1)[0]
+    supervisor = "\n".join(
+        _extract_fleet_function(source, name + "() {")
+        for name in ("terminate_fleet_runner_group", "run_fleet_child_supervised")
+    )
+    parameters = {
+        "FLEET_DIR": str(tmp_path),
+        "DASH_BASE": "41000",
+        "FLEET_OWNER_TOKEN": "fixture-owner",
+        "INVENTORY_INDEX": str(tmp_path / "inventory"),
+        "SNAPSHOT_LOOP_PID": "0",
+        "SNAPSHOT_LOOP_TOKEN": "fixture-publisher",
+        "SYNCHRONIZED_START": "0",
+        "RUN_ID": "fixture-run",
+        "BARRIER_RELEASE_TOKEN": "fixture-barrier",
+        "START_BARRIER_WAIT_SECONDS": "60",
+        "FIRST_RUN_STACK_WAIT_SECONDS": "60",
+        "BOOT_CONFIG_BARRIER": str(tmp_path / "barrier"),
+        "BOOT_UPDATE_CAPACITY_WAIT_SECONDS": "30",
+        "BOOT_CONFIG_BARRIER_WAIT_SECONDS": "30",
+        "FLEET_PATCH_FILE": "",
+        "FLEET_PATCH_SHA256": "",
+        "INFRA_PROBE": "0",
+        "SKIP_AUTOSCALER": "0",
+        "CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE": "0",
+        "EXECUTION_PROVENANCE_FILE": str(tmp_path / "fixture-provenance"),
+        "BENCH_REF": "fixture-ref",
+        "CHILD_RUN_TIMEOUT": "10",
+        "RUN_BENCH_CLOUD_BIN": str(child),
+        "ENV_CAPTURE": str(capture),
+    }
+    assignments = "\n".join(f"{key}={shlex.quote(value)}" for key, value in parameters.items())
+    script = f"""set -uo pipefail
+FRESH_VOLUMES={enabled}; BENCHES=(alpha); CATALOG_MODES=({catalog}); SIM_ON_CSV={shlex.quote(sim_on)}
+CHILD_MACHINE=(); i=0
+{assignments}
+export ENV_CAPTURE
+cloudbench_fleet_workspace_name() {{ printf fixture-workspace; }}
+{functions}
+{supervisor}
+for bench in "${{BENCHES[@]}}"; do
+{launch}
+wait
+done
+"""
+    result = subprocess.run(["bash", "-c", script], env=dict(os.environ), text=True, capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert (out / "benchmark-child.finished").read_text().strip() == "0"
+    emitted = json.loads(capture.read_text())
+    assert emitted["CLOUDBENCH_STORAGE_READY"] == str(int(allocated_source == "pool"))
+    assert emitted["CLOUDBENCH_FRESH_VOLUME"] == str(int(allocated_source == "clone" and expected == "fresh"))
 
 
 @pytest.mark.parametrize(
