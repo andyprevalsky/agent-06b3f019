@@ -16419,9 +16419,11 @@ def test_phone_call_hold_queue_task_waits_real_three_hours_for_flight_credit():
     """Hold-queue bench stays on a live 2h45m hold, then claims an Air Canada-style flight credit."""
     from domains.call_phone_number.config import (
         ACTIVITY_TIMEOUT_MINUTES,
+        HEARTBEAT_TIMEOUT_SECONDS,
         HTTP_TIMEOUT_POLL,
-        MAX_POLL_ATTEMPTS,
+        MAX_RETRY_ATTEMPTS,
     )
+    from domains.call_phone_number.service import max_poll_coverage_seconds
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.phone_callee import HOLD_SUCCESS_MAX_SECONDS
 
@@ -16434,8 +16436,11 @@ def test_phone_call_hold_queue_task_waits_real_three_hours_for_flight_credit():
     assert hold.timeout_seconds == 12600
     assert hold.timeout_seconds >= 9900
     assert ACTIVITY_TIMEOUT_MINUTES * 60 >= hold.timeout_seconds
-    assert MAX_POLL_ATTEMPTS * 5 >= hold.timeout_seconds
+    assert max_poll_coverage_seconds() >= hold.timeout_seconds
     assert HTTP_TIMEOUT_POLL >= 30
+    assert HEARTBEAT_TIMEOUT_SECONDS >= 600
+    assert HEARTBEAT_TIMEOUT_SECONDS > HTTP_TIMEOUT_POLL * 2
+    assert MAX_RETRY_ATTEMPTS >= 5
     assert "phone" in hold.tags
     assert "{callee_phone_number}" in hold.prompt
     assert "exactly once" in hold.prompt

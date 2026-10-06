@@ -10,11 +10,36 @@ from datetime import datetime
 from typing import Any
 
 from domains.call_phone_number.config import (
+    ACTIVE_POLL_INTERVAL_SECONDS,
     CALL_PROVIDER,
     COST_CENTS_PER_MINUTE,
+    INITIAL_POLL_INTERVAL_SECONDS,
+    LONG_HOLD_POLL_AFTER_POLLS,
+    LONG_HOLD_POLL_INTERVAL_SECONDS,
+    MAX_POLL_ATTEMPTS,
     MINIMUM_BILLED_MINUTES,
 )
 from domains.call_phone_number.repo import save_phone_call_message as save_phone_call_message
+
+
+def poll_interval_seconds(polls: int, *, call_started: bool) -> int:
+    """Return the next sleep before another Vapi status fetch.
+
+    Short calls keep the 5s in-progress cadence. Long holds back off so the
+    worker is not parsing a growing artifact every few seconds.
+    """
+    if not call_started:
+        return INITIAL_POLL_INTERVAL_SECONDS
+    if polls >= LONG_HOLD_POLL_AFTER_POLLS:
+        return LONG_HOLD_POLL_INTERVAL_SECONDS
+    return ACTIVE_POLL_INTERVAL_SECONDS
+
+
+def max_poll_coverage_seconds() -> int:
+    """Lower-bound wall time the poll loop can stay on a live call."""
+    early = min(LONG_HOLD_POLL_AFTER_POLLS, MAX_POLL_ATTEMPTS)
+    late = max(0, MAX_POLL_ATTEMPTS - early)
+    return early * ACTIVE_POLL_INTERVAL_SECONDS + late * LONG_HOLD_POLL_INTERVAL_SECONDS
 
 
 def format_phone_number(number: str) -> str:

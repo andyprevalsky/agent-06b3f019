@@ -391,16 +391,40 @@ async def test_manager_execute_tool_success():
     assert out == activity_result
 
 
+def test_poll_interval_backs_off_after_long_hold():
+    from domains.call_phone_number.config import (
+        ACTIVE_POLL_INTERVAL_SECONDS,
+        HEARTBEAT_TIMEOUT_SECONDS,
+        HTTP_TIMEOUT_POLL,
+        INITIAL_POLL_INTERVAL_SECONDS,
+        LONG_HOLD_POLL_AFTER_POLLS,
+        LONG_HOLD_POLL_INTERVAL_SECONDS,
+        MAX_RETRY_ATTEMPTS,
+    )
+    from domains.call_phone_number.service import max_poll_coverage_seconds, poll_interval_seconds
+
+    assert poll_interval_seconds(0, call_started=False) == INITIAL_POLL_INTERVAL_SECONDS
+    assert poll_interval_seconds(10, call_started=True) == ACTIVE_POLL_INTERVAL_SECONDS
+    assert poll_interval_seconds(LONG_HOLD_POLL_AFTER_POLLS, call_started=True) == LONG_HOLD_POLL_INTERVAL_SECONDS
+    assert HEARTBEAT_TIMEOUT_SECONDS >= 600
+    assert HEARTBEAT_TIMEOUT_SECONDS > HTTP_TIMEOUT_POLL * 2
+    assert MAX_RETRY_ATTEMPTS >= 5
+    assert max_poll_coverage_seconds() >= 12600
+
+
 async def test_manager_execute_tool_uses_idempotent_retry_policy():
     """Activity retry is allowed only because backend call creation is idempotent."""
     from domains.call_phone_number.handler import CallPhoneNumberManager
 
     seen_retry_policy = None
 
+    seen_heartbeat = None
+
     async def mock_execute_activity(activity_fn, *, args, **kw):
-        nonlocal seen_retry_policy
+        nonlocal seen_retry_policy, seen_heartbeat
         if getattr(activity_fn, "__name__", "") == "call_phone_number_activity":
             seen_retry_policy = kw["retry_policy"]
+            seen_heartbeat = kw["heartbeat_timeout"]
             return {"success": True, "call_id": "c-1", "duration": 60}
         return None
 
@@ -414,7 +438,12 @@ async def test_manager_execute_tool_uses_idempotent_retry_policy():
     )
 
     assert seen_retry_policy is not None
-    assert seen_retry_policy.maximum_attempts == 2
+    assert seen_retry_policy.maximum_attempts == 5
+    from datetime import timedelta
+
+    from domains.call_phone_number.config import HEARTBEAT_TIMEOUT_SECONDS
+
+    assert seen_heartbeat == timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS)
 
 
 async def test_manager_execute_tool_error():
@@ -488,6 +517,7 @@ async def run_all_tests():
     r.record("calculate_duration_from_timestamps_invalid", test_calculate_duration_from_timestamps_invalid)
     r.record("manager_get_approval_question", test_manager_get_approval_question)
     r.record("manager_get_approval_question_defaults", test_manager_get_approval_question_defaults)
+    r.record("poll_interval_backs_off_after_long_hold", test_poll_interval_backs_off_after_long_hold)
     await r.record_async("manager_execute_tool_success", test_manager_execute_tool_success)
     await r.record_async(
         "manager_execute_tool_uses_idempotent_retry_policy",

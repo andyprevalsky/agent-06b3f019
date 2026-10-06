@@ -20,7 +20,6 @@ from temporalio.common import RetryPolicy
 
 from config import load_config
 from domains.call_phone_number.config import (
-    ACTIVE_POLL_INTERVAL_SECONDS,
     ACTIVITY_TIMEOUT_MINUTES,
     HEARTBEAT_TIMEOUT_SECONDS,
     HTTP_TIMEOUT_INITIATE,
@@ -38,6 +37,8 @@ from domains.call_phone_number.service import (
     compute_service_usage,
     enrich_transcript_with_dtmf,
     format_phone_number,
+    max_poll_coverage_seconds,
+    poll_interval_seconds,
     save_phone_call_message,
 )
 from domains.call_phone_number.types import ExecuteActivityCallable
@@ -353,10 +354,12 @@ async def _call_phone_number_activity_real(
                 polls=polls,
                 call_id=call_id,
             )
+            poll_interval = poll_interval_seconds(polls, call_started=call_started)
             continue
 
         if response.status_code != 200:
             logger.warning("Poll request failed", status=response.status_code, text=response.text)
+            poll_interval = poll_interval_seconds(polls, call_started=call_started)
             continue
 
         poll_result = response.json()
@@ -367,7 +370,6 @@ async def _call_phone_number_activity_real(
         # When call starts, send IN_PROGRESS message with live metadata
         if status == "in-progress" and not call_started:
             call_started = True
-            poll_interval = ACTIVE_POLL_INTERVAL_SECONDS
 
             monitor = poll_result.get("monitor", {})
             listen_url = monitor.get("listenUrl")
@@ -457,8 +459,10 @@ async def _call_phone_number_activity_real(
                 "to": to,
             }
 
+        poll_interval = poll_interval_seconds(polls, call_started=call_started)
+
     # Timeout
-    msg = f"Call timed out after {MAX_POLL_ATTEMPTS * poll_interval} seconds"
+    msg = f"Call timed out after {max_poll_coverage_seconds()} seconds"
     raise Exception(msg)  # noqa: TRY002
 
 
