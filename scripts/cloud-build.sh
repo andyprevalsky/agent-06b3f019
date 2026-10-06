@@ -82,10 +82,17 @@ if ! $IS_MAC; then
         if ! command -v pg_isready >/dev/null 2>&1; then
             $SUDO apt-get update -qq && $SUDO apt-get install -y -qq postgresql postgresql-client
         fi
-        # pgvector for the installed major (planner-memory vector columns).
-        $SUDO bash "$ROOT/scripts/cloudbench-install-pgvector.sh"
-        # Start the cluster
         PG_VER=$(pg_lsclusters -h 2>/dev/null | head -1 | awk '{print $1}')
+        # pgvector for the installed major (planner-memory vector columns). The
+        # pinned build needs server headers at the exact installed version, which
+        # the archive drops once a newer patch ships; that must never abort the
+        # npm/venv provisioning below.
+        if ! $SUDO bash "$ROOT/scripts/cloudbench-install-pgvector.sh"; then
+            echo "⚠️  Pinned pgvector build failed — installing postgresql-$PG_VER-pgvector"
+            $SUDO apt-get install -y -qq "postgresql-$PG_VER-pgvector" \
+                || echo "❌ pgvector unavailable — prisma db push needs the vector extension"
+        fi
+        # Start the cluster
         $SUDO pg_ctlcluster "$PG_VER" main start 2>/dev/null || $SUDO service postgresql start 2>/dev/null || true
         # Set password + create DB to match the Docker container convention
         $SUDO su - postgres -c "psql -c \"ALTER USER postgres PASSWORD 'postgres';\"" 2>/dev/null || true
