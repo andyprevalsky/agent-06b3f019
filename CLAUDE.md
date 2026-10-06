@@ -1221,6 +1221,17 @@ redirected to private `.context` artifacts. Keep those diagnostics out of git.
 Semantic readiness checks session state and visible behavior; never add a
 network-idle prerequisite to the realtime app's authenticated test helper.
 
+### Worker generation verification
+
+If `monitor-cooperative-cutover.ts --verify` reports a generation mismatch
+after an exact-SHA CI success, compare the CLI's surface file list with that
+same merged generation before treating the deploy as stalled. The generation
+walker must use exact-case module paths on both Mac and Linux; class re-exports
+must not create case-folded file aliases. Preserve the failed receipt, bind the
+actual CI generation to the exact merged bytes, and use the normal monitor and
+existing `scripts/tests/agent-surface-hash.test.sh` owner; do not force a rollover
+or alter deployment deadlines to resolve a host-only hash mismatch.
+
 ## Factory Workflow Review
 
 Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md`) to generate and open the source-backed `/deploy`, `/RCA`, and checked-in `/descend` lifecycle, wall-clock, sequencing, and trend report; validate it with `python3 scripts/factory_review.py --self-test`.
