@@ -6287,6 +6287,30 @@ def test_cuda_kernel_stall_limit_covers_full_claude_code_runtime():
     assert chat_limit < cuda_limit
 
 
+def test_in_progress_phone_call_counts_as_live_stall_activity():
+    """A connected hold must not trip tree-stall just because message_count is frozen."""
+    from benchmarks.benchmark_tasks import TASK_TIMEOUT_FLOORS, get_task_by_name, get_timeout_floor
+    from benchmarks.run_benchmark import AGENT_STALL_SECONDS, agent_stall_limit_seconds, has_in_progress_phone_call
+
+    hold = get_task_by_name("phone-call-hold-queue")
+    chat = get_task_by_name("chat-mode")
+
+    assert has_in_progress_phone_call(
+        [{"metadata": {"toolName": "call_phone_number", "toolStatus": "IN_PROGRESS"}}]
+    )
+    assert not has_in_progress_phone_call(
+        [{"metadata": {"toolName": "call_phone_number", "toolStatus": "FINISHED"}}]
+    )
+    assert not has_in_progress_phone_call([{"metadata": {"toolName": "web_search", "toolStatus": "IN_PROGRESS"}}])
+    assert not has_in_progress_phone_call([])
+    # Keep the default fail-fast budget for hold-queue tasks that never place a
+    # call; the live IN_PROGRESS chip is what keeps a connected hold alive.
+    assert agent_stall_limit_seconds(hold) == AGENT_STALL_SECONDS
+    assert agent_stall_limit_seconds(chat) == AGENT_STALL_SECONDS
+    assert get_timeout_floor(hold.name) == hold.timeout_seconds
+    assert TASK_TIMEOUT_FLOORS[hold.name] == 12600
+
+
 async def test_declared_evaluator_hydrates_claude_code_sessions():
     """Transcript static checks hydrate Claude Code sessions before grading."""
     from dataclasses import replace
@@ -16478,6 +16502,9 @@ def test_phone_call_hold_queue_task_waits_real_three_hours_for_flight_credit():
     assert hold.timeout_seconds > 7200
     assert "resolved > seconds" in backstop_source
     assert "task.timeout_seconds" in backstop_source
+    from benchmarks.benchmark_tasks import get_timeout_floor
+
+    assert get_timeout_floor(hold.name) == hold.timeout_seconds
 
 
 def test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap():
@@ -20863,6 +20890,10 @@ async def run_all_tests():
     r.record(
         "cuda_kernel_stall_limit_covers_full_claude_code_runtime",
         test_cuda_kernel_stall_limit_covers_full_claude_code_runtime,
+    )
+    r.record(
+        "in_progress_phone_call_counts_as_live_stall_activity",
+        test_in_progress_phone_call_counts_as_live_stall_activity,
     )
     r.record(
         "blue_bottle_spawn_contract_blocks_dom_patch_evaluate",

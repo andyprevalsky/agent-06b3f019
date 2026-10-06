@@ -231,6 +231,27 @@ def _finalize_interrupt_cleanup_status() -> None:
     )
 
 
+def has_in_progress_phone_call(messages: list | None) -> bool:
+    """True when a live ``call_phone_number`` chip is still in progress.
+
+    A connected hold updates one IN_PROGRESS message in place for hours and
+    does not increment ``message_count`` or tree LLM cost until the call ends.
+    Tree-stall early-fail must treat that chip as activity or it kills a
+    healthy hold after the default ~510s silence budget.
+    """
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "call_phone_number":
+            continue
+        if str(metadata.get("toolStatus") or "").upper() == "IN_PROGRESS":
+            return True
+    return False
+
+
 def agent_stall_limit_seconds(task: "BenchmarkTask") -> int:
     """Per-task early-fail silence budget for non-terminal leaves.
 
@@ -4398,6 +4419,15 @@ async def _poll_agent(
         # ── Tree-level stall detection ──────────────────────────────
         # Periodically fetch tree stats (every TREE_POLL_INTERVAL seconds)
         now = time.time()
+        live_phone_call = has_in_progress_phone_call(messages)
+        if live_phone_call:
+            last_activity_time = now
+            root_state = per_agent_state.get(agent_id)
+            if root_state is None:
+                per_agent_state[agent_id] = {"count": root_msg_count, "last_change_time": now, "status": status}
+            else:
+                root_state["last_change_time"] = now
+                root_state["status"] = status
         if now - last_tree_poll >= TREE_POLL_INTERVAL:
             last_tree_poll = now
             tree_stats = await _fetch_tree_stats(base_url, agent_id)
