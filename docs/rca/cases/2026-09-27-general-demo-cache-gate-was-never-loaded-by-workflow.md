@@ -60,6 +60,38 @@ The owning repro failed with `ImportError: cannot import name
 exact benchmark rerun remains approval-gated, so this case stays open until the
 unchanged task proves replay and outcome behavior end to end.
 
+## October 6 continuation: obsolete helper-name fixture
+
+The integrated backend contract resolves the full durable cache context without
+the older `unpack_fast_cache_goal_resolution` helper or its conditional legacy
+branch. Agent coverage passed all 109 blackbox domains, then failed
+`test_is_demo_cache_task_reads_restored_fast_cache_goal` while searching source
+text for that deleted helper. Archive searches used the literal unit failure
+and restored/leftover-root cache vocabulary; this is a related fixture defect,
+not a recurrence of the workflow cache decision bug.
+
+The identical focused command failed before the correction with `ValueError:
+substring not found` and passed afterward:
+
+```bash
+agents/venv/bin/python -m pytest agents/tests/unit/test_demo_cache_policy.py::test_is_demo_cache_task_reads_restored_fast_cache_goal -q
+```
+
+The fixture now runs actual workflow startup with a live input goal, a DEMO
+continuation goal, and the provider button off. Its checkpoint occurs before
+durable activities: it asserts that the restored goal enables cache replay and
+determines compute affinity while leaving the provider button off. Adversarial
+review identified this startup-order assertion as necessary; a restore-only
+policy check would not preserve the old regression protection. The existing
+Temporal SDK blackbox still asserts that leftover children resolve their root
+and inherit the DEMO decision with the button off. No workflow branch, prompt,
+evaluator, or cache eligibility rule was changed for this fixture repair.
+
+Evidence: `.context/wmh-demo-policy-red.log`,
+`.context/wmh-demo-policy-green.log`, and the 109-domain result in
+`.context/wmh-agents-coverage-verified.log`. The fundraiser outcome remains
+unproven until the exact rebuilt-model benchmark finishes.
+
 ## Human feedback
 
 The user required the fundraiser to be marked `DEMO`, required both agent and
