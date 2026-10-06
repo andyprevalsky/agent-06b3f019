@@ -995,6 +995,8 @@ scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse H
 
 REAL tasks now use fresh primary and worker volumes by default with the verified dependency image, exact authenticated Git checkout and the same canonical isolated database fixture. SIM tasks, including `--sim-on` overrides, retain their snapshot and cached World Model assets. `--snapshot-volumes` forces the historical restored-volume path for a provider diagnostic; generic `--provision-pool` and legacy startup keep compatible snapshot storage. Source-only changes reuse the pinned image and inject current bootstrap helpers. A successful clone command precedes storage readiness: inspect its exact owned IDs and keyed volume state when preflight waits; retain the original failed receipt and let the owning CLI finish cleanup.
 
+Bootstrap preserves both hoisted and workspace-local baked dependencies and uses the installed Prisma CLI; do not repair a missing CLI by downloading a floating version. If a strict campaign's infrastructure canary fails, its waiting copies observe the same cohort failure instead of launching another canary each. A new CLI invocation creates a fresh cohort automatically. Genuine benchmark task failure is still a valid terminal outcome for an infrastructure/speed run; a preflight failure has no task execution credit. The compact deploy gate owns the dependency-layout, schema-cache and failed-cohort regressions.
+
 An accepted delete plus an exact owned-volume `pending_destroy` or `destroyed`
 terminal receipt qualifies release even when Fly retains the object. Request
 acceptance alone does not establish release.

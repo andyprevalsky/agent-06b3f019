@@ -341,13 +341,16 @@ def test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with patch.dict(
-            os.environ,
-            {
-                "BENCHMARK_HUB_UPLOAD_URL": f"http://127.0.0.1:{server.server_address[1]}",
-                "BENCHMARK_HUB_API_KEY": "gzip-fixture-key",
-            },
-        ), patch("benchmarks.hub_upload.time.sleep", lambda _delay: None):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "BENCHMARK_HUB_UPLOAD_URL": f"http://127.0.0.1:{server.server_address[1]}",
+                    "BENCHMARK_HUB_API_KEY": "gzip-fixture-key",
+                },
+            ),
+            patch("benchmarks.hub_upload.time.sleep", lambda _delay: None),
+        ):
             native_open = urllib.request.OpenerDirector.open
             timeouts = []
 
@@ -358,13 +361,21 @@ def test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry():
 
             for live in (True, False):
                 message = {
-                    "role": "TOOL", "message": "escaped \\\" 🧪 " * 512,
+                    "role": "TOOL",
+                    "message": 'escaped \\" 🧪 ' * 512,
                     "metadata": {"nested": [True, None, {"step": 3}]},
                 }
-                bundle = {"run_id": "gzip-transport", "tasks": [{
-                    "name": "wire-fixture", "agent_id": "fixture-root", "passed": False,
-                    "logs": {"messages": [message]},
-                }]}
+                bundle = {
+                    "run_id": "gzip-transport",
+                    "tasks": [
+                        {
+                            "name": "wire-fixture",
+                            "agent_id": "fixture-root",
+                            "passed": False,
+                            "logs": {"messages": [message]},
+                        }
+                    ],
+                }
                 expected = {**bundle, "source": "manual-run"}
                 with patch("urllib.request.OpenerDirector.open", observe_open):
                     assert upload_run_bundle(bundle, live=live, required=True)
@@ -643,7 +654,10 @@ def _run_owned_benchmark_commands(commands, cwd, timeout=60):
             try:
                 rows = subprocess.run(
                     ["ps", "-axo", "pid=,ppid=,pgid=,stat="],
-                    capture_output=True, text=True, check=True, timeout=5,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=5,
                 ).stdout
                 break
             except subprocess.TimeoutExpired:
@@ -657,7 +671,9 @@ def _run_owned_benchmark_commands(commands, cwd, timeout=60):
         for child, _ in children:
             assert table.get(child.pid, (None,))[0] == os.getpid(), "owned benchmark leader was reaped before cleanup"
             assert table[child.pid][1] == child.pid, "owned benchmark process group changed"
-            live[child.pid] = [pid for pid, (_, group, state) in table.items() if group == child.pid and not state.startswith("Z")]
+            live[child.pid] = [
+                pid for pid, (_, group, state) in table.items() if group == child.pid and not state.startswith("Z")
+            ]
         return table, live
 
     with contextlib.ExitStack() as stack:
@@ -666,7 +682,9 @@ def _run_owned_benchmark_commands(commands, cwd, timeout=60):
                 output = stack.enter_context(tempfile.TemporaryFile(mode="w+"))
                 child = subprocess.Popen(
                     command,
-                    cwd=cwd, stdout=output, stderr=subprocess.STDOUT,
+                    cwd=cwd,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )
                 children.append((child, output))
@@ -881,7 +899,8 @@ def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "2 passed" in result.stdout
+    # Regeneration/fatal-marker controls plus both donor layouts and containment.
+    assert "5 passed" in result.stdout
 
 
 def test_cloudbench_boot_payload_behavior_is_in_permanent_gate():
@@ -3312,9 +3331,10 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     }
     duplicate_lifecycle = deepcopy(idempotency.expected_payment_lifecycle)
     duplicate_lifecycle["integrity"]["cardCount"] = 2
-    assert _validate_payment_lifecycle(
-        idempotency, {"_benchmark": {"payment_lifecycle": duplicate_lifecycle}}
-    ) == "payment_lifecycle.integrity.cardCount mismatch: expected 1, got 2"
+    assert (
+        _validate_payment_lifecycle(idempotency, {"_benchmark": {"payment_lifecycle": duplicate_lifecycle}})
+        == "payment_lifecycle.integrity.cardCount mismatch: expected 1, got 2"
+    )
     abandonment = get_task_by_name("agent-payment-abandonment")
     assert abandonment.payment_card_request_action == "abandon"
     assert abandonment.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
@@ -9113,9 +9133,7 @@ async def test_sibling_task_cleanup_cannot_revert_a_concurrent_run_identity():
     original_env = os.environ.pop("BENCHMARK_RUN_USER_ID", None)
     try:
         bench._apply_live_fixtures = fake_apply_live_fixtures
-        bench._benchmark_user_id_for_task = lambda name, base_url=None: (
-            scoped_user if name == owner.name else None
-        )
+        bench._benchmark_user_id_for_task = lambda name, base_url=None: scoped_user if name == owner.name else None
         base_url = "http://localhost:54121"
         sibling_run = asyncio.create_task(bench.run_single_task(base_url, sibling))
         await asyncio.sleep(0)
@@ -9133,8 +9151,7 @@ async def test_sibling_task_cleanup_cannot_revert_a_concurrent_run_identity():
     assert sibling_result.failure_reason.startswith("sibling finished")
     assert owner_result.failure_reason.startswith("owner observed its run user")
     assert observed.get("owner") == scoped_user, (
-        "the owner task must keep its own run user after a sibling finishes; "
-        f"got {observed.get('owner')!r}"
+        f"the owner task must keep its own run user after a sibling finishes; got {observed.get('owner')!r}"
     )
     assert leaked is None, "a task-scoped run user must not leak into the process environment"
     assert bench._current_benchmark_user_id() == bench.USER_ID
@@ -11075,8 +11092,11 @@ async def test_parallel_benchmark_user_scope_keeps_approval_auth_on_task_user():
 
     def fake_task(name):
         return SimpleNamespace(
-            name=name, runner=None, requires_claude_code=False,
-            production_only=False, disable_purchase_reuse=False,
+            name=name,
+            runner=None,
+            requires_claude_code=False,
+            production_only=False,
+            disable_purchase_reuse=False,
         )
 
     try:
@@ -11117,7 +11137,9 @@ async def test_benchmark_user_scope_covers_preflight_errors_and_default_tasks():
     previous_run_minted = bench.run_minted_agent_account_task
     previous_env_user = os.environ.get("BENCHMARK_RUN_USER_ID")
     expected_default = getattr(
-        bench, "_default_benchmark_user_id", previous_env_user or bench.USER_ID,
+        bench,
+        "_default_benchmark_user_id",
+        previous_env_user or bench.USER_ID,
     )
     plain_started = asyncio.Event()
     synthetic_started = asyncio.Event()
@@ -11125,8 +11147,11 @@ async def test_benchmark_user_scope_covers_preflight_errors_and_default_tasks():
 
     def fake_task(name, *, fail_preflight=False):
         return SimpleNamespace(
-            name=name, runner=None, requires_claude_code=False,
-            production_only=False, disable_purchase_reuse=fail_preflight,
+            name=name,
+            runner=None,
+            requires_claude_code=False,
+            production_only=False,
+            disable_purchase_reuse=fail_preflight,
             environment=None,
         )
 
@@ -11141,26 +11166,31 @@ async def test_benchmark_user_scope_covers_preflight_errors_and_default_tasks():
 
     try:
         bench.MINTED_AGENT_ACCOUNT_TASK_NAMES = {"plain", "synthetic"}
-        bench._benchmark_user_id_for_task = (
-            lambda name, _base_url: "synthetic-user" if name == "synthetic" else None
-        )
+        bench._benchmark_user_id_for_task = lambda name, _base_url: "synthetic-user" if name == "synthetic" else None
         bench.run_minted_agent_account_task = fake_run_minted
         try:
             await bench.run_single_task(
-                "http://localhost:3001", fake_task("synthetic", fail_preflight=True),
+                "http://localhost:3001",
+                fake_task("synthetic", fail_preflight=True),
             )
         except RuntimeError as exc:
             assert "disable_purchase_reuse requires" in str(exc)
         else:
             assert False, "Expected preflight failure"
-        assert (await bench.run_single_task(
-            "http://localhost:3001", fake_task("plain"),
-        )).user_id == expected_default
+        assert (
+            await bench.run_single_task(
+                "http://localhost:3001",
+                fake_task("plain"),
+            )
+        ).user_id == expected_default
 
         await bench.run_single_task("http://localhost:3001", fake_task("synthetic"))
-        assert (await bench.run_single_task(
-            "http://localhost:3001", fake_task("plain"),
-        )).user_id == expected_default
+        assert (
+            await bench.run_single_task(
+                "http://localhost:3001",
+                fake_task("plain"),
+            )
+        ).user_id == expected_default
 
         concurrent = True
         plain_user, synthetic_user = await asyncio.gather(
@@ -19573,9 +19603,11 @@ async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, ju
             if outcome is None:
                 continue
             name, error = outcome
+
             def report(error=error):
                 if error is not None:
                     raise error
+
             result.record(name, report)
     if interrupted is not None:
         raise interrupted
@@ -19600,6 +19632,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         assert release.wait(10), "judge did not observe two bounded native lanes"
         with admission_lock:
             active -= 1
+
     main_thread = threading.get_ident()
     judges_finished = False
 
@@ -19628,11 +19661,23 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
 
     result = BlackboxResult()
     controller_cases = [
-        ("test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate", "cloudbench_prisma_freshness_permanent_gate"),
+        (
+            "test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate",
+            "cloudbench_prisma_freshness_permanent_gate",
+        ),
         ("test_cloudbench_boot_payload_behavior_is_in_permanent_gate", "cloudbench_boot_payload_permanent_gate"),
-        ("test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate", "cloudbench_bundled_frontend_prerequisites_permanent_gate"),
-        ("test_cloudbench_log_transport_contract_is_in_permanent_gate", "cloudbench_log_transport_contract_permanent_gate"),
-        ("test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate", "cloudbench_dependency_rebuild_permanent_gate"),
+        (
+            "test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate",
+            "cloudbench_bundled_frontend_prerequisites_permanent_gate",
+        ),
+        (
+            "test_cloudbench_log_transport_contract_is_in_permanent_gate",
+            "cloudbench_log_transport_contract_permanent_gate",
+        ),
+        (
+            "test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate",
+            "cloudbench_dependency_rebuild_permanent_gate",
+        ),
         ("test_private_fleet_source_behavior_is_in_permanent_gate", "private_fleet_source_permanent_gate"),
         ("test_fly_native_completion_is_in_permanent_gate", "fly_native_completion_permanent_gate"),
         ("test_autoscaler_runtime_handoff_is_in_permanent_gate", "autoscaler_runtime_handoff_permanent_gate"),
@@ -19643,28 +19688,45 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         ("test_successful_llm_evidence_is_in_permanent_gate", "successful_llm_evidence_permanent_gate"),
     ]
     judge_cases = [
-        ("test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics", "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics"),
-        ("test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics", "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics"),
-        ("test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics", "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics"),
-        ("test_blue_bottle_tree_proof_passes_with_subagent_evidence", "blue_bottle_tree_proof_passes_with_subagent_evidence"),
+        (
+            "test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
+            "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
+        ),
+        (
+            "test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
+            "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
+        ),
+        (
+            "test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
+            "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
+        ),
+        (
+            "test_blue_bottle_tree_proof_passes_with_subagent_evidence",
+            "blue_bottle_tree_proof_passes_with_subagent_evidence",
+        ),
     ]
     invoked_controllers, invoked_judges, reported_controllers = [], [], []
     replacements = {}
     for index, (name, _) in enumerate(controller_cases):
+
         def controller(index=index, name=name):
             invoked_controllers.append(name)
             if index < 3:
                 return (native_failure, native_success, unexecuted_native)[index]()
+
         replacements[name] = controller
     for index, (name, _) in enumerate(judge_cases):
+
         async def judge(index=index, name=name):
             invoked_judges.append(name)
             if index < 3:
                 await (judge_success, judge_failure, final_judge)[index]()
+
         replacements[name] = judge
     original_record, original_async = BlackboxResult.record, BlackboxResult.record_async
     controller_names = [name for _, name in controller_cases]
     judge_names = [name for _, name in judge_cases]
+
     def record_registered(self, name, case):
         if name in controller_names:
             reported_controllers.append(name)
@@ -19673,6 +19735,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
                 original_record(result, ("native_failure", "native_success", "unexecuted_native")[index], case)
             else:
                 case()
+
     async def record_registered_async(self, name, case):
         if name in judge_names:
             index = judge_names.index(name)
@@ -19680,13 +19743,16 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
                 await original_async(result, ("judge_success", "judge_failure", "final_judge")[index], case)
             else:
                 await case()
+
     with (
         contextlib.redirect_stdout(io.StringIO()),
         contextlib.redirect_stderr(io.StringIO()),
         patch.dict(globals(), replacements),
         patch.object(BlackboxResult, "record", record_registered),
         patch.object(BlackboxResult, "record_async", record_registered_async),
-        patch.object(_test_utils, "clear_captures", side_effect=lambda: resets.append((threading.get_ident(), judges_finished))),
+        patch.object(
+            _test_utils, "clear_captures", side_effect=lambda: resets.append((threading.get_ident(), judges_finished))
+        ),
     ):
         await run_all_tests()
     assert sorted(invoked_controllers) == sorted(name for name, _ in controller_cases)
@@ -19697,7 +19763,11 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
     assert "native_failure: owned native failure" in result.errors, "native wait finished before the judge progressed"
     assert all(thread != main_thread for _, thread in seen)
     assert result.summary() == {"passed": 3, "failed": 3, "total": 6}
-    assert {error.split(":", 1)[0] for error in result.errors} == {"native_failure", "judge_failure", "unexecuted_native"}
+    assert {error.split(":", 1)[0] for error in result.errors} == {
+        "native_failure",
+        "judge_failure",
+        "unexecuted_native",
+    }
     assert all(thread == main_thread for thread, _ in resets)
     assert all(done for _, done in resets[-3:]), "native result recording reset captures during a judge"
 
@@ -19705,17 +19775,25 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
     release.clear()
     seen.clear()
     active = peak = 0
+
     def owned_native():
         native_enter()
         seen.append("drained")
+
     def forbidden_next_native():
         seen.append("started_after_cancellation")
+
     async def waiting_judge():
         await asyncio.Event().wait()
+
     with contextlib.redirect_stdout(io.StringIO()):
-        owner = asyncio.create_task(_run_benchmark_subprocess_and_judge_cases(
-            BlackboxResult(), [("owned_one", owned_native), ("owned_two", owned_native), ("forbidden", forbidden_next_native)], [("waiting", waiting_judge)],
-        ))
+        owner = asyncio.create_task(
+            _run_benchmark_subprocess_and_judge_cases(
+                BlackboxResult(),
+                [("owned_one", owned_native), ("owned_two", owned_native), ("forbidden", forbidden_next_native)],
+                [("waiting", waiting_judge)],
+            )
+        )
         try:
             assert await asyncio.to_thread(started.wait, 10)
             owner.cancel()
@@ -19769,7 +19847,9 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             owner = json.loads(descendant.read_text())
             observed = subprocess.run(
                 ["ps", "-p", str(owner["pid"]), "-o", "stat="],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             assert observed.returncode in (0, 1), "native control process observation failed"
             if observed.returncode == 1 and not observed.stdout.strip():
@@ -19782,7 +19862,9 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             except (OSError, ValueError, IndexError):
                 gone = subprocess.run(
                     ["ps", "-p", str(owner["pid"]), "-o", "stat="],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 assert (gone.returncode == 1 and not gone.stdout.strip()) or (
                     gone.returncode == 0 and gone.stdout.strip().startswith("Z")
@@ -19826,7 +19908,9 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         finally:
             if descendant_live():
                 owner = json.loads(descendant.read_text())
-                identity.main(["process-identity.py", "--expect", owner["birth"], "--signal", "KILL", str(owner["pid"])])
+                identity.main(
+                    ["process-identity.py", "--expect", owner["birth"], "--signal", "KILL", str(owner["pid"])]
+                )
             cleanup_deadline = time.monotonic() + 10
             while descendant_live() and time.monotonic() < cleanup_deadline:
                 await asyncio.sleep(0.02)
@@ -19921,25 +20005,52 @@ async def run_all_tests():
     await _run_benchmark_subprocess_and_judge_cases(
         r,
         [
-            ("cloudbench_prisma_freshness_permanent_gate", test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate),
+            (
+                "cloudbench_prisma_freshness_permanent_gate",
+                test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate,
+            ),
             ("cloudbench_boot_payload_permanent_gate", test_cloudbench_boot_payload_behavior_is_in_permanent_gate),
-            ("cloudbench_bundled_frontend_prerequisites_permanent_gate", test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate),
-            ("cloudbench_log_transport_contract_permanent_gate", test_cloudbench_log_transport_contract_is_in_permanent_gate),
-            ("cloudbench_dependency_rebuild_permanent_gate", test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate),
+            (
+                "cloudbench_bundled_frontend_prerequisites_permanent_gate",
+                test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate,
+            ),
+            (
+                "cloudbench_log_transport_contract_permanent_gate",
+                test_cloudbench_log_transport_contract_is_in_permanent_gate,
+            ),
+            (
+                "cloudbench_dependency_rebuild_permanent_gate",
+                test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate,
+            ),
             ("private_fleet_source_permanent_gate", test_private_fleet_source_behavior_is_in_permanent_gate),
             ("fly_native_completion_permanent_gate", test_fly_native_completion_is_in_permanent_gate),
             ("autoscaler_runtime_handoff_permanent_gate", test_autoscaler_runtime_handoff_is_in_permanent_gate),
             ("boot_terminal_runtime_evidence_permanent_gate", test_boot_terminal_runtime_evidence_is_in_permanent_gate),
             ("cloudbench_codex_auth_permanent_gate", test_cloudbench_codex_auth_is_in_permanent_gate),
             ("cloudbench_pool_vm_shapes_permanent_gate", test_cloudbench_pool_vm_shapes_are_in_permanent_gate),
-            ("live_query_proof_zero_spend_admission", test_live_query_proof_rejects_zero_spend_tasks_before_provisioning),
+            (
+                "live_query_proof_zero_spend_admission",
+                test_live_query_proof_rejects_zero_spend_tasks_before_provisioning,
+            ),
             ("successful_llm_evidence_permanent_gate", test_successful_llm_evidence_is_in_permanent_gate),
         ],
         [
-            ("blue_bottle_k5_trial_b217afca_passes_single_turn_semantics", test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics),
-            ("blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics", test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics),
-            ("blue_bottle_k5_trial_7d282652_passes_single_turn_semantics", test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics),
-            ("blue_bottle_tree_proof_passes_with_subagent_evidence", test_blue_bottle_tree_proof_passes_with_subagent_evidence),
+            (
+                "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
+                test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics,
+            ),
+            (
+                "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
+                test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics,
+            ),
+            (
+                "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
+                test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics,
+            ),
+            (
+                "blue_bottle_tree_proof_passes_with_subagent_evidence",
+                test_blue_bottle_tree_proof_passes_with_subagent_evidence,
+            ),
         ],
     )
     r.record(

@@ -178,6 +178,22 @@ rebuild_python_dependencies() {
     printf '%s\n' "$expected" > "$target/.cloudbench-deps-fingerprint"
 }
 
+sync_node_workspace_trees() {
+    local workspace donor_tree repo_tree
+    for workspace in back-end front-end agents; do
+        donor_tree="$DEPS_DIR/$workspace/node_modules"
+        repo_tree="$REPO_DIR/$workspace/node_modules"
+        [ -d "$donor_tree" ] || continue
+        sync_tree "JavaScript $workspace" "$donor_tree" "$repo_tree" "$repo_node"
+        if [ "$SYNC_TREE_REFRESHED" = "1" ]; then
+            # A copied client may belong to the donor's older schema even when
+            # dependency manifests match the current checkout.
+            rm -f "$REPO_DIR/node_modules/.prisma/.rose-schema-fingerprint"
+            printf '%s\n' "$repo_node" > "$repo_tree/.cloudbench-deps-fingerprint"
+        fi
+    done
+}
+
 repo_node="$(cloudbench_node_dependency_fingerprint "$REPO_DIR")"
 node_marker="$REPO_DIR/node_modules/.cloudbench-deps-fingerprint"
 installed_node=""
@@ -194,9 +210,23 @@ if [ "$installed_node" != "$repo_node" ]; then
         fi
     else
         sync_tree "JavaScript" "$DEPS_DIR/node_modules" "$REPO_DIR/node_modules" "$repo_node"
-        if [ "$SYNC_TREE_REFRESHED" = "1" ]; then
+        root_node_refreshed="$SYNC_TREE_REFRESHED"
+        if [ "$root_node_refreshed" = "1" ]; then
+            rm -f "$REPO_DIR/node_modules/.prisma/.rose-schema-fingerprint"
+        fi
+        sync_node_workspace_trees
+        if [ "$root_node_refreshed" = "1" ]; then
             printf '%s\n' "$repo_node" > "$node_marker"
         fi
+    fi
+fi
+# Older volume receipts covered only the root tree. Repair missing workspace
+# trees only from an exact matching donor; a valid cached/rebuilt volume remains
+# usable when its donor has a different manifest set.
+if [ "$installed_node" = "$repo_node" ]; then
+    donor_node="$(cloudbench_node_dependency_fingerprint "$DEPS_DIR")"
+    if [ "$donor_node" = "$repo_node" ]; then
+        sync_node_workspace_trees
     fi
 fi
 

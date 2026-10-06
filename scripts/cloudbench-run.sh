@@ -779,11 +779,11 @@ fi
 # Prisma's generated client is compiled from schema.prisma, not just the npm
 # manifests. A warm dependency tree can therefore be package-current but
 # schema-stale when a benchmark checks out another ref or applies a local patch.
+chown -R "$APP_USER:$APP_USER" "$REPO_DIR/node_modules" "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/venv" 2>/dev/null || true
 if ! bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"; then
     log "FATAL: Prisma client synchronization failed"
     finish 1
 fi
-chown -R "$APP_USER:$APP_USER" "$REPO_DIR/node_modules" "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/venv" 2>/dev/null || true
 
 # The warm image omits local Chromium because ordinary simulated benches use
 # remote/browser-model boundaries. Hosted Stripe Checkout in this daily task

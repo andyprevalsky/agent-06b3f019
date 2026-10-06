@@ -12749,7 +12749,9 @@ fleet_infra_canary_preflight() {
     case "$ttl" in
         ''|*[!0-9]*|0) ttl=3600 ;;
     esac
-    if [ -f "$stamp" ]; then
+    # A campaign must check its own abort/failure even when another cohort has
+    # a fresh global PASS. The transaction helper owns that check.
+    if [ -z "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ] && [ -f "$stamp" ]; then
         age=$(( $(date +%s) - $(stat -c %Y "$stamp" 2>/dev/null || echo 0) ))
         if [ "$age" -ge 0 ] && [ "$age" -lt "$ttl" ]; then
             echo "🛡  infra canary preflight: stamp fresh (${age}s < ${ttl}s) — $stamp"

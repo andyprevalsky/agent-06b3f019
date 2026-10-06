@@ -400,13 +400,19 @@ def _write_prisma_fixture(root: Path) -> tuple[Path, Path, dict[str, str]]:
     gosu = bin_dir / "gosu"
     gosu.write_text('#!/usr/bin/env bash\nset -eu\nshift\nexec "$@"\n')
     gosu.chmod(0o755)
-    npx = bin_dir / "npx"
-    npx.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -eu\n"
-        'printf \'%s\\n\' "$*" >> "$PRISMA_GENERATE_LOG"\n'
-        '[ "${PRISMA_GENERATE_FAIL:-0}" != 1 ]\n'
+    # The real Node resolver must find and execute this installed package.
+    package = repo / "node_modules/prisma"
+    package.mkdir()
+    (package / "package.json").write_text(
+        json.dumps({"name": "prisma", "version": "5.22.0", "bin": {"prisma": "cli.js"}})
     )
+    (package / "cli.js").write_text(
+        'const fs = require("node:fs");\n'
+        'fs.appendFileSync(process.env.PRISMA_GENERATE_LOG, process.argv.slice(2).join(" ") + "\\n");\n'
+        'process.exit(process.env.PRISMA_GENERATE_FAIL === "1" ? 1 : 0);\n'
+    )
+    npx = bin_dir / "npx"
+    npx.write_text("#!/usr/bin/env bash\nexit 97\n")
     npx.chmod(0o755)
 
     generate_log = root / "prisma-generate.log"
@@ -434,9 +440,7 @@ def test_prisma_client_regenerates_only_when_schema_fingerprint_changes(
 
     first = _run_prisma_sync(repo, env)
     assert first.returncode == 0, first.stderr
-    assert generate_log.read_text().splitlines() == [
-        f"--no-install prisma generate --schema {repo / 'back-end/prisma/schema.prisma'}"
-    ]
+    assert generate_log.read_text().splitlines() == [f"generate --schema {repo / 'back-end/prisma/schema.prisma'}"]
     first_fingerprint = marker.read_text()
 
     unchanged = _run_prisma_sync(repo, env)
@@ -26397,3 +26401,83 @@ def test_prebuilt_volume_cli_keeps_pool_and_last_override_contract(args: list[st
     )
     assert result.returncode == status, result.stderr
     assert result.stdout == expected
+
+
+@pytest.mark.parametrize("layout", ["hoisted", "workspace-local"])
+def test_prebuilt_prisma_client_sync_preserves_donor_workspace_layout(tmp_path: Path, layout: str) -> None:
+    donor = tmp_path / "donor"
+    repo = tmp_path / "repo"
+    _write_manifests(donor)
+    _write_manifests(repo)
+    schema = repo / "back-end/prisma/schema.prisma"
+    schema.parent.mkdir(parents=True)
+    schema.write_text("model Alpha { id String @id }\n")
+    root_tree = donor / "node_modules"
+    root_tree.mkdir()
+    tree = root_tree if layout == "hoisted" else donor / "back-end/node_modules"
+    package = tree / "prisma"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(
+        json.dumps({"name": "prisma", "version": "5.22.0", "bin": {"prisma": "cli.js"}})
+    )
+    (package / "cli.js").write_text(
+        '#!/usr/bin/env node\nconst fs = require("node:fs");\n'
+        'fs.writeFileSync(process.env.GENERATED_CLIENT, fs.readFileSync(process.argv[process.argv.indexOf("--schema") + 1], "utf8"));\n'
+    )
+    (package / "cli.js").chmod(0o755)
+    (tree / ".bin").mkdir()
+    (tree / ".bin/prisma").symlink_to("../prisma/cli.js")
+    # The client is a required runtime asset, separate from the CLI.
+    client = tree / "@prisma/client"
+    client.mkdir(parents=True)
+    (client / "package.json").write_text('{"name":"@prisma/client","version":"5.22.0"}')
+    (client / "generated-schema").write_text("older donor schema")
+    if layout == "workspace-local":
+        (root_tree / "fixture-backend").symlink_to("../back-end")
+    python = donor / "agents/venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    python.chmod(0o755)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gosu").write_text('#!/usr/bin/env bash\nshift\nexec "$@"\n')
+    (bin_dir / "gosu").chmod(0o755)
+    copied_tree = repo / "node_modules" if layout == "hoisted" else repo / "back-end/node_modules"
+    generated = copied_tree / "@prisma/client/generated-schema"
+    env = dict(
+        os.environ,
+        PATH=f"{bin_dir}:{os.environ['PATH']}",
+        GENERATED_CLIENT=str(generated),
+        npm_config_offline="true",
+        npm_config_cache=str(tmp_path / "npm-cache"),
+    )
+    for attempt in range(2):
+        if attempt and layout == "workspace-local":
+            # An old root-only receipt and current schema marker cannot hide a
+            # missing workspace client that must be copied and regenerated.
+            shutil.rmtree(repo / "back-end/node_modules")
+        sync = subprocess.run(
+            ["bash", str(SCRIPT), str(donor), str(repo)], env=env, text=True, capture_output=True, timeout=30
+        )
+        assert sync.returncode == 0, sync.stdout + sync.stderr
+        result = _run_prisma_sync(repo, env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert generated.read_text() == schema.read_text()
+        copied_tree = repo / "node_modules" if layout == "hoisted" else repo / "back-end/node_modules"
+        assert json.loads((copied_tree / "@prisma/client/package.json").read_text())["version"] == "5.22.0"
+        assert (repo / "node_modules/.prisma/.rose-schema-fingerprint").read_text().strip() == hashlib.sha256(
+            schema.read_bytes()
+        ).hexdigest()
+
+
+def test_prebuilt_prisma_client_sync_rejects_a_cli_outside_the_checkout(tmp_path: Path) -> None:
+    repo, generate_log, env = _write_prisma_fixture(tmp_path)
+    package = repo / "node_modules/prisma"
+    outside = tmp_path / "ambient-prisma"
+    package.rename(outside)
+    package.symlink_to(outside, target_is_directory=True)
+    result = _run_prisma_sync(repo, env)
+    assert result.returncode != 0
+    assert "Prisma CLI must belong to this checkout" in result.stderr
+    assert not generate_log.exists()
+    assert not (repo / "node_modules/.prisma/.rose-schema-fingerprint").exists()
