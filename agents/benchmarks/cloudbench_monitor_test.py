@@ -1,0 +1,178 @@
+"""Read-only operator observations must distinguish results from retirement."""
+
+import json
+import os
+import subprocess
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def observe(directory: Path, *args: str) -> dict:
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/run-bench"), "monitor", str(directory), *args],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def write(directory: Path, name: str, value: dict) -> Path:
+    target = directory / "_batch" / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(value))
+    return target
+
+
+def test_fleet_monitor_terminal_task_is_not_controller_completion(tmp_path: Path):
+    write(
+        tmp_path,
+        "report-card.json",
+        {
+            "per_task": [
+                {"name": "task-a", "status": "failed", "lifecycle_stage": "evaluated"},
+                {"name": "task-b", "status": "running", "lifecycle_stage": "running"},
+            ],
+            "private_request_body": "MUST_NOT_PRINT",
+        },
+    )
+    write(tmp_path, "run.json", {"tasks": [{"name": "task-a", "status": "FAILED"}]})
+    result = observe(tmp_path)
+    assert result["controller_terminal"] is False
+    assert result["occupancy"]["evaluation/evidence"] == 1
+    assert result["occupancy"]["running"] == 1
+    assert result["task_outcomes"] == {"failed": 1, "running": 1}
+    assert "MUST_NOT_PRINT" not in json.dumps(result)
+
+
+def test_fleet_monitor_checks_terminal_receipt_even_when_card_is_stale(tmp_path: Path):
+    card = write(
+        tmp_path,
+        "report-card.json",
+        {
+            "per_task": [
+                {"name": "task-a", "status": "failed", "lifecycle_stage": "running"},
+            ]
+        },
+    )
+    os.utime(card, (1, 1))
+    task = tmp_path / "task-a"
+    task.mkdir()
+    (task / "bench-e2e.finished-epoch").write_text("2\n")
+    write(
+        tmp_path,
+        "lifecycle.json",
+        {
+            "version": 1,
+            "run_id": tmp_path.name,
+            "status": "verified",
+            "controller_exit_code": 1,
+        },
+    )
+    pending = observe(tmp_path)
+    assert pending["controller_terminal"] is False
+    assert pending["lifecycle_terminal"] is True
+    assert pending["next_action"] == "inspect_terminal_and_owned_resources"
+    status = tmp_path / "detached.status"
+    status.write_text("1\n")
+    result = observe(tmp_path, "--controller-status", str(status))
+    assert result["controller_terminal"] is True
+    assert result["cleanup_status"] == "verified"
+    assert result["controller_exit_code"] == 1
+    assert result["occupancy"]["finished"] == 1
+    assert result["card_age_s"] > 60
+
+
+def test_fleet_monitor_missing_observation_never_authorizes_restart(tmp_path: Path):
+    write(tmp_path, "benches.json", [{"name": "task-a"}, {"name": "task-b"}])
+    result = observe(tmp_path)
+    assert result["controller_terminal"] is False
+    assert result["occupancy"]["preflight"] == 2
+    assert result["observation_warning"]
+    assert result["next_action"] == "observe_again"
+
+
+def test_fleet_monitor_rejects_foreign_terminal_receipt(tmp_path: Path):
+    write(tmp_path, "lifecycle.json", {"run_id": "another-run", "status": "verified"})
+    result = observe(tmp_path)
+    assert result["controller_terminal"] is False
+    assert result["cleanup_status"] == "unknown"
+
+
+def test_fleet_monitor_handles_malformed_rows_and_nonterminal_receipt(tmp_path: Path):
+    write(tmp_path, "report-card.json", {"per_task": {"unexpected": "shape"}})
+    write(tmp_path, "benches.json", [{"name": "task-a", "status": {"private": "MUST_NOT_PRINT"}}])
+    write(tmp_path, "lifecycle.json", {"run_id": tmp_path.name, "status": "in_progress"})
+    result = observe(tmp_path)
+    assert result["occupancy"]["preflight"] == 1
+    assert result["task_outcomes"] == {"queued": 1}
+    assert result["observation_warning"]
+    assert result["lifecycle_terminal"] is False
+    assert result["cleanup_status"] == "unknown"
+    assert "MUST_NOT_PRINT" not in json.dumps(result)
+
+    write(tmp_path, "benches.json", {"unexpected": "shape"})
+    result = observe(tmp_path)
+    assert sum(result["occupancy"].values()) == 0
+    assert result["observation_warning"]
+
+
+def test_fleet_monitor_preserves_caller_relative_paths(tmp_path: Path):
+    directory = tmp_path / "run"
+    write(
+        directory,
+        "report-card.json",
+        {
+            "per_task": [
+                {"name": "task-a", "status": "running", "lifecycle_stage": "running"},
+            ]
+        },
+    )
+    (tmp_path / "exit.status").write_text("0\n")
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/run-bench"), "monitor", "run", "--controller-status", "exit.status"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    value = json.loads(result.stdout)
+    assert value["occupancy"]["running"] == 1
+    assert value["controller_exit_code"] == 0
+
+
+def test_fleet_monitor_default_detach_records_actual_controller_exit(tmp_path: Path):
+    runs = tmp_path / "runs"
+    snapshots = tmp_path / "snapshots"
+    runs.mkdir()
+    snapshots.mkdir()
+    env = {
+        **os.environ,
+        "CLOUDBENCH_RUNS_ROOT": str(runs),
+        "CLOUDBENCH_SCRIPT_SNAPSHOT": "",
+        "CLOUDBENCH_SKIP_LOCAL_PATCH": "1",
+        "CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_EXIT_AFTER_CLAIM": "7",
+        "TMPDIR": str(snapshots),
+    }
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/run-bench"), "spawn-sub-agents", "--ref", "origin/main"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    deadline = time.monotonic() + 10
+    statuses = []
+    while time.monotonic() < deadline:
+        statuses = list(runs.glob("detached-*.status"))
+        if statuses:
+            break
+        time.sleep(0.05)
+    assert len(statuses) == 1, "default detached launch lost its actual exit status"
+    assert statuses[0].read_text().strip() == "7"
+    assert "monitor every 30s" in result.stdout

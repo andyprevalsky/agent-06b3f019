@@ -523,6 +523,13 @@ exact composite-root cleanup, and quiesced resource retirement offline. Larger
 paid fleet campaigns remain explicit human-requested validation; they are not
 added to this automatic gate.
 
+During deploy benchmarks, follow CLAUDE.md's "Monitor every cloud launch"
+instructions and the exact metrics command in the printed controller log.
+Poll every 30 seconds, check the printed controller exit marker on every poll,
+and observe through owned-resource release. Early task PASS/FAIL and stale cards
+are distinct from controller exit and cleanup. The existing live-results gate
+also runs the compact monitor controls; no additional live verification is added.
+
 The structural runner admits eight suites concurrently by default and runs the
 complete registry. Use `--max-workers N` to choose a host-appropriate limit;
 this changes test scheduling only, not benchmark fleet width or task deadlines.
