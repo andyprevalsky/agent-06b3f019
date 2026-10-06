@@ -12,8 +12,14 @@ cloudbench_install_pgvector() (
     fi
     server_version="$(dpkg-query -W -f='${Version}' "postgresql-$pg_major")"
     apt-get update
-    apt-get install -y --no-install-recommends build-essential \
-        "postgresql-server-dev-$pg_major=$server_version" "postgresql-$pg_major=$server_version"
+    local used_exact_pin=1
+    if ! apt-get install -y --no-install-recommends build-essential \
+        "postgresql-server-dev-$pg_major=$server_version" "postgresql-$pg_major=$server_version"; then
+        used_exact_pin=0
+        echo "exact PostgreSQL $server_version packages unavailable; using current $pg_major packages" >&2
+        apt-get install -y --no-install-recommends build-essential \
+            "postgresql-server-dev-$pg_major" "postgresql-$pg_major"
+    fi
 
     temporary="$(mktemp -d)"
     trap 'rm -rf "$temporary"' EXIT
@@ -29,7 +35,11 @@ cloudbench_install_pgvector() (
     make -C "$source_dir" PG_CONFIG="$pg_config" OPTFLAGS="" with_llvm=no install
     test -f "/usr/share/postgresql/$pg_major/extension/vector.control"
     test -f "/usr/lib/postgresql/$pg_major/lib/vector.so"
-    test "$(dpkg-query -W -f='${Version}' "postgresql-$pg_major")" = "$server_version"
+    # Exact-pin installs must keep the running server ABI. The fallback path
+    # may move $pg_major to the current distro package when the old pin is gone.
+    if [ "$used_exact_pin" -eq 1 ]; then
+        test "$(dpkg-query -W -f='${Version}' "postgresql-$pg_major")" = "$server_version"
+    fi
 )
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
