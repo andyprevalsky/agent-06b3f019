@@ -24,6 +24,7 @@ for test_file in \
   sms-transport-mock.test.ts \
   sms-queue-benchmark-mock.test.ts \
   whatsapp-queue-benchmark-mock.test.ts \
+  live-messaging-guard.test.ts \
   benchmark-sms-guards.test.ts; do
   if [ -f "$UNIT_DIR/$test_file" ]; then
     PASS=$((PASS + 1))
@@ -35,14 +36,39 @@ for test_file in \
 done
 
 require_text \
-  "smsQueue consults benchmark mock gate" \
+  "smsQueue consults live-messaging mock gate" \
   "$ROOT_DIR/back-end/src/providers/smsQueue.ts" \
-  "shouldMockBenchmarkSmsSend"
+  "shouldMockMessagingSend('surge'"
 
 require_text \
-  "whatsappCloud consults benchmark mock gate" \
+  "whatsappCloud consults live-messaging mock gate" \
   "$ROOT_DIR/back-end/src/providers/whatsappCloud.ts" \
-  "shouldMockBenchmarkWhatsAppSend"
+  "shouldMockMessagingSend('whatsapp'"
+
+require_text \
+  "AgentPhone outbound consults live-messaging mock gate" \
+  "$ROOT_DIR/back-end/src/domains/agent-phone/service.ts" \
+  "shouldMockMessagingSend('agentphone'"
+
+require_text \
+  "Twilio Verify OTP send consults live-messaging mock gate" \
+  "$ROOT_DIR/back-end/src/domains/auth/service.twilio.ts" \
+  "shouldMockMessagingSend('twilio-verify')"
+
+require_text \
+  "fetch capture marks its messaging fakes installed" \
+  "$ROOT_DIR/back-end/src/providers/fetchCapture.ts" \
+  "markMessagingFetchFakesInstalled()"
+
+require_text \
+  "blackbox runner fakes Twilio Verify sends" \
+  "$ROOT_DIR/back-end/scripts/run-blackbox-tests.sh" \
+  'BLACKBOX_TEST_FAKE_TWILIO="${BLACKBOX_TEST_FAKE_TWILIO:-1}"'
+
+require_text \
+  "coverage runner fakes Twilio Verify sends" \
+  "$ROOT_DIR/back-end/scripts/run-coverage.sh" \
+  'BLACKBOX_TEST_FAKE_TWILIO="${BLACKBOX_TEST_FAKE_TWILIO:-1}"'
 
 require_text \
   "run.sh fakes AgentPhone in benchmark mode" \

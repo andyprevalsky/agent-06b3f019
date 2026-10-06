@@ -1,4 +1,5 @@
 import { createLogger } from '../../providers/logger';
+import { shouldMockMessagingSend } from '../../providers/smsTransportMock';
 import * as repo from './repo';
 import {
   TWILIO_ACCOUNT_SID,
@@ -152,6 +153,16 @@ export async function sendTwilioVerifyOTP(
   // Bypass Twilio only for fixed internal/review evaluation credentials.
   if (shouldBypassOtpSend(phone)) {
     log.info('OTP bypass: skipping Twilio send for test phone');
+    return { success: true };
+  }
+
+  // The check stays live: a mocked send leaves no pending verification, so a
+  // non-production login fails closed instead of accepting any code.
+  if ((await shouldMockMessagingSend('twilio-verify')) !== null) {
+    log.info(
+      'Mocked Twilio Verify OTP send outside production; set ALLOW_LIVE_MESSAGING=1 to text this phone',
+      { phone: phone.slice(0, -4) + '****' }
+    );
     return { success: true };
   }
 

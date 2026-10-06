@@ -6,6 +6,7 @@
 
 import { z } from 'zod';
 import * as hubStore from '../../providers/benchmarkHubStore';
+import { getRunDetail } from '../../providers/benchmarkHubRunDetail';
 import * as repo from './repo';
 
 export const runRequestSchema = z
@@ -71,7 +72,7 @@ export async function claimRunRequest(id: string, claimedBy: string) {
  * the startup timeline the fleet dashboard had while a run is still spinning up.
  */
 export async function getRunView(runId: string) {
-  const detail = await hubStore.getRunDetail(runId);
+  const detail = await getRunDetail(runId);
   if (detail === null) return null;
   const request = await repo.findRunRequestByRunId(runId);
   return {
