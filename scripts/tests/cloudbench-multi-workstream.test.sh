@@ -4277,8 +4277,10 @@ CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=2 
 [ -f "$FAKE_DIR/worker-clone-blocked" ] ||
     fail "the in-progress allocation regression never blocked inside the worker clone boundary"
 # A clone still blocked inside the provider is outstanding capacity whichever
-# boundary catches it first: the autoscaler startup deadline or final acceptance.
-grep -Eq 'mandatory autoscaler (startup timed out: 0/1 ready|worker capacity below desired: 0/1)' \
+# boundary catches it first: the autoscaler startup deadline, final acceptance's
+# capacity count, or the autoscaler never confirming terminal completion because
+# it is still inside the blocked provider call.
+grep -Eq 'mandatory autoscaler (startup timed out: 0/1 ready|worker capacity below desired: 0/1|did not confirm terminal completion)' \
     "$TMP_ROOT/controller-autoscaler-worker-clone-pending.log" ||
     fail "outstanding desired capacity was not enforced at final acceptance"
 remaining="$(python3 -c '
