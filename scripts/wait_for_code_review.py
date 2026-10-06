@@ -24,7 +24,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 def _trusted_github_host() -> str:
@@ -409,6 +409,10 @@ def _enrich_coderabbit_description(
     return payload
 
 
+# How long a push-triggered skip may trail the review command before it counts.
+SKIPPED_AFTER_TRIGGER_GRACE_SECONDS = 180
+
+
 def wait_for_review(
     *,
     pr: str,
@@ -475,7 +479,16 @@ def wait_for_review(
         )
         if triggered_at is not None and status.terminal and not status.successful:
             started = parse_github_time(status.raw.get("startedAt"))
-            if started is None or started < triggered_at:
+            # A push posts its own "review skipped" check (review-on-push is
+            # off) seconds after our `@coderabbitai review` comment; the review
+            # that comment triggered replaces it shortly after. Only a skip
+            # that outlives that window is the real answer.
+            skip_grace = (
+                timedelta(seconds=SKIPPED_AFTER_TRIGGER_GRACE_SECONDS)
+                if status.state == "REVIEW_SKIPPED"
+                else timedelta(0)
+            )
+            if started is None or started < triggered_at + skip_grace:
                 status = ReviewStatus(
                     "AWAITING_TRIGGERED_REVIEW", False, False, status.kind, status.raw
                 )

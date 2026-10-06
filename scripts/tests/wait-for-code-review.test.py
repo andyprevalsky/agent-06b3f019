@@ -501,7 +501,7 @@ class ReviewWaitTest(unittest.TestCase):
             MODULE.gh_payload = original
         self.assertEqual(len(calls), 2)
 
-    def test_skip_posted_after_the_trigger_is_terminal(self) -> None:
+    def test_skip_posted_well_after_the_trigger_is_terminal(self) -> None:
         head = "1" * 40
         status = MODULE.wait_for_review(
             pr="1348",
@@ -516,7 +516,7 @@ class ReviewWaitTest(unittest.TestCase):
                         "__typename": "StatusContext",
                         "context": "CodeRabbit",
                         "state": "SUCCESS",
-                        "startedAt": "2026-10-01T23:55:00Z",
+                        "startedAt": "2026-10-02T00:05:00Z",
                         "description": "Review skipped: no new changes",
                     }
                 ],
@@ -527,6 +527,40 @@ class ReviewWaitTest(unittest.TestCase):
 
         self.assertEqual(status.state, "REVIEW_SKIPPED")
         self.assertFalse(status.successful)
+
+    def test_push_skip_seconds_after_the_trigger_is_awaited_until_the_review_lands(self) -> None:
+        """The push posts its own "review skipped" check seconds after our review
+        command (review-on-push is off); the review that command triggered then
+        replaces it. Three deploys on 2026-10-06 read that skip as terminal."""
+        head = "1" * 40
+        skipped = {
+            "__typename": "StatusContext",
+            "context": "CodeRabbit",
+            "state": "SUCCESS",
+            "startedAt": "2026-10-01T23:55:00Z",
+            "description": "Review skipped: incremental reviews are disabled",
+        }
+        completed = {
+            "__typename": "StatusContext",
+            "context": "CodeRabbit",
+            "state": "SUCCESS",
+            "startedAt": "2026-10-01T23:58:00Z",
+            "description": "Review completed",
+        }
+        payloads = iter([skipped, skipped, completed])
+        status = MODULE.wait_for_review(
+            pr="1348",
+            expected_head=head,
+            repo=None,
+            timeout_seconds=1,
+            poll_seconds=0,
+            loader=lambda _pr, _repo: {"headRefOid": head, "statusCheckRollup": [next(payloads)]},
+            sleeper=lambda _seconds: None,
+            triggered_at=MODULE.parse_github_time("2026-10-01T23:54:31Z"),
+        )
+
+        self.assertEqual(status.state, "SUCCESS")
+        self.assertTrue(status.successful)
 
     def test_completed_review_before_the_trigger_still_counts(self) -> None:
         head = "2" * 40
