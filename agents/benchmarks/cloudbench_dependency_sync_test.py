@@ -537,6 +537,11 @@ def test_fresh_dependency_overlay_prisma_client_preserves_checkout_and_copy_boun
         (checkout / "back-end/source.js").write_text(value)
     (donor / "back-end/node_modules/@prisma/client").mkdir(parents=True)
     (donor / "back-end/node_modules/@prisma/client/generated").write_text("donor-schema")
+    frontend_package = donor / "front-end/node_modules/frontend-fixture"
+    frontend_package.mkdir(parents=True)
+    (frontend_package / "package.json").write_text('{"name":"frontend-fixture","version":"1.0.0","main":"index.js"}')
+    (frontend_package / "index.js").write_text("module.exports = 'frontend-ready';")
+    (donor / "front-end/node_modules").chmod(0o750)
     python = donor / "agents/venv/bin/python"
     python.parent.mkdir(parents=True)
     python.write_text("#!/usr/bin/env bash\nexit 0\n")
@@ -546,9 +551,11 @@ def test_fresh_dependency_overlay_prisma_client_preserves_checkout_and_copy_boun
     mounts.write_text("{}")
     calls.write_text("")
     real_rsync = shutil.which("rsync")
-    assert real_rsync
+    real_chown = shutil.which("chown")
+    real_chmod = shutil.which("chmod")
+    assert real_rsync and real_chown and real_chmod
     transport = f"""#!{sys.executable}
-import json, os, pathlib, shutil, signal, sys
+import json, os, pathlib, shutil, signal, stat, sys
 name = pathlib.Path(sys.argv[0]).name
 state = pathlib.Path({str(mounts)!r}); calls = pathlib.Path({str(calls)!r})
 fault = {fault!r}; args = sys.argv[1:]; mounted = json.loads(state.read_text())
@@ -558,8 +565,11 @@ elif name == 'id': print('0')
 elif name == 'mount':
     if fault == 'denied': raise SystemExit(32)
     options = args[args.index('-o') + 1]; target = args[-1]
-    lower = dict(part.split('=', 1) for part in options.split(',') if '=' in part)['lowerdir']
+    directories = dict(part.split('=', 1) for part in options.split(',') if '=' in part)
+    lower = directories['lowerdir']; upper = pathlib.Path(directories['upperdir']).stat()
     shutil.copytree(lower, target, symlinks=True, dirs_exist_ok=True)
+    # The real kernel exposes upper-root metadata, not copytree's donor root.
+    os.chown(target, upper.st_uid, upper.st_gid); os.chmod(target, stat.S_IMODE(upper.st_mode))
     mounted[target] = options; state.write_text(json.dumps(mounted))
     if fault == 'interrupt': os.kill(os.getppid(), signal.SIGTERM)
 elif name == 'findmnt':
@@ -569,11 +579,19 @@ elif name == 'findmnt':
 elif name == 'umount':
     target = args[-1]; mounted.pop(target, None); state.write_text(json.dumps(mounted))
     shutil.rmtree(target); pathlib.Path(target).mkdir()
+elif name in ('chown', 'chmod'):
+    if args[0].startswith('--reference='):
+        metadata = pathlib.Path(args[0].split('=', 1)[1]).stat()
+        if name == 'chown': os.chown(args[1], metadata.st_uid, metadata.st_gid)
+        else: os.chmod(args[1], stat.S_IMODE(metadata.st_mode))
+    else:
+        command = {real_chown!r} if name == 'chown' else {real_chmod!r}
+        os.execv(command, [command, *args])
 elif name == 'rsync':
     if os.environ.get('UNREADABLE_SOURCE') == args[-2]: raise SystemExit(5)
     os.execv({real_rsync!r}, [{real_rsync!r}, *args])
 """
-    for name in ("uname", "id", "mount", "findmnt", "umount", "rsync"):
+    for name in ("uname", "id", "mount", "findmnt", "umount", "rsync", "chown", "chmod"):
         command = commands / name
         command.write_text(transport)
         command.chmod(0o755)
@@ -595,10 +613,24 @@ elif name == 'rsync':
         assert not (repo / "node_modules/.cloudbench-deps-fingerprint").exists()
         return
     assert result.returncode == 0, result.stdout + result.stderr
+    for relative in ("node_modules", "back-end/node_modules", "front-end/node_modules", "agents/venv"):
+        actual, expected = (repo / relative).stat(), (donor / relative).stat()
+        assert (actual.st_uid, actual.st_gid, actual.st_mode & 0o7777) == (
+            expected.st_uid, expected.st_gid, expected.st_mode & 0o7777
+        ), f"hydrated {relative} changed donor root access"
+    state_root = repo / ".cloudbench-deps-overlays"
+    if state_root.exists():
+        assert state_root.stat().st_mode & 0o777 == 0o700
+        assert all(owner.stat().st_mode & 0o777 == 0o600 for owner in state_root.glob("*/owner"))
+    frontend = subprocess.run(
+        ["node", "-e", "const {createRequire}=require('node:module'); const r=createRequire(process.argv[1]); if(r('frontend-fixture')!=='frontend-ready')process.exit(1);", str(repo / "front-end/package.json")],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert frontend.returncode == 0, frontend.stderr
     mounted = [args for name, args in operations if name == "mount"]
     copies = [args for name, args in operations if name == "rsync"]
     if not fault:
-        assert len(mounted) == 3 and not copies, "matching fresh dependencies were copied instead of overlaid"
+        assert len(mounted) == 4 and not copies, "matching fresh dependencies were copied instead of overlaid"
         assert all("metacopy=on" in args[args.index("-o") + 1] for args in mounted)
         assert (repo / ".cloudbench-deps-overlays").stat().st_mode & 0o777 == 0o700
     else:
@@ -673,7 +705,7 @@ elif name == 'rsync':
         )
         assert rejected.returncode != 0
         assert generated.read_text() == "checkout-schema"
-        assert len(json.loads(mounts.read_text())) == 2, "new revision detached prior successful dependencies"
+        assert len(json.loads(mounts.read_text())) == 3, "new revision detached prior successful dependencies"
         npm = commands / "npm"
         npm.write_text("#!/usr/bin/env bash\nexit 9\n")
         npm.chmod(0o755)

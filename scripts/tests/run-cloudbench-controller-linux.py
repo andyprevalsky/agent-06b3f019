@@ -18,11 +18,15 @@ import tempfile
 import uuid
 
 
-TOOL_CHECK = """import shutil,subprocess,sys
+TOOL_CHECK = """import re,shutil,subprocess,sys
 assert sys.platform=='linux' and sys.version_info[:3]==(3,11,9), 'requires Linux Python3.11.9'
 assert subprocess.check_output(['node','--version'],text=True).strip()=='v22.13.0', 'requires Node22.13.0'
 assert int(subprocess.check_output(['bash','--version'],text=True).split('version ',1)[1].split('.',1)[0])>=5, 'requires Bash5+'
 assert all(shutil.which(name) for name in ('git','curl','ps','rg')), 'requires git/curl/procps/ripgrep'
+assert all(shutil.which(name) for name in ('npm','npx')), 'requires npm/npx'
+package_runner_versions = [subprocess.check_output([name,'--version'],text=True).strip() for name in ('npm','npx')]
+assert all(re.fullmatch(r'[0-9]+\\.[0-9]+\\.[0-9]+',version) for version in package_runner_versions), 'requires executable npm/npx version commands'
+assert len(set(package_runner_versions))==1, 'requires npm/npx from the same package'
 """
 
 
