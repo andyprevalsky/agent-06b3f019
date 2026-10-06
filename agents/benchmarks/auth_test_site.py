@@ -29,6 +29,7 @@ per-run site in its prompt as ``{auth_test_site_url}``.
 
 from __future__ import annotations
 
+import re
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, Optional
@@ -80,6 +81,10 @@ NO_SESSION_SCENARIOS = (
     "account_locked",
     "code_never_arrives",
     "signup_fails_purchase",
+    # Members pay less but the sign-up is refused, or membership costs money:
+    # the order is placed as a guest either way.
+    "member_discount_signup_fails_purchase",
+    "paid_membership_purchase",
 )
 USER_RESPONSES = ("sign_in", "decline")
 # Scenarios whose manifest carries the password only the user knows.
@@ -490,6 +495,24 @@ def _check_event_rules(check: dict, attempts: list[dict], manifest: dict, where:
     return None
 
 
+def _deliverable_reports(deliverable: str, identifier: str) -> bool:
+    """True when the deliverable carries the identifier's information in any rendering.
+
+    The agent's output schema may type a "member number" as an integer, so the Task
+    Complete card can show 92884370 for RS-92884370. The evaluator checks that the
+    information reached the user, not how the schema typed it: the exact identifier,
+    or its digit run (at least four digits) once separators are removed, both count.
+    """
+    if not identifier:
+        return False
+    if identifier in deliverable:
+        return True
+    digits = re.sub(r"\D", "", identifier)
+    if len(digits) < 4:
+        return False
+    return digits in re.sub(r"[\s\-_.,:/#]", "", deliverable)
+
+
 def _member_number(manifest: dict, report: dict) -> str:
     sign_in_email = str(report.get("signInEmail") or "").casefold()
     for account in report.get("accounts") or []:
@@ -647,10 +670,10 @@ def evaluate_outcome(check: dict, evidence: Any, deliverable: str) -> tuple[bool
 
     if check.get("deliverable_contains_member_number"):
         member_number = _member_number(manifest, report)
-        if not member_number or member_number not in deliverable:
+        if not _deliverable_reports(deliverable, member_number):
             return False, f"Final answer did not report member number {member_number or '<unknown>'}"
     if check.get("deliverable_contains_order_number"):
         numbers = [str(order.get("orderNumber") or "") for order in report.get("orders") or []]
-        if not numbers or not all(number and number in deliverable for number in numbers):
+        if not numbers or not all(_deliverable_reports(deliverable, number) for number in numbers):
             return False, f"Final answer did not report order number {numbers or '<none placed>'}"
     return True, f"Rose Shop {manifest.get('scenario')}: {trail}"

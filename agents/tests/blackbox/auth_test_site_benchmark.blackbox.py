@@ -391,6 +391,15 @@ def test_outcome_check_grades_the_sites_own_records() -> None:
     ok, detail = evaluate_outcome(retry, evidence, "You're signed in to Rose Shop.")
     assert not ok and MEMBER_NUMBER in detail
 
+    # The outcome check grades information, not the output schema's typing: a
+    # member number the schema typed as an integer still reaches the user.
+    ok, detail = evaluate_outcome(retry, evidence, "Member Number: 12345678")
+    assert ok, detail
+    ok, detail = evaluate_outcome(retry, evidence, "Member Number: RS 1234 5678")
+    assert ok, detail
+    ok, detail = evaluate_outcome(retry, evidence, "Member Number: 87654321")
+    assert not ok and MEMBER_NUMBER in detail
+
     lucky = {
         "manifest": _manifest("password_retry"),
         "report": {
