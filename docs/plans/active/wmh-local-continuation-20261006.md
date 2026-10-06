@@ -1,9 +1,12 @@
 # WMH build and fundraiser benchmark: local continuation
 
-Status: WIP snapshot from the cloud `porto-novo` checkout on 2026-10-06. This
-branch preserves its tracked and untracked source changes. It is **not merged or
-deployed**. The October 1 `/deploy` of `a4b605f` was a separate change and did
-not ship this WMH work.
+Status: WIP snapshot on remote branch `codex/wmh-handoff-20261006` from the
+cloud `porto-novo` checkout on 2026-10-06. This branch preserves its tracked
+and untracked source changes. It is **not merged or deployed**. The October 1
+`/deploy` of `a4b605f` was a separate change and did not ship this WMH work.
+For a checkout from another branch, use the local Git worktree command in
+`WMH_HANDOFF.md`. Portable run records and reports are included under
+`docs/plans/active/wmh-evidence-20261006/`.
 
 ## Goal and user decisions
 
@@ -52,8 +55,10 @@ movement should occur in simulate mode.
   DEMO cache), `run_benchmark.py`/`local.py` (simulation and reporting),
   `agents/helpers/world_model_runtime.py`, and
   `agents/benchmarks/tasks.json` (fundraiser contract).
-- The ignored cloud artifact `.context/world-model/` is about 1.7 GB and is
-  **not on this Git branch**. Its September 28 corpus conformance report passed:
+- The generated model artifact `.context/world-model/` is about 1.7 GB and its
+  binary index is **not on this Git branch**. The exact run records, corpus
+  conformance, delta index, audits, and small model metadata are included as
+  portable evidence files. The September 28 corpus conformance report passed:
   100 sampled examples, 7,264 trajectories, 10 categories, 42 tool names,
   103,519 eligible examples. The saved prediction score in `.context/` is from
   an older build; it does not validate this artifact or a new local rebuild.

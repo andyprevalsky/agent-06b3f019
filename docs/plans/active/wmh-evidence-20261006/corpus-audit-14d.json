@@ -1,0 +1,84 @@
+{
+  "14_day_db_roots": 3586,
+  "14_day_indexed_modes": {
+    "real": 1977
+  },
+  "14_day_indexed_runs": 1977,
+  "14_day_indexed_sources": {
+    "benchmark": 1687,
+    "production": 290
+  },
+  "14_day_indexed_statuses": {
+    "ACTIVE": 276,
+    "COMPLETED": 1576,
+    "FAILED": 6,
+    "PAUSED": 119
+  },
+  "14_day_indexed_steps": 30953,
+  "14_day_indexed_steps_by_source": {
+    "benchmark": 27224,
+    "production": 3729
+  },
+  "14_day_stage_counts": {
+    "demo": 102,
+    "indexed": 1977,
+    "missing-manifest": 3,
+    "missing-start": 14,
+    "no-completed-results": 722,
+    "no-result-artifacts": 690,
+    "non-real:pending": 15,
+    "non-real:simulate": 23,
+    "not-in-r2-screen": 6,
+    "post-screen-export-or-integrity-failure": 15,
+    "unreadable-manifest": 19
+  },
+  "14_day_stage_counts_by_source": {
+    "benchmark": {
+      "demo": 102,
+      "indexed": 1687,
+      "missing-start": 6,
+      "no-completed-results": 22,
+      "non-real:pending": 15,
+      "non-real:simulate": 23,
+      "not-in-r2-screen": 3,
+      "post-screen-export-or-integrity-failure": 15,
+      "unreadable-manifest": 19
+    },
+    "production": {
+      "indexed": 290,
+      "missing-manifest": 3,
+      "missing-start": 8,
+      "no-completed-results": 700,
+      "no-result-artifacts": 690,
+      "not-in-r2-screen": 3
+    }
+  },
+  "all_time_indexed_runs": 7050,
+  "all_time_indexed_steps": 100756,
+  "all_time_screened": 87233,
+  "cutoff": "2026-08-29T18:29:00.000Z",
+  "indexed_members_with_noneligible_verdict": {},
+  "post_screen_missing_count": 15,
+  "post_screen_missing_sample": [
+    "03d77bf3-29e7-45ee-8092-e63128a85bbc",
+    "064b5bdd-3ce9-4152-a7df-b1e048ee79d7",
+    "0b9d33c2-f22a-4265-9cf9-58d7f6c7cd83",
+    "219df1c9-4cdc-4208-afb9-7a8fd1e4a95a",
+    "2756641a-c31a-4e47-ace7-9309944b280a",
+    "3a9d79e5-8566-4489-b392-509f7b45add9",
+    "4d52f69b-739e-4d53-893b-8656addfdec0",
+    "66be26f3-2272-46f7-b5b1-c44ef76bb4f7",
+    "8829a800-8c58-4657-b135-ab09c28c9545",
+    "b254b195-1341-4718-b667-56524664c37f",
+    "bcaa6591-06f8-49d6-9d39-e7c49a75e7dc",
+    "c5ad3f37-ad3e-48d5-a210-b5e2635623f0",
+    "c993d6bb-566d-448d-aaa9-9f4a20fbca43",
+    "d3210ca4-780a-46c7-ac7d-887c9b0969fb",
+    "e2681fe6-478d-431d-aa9c-f63d8ab1554b"
+  ],
+  "queried_at": "2026-09-12T21:53:11.465Z",
+  "screening_policy": "real-results-v6",
+  "snapshot_as_of": "2026-09-12T18:29:00.000Z",
+  "zero_step_indexed_count": 0,
+  "zero_step_indexed_sample": []
+}
