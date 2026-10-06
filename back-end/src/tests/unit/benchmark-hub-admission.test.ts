@@ -322,3 +322,178 @@ test('settled packets are evicted and late live packets preserve the absorbing f
   assert.equal(boundary.stats().transactions, 4);
   assert.deepEqual(JSON.parse(boundary.objects.get(`runs/${packet.run_id}.json`)!), terminalPacket);
 });
+
+test('nonconsecutive identical packets preserve actual A B A storage order', async (context) => {
+  const entered = deferred();
+  const gate = deferred();
+  const boundary = putBoundary(async (key) => {
+    if (key.startsWith('runs/')) {
+      entered.resolve();
+      await gate.promise;
+    }
+  });
+  const first = boundary.putRun(packet, { live: true, source: 'fixture' });
+  await entered.promise;
+  const second = boundary.putRun(
+    { ...packet, marker: 'changed' },
+    { live: true, source: 'fixture' }
+  );
+  const last = boundary.putRun(JSON.parse(JSON.stringify(packet)), {
+    live: true,
+    source: 'fixture',
+  });
+  gate.resolve();
+  await Promise.all([first, second, last]);
+  const persisted = JSON.parse(boundary.objects.get(`runs/${packet.run_id}.json`)!);
+  context.diagnostic(
+    JSON.stringify({
+      control: 'actual A B A storage',
+      firstAndLastSharePromise: first === last,
+      actualRunWrites: boundary.runWrites().length,
+      finalPacketIsLastA: JSON.stringify(persisted) === JSON.stringify(packet),
+    })
+  );
+  assert.deepEqual(
+    boundary.runWrites().map(({ value }) => JSON.parse(value)),
+    [packet, { ...packet, marker: 'changed' }, packet]
+  );
+  assert.deepEqual(persisted, packet);
+  assert.notEqual(last, first);
+});
+
+for (const mode of ['source', 'live'] as const) {
+  test(`an intervening same-run ${mode} change admits the final identical packet`, async () => {
+    const entered = deferred();
+    const gate = deferred();
+    const boundary = putBoundary(async (key) => {
+      if (key.startsWith('runs/')) {
+        entered.resolve();
+        await gate.promise;
+      }
+    });
+    const options = { live: mode === 'source', source: 'fixture' };
+    const first = boundary.putRun(packet, options);
+    await entered.promise;
+    const second = boundary.putRun(
+      packet,
+      mode === 'source' ? { ...options, source: 'other-source' } : { ...options, live: true }
+    );
+    const last = boundary.putRun(JSON.parse(JSON.stringify(packet)), options);
+    gate.resolve();
+    const results = await Promise.all([first, second, last]);
+    assert.notEqual(last, first);
+    assert.equal(boundary.stats().transactions, 3);
+    assert.equal(boundary.runWrites().length, mode === 'source' ? 3 : 2);
+    assert.equal(results[2].source, 'fixture');
+    assert.equal(results[2].live, options.live);
+    assert.deepEqual(JSON.parse(boundary.objects.get(`runs/${packet.run_id}.json`)!), packet);
+  });
+}
+
+for (const fails of [false, true]) {
+  test(`an earlier ${fails ? 'rejection' : 'success'} cannot evict the latest pending packet`, async () => {
+    const entered = deferred();
+    const firstGate = deferred();
+    const secondGate = deferred();
+    const marker = new Error('fixture earlier write failure');
+    let runWrites = 0;
+    const boundary = putBoundary(async (key) => {
+      if (!key.startsWith('runs/')) return;
+      runWrites += 1;
+      if (runWrites === 1) {
+        entered.resolve();
+        await firstGate.promise;
+        if (fails) throw marker;
+      }
+      if (runWrites === 2) await secondGate.promise;
+    });
+    const first = boundary.putRun(packet, { live: true, source: 'fixture' });
+    const firstOutcome = first.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    await entered.promise;
+    const second = boundary.putRun(
+      { ...packet, marker: 'changed' },
+      { live: true, source: 'fixture' }
+    );
+    const last = boundary.putRun(JSON.parse(JSON.stringify(packet)), {
+      live: true,
+      source: 'fixture',
+    });
+    const lastOutcome = last.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    firstGate.resolve();
+    const firstResult = await firstOutcome;
+    const peer = boundary.putRun(JSON.parse(JSON.stringify(packet)), {
+      live: true,
+      source: 'fixture',
+    });
+    const outcomes = Promise.allSettled([second, last, peer]);
+    secondGate.resolve();
+    const results = await outcomes;
+    assert.equal(firstResult, fails ? marker : undefined);
+    assert.equal(peer, last);
+    assert.equal(await lastOutcome, undefined);
+    assert.ok(results.every((result) => result.status === 'fulfilled'));
+    assert.equal(boundary.stats().transactions, 3);
+    assert.equal(boundary.runWrites().length, fails ? 2 : 3);
+    assert.deepEqual(JSON.parse(boundary.objects.get(`runs/${packet.run_id}.json`)!), packet);
+  });
+}
+
+test('a different run preserves consecutive duplicate sharing for the first run', async () => {
+  const entered = deferred();
+  const gate = deferred();
+  const boundary = putBoundary(async (key) => {
+    if (key.startsWith('runs/')) {
+      entered.resolve();
+      await gate.promise;
+    }
+  });
+  const first = boundary.putRun(packet, { live: true, source: 'fixture' });
+  await entered.promise;
+  const other = boundary.putRun(
+    { ...packet, run_id: 'fixture-other' },
+    { live: true, source: 'fixture' }
+  );
+  const last = boundary.putRun(JSON.parse(JSON.stringify(packet)), {
+    live: true,
+    source: 'fixture',
+  });
+  gate.resolve();
+  await Promise.all([first, other, last]);
+  assert.equal(last, first);
+  assert.equal(boundary.stats().transactions, 2);
+  assert.equal(boundary.runWrites().length, 2);
+});
+
+test('coalescing follows the same normalized run identity as actual persistence', async () => {
+  const entered = deferred();
+  const gate = deferred();
+  const boundary = putBoundary(async (key) => {
+    if (key.startsWith('runs/')) {
+      entered.resolve();
+      await gate.promise;
+    }
+  });
+  const firstPacket = { ...packet, run_id: 42 };
+  const first = boundary.putRun(firstPacket, { live: true, source: 'fixture' });
+  await entered.promise;
+  const second = boundary.putRun(
+    { ...firstPacket, run_id: '42', marker: 'changed' },
+    { live: true, source: 'fixture' }
+  );
+  const last = boundary.putRun(JSON.parse(JSON.stringify(firstPacket)), {
+    live: true,
+    source: 'fixture',
+  });
+  gate.resolve();
+  await Promise.all([first, second, last]);
+  assert.notEqual(last, first);
+  assert.equal(boundary.stats().transactions, 3);
+  assert.equal(boundary.runWrites().length, 3);
+  assert.deepEqual(JSON.parse(boundary.objects.get('runs/42.json')!), firstPacket);
+});
