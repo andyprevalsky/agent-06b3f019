@@ -58,6 +58,8 @@ CALLEE_NUMBER_NAME = "rose-benchmark-callee"
 CALLEE_SESSION_NUMBER_PREFIX = f"{CALLEE_NUMBER_NAME}-session-"
 CALLEE_NUMBER_ID_ENV = "BENCHMARK_CALLEE_PHONE_NUMBER_ID"
 CALLEE_NUMBER_IDS_ENV = "BENCHMARK_CALLEE_PHONE_NUMBER_IDS"
+CALLEE_ASSISTANT_NAME_PREFIX = "benchmark-callee-"
+# Longer than any phone task's session, so an older session resource is a leak.
 CALLEE_SESSION_NUMBER_TTL = timedelta(hours=5)
 # Vapi documents a "couple of minutes" before free numbers become functional;
 # keep a small propagation margin so benchmark calls never race that boundary.
@@ -548,6 +550,7 @@ class PhoneCalleeSession:
                 await self._create_persona_tools(client)
                 await self._create_persona_assistant(client)
                 await self._attach_assistant(client, self.assistant_id)
+                await self._reclaim_leaked_prior_assistant(client)
             self.hold_line = self._new_hold_line()
             if self.hold_line is not None:
                 await self.hold_line.acquire()
@@ -644,6 +647,34 @@ class PhoneCalleeSession:
             if response.status_code != 200:
                 print(f"    ⚠ Failed to reclaim stale callee number {number_id[:8]}: {response.status_code}")
 
+    async def _reclaim_leaked_prior_assistant(self, client: httpx.AsyncClient) -> None:
+        """A persona assistant older than any session is a leak: delete it instead of restoring it later."""
+        prior_id = self._prior_assistant_id
+        if not prior_id or prior_id == self.assistant_id:
+            return
+        try:
+            resp = await client.get(f"/assistant/{prior_id}")
+            if resp.status_code == 404:
+                self._prior_assistant_id = None
+                return
+            resp.raise_for_status()
+            prior = resp.json() or {}
+            created_at = _parse_audit_timestamp(prior.get("createdAt"))
+            if not (
+                str(prior.get("name") or "").startswith(CALLEE_ASSISTANT_NAME_PREFIX)
+                and created_at is not None
+                and created_at < datetime.now(timezone.utc) - CALLEE_SESSION_NUMBER_TTL
+            ):
+                return
+            self._prior_assistant_id = None
+            deleted = await client.delete(f"/assistant/{prior_id}")
+            if deleted.status_code >= 300:
+                print(f"    ⚠ Failed to delete leaked callee assistant {prior_id[:8]}: {deleted.status_code}")
+                return
+            print(f"    🧹 Reclaimed leaked callee assistant {prior_id[:8]} created {prior.get('createdAt')}")
+        except httpx.HTTPError as exc:
+            print(f"    ⚠ Could not inspect prior callee assistant {prior_id[:8]}: {type(exc).__name__}: {exc}")
+
     async def _create_persona_tools(self, client: httpx.AsyncClient) -> None:
         tool_specs = self.persona.get("tools") or []
         if "complete_test_payment" not in tool_specs:
@@ -688,7 +719,7 @@ class PhoneCalleeSession:
 
     async def _create_persona_assistant(self, client: httpx.AsyncClient) -> None:
         config = dict(_CALLEE_ASSISTANT_BASE)
-        config["name"] = f"benchmark-callee-{self.task_name}"[:40]  # Vapi caps assistant names at 40 chars
+        config["name"] = f"{CALLEE_ASSISTANT_NAME_PREFIX}{self.task_name}"[:40]  # Vapi caps assistant names at 40 chars
         config["model"] = {
             **_CALLEE_ASSISTANT_BASE["model"],
             "messages": [{"role": "system", "content": self.persona["system_prompt"]}],
@@ -906,7 +937,9 @@ class PhoneCalleeSession:
                 async with httpx.AsyncClient(timeout=30) as control_client:
                     await control_client.post(control_url, json={"type": "end-call"})
             except Exception as exc:
-                print(f"    ⚠ Failed to end active callee call {str(call.get('id', ''))[:8]}: {exc}")
+                print(
+                    f"    ⚠ Failed to end active callee call {str(call.get('id', ''))[:8]}: {type(exc).__name__}: {exc}"
+                )
 
     async def _delete_owned_phone_number(self, client: httpx.AsyncClient) -> None:
         if not (self._owns_phone_number and self.phone_number_id):
@@ -953,7 +986,12 @@ class PhoneCalleeSession:
                         print(f"    ⚠ Failed to detach callee assistant: {exc}")
                 if self.assistant_id:
                     try:
-                        await client.delete(f"/assistant/{self.assistant_id}")
+                        deleted = await client.delete(f"/assistant/{self.assistant_id}")
+                        if deleted.status_code >= 300 and deleted.status_code != 404:
+                            print(
+                                f"    ⚠ Failed to delete callee assistant {self.assistant_id[:8]}: "
+                                f"{deleted.status_code} {deleted.text[:200]}"
+                            )
                     except Exception as exc:
                         print(f"    ⚠ Failed to delete callee assistant {self.assistant_id[:8]}: {exc}")
                     self.assistant_id = ""

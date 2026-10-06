@@ -421,6 +421,47 @@ def test_setup_leases_the_line_after_the_persona_and_cleanup_releases_it_first(m
     assert events.index("release") < events.index("vapi DELETE /assistant/asst-rep")
 
 
+def test_configured_number_reclaims_a_leaked_persona_assistant_instead_of_restoring_it():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    stale = (now - phone_callee.CALLEE_SESSION_NUMBER_TTL - timedelta(minutes=1)).isoformat()
+    fresh = (now - timedelta(hours=1)).isoformat()
+    assistants = {
+        "leaked": {"name": "benchmark-callee-phone-call-hold-queue", "createdAt": stale},
+        "concurrent": {"name": "benchmark-callee-phone-call-hold-queue", "createdAt": fresh},
+        "owner": {"name": "Rose Labs", "createdAt": stale},
+    }
+    requests: list[str] = []
+
+    def handler(request: phone_callee.httpx.Request) -> phone_callee.httpx.Response:
+        requests.append(f"{request.method} {request.url.path}")
+        assistant_id = request.url.path.rsplit("/", 1)[-1]
+        if request.method == "GET":
+            if assistant_id not in assistants:
+                return phone_callee.httpx.Response(404, json={"message": "Not Found"})
+            return phone_callee.httpx.Response(200, json={"id": assistant_id, **assistants[assistant_id]})
+        if request.method == "DELETE":
+            return phone_callee.httpx.Response(200, json={})
+        return phone_callee.httpx.Response(200, json={"id": "pn-hold", "assistantId": None})
+
+    async def prior_after_setup(prior_id: str) -> tuple:
+        requests.clear()
+        session = phone_callee.PhoneCalleeSession("phone-call-hold-queue", {"system_prompt": "p"}, api_key="k")
+        session.phone_number_id, session.assistant_id, session._prior_assistant_id = "pn-hold", "asst-new", prior_id
+        async with phone_callee.httpx.AsyncClient(
+            base_url="https://vapi.test", transport=phone_callee.httpx.MockTransport(handler)
+        ) as client:
+            await session._reclaim_leaked_prior_assistant(client)
+        return session._prior_assistant_id, list(requests)
+
+    assert asyncio.run(prior_after_setup("leaked")) == (None, ["GET /assistant/leaked", "DELETE /assistant/leaked"])
+    assert asyncio.run(prior_after_setup("concurrent")) == ("concurrent", ["GET /assistant/concurrent"])
+    assert asyncio.run(prior_after_setup("owner")) == ("owner", ["GET /assistant/owner"])
+    assert asyncio.run(prior_after_setup("deleted")) == (None, ["GET /assistant/deleted"])
+    assert asyncio.run(prior_after_setup("asst-new")) == ("asst-new", [])
+
+
 def test_callee_checks_match_spoken_calendar_dates():
     assert (
         phone_callee.callee_check_failures(
