@@ -118,7 +118,8 @@ CLOUDBENCH_FRESH_VOLUME=1 CLOUDBENCH_GIT_MIN_FREE_KB=1 \
   || fail "empty REAL-primary volume did not bootstrap its exact checkout"
 [ "$(git -C "$fresh_checkout" rev-parse HEAD)" = "$next_target" ] \
   || fail "fresh checkout did not verify the requested commit"
-[ "$(git -C "$fresh_checkout" remote get-url origin)" = https://github.com/Rose-Ai-Labs/rose.git ] \
+# Read the stored key: `remote get-url` applies the host's own insteadOf rules.
+[ "$(git -C "$fresh_checkout" config --get remote.origin.url)" = https://github.com/Rose-Ai-Labs/rose.git ] \
   || fail "fresh checkout persisted a rewritten or authenticated origin"
 assert_lock_released "$fresh_checkout/.git/cloudbench-fetch.lock"
 if CLOUDBENCH_GIT_MIN_FREE_KB=1 bash "$FETCH_SCRIPT" "$TMP_ROOT/not-authorized" "$next_target" >/dev/null 2>&1; then

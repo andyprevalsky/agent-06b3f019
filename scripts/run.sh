@@ -1546,9 +1546,8 @@ supervised_edge_probe() {
     # A configured proxy can answer with its own block page. Only the final
     # HTTP response identifies the edge; a proxy CONNECT response is earlier.
     if [ "$provider" = ngrok ]; then
-        # ngrok's edge has answered ERR_NGROK_8012 (agent reached, origin not
-        # listening yet) as 400 and, in current releases, as 502.
-        if { [ "$status" = "400" ] || [ "$status" = "502" ]; } && awk -v probe_status="$status" '
+        # ngrok 3.39's edge answers 502 for ERR_NGROK_8012; 400 is also accepted.
+        if { [ "$status" = "400" ] || [ "$status" = "502" ]; } && awk -v expected_status="$status" '
             {
                 line = tolower($0); sub(/\r$/, "", line)
                 if (line ~ /^http\/[0-9.]+[ \t]+[0-9][0-9][0-9]([ \t]|$)/) {
@@ -1557,7 +1556,7 @@ supervised_edge_probe() {
                 else if (in_headers && line ~ /^ngrok-error-code:[ \t]*err_ngrok_8012[ \t]*$/) { code = "err_ngrok_8012" }
                 else if (in_headers && line ~ /^server:/) { server = line; sub(/^server:[ \t]*/, "", server) }
             }
-            END { exit !(response_status == probe_status && code == "err_ngrok_8012" && (server == "" || server == "ngrok")) }
+            END { exit !(response_status == expected_status && code == "err_ngrok_8012" && (server == "" || server == "ngrok")) }
         ' "$headers_file"; then
             : # Actual provider response: this owned agent received traffic before its origin starts.
         elif [ "$status" = "200" ] && grep -qF '<div id="root">' "$probe_body_file"; then
@@ -1641,14 +1640,14 @@ from urllib.parse import urlsplit
 path, expected_url, expected_port = sys.argv[1:]
 
 
-def emitted_upstream(addr):
-    # ngrok 3.39 logs the upstream as Go's url.URL struct; older releases log the URL string.
+def owned_upstream(addr, port):
     if isinstance(addr, str):
-        return addr
-    url_parts = ("Opaque", "User", "Path", "RawPath", "RawQuery", "Fragment", "RawFragment")
-    if isinstance(addr, dict) and not any(addr.get(part) for part in url_parts):
-        return f"{addr.get('Scheme')}://{addr.get('Host')}"
-    return None
+        return addr == f"http://localhost:{port}"
+    # ngrok 3.39 logs the upstream as a serialized Go url.URL.
+    if isinstance(addr, dict):
+        rest = (value for key, value in addr.items() if key not in ("Scheme", "Host"))
+        return addr.get("Scheme") == "http" and addr.get("Host") == f"localhost:{port}" and not any(rest)
+    return False
 
 
 try:
@@ -1670,7 +1669,7 @@ try:
     if len(events) != 1:
         raise ValueError("ambiguous emitted endpoints")
     event = events[0]
-    if event.get("obj") != "tunnels" or event.get("name") != "command_line" or event.get("url") != expected_url or emitted_upstream(event.get("addr")) != f"http://localhost:{port}":
+    if event.get("obj") != "tunnels" or event.get("name") != "command_line" or event.get("url") != expected_url or not owned_upstream(event.get("addr"), port):
         raise ValueError("emitted endpoint does not belong to requested upstream")
 except FileNotFoundError:
     raise SystemExit(1)

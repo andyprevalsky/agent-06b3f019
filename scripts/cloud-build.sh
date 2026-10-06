@@ -82,11 +82,24 @@ if ! $IS_MAC; then
         if ! command -v pg_isready >/dev/null 2>&1; then
             $SUDO apt-get update -qq && $SUDO apt-get install -y -qq postgresql postgresql-client
         fi
+        # The pgvector installer builds against headers pinned to the installed
+        # server. A reused VM snapshot can carry a server minor the archive no
+        # longer offers headers for; move that server to the archive candidate first.
+        PG_MAJOR=$(ls /usr/lib/postgresql 2>/dev/null | sort -n | tail -1)
+        if [ -n "$PG_MAJOR" ] && [ ! -f "/usr/share/postgresql/$PG_MAJOR/extension/vector.control" ]; then
+            PG_INSTALLED=$(dpkg-query -W -f='${Version}' "postgresql-$PG_MAJOR" 2>/dev/null || true)
+            $SUDO apt-get update -qq
+            if [ -n "$PG_INSTALLED" ] && ! apt-cache madison "postgresql-server-dev-$PG_MAJOR" \
+                | awk -F'|' '{gsub(/ /, "", $2); print $2}' | grep -qxF "$PG_INSTALLED"; then
+                echo "   Refreshing postgresql-$PG_MAJOR $PG_INSTALLED (no matching headers in the archive)"
+                $SUDO apt-get install -y -qq --only-upgrade "postgresql-$PG_MAJOR" "postgresql-client-$PG_MAJOR" \
+                    || echo "   ⚠️  Could not refresh postgresql-$PG_MAJOR; pgvector install may fail"
+            fi
+        fi
         PG_VER=$(pg_lsclusters -h 2>/dev/null | head -1 | awk '{print $1}')
-        # pgvector for the installed major (planner-memory vector columns). The
-        # pinned build needs server headers at the exact installed version, which
-        # the archive drops once a newer patch ships; that must never abort the
-        # npm/venv provisioning below.
+        # pgvector for the installed major (planner-memory vector columns). If the
+        # pinned build still cannot find matching headers, that must never abort
+        # the npm/venv provisioning below.
         PG_FALLBACK_ERROR=""
         if ! $SUDO bash "$ROOT/scripts/cloudbench-install-pgvector.sh"; then
             echo "⚠️  Pinned pgvector build failed — installing postgresql-$PG_VER-pgvector"
@@ -136,12 +149,15 @@ JS_LOG="$(mktemp)"; PY_LOG="$(mktemp)"
 trap 'rm -f "$JS_LOG" "$PY_LOG"' EXIT
 
 (
-    if [ -f package.json ] && [ ! -d node_modules ]; then
+    # cloud-init seeds the DB through `npx --no-install tsx`, so a tree without
+    # the back-end devDependency tsx counts as unprovisioned.
+    if [ -f package.json ] && { [ ! -d node_modules ] \
+        || { [ ! -x node_modules/.bin/tsx ] && [ ! -x back-end/node_modules/.bin/tsx ]; }; }; then
         echo "📦 npm install (root + workspaces)..."
         # Arborist on npm 10.9 + this workspace tree throws
         # `Cannot read properties of null (reading 'edgesOut')` while
         # resolving vitest peers. --legacy-peer-deps skips that path.
-        npm install --no-audit --no-fund --legacy-peer-deps
+        npm install --include=dev --no-audit --no-fund --legacy-peer-deps
     else
         echo "✅ Root node_modules already present"
     fi

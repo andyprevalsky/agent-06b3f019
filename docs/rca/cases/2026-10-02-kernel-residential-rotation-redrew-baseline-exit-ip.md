@@ -17,8 +17,10 @@ tags:
   - residential-proxy
   - live-parity
   - deploy-gate
+  - steel
 sources:
   - PR #1341
+  - PR #1416
 repro: bash back-end/scripts/run-blackbox-tests.sh browser-provider
 status: open
 ---
@@ -81,6 +83,36 @@ Still open:
 - Whether Kernel residential sessions are sticky per session, and how large the
   San Francisco pool is, is not documented. One collision is not enough to
   decide between "verify and re-create once" and "rotate to a wider geo".
+
+## Recurrence: Steel residential, 2026-10-06
+
+`/deploy` Step 4a for PR #1416 (deploy run `20261006-025038-30459`, stage log
+`backend-coverage-blackbox-20261006-185334-1687886.log`) failed one of 185
+backend blackbox domains with
+`proxy returned unchanged exit IP 75.84.80.105 (rotation4 steel, Steel session 354b9aa0-89f7-4950-a9f0-e6e481cc0db6)`.
+No browser, Steel, or proxy code changed on the branch.
+
+This time the Kernel legs changed IP, and the collision was between the two
+Steel sessions. Steel rejected the San Francisco city proxy with
+`400 Invalid proxy configuration` on call 3. The retry dropped the city, and the
+memo then made call 4 request state-level CA directly. Both sessions reused the
+same persisted Steel profile with managed geolocation proxies, not Dedicated IPs.
+Call 4 created a new session (`354b9aa0-…`) and released the old one
+(`0488d9b6-…`), and all three reads on the new session returned the previous
+session's exit IP.
+
+| Run | Kernel baseline → residential → mobile | Steel call 3 | Steel call 4 |
+|---|---|---|---|
+| Failed coverage run | changed at every step | 75.84.80.105 | 75.84.80.105 on 3 reads |
+| Standalone rerun 1 | 76.21.2.117 → 99.42.140.107 → 97.215.199.108 | 192.241.14.45 | different (passed) |
+| Standalone rerun 2 | 75.26.17.134 → 23.93.95.39 → 172.56.47.88 | 47.146.111.217 | different (passed) |
+
+The profile does not pin the IP, since both reruns rotated on the same flow. So
+this is the same failure class at a different ladder step and provider: a fresh
+session from a managed residential pool can draw the previous session's exit
+node, and keep it. That makes two collisions, across two providers. Production
+`rotate_ip` still does not verify the exit IP, so the open item above still
+holds.
 
 ## Human feedback
 

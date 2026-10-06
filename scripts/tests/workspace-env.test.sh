@@ -546,7 +546,7 @@ grep -q 'cloudbench-install-pgvector.sh' "$pg_fallback_block" \
   || { echo "FAIL: could not extract cloud-build.sh's system Postgres fallback" >&2; exit 1; }
 pg_root="$TMP_ROOT/pg-fallback"
 mkdir -p "$pg_root/bin" "$pg_root/scripts"
-for tool in pg_isready pg_ctlcluster service su; do
+for tool in pg_isready pg_ctlcluster service su dpkg-query apt-cache; do
   printf '#!/bin/sh\nexit 0\n' >"$pg_root/bin/$tool"
 done
 printf '#!/bin/sh\nexit 1\n' >"$pg_root/bin/docker"
