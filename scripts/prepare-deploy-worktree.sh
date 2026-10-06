@@ -187,6 +187,22 @@ check_env_files() {
   done
 }
 
+# A venv copied from another checkout keeps that checkout's path in its
+# activate script, so `source venv/bin/activate` (run.sh, run_local_worker.sh)
+# runs the OTHER checkout's interpreter and packages while `venv/bin/python`
+# runs this one. Activate it for real instead of parsing the script, whose
+# shape differs across Python versions.
+agents_venv_is_self_rooted() {
+  local venv="$1"
+  local activated
+  [ -f "$venv/bin/activate" ] || return 1
+  activated="$(
+    bash -c '. "$1/bin/activate" >/dev/null 2>&1 && printf "%s" "${VIRTUAL_ENV:-}"' _ "$venv"
+  )" || return 1
+  [ -n "$activated" ] && [ -d "$activated" ] &&
+    [ "$(canonical_dir "$activated")" = "$(canonical_dir "$venv")" ]
+}
+
 ensure_dependencies() {
   local target="$1"
   local source_workspace="$2"
@@ -207,6 +223,7 @@ ensure_dependencies() {
     fi
     bash scripts/ensure-workspace-dependencies.sh "${workspaces[@]}"
     if [ ! -x agents/venv/bin/python ] ||
+      ! agents_venv_is_self_rooted agents/venv ||
       ! agents/venv/bin/python -c 'import browser_use, pytest, temporalio' >/dev/null 2>&1; then
       source_python="$source_workspace/agents/venv/bin/python"
       [ -x "$source_python" ] || source_python="$(command -v python3)"
@@ -220,6 +237,7 @@ ensure_dependencies() {
       agents/venv/bin/python -m pip install -r agents/requirements.txt
     fi
     agents/venv/bin/python -c 'import browser_use, pytest, temporalio' >/dev/null
+    agents_venv_is_self_rooted agents/venv
   )
 }
 
@@ -385,6 +403,11 @@ if $CHECK_ONLY; then
   check_env_files "$WORKTREE" "$ROSE_DEPLOY_SOURCE_WORKSPACE"
   [ -x "$WORKTREE/agents/venv/bin/python" ] || {
     echo "❌ Deploy worktree is missing agents/venv." >&2
+    exit 1
+  }
+  agents_venv_is_self_rooted "$WORKTREE/agents/venv" || {
+    echo "❌ Deploy worktree agents/venv activates another checkout's environment (copied venv)." >&2
+    echo "   Re-run deploy-worktree preparation to rebuild it in place." >&2
     exit 1
   }
   [ -d "$WORKTREE/node_modules" ] || {
