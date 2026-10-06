@@ -42,6 +42,7 @@ import {
 } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
 import type { RotationRecoveryAction, RotationStep } from './rotation';
+import { persistSignedInBrowserState } from './sessionAuthPersist';
 import { releaseSupersededBrowser } from './sessionCleanup';
 import {
   storedBrowserProvider,
@@ -233,6 +234,12 @@ export async function closeSession(
   pause = false,
   currentUrl?: string
 ): Promise<void> {
+  await persistSignedInBrowserState(sessionId).catch((error) => {
+    log.warn('Failed to persist signed-in browser state before close', {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
   const provider = await providerForSession(sessionId);
   if (provider === 'kernel') {
     await closeKernelSession(sessionId, pause, currentUrl);

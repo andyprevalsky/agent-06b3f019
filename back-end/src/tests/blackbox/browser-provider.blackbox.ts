@@ -27,6 +27,7 @@ import {
   isSteelProvisioningOutage,
   isSteelSessionValidationFailure,
 } from './browser-provider-rotation.support';
+import { runLiveKernelSteelAuthPersist } from './browser-provider.auth-persist.live';
 import { runLiveProviderParity } from './browser-provider.live.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import {
@@ -537,6 +538,17 @@ async function main(): Promise<void> {
     console.error(
       `FAIL live Kernel provider parity: ${error instanceof Error ? error.message : String(error)}`
     );
+  }
+
+  if (process.env.TEST_BASE_URL) {
+    try {
+      await runLiveKernelSteelAuthPersist();
+    } catch (error) {
+      failed++;
+      console.error(
+        `FAIL live Kernel/Steel auth persist: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   if (failed > 0) process.exit(1);
