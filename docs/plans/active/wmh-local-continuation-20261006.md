@@ -209,6 +209,47 @@ movement should occur in simulate mode.
 
 ## Continuation sequence
 
+October 6 native architecture continuation: work is isolated in
+`~/Developer/rose-wmh-experiential-parallel`, branch
+`codex/wmh-experiential-parallel-20261006`. Current main `21378a4d8` was
+integrated at `264f47eb6`. The native path pins Experiential `0.7.158` at
+`bf75987eac5e8c984d8f3868249f84e4095d1733` and uses its actual v3 request
+builder/parser, immutable dataset/RAG/model artifacts, lineage exclusion and
+context packing. Python 3.12 runs separately from Rose's Python 3.11 provider:
+the complete manifests conflict on anyio, so an authenticated loopback bridge
+retains existing credential leasing and pool routing without changing either
+dependency contract. Select it explicitly with `WMH_ENGINE=experiential`.
+
+Same-world predictions still overlap. Atomic commits compare the whole state
+revision and re-predict stale calls; disjoint writes alone cannot establish
+independence when both calls read a shared balance. Eight overlapping calls
+retain eight effects, with up to 36 predictions in the worst-case fixture.
+This is an eight-call boundary proof, not a 10,000-agent capacity result.
+Invocation receipts survive caller disconnects and deduplicate retries;
+failed operations release their receipts, and the parent joins its exact
+native child during shutdown. Generated predictions remain outside fit data.
+
+The final WMH blackbox gate returned `all_passed: True` with 23 native checks
+and 46 provider checks. The focused serving/provider/initial-state suites
+passed 60 tests. New evaluator tests first failed for exact canonical receipts,
+then passed with protocol-neutral decoding and unchanged fidelity thresholds.
+The caller retains its prior result shape. Native suites now record exact
+source transition IDs in `conformance.native.json` and require the served
+artifact ID and manifest digest to match before any live predictions. Legacy
+suites remain compatible. Native traces retain full root and delegated goals,
+returned responses, and typed failures with timing; a response rejected inside
+the provider is not falsely reported as captured. Unchanged archive updates
+validate/rebind the existing artifact rather than reconstructing the corpus;
+changed builds retain upstream embedding checkpoints.
+
+The full native import reached 179,150 observations, excluding nine explicit
+DEMO-fixture trajectories (19 observations) from the original 179,169-pair
+local snapshot. Index construction is still running; this does not yet prove
+a ready/loadable artifact, matching live conformance or improved fundraiser
+predictions. The previously recorded 97 remote checksum exclusions remain an
+open corpus gap. No native benchmark, viewer acceptance or production rollout
+has passed yet. The new model remains gitignored and must be rebuilt locally.
+
 1. Read `CLAUDE.md`, `docs/testing.md`, and
    `agents/benchmarks/README.md` (World-model refresh conformance). Set up the
    local Mac environment using repo guidance. Do not use the Linux cloud-init

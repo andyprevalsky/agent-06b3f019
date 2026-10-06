@@ -27,6 +27,7 @@ asyncio futures and tasks that must stay on their owning loop.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import threading
@@ -34,7 +35,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
 import structlog
-
 from providers.fast_cache.context import FastCacheContext
 from providers.rose import (
     ClaudeAuthContext,
@@ -44,10 +44,11 @@ from providers.rose import (
 from providers.rose.pricing import get_model_pricing
 from providers.rose.types import StreamChunk
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from wmh.providers.base import Completion, Message
+from utils.world_model_observation import effective_world_model_content
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
     from providers.rose.types import PoolName
+    from wmh.providers.base import Completion, Message
 
 logger = structlog.get_logger(__name__)
 
@@ -73,6 +74,7 @@ def _wmh_async_loop() -> asyncio.AbstractEventLoop:
                 raise RuntimeError("WMH async event loop failed to start")
             _WMH_ASYNC_LOOP = loop
         return _WMH_ASYNC_LOOP
+
 
 # The benchmark user whose pooled compute tokens back WMH inference by default.
 # Overridable via env so a different tenant's pool can be used.
@@ -105,8 +107,25 @@ def _wmh_cache_key_material(request: object) -> object:
         return request
     messages = []
     for message in request["messages"]:
-        if not isinstance(message, dict) or message.get("role") != "user" or not isinstance(message.get("content"), str):
+        if (
+            not isinstance(message, dict)
+            or message.get("role") != "user"
+            or not isinstance(message.get("content"), str)
+        ):
             messages.append(message)
+            continue
+        try:
+            native = json.loads(message["content"])
+        except (ValueError, TypeError):
+            native = None
+        if isinstance(native, dict) and "candidate_response" in native:
+            calls = native.get("candidate_response", {}).get("tool_calls", [])
+            for call in calls:
+                if isinstance(call.get("arguments"), dict):
+                    call["arguments"].pop("timestamp_ms", None)
+            messages.append(
+                {**message, "content": json.dumps(native, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
+            )
             continue
         lines = []
         for line in message["content"].splitlines(keepends=True):
@@ -128,7 +147,7 @@ class _WMHFastCacheContext(FastCacheContext):
         return bool(self.enabled and self.write_enabled)
 
     def llm_key(self, call_site: str, messages: object = None) -> str:
-        if call_site == "wmh_world_model":
+        if call_site in {"wmh_world_model", "wmh_world_model_v3"}:
             messages = _wmh_cache_key_material(messages)
         return super().llm_key(call_site, messages)
 
@@ -139,20 +158,68 @@ class _WMHInvalidPrediction(ValueError):
     def __init__(self, reason: str, usage: dict, actual_model: str) -> None:
         super().__init__(f"WMH prediction rejected: {reason}")
         self.usage = {
-            key: usage[key]
-            for key in ("prompt_tokens", "completion_tokens", "finish_reason")
-            if key in usage
+            key: usage[key] for key in ("prompt_tokens", "completion_tokens", "finish_reason") if key in usage
         }
         self.actual_model = actual_model
 
 
-def _require_wmh_prediction(content: str, usage: dict, actual_model: str) -> None:
+def _native_call_ids(messages: list[dict]) -> tuple[str, ...] | None:
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        try:
+            evidence = json.loads(message["content"])
+        except (ValueError, TypeError, KeyError):
+            continue
+        if isinstance(evidence, dict) and isinstance(evidence.get("candidate_response"), dict):
+            return tuple(call["call_id"] for call in evidence["candidate_response"].get("tool_calls", ()))
+    return None
+
+
+def _require_wmh_prediction(
+    content: str,
+    usage: dict,
+    actual_model: str,
+    *,
+    protocol: str = "legacy",
+    expected_call_ids: tuple[str, ...] | None = None,
+) -> None:
     from helpers.world_model_runtime import parse_world_model_prediction
 
     reason = "empty visible content" if not content.strip() else None
-    if reason is None:
+    if reason is None and protocol == "text-world-model-v3":
+        raw = content.strip()
+        if raw.startswith("```") and raw.endswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        try:
+            native = json.loads(raw)
+            if not isinstance(native, dict) or set(native) != {"message", "tool_results", "state", "terminal"}:
+                raise ValueError("Invalid native transition keys")
+            if native["message"] != "" or native["terminal"] is not False or not isinstance(native["state"], dict):
+                raise ValueError("Invalid native tool transition")
+            if not isinstance(native["tool_results"], list) or not native["tool_results"]:
+                raise ValueError("Missing native tool observations")
+            for result in native["tool_results"]:
+                if (
+                    set(result) != {"call_id", "content", "is_error"}
+                    or not isinstance(result["call_id"], str)
+                    or not result["call_id"]
+                    or not isinstance(result["content"], str)
+                    or not effective_world_model_content(result["content"]).strip()
+                    or type(result["is_error"]) is not bool
+                ):
+                    raise ValueError("Invalid native tool observation")
+            if (
+                expected_call_ids is not None
+                and tuple(result["call_id"] for result in native["tool_results"]) != expected_call_ids
+            ):
+                raise ValueError("Native result call IDs differ from the candidate action")
+            json.dumps(native, allow_nan=False)
+        except (ValueError, TypeError, KeyError) as exc:
+            reason = str(exc)
+    elif reason is None:
         observation = parse_world_model_prediction(content)
-        observation_content = observation["content"]
+        observation_content = effective_world_model_content(observation["content"])
         if not observation_content.strip():
             reason = "empty observation content"
     if reason is None and usage.get("finish_reason") == "length":
@@ -166,7 +233,9 @@ class _WMHCacheSafeRoseClient(RoseClient):
     """Keep leased credentials out of WMH's persisted DEMO response stream."""
 
     async def _complete_impl(self, **kwargs):
-        is_wmh = kwargs.get("call_site") == "wmh_world_model"
+        call_site = kwargs.get("call_site")
+        is_wmh = call_site in {"wmh_world_model", "wmh_world_model_v3"}
+        protocol = "text-world-model-v3" if call_site == "wmh_world_model_v3" else "legacy"
         content_parts = []
         usage = {}
         actual_model = ""
@@ -181,7 +250,15 @@ class _WMHCacheSafeRoseClient(RoseClient):
                 elif chunk.kind == "done":
                     # Rose writes the DEMO cache on done. Reject unusable output
                     # before that marker, and before WMH can commit a step.
-                    _require_wmh_prediction("".join(content_parts), usage, actual_model)
+                    _require_wmh_prediction(
+                        "".join(content_parts),
+                        usage,
+                        actual_model,
+                        protocol=protocol,
+                        expected_call_ids=_native_call_ids(kwargs.get("messages", []))
+                        if protocol == "text-world-model-v3"
+                        else None,
+                    )
             if is_wmh and chunk.kind == "usage":
                 token = chunk.data.get("compute_token_used")
                 if isinstance(token, dict):
@@ -207,6 +284,14 @@ def _wmh_task_from_messages(messages: List["Message"]) -> Optional[str]:
         content = message.content
         if message.role != "user" or not isinstance(content, str):
             continue
+        try:
+            native = json.loads(content)
+        except ValueError:
+            native = None
+        if isinstance(native, dict) and isinstance(native.get("task"), dict):
+            instruction = native["task"].get("instruction")
+            if isinstance(instruction, str) and instruction.strip():
+                return instruction.strip()
         _prefix, marker, tail = content.partition(_TASK_MARKER)
         if not marker:
             continue
@@ -231,9 +316,7 @@ def _demo_cache_goal_from_messages(messages: List["Message"]) -> Optional[str]:
         return None
     candidates = [task]
     if task.startswith(_ROOT_OBJECTIVE_MARKER):
-        root_goal, marker, _delegation = task.removeprefix(_ROOT_OBJECTIVE_MARKER).partition(
-            _DELEGATION_MARKER
-        )
+        root_goal, marker, _delegation = task.removeprefix(_ROOT_OBJECTIVE_MARKER).partition(_DELEGATION_MARKER)
         if marker and root_goal.strip():
             candidates.insert(0, root_goal.strip())
     return next((candidate for candidate in candidates if demo_cache_allowed(candidate)), None)
@@ -330,6 +413,13 @@ class _RoseProviderConfig:
         self.model = model
 
 
+@dataclass
+class _NativeCompletion:
+    text: str
+    usage: object
+    actual_model: str
+
+
 class RoseWMHProvider:
     """WMH `Provider` whose `complete()` routes through Rose completions.
 
@@ -347,8 +437,12 @@ class RoseWMHProvider:
         model_label: Optional[str] = None,
         client: Optional[RoseClient] = None,
         usage: Optional[RoseUsageAccumulator] = None,
+        protocol: str = "legacy",
     ) -> None:
         self._pool: "PoolName" = pool
+        if protocol not in {"legacy", "text-world-model-v3"}:
+            raise ValueError("Unknown world-model protocol")
+        self._protocol = protocol
         self._user_id = _resolve_user_id(user_id)
         # `config.model` is a metering label only (no model resolution happens here —
         # the pool decides the real model). Default to the pool name so the metered
@@ -385,9 +479,7 @@ class RoseWMHProvider:
             running_loop = None
         if running_loop is loop:
             raise RuntimeError("WMH synchronous complete cannot run on its async bridge loop")
-        future = asyncio.run_coroutine_threadsafe(
-            self._complete_async(system, messages, max_tokens=max_tokens), loop
-        )
+        future = asyncio.run_coroutine_threadsafe(self._complete_async(system, messages, max_tokens=max_tokens), loop)
         return future.result()
 
     def embed(self, texts: List[str]) -> List[List[float]]:  # pragma: no cover - not on serve path
@@ -397,9 +489,7 @@ class RoseWMHProvider:
         )
 
     def verify(self):  # pragma: no cover - not on serve path
-        raise NotImplementedError(
-            "RoseWMHProvider does not implement verify(); it is not on the serve step path."
-        )
+        raise NotImplementedError("RoseWMHProvider does not implement verify(); it is not on the serve step path.")
 
     # -- internals -------------------------------------------------------------
 
@@ -412,13 +502,12 @@ class RoseWMHProvider:
     ) -> "Completion":
         # Import the vendored value types lazily so importing this module doesn't require
         # the `wmh` package (e.g. for unit tests that monkeypatch the client).
-        from wmh.providers.base import Completion, TokenUsage
-
         from providers.fast_cache.context import (
             current_context,
             reset_context,
             set_context,
         )
+        from wmh.providers.base import Completion, TokenUsage
 
         rose_messages = _to_rose_messages(system, messages)
         demo_goal = _demo_cache_goal_from_messages(messages)
@@ -442,7 +531,7 @@ class RoseWMHProvider:
                 max_tokens=max_tokens,
                 claude_auth=claude_auth,
                 gpt_auth=gpt_auth,
-                call_site="wmh_world_model",
+                call_site="wmh_world_model_v3" if self._protocol == "text-world-model-v3" else "wmh_world_model",
                 dump_context=False,
             )
         except _WMHInvalidPrediction as exc:
@@ -456,11 +545,20 @@ class RoseWMHProvider:
         input_tokens, output_tokens = self._record_usage(usage, response.actual_model or "")
         # Cached responses bypass _complete_impl; validate them at the provider
         # boundary as well. A rejected prediction never reaches parse_observation.
-        _require_wmh_prediction(response.content, usage, response.actual_model or "")
+        _require_wmh_prediction(
+            response.content,
+            usage,
+            response.actual_model or "",
+            protocol=self._protocol,
+            expected_call_ids=_native_call_ids(rose_messages) if self._protocol == "text-world-model-v3" else None,
+        )
 
-        return Completion(
+        completion_type = _NativeCompletion if self._protocol == "text-world-model-v3" else Completion
+        extra = {"actual_model": response.actual_model or ""} if self._protocol == "text-world-model-v3" else {}
+        return completion_type(
             text=response.content,
             usage=TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens),
+            **extra,
         )
 
     def _record_usage(self, usage: dict, actual_model: str) -> tuple[int, int]:

@@ -32,6 +32,8 @@ from typing import Any, Awaitable, Callable, Iterable, Iterator, Optional
 
 import httpx
 
+from utils.world_model_observation import normalize_world_model_observation
+
 from helpers.context_scope import is_internal_subagent_message
 from helpers.trace_archive import (
     archive_backend_is_r2,
@@ -3015,9 +3017,12 @@ def score_observation_prediction(
     a disabled/not-configured report rather than pretending fidelity was measured.
     """
 
+    predicted = normalize_world_model_observation(predicted, canonical=True)
     schema_validity = 1.0 if isinstance(predicted.get("content"), str) else 0.0
     predicted_content = str(predicted.get("content") or "")
     predicted_metadata = predicted.get("metadata") if isinstance(predicted.get("metadata"), dict) else {}
+    if isinstance(predicted.get("artifact_refs"), list):
+        predicted_metadata = {**predicted_metadata, "artifact_refs": predicted["artifact_refs"]}
     content_accuracy = _token_f1(actual.content, predicted_content)
     actual_note = actual.metadata.get("state_note")
     predicted_note = predicted_metadata.get("state_note")
@@ -3766,6 +3771,10 @@ def update_world_model_for_simulation(
         )
     manifest_path = out_dir / "build.manifest.json"
     needs_build = force or not manifest_path.exists()
+    native_engine = os.environ.get("WMH_ENGINE") == "experiential"
+    if native_engine and manifest_path.exists():
+        current_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        needs_build = needs_build or current_manifest.get("engine") != "experiential"
     # A newly ineligible retained bundle (for example a DEMO task admitted by
     # an older screening policy) changes the aggregate even when no surviving
     # bundle needs re-export. Refresh the retriever so removed steps cannot
@@ -3791,7 +3800,22 @@ def update_world_model_for_simulation(
 
     build_manifest: JsonObject
     index_refresh: JsonObject | None = None
-    if needs_build:
+    if native_engine:
+        from benchmarks.experiential_bridge import build_native
+
+        if needs_build or needs_index_refresh:
+            build_native(out_dir, out_dir, name, os.environ.get("WMH_ROSE_POOL", "rose-1-ultra"))
+        else:
+            # Rebind the refreshed suite against the verified immutable artifact,
+            # without reconstructing its dataset or index. Runtime identity checks
+            # reject a changed prompt, pool, capability contract or corrupt source.
+            build_native(out_dir, out_dir, name, os.environ.get("WMH_ROSE_POOL", "rose-1-ultra"), bind_only=True)
+        build_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        build_manifest["build_skipped"] = not (needs_build or needs_index_refresh)
+        build_ran = needs_build or needs_index_refresh
+        conformance_path = out_dir / "conformance.native.json"
+        conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+    elif needs_build:
         build_manifest = build_world_model_from_otel_jsonl(
             aggregate_trace_file,
             out_dir,
@@ -3808,7 +3832,9 @@ def update_world_model_for_simulation(
             judge_provider=judge_provider,
             embedder=embedder,
         )
+        build_ran = True
     else:
+        build_ran = False
         build_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         build_manifest["build_skipped"] = True
         if needs_index_refresh:
@@ -3879,7 +3905,7 @@ def update_world_model_for_simulation(
         "ciphertext_bytes": total_ciphertext_bytes,
         "aggregate_trace_bytes": aggregate_bytes,
         "replay_corpus_bytes": session_bytes,
-        "build_ran": needs_build,
+        "build_ran": build_ran,
         "index_refreshed": needs_index_refresh,
         "index_refresh": index_refresh,
         "elapsed_ms": elapsed_ms,
@@ -3898,7 +3924,7 @@ def update_world_model_for_simulation(
         replay_corpus_bytes=session_bytes,
         conformance_status=conformance["status"],
         conformance_examples=conformance["sampled_examples"],
-        build_ran=needs_build,
+        build_ran=build_ran,
         elapsed_ms=elapsed_ms,
     )
     return result
@@ -3971,6 +3997,15 @@ class WMHHttpClient:
             data = response.json()
         models = data.get("world_models")
         return models if isinstance(models, list) else []
+
+    async def model_identity(self, world_model: str) -> JsonObject:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.get(f"{self.base_url}/healthz")
+            response.raise_for_status()
+            data = response.json()
+        if data.get("world_model_name") != world_model:
+            raise ValueError("Served native world model identity names another model")
+        return {key: data.get(key) for key in ("world_model_id", "world_model_manifest_sha256")}
 
     async def start_session(
         self, world_model: str, *, task: str | None = None, seed_state: JsonObject | None = None
@@ -4047,6 +4082,19 @@ async def evaluate_world_model_conformance_suite(
         if not base_url:
             raise ValueError("base_url is required when client is not provided")
         client = WMHHttpClient(base_url)
+    bound_identity: JsonObject = {}
+    if payload.get("native_world_model_id") or payload.get("native_world_model_manifest_sha256"):
+        expected_identity = {
+            "world_model_id": payload.get("native_world_model_id"),
+            "world_model_manifest_sha256": payload.get("native_world_model_manifest_sha256"),
+        }
+        if not all(isinstance(value, str) and value for value in expected_identity.values()):
+            raise ValueError("Native conformance suite has incomplete artifact identity")
+        identity_reader = getattr(client, "model_identity", None)
+        if identity_reader is None or await identity_reader(world_model_name) != expected_identity:
+            raise ValueError("Served native artifact identity differs from the bound conformance suite")
+        bound_identity = {"native_world_model_id": expected_identity["world_model_id"],
+                          "native_world_model_manifest_sha256": expected_identity["world_model_manifest_sha256"]}
     semaphore = asyncio.Semaphore(concurrency)
 
     async def score_example(index: int, example: JsonObject) -> JsonObject:
@@ -4153,6 +4201,7 @@ async def evaluate_world_model_conformance_suite(
     )
     report: JsonObject = {
         "schema": "rose.wmh_prediction_conformance.v1",
+        **bound_identity,
         "status": "passed" if passed else "failed",
         "world_model": world_model_name,
         "base_url": base_url,

@@ -19,12 +19,14 @@ in an inner `run()` coroutine driven by `asyncio.run(...)`.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
 import pytest
+from providers.rose import ClaudeAuthContext, RoseResponse
 from wmh.providers.base import Message
 
 from benchmarks import wmh_rose_provider
@@ -35,7 +37,83 @@ from benchmarks.wmh_rose_provider import (
     _cost_usd_for_call,
     _to_rose_messages,
 )
-from providers.rose import ClaudeAuthContext, RoseResponse
+
+
+@pytest.mark.parametrize("legacy_wrapper", [False, True])
+def test_native_canonical_receipt_scores_identically_to_unwrapped_observation(legacy_wrapper):
+    from benchmarks.world_model_harness import CanonicalObservation, score_observation_prediction
+    from utils.world_model_observation import world_model_observation_to_tool_result
+
+    actual = CanonicalObservation(
+        category="browser",
+        content="observed",
+        is_error=True,
+        metadata={"state_note": "submitted form"},
+        artifact_refs=["artifact://recording/123"],
+    )
+    content = actual.to_output_text()
+    if legacy_wrapper:
+        content = json.dumps({"output": content, "is_error": True, "state_note": "submitted form"})
+    predicted = {"content": content, "is_error": False, "metadata": {"protocol": "text-world-model-v3"}}
+    expected = {
+        "content": actual.content,
+        "is_error": True,
+        "metadata": {**actual.metadata, "artifact_refs": actual.artifact_refs},
+    }
+    assert world_model_observation_to_tool_result(predicted, simulated=True)["message"] == actual.content
+    assert score_observation_prediction(actual, predicted) == score_observation_prediction(actual, expected)
+    assert score_observation_prediction(actual, predicted)[0] == 1.0
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_native_conformance_requires_exact_served_artifact_identity(tmp_path, matching):
+    from benchmarks.world_model_harness import evaluate_world_model_conformance_suite
+
+    class Client:
+        predictions = 0
+
+        async def model_identity(self, name):
+            return {
+                "world_model_id": "artifact-a" if matching else "artifact-b",
+                "world_model_manifest_sha256": "a" * 64,
+            }
+
+        async def start_session(self, *args, **kwargs):
+            self.predictions += 1
+            return "session"
+
+        async def step(self, *args, **kwargs):
+            return {"content": "exact observation", "is_error": False, "metadata": {}}
+
+    suite = {
+        "schema": "rose.wmh_conformance_suite.v1",
+        "status": "passed",
+        "requested_examples": 1,
+        "native_world_model_id": "artifact-a",
+        "native_world_model_manifest_sha256": "a" * 64,
+        "examples": [
+            {
+                "task": "root task",
+                "action": {
+                    "category": "browser",
+                    "name": "spawn_browser_agent",
+                    "arguments": {},
+                    "tool_call_id": "call",
+                },
+                "observation": {"category": "browser", "content": "exact observation"},
+            }
+        ],
+    }
+    path = tmp_path / "suite.json"
+    path.write_text(json.dumps(suite))
+    client = Client()
+    if matching:
+        report = asyncio.run(evaluate_world_model_conformance_suite(path, world_model_name="rose-test", client=client))
+        assert report["status"] == "passed" and report["native_world_model_id"] == "artifact-a"
+    else:
+        with pytest.raises(ValueError, match="identity"):
+            asyncio.run(evaluate_world_model_conformance_suite(path, world_model_name="rose-test", client=client))
+        assert client.predictions == 0
 
 
 class _FakeRoseClient:
@@ -108,6 +186,279 @@ def test_message_conversion_puts_system_first():
     ]
 
 
+def test_native_protocol_uses_same_rose_transport_and_retains_actual_model(monkeypatch):
+    text = json.dumps(
+        {
+            "message": "",
+            "tool_results": [{"call_id": "call-1", "content": "observed", "is_error": False}],
+            "state": {"forms": {}},
+            "terminal": False,
+        }
+    )
+    fake = _FakeRoseClient(_canned_response(content=text, prompt=10, completion=5, token_used=None))
+    provider = RoseWMHProvider(client=fake, protocol="text-world-model-v3", usage=RoseUsageAccumulator())
+
+    async def no_auth():
+        return None, None
+
+    monkeypatch.setattr(provider, "_lease_auth", no_auth)
+    request = {
+        "task": {"instruction": "Find application"},
+        "candidate_response": {
+            "tool_calls": [
+                {
+                    "call_id": "call-1",
+                    "name": "rose.browser.spawn_browser_agent",
+                    "arguments": {"timestamp_ms": 1, "arguments": {"goal": "Inspect application"}},
+                }
+            ]
+        },
+    }
+    completion = provider.complete("native system", [Message(role="user", content=json.dumps(request))])
+    assert completion.text == text and completion.actual_model == "claude-haiku-4-5-claude"
+    assert fake.calls[0]["call_site"] == "wmh_world_model_v3" and fake.calls[0]["max_tokens"] == 16384
+    assert fake.calls[0]["messages"][1]["content"] == json.dumps(request)
+
+
+def test_native_cache_fingerprint_changes_only_current_action_timestamp():
+    original = {
+        "messages": [
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "candidate_response": {"tool_calls": [{"call_id": "1", "arguments": {"timestamp_ms": 1}}]},
+                        "environment_state": {"timestamp_ms": 10},
+                        "grounded_examples": [{"timestamp_ms": 20}],
+                    }
+                ),
+            }
+        ]
+    }
+    other = json.loads(json.dumps(original))
+    body = json.loads(other["messages"][0]["content"])
+    body["candidate_response"]["tool_calls"][0]["arguments"]["timestamp_ms"] = 2
+    other["messages"][0]["content"] = json.dumps(body)
+    assert wmh_rose_provider._wmh_cache_key_material(original) == wmh_rose_provider._wmh_cache_key_material(other)
+    body["environment_state"]["timestamp_ms"] = 11
+    other["messages"][0]["content"] = json.dumps(body)
+    assert wmh_rose_provider._wmh_cache_key_material(original) != wmh_rose_provider._wmh_cache_key_material(other)
+    assert (
+        json.loads(original["messages"][0]["content"])["candidate_response"]["tool_calls"][0]["arguments"][
+            "timestamp_ms"
+        ]
+        == 1
+    )
+
+
+def test_native_provider_bridge_rejects_unauthorized_calls_and_exposes_safe_usage():
+    from fastapi.testclient import TestClient
+
+    from benchmarks.experiential_bridge import build_provider_bridge
+
+    class Provider:
+        _usage = RoseUsageAccumulator()
+
+    http = TestClient(build_provider_bridge(Provider(), "private-test-token"))
+    assert http.post("/complete", json={}).status_code == 401
+    response = http.get("/rose_usage", headers={"X-Rose-Provider-Token": "private-test-token"})
+    assert response.status_code == 200 and response.json()["calls"] == 0
+
+
+def test_native_wrong_call_result_is_rejected_before_cache_done(monkeypatch):
+    from providers.rose import RoseClient
+    from providers.rose.types import StreamChunk
+
+    text = json.dumps(
+        {
+            "message": "",
+            "tool_results": [{"call_id": "wrong-call", "content": "observed", "is_error": False}],
+            "state": {},
+            "terminal": False,
+        }
+    )
+
+    async def stream(self, **kwargs):
+        yield StreamChunk(kind="content", data={"text": text})
+        yield StreamChunk(kind="done")
+
+    monkeypatch.setattr(RoseClient, "_complete_impl", stream)
+    client = object.__new__(wmh_rose_provider._WMHCacheSafeRoseClient)
+
+    async def run():
+        seen = []
+        with pytest.raises(wmh_rose_provider._WMHInvalidPrediction, match="call IDs"):
+            async for chunk in client._complete_impl(
+                call_site="wmh_world_model_v3",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": json.dumps({"candidate_response": {"tool_calls": [{"call_id": "real-call"}]}}),
+                    }
+                ],
+            ):
+                seen.append(chunk)
+        assert not any(chunk.kind == "done" for chunk in seen)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        {
+            "schema": "rose.canonical_observation.v1",
+            "category": "browser",
+            "content": "",
+            "is_error": False,
+            "metadata": {},
+        },
+        {"output": "", "is_error": False},
+    ],
+)
+def test_native_decoded_blank_is_rejected_before_cache_done(monkeypatch, encoded):
+    from providers.rose import RoseClient
+    from providers.rose.types import StreamChunk
+
+    text = json.dumps(
+        {
+            "message": "",
+            "tool_results": [{"call_id": "real-call", "content": json.dumps(encoded), "is_error": False}],
+            "state": {"bad_commit": True},
+            "terminal": False,
+        }
+    )
+
+    async def stream(self, **kwargs):
+        yield StreamChunk(kind="content", data={"text": text})
+        yield StreamChunk(kind="done")
+
+    monkeypatch.setattr(RoseClient, "_complete_impl", stream)
+    client = object.__new__(wmh_rose_provider._WMHCacheSafeRoseClient)
+
+    async def run():
+        seen = []
+        with pytest.raises(wmh_rose_provider._WMHInvalidPrediction):
+            async for chunk in client._complete_impl(
+                call_site="wmh_world_model_v3",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": json.dumps({"candidate_response": {"tool_calls": [{"call_id": "real-call"}]}}),
+                    }
+                ],
+            ):
+                seen.append(chunk)
+        assert not any(chunk.kind == "done" for chunk in seen)
+
+    asyncio.run(run())
+
+
+def test_native_provider_bridge_returns_typed_protocol_feedback():
+    from fastapi.testclient import TestClient
+
+    from benchmarks.experiential_bridge import build_provider_bridge
+
+    class Provider:
+        _usage = RoseUsageAccumulator()
+
+        def complete(self, *args, **kwargs):
+            raise wmh_rose_provider._WMHInvalidPrediction("bad native JSON", {}, "test")
+
+    with TestClient(build_provider_bridge(Provider(), "test-token")) as http:
+        response = http.post(
+            "/complete",
+            headers={"X-Rose-Provider-Token": "test-token"},
+            json={
+                "messages": [{"role": "system", "content": "system"}, {"role": "user", "content": "evidence"}],
+                "maximum_output_tokens": 16384,
+            },
+        )
+        assert response.status_code == 422 and response.json()["detail"]["kind"] == "invalid_prediction"
+
+
+def test_native_service_owner_joins_child_on_shutdown(tmp_path):
+    import os
+    import socket
+    import subprocess
+    import time
+    from pathlib import Path
+
+    import httpx
+    import psutil
+
+    from benchmarks.experiential_bridge import native_python, pool_sha256
+
+    repo = Path(__file__).resolve().parents[2]
+    python = native_python()
+    digest = pool_sha256("rose-1-ultra")
+    fixture_script = 'from pathlib import Path; from benchmarks.experiential_world_model_checks import _source_fixture; from benchmarks.build_experiential_world_model import build; import sys; p=Path(sys.argv[1]); build(_source_fixture(p), p/"native", "rose-test", "rose-1-ultra", sys.argv[2])'
+    env = {**os.environ, "PYTHONPATH": str(repo / "agents")}
+    subprocess.run(
+        [python, "-c", fixture_script, str(tmp_path), digest],
+        cwd=repo,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    log = tmp_path / "service.log"
+    with log.open("w") as output:
+        owner = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "benchmarks.serve_world_model",
+                "--engine",
+                "experiential",
+                "--name",
+                "rose-test",
+                "--root",
+                str(tmp_path / "native"),
+                "--port",
+                str(port),
+            ],
+            cwd=repo,
+            env=env,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+        )
+        children = []
+        try:
+            with httpx.Client(trust_env=False, timeout=1) as http:
+                deadline = time.monotonic() + 35
+                while time.monotonic() < deadline:
+                    assert owner.poll() is None, log.read_text()
+                    try:
+                        response = http.get(f"http://127.0.0.1:{port}/healthz")
+                        if response.status_code == 200:
+                            break
+                    except httpx.ConnectError:
+                        pass
+                    time.sleep(0.1)
+                else:
+                    pytest.fail(log.read_text())
+                assert response.json()["engine"] == "experiential"
+            children = psutil.Process(owner.pid).children()
+            assert len(children) == 1
+        finally:
+            if owner.poll() is None:
+                owner.terminate()
+            try:
+                owner.wait(timeout=25)
+            except subprocess.TimeoutExpired:
+                owner.kill()
+                owner.wait(timeout=5)
+                pytest.fail("Native service owner did not finish cleanup")
+        assert not any(child.is_running() and child.status() != psutil.STATUS_ZOMBIE for child in children), (
+            log.read_text()
+        )
+
+
 def test_message_conversion_omits_empty_system():
     rose = _to_rose_messages("", [Message(role="user", content="hi")])
     assert rose == [{"role": "user", "content": "hi"}]
@@ -147,12 +498,17 @@ def test_wmh_cache_stream_never_contains_leased_access_token(monkeypatch):
     assert other_chunks[0].data["compute_token_used"]["accessToken"] == "secret-lease"
 
 
-@pytest.mark.parametrize("content,finish", [
-    ("", "length"), (" \n\t", "stop"), ('{"output":"unfinished', "length"),
-    ('{"output":"","is_error":false,"state_note":"research complete"}', "stop"),
-    ('{"output":"","is_error":false}', "stop"),
-    ('{"state_note":"research complete"}', "stop"),
-])
+@pytest.mark.parametrize(
+    "content,finish",
+    [
+        ("", "length"),
+        (" \n\t", "stop"),
+        ('{"output":"unfinished', "length"),
+        ('{"output":"","is_error":false,"state_note":"research complete"}', "stop"),
+        ('{"output":"","is_error":false}', "stop"),
+        ('{"state_note":"research complete"}', "stop"),
+    ],
+)
 def test_invalid_prediction_is_rejected_before_cache_done(monkeypatch, content, finish):
     from providers.rose import RoseClient
     from providers.rose.types import StreamChunk
@@ -200,16 +556,17 @@ def test_stream_rejection_retains_usage_without_credentials(monkeypatch):
     assert "secret" not in str(error.usage)
 
 
-@pytest.mark.parametrize("content", [
-    '{"output":"complete"}',
-    'Observation with {unstructured braces}.',
-    '{"success":false,"output":"declined","metadata":{"source":"payment"}}',
-    '{"success":true,"output":"","metadata":{"source":"query"}}',
-])
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"output":"complete"}',
+        "Observation with {unstructured braces}.",
+        '{"success":false,"output":"declined","metadata":{"source":"payment"}}',
+        '{"success":true,"output":"","metadata":{"source":"query"}}',
+    ],
+)
 def test_default_budget_leaves_room_for_reasoning_and_terminal_json(monkeypatch, content):
-    fake_client = _FakeRoseClient(
-        _canned_response(content=content, prompt=10, completion=20, token_used=None)
-    )
+    fake_client = _FakeRoseClient(_canned_response(content=content, prompt=10, completion=20, token_used=None))
 
     async def fake_lease(self):
         return None, None
@@ -275,9 +632,7 @@ def test_complete_maps_text_and_usage_via_rose_only(monkeypatch):
     provider = RoseWMHProvider(client=fake_client)
 
     async def run():
-        return await provider._complete_async(
-            "SYS", [Message(role="user", content="go")], max_tokens=8192
-        )
+        return await provider._complete_async("SYS", [Message(role="user", content="go")], max_tokens=8192)
 
     completion = asyncio.run(run())
 
@@ -422,9 +777,12 @@ def test_fundraiser_wmh_prompt_uses_demo_cache_goal():
 
     tasks = json.loads(Path(__file__).with_name("tasks.json").read_text())
     goal = next(task["prompt"] for task in tasks if task["name"] == "raise-5m-rose-labs-brex")
-    assert _demo_cache_goal_from_messages(
-        [Message(role="user", content=f"TASK:\n{goal}\n\nINTERACTION HISTORY:\n(start)")]
-    ) == goal
+    assert (
+        _demo_cache_goal_from_messages(
+            [Message(role="user", content=f"TASK:\n{goal}\n\nINTERACTION HISTORY:\n(start)")]
+        )
+        == goal
+    )
 
 
 def test_config_model_defaults_to_pool_for_metering():
@@ -470,9 +828,7 @@ def test_lease_reuses_helpers_and_delegates_rotation(monkeypatch):
     # Patch the symbols where the provider imports them (helpers.llm).
     import helpers.llm as real_llm
 
-    monkeypatch.setattr(
-        real_llm, "fetch_compute_token_activity", fake_fetch_compute_token_activity
-    )
+    monkeypatch.setattr(real_llm, "fetch_compute_token_activity", fake_fetch_compute_token_activity)
     monkeypatch.setattr(real_llm, "_build_compute_auth_context", fake_build_ctx)
 
     # A fake client that simulates an auth error by driving the leased context's rotation
@@ -499,9 +855,7 @@ def test_lease_reuses_helpers_and_delegates_rotation(monkeypatch):
     provider = RoseWMHProvider(client=client, user_id="u-1")
 
     async def run():
-        return await provider._complete_async(
-            "S", [Message(role="user", content="q")], max_tokens=8192
-        )
+        return await provider._complete_async("S", [Message(role="user", content="q")], max_tokens=8192)
 
     completion = asyncio.run(run())
 
@@ -534,9 +888,7 @@ def test_no_compute_token_falls_through_to_waterfall(monkeypatch):
 
 def test_complete_bridges_sync_to_async(monkeypatch):
     """The sync `complete()` drives the async path via asyncio.run (no running loop)."""
-    fake_client = _FakeRoseClient(
-        _canned_response(content="sync-ok", prompt=1, completion=1, token_used=None)
-    )
+    fake_client = _FakeRoseClient(_canned_response(content="sync-ok", prompt=1, completion=1, token_used=None))
 
     async def fake_lease(self):
         return _leased_claude_auth(fetch_fresh=None), None
@@ -642,8 +994,7 @@ def test_cost_nonzero_for_waterfall_model():
     assert pricing is not None
     cost = _cost_usd_for_call("google/gemini-3.5-flash", 1000, 1000)
     expected = (
-        (1000 / 1000.0) * pricing["input_cents_per_1k"]
-        + (1000 / 1000.0) * pricing["output_cents_per_1k"]
+        (1000 / 1000.0) * pricing["input_cents_per_1k"] + (1000 / 1000.0) * pricing["output_cents_per_1k"]
     ) / 100.0
     assert cost == pytest.approx(expected)
     assert cost > 0.0
@@ -652,9 +1003,7 @@ def test_cost_nonzero_for_waterfall_model():
 def test_complete_records_cost_into_injected_accumulator(monkeypatch):
     """Each WMH step folds its Rose cost + tokens into the provider's accumulator."""
     acc = RoseUsageAccumulator()
-    fake_client = _FakeRoseClient(
-        _waterfall_response(content="obs", prompt=1000, completion=1000)
-    )
+    fake_client = _FakeRoseClient(_waterfall_response(content="obs", prompt=1000, completion=1000))
 
     async def fake_lease(self):
         return _leased_claude_auth(fetch_fresh=None), None
@@ -663,9 +1012,7 @@ def test_complete_records_cost_into_injected_accumulator(monkeypatch):
     provider = RoseWMHProvider(client=fake_client, usage=acc)
 
     async def run():
-        return await provider._complete_async(
-            "SYS", [Message(role="user", content="go")], max_tokens=8192
-        )
+        return await provider._complete_async("SYS", [Message(role="user", content="go")], max_tokens=8192)
 
     completion = asyncio.run(run())
     assert completion.usage.input_tokens == 1000
@@ -675,17 +1022,13 @@ def test_complete_records_cost_into_injected_accumulator(monkeypatch):
     assert snap.calls == 1
     assert snap.input_tokens == 1000
     assert snap.output_tokens == 1000
-    assert snap.total_cost_usd == pytest.approx(
-        _cost_usd_for_call("google/gemini-3.5-flash", 1000, 1000)
-    )
+    assert snap.total_cost_usd == pytest.approx(_cost_usd_for_call("google/gemini-3.5-flash", 1000, 1000))
 
 
 def test_complete_records_zero_cost_for_direct_claude(monkeypatch):
     """The common claudeAuth path adds tokens but $0 cost."""
     acc = RoseUsageAccumulator()
-    fake_client = _FakeRoseClient(
-        _canned_response(content="obs", prompt=500, completion=200, token_used=None)
-    )
+    fake_client = _FakeRoseClient(_canned_response(content="obs", prompt=500, completion=200, token_used=None))
 
     async def fake_lease(self):
         return _leased_claude_auth(fetch_fresh=None), None
@@ -694,9 +1037,7 @@ def test_complete_records_zero_cost_for_direct_claude(monkeypatch):
     provider = RoseWMHProvider(client=fake_client, usage=acc)
 
     async def run():
-        return await provider._complete_async(
-            "SYS", [Message(role="user", content="go")], max_tokens=8192
-        )
+        return await provider._complete_async("SYS", [Message(role="user", content="go")], max_tokens=8192)
 
     asyncio.run(run())
     snap = acc.snapshot()

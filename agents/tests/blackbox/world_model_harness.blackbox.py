@@ -5070,9 +5070,90 @@ def test_served_wmh_rejects_empty_and_truncated_rose_predictions_without_committ
             assert response.json()["observation"]["content"] == text, "the parser discarded production receipt fields"
 
 
+def test_native_upstream_shared_world_regressions():
+    """The recurring WMH gate must exercise the real isolated upstream package."""
+    import subprocess
+    from benchmarks.experiential_bridge import native_python
+
+    root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [
+            native_python(),
+            "-m",
+            "pytest",
+            "-c",
+            "/dev/null",
+            "--confcutdir",
+            str(root / "agents/benchmarks"),
+            "-o",
+            f"cache_dir={root}/.context/native-pytest-cache",
+            "-q",
+            str(root / "agents/benchmarks/experiential_world_model_checks.py"),
+        ],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(root / "agents")},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    print(result.stdout.strip())
+
+
+def test_native_delta_reuses_unchanged_artifact_and_reports_actual_builds():
+    from benchmarks.world_model_harness import update_world_model_for_simulation
+
+    with tempfile.TemporaryDirectory() as archive, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(archive)
+        calls = []
+        try:
+            _write_golden_bundle("root-native-delta")
+
+            def native(source, output, name, pool, *, bind_only=False):
+                calls.append(bind_only)
+                (Path(output) / "build.manifest.json").write_text(json.dumps({"engine": "experiential"}))
+                (Path(output) / "conformance.native.json").write_text((Path(source) / "conformance.json").read_text())
+
+            with patch.dict(os.environ, {"WMH_ENGINE": "experiential", "WMH_EXPORT_WORKERS": "1"}), patch(
+                "benchmarks.experiential_bridge.build_native", native
+            ):
+                options = dict(output_dir=out, root_agent_ids=["root-native-delta"], name="rose-native-delta",
+                               gepa_budget=0, require_conformance=False)
+                first = update_world_model_for_simulation(**options)
+                second = update_world_model_for_simulation(**options)
+                forced = update_world_model_for_simulation(**options, force=True)
+            assert calls == [False, True, False], calls
+            assert first["build_ran"] is True
+            assert second["build_ran"] is False and second["updated_traces"] == 0
+            assert forced["build_ran"] is True
+            assert Path(second["conformance_path"]).name == "conformance.native.json"
+        finally:
+            restore()
+
+
+def test_native_rose_provider_regressions():
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(root / "agents/benchmarks/wmh_rose_provider_test.py")],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(root / "agents")},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    print(result.stdout.strip())
+
+
 async def run_all_tests():
     print("world model harness blackbox tests:")
     r = BlackboxResult()
+    r.record("native_upstream_shared_world_regressions", test_native_upstream_shared_world_regressions)
+    r.record("native_delta_reuses_unchanged_artifact_and_reports_actual_builds", test_native_delta_reuses_unchanged_artifact_and_reports_actual_builds)
+    r.record("native_rose_provider_regressions", test_native_rose_provider_regressions)
     await r.record_async(
         "runtime_wmh_http_retries_preserve_native_invocation_identity",
         test_runtime_wmh_http_retries_preserve_native_invocation_identity,

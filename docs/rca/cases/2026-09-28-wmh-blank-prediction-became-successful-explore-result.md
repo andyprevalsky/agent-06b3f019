@@ -60,6 +60,17 @@ October 6 continuation: the HTTP regression now rejects six invalid completions,
 
 The user noticed that the main agent seemed confused by tool results and asked what was happening. They previously required WMH same-session LLM parallelism and a valid 10-minute trajectory, and asked that the timeout transition be considered separately.
 
+October 6 native-v3 recurrence: nonempty JSON bytes containing a canonical
+observation with empty inner `content` still bypassed the provider's visible
+content check. Both a direct canonical envelope and the legacy `output`
+wrapper reproduced the defect in provider and native commit tests (four
+failures before repair; the identical assertions passed afterward). The shared
+pure decoder in `agents/utils/world_model_observation.py` now checks the same
+effective content the caller displays before cache completion or state commit.
+The full WMH domain passes, including these regressions; this remains separate
+from live conformance and the unchanged fundraiser outcome. The case stays
+open until that benchmark has its own passing evidence.
+
 ## Reusable lesson
 
 Reject empty model completions at the WMH provider boundary before they become successful tool observations.

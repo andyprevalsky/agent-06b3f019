@@ -22,6 +22,7 @@ import argparse
 import contextvars
 import json
 import math
+import os
 import re
 import sys
 import threading
@@ -40,7 +41,8 @@ _ROSE_SESSION_SCOPE: contextvars.ContextVar[str | None] = contextvars.ContextVar
     default=None,
 )
 _ROSE_STEP_INVOCATION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "rose_wmh_step_invocation", default=None,
+    "rose_wmh_step_invocation",
+    default=None,
 )
 
 _RETRIEVAL_STOPWORDS = frozenset(
@@ -120,18 +122,14 @@ def _step_summary(step, *, source: str) -> dict:
         "task": _preview(step.task or ""),
         "root_agent_id": structured.get("root_agent_id"),
         "state": {
-            key: structured[key]
-            for key in ("schema", "root_goal", "row_counts", "url", "title")
-            if key in structured
+            key: structured[key] for key in ("schema", "root_goal", "row_counts", "url", "title") if key in structured
         },
         "action": _action_summary(step.action),
         "observation": {
             "content": _preview(step.observation.content),
             "is_error": step.observation.is_error,
             "metadata": {
-                key: metadata[key]
-                for key in ("source", "result_unavailable", "state_note", "url")
-                if key in metadata
+                key: metadata[key] for key in ("source", "result_unavailable", "state_note", "url") if key in metadata
             },
         },
         "raw_span_ids": list(step.raw_span_ids),
@@ -206,7 +204,8 @@ class RetrievalAuditRetriever:
                         sum(
                             math.log1p((len(rows) + 1) / (frequency[token] + 1))
                             for token in query_terms.intersection(terms)
-                        ) / math.sqrt(max(1, len(terms)))
+                        )
+                        / math.sqrt(max(1, len(terms)))
                         for terms in terms_by_row
                     ),
                     dtype=np.float64,
@@ -255,9 +254,7 @@ class RetrievalAuditRetriever:
                         _step_summary(
                             step,
                             source=(
-                                "real_world_archive"
-                                if id(step) in self._offline_step_ids
-                                else "generated_session"
+                                "real_world_archive" if id(step) in self._offline_step_ids else "generated_session"
                             ),
                         )
                         for step in demos
@@ -278,12 +275,7 @@ class RetrievalAuditRetriever:
     def snapshot(self) -> dict:
         with self._lock:
             events = list(self._events)
-        archive_demos = sum(
-            1
-            for event in events
-            for demo in event["demos"]
-            if demo["source"] == "real_world_archive"
-        )
+        archive_demos = sum(1 for event in events for demo in event["demos"] if demo["source"] == "real_world_archive")
         return {
             "schema": "rose.wmh_retrieval_audit.v1",
             "query_count": len(events),
@@ -306,6 +298,7 @@ def _parallel_pinned_wmh_step(world_model, session_id, action, session_lock, on_
     from wmh.providers.base import Message
     from wmh.telemetry import capture
     from wmh.tracking import Phase
+
     from helpers.world_model_runtime import parse_world_model_prediction
 
     started = time.monotonic()
@@ -446,7 +439,10 @@ def _install_root_scoped_sessions(app, world_model_name: str, world_model) -> No
         try:
             if isinstance(world_model, WorldModel):
                 observation = _parallel_pinned_wmh_step(
-                    world_model, session_id, action, step_lock,
+                    world_model,
+                    session_id,
+                    action,
+                    step_lock,
                     on_commit=receipt.set_result if receipt is not None else None,
                 )
             else:
@@ -466,6 +462,7 @@ def _install_root_scoped_sessions(app, world_model_name: str, world_model) -> No
     world_model.step = concurrent_step
     original_end_session = getattr(world_model, "end_session", None)
     if original_end_session is not None:
+
         def scoped_end_session(session_id):
             session_key = str(session_id)
             with state_lock:
@@ -485,7 +482,11 @@ def _install_root_scoped_sessions(app, world_model_name: str, world_model) -> No
 
     @app.middleware("http")
     async def bind_root_session_scope(request: Request, call_next):
-        if request.method == "POST" and request.url.path.startswith(session_path + "/") and request.url.path.endswith("/step"):
+        if (
+            request.method == "POST"
+            and request.url.path.startswith(session_path + "/")
+            and request.url.path.endswith("/step")
+        ):
             invocation = request.headers.get("X-Rose-WMH-Invocation")
             if invocation:
                 token = _ROSE_STEP_INVOCATION.set(invocation)
@@ -570,12 +571,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--name", required=True, help="World model name to serve.")
     parser.add_argument("--port", type=int, required=True, help="Port for the local backend.")
     parser.add_argument("--root", required=True, help="Project dir holding models/<name>/.")
+    parser.add_argument("--engine", choices=("legacy", "experiential"), default=os.environ.get("WMH_ENGINE", "legacy"))
     parser.add_argument(
         "--pool",
         default="rose-1-ultra",
         help="Rose pool backing WMH inference (default: rose-1-ultra).",
     )
     args = parser.parse_args(argv)
+
+    if args.engine == "experiential":
+        from benchmarks.experiential_bridge import serve_native
+
+        return serve_native(args.name, args.root, args.pool, args.port)
 
     try:
         app = build_app(args.name, args.root, args.pool)
