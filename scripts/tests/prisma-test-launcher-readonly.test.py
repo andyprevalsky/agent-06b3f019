@@ -53,6 +53,7 @@ console.log(JSON.stringify({client, prisma: dirname(backend.resolve('prisma/pack
             for name in (
                 launcher,
                 "local-db-container.sh",
+                "coverage-failure-evidence.sh",
                 "coverage-process-lock.py",
                 "coverage_process_registry.py",
                 "blackbox-auto-rca-env.sh",

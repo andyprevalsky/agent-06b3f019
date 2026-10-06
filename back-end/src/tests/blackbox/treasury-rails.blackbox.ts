@@ -9,8 +9,10 @@
  *
  * ── Why this runs on SANDBOX ───────────────────────────────────────────────────────────────────
  * The money-moving half (mint / charge / close / recover) executes for real. AgentCard's sandbox
- * org has play money and `test_charge`, and — unlike live — recoveries settle instantly, so the
- * whole loop is observable in one run. The read-only half (Brex + Coinbase balances, config
+ * org has play money and `test_charge`, and most unused-card reclaims land within minutes, so the
+ * loop is usually observable in one run. A reclaim that has not landed by the end of the run is
+ * recorded outside the worktree, and later runs fail it if it is still missing a day after the
+ * mint (`treasury-rails-pending-mints.ts`). The read-only half (Brex + Coinbase balances, config
  * resolution) is safe against live credentials and is exercised as-is.
  *
  * ── HARD SAFETY GUARD ──────────────────────────────────────────────────────────────────────────
@@ -31,6 +33,8 @@ import { recoverAllCardholderResiduals } from '../../providers/agentcard/fund-re
 import { planOrgWalletTopUp } from '../../providers/agentcard/org-wallet-topup';
 import { fiatPullEnabled, resolveFiatSource } from '../../providers/agentcard/org-wallet-fiat';
 import {
+  UNUSED_MINT_RECLAIM_DEADLINE_MS,
+  classifyUnusedMintTransfer,
   unusedMintSettleOutcome,
   type MintTransferObservation,
 } from '../../providers/agentcard/unused-mint-settle';
@@ -38,6 +42,11 @@ import { loadCoinbaseTreasuryConfig } from '../../providers/coinbase/config';
 import { createCoinbaseTreasury } from '../../providers/coinbase/treasury';
 import { createBrexTreasury, loadBrexConfig } from '../../providers/brex/treasury';
 import { cleanupTreasuryRailCards } from './treasury-rails-card-cleanup';
+import {
+  checkPendingUnusedMints,
+  pendingMintLedgerPath,
+  recordPendingMint,
+} from './treasury-rails-pending-mints';
 
 loadDotenvWithCallerOverrides();
 
@@ -88,11 +97,13 @@ async function sweepResidualHeadroom(timeoutMs = 60_000): Promise<number> {
  * AgentCard may reclaim the mint transfer directly on close without ever exposing cardholder
  * residual for `recover_funds`.
  */
-async function readCardTransfer(
-  cardId: string
-): Promise<
-  (MintTransferObservation & { amountCents: number; transferredCents: number }) | undefined
-> {
+type CardTransfer = MintTransferObservation & {
+  amountCents: number;
+  transferredCents: number;
+  raw: Record<string, unknown>;
+};
+
+async function readCardTransfer(cardId: string): Promise<CardTransfer | undefined> {
   const transfers =
     (
       (await callOrgTool('list_transfers', { limit: 100 })) as {
@@ -106,6 +117,7 @@ async function readCardTransfer(
     amountCents: Number(mine.amount_cents ?? 0),
     releasedCents: Number(mine.released_cents ?? 0),
     transferredCents: Number(mine.transferred_cents ?? 0),
+    raw: mine,
   };
 }
 
@@ -118,24 +130,29 @@ async function readCardTransfer(
  * `consumed`, then the follow-up poll stopped calling recover_funds and timed out.
  *
  * Auto-reclaim without residual (transfer flips while recover answers insufficient_headroom) is
- * still accepted via the transfer observation alone.
+ * still accepted via the transfer observation alone. When the in-run wait runs out this returns
+ * the latest observation instead of failing: a reclaim can legitimately take up to a day.
  */
 async function waitForUnusedMintSettled(
   cardId: string,
   minReleasedCents: number,
   timeoutMs = 240_000
-): Promise<MintTransferObservation & { transferredCents: number }> {
+): Promise<CardTransfer | undefined> {
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
-  let last: MintTransferObservation & { transferredCents: number } = {
-    status: 'not_found',
-    releasedCents: 0,
-    transferredCents: 0,
-  };
+  let last: CardTransfer | undefined;
+  // A residual can be recovered while THIS transfer never flips. Keep every attempt's sweep yield
+  // and the provider's own transfer row so a timeout shows which side stalled.
+  const sweepYields: string[] = [];
   for (;;) {
     attempt += 1;
     try {
       const sweep = await recoverAllCardholderResiduals(callOrgTool);
+      if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
+        sweepYields.push(
+          `#${attempt} settled=${usd(sweep.settledCents)} pending=${usd(sweep.pendingCents)}`
+        );
+      }
       const transfer = await readCardTransfer(cardId);
       if (transfer !== undefined) last = transfer;
       const outcome = unusedMintSettleOutcome(transfer, minReleasedCents);
@@ -155,9 +172,10 @@ async function waitForUnusedMintSettled(
         return transfer;
       }
       if (Date.now() >= deadline) {
-        console.error(
-          `  unused mint never reclaimed after ${attempt} attempts; transfer for ${cardId}: ` +
-            JSON.stringify(last)
+        console.warn(
+          `  unused mint not reclaimed within the in-run wait (${attempt} attempts); provider row ` +
+            `for ${cardId}: ${JSON.stringify(last?.raw ?? null)}` +
+            `; recover_funds yields: ${sweepYields.join(', ') || 'none'}`
         );
         return last;
       }
@@ -177,6 +195,52 @@ async function waitForUnusedMintSettled(
 
 function record(name: string): void {
   console.log(`  PASS ${name}`);
+}
+
+const hours = (ms: number): string => `${(ms / 3_600_000).toFixed(1)}h`;
+const RECLAIM_DEADLINE = hours(UNUSED_MINT_RECLAIM_DEADLINE_MS);
+
+/** Earlier runs' unused mints that had not come back yet; any lost past the deadline fails here. */
+async function checkEarlierUnusedMints(
+  cardholderIds: ReadonlySet<string>,
+  ledgerPath: string
+): Promise<void> {
+  const checks = await checkPendingUnusedMints({ callOrgTool, ledgerPath, cardholderIds });
+  if (checks.length === 0) {
+    record('no earlier unused mints awaiting reclaim');
+    return;
+  }
+  const lost: string[] = [];
+  for (const { entry, verdict } of checks) {
+    const label = `earlier mint ${entry.cardId} (${hours(verdict.ageMs)} old)`;
+    switch (verdict.kind) {
+      case 'settled':
+        record(`${label} ${verdict.status} in full: released ${usd(verdict.releasedCents)}`);
+        break;
+      case 'waiting':
+        console.log(`  PENDING ${label} still ${verdict.status}; deadline ${RECLAIM_DEADLINE}`);
+        break;
+      case 'unobservable':
+        console.warn(`  UNVERIFIED ${label}: ${verdict.reason}`);
+        break;
+      case 'overdue':
+        lost.push(
+          `${label} still ${verdict.status} past the ${RECLAIM_DEADLINE} reclaim deadline; ` +
+            `provider row: ${JSON.stringify(verdict.row ?? null)}`
+        );
+        break;
+      case 'failed':
+        lost.push(
+          `${label}: ${verdict.reason}; provider row: ${JSON.stringify(verdict.row ?? null)}`
+        );
+        break;
+    }
+  }
+  if (lost.length > 0) {
+    assert.fail(
+      `unused mint(s) never returned to the pool (recorded in ${ledgerPath}):\n  ${lost.join('\n  ')}`
+    );
+  }
 }
 
 async function main(): Promise<void> {
@@ -310,6 +374,10 @@ async function main(): Promise<void> {
     record('pre-mint residual sweep found nothing idle');
   }
 
+  // After the sweep: recovering residual is what usually flips an earlier mint to reclaimed.
+  const ledgerPath = pendingMintLedgerPath();
+  await checkEarlierUnusedMints(new Set(cardholders.map((holder) => holder.id)), ledgerPath);
+
   const mintCents = 1_300;
   const createdCardIds = new Set<string>();
   let provedPoolMint = false;
@@ -347,32 +415,48 @@ async function main(): Promise<void> {
       cardClosed = true;
       record('closed the card unused');
 
-      // Keep recovering while this exact card's transfer settles.
-      const settled = await waitForUnusedMintSettled(cardId, mintCents);
+      // Keep recovering while this exact card's transfer settles. Another
+      // cardholder's recover_funds yield is not evidence for this transfer.
+      const transfer = await waitForUnusedMintSettled(cardId, mintCents);
+      assert.ok(transfer !== undefined, `no company-wallet transfer listed for ${cardId}`);
       assert.ok(
-        settled.status === 'reclaimed' || settled.status === 'released',
-        `transfer for ${cardId} ended in "${settled.status}" — an unused card must reclaim/release, ` +
-          `not stay consumed`
+        transfer.transferredCents >= 0 && transfer.transferredCents <= mintCents,
+        `transfer for ${cardId} reported an invalid pool debit ${transfer.transferredCents}`
       );
-      assert.ok(
-        settled.releasedCents >= mintCents,
-        `released ${usd(settled.releasedCents)} but the card held ${usd(mintCents)} — the full unused ` +
-          `amount must return to the pool`
-      );
-      record(
-        `transfer ${settled.status} in full: released ${usd(settled.releasedCents)} of ${usd(mintCents)}`
-      );
-      assert.ok(
-        settled.transferredCents >= 0 && settled.transferredCents <= mintCents,
-        `transfer for ${cardId} reported an invalid pool debit ${settled.transferredCents}`
-      );
-      if (settled.transferredCents === mintCents) {
+      const outcome = classifyUnusedMintTransfer(transfer, mintCents);
+      if (outcome.kind === 'failed') {
+        assert.fail(
+          `transfer for ${cardId}: ${outcome.reason} — the full unused amount must return to the ` +
+            `pool; provider row: ${JSON.stringify(transfer.raw)}`
+        );
+      }
+      if (outcome.kind === 'settled') {
+        record(
+          `transfer ${outcome.status} in full: released ${usd(outcome.releasedCents)} of ${usd(mintCents)}`
+        );
+      } else {
+        const mintedAt = transfer.raw.created_at;
+        assert.ok(typeof mintedAt === 'string', `transfer for ${cardId} has no created_at`);
+        recordPendingMint(ledgerPath, {
+          cardId,
+          transferId: String(transfer.raw.id),
+          cardholderId,
+          mintCents,
+          mintedAt,
+        });
+        console.log(
+          `  PENDING transfer for ${cardId} still ${outcome.status} after the in-run wait; later ` +
+            `runs fail it if it is not reclaimed within ${RECLAIM_DEADLINE} of the mint ` +
+            `(recorded in ${ledgerPath})`
+        );
+      }
+      if (transfer.transferredCents === mintCents) {
         provedPoolMint = true;
         record('mint drew from the pool');
         break;
       }
       record(
-        `mint drew ${usd(settled.transferredCents)} from the pool and netted remaining cardholder headroom; retrying direct pool proof`
+        `mint drew ${usd(transfer.transferredCents)} from the pool and netted remaining cardholder headroom; retrying direct pool proof`
       );
     } finally {
       try {
@@ -384,7 +468,7 @@ async function main(): Promise<void> {
       }
     }
   }
-  assert.ok(provedPoolMint, 'two settled company_flow mints both netted existing headroom');
+  assert.ok(provedPoolMint, 'both company_flow mints netted existing headroom instead of the pool');
 
   console.log('\ntreasury-rails blackbox: all checks passed');
 }

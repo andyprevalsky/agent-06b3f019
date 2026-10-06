@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import tempfile
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -199,6 +200,13 @@ const TERMINAL = new Set(['CLOSED', 'COMPLETED', 'ERROR']);
         payload_path.unlink(missing_ok=True)
 
 
+class _LoopbackProxyHandler(urllib.request.ProxyHandler):
+    def proxy_open(self, request, proxy, proxy_type):
+        if urllib.parse.urlsplit(request.full_url).hostname in {"localhost", "127.0.0.1", "::1"}:
+            return None
+        return super().proxy_open(request, proxy, proxy_type)
+
+
 def verify_session_on_hub(session_id: str) -> int:
     """Return output length from durable hub API, or -1 on failure."""
     backend_env = load_backend_env()
@@ -227,7 +235,7 @@ def verify_session_on_hub(session_id: str) -> int:
         method="GET",
     )
     try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=30) as resp:
+        with urllib.request.build_opener(_LoopbackProxyHandler()).open(req, timeout=30) as resp:
             payload = json.loads(resp.read() or b"{}")
     except Exception:
         return -1

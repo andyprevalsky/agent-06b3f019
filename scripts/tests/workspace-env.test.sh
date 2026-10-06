@@ -252,6 +252,12 @@ expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$boot_only_env' agent-id
   printf 'bc-live' >"$fake_store/self-store-id"
   bash -c 'exec -a cursor-agent-store-fuse sleep 60' &
   store_pid=$!
+  # The real daemon writes ready once it runs. Until exec completes, /proc shows the
+  # forked test shell's cmdline (or none mid-exec), so publish the pid only after that.
+  for _ in $(seq 1 100); do
+    tr '\0' ' ' <"/proc/$store_pid/cmdline" 2>/dev/null | grep -q '^cursor-agent-store-fuse ' && break
+    sleep 0.05
+  done
   printf 'pid=%s\n' "$store_pid" >"$fake_store/ready"
   expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "bc-live" "a running store daemon's id is the agent id"
   kill "$store_pid" 2>/dev/null || true
@@ -485,6 +491,50 @@ for venv_provisioner in scripts/cloud-build.sh scripts/run.sh scripts/prepare-de
   fi
 done
 echo "PASS: every agents venv provisioner checks requirements.txt satisfaction"
+
+# run.sh builds a missing venv from asdf's pinned python when the lookup works
+# and from PATH's python3 otherwise. A failed lookup used to leave "/bin/python3"
+# (the system interpreter, 3.12 on Cloud VMs) as the candidate.
+run_venv_block="$TMP_ROOT/run-venv-block.sh"
+awk '/^# ── Pre-flight: ensure agents venv/{on=1} on{print} on&&/^fi$/{exit}' \
+  "$ROOT_DIR/scripts/run.sh" >"$run_venv_block"
+grep -q 'agents_venv_satisfied.py' "$run_venv_block" \
+  || { echo "FAIL: could not extract run.sh's agents venv preflight" >&2; exit 1; }
+asdf_root="$TMP_ROOT/venv-asdf"
+mkdir -p "$asdf_root/agents" "$asdf_root/bin" "$asdf_root/asdf-python/bin"
+printf '3.11\n' >"$asdf_root/agents/.python-version"
+: >"$asdf_root/agents/requirements.txt"
+printf '#!/usr/bin/env bash\n[ -n "${ASDF_PYTHON_ROOT:-}" ] || exit 1\nprintf "%%s\\n" "$ASDF_PYTHON_ROOT"\n' \
+  >"$asdf_root/bin/asdf"
+cat >"$asdf_root/bin/python3" <<'PY'
+#!/usr/bin/env bash
+printf '%s\n' "$0" >>"$BASE_PYTHON_CALLS"
+case "$1" in
+  --version) echo "Python 3.11.0" ;;
+  -m)
+    [ "$2" = venv ] || exit 2
+    mkdir -p "$3/bin"
+    printf 'PATH="%s/bin:$PATH"\n' "$(cd "$3" && pwd)" >"$3/bin/activate"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$3/bin/pip"
+    chmod +x "$3/bin/pip"
+    ;;
+  *) exit 2 ;;
+esac
+PY
+cp "$asdf_root/bin/python3" "$asdf_root/asdf-python/bin/python3"
+chmod +x "$asdf_root/bin/asdf" "$asdf_root/bin/python3" "$asdf_root/asdf-python/bin/python3"
+run_venv_preflight() { # run_venv_preflight [asdf python root]
+  rm -rf "$asdf_root/agents/venv"
+  : >"$asdf_root/base-calls"
+  (cd "$asdf_root" && PATH="$asdf_root/bin:$PATH" ASDF_PYTHON_ROOT="${1:-}" \
+    BASE_PYTHON_CALLS="$asdf_root/base-calls" bash "$run_venv_block" >/dev/null 2>&1)
+}
+run_venv_preflight || { echo "FAIL: run.sh venv preflight failed without asdf" >&2; exit 1; }
+expect_eq "$(sort -u "$asdf_root/base-calls")" "$asdf_root/bin/python3" \
+  "a failed asdf lookup builds the venv with PATH python3"
+run_venv_preflight "$asdf_root/asdf-python" || { echo "FAIL: run.sh venv preflight failed with asdf" >&2; exit 1; }
+expect_eq "$(sort -u "$asdf_root/base-calls")" "$asdf_root/asdf-python/bin/python3" \
+  "a working asdf lookup selects its python"
 
 # cloud-init.sh's injected-secret -> .env sync has no /deploy gate of its own;
 # this already-gated environment suite runs it so a regression fails Step 4s.

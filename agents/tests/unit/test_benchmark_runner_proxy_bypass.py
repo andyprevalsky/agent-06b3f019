@@ -1,13 +1,8 @@
-"""Cement: local benchmark runner subprocesses never use the host system proxy.
-
-The isolated stack services already bypassed the macOS system proxy, but the
-run_benchmark.py runner did not. With Freedom's proxy (127.0.0.1:7769) active,
-a pre-agent fixture call hung on an idle proxied TLS socket and the predeploy
-smoke batch never finished its last task.
-"""
+"""Local benchmark children preserve configured and absent inherited proxies."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -20,33 +15,44 @@ from benchmarks.local import benchmark_runner_env, run_streamed_command
 
 PROXIED_ENV = {
     "PATH": "/usr/bin:/bin",
-    "HTTPS_PROXY": "http://127.0.0.1:7769",
-    "https_proxy": "http://127.0.0.1:7769",
-    "HTTP_PROXY": "http://127.0.0.1:7769",
-    "ALL_PROXY": "http://127.0.0.1:7769",
+    "HTTPS_PROXY": "http://upper-https.example.invalid:7769",
+    "https_proxy": "http://lower-https.example.invalid:7769",
+    "HTTP_PROXY": "http://upper-http.example.invalid:7769",
+    "http_proxy": "http://lower-http.example.invalid:7769",
+    "ALL_PROXY": "http://upper-all.example.invalid:7769",
+    "all_proxy": "http://lower-all.example.invalid:7769",
+    "NO_PROXY": "upper.example.invalid",
+    "no_proxy": "lower.example.invalid",
 }
+PROXY_KEYS = tuple(key for key in PROXIED_ENV if key != "PATH")
 
 
-def test_runner_env_drops_proxies_and_bypasses_system_proxy() -> None:
-    env = benchmark_runner_env(PROXIED_ENV)
-    assert env["NO_PROXY"] == "*"
-    assert env["no_proxy"] == "*"
-    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-        assert name not in env
-    assert env["PYTHONUNBUFFERED"] == "1"
-    assert env["BENCHMARK_FAST_MODE_CACHE"] == "false"
+def test_runner_env_preserves_inherited_proxy_configuration() -> None:
+    for original in (PROXIED_ENV, {"PATH": PROXIED_ENV["PATH"]}):
+        before = dict(original)
+        env = benchmark_runner_env(original)
+        assert original == before
+        for name in PROXY_KEYS:
+            assert (name in env) == (name in original)
+            assert env.get(name) == original.get(name)
+        assert env["PYTHONUNBUFFERED"] == "1"
+        assert env["BENCHMARK_FAST_MODE_CACHE"] == "false"
 
-    # urllib (and requests/httpx, which build on it) fall back to the macOS
-    # system proxy only when no proxy variable is set; the runner env must
-    # resolve to no proxy at all.
+    # Resolve the configured environment through Python's real proxy discovery.
+    # This reads configuration; it makes no network request.
     resolved = subprocess.run(
-        [sys.executable, "-c", "import urllib.request; print(sorted(urllib.request.getproxies().items()))"],
-        env=env,
+        [sys.executable, "-c", "import json,urllib.request; print(json.dumps(urllib.request.getproxies()))"],
+        env=benchmark_runner_env(PROXIED_ENV),
         capture_output=True,
         text=True,
         check=True,
     ).stdout.strip()
-    assert resolved == "[('no', '*')]", resolved
+    assert json.loads(resolved) == {
+        "https": PROXIED_ENV["https_proxy"],
+        "http": PROXIED_ENV["http_proxy"],
+        "all": PROXIED_ENV["all_proxy"],
+        "no": PROXIED_ENV["no_proxy"],
+    }
 
 
 def test_runner_env_keeps_an_explicit_fast_cache_choice() -> None:
@@ -54,16 +60,20 @@ def test_runner_env_keeps_an_explicit_fast_cache_choice() -> None:
     assert env["BENCHMARK_FAST_MODE_CACHE"] == "true"
 
 
-def test_streamed_benchmark_commands_bypass_the_host_proxy() -> None:
-    code, output = run_streamed_command(
-        [
-            sys.executable,
-            "-c",
-            "import os; print(os.environ.get('NO_PROXY'), os.environ.get('HTTPS_PROXY'))",
-        ],
-        cwd=AGENTS_DIR,
-        env=dict(PROXIED_ENV),
-        check=True,
-    )
-    assert code == 0
-    assert output.strip().splitlines()[-1] == "* None"
+def test_streamed_benchmark_commands_preserve_inherited_proxies() -> None:
+    for original in (PROXIED_ENV, {"PATH": PROXIED_ENV["PATH"]}):
+        code, output = run_streamed_command(
+            [
+                sys.executable,
+                "-c",
+                "import json,os; print(json.dumps({name: os.environ.get(name) for name in "
+                + repr(PROXY_KEYS) + "}))",
+            ],
+            cwd=AGENTS_DIR,
+            env=dict(original),
+            check=True,
+        )
+        assert code == 0
+        assert json.loads(output.strip().splitlines()[-1]) == {
+            name: original.get(name) for name in PROXY_KEYS
+        }

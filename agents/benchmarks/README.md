@@ -57,6 +57,143 @@ own run. Poll that command every 30 seconds; its `--controller-status` marker
 reports the actual controller exit independently of card freshness and cleanup.
 Follow CLAUDE.md's "Monitor every cloud launch" guidance through resource release.
 
+Standard boot-launched REAL tasks use fresh volumes for both primaries and
+workers, with verified image dependencies, an authenticated exact-ref Git
+checkout and the same canonical isolated database fixture. SIM tasks and
+`--sim-on` keep snapshots and World Model assets. Use `--snapshot-volumes` for
+a restore diagnostic; generic `--provision-pool` and legacy startup retain
+their snapshot path. Source-only bootstrap changes reuse the verified image.
+Continue monitoring through exact resource release: an accepted delete plus an
+exact owned-volume `pending_destroy` or `destroyed` terminal receipt qualifies
+release even when the provider retains that object; request acceptance alone
+does not.
+
+Ordinary source-only runs reuse verified dependency images and completed
+snapshots. For an explicitly requested cold build/push measurement, use
+`scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`
+from the repository root. The selected checkout supplies both Dockerfile and
+Fly config; the private receipt records pre-launch source/dirty status and
+recipe/config hashes, not artifact equivalence. The shared final-layer installer
+joins unchanged npm/Prisma and Python installs concurrently and retains installed
+dependencies and home assets except npm download caches/logs.
+`image-build` defaults to Fly-integrated Depot with app scope, zstd level 3 and
+`linux/amd64`; `--builder native` remains an explicit diagnostic. Its receipt
+records those requested options. Independent `807edee9f` no-cache build/push completed
+in 493.6 seconds in one attempt, excluding activation/fleet startup. Activate the
+exact receipt image and verify guest digest/runtime consumption before the cohort.
+Image publication automatically caches a checksum-verified pinned Fly client in
+the Git common directory. Native publishing uses child-only classic Docker over
+HTTPS (`DOCKER_BUILDKIT=0`, `--wg=false`); shared Fly/PATH and the benchmark
+runtime remain unchanged. A tiny CLI control took 31.6 seconds including client
+installation and push; it is not a full cold-image measurement. No manual
+download is needed for fresh worktrees.
+
+The existing recorded mass-demo cache diagnostic uses:
+
+```bash
+CLOUDBENCH_APP_MACHINE_CEILING=138 \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  scripts/run-bench test-mass-agent-run-0 --demo-cache \
+  -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
+```
+
+For this requested cached diagnostic, the 300-second settings are temporary
+execution controls. Independently enforce a 1,200-second deadline for each copy
+from allocation through verified release of its exact owned resources. This
+deadline supersedes the older 1,800-second proof budget only for this diagnostic;
+normal 7,200-second defaults remain unchanged. A task verdict does not establish
+resource release. On a cutoff, signal only the exact owned controller, let its
+cleanup traps run, audit its resources, and grant no acceptance credit.
+
+An exact fresh infra canary canceled during database/dependency bootstrap may
+have no service PID ledger, backend log, or driver cleanup ACK. Preserve its
+stopped Machine and volume while capturing the original files through an inert
+boot and restoring its exact original config. This is a pre-service case:
+`run.sh` and an isolated database may already have run. The source-specific
+archival validator supports only the attested task-free infra recipe and checks
+the original owner/slot, complete original logs, missing service files, clean
+source hashes, and current stopped native Machine/attached-volume config:
+
+```bash
+python3 scripts/cloudbench-prestack-recovery.py \
+  --registry <absolute-exact-owner-directory> --bench <exact-canary-task> \
+  --capture-dir <absolute-private-original-capture-directory> \
+  --machines-json <private-current-native-Machines-json> \
+  --volumes-json <private-current-native-volumes-json> --publish
+scripts/run-bench-fleet --recover-stale-owner <exact-owner-token>
+```
+
+The capture directory retains `<machine>.originals.private.tar.gz`,
+`<machine>.provenance.safe.json`, and `<machine>.original-config.private.json`.
+The distinct `guest-bootstrap.confirmed` receipt reports isolated DB creation,
+zero provider allocation and zero benchmark credit. It creates no standard
+provider manifest or guest shutdown ACK. Exact recovery rechecks the original
+capture and fresh native inventory before its existing fresh-resource reaper;
+unknown source recipes, service launch, incomplete capture and foreign owners
+stay quarantined. Continue monitoring through exact Machine/volume release.
+
+For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
+
+```bash
+scripts/run-bench image-build --builder depot --no-cache --build-context <committed-checkout> --out-dir .context/image-build
+benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/image-build/cloudbench-image-build.json"))["image_ref"])')
+scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
+```
+
+`image-activate` uses the existing app environment lock and owned warm-source setup. It strictly stops the exact existing donor before environment activation, activates the published image on the donor and this workspace's stopped pool members, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
+
+Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
+
+For this explicitly requested 50-copy cached stress run, use the command-scoped
+Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
+Machines plus 50 primaries, up to 50 optional autoscaler workers and two transient
+slots. Inspect native app inventory and headroom again before a future run;
+ordinary ceiling 56 cannot hold this current cohort, and ceiling 88 leaves only
+two worker slots. This profile creates no idle resources and changes no default
+ceiling, shared-CPU governor or production headroom. `--strict-barrier` keeps all
+50 copies in one ready cohort; controller occupancy does not prove execution overlap.
+
+Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
+seconds, then follow each job log's exact printed fleet-monitor handle through
+controller exit and owned teardown. The campaign directory itself is not a
+fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
+Foreground campaigns may print no `--controller-status` marker; use only the
+actual printed handle and read each copy's controller exit separately from
+`summary.json` → `jobs[].controller_exit_code`, keyed by `job_id`. The monitor's
+null controller fields alone do not establish liveness or completion.
+Allocation timestamps are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
+`bench-e2e.finished-epoch`. The run's `teardown-ownership.path` identifies its
+exact audit/token; while live, capture `pid` and `pid_start` from
+`<git-common>/cloudbench-fleet-ownership/<token>/meta`. Normal cleanup removes
+that active claim, so retain the captured identity and verify native process
+birth before any exact-owner signal. Audit retention is separate from liveness.
+
+This launches 50 independent one-task controllers, each with the unchanged 50
+first-level general-purpose children: 2,500, with existing explore allowances unchanged,
+not 50 distinct tasks. Task-agent replay is read-only and refuses live fallback
+on misses or unresolved context. The separate harness keeps genuine declared
+evaluation; LLM judges may call providers. Existing cold-terminal passthrough
+is not a recorded hit, and cached diagnostics earn zero LIVE acceptance credit.
+Keep tasks, prompts and evaluators unchanged and follow the printed monitor command.
+These compact regression controls run in the existing deploy gate; large cached
+campaigns remain explicitly requested experiments.
+Repeated `--strict-barrier` campaigns wait for every copy’s unchanged stack and
+autoscaler readiness before releasing each bounded cohort. A startup failure
+aborts through owned cleanup; ordinary non-strict sliding scheduling remains
+unchanged. Measure execution overlap from task start/terminal intervals rather
+than the campaign’s active controller count.
+
+The controller regression command is `bash scripts/tests/cloudbench-multi-workstream.test.sh`.
+It requires native Linux for the real worker supervisor’s subreaping proof. On Mac,
+the command snapshots tracked scripts and the five real helper modules into private
+artifacts, then runs the same fixture with read-only source mounts and no container
+network. Its small committed Docker recipe pins Python3.11.9 and Node22.13.0; the
+recipe fingerprint selects a reusable local image. Set
+`CLOUDBENCH_CONTROLLER_TEST_IMAGE` only to an existing local image that passes the
+same platform/toolchain check. Cancellation verifies the exact container’s ID,
+unique owner label and source mounts before stopping it. The quick dispatcher
+controls are always included in the deploy structural gate.
+
 The daily `agent-payment-new-user-journey` task exercises an isolated, fresh
 non-admin account from exhausted free credit through a real Stripe **test-mode**
 subscription Checkout, subscription-gate resolution, payment-card approval,

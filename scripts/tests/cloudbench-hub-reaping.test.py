@@ -131,21 +131,41 @@ from pathlib import Path
 base=Path(sys.argv[1])
 Path(sys.argv[2]).write_text(json.dumps({p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in base.iterdir() if p.is_file()}))
 PY
-observation="$4"
+# Library functions declare their own `local observation`; a uniquely named
+# fault keeps these stubs from reading a shadowed (unset) value.
+identity_fault="$4"
 ps() {
     if [ "$1" = -p ] && [ "$2" = "$target_pid" ] && [ "$3" = -o ]; then
-        case "$observation:$4" in
+        case "$identity_fault:$4" in
             drift:lstart=) printf '%s\n' 'Sat Sep 12 01:12:09 2026'; return 0 ;;
             unknown:lstart=|unknown:stat=) return 2 ;;
         esac
     fi
     command ps "$@"
 }
+# Linux records the boot-relative /proc start tick rather than ps lstart, so
+# the birth observation must be faulted at that source as well.
+real_proc_observation="$(declare -f cloudbench_proc_pid_observation)"
+eval "real_${real_proc_observation}"
+cloudbench_proc_pid_observation() {
+    if [ "$1" = "$target_pid" ]; then
+        case "$identity_fault" in
+            drift)
+                local real
+                real="$(real_cloudbench_proc_pid_observation "$1")" || return 1
+                printf 'proc-start:drifted:%s\n' "${real#proc-start:}"
+                return 0
+                ;;
+            unknown) return 1 ;;
+        esac
+    fi
+    real_cloudbench_proc_pid_observation "$@"
+}
 printf '%s\n' "$target_pid" > "$2/call.ready"
 rc=0
 "terminate_test_${3}_hubs" "$ws" > "$2/cleanup.log" 2>&1 || rc=$?
 printf '%s\n' "$rc" > "$2/call.result"
-if [ "$observation" = normal ]; then
+if [ "$identity_fault" = normal ]; then
     [ "$rc" -eq 0 ] || exit 12
     ! kill -0 "$target_pid" 2>/dev/null || exit 13
 else
@@ -161,10 +181,11 @@ PY
     [ "$?" -eq 0 ] || exit 17
 fi
 unset -f ps
+eval "$real_proc_observation"
 terminate_test_owned_hubs "$ws" || exit 18
 [ "${#HUB_PIDS[@]}" -eq 0 ] || exit 19
 test_tcp_listener_absent "$port" || exit 20
-printf 'PASS: %s cleanup with %s observation\n' "$3" "$observation"
+printf 'PASS: %s cleanup with %s observation\n' "$3" "$identity_fault"
 """
             shell = os.environ.get("BASH", shutil.which("bash"))
             self.assertTrue(shell)

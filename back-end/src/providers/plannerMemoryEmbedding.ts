@@ -108,21 +108,48 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
   return vectors;
 }
 
-async function upsertEmbedding(id: string, goalHash: string, vector: number[]): Promise<void> {
+export type PlannerMemoryEmbeddingWrite = 'written' | 'current' | 'superseded';
+
+/**
+ * Stores `vector` only while the row still has the exact goal it was built from,
+ * and leaves an embedding already current for that goal untouched. The detached
+ * finalize drain reads rows before writing, so a synchronous embed or a goal
+ * change can land in between; an unconditional upsert would re-embed the
+ * unchanged goal or restore the superseded goal's vector, which the pending
+ * drain would then never revisit.
+ */
+export async function writePlannerMemoryEmbedding(
+  id: string,
+  goal: string,
+  vector: number[]
+): Promise<PlannerMemoryEmbeddingWrite> {
   const literal = toVectorLiteral(vector);
-  await prisma.$executeRaw(Prisma.sql`
-    INSERT INTO "PlannerMemoryEmbedding"
-      ("plannerMemoryId", "model", "goalHash", "goalVector", "updatedAt")
-    VALUES (${id}, ${PLANNER_MEMORY_INDEX_VERSION}, ${goalHash}, ${literal}::vector, NOW())
-    ON CONFLICT ("plannerMemoryId") DO UPDATE SET
-      "model" = EXCLUDED."model",
-      "goalHash" = EXCLUDED."goalHash",
-      "goalVector" = EXCLUDED."goalVector",
-      "updatedAt" = NOW()
+  const [outcome] = await prisma.$queryRaw<Array<{ matched: bigint; written: bigint }>>(Prisma.sql`
+    WITH source AS (
+      SELECT m."id" FROM "PlannerMemory" m WHERE m."id" = ${id} AND m."goal" = ${goal}
+    ),
+    upserted AS (
+      INSERT INTO "PlannerMemoryEmbedding"
+        ("plannerMemoryId", "model", "goalHash", "goalVector", "updatedAt")
+      SELECT source."id", ${PLANNER_MEMORY_INDEX_VERSION}, ${plannerMemoryGoalHash(goal)},
+             ${literal}::vector, NOW()
+      FROM source
+      ON CONFLICT ("plannerMemoryId") DO UPDATE SET
+        "model" = EXCLUDED."model",
+        "goalHash" = EXCLUDED."goalHash",
+        "goalVector" = EXCLUDED."goalVector",
+        "updatedAt" = NOW()
+      WHERE "PlannerMemoryEmbedding"."model" <> EXCLUDED."model"
+         OR "PlannerMemoryEmbedding"."goalHash" <> EXCLUDED."goalHash"
+      RETURNING 1
+    )
+    SELECT (SELECT COUNT(*) FROM source) AS matched, (SELECT COUNT(*) FROM upserted) AS written
   `);
+  if (Number(outcome?.matched ?? 0) === 0) return 'superseded';
+  return Number(outcome?.written ?? 0) > 0 ? 'written' : 'current';
 }
 
-export type PlannerMemoryEmbedOutcome = 'embedded' | 'current' | 'missing';
+export type PlannerMemoryEmbedOutcome = 'embedded' | 'current' | 'superseded' | 'missing';
 
 /**
  * Idempotent: a row whose embedding matches the current index version and goal
@@ -143,7 +170,8 @@ export async function embedPlannerMemory(id: string): Promise<PlannerMemoryEmbed
   }
   const started = Date.now();
   const [vector] = await embedTexts([row.goal]);
-  await upsertEmbedding(id, goalHash, vector);
+  const write = await writePlannerMemoryEmbedding(id, row.goal, vector);
+  if (write !== 'written') return write;
   log.info('planner memory embedded', { root_agent_id: id, duration_ms: Date.now() - started });
   return 'embedded';
 }
@@ -177,37 +205,41 @@ export async function embedPendingPlannerMemories(
 ): Promise<PlannerMemoryEmbedDrainResult> {
   const result: PlannerMemoryEmbedDrainResult = { embedded: 0, failed: 0, remaining: 0 };
   const rows = await pendingPlannerMemories(limit);
-  const byHash = new Map<string, { goal: string; ids: string[] }>();
+  const byHash = new Map<string, { goal: string; rows: Array<{ id: string; goal: string }> }>();
   for (const row of rows) {
     const hash = plannerMemoryGoalHash(row.goal);
-    const group = byHash.get(hash) ?? { goal: row.goal, ids: [] };
-    group.ids.push(row.id);
+    const group = byHash.get(hash) ?? { goal: row.goal, rows: [] };
+    group.rows.push(row);
     byHash.set(hash, group);
   }
-  const groups = [...byHash.entries()];
+  const groups = [...byHash.values()];
   for (let start = 0; start < groups.length; start += PLANNER_MEMORY_EMBED_BATCH) {
     const batch = groups.slice(start, start + PLANNER_MEMORY_EMBED_BATCH);
     let vectors: number[][];
     try {
-      vectors = await embedTexts(batch.map(([, group]) => group.goal));
+      vectors = await embedTexts(batch.map((group) => group.goal));
     } catch (error) {
       // Provider failure: nothing in this batch was written.
-      result.failed += batch.reduce((sum, [, group]) => sum + group.ids.length, 0);
+      result.failed += batch.reduce((sum, group) => sum + group.rows.length, 0);
       log.warn('pending embed batch failed', {
         rows: batch.length,
         error: error instanceof Error ? error.message.slice(0, 200) : String(error),
       });
       continue;
     }
-    for (const [index, [hash, group]] of batch.entries()) {
-      for (const id of group.ids) {
+    for (const [index, group] of batch.entries()) {
+      for (const row of group.rows) {
         try {
-          await upsertEmbedding(id, hash, vectors[index]);
-          result.embedded += 1;
+          // A concurrent writer that already embedded this goal leaves the row current too.
+          if (
+            (await writePlannerMemoryEmbedding(row.id, row.goal, vectors[index])) !== 'superseded'
+          ) {
+            result.embedded += 1;
+          }
         } catch (error) {
           result.failed += 1;
           log.warn('pending embed upsert failed', {
-            root_agent_id: id,
+            root_agent_id: row.id,
             error: error instanceof Error ? error.message.slice(0, 200) : String(error),
           });
         }

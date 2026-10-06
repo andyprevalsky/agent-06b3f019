@@ -91,6 +91,8 @@ _CONFIG_SCALAR_KEYS = {
     "per_child_max_concurrency",
     "wmh_model_name",
     "benchmark_fast_mode_cache",
+    "fast_mode_cache_disable_write_through",
+    "benchmark_demo_cache_read_only",
     "benchmark_claude_code_cache_ratchet_warn_only",
     "rose_exclude_anthropic_family",
     "task_count",

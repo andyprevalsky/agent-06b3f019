@@ -11,6 +11,7 @@ symptoms:
   - "❌ script snapshot owner birth drifted from sealed identity"
   - "snapshot ownership error: snapshot ownership transferred to another live process"
   - "❌ infra canary preflight FAILED (exit=1) — refusing capability fleet (INFRA)"
+  - "campaign cohort does not own this controller"
   - all Polar tasks terminalized INFRA_ERROR with no current run artifact produced
 tags:
   - cloudbench
@@ -18,6 +19,7 @@ tags:
   - script-snapshot
   - nested-controller
   - process-identity
+  - campaign-barrier
 sources:
   - PR #1299
   - commit e9ce394585db709669f6bae68e578a85624bb434
@@ -27,6 +29,8 @@ sources:
   - fleet run 20260909-170812-4093151
   - fleet run 20260909-170832-4093685
   - fleet run capability-stability-20260910105116-2670724
+  - fleet run 20261006-053308-448
+  - commit f1e756cea51c1946ad80ea8904d88ca0547452ce
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: open
 ---
@@ -188,3 +192,61 @@ and separately rejects two candidates claiming the parent identity. The first
 fixture failed before the fix; the complete proof suite passes afterwards:
 `.context/acceptance/nested-canary-provenance-{repro,fixed}.log`. Selection is
 linear in the controller log's provenance entries and performs no provider IO.
+
+## Campaign-slot recurrence on 2026-10-05
+
+The strict cached campaign `campaign-20261006-053209-82156` reached its shared
+two-task substrate canary while its other controllers waited on the existing
+check/run/stamp transaction. Its first terminal error was a separate Hub
+publication timeout in `r031-j0031`. The campaign was canceled normally with
+zero benchmark executions: one failed outer controller, 49 canceled controllers,
+and no cohort release. This recurrence does not assign that Hub failure to the
+canary.
+
+Read-only inspection found an additional inherited parent identity. The
+preflight helper copied `RUN_BENCH_CAMPAIGN_BARRIER_DIR`,
+`RUN_BENCH_CAMPAIGN_COHORT`, and `RUN_BENCH_CAMPAIGN_JOB_ID` into the nested
+canary. The campaign manifest assigned `r005-j0005` to outer PID 82290, while
+its nested canary was PID 448 in run `20261006-053308-448`. Once that canary
+reached ordinary stack readiness, the real campaign rendezvous would reject its
+different PID. This is an upcoming boundary: the actual canceled canary retained
+only cloning states, two allocation epochs, and no task `run.json`; it never
+called that rendezvous. The retained inventory diagnostics show 27 successful
+refreshes. The shared transaction lock, width two, and 3600-second stamp TTL
+were operating as designed, with no evidence of a publisher failure or lock
+self-deadlock.
+
+The bounded replay used the unchanged production preflight helper and campaign
+rendezvous with a real parent lock and a manifest binding the parent PID. Its
+distinct child exited 1 in 0.053 seconds with the exact
+`campaign cohort does not own this controller` rejection and no PASS stamp or
+parent ready marker. The ordinary-canary inverse exited 0 and stamped PASS in
+0.053 seconds. Neither replay used a provider, service, or model. Private
+source-bound receipts are under
+`.context/deploy-runs/20261006-024302-65153/canary-pipeline-rca/`.
+
+The helper now removes only those three campaign rendezvous keys from its
+child environment. The parent's campaign slot remains intact. Shared inventory,
+inherited proxies, immutable snapshot borrowing, the fresh nested fleet owner,
+and the distinct nested controller lock are preserved. The nested substrate
+check must finish before the outer controller can join its campaign; it cannot
+participate in that outer slot itself. This is another instance of inherited
+parent authority crossing the same nested-controller boundary, so the evidence
+extends this case rather than creating a duplicate.
+
+The existing permanent `scripts/tests/fleet-infra-canary.test.sh` now exercises
+that production-helper/rendezvous path. The same owning control failed before
+the fix (exit 1, 0.831 seconds); the full gate passed after it (exit 0, 1.625
+seconds). It also checks the ordinary inverse, preserved inventory/proxy values,
+fresh nested owner and lock, unchanged parent identity, wrong-controller
+rejection, and correct-parent acceptance. Existing serialization, failure-status,
+and crashed-helper lock controls remain unchanged. No barrier criterion,
+deadline, concurrency, task behavior, or resource cleanup policy changed.
+
+The final native 32-scenario proof and 82% composite coverage remain separate
+executed receipts on `f1e756cea`. The native fixture's only fleet execution
+entry always supplies `CLOUDBENCH_FAKE_DIR`, whose unchanged guard skips this
+substrate preflight. The changed helper is verified by its owning offline gate;
+the recorded native and funded successes are retained with explicit dependency
+hash differences rather than relabeled as fresh full runs. A new successful
+cached campaign is still required for its own acceptance credit.

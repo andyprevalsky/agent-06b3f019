@@ -11,10 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.cloudbench_dependency_sync_test import _extract_fleet_function
+from benchmarks.cloudbench_dependency_sync_test import _extract_fleet_function, fleet_source_text
 
 ROOT = Path(__file__).resolve().parents[2]
-FLEET = Path(os.environ.get("CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", ROOT / "scripts/run-bench-fleet"))
 
 
 @pytest.mark.parametrize("mode", ["current", "stale", "forced"])
@@ -25,7 +24,7 @@ def test_runtime_pending_registry_cannot_be_reaped(tmp_path: Path, mode: str) ->
     (registry / "meta").write_text("version=2\n")
     (registry / "clones" / "clone-a").write_text("name=clone-a\nid=abc123\nvolume_id=vol_a\n")
     mutations = tmp_path / "mutations"
-    function = _extract_fleet_function(FLEET.read_text(), "reap_registry_clones() {")
+    function = _extract_fleet_function(fleet_source_text(), "reap_registry_clones() {")
     result = subprocess.run(
         [
             "bash",
@@ -67,7 +66,7 @@ def test_worker_capture_precedes_scale_down_destroy(tmp_path: Path, capture_ok: 
     evidence = out / "worker-runtime-evidence" / "abc123"
     evidence.mkdir(parents=True)
     (evidence / "owner.json").write_text("{}\n")
-    function = _extract_fleet_function(FLEET.read_text(), "cleanup_failed_worker() {")
+    function = _extract_fleet_function(fleet_source_text(), "cleanup_failed_worker() {")
     result = subprocess.run(
         [
             "bash",
@@ -210,7 +209,7 @@ def test_failed_controller_all_sealed_archive_retires_with_zero_credit(tmp_path:
     machines_path.write_text(json.dumps(machines))
     volumes_path.write_text(json.dumps(volumes))
     functions = "\n".join(
-        _extract_fleet_function(FLEET.read_text(), name + "() {")
+        _extract_fleet_function(fleet_source_text(), name + "() {")
         for name in ("registry_meta_value", "fleet_recovery_confirm_forensic_retirement")
     )
     script = (
@@ -265,7 +264,7 @@ def test_primary_retention_rechecks_complete_capture(tmp_path: Path, corrupt: st
             manifest = json.loads((root / "manifest.json").read_text())
             manifest["machine_id"] = "def456"
             (root / "manifest.json").write_text(json.dumps(manifest))
-    function = _extract_fleet_function(FLEET.read_text(), "cloudbench_validate_primary_runtime_evidence() {")
+    function = _extract_fleet_function(fleet_source_text(), "cloudbench_validate_primary_runtime_evidence() {")
     result = subprocess.run(
         ["bash", "-c", function + '\ncloudbench_validate_primary_runtime_evidence "$OUT" abc123 run-0'],
         env={**os.environ, "OUT": str(out)},
@@ -300,7 +299,7 @@ def test_runtime_retention_latch_clears_only_after_all_owners(tmp_path: Path, fa
     marker = registry / "runtime-evidence-unconfirmed"
     marker.touch()
     functions = "\n".join(
-        _extract_fleet_function(FLEET.read_text(), name + "() {")
+        _extract_fleet_function(fleet_source_text(), name + "() {")
         for name in (
             "cloudbench_retain_runtime_evidence",
             "cloudbench_validate_primary_runtime_evidence",
@@ -351,7 +350,7 @@ cloudbench_collect_remaining_runtime_evidence
 
 
 def test_worker_evidence_owner_is_immutable_before_launch(tmp_path: Path) -> None:
-    function = _extract_fleet_function(FLEET.read_text(), "cloudbench_record_worker_evidence_owner() {")
+    function = _extract_fleet_function(fleet_source_text(), "cloudbench_record_worker_evidence_owner() {")
     command = [
         "bash",
         "-c",
@@ -393,7 +392,7 @@ def test_exact_recovery_consumes_runtime_receipt_without_repeating_guest_shutdow
     )
     (registry / "runtime-evidence-unconfirmed").touch()
     functions = "\n".join(
-        _extract_fleet_function(FLEET.read_text(), name + "() {")
+        _extract_fleet_function(fleet_source_text(), name + "() {")
         for name in (
             "registry_meta_value",
             "fleet_registry_cleanup_state",
@@ -450,14 +449,33 @@ recover_exact_stale_fleet_owner "$TOKEN"
 
 @pytest.mark.parametrize(
     "corrupt",
-    ["none", "canonical-mismatch", "raw-log", "result-rejected", "omitted-task", "fsync-file", "fsync-directory"],
+    [
+        "none",
+        "absent-pool",
+        "preallocation",
+        "preallocation-no-inputs",
+        "preallocation-root-marker",
+        "preallocation-nested-marker",
+        "preallocation-dangling-link",
+        "admitted-no-inputs",
+        "linked-pool",
+        "canonical-mismatch",
+        "raw-log",
+        "result-rejected",
+        "omitted-task",
+        "fsync-file",
+        "fsync-directory",
+    ],
 )
 def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_path: Path, corrupt: str) -> None:
     token = "a" * 32
     registry = tmp_path / "registries" / token
     registry.mkdir(parents=True)
+    (registry / "clones").mkdir()
     audit = tmp_path / "audits" / token
     (audit / "fresh").mkdir(parents=True)
+    (audit / "expected-fresh").mkdir()
+    (audit / "by-machine-id").mkdir()
     (audit / "pool").mkdir()
     (audit / "meta").write_text(f"fleet_owner_token={token}\n")
     (audit / "fresh/primary").write_text("source_machine_id=123456\nmachine_id=abc123\n")
@@ -485,6 +503,26 @@ def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_pa
     (out / "post-config-start.accepted").write_text("abc123\n")
     (out / "cloudbench-run.json").write_bytes((raw / "run.json").read_bytes())
     (out / "runtime-evidence.pending").write_bytes((out / "runtime-evidence.owner.json").read_bytes())
+    if corrupt in {"absent-pool", "admitted-no-inputs", "linked-pool"} or corrupt.startswith("preallocation"):
+        (audit / "pool").rmdir()
+    if corrupt == "linked-pool":
+        (audit / "pool").symlink_to(audit / "fresh", target_is_directory=True)
+    if corrupt.startswith("preallocation"):
+        import shutil
+
+        shutil.rmtree(out)
+        (audit / "fresh/primary").unlink()
+    if corrupt not in {"preallocation"} and (corrupt.startswith("preallocation") or corrupt == "admitted-no-inputs"):
+        (run / "execution-task-matrix.json").unlink()
+        (run / "execution-provenance.json").unlink()
+    if corrupt == "preallocation-root-marker":
+        (run / ".cid").write_text("clone abc123\n")
+    if corrupt == "preallocation-nested-marker":
+        nested = run / "task/deeper"
+        nested.mkdir(parents=True)
+        (nested / ".cid").write_text("clone abc123\n")
+    if corrupt == "preallocation-dangling-link":
+        (run / "unrelated").symlink_to(run / "absent")
     (registry / "meta").write_text(f"fleet_owner_token={token}\naudit_dir={audit}\nruns_root={runs}\nrun_id=run-a\n")
     latch = registry / "runtime-evidence-unconfirmed"
     latch.touch()
@@ -514,7 +552,7 @@ def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_pa
             "os.fsync=injected\n"
         )
     functions = "\n".join(
-        _extract_fleet_function(FLEET.read_text(), name + "() {")
+        _extract_fleet_function(fleet_source_text(), name + "() {")
         for name in (
             "registry_meta_value",
             "cloudbench_retain_runtime_evidence",
@@ -548,9 +586,10 @@ fleet_recovery_confirm_runtime_evidence "$REGISTRY"
         timeout=10,
         check=False,
     )
-    assert (result.returncode == 0) == (corrupt == "none"), result.stderr
-    assert latch.exists() == (corrupt != "none")
-    assert (out / "runtime-evidence.pending").exists() == (corrupt != "none")
+    accepted = corrupt in {"none", "absent-pool", "preallocation", "preallocation-no-inputs"}
+    assert (result.returncode == 0) == accepted, result.stderr
+    assert latch.exists() == (not accepted)
+    assert (out / "runtime-evidence.pending").exists() == (not accepted and not corrupt.startswith("preallocation"))
 
 
 @pytest.mark.parametrize(

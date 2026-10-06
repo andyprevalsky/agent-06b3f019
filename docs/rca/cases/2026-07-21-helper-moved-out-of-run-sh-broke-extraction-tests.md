@@ -89,3 +89,26 @@ worker refresh plus the previously unrun canonical coverage tail is required;
 the failed aggregate must not be relabeled as a fresh passing full-suite run.
 This recurrence shows why extracting the caller alone does not preserve its
 real shell dependency set, including error paths that retain `errexit`.
+
+## Recurrence: shared fleet inventory fixture (2026-10-05)
+
+The canonical agents coverage run on `152f4b7fa3a350e3477870443b499c9eb0c3fcc8`
+passed 106 of 107 blackbox domains. The benchmark domain's runtime-retention
+selection failed sixteen existing controls with `ValueError: substring not found`.
+The inventory publisher refactor moved `registry_meta_value` into the sourced
+`cloudbench-inventory.sh`; the retention fixture still read the fleet file alone.
+No failing assertion reached the resource-retention implementation. The aggregate
+remains failed; it is not acceptance credit or a fresh passing coverage result.
+
+The identical sixteen-case selection reproduced sixteen failures in 3.24 seconds.
+Changing only its source loader to the existing `fleet_source_text` resolver made
+the unchanged selection pass in 2.12 seconds. All fifty-eight retention controls
+then passed in 11.36 seconds on native Linux in the existing review image, with
+network disabled and source/test dependencies mounted read-only. Original and
+corrected logs remain private under `.context/acceptance/startup-speed-20261005/`.
+No resource assertion, fake-provider behavior, timeout, or production code was
+changed. These controls continue to execute the real sourced shell helpers.
+
+The sixteen controls also belong in the existing compact deploy gate so a source
+location refactor is caught before funded coverage. Independent review and the
+final source-bound canonical coverage are required before merge.

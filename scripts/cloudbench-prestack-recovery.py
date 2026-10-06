@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Attest a cloud guest rejected by a platform preflight before stack startup.
+"""Attest a captured cloud guest stopped before service/provider startup.
 
 The exact stopped original volume must be captured first. This receipt can
 retire runtime ownership with zero benchmark credit; it is never a run result.
@@ -8,7 +8,9 @@ retire runtime ownership with zero benchmark credit; it is never a run result.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -48,8 +50,201 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+BOOTSTRAP_REF = "e33e3c94e285c5665f77b198c25e7bca3f1ac9c6"
+# Independently reviewed native clean-tree attestation of the driver, run.sh,
+# its eight sourced libraries, bootstrap helpers and package install hooks.
+# New source recipes require another causal review; HEAD alone is insufficient.
+BOOTSTRAP_SOURCE_SHA256 = "44e814acf5773835107e1886bdb72d1339b6aa99bc716feceb03defa83a50459"
+
+
+def bootstrap_regular(path: Path, maximum: int = 64 * 1024 * 1024) -> bytes:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as error:
+        raise ValueError("missing or unsafe bootstrap evidence file") from error
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
+            raise ValueError("unsafe bootstrap evidence file")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            data = stream.read(maximum + 1)
+        if len(data) != info.st_size or len(data) > maximum:
+            raise ValueError("changed or oversized bootstrap evidence file")
+        return data
+    finally:
+        os.close(descriptor)
+
+
+def verify_bootstrap(registry: Path, bench: str, capture_dir: Path,
+                     machines_file: Path, volumes_file: Path) -> tuple[Path, dict[str, object]]:
+    """Fresh task-free infra probe canceled during DB/dependency bootstrap.
+
+    This proves no backend/worker/provider launch in one captured source
+    recipe. It does not claim that run.sh or its isolated database never ran.
+    The original Machine remains stopped until the normal exact fresh reaper.
+    """
+    def obj(path: Path, maximum: int = 1048576):
+        return json.loads(bootstrap_regular(path, maximum))
+
+    for path in (registry, capture_dir):
+        if not path.is_absolute() or path.resolve() != path or not path.is_dir() or path.is_symlink():
+            raise ValueError("unsafe bootstrap owner or capture path")
+    owner = registry.name
+    if not re.fullmatch(r"[0-9a-f]{32}", owner) or not re.fullmatch(r"[A-Za-z0-9._-]+", bench):
+        raise ValueError("unsafe bootstrap identity")
+    meta = fields(registry / "meta")
+    if (meta.get("version") != "2" or meta.get("fleet_owner_token") != owner
+            or meta.get("cleanup_policy") not in {"retain", "reap"}
+            or (registry / "runtime-evidence-unconfirmed").exists()
+            or (registry / "runtime-evidence-unconfirmed").is_symlink()):
+        raise ValueError("bootstrap owner has unarchived runtime or unsafe policy")
+    run_id = meta["run_id"]
+    run, audit = Path(meta["runs_root"]) / run_id, Path(meta["audit_dir"])
+    if (not run.is_absolute() or run.resolve() != run or not run.is_dir()
+            or not audit.is_absolute() or audit.resolve() != audit or audit.name != owner):
+        raise ValueError("bootstrap run or audit is not exact")
+    audit_meta = fields(audit / "meta")
+    if any(audit_meta.get(key) != meta[key] for key in ("fleet_owner_token", "run_id", "app")):
+        raise ValueError("bootstrap audit owner disagrees")
+    lifecycle, tasks = obj(run / "_batch/lifecycle.json"), obj(run / "_batch/benches.json")
+    if (lifecycle.get("status") != "failed" or lifecycle.get("fleet_owner_token") != owner
+            or lifecycle.get("run_id") != run_id
+            or type(lifecycle.get("controller_exit_code")) is not int
+            or lifecycle["controller_exit_code"] == 0 or not isinstance(tasks, list)
+            or not tasks or any(not isinstance(row, dict) for row in tasks)):
+        raise ValueError("bootstrap fleet is not terminal and failed")
+    names = [row.get("name") for row in tasks]
+    if len(set(names)) != len(names) or bench not in names:
+        raise ValueError("bootstrap catalog slot is not exact")
+    out, token = run / bench, f"{owner}-{names.index(bench)}"
+    cid = bootstrap_regular(out / ".cid", 256).decode().split()
+    if len(cid) != 2 or cid[0] != "clone" or not re.fullmatch(r"[0-9a-f]{14}", cid[1]):
+        raise ValueError("bootstrap guest is not a fresh clone")
+    machine = cid[1]
+    clone = bootstrap_regular(audit / "by-machine-id" / machine, 256).decode().strip()
+    if not re.fullmatch(r"cloudbench-[A-Za-z0-9._-]+", clone):
+        raise ValueError("bootstrap clone index is unsafe")
+    fresh = fields(audit / "fresh" / clone)
+    claimed = fields(registry / "clones" / clone)
+    volume = fresh.get("volume_id", "")
+    if (any(fresh.get(key) != meta[key] for key in ("fleet_owner_token", "run_id", "app"))
+            or fresh.get("source") != "fresh-clone" or fresh.get("disposition") != "owned"
+            or fresh.get("clone_name") != clone or fresh.get("machine_id") != machine
+            or not re.fullmatch(r"vol_[A-Za-z0-9]+", volume)
+            or claimed != {"name": clone, "id": machine, "volume_id": volume}):
+        raise ValueError("bootstrap fresh ownership is not exact")
+    if (bootstrap_regular(out / "post-config-start.accepted", 256) != (machine + "\n").encode()
+            or bootstrap_regular(out / "primary.ids", 256) != (machine + "\n").encode()
+            or bootstrap_regular(out / "benchmark-child.finished", 256).strip() != b"143"
+            or bootstrap_regular(out / "desired-worker-count", 256).strip() != b"0"):
+        raise ValueError("bootstrap child did not terminate before worker allocation")
+    for name in ("cloudbench-run.json", "runtime-evidence.pending", "worker-runtime-evidence"):
+        if (out / name).exists() or (out / name).is_symlink():
+            raise ValueError("bootstrap guest crossed runtime evidence boundary")
+    for name in ("guest-shutdown.confirmed", "guest-cleanup.provider-manifest.json",
+                 "guest-cleanup.recovery-receipt.json"):
+        if (out / name).exists() or (out / name).is_symlink():
+            raise ValueError("bootstrap receipt must remain distinct from guest/provider acknowledgement")
+    machines, volumes = obj(machines_file, 128 * 1024 * 1024), obj(volumes_file, 128 * 1024 * 1024)
+    if not isinstance(machines, list) or not isinstance(volumes, list):
+        raise ValueError("unsafe bootstrap native inventory")
+    native = [row for row in machines if row.get("id") == machine]
+    native_volume = [row for row in volumes if row.get("id") == volume]
+    config_bytes = bootstrap_regular(capture_dir / f"{machine}.original-config.private.json", 1048576)
+    config = json.loads(config_bytes)
+    if (len(native) != 1 or len(native_volume) != 1
+            or native[0].get("state") != "stopped" or native[0].get("name") != clone
+            or native[0].get("config") != config
+            or native_volume[0].get("attached_machine_id") != machine
+            or config.get("init", {}).get("cmd") != ["bash", "/cloudbench-boot.sh"]
+            or not isinstance(config.get("mounts"), list) or len(config["mounts"]) != 1
+            or config["mounts"][0].get("volume") != volume or config["mounts"][0].get("path") != "/data"
+            or "@sha256:" not in config.get("image", "")):
+        raise ValueError("original stopped bootstrap config or volume is not exact")
+    env = config.get("env", {})
+    if (env.get("CLOUDBENCH_RUN_TOKEN") != token or env.get("CLOUDBENCH_INFRA_PROBE") != "1"
+            or env.get("CLOUDBENCH_FRESH_VOLUME") != "1" or env.get("REF") != BOOTSTRAP_REF
+            or env.get("BENCH_TASKS_B64") != base64.b64encode(bench.encode()).decode()):
+        raise ValueError("bootstrap native config is not the exact task-free infra probe")
+    provenance = obj(capture_dir / f"{machine}.provenance.safe.json", 1048576)
+    capture = capture_dir / f"{machine}.originals.private.tar.gz"
+    captured = bootstrap_regular(capture, 134217728)
+    source = provenance.get("source_file_sha256")
+    if (provenance.get("version") != 1 or provenance.get("direct_original_volume") is not True
+            or provenance.get("source_machine_id") != machine or provenance.get("machine_id") != machine
+            or provenance.get("source_volume_id") != volume or provenance.get("guest_run_token") != token
+            or provenance.get("proof_credit") != 0 or provenance.get("git_head") != BOOTSTRAP_REF
+            or provenance.get("git_exit_code") != 0 or provenance.get("tracked_change_exit_code") != 0
+            or provenance.get("tracked_changed_paths") != [] or not isinstance(source, dict)
+            or sha(json.dumps(source, sort_keys=True, separators=(",", ":")).encode()) != BOOTSTRAP_SOURCE_SHA256
+            or provenance.get("native_original_config_sha256") != sha(config_bytes)
+            or provenance.get("archive_sha256") != sha(captured)
+            or provenance.get("archive_bytes") != len(captured)):
+        raise ValueError("bootstrap capture, clean source or original config attestation is incomplete")
+    originals = {}
+    with tarfile.open(fileobj=io.BytesIO(captured), mode="r:gz") as stream:
+        for member in stream:
+            if (not member.isfile() or member.name in originals or Path(member.name).is_absolute()
+                    or ".." in Path(member.name).parts or member.size > 67108864):
+                raise ValueError("unsafe bootstrap original-volume member")
+            reader = stream.extractfile(member)
+            if reader is None:
+                raise ValueError("missing bootstrap original-volume member")
+            originals[member.name] = reader.read(member.size + 1)
+            if len(originals[member.name]) != member.size:
+                raise ValueError("truncated bootstrap original-volume member")
+    expected = {"bench.log", "cloudbench-driver.state", f"cloudbench-shutdown-{token}.request",
+                "repo/.context/cloudbench/stack.log"}
+    required_absent = {"cloudbench-driver.pid", f"cloudbench-driver-clean-{token}.ack",
+                       "repo/.context/cloudbench/services.json", "repo/.context/cloudbench/run.json",
+                       "repo/.context/cloudbench/logs/backend.log", "repo/.context/cloudbench/logs/worker.log"}
+    if (set(originals) != expected or not isinstance(provenance.get("missing"), list)
+            or not required_absent <= set(provenance["missing"])
+            or provenance.get("files") != {name: {"bytes": len(data), "sha256": sha(data)}
+                                         for name, data in originals.items()}
+            or originals["cloudbench-driver.state"] != b"exited\n"
+            or originals[f"cloudbench-shutdown-{token}.request"] != b""):
+        raise ValueError("bootstrap capture lacks complete original files and service absence")
+    bench_log = originals["bench.log"].decode()
+    required = [f"RUNSTAMP-{token}\n", "launching stack (run.sh --benchmark)",
+                "waiting for stack to become healthy", "guest shutdown requested",
+                "stack worker cleanup was not confirmed; refusing guest cleanup acknowledgement",
+                "driver exited rc=143; holding for controller collection"]
+    if (not bench_log.startswith(required[0]) or any(marker not in bench_log for marker in required)
+            or "stack healthy" in bench_log or "running benchmark:" in bench_log):
+        raise ValueError("bootstrap driver crossed service or task boundary")
+    stack = originals["repo/.context/cloudbench/stack.log"].decode()
+    lines = stack.splitlines()
+    database = re.findall(r"Created isolated system database ([A-Za-z_][A-Za-z0-9_]{0,62})", stack)
+    if len(database) != 1 or "DB restored from dump" not in stack or not lines:
+        raise ValueError("bootstrap isolated DB stage is incomplete")
+    try:
+        last_index = json.loads(lines[-1])
+    except (ValueError, TypeError):
+        last_index = None
+    if lines[-1] == "📦 Installing front-end dependencies...":
+        phase = "frontend-dependency-preflight"
+    elif ("agent-network grep indexes" in lines[-1].lower()
+          or last_index == {"ok": True, "indexes": ["Message_agent_network_grep_trgm_idx",
+                                                    "Message_agentId_createdAt_id_idx"]}):
+        phase = "agent-network-index-bootstrap"
+    else:
+        raise ValueError("bootstrap final source phase is unsupported")
+    return out, {"version": 1, "kind": "fresh-infra-bootstrap-zero-provider",
+        "fleet_owner_token": owner, "run_id": run_id, "bench": bench, "machine_id": machine,
+        "volume_id": volume, "clone_name": clone, "run_token": token, "provider_state": "stopped",
+        "proof_credit": 0, "isolated_database_created": True, "provider_allocation_count": 0,
+        "bootstrap_phase": phase, "source_ref": BOOTSTRAP_REF, "source_recipe_sha256": BOOTSTRAP_SOURCE_SHA256,
+        "capture_dir": str(capture_dir), "capture_sha256": sha(captured),
+        "capture_provenance_sha256": sha(bootstrap_regular(capture_dir / f"{machine}.provenance.safe.json")),
+        "native_original_config_sha256": sha(config_bytes),
+        "original_file_sha256": {name: sha(data) for name, data in sorted(originals.items())}}
+
+
 def verify(registry: Path, bench: str, capture_dir: Path,
            machines_file: Path, volumes_file: Path) -> tuple[Path, dict[str, object]]:
+    if bench != "message-person":
+        return verify_bootstrap(registry, bench, capture_dir, machines_file, volumes_file)
     owner = registry.name
     if not re.fullmatch(r"[0-9a-f]{32}", owner) or bench != "message-person":
         raise ValueError("unsupported prestack owner or task")
@@ -154,7 +349,8 @@ def verify(registry: Path, bench: str, capture_dir: Path,
 
 
 def publish(out: Path, receipt: dict[str, object]) -> None:
-    path = out / "guest-prestack.confirmed"
+    path = out / ("guest-bootstrap.confirmed" if receipt.get("kind") == "fresh-infra-bootstrap-zero-provider"
+                  else "guest-prestack.confirmed")
     payload = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode()
     if path.exists() or path.is_symlink():
         if regular(path, 65536) != payload:
@@ -177,9 +373,14 @@ def main() -> None:
     parser.add_argument("--machines-json", required=True, type=Path)
     parser.add_argument("--volumes-json", required=True, type=Path)
     parser.add_argument("--publish", action="store_true")
+    parser.add_argument("--validate-published-bootstrap", action="store_true")
     args = parser.parse_args()
     out, receipt = verify(args.registry, args.bench, args.capture_dir,
                           args.machines_json, args.volumes_json)
+    if args.validate_published_bootstrap:
+        if (args.publish or receipt.get("kind") != "fresh-infra-bootstrap-zero-provider"
+                or json.loads(bootstrap_regular(out / "guest-bootstrap.confirmed", 1048576)) != receipt):
+            raise ValueError("published bootstrap retirement does not match exact original capture")
     if args.publish:
         publish(out, receipt)
     print(json.dumps({"verified": True, "published": args.publish,
