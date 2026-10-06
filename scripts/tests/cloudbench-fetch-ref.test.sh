@@ -5,6 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FETCH_SCRIPT="$ROOT_DIR/scripts/cloudbench-fetch-ref.sh"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
+# Host url.*.insteadOf rules (for example a cloud VM's token-embedding GitHub
+# rewrite) change what `git remote get-url` reports and where fetches go.
+: > "$TMP_ROOT/gitconfig"
+export GIT_CONFIG_GLOBAL="$TMP_ROOT/gitconfig" GIT_CONFIG_NOSYSTEM=1
 
 fail() {
   echo "FAIL: $1" >&2
