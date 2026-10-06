@@ -5422,6 +5422,147 @@ async def test_client_collect_selects_final_structured_output_item():
     assert response.content == '{"answer":"final"}'
 
 
+def _cut_off_recovery_handler(replies: dict, seen: list):
+    """Mock OpenRouter: `replies[(model, max_tokens)]` is (text, finish_reason)."""
+
+    def handler(req):
+        body = json.loads(req.content)
+        key = (body["model"], body.get("max_tokens"))
+        seen.append(key)
+        text, finish = replies[key]
+        sse = "\n".join(
+            _openai_sse(
+                [
+                    {"choices": [{"delta": {"content": text}, "finish_reason": finish}]},
+                    {"usage": {"prompt_tokens": 5, "completion_tokens": 9, "total_tokens": 14}},
+                ]
+            )
+        )
+        return httpx.Response(200, text=sse, headers={"Content-Type": "text/event-stream"})
+
+    return handler
+
+
+async def test_collect_retries_a_cut_off_reply_with_a_larger_limit_then_the_next_model():
+    """A structured reply cut off at the output limit is never re-asked unchanged."""
+    from pydantic import BaseModel
+
+    class Answer(BaseModel):
+        answer: str
+
+    seen: list = []
+    set_mock_handler(
+        _cut_off_recovery_handler(
+            {
+                ("qwen/qwen3.8-27b", 2048): ('{"answer":"cut', "length"),
+                ("qwen/qwen3.8-27b", 16000): ('{"answer":"still cut', "length"),
+                ("google/gemini-3.8-flash", 16000): ('{"answer":"ok"}', "stop"),
+            },
+            seen,
+        )
+    )
+    response = await RoseClient(openrouter_key="ork-x").collect(
+        pool="rose-1-flash",
+        messages=[{"role": "user", "content": "hi"}],
+        response_model=Answer,
+        max_tokens=2048,
+        call_site="test-cut-off-recovery",
+    )
+
+    assert seen == [
+        ("qwen/qwen3.8-27b", 2048),
+        ("qwen/qwen3.8-27b", 16000),
+        ("google/gemini-3.8-flash", 16000),
+    ], seen
+    assert response.content == '{"answer":"ok"}', response.content
+    assert response.actual_model == "google/gemini-3.8-flash", response.actual_model
+    # The two abandoned attempts were real spend: their tokens ride on the final
+    # usage, per attempt with the model that produced them.
+    assert response.usage.get("prompt_tokens") == 15, response.usage
+    assert response.usage.get("completion_tokens") == 27, response.usage
+    assert len(response.usage.get("abandoned_attempts") or []) == 2, response.usage
+    assert response.usage.get("finish_reason") == "stop", response.usage
+
+
+async def test_collect_stops_retrying_once_the_larger_limit_is_enough():
+    from pydantic import BaseModel
+
+    class Answer(BaseModel):
+        answer: str
+
+    seen: list = []
+    set_mock_handler(
+        _cut_off_recovery_handler(
+            {
+                ("qwen/qwen3.8-27b", 2048): ('{"answer":"cut', "length"),
+                ("qwen/qwen3.8-27b", 16000): ('{"answer":"ok"}', "stop"),
+            },
+            seen,
+        )
+    )
+    response = await RoseClient(openrouter_key="ork-x").collect(
+        pool="rose-1-flash",
+        messages=[{"role": "user", "content": "hi"}],
+        response_model=Answer,
+        max_tokens=2048,
+        call_site="test-cut-off-larger-limit",
+    )
+
+    assert seen == [("qwen/qwen3.8-27b", 2048), ("qwen/qwen3.8-27b", 16000)], seen
+    assert response.content == '{"answer":"ok"}', response.content
+
+
+async def test_cut_off_recovery_leaves_plain_text_and_non_opted_streams_alone():
+    """A cut-off answer in prose is still a partial answer; streams that cannot restart get one attempt."""
+    from pydantic import BaseModel
+
+    class Answer(BaseModel):
+        answer: str
+
+    seen: list = []
+    set_mock_handler(_cut_off_recovery_handler({("qwen/qwen3.8-27b", 2048): ("half an ans", "length")}, seen))
+    client = RoseClient(openrouter_key="ork-x")
+    response = await client.collect(
+        pool="rose-1-flash",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=2048,
+        call_site="test-cut-off-plain-text",
+    )
+    assert response.content == "half an ans" and len(seen) == 1, (response.content, seen)
+
+    chunks = await _drain(
+        client.complete(
+            pool="rose-1-flash",
+            messages=[{"role": "user", "content": "hi"}],
+            response_model=Answer,
+            max_tokens=2048,
+            call_site="test-cut-off-plain-stream",
+        )
+    )
+    assert len(seen) == 2 and not any(chunk.kind == "restart" for chunk in chunks), seen
+
+
+def test_cut_off_recovery_limits_model_keys_and_cache_restart():
+    from providers.fast_cache.rose_cache import accumulate_chunk, empty_response
+    from providers.rose.truncation import escalated_max_tokens, model_key, needs_result
+
+    assert escalated_max_tokens(2048) == 16000
+    assert escalated_max_tokens(8192) == 32000
+    assert escalated_max_tokens(32000) is None and escalated_max_tokens(None) is None
+    assert model_key("qwen/qwen3.8-27b") == model_key("qwen-3.8-27b")
+    assert model_key("claude-sonnet-5-claude") == model_key("anthropic/claude-sonnet-5")
+    assert model_key("google/gemini-3.8-flash") != model_key("qwen/qwen3.8-27b")
+    assert needs_result(tools=[{"name": "click"}], tool_choice=None, response_model=None)
+    assert not needs_result(tools=[{"name": "click"}], tool_choice="none", response_model=None)
+    assert not needs_result(tools=None, tool_choice=None, response_model=None)
+
+    stored = empty_response()
+    accumulate_chunk(stored, StreamChunk(kind="content", data={"text": "abandoned"}))
+    accumulate_chunk(stored, StreamChunk(kind="restart", data={}))
+    accumulate_chunk(stored, StreamChunk(kind="content", data={"text": "kept"}))
+    assert stored["content"] == "kept", stored
+
+
 async def test_client_collect_emits_common_rose_timing_logs():
     sse_ok = "\n".join(
         _openai_sse(
@@ -7902,6 +8043,18 @@ async def run_all_tests():
         test_client_collect_selects_final_structured_output_item,
     )
     await r.record_async("client_collect_common_timing_logs", test_client_collect_emits_common_rose_timing_logs)
+    await r.record_async(
+        "collect_cut_off_larger_limit_then_next_model",
+        test_collect_retries_a_cut_off_reply_with_a_larger_limit_then_the_next_model,
+    )
+    await r.record_async(
+        "collect_cut_off_larger_limit_is_enough", test_collect_stops_retrying_once_the_larger_limit_is_enough
+    )
+    await r.record_async(
+        "cut_off_recovery_skips_plain_text_and_plain_streams",
+        test_cut_off_recovery_leaves_plain_text_and_non_opted_streams_alone,
+    )
+    r.record("cut_off_recovery_limits_keys_cache", test_cut_off_recovery_limits_model_keys_and_cache_restart)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
     await r.record_async(
         "client_foundry_stream_exit_closes_http_owner",

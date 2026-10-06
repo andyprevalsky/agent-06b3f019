@@ -536,6 +536,63 @@ run_venv_preflight "$asdf_root/asdf-python" || { echo "FAIL: run.sh venv preflig
 expect_eq "$(sort -u "$asdf_root/base-calls")" "$asdf_root/asdf-python/bin/python3" \
   "a working asdf lookup selects its python"
 
+# A snapshot VM's installed Postgres patch can fall off the archive, so the
+# pinned pgvector build fails. Under cloud-build.sh's `set -eu` that used to
+# abort before npm/venv provisioning and left an empty agents venv.
+pg_fallback_block="$TMP_ROOT/cloud-build-pg-fallback.sh"
+awk '/# ── 2b\. Fallback: system Postgres/{on=1} on{print} on&&/^    fi$/{exit}' \
+  "$cloud_build_script" >"$pg_fallback_block"
+grep -q 'cloudbench-install-pgvector.sh' "$pg_fallback_block" \
+  || { echo "FAIL: could not extract cloud-build.sh's system Postgres fallback" >&2; exit 1; }
+pg_root="$TMP_ROOT/pg-fallback"
+mkdir -p "$pg_root/bin" "$pg_root/scripts"
+for tool in pg_isready pg_ctlcluster service su dpkg-query apt-cache; do
+  printf '#!/bin/sh\nexit 0\n' >"$pg_root/bin/$tool"
+done
+printf '#!/bin/sh\nexit 1\n' >"$pg_root/bin/docker"
+printf '#!/bin/sh\nexit 0\n' >"$pg_root/bin/find"
+printf '#!/bin/sh\necho "16 main 5432 online postgres /var/lib/postgresql/16/main log"\n' \
+  >"$pg_root/bin/pg_lsclusters"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"$APT_CALLS"\nexit "${APT_RC:-0}"\n' >"$pg_root/bin/apt-get"
+chmod +x "$pg_root/bin"/*
+run_pg_fallback() { # run_pg_fallback <pinned-build-rc> <apt-rc>
+  printf '#!/bin/sh\nexit %s\n' "$1" >"$pg_root/scripts/cloudbench-install-pgvector.sh"
+  : >"$pg_root/apt-calls"
+  PATH="$pg_root/bin:$PATH" APT_CALLS="$pg_root/apt-calls" APT_RC="$2" \
+    bash -c 'set -eu; ROOT="$1"; SUDO=""; . "$2"; echo PROVISIONING_CONTINUES' \
+    _ "$pg_root" "$pg_fallback_block" 2>&1
+}
+pg_out="$(run_pg_fallback 1 0)" || { echo "FAIL: a failed pinned pgvector build aborted cloud-build.sh" >&2; exit 1; }
+[[ "$pg_out" == *PROVISIONING_CONTINUES* && "$pg_out" == *"System Postgres running"* ]] \
+  || { echo "FAIL: cloud-build.sh stopped after a failed pinned pgvector build" >&2; exit 1; }
+grep -qx 'install -y -qq postgresql-16-pgvector' "$pg_root/apt-calls" \
+  || { echo "FAIL: a failed pinned pgvector build did not install postgresql-16-pgvector" >&2; exit 1; }
+echo "PASS: a failed pinned pgvector build installs the distro package and keeps provisioning"
+pg_out="$(run_pg_fallback 1 1)" || { echo "FAIL: an unavailable pgvector aborted cloud-build.sh" >&2; exit 1; }
+[[ "$pg_out" == *"fallback unusable: pgvector unavailable"* && "$pg_out" == *PROVISIONING_CONTINUES* ]] \
+  || { echo "FAIL: an unavailable pgvector was not reported while provisioning continued" >&2; exit 1; }
+[[ "$pg_out" != *"System Postgres running"* ]] \
+  || { echo "FAIL: a fallback without pgvector was reported ready" >&2; exit 1; }
+echo "PASS: an unavailable pgvector marks the fallback unusable without aborting provisioning"
+# The npm/venv results print first; only then does the missing extension fail the build.
+build_tail="$TMP_ROOT/cloud-build-tail.sh"
+awk '/^\[ \$JS_RC -eq 0 \]/{on=1} on{print}' "$cloud_build_script" >"$build_tail"
+grep -q 'PG_FALLBACK_ERROR' "$build_tail" \
+  || { echo "FAIL: cloud-build.sh's final status ignores the system Postgres fallback" >&2; exit 1; }
+tail_out="$(JS_RC=0 PY_RC=0 PG_FALLBACK_ERROR="pgvector unavailable" bash -c 'set -eu; . "$1"' _ "$build_tail" 2>&1)" \
+  && { echo "FAIL: cloud-build.sh reported success with an unusable system Postgres" >&2; exit 1; }
+[[ "$tail_out" == *"Database setup failed: pgvector unavailable"* && "$tail_out" != *"Cloud build complete"* ]] \
+  || { echo "FAIL: cloud-build.sh did not report the unusable system Postgres" >&2; exit 1; }
+tail_out="$(JS_RC=0 PY_RC=0 bash -c 'set -eu; . "$1"' _ "$build_tail" 2>&1)" \
+  || { echo "FAIL: cloud-build.sh failed without a database error" >&2; exit 1; }
+[[ "$tail_out" == *"Cloud build complete"* ]] \
+  || { echo "FAIL: cloud-build.sh did not report completion" >&2; exit 1; }
+echo "PASS: cloud-build.sh fails after provisioning when the system Postgres fallback is unusable"
+run_pg_fallback 0 0 >/dev/null || { echo "FAIL: a successful pinned pgvector build failed the fallback" >&2; exit 1; }
+[ ! -s "$pg_root/apt-calls" ] \
+  || { echo "FAIL: a successful pinned pgvector build still installed the distro package" >&2; exit 1; }
+echo "PASS: a successful pinned pgvector build skips the distro package"
+
 # cloud-init.sh's injected-secret -> .env sync has no /deploy gate of its own;
 # this already-gated environment suite runs it so a regression fails Step 4s.
 bash "$ROOT_DIR/scripts/tests/cloud-init-env.test.sh"
