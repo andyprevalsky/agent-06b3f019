@@ -72,6 +72,15 @@ assertions and budgets are unchanged. The distinct signal-retention predicate
 repair is recorded in
 `2026-10-05-controller-fixture-deleted-canceled-evidence.md`.
 
+The next full run passed the original concurrent-provisioning scenario, then
+failed a distinct intentional signal-cleanup contract. Its runner also reported
+an unproven export verdict despite exact container absence; that original
+underlying exporter cause was not captured and remains unexplained. A bounded
+instrumented run on the corrected child contracts subsequently proved all
+retirement branches and private export in 6.212 seconds. No further exporter
+source change is justified by that successful reproduction; the original failed
+receipt is retained alongside it.
+
 ## Human feedback
 
 Preserve both failed receipts and successful inverses. Repair the owning offline

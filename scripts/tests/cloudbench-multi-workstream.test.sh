@@ -3224,6 +3224,7 @@ with socket.socket() as listener:
 PY
 )" || return 1
     (
+        export CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE=0
         TMP_ROOT="$contract_root"
         SCRIPT_SNAPSHOT_TMP="$TMP_ROOT/script-snapshots"
         PIDS=()
@@ -3317,6 +3318,7 @@ PY
 )" || return 1
     (
         local contract_shell_pid notifier_pid
+        export CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE=0
         TMP_ROOT="$contract_root"
         SCRIPT_SNAPSHOT_TMP="$TMP_ROOT/script-snapshots"
         PIDS=()

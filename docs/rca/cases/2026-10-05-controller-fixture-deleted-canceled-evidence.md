@@ -56,6 +56,19 @@ files, exact fixture container absent, and an inert sibling preserved through
 retirement. The full normal native gate remains required before closing deployment
 evidence. The original failed integration is retained separately.
 
+The next full gate passed concurrent provisioning, then exposed a related
+fixture-policy interaction: two deliberate TERM cleanup contracts expected their
+child directories to be deleted even while inheriting global failure retention.
+Set retention to zero only inside those two intentional child contracts. Keep
+their original exit143, PID birth, process-group absence, listener absence, owner
+removal and directory-removal assertions. An audit of signal and fixture-root
+consumers found no other intentional directory-removal contracts affected by
+the inherited flag. The unchanged actual native pending-Hub and prepublication
+contracts then passed through the normal dispatcher in 6.212 seconds, preserving
+all original process and directory assertions. That bounded run also proved
+stop, private export, exact removal and native absence, with all 2,147 exported
+regular files at mode 0600. The full native gate remains pending.
+
 ## Human feedback
 
 Preserve real failure and cancellation evidence without manufacturing fixture
