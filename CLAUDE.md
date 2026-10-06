@@ -1017,6 +1017,12 @@ successful compiler check do not replace dependency admission as the runtime
 user. If a guest unexpectedly installs dependencies, inspect the retained startup
 steps and npm error boundary before rebuilding or retrying.
 
+The default offline controller image includes Node's matching npm/npx package.
+Use `python3 scripts/tests/run-cloudbench-controller-linux.py --check-only` to
+check its local package runners before the normal controller suite. An existing
+verified image can be selected with `CLOUDBENCH_CONTROLLER_TEST_IMAGE`; that
+override is recorded separately from qualification of the default recipe.
+
 An accepted delete plus an exact owned-volume `pending_destroy` or `destroyed`
 terminal receipt qualifies release even when Fly retains the object. Request
 acceptance alone does not establish release.
@@ -1426,7 +1432,7 @@ Always log these events (use `[Component]` prefix, include IDs, truncate payload
 - Supabase URL: `https://kzlurqihzaolhzsbkctf.supabase.co`
 - Test phone: `+19729777432`
 - Test OTP: `181818`
-- Backend API Key: `AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=`
+- **Backend API key:** read `BACKEND_API_KEY` from the authoritative `agents/.env` and `back-end/.env` files; preserve their matching value.
 - If a test fails due to an invalid GPT auth token or invalid Claude auth token, retry with the token stored locally on the computer, or refetch the ones stored in the prod database — do not escalate before trying these.
 
 **Query backend locally:**
