@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { isBenchmarkAgent } from './benchmarkAgent';
 import { createLogger } from './logger';
+import { isBenchmarkRuntime } from './plannerMemoryDefaults';
 
 const log = createLogger('SmsTransportMock');
 
@@ -48,28 +49,89 @@ export function mockWhatsAppMessageId(seed: string): string {
   return `wamid.${digest}`;
 }
 
-export async function shouldMockBenchmarkSmsSend(agentId?: string | null): Promise<boolean> {
-  if (agentId === undefined || agentId === null || agentId.trim() === '') return false;
-  return isBenchmarkAgent(agentId);
+export type MessagingTransport = 'surge' | 'whatsapp' | 'agentphone' | 'twilio-verify';
+export type MessagingMockReason = 'benchmark_agent' | 'non_production_runtime';
+
+const FETCH_FAKE_FLAGS: Record<MessagingTransport, string> = {
+  surge: 'BLACKBOX_TEST_FAKE_SURGE',
+  whatsapp: 'BLACKBOX_TEST_FAKE_WHATSAPP',
+  agentphone: 'BLACKBOX_TEST_FAKE_AGENTPHONE',
+  'twilio-verify': 'BLACKBOX_TEST_FAKE_TWILIO',
+};
+
+let messagingFetchFakesInstalled = false;
+
+/** Called by `installFetchCapture()`; the fake flags mean nothing until it runs. */
+export function markMessagingFetchFakesInstalled(): void {
+  messagingFetchFakesInstalled = true;
 }
 
-export async function shouldMockBenchmarkWhatsAppSend(agentId?: string | null): Promise<boolean> {
-  if (agentId === undefined || agentId === null || agentId.trim() === '') return false;
-  return isBenchmarkAgent(agentId);
+export function isMessagingTransportFakedAtFetchBoundary(
+  transport: MessagingTransport,
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  return messagingFetchFakesInstalled && env[FETCH_FAKE_FLAGS[transport]] === '1';
+}
+
+/**
+ * Only the production backend may text real phones. Benchmark stacks and Render
+ * PR previews can never opt in; any other process can with
+ * ALLOW_LIVE_MESSAGING=1 (deliberate local testing, or a unit test that stubs fetch).
+ */
+export function isLiveMessagingRuntime(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (isBenchmarkRuntime(env)) return false;
+  if (env.IS_PULL_REQUEST === 'true') return false;
+  if (env.ALLOW_LIVE_MESSAGING === '1') return true;
+  return env.NODE_ENV === 'production' && env.BLACKBOX_TEST_CAPTURE_OUTBOUND !== '1';
+}
+
+/**
+ * Null means the caller may hand the request to `fetch`: either the runtime is
+ * live, or the installed fetch-capture fake owns this provider's boundary.
+ * A benchmark agent is mocked in every runtime; its lookup error propagates so
+ * callers fail closed instead of texting.
+ */
+export async function shouldMockMessagingSend(
+  transport: MessagingTransport,
+  agentId?: string | null
+): Promise<MessagingMockReason | null> {
+  if (
+    agentId !== undefined &&
+    agentId !== null &&
+    agentId.trim() !== '' &&
+    (await isBenchmarkAgent(agentId))
+  ) {
+    return 'benchmark_agent';
+  }
+  if (isMessagingTransportFakedAtFetchBoundary(transport)) return null;
+  return isLiveMessagingRuntime() ? null : 'non_production_runtime';
+}
+
+/** Archive markers for a mocked send; `benchmark_transport_mock` stays benchmark-only. */
+export function transportMockArchiveContext(reason: MessagingMockReason): {
+  benchmark_transport_mock: boolean;
+  transport_mock_reason: MessagingMockReason;
+} {
+  return {
+    benchmark_transport_mock: reason === 'benchmark_agent',
+    transport_mock_reason: reason,
+  };
 }
 
 export async function buildMockSurgeSendResult(params: {
   phoneNumber: string;
   message: string;
   seed: string;
+  reason: MessagingMockReason;
 }): Promise<{
   success: true;
   messageSid: string;
   mocked: true;
-  reason: 'benchmark_transport_mock';
+  reason: MessagingMockReason;
 }> {
   const messageSid = mockSurgeMessageId(params.seed);
-  log.info('Mocked Surge SMS send for benchmark run', {
+  log.info('Mocked Surge SMS send', {
+    reason: params.reason,
     messageSid,
     phone: params.phoneNumber.substring(0, 7) + '****',
     bodyChars: params.message.length,
@@ -78,7 +140,7 @@ export async function buildMockSurgeSendResult(params: {
     success: true,
     messageSid,
     mocked: true,
-    reason: 'benchmark_transport_mock',
+    reason: params.reason,
   };
 }
 
@@ -86,9 +148,11 @@ export function buildMockAgentPhoneSendResult(params: {
   fromNumber: string;
   toNumber: string;
   seed: string;
+  reason: MessagingMockReason;
 }) {
   const messageId = mockAgentPhoneMessageId(params.seed);
-  log.info('Mocked AgentPhone SMS send for benchmark run', {
+  log.info('Mocked AgentPhone SMS send', {
+    reason: params.reason,
     messageId,
     from: params.fromNumber.substring(0, 7) + '****',
     to: params.toNumber.substring(0, 7) + '****',
@@ -106,14 +170,16 @@ export function buildMockAgentPhoneSendResult(params: {
 export async function buildMockWhatsAppSendResult(params: {
   phoneNumber: string;
   seed: string;
+  reason: MessagingMockReason;
 }): Promise<{
   success: true;
   messageSid: string;
   mocked: true;
-  reason: 'benchmark_transport_mock';
+  reason: MessagingMockReason;
 }> {
   const messageSid = mockWhatsAppMessageId(params.seed);
-  log.info('Mocked WhatsApp Cloud API send for benchmark run', {
+  log.info('Mocked WhatsApp Cloud API send', {
+    reason: params.reason,
     messageSid,
     phone: params.phoneNumber.substring(0, 7) + '****',
   });
@@ -121,6 +187,6 @@ export async function buildMockWhatsAppSendResult(params: {
     success: true,
     messageSid,
     mocked: true,
-    reason: 'benchmark_transport_mock',
+    reason: params.reason,
   };
 }
