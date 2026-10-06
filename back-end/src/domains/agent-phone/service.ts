@@ -3,7 +3,7 @@ import { listInboundMessagesForNumber, sendAgentPhoneMessage } from '../../provi
 import {
   buildMockAgentPhoneSendResult,
   isLocalBenchmarkAgentPhoneMockEnabled,
-  shouldMockBenchmarkSmsSend,
+  shouldMockMessagingSend,
 } from '../../providers/smsTransportMock';
 import {
   claimToolSideEffect,
@@ -101,11 +101,13 @@ async function deliverAgentPhoneOutbound(params: {
   identity: NonNullable<Awaited<ReturnType<typeof repo.findAgentIdentityForMessages>>>;
 }) {
   const mockSeed = `${params.agentId}:${params.idempotencyKey}:${params.phoneNumber}:${params.message}`;
-  return (await shouldMockBenchmarkSmsSend(params.agentId))
+  const mockReason = await shouldMockMessagingSend('agentphone', params.agentId);
+  return mockReason !== null
     ? buildMockAgentPhoneSendResult({
         fromNumber: params.identity.phone ?? '+10000000000',
         toNumber: params.phoneNumber,
         seed: mockSeed,
+        reason: mockReason,
       })
     : sendAgentPhoneMessage({
         agentId: params.identity.phoneProviderAgentId,
