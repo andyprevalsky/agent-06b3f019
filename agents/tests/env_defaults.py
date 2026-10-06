@@ -39,7 +39,26 @@ TEST_ENV_DEFAULTS: dict[str, str] = {
 }
 
 
+# Fixture repositories are throwaway. A host whose global git config signs every
+# commit (Cursor Cloud routes ssh signing through a remote helper) otherwise
+# stalls fixture commits for seconds each and couples suites to that service.
+UNSIGNED_FIXTURE_GIT_CONFIG: dict[str, str] = {
+    "commit.gpgsign": "false",
+    "tag.gpgsign": "false",
+}
+
+
+def _disable_fixture_git_signing() -> None:
+    if "GIT_CONFIG_COUNT" in os.environ:
+        return
+    for index, (key, value) in enumerate(UNSIGNED_FIXTURE_GIT_CONFIG.items()):
+        os.environ[f"GIT_CONFIG_KEY_{index}"] = key
+        os.environ[f"GIT_CONFIG_VALUE_{index}"] = value
+    os.environ["GIT_CONFIG_COUNT"] = str(len(UNSIGNED_FIXTURE_GIT_CONFIG))
+
+
 def apply_test_env_defaults() -> None:
     """Populate missing test credentials without overriding a real environment."""
     for name, value in TEST_ENV_DEFAULTS.items():
         os.environ.setdefault(name, value)
+    _disable_fixture_git_signing()
