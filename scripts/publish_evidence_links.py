@@ -63,8 +63,15 @@ def _normalize_agent_id(raw: str) -> str:
     return agent_id.lower()
 
 
+class _LoopbackProxyHandler(urllib.request.ProxyHandler):
+    def proxy_open(self, request, proxy, proxy_type):
+        if urllib.parse.urlsplit(request.full_url).hostname in {"localhost", "127.0.0.1", "::1"}:
+            return None
+        return super().proxy_open(request, proxy, proxy_type)
+
+
 def _opener() -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(_LoopbackProxyHandler())
 
 
 def _auth_headers() -> dict[str, str]:

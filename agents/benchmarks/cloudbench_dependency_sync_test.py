@@ -871,7 +871,7 @@ def test_fleet_barrier_budget_covers_cold_guest_bootstrap() -> None:
     override all the way into the remote driver. The global barrier may never
     be shorter than the per-box budget.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     cloud = CLOUD_SCRIPT.read_text()
     helper = _extract_fleet_function(fleet, "per_box_barrier_wait_seconds() {")
     result = subprocess.run(
@@ -977,7 +977,7 @@ boot_update_with_capacity_recovery "$1" fake_update
     assert ordinary.returncode != 0
     assert counter.read_text().strip() == "2"
 
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     assert 'CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS="$BOOT_UPDATE_CAPACITY_WAIT_SECONDS"' in fleet
     assert 'CLOUDBENCH_BOOT_CONFIG_BARRIER_WAIT_SECONDS="$BOOT_CONFIG_BARRIER_WAIT_SECONDS"' in fleet
 
@@ -988,7 +988,7 @@ def test_boot_config_barrier_detects_failed_child_before_recovery_deadline(
     """The longer capacity-recovery ceiling must not delay a deterministic
     ordinary child failure. A child that exited without its exact ready marker
     makes the global boot barrier impossible and must fail it immediately."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     helper = _extract_fleet_function(fleet, "boot_config_failed_child() {")
     barrier = tmp_path / "barrier"
     (barrier / "ready").mkdir(parents=True)
@@ -1071,7 +1071,7 @@ def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
 def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> None:
     driver = DRIVER_SCRIPT.read_text()
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
 
     assert "synchronized start barrier ready" in driver
     assert "CLOUDBENCH_START_BARRIER" in cloud
@@ -1435,7 +1435,7 @@ def test_cloudbench_wrappers_require_strict_pass_without_claude_credential_skip(
     surface as failures (INFRA), not green SKIPs.
     """
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
 
     cloud_validation = cloud.split('"$CLOUDBENCH_RESULT_SCRIPT" "$RUN_OUT"', 1)[1].split("then", 1)[0]
     assert "--require-pass" in cloud_validation
@@ -1532,7 +1532,7 @@ def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
 
 def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     fleet_normalized = " ".join(line.strip().rstrip("\\").strip() for line in fleet.splitlines())
 
     cloud_normalized = " ".join(line.strip().rstrip("\\").strip() for line in cloud.splitlines())
@@ -1603,7 +1603,7 @@ def test_fleet_patch_packages_clean_unpushed_head_from_fetchable_base(
     tmp_path: Path,
 ) -> None:
     """A clean local commit still needs a patch when guests can fetch only its base."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     patch_setup = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("# ── Preflight:", 1)[0]
     repo = tmp_path / "repo"
     checkout = tmp_path / "checkout"
@@ -1657,7 +1657,7 @@ def test_fleet_launch_survives_a_ledger_only_unpushed_head(tmp_path: Path) -> No
     "could not create the fleet local workspace patch". Nothing to ship must run
     the base ref instead of killing the fleet.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     patch_setup = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("# ── Preflight:", 1)[0]
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
@@ -2691,7 +2691,7 @@ def test_boot_payload_failure_seals_no_launch_and_uses_sealed_helper(tmp_path: P
     end = boot.index("# Nothing from the requested checkout", start)
     assert boot.index('setsid python3 "$STATUS_SERVER_SCRIPT"') < start
     assert start < boot.index('if [ ! -s "$DRIVER" ]; then')
-    assert '"$ROOT_DIR/scripts/cloudbench-boot-payload.py"' in FLEET_SCRIPT.read_text()
+    assert '"$ROOT_DIR/scripts/cloudbench-boot-payload.py"' in fleet_source_text()
     assert 'CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/' in cloud
     functions = "\n".join(_extract_fleet_function(boot, f"{name}() {{") for name in (
         "publish_driver_state", "publish_cleanup_ack", "seal_missing_injected_helper",
@@ -2752,7 +2752,7 @@ def test_cloud_patch_detection_and_payload_include_staged_only_changes(tmp_path:
     ).stdout
     assert "+staged-only" in patch
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     assert 'cloudbench_worktree_has_changes "$ROOT_DIR"' in cloud
     assert fleet.count('cloudbench_worktree_has_changes "$ROOT_DIR"') >= 2
 
@@ -2772,7 +2772,7 @@ def test_patch_delivery_clears_stale_base64_configuration() -> None:
 
 def test_shared_patch_digest_is_pinned_and_verified(tmp_path: Path) -> None:
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     block_start = cloud.index("STAGED_LOCAL_FILES=()")
     block_end = cloud.index("# ── Launch the driver", block_start)
     patch_block = cloud[block_start:block_end]
@@ -3006,7 +3006,7 @@ def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
     assert '!= "1"' in patch_block
     assert 'create-worktree-patch.sh"' in patch_block
     assert "cloudbench_prepare_workspace_patch" in patch_block
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     fleet_patch_block = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("# ── Preflight:", 1)[0]
     assert "CLOUDBENCH_SKIP_LOCAL_PATCH:-0" in fleet_patch_block
     assert '!= "1"' in fleet_patch_block
@@ -3018,7 +3018,7 @@ def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
 def test_boot_launch_delivers_the_exact_worktree_patch_to_every_guest() -> None:
     """The no-SSH launch path must not silently run the base checkout."""
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     driver = DRIVER_SCRIPT.read_text()
     worker = WORKER_SCRIPT.read_text()
 
@@ -3242,7 +3242,7 @@ bootstrap_checkout_ref
 def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Path) -> None:
     """Storage, upload, and readiness failures must remain diagnosable while
     the failed worker is removed so replacement capacity can be created."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
     reap = "\n".join(
         _extract_fleet_function(fleet, signature)
@@ -3475,7 +3475,7 @@ def test_autoscaler_scale_down_cancels_pending_worker_contract_is_rejected(
     tmp_path: Path,
 ) -> None:
     """A transient low target cannot revoke capacity committed to staging."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
     ready_count = _extract_fleet_function(fleet, "_ready_pool_ids() {")
     worker_is_tracked = _extract_fleet_function(fleet, "worker_is_tracked() {")
@@ -3629,7 +3629,7 @@ test -e "$OUT/autoscaler.completed-after-child"
 
 
 def test_worker_token_falls_back_to_workspace_env_without_gh(tmp_path: Path) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     resolver = _extract_fleet_function(fleet, "controller_github_token_b64() {")
     (tmp_path / "back-end").mkdir()
     (tmp_path / "back-end/.env").write_text('GITHUB_TOKEN="workspace-token"\n')
@@ -3692,7 +3692,7 @@ def test_worker_preflight_failure_records_cleanup_failure_and_keeps_retry_handle
     The original provisioning error stays visible, while the worker id remains
     tracked so controller teardown can retry deletion.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     cleanup = _worker_cleanup_bundle(fleet)
     provision = _extract_fleet_function(fleet, "provision_worker() {")
     output = tmp_path / "bench"
@@ -3733,7 +3733,7 @@ exit $?
 
 def test_worker_cleanup_serializes_ledger_and_preserves_cancellation(tmp_path: Path) -> None:
     """Two cleanup owners must reap once and keep a late cancellation durable."""
-    cleanup = _worker_cleanup_bundle(FLEET_SCRIPT.read_text())
+    cleanup = _worker_cleanup_bundle(fleet_source_text())
     output = tmp_path / "bench"
     output.mkdir()
     worker_id = "deadbeef000002"
@@ -3800,7 +3800,7 @@ test ! -e "$OUT/worker-clones.ids.lock"
 
 def test_fleet_registry_release_id_is_idempotent_with_other_records(tmp_path: Path) -> None:
     """Removing one worker must not inherit a later nonmatching record's status."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     helpers = "\n".join(
         (
             _extract_fleet_function(fleet, "registry_meta_value() {"),
@@ -3831,7 +3831,7 @@ def test_worker_ledger_lock_recovers_dead_owner_and_rejects_foreign_release(
     tmp_path: Path,
 ) -> None:
     """A killed controller cannot wedge teardown, and only its successor may unlock."""
-    locks = _worker_ledger_lock_bundle(FLEET_SCRIPT.read_text())
+    locks = _worker_ledger_lock_bundle(fleet_source_text())
     output = tmp_path / "bench"
     output.mkdir()
     lock = output / "worker-clones.ids.lock"
@@ -3874,7 +3874,7 @@ def test_worker_cleanup_reaps_different_workers_without_holding_global_ledger_lo
     tmp_path: Path,
 ) -> None:
     """Slow provider deletes for separate workers must overlap without losing either ledger edit."""
-    cleanup = _worker_cleanup_bundle(FLEET_SCRIPT.read_text())
+    cleanup = _worker_cleanup_bundle(fleet_source_text())
     output = tmp_path / "bench"
     output.mkdir()
     workers = ("deadbeef000010", "deadbeef000011")
@@ -3922,7 +3922,7 @@ def test_ready_reconciliation_uses_worker_ledger_lock_and_never_duplicates_id(
     tmp_path: Path,
 ) -> None:
     """Concurrent readiness publishers serialize with cleanup's ownership ledger."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     bundle = "\n".join(
         (
             _extract_fleet_function(fleet, "worker_is_tracked() {"),
@@ -3962,7 +3962,7 @@ test ! -e "$OUT/worker-clones.ids.lock"
 
 def test_worker_numeric_settings_are_validated_independently(tmp_path: Path) -> None:
     """Colon-bearing values must never reach numeric tests or seq."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     cleanup = _worker_cleanup_bundle(fleet)
     provision = _extract_fleet_function(fleet, "provision_worker() {")
 
@@ -4636,7 +4636,7 @@ machine_storage_ready machine-1
 
 def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     startup = cloud.split("# ── 1. Start the warm machine", 1)[1].split("# ── 2.", 1)[0]
 
     assert 'MACHINE_READINESS_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-machine-readiness.py"' in cloud
@@ -4654,7 +4654,7 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
 
 def test_boot_update_always_submits_a_bounded_post_config_start() -> None:
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     branch = cloud[cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then') :]
     update_retry = _extract_fleet_function(cloud, "boot_update_with_capacity_recovery() {")
     assert "CLOUDBENCH_BOOT_UPDATE_TIMEOUT" in update_retry
@@ -4718,7 +4718,7 @@ def test_boot_launch_executes_the_current_injected_driver() -> None:
 
 
 def test_snapshot_and_pool_dependency_proofs_are_exact() -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
 
     assert '[ "$_rest" = "$SNAP_ID" ]' in fleet
     assert 'RECORDED_SNAP_ID="$(warm_deps_recorded_state' in fleet
@@ -4731,7 +4731,7 @@ def test_snapshot_and_pool_dependency_proofs_are_exact() -> None:
 
 
 def test_autoscaler_metrics_poll_over_data_plane_without_ssh() -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     desired = _extract_fleet_function(fleet, "_box_desired() {")
     autoscaler = _extract_fleet_function(fleet, "bench_autoscaler() {")
     provision_worker = _extract_fleet_function(fleet, "provision_worker() {")
@@ -4764,7 +4764,7 @@ def test_autoscaler_metrics_port_avoids_persistent_archive_listener(
     Metrics tunnels must use a host-wide atomic lease around an actually
     bindable port instead of retrying the same deterministic occupied range.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     claim = _extract_fleet_function(fleet, "claim_autoscaler_metrics_port() {")
     release = _extract_fleet_function(fleet, "release_autoscaler_metrics_port() {")
 
@@ -5046,7 +5046,7 @@ def test_autoscaler_retries_metrics_transport_until_first_capacity_observation()
     stack and before /metrics exists. Pre-readiness transport loss must retry
     under the stack/child lifecycle; once desired capacity has been observed,
     the identical loss remains a bounded mandatory-autoscaler failure."""
-    autoscaler = _extract_fleet_function(FLEET_SCRIPT.read_text(), "bench_autoscaler() {")
+    autoscaler = _extract_fleet_function(fleet_source_text(), "bench_autoscaler() {")
     recovery = autoscaler.split('if ! fleet_job_running "$metrics_proxy_pid"; then', 1)[1].split(
         "local desired want cur", 1
     )[0]
@@ -5066,7 +5066,7 @@ def test_autoscaler_worker_clone_failure_sets_the_fatal_marker(tmp_path: Path) -
     nonzero helper status is insufficient: the durable failure marker is the
     controller's authoritative final gate.
     """
-    provision_worker = _extract_fleet_function(FLEET_SCRIPT.read_text(), "provision_worker() {")
+    provision_worker = _extract_fleet_function(fleet_source_text(), "provision_worker() {")
     output = tmp_path / "bench"
     output.mkdir()
     script = f"""set +e
@@ -5135,7 +5135,7 @@ def test_autoscaled_worker_uses_authenticated_fetch_ref_helper(tmp_path: Path) -
     leave the controller waiting for a health endpoint that will never appear.
     """
     worker = WORKER_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     token_helper = _extract_fleet_function(fleet, "controller_github_token_b64() {")
     provision = _extract_fleet_function(fleet, "provision_worker() {")
 
@@ -5238,7 +5238,7 @@ done
 
 
 def test_autoscaler_persists_desired_capacity_before_reporting_ready() -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     autoscaler = _extract_fleet_function(fleet, "bench_autoscaler() {")
 
     desired_write = autoscaler.index('mv "$out/desired-worker-count.tmp"')
@@ -5253,7 +5253,7 @@ def test_autoscaler_publishes_failure_when_readiness_reconcile_exits(
     tmp_path: Path,
 ) -> None:
     """Startup must not collapse a silent autoscaler return into an opaque abort."""
-    autoscaler = _extract_fleet_function(FLEET_SCRIPT.read_text(), "bench_autoscaler() {")
+    autoscaler = _extract_fleet_function(fleet_source_text(), "bench_autoscaler() {")
     out_dir = tmp_path / "bench"
     script = f"""
 set -uo pipefail
@@ -5310,7 +5310,7 @@ def test_autoscaler_stops_cleanly_when_its_benchmark_child_finishes(
     """A remote driver tears down /metrics immediately after its benchmark.
     That expected lifecycle must stop the autoscaler before its unreadable-
     metrics threshold can rewrite a completed benchmark as infrastructure."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     autoscaler = _extract_fleet_function(fleet, "bench_autoscaler() {")
     supervisor = _extract_fleet_function(fleet, "run_fleet_child_supervised() {")
     launch = fleet.split("# ── Phase 2: launch each provisioned bench", 1)[1].split("CHILD_PIDS+=(", 1)[0]
@@ -5371,8 +5371,8 @@ def test_fleet_child_supervisor_forwards_termination_and_awaits_cleanup(
     starts.  A controller TERM therefore has to be forwarded explicitly and
     the runner must be reaped before the durable child-finished marker appears.
     """
-    supervisor = _extract_fleet_function(FLEET_SCRIPT.read_text(), "run_fleet_child_supervised() {")
-    terminator = _extract_fleet_function(FLEET_SCRIPT.read_text(), "terminate_fleet_runner_group() {")
+    supervisor = _extract_fleet_function(fleet_source_text(), "run_fleet_child_supervised() {")
+    terminator = _extract_fleet_function(fleet_source_text(), "terminate_fleet_runner_group() {")
     assert "os.setsid()" in supervisor
     launch = supervisor.index("python3 -c")
     assigned = supervisor.index("runner_pid=$!")
@@ -5427,8 +5427,8 @@ def test_fleet_child_supervisor_bounds_escalation_and_reaps_process_group(
     The supervisor gets less time than the controller's own CHILD_PIDS ceiling
     and escalates against the runner's whole process group, including descendants.
     """
-    terminator = _extract_fleet_function(FLEET_SCRIPT.read_text(), "terminate_fleet_runner_group() {")
-    supervisor = _extract_fleet_function(FLEET_SCRIPT.read_text(), "run_fleet_child_supervised() {")
+    terminator = _extract_fleet_function(fleet_source_text(), "terminate_fleet_runner_group() {")
+    supervisor = _extract_fleet_function(fleet_source_text(), "run_fleet_child_supervised() {")
     marker = tmp_path / "benchmark-child.finished"
     ready = tmp_path / "child.ready"
     child_pid = tmp_path / "child.pid"
@@ -6153,7 +6153,7 @@ def test_setup_fetch_trusts_only_the_rose_owned_warm_checkout() -> None:
 
 def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> None:
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     lock_lib = APP_ENV_LOCK_SCRIPT.read_text()
 
     # Maintenance ops (--setup / --refresh-wmh / --refresh-secrets) remain the
@@ -6166,7 +6166,9 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
     wrapper_end = cloud.index("\n}\n", wrapper_start)
     wrapper = cloud[wrapper_start:wrapper_end]
     assert wrapper.index("acquire_app_environment_lock") < wrapper.index("( _inject_secrets_locked )")
-    assert wrapper.index("( _inject_secrets_locked )") < wrapper.index("release_app_environment_lock")
+    # The normal release follows injection; pre-injection failure branches also
+    # release the lock, and the owning activation controls exercise those paths.
+    assert wrapper.index("( _inject_secrets_locked )") < wrapper.rindex("release_app_environment_lock")
     locked_start = cloud.index("_inject_secrets_locked() {")
     locked_end = cloud.index("\n}\n", locked_start)
     assert 'FLY secrets set --stage -a "$APP"' in cloud[locked_start:locked_end]
@@ -6226,7 +6228,7 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
 
 
 def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     function_start = fleet.index("pool_machine_state_from_json() {")
     reconcile_start = fleet.index("reconcile_pool() {", function_start)
     function_end = fleet.index("\n}\n", reconcile_start) + 3
@@ -6298,7 +6300,7 @@ printf 'refresh\\n' >> "$OPERATIONS_FILE"
 
 
 def test_pool_claims_survive_command_substitution_and_stay_distinct(tmp_path: Path) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     write_start = fleet.index("write_pool_claim() {")
     write_end = fleet.index("# Self-heal a same-host dead claim", write_start)
     write_function = (
@@ -6376,7 +6378,7 @@ def test_cleanup_unconfirmed_pool_claim_survives_successor_fleet(tmp_path: Path)
     the same running pool machine and claim untouched until an operator resolves
     the browser/session cleanup boundary.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     support = _fleet_pid_identity_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -6461,7 +6463,7 @@ printf 'unavailable=%s\n' "${{UNAVAILABLE_POOL_IDS[*]}}"
 
 
 def test_pool_reconcile_fails_closed_on_falsy_non_list_machine_json(tmp_path: Path) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     function_start = fleet.index("pool_machine_state_from_json() {")
     reconcile_start = fleet.index("reconcile_pool() {", function_start)
     function_end = fleet.index("\n}\n", reconcile_start) + 3
@@ -6511,7 +6513,7 @@ reconcile_pool
 def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
     tmp_path: Path,
 ) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     function_start = fleet.index("machine_id_for_clone_name() {")
     clone_start = fleet.index("clone_machine_target() {", function_start)
     function_end = fleet.index("\n}\n", clone_start) + 3
@@ -6659,7 +6661,7 @@ def test_clone_retries_provider_accepted_failed_snapshot_volume(
     target must be reaped and retried during provisioning; publishing it to the
     boot barrier turns one bad volume into an all-benchmark timeout."""
 
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     cloner = _clone_machine_bundle(fleet)
     ledger = tmp_path / "owned.ids"
     clone_count = tmp_path / "clone-count"
@@ -6725,7 +6727,7 @@ def test_clone_releases_only_definitive_preallocation_failures() -> None:
     exact ID must remain the cleanup authority instead of being misclassified
     as an allocation-free failure.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     classifier = _extract_fleet_function(fleet, "clone_failure_definitively_unallocated() {")
     owned_volume = _extract_fleet_function(fleet, "clone_failure_owned_volume_id() {")
     cloner = _clone_machine_bundle(fleet)
@@ -6818,7 +6820,7 @@ def test_failed_clone_captures_owned_volume_before_machine_name_reconciliation(
     machine-name reconciliation, durably recorded, and reaped. No app-wide
     volume listing or neighbor-volume deletion is allowed.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -6934,7 +6936,7 @@ def test_failed_clone_retains_exact_owner_when_delete_absence_is_unknown(
     The exact volume record must exist before the first delete attempt. Neither
     a failed provider read, invalid JSON, nor a live state proves deletion.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -7039,7 +7041,7 @@ def test_clone_retries_after_accepted_destroy_outlives_confirmation_window(
     but a later bounded clone attempt may proceed; only authoritative exact-ID
     absence can retire the first attempt's ownership.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -7192,7 +7194,7 @@ volume_inventory_contains_id vol_delayed123 >/dev/null || absence_rc=$?
 
 
 def test_pool_promotes_only_successful_owned_clone_ids() -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     pool_function = _extract_fleet_function(fleet, "provision_pool_slot() {")
 
     clone_call = 'id="$(clone_machine_target "$slot_ledger")"'
@@ -7219,7 +7221,7 @@ def test_pool_provision_fans_out_slots_concurrently() -> None:
     """A 30-machine warm pool must take roughly one clone's wall clock, not
     thirty. Each concurrent slot owns a separate ephemeral ledger; only the
     stopped-id promotion is serialized by the durable pool ledger lock."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     pool = _extract_fleet_function(fleet, "provision_pool() {")
     slot = _extract_fleet_function(fleet, "provision_pool_slot() {")
 
@@ -7241,7 +7243,7 @@ def test_pool_provision_fans_out_slots_concurrently() -> None:
 
 
 def test_unresolved_clone_name_fails_loudly_without_polling_past_deadline() -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     function_start = fleet.index("machine_id_for_clone_name() {")
     function_end = fleet.index("\n}\n", function_start) + 3
     resolver_function = fleet[function_start:function_end]
@@ -7270,7 +7272,7 @@ machine_id_for_clone_name cloudbench-late "$SECONDS"
 
 
 def test_fleet_cleanup_refuses_to_destroy_the_warm_source(tmp_path: Path) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     function_start = fleet.index("reap_machine() {")
     function_end = fleet.index("\n}\n", function_start) + 3
     reap_function = fleet[function_start:function_end]
@@ -7464,7 +7466,7 @@ def test_fleet_terminal_projection_uses_two_archives_and_one_terminal_task_list(
     assert len(rerun["tasks"]) == len(benches)
     assert len(rerun_report["per_task"]) == len(benches)
 
-    fleet_source = FLEET_SCRIPT.read_text()
+    fleet_source = fleet_source_text()
     cleanup = _extract_fleet_function(fleet_source, "cleanup() {")
     assert 'finalize_terminal_projection "$ec"' in cleanup
     assert "trap cleanup EXIT" in fleet_source
@@ -7621,7 +7623,7 @@ def test_fleet_terminal_projection_runs_from_signal_exit_finalization(
     batch.mkdir(parents=True)
     (batch / "benches.json").write_text(json.dumps([{"name": "interrupted-infra", "mode": "REAL"}]))
     finalizer = _extract_fleet_function(
-        FLEET_SCRIPT.read_text(),
+        fleet_source_text(),
         "finalize_terminal_projection() {",
     )
     script = f"""set -uo pipefail
@@ -7673,7 +7675,7 @@ def test_fleet_lifecycle_receipt_requires_final_registry_retirement(tmp_path: Pa
         "pathlib.Path(sys.argv[2]).write_text(sys.argv[1])\n"
         "raise SystemExit(1 if os.environ.get('UPLOAD_WARNING') == '1' else 0)\n"
     )
-    fleet_source = FLEET_SCRIPT.read_text()
+    fleet_source = fleet_source_text()
     cleanup = "\n".join(_extract_fleet_function(fleet_source, signature) for signature in (
         "cloudbench_fsync_directory() {", "cloudbench_collect_remaining_runtime_evidence() {", "cleanup() {",
     ))
@@ -7788,6 +7790,10 @@ def _make_execution_provenance(tmp_path: Path) -> tuple[Path, Path, Path]:
             "run_timeout_seconds=7200",
             "--config-value",
             "benchmark_wall_clock_backstop_seconds=300",
+            "--config-value",
+            "fast_mode_cache_disable_write_through=1",
+            "--config-value",
+            "benchmark_demo_cache_read_only=1",
             "--output",
             str(provenance),
         ],
@@ -7796,6 +7802,9 @@ def _make_execution_provenance(tmp_path: Path) -> tuple[Path, Path, Path]:
         check=False,
     )
     assert made_provenance.returncode == 0, made_provenance.stderr
+    cache_policy = json.loads(provenance.read_text())["config"]["values"]
+    assert cache_policy["fast_mode_cache_disable_write_through"] == "1"
+    assert cache_policy["benchmark_demo_cache_read_only"] == "1"
     return snapshot, manifest, provenance
 
 
@@ -7859,7 +7868,7 @@ def test_execution_provenance_snapshot_stays_sealed_across_real_consumers(
     tmp_path: Path,
 ) -> None:
     """Snapshot-local imports must never create unattested bytecode at runtime."""
-    fleet_source = FLEET_SCRIPT.read_text()
+    fleet_source = fleet_source_text()
     cloud_source = CLOUD_SCRIPT.read_text()
     boot_source = BOOT_SCRIPT.read_text()
     driver_source = DRIVER_SCRIPT.read_text()
@@ -8360,7 +8369,7 @@ def test_cloud_fleet_acceptance_rejects_missing_and_opposite_provenance(
 
 
 def test_cloud_fleet_provenance_is_staged_stamped_aggregated_and_validated() -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     cloud = CLOUD_SCRIPT.read_text()
     driver = DRIVER_SCRIPT.read_text()
     aggregate = AGGREGATE_SCRIPT.read_text()
@@ -8407,6 +8416,14 @@ def test_cloud_fleet_provenance_is_staged_stamped_aggregated_and_validated() -> 
     assert emitted_scalar_keys == module._CONFIG_SCALAR_KEYS
 
 
+def fleet_source_text() -> str:
+    source = FLEET_SCRIPT.read_text()
+    marker = 'source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-inventory.sh"'
+    if marker in source:
+        source = source.replace(marker, (FLEET_SCRIPT.parent / "lib/cloudbench-inventory.sh").read_text())
+    return source
+
+
 def _extract_fleet_function(source: str, signature: str) -> str:
     start = source.index(signature)
     heredoc_terminator: str | None = None
@@ -8431,33 +8448,45 @@ def _extract_fleet_function(source: str, signature: str) -> str:
 
 
 def _fleet_pid_identity_helpers(source: str) -> str:
-    """Birth-identity helpers that extracted owner/lock functions call; without
-    them a missing command silently reads every owner as dead."""
+    """Birth helpers for extracted fleet and shared inventory owner/lock callers.
+    A missing helper otherwise silently reads every owner as dead."""
     return f"source {shlex.quote(str(ENV_HELPER_SCRIPT))}\n" + "".join(
         _extract_fleet_function(source, signature)
-        for signature in ("fleet_pid_start_time() {", "fleet_pid_matches_start() {")
+        for signature in (
+            "fleet_pid_start_time() {",
+            "fleet_pid_matches_start() {",
+            "inventory_pid_start_time() {",
+            "inventory_pid_matches_start() {",
+        )
     )
 
 
 def test_extracted_fleet_pid_identity_callers_include_birth_helpers() -> None:
     """Every fixture that extracts an identity-reading fleet function must also
     load the birth-identity helpers, or its owner proofs pass vacuously."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     starts = [
         (match.start(), match.group(1))
         for match in re.finditer(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{", fleet, re.M)
     ]
-    helper_names = {"fleet_pid_start_time", "fleet_pid_matches_start"}
+    helper_names = {
+        "fleet_pid_start_time",
+        "fleet_pid_matches_start",
+        "inventory_pid_start_time",
+        "inventory_pid_matches_start",
+    }
     callers = {
         name
         for index, (start, name) in enumerate(starts)
         if name not in helper_names
         and re.search(
-            r"\bfleet_pid_(?:start_time|matches_start)\b",
+            r"\b(?:fleet|inventory)_pid_(?:start_time|matches_start)\b",
             fleet[start : starts[index + 1][0] if index + 1 < len(starts) else len(fleet)],
         )
     }
     assert "registry_owner_alive" in callers
+    assert "inventory_refresh_lock_acquire" in callers
+    assert "campaign_inventory_borrow" in callers
 
     module = Path(__file__).read_text()
     tests = [
@@ -8663,7 +8692,7 @@ def test_runner_ownership_probe_executes_through_remote_shell() -> None:
     Model flyctl's direct-exec boundary: only an explicit remote shell may
     interpret the assignment, pipeline, command substitution, and printf.
     """
-    probe = _extract_fleet_function(FLEET_SCRIPT.read_text(), "registry_runner_count() {")
+    probe = _extract_fleet_function(fleet_source_text(), "registry_runner_count() {")
     script = f"""set -u
 APP=test-app
 FLY() {{
@@ -8701,7 +8730,7 @@ def test_fleet_canonicalizes_short_ref_before_remote_handoff(tmp_path: Path) -> 
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "fixture"], check=True)
     full_ref = subprocess.check_output(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True).strip()
     short_ref = full_ref[:9]
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     canonicalize = (
         _extract_fleet_function(fleet, "canonicalize_bench_ref() {") if "canonicalize_bench_ref() {" in fleet else ""
     )
@@ -8723,7 +8752,7 @@ def test_fleet_canonicalizes_short_ref_before_remote_handoff(tmp_path: Path) -> 
 @pytest.mark.parametrize("init_override", [None, "exec", "entrypoint"])
 def test_clone_creation_cannot_start_copied_primary(tmp_path: Path, init_override) -> None:
     """Fly clone starts immediately; a later update cannot fence initial boot."""
-    source = FLEET_SCRIPT.read_text()
+    source = fleet_source_text()
     booted = tmp_path / "unintended-primary-boot"
     boot = [sys.executable, "-c", f"from pathlib import Path; Path({str(booted)!r}).touch()"]
     init = {"cmd": boot}
@@ -8791,7 +8820,7 @@ def test_clone_retries_transient_volume_not_found(tmp_path: Path) -> None:
     clone_machine_target retries with a fresh name and returns the id once the
     transient failure clears. Guards the 28-wide synchronized-start barrier
     against one flaky clone tearing down every isolated stack."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
     cloner = _clone_machine_bundle(fleet)
@@ -8901,7 +8930,7 @@ clone_machine_target "$LEDGER"
 def test_clone_gives_up_after_max_attempts(tmp_path: Path) -> None:
     """Persistent (non-transient) clone failure still fails closed after the
     bounded retry budget — retries must not loop forever."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
     cloner = _clone_machine_bundle(fleet)
@@ -8959,7 +8988,7 @@ def test_clone_times_out_and_retries_a_hung_clone(tmp_path: Path) -> None:
     sequential provisioning loop: fly_with_timeout reaps it and the retry loop
     proceeds with a fresh clone. This is the iteration-3 failure (controller
     blocked 25min on one clone → barrier never released → 0/28)."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
     cloner = _clone_machine_bundle(fleet)
@@ -9034,7 +9063,7 @@ def test_fleet_provisions_clones_concurrently() -> None:
     volume race / cross-workspace contention event aborted the batch in. Phase 1
     backgrounds each claim-or-clone in its own subshell writing its own per-bench
     ledger; a barrier waits for all before Phase 2 launches any child."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     assert "concurrently (claim-or-clone)" in fleet
     prov = fleet.index("# ── Phase 1:")
     wait_all = fleet.index('for pp in "${PROVISION_PIDS[@]}"; do wait')
@@ -9061,7 +9090,7 @@ def test_fleet_provisions_clones_concurrently() -> None:
 
 def test_large_primary_provisioning_uses_only_a_matching_pool_shape() -> None:
     """A 4GB pool cannot host an 8GB task; a matching 8GB pool can."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     assert 'FLEET_BUNDLED_FRONTEND_VM_SIZE="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}"' in fleet
     assert 'FLEET_BUNDLED_FRONTEND_VM_MEMORY="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}"' in fleet
     classifier = _extract_fleet_function(fleet, "bench_needs_large_primary() {")
@@ -9106,7 +9135,7 @@ bench_uses_default_pool_shape agent-payment-setup-resume || exit 4
 
 def test_cpu_bound_primary_resizes_only_for_real_benchmark() -> None:
     """CPU-bound stack boots can reuse a pool volume with a larger guest VM."""
-    helpers = _fleet_primary_shape_helpers(FLEET_SCRIPT.read_text())
+    helpers = _fleet_primary_shape_helpers(fleet_source_text())
     script = f"""set -eu
 CATALOG_BROWSER_REQUIRED_TASKS=()
 FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
@@ -9137,7 +9166,7 @@ def test_reap_machine_destroys_the_clones_forked_volume(tmp_path: Path) -> None:
     leaks and bills forever (observed: 42 x 20GB in one day). reap_machine must
     resolve the volume BEFORE the machine disappears and destroy it after,
     while never touching the warm source's volume."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     helpers = "".join(
         _extract_fleet_function(fleet, sig)
         for sig in (
@@ -9229,7 +9258,7 @@ def test_stale_provider_detach_does_not_block_unrelated_fleet_but_retains_owner(
     (registry / "meta").write_text("version=2\n")
     clone.write_text("name=cloudbench-one\nid=deadbeef\nvolume_id=vol_owned\n")
     original = clone.read_bytes()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     assert fleet.index('if stale_registry_only_waits_for_provider_detach "$registry"; then') < fleet.index(
         'if ! reap_registry_clones "$registry" stale; then'
     )
@@ -9265,7 +9294,7 @@ def test_reap_volume_requires_exact_absence_and_distinguishes_accepted_pending(
     tmp_path: Path,
 ) -> None:
     """Exact absence, retained terminal deletion, and transition stay distinct."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     helpers = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -9340,7 +9369,7 @@ def test_accepted_pending_volume_does_not_block_later_exact_owner_records(
     tmp_path: Path,
 ) -> None:
     """One soft-deleted volume cannot serialize an exact owner's cleanup."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     reaper = _extract_fleet_function(fleet, "reap_registry_clones() {")
     ownership_root = tmp_path / "ownership"
     registry = ownership_root / ("8d" * 16)
@@ -9413,11 +9442,128 @@ rc=$?
     ]
 
 
+@pytest.mark.parametrize("failed_disposition", [0, 75])
+def test_current_registry_retirement_is_bounded_parallel_and_joins_receipts(
+    tmp_path: Path, failed_disposition: int,
+) -> None:
+    """Slow independent exact native receipts overlap, and failures stay owned."""
+    fleet = fleet_source_text()
+    ownership = tmp_path / "ownership"
+    registry = ownership / ("5d" * 16)
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    (registry / "meta").write_text("version=2\n")
+    machines = [f"{index + 1:014x}" for index in range(8)]
+    for machine in machines:
+        (clones / f"cloudbench-{machine}").write_text(
+            f"name=cloudbench-{machine}\nid={machine}\nvolume_id=vol_{machine}\n"
+        )
+    provider = tmp_path / "provider.py"
+    provider.write_text('''import fcntl,json,sys,time
+from pathlib import Path
+root=Path(sys.argv[1]); stage=sys.argv[2]; machine=sys.argv[3]
+def update():
+    with (root/'provider.lock').open('a+') as lock:
+        fcntl.flock(lock.fileno(),fcntl.LOCK_EX)
+        path=root/'counts.json'
+        row=json.loads(path.read_text()) if path.exists() else {'active':0,'peak':0,'calls':[]}
+        row['active']+=1 if stage=='enter' else -1
+        if stage=='enter': row['calls'].append(machine)
+        row['peak']=max(row['peak'],row['active'])
+        path.write_text(json.dumps(row))
+        if row['active']==4: (root/'release').touch()
+update()
+if stage=='enter':
+    # One serialized operation cannot release this real concurrency barrier.
+    deadline=time.monotonic()+5
+    while not (root/'release').exists():
+        if time.monotonic()>=deadline: raise SystemExit(90)
+        time.sleep(.01)
+    time.sleep(.05)
+''')
+    reaper = _extract_fleet_function(fleet, "reap_registry_clones() {")
+    script = f'''set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership))}
+REGISTRY={shlex.quote(str(registry))}
+TEST_ROOT={shlex.quote(str(tmp_path))}
+PYTHON_BIN={shlex.quote(sys.executable)}
+CLOUDBENCH_REAP_MAX_IN_FLIGHT=4
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_machine_details() {{ printf 'stopped cloudbench-%s\\n' "$1"; }}
+fleet_registry_reconcile_mounted_volume() {{ printf 'vol_%s\\n' "$3"; }}
+reap_machine() {{
+  "$PYTHON_BIN" "$TEST_ROOT/provider.py" "$TEST_ROOT" enter "$1" || return $?
+  "$PYTHON_BIN" "$TEST_ROOT/provider.py" "$TEST_ROOT" leave "$1" || return $?
+  [ "$1" != {machines[0]} ] || return {failed_disposition}
+}}
+fleet_audit_update_registry_clone() {{ printf '%s\\n' "$2" >> "$TEST_ROOT/audits"; }}
+{reaper}
+reap_registry_clones "$REGISTRY" current
+'''
+    started = time.monotonic()
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=60,
+    )
+    elapsed = time.monotonic() - started
+    (tmp_path / "duration.json").write_text(json.dumps({"elapsed_seconds": elapsed}))
+    assert result.returncode == (0 if failed_disposition == 0 else 1), result.stdout + result.stderr
+    counts = json.loads((tmp_path / "counts.json").read_text())
+    assert counts["active"] == 0, "all submitted native receipts must be joined"
+    assert 1 < counts["peak"] <= 4, "independent retirement must overlap within admission bound"
+    assert sorted(counts["calls"]) == machines
+    expected = [] if failed_disposition == 0 else [f"cloudbench-{machines[0]}"]
+    assert sorted(path.name for path in clones.iterdir()) == expected
+    audits = (tmp_path / "audits").read_text().splitlines()
+    assert sorted(audits) == [f"cloudbench-{machine}" for machine in machines if failed_disposition == 0 or machine != machines[0]]
+
+
+@pytest.mark.parametrize("unsafe_record", ["symlink", "duplicate-machine", "warm-machine"])
+def test_current_registry_retirement_validates_cohort_before_native_mutations(
+    tmp_path: Path, unsafe_record: str,
+) -> None:
+    fleet = fleet_source_text()
+    ownership = tmp_path / "ownership"
+    registry = ownership / ("5d" * 16)
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    (registry / "meta").write_text("version=2\n")
+    first = clones / "cloudbench-first"
+    first.write_text("name=cloudbench-first\nid=deadbeef000001\nvolume_id=vol_first\n")
+    second = clones / "cloudbench-second"
+    machine = "feedface000001" if unsafe_record == "warm-machine" else "deadbeef000001"
+    payload = f"name=cloudbench-second\nid={machine}\nvolume_id=vol_second\n"
+    if unsafe_record == "symlink":
+        original = tmp_path / "foreign-record"
+        original.write_text(payload)
+        second.symlink_to(original)
+    else:
+        second.write_text(payload)
+    before = {path.name: path.read_bytes() for path in clones.iterdir()}
+    reaper = _extract_fleet_function(fleet, "reap_registry_clones() {")
+    native_calls = tmp_path / "native-calls"
+    script = f'''set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership))}
+REGISTRY={shlex.quote(str(registry))}
+WARM_ID=feedface000001
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_machine_details() {{ touch {shlex.quote(str(native_calls))}; return 99; }}
+{reaper}
+reap_registry_clones "$REGISTRY" current
+'''
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10,
+    )
+    assert result.returncode != 0
+    assert not native_calls.exists(), "unsafe cohort must reject before native provider mutations"
+    assert {path.name: path.read_bytes() for path in clones.iterdir()} == before
+    assert second.is_symlink() == (unsafe_record == "symlink")
+
+
 def test_exact_owner_recovery_records_provider_retained_terminal_volume(
     tmp_path: Path,
 ) -> None:
     """Provider-retained deletion is terminal without pretending exact absence."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -9505,7 +9651,7 @@ def test_reap_volume_durably_captures_bounded_destroy_responses(
     tmp_path: Path,
 ) -> None:
     """The owning boundary must preserve provider rejection evidence."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     helpers = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -9569,7 +9715,7 @@ def test_reap_volume_retains_authority_when_restore_reappears_after_absence(
     Teardown must not return success and retire its exact audit/registry authority
     when the same volume later settles back to detached ``created``.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     helpers = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -9639,7 +9785,7 @@ def test_exact_volume_ownership_survives_delayed_visibility_and_failed_delete(
     persist the exact volume before destroying a terminal-storage-failed
     machine, retain that record when volume deletion fails, and let a later
     exact-owner recovery delete only that volume."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     reap_helpers = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -9893,7 +10039,7 @@ def test_forced_recovery_retires_only_aged_absent_name_only_clone(
     tmp_path: Path,
 ) -> None:
     """Exact recovery has the same dead-owner proof as automatic stale recovery."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     reaper = _extract_fleet_function(fleet, "reap_registry_clones() {")
     ownership_root = tmp_path / "ownership"
     registry = ownership_root / ("c" * 32)
@@ -9947,7 +10093,7 @@ def test_exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reaper
     Exact cancellation recovery must enter the guest acknowledgement boundary
     and retain every durable handle when that boundary cannot prove teardown.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = _fleet_pid_identity_helpers(fleet) + "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -10056,7 +10202,7 @@ def test_interrupted_archive_routes_exact_pool_stop_before_evidence_release(
     )
     (registry / "runtime-evidence-unconfirmed").touch()
     reconnect_called = tmp_path / "reconnect-called"
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     recover = _extract_fleet_function(fleet, "recover_exact_stale_fleet_owner() {")
     script = f"""set -uo pipefail
 APP=bench-app
@@ -10086,7 +10232,7 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
     tmp_path: Path,
 ) -> None:
     """Exact recovery must prove every configured guest ack before provider reap."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     signatures = (
         "machine_status_exact_read() {",
         "machine_config_exact_read() {",
@@ -10408,7 +10554,7 @@ def test_pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper(
     Recovery may authenticate and validate that exact private receipt, persist a
     controller receipt, and only then enter the existing exact-ID reaper.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     signatures = (
         "registry_meta_value() {",
         "fleet_registry_cleanup_state() {",
@@ -10557,7 +10703,7 @@ def test_exact_recovery_seals_actual_retained_owner_remote_evidence_paths(
     tmp_path: Path,
 ) -> None:
     """Fallback reads the retained guest's real /data layout before proxy release."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     signatures = (
         "registry_meta_value() {",
         "fleet_registry_build_guest_recovery_plan() {",
@@ -10946,7 +11092,7 @@ def _exercise_runner_receipt_recovery(
     preexisting_runner_receipt: bool = False,
 ) -> None:
     """A runner receipt only short-circuits recovery with a guest stack ACK."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     recover = _extract_fleet_function(
         fleet, "cloudbench_recover_guest_cleanup_receipts() {"
     )
@@ -11267,7 +11413,7 @@ def test_unquiesced_guest_seals_sessions_then_stops_exact_machine_before_cleanup
     guest_state: str,
 ) -> None:
     """An unquiesced exact guest is fenced by Machine stop before cleanup."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -12319,7 +12465,7 @@ def test_exact_guest_recovery_mapping_is_complete_and_volume_only_safe(
     tmp_path: Path,
 ) -> None:
     """Only one-to-one local output mappings may authorize guest reconnection."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     start = fleet.index("fleet_registry_build_guest_recovery_plan() {")
     end = fleet.index("\nPY\n}", start) + len("\nPY\n}")
     build_plan = fleet[start:end]
@@ -12392,7 +12538,7 @@ fleet_registry_build_guest_recovery_plan "$1" "$2"
 
 def test_exact_guest_recovery_maps_only_bound_pool_claims(tmp_path: Path) -> None:
     """A borrowed guest needs the exact owner audit, ledger, and live claim."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     start = fleet.index("fleet_registry_build_guest_recovery_plan() {")
     end = fleet.index("\nPY\n}", start) + len("\nPY\n}")
     build_plan = fleet[start:end]
@@ -12467,7 +12613,7 @@ fleet_registry_build_guest_recovery_plan "$1" "$2"
 
 
 def test_exact_pool_claim_confirmation_requires_guest_receipt(tmp_path: Path) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -12552,7 +12698,7 @@ def test_exact_guest_recovery_maps_autoscaler_workers_without_guest_ack(
     tmp_path: Path,
 ) -> None:
     """A worker is owned teardown state, not a second top-level guest."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     start = fleet.index("fleet_registry_build_guest_recovery_plan() {")
     end = fleet.index("\nPY\n}", start) + len("\nPY\n}")
     build_plan = fleet[start:end]
@@ -12653,7 +12799,7 @@ def test_exact_guest_recovery_rejects_unsafe_autoscaler_worker_mappings(
     tmp_path: Path,
 ) -> None:
     """Every worker role and parent edge must have exact owner-local evidence."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     start = fleet.index("fleet_registry_build_guest_recovery_plan() {")
     end = fleet.index("\nPY\n}", start) + len("\nPY\n}")
     build_plan = fleet[start:end]
@@ -12785,7 +12931,7 @@ def test_exact_guest_status_and_shutdown_config_fail_closed(
     tmp_path: Path,
 ) -> None:
     """Absent/malformed exact-ID state or config never reaches proxy startup."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     status_functions = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -12926,7 +13072,7 @@ def test_exact_guest_recovery_retains_quarantine_on_proxy_or_health_failure(
     tmp_path: Path,
 ) -> None:
     """Proxy startup and non-204 shutdown health are mandatory acknowledgements."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     cleanup_proxy = _extract_fleet_function(fleet, "cleanup_stale_owner_recovery_proxies() {")
     reconnect = _extract_fleet_function(fleet, "fleet_recovery_reconnect_guest_shutdowns() {")
     confirm = _extract_fleet_function(fleet, "cloudbench_confirm_guest_shutdowns() {")
@@ -13040,7 +13186,7 @@ def test_exact_guest_cleanup_latch_survives_separate_runtime_capture_failure(
     tmp_path: Path,
 ) -> None:
     """A stopped guest's missing runtime bundle must not re-quarantine cleanup."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     reconnect = _extract_fleet_function(fleet, "fleet_recovery_reconnect_guest_shutdowns() {")
     confirm = _extract_fleet_function(fleet, "fleet_registry_confirm_guest_teardown() {")
     owner = "7c" * 16
@@ -13111,7 +13257,7 @@ if fleet_recovery_reconnect_guest_shutdowns "$REGISTRY"; then exit 90; fi
 def test_exact_recovery_releases_only_its_capacity_and_proxy_leases(
     tmp_path: Path,
 ) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     owner = "5d" * 16
     neighbor = "6d" * 16
     capacity_root = tmp_path / "capacity"
@@ -13133,8 +13279,10 @@ def test_exact_recovery_releases_only_its_capacity_and_proxy_leases(
         )
 
     owner_token = f"{owner}-primary"
+    worker_token = f"{owner}-worker-{'7d' * 16}"
     neighbor_token = f"{neighbor}-primary"
     (reservations / owner_token).write_text(reservation_payload(owner_token, owner))
+    (reservations / worker_token).write_text(reservation_payload(worker_token, owner))
     neighbor_reservation = reservations / neighbor_token
     neighbor_reservation.write_text(reservation_payload(neighbor_token, neighbor))
     capacity_functions = "\n".join(
@@ -13165,6 +13313,15 @@ capacity_release_stale_owner_reservations "$2" "$3"
     )
     assert result.returncode == 0, result.stderr
     assert not (reservations / owner_token).exists()
+    assert not (reservations / worker_token).exists()
+    assert neighbor_reservation.exists()
+
+    # A preceding recovery may already have released its primary reservation.
+    # The exact unused worker still belongs to the same verified owner cohort.
+    (reservations / worker_token).write_text(reservation_payload(worker_token, owner))
+    repeated = subprocess.run(result.args, text=True, capture_output=True, check=False, timeout=10)
+    assert repeated.returncode == 0, repeated.stderr
+    assert not (reservations / worker_token).exists()
     assert neighbor_reservation.exists()
 
     release_proxy = _extract_fleet_function(fleet, "release_recovery_status_proxy_ports() {")
@@ -13203,10 +13360,61 @@ release_recovery_status_proxy_ports exact-token
     assert release_result.returncode == 0, release_result.stderr
 
 
+@pytest.mark.parametrize("corruption", ["symlink", "foreign-birth", "duplicate-key"])
+def test_exact_recovery_validates_complete_capacity_cohort_before_release(
+    tmp_path: Path, corruption: str,
+) -> None:
+    fleet = fleet_source_text()
+    owner = "5d" * 16
+    reservations = tmp_path / "capacity" / "reservations"
+    reservations.mkdir(parents=True)
+    owner_meta = tmp_path / "meta"
+    identity = "host=test-host\npid=999999\npid_start=Mon Jan 1 00:00:00 2001\n"
+    owner_meta.write_text(identity + f"fleet_owner_token={owner}\n")
+    primary_token = f"{owner}-primary"
+    worker_token = f"{owner}-worker-{'7d' * 16}"
+
+    def record(token: str) -> str:
+        return (
+            "version=1\napp=bench-app\n" + identity
+            + f"fleet_owner_token={owner}\ntoken={token}\n"
+        )
+
+    primary = reservations / primary_token
+    primary.write_text(record(primary_token))
+    worker = reservations / worker_token
+    original_worker = record(worker_token)
+    if corruption == "symlink":
+        target = tmp_path / "foreign-record"
+        target.write_text(original_worker)
+        worker.symlink_to(target)
+    elif corruption == "foreign-birth":
+        worker.write_text(original_worker.replace("pid=999999\n", "pid=999998\n"))
+    else:
+        worker.write_text(original_worker + "pid=999999\n")
+    before = {path.name: path.read_bytes() for path in reservations.iterdir()}
+    helpers = "\n".join(
+        _extract_fleet_function(fleet, name + "() {")
+        for name in ("registry_meta_value", "capacity_release_stale_owner_reservations")
+    )
+    result = subprocess.run(
+        [
+            "bash", "-c",
+            "set -uo pipefail\nAPP=bench-app\nCAPACITY_RESERVATION_ROOT=\"$1\"\n"
+            + helpers + '\ncapacity_release_stale_owner_reservations "$2" "$3"\n',
+            "complete-capacity-cohort", str(tmp_path / "capacity"), str(owner_meta), primary_token,
+        ],
+        text=True, capture_output=True, check=False, timeout=10,
+    )
+    assert result.returncode != 0, "unsafe cohort must reject the entire release"
+    assert {path.name: path.read_bytes() for path in reservations.iterdir()} == before
+    assert worker.is_symlink() == (corruption == "symlink")
+
+
 def test_exact_v2_pool_recovery_reads_only_owner_audit_claims(
     tmp_path: Path,
 ) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     owner = "5e" * 16
     exact_id = "deadbeef000001"
     neighbor_id = "feedface000002"
@@ -13317,7 +13525,7 @@ def test_forced_exact_reaper_uses_only_owned_machine_ids_and_exact_volume_ids(
     tmp_path: Path, terminal: bool,
 ) -> None:
     """Exact stale-owner cleanup must never inventory or resolve neighboring Machines."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -13456,7 +13664,7 @@ reap_registry_clones "$REGISTRY" forced || exit 90
 
 
 def test_exact_recovery_entrypoint_has_no_global_machine_or_proxy_sweep() -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     start = fleet.index('if [ "$RECOVER_STALE_ONLY" = "1" ]; then', fleet.index("# ── One controller lock"))
     end = fleet.index("\nfi\n", start) + len("\nfi\n")
     recovery_entrypoint = fleet[start:end]
@@ -13468,7 +13676,7 @@ def test_exact_recovery_entrypoint_has_no_global_machine_or_proxy_sweep() -> Non
 
 
 def test_exact_recovery_pool_only_skips_nonexistent_warm_source(tmp_path: Path) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     probe = _extract_fleet_function(fleet, "exact_recovery_is_pool_only() {")
     owner = "a" * 32
     app = "bench-app"
@@ -13512,6 +13720,15 @@ def test_exact_recovery_pool_only_skips_nonexistent_warm_source(tmp_path: Path) 
     assert check().returncode != 0
     (registry / "source-manifest.json").unlink()
     pool.unlink()
+    # A controller may retire before the first pool claim or clone allocation.
+    # Its canonical empty ledgers need no external donor to recover.
+    assert check().returncode == 0
+    (registry / "clones" / "cloudbench-pending").write_text("name=cloudbench-pending\n")
+    assert check().returncode != 0
+    (registry / "clones" / "cloudbench-pending").unlink()
+    (audit / "pool").rmdir()
+    assert check().returncode == 0, "preallocation audit creates pool only at its first claim"
+    (audit / "pool").symlink_to(tmp_path / "ownership", target_is_directory=True)
     assert check().returncode != 0
 
 
@@ -13519,7 +13736,7 @@ def test_exact_recovery_resolves_warm_root_from_autoscaler_clone_graph(
     tmp_path: Path,
 ) -> None:
     """Worker clones make primary Machines intermediate graph nodes, not warm roots."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     resolver = _extract_fleet_function(fleet, "resolve_exact_recovery_warm_identity() {")
     owner = "5" * 32
     app = "bench-app"
@@ -13601,7 +13818,7 @@ def test_exact_recovery_rejects_unsafe_hierarchical_clone_topologies(
     tmp_path: Path,
 ) -> None:
     """Only one connected, owner-indexed clone DAG can identify the source guard."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     resolver = _extract_fleet_function(fleet, "resolve_exact_recovery_warm_identity() {")
     owner = "6" * 32
     app = "bench-app"
@@ -13752,7 +13969,7 @@ def test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper(
     Audit-only crash-window recovery must accept that complete volume-only
     identity so the registry reaper can terminalize the exact owned volume.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = _fleet_pid_identity_helpers(fleet) + "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -13875,7 +14092,7 @@ def test_audit_only_recovery_rejects_noncanonical_owned_identities(
     tmp_path: Path,
 ) -> None:
     """Owned recovery accepts only exact volume-only or machine+volume forms."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -13978,7 +14195,7 @@ def test_stale_registry_identity_promotes_original_audit_before_publish_and_retr
     registry identity.  A failure in that second write stays retryable from the
     owned audit, while partial records repair only when their fields agree.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -14166,7 +14383,7 @@ def test_stale_pre_volume_id_registry_retires_after_authoritative_absence(
     name are absent and a strict provider read proves there are no unattached
     clone-data volumes. Attached neighbors and other volume names are not
     ownership candidates and must remain untouched."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     helpers_start = fleet.index("registry_meta_value() {")
     helpers_end = fleet.index("\nfleet_registry_remove_if_empty() {", helpers_start)
     helpers = fleet[helpers_start:helpers_end]
@@ -14236,7 +14453,7 @@ def test_stale_pre_volume_id_registry_fails_closed_without_complete_absence_proo
 ) -> None:
     """A live exact name, an unattached clone-data volume, or malformed volume
     inventory each invalidates the legacy-record absence proof."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     helpers_start = fleet.index("registry_meta_value() {")
     helpers_end = fleet.index("\nfleet_registry_remove_if_empty() {", helpers_start)
     helpers = fleet[helpers_start:helpers_end]
@@ -14341,7 +14558,7 @@ def test_fleet_startup_never_sweeps_unowned_unattached_volumes(tmp_path: Path) -
     workspace or operator.  Only the durable per-owner registry is authority to
     destroy it; name, age, and attachment state are not an ownership proof.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     calls = tmp_path / "calls"
     calls.write_text("")
 
@@ -14455,7 +14672,7 @@ cloudbench_detach_reexec "$LOG" bash -c \
     # Every paid fleet detaches before any lock/machine acquisition. The
     # detached child receives the explicit foreground marker so default-detach
     # cannot recurse, while tests/debugging retain an intentional opt-out.
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     assert '\nDETACH="1"\n' in fleet
     assert "--detach)" in fleet
     assert '--wait)           DETACH="1"; WAIT_FOR_DETACHED="1"' in fleet
@@ -14515,7 +14732,7 @@ def test_read_pollers_share_one_machines_snapshot(tmp_path: Path) -> None:
     fall back to one provider call per consumer when that snapshot ages during
     rate limiting, and hot per-machine reads must use the keyed index instead of
     reparsing an app-wide array in every child."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
 
     # The snapshot loop exists, initializes before Phase 1, and its complete
     # process tree is reaped in cleanup. A bare kill of the Bash root leaves its
@@ -14523,7 +14740,7 @@ def test_read_pollers_share_one_machines_snapshot(tmp_path: Path) -> None:
     assert "machines_snapshot_loop() {" in fleet
     assert "start_machines_snapshot_loop" in fleet
     cleanup = _extract_fleet_function(fleet, "cleanup() {")
-    assert '"${UNIFIED_AGG_PID:-}" "${SNAPSHOT_LOOP_PID:-}"' in cleanup
+    assert '"${UNIFIED_AGG_PID:-}" "$snapshot_teardown_pid"' in cleanup
     assert "cloudbench_terminate_tree_and_wait" in cleanup
     assert 'kill "$SNAPSHOT_LOOP_PID"' not in cleanup
     assert 'SNAPSHOT_LOOP_PID=""' in cleanup
@@ -14655,7 +14872,7 @@ test ! -e "$FLEET_DIR/machines-refresh.lock"
 
 def test_inventory_refresh_failure_preserves_provider_phase_and_private_response(tmp_path: Path) -> None:
     """A stale index must leave the original failed Fly response for RCA."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     diagnostic = (
         _extract_fleet_function(fleet, "inventory_refresh_diagnostic() {")
         if "inventory_refresh_diagnostic() {" in fleet else ""
@@ -14691,7 +14908,7 @@ def test_inventory_publishers_share_one_recoverable_atomic_lock(tmp_path: Path) 
     """Periodic and post-clone refreshes must serialize behind the same lock.
     The lock is published atomically with complete owner metadata so SIGKILL
     cannot expose a metadata-less directory that outlives the waiter budget."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     required = (
         "inventory_refresh_lock_acquire() {",
         "inventory_refresh_lock_release() {",
@@ -14757,7 +14974,7 @@ test ! -e "$lock"
 
 def test_inventory_release_uses_sealed_owner_birth_identity(tmp_path: Path) -> None:
     """A fallible second ps read must not strand a live owner's keyed lock."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     helpers = _fleet_pid_identity_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -14797,7 +15014,7 @@ mkfifo "$INVENTORY_WAIT_FIFO"
 {helpers}
 # Linux reads birth identity from /proc rather than ps, so the drifting
 # source is injected where both formats are observed.
-fleet_pid_start_time() {{ ps -p "$1" -o lstart=; }}
+inventory_pid_start_time() {{ ps -p "$1" -o lstart=; }}
 inventory_refresh_lock_acquire || exit 10
 [ -e "$INVENTORY_REFRESH_LOCK" ] || exit 11
 inventory_refresh_lock_release || exit 12
@@ -14824,7 +15041,7 @@ def test_exceptional_inventory_refresh_coalesces_waiters(tmp_path: Path) -> None
     """A clone-name waiter must leave as soon as another publisher advances the
     generation. It must not acquire the released lock and serialize a redundant
     provider refresh, nor spawn sleep/process probes in its contention tick."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     assert "inventory_refresh_wait_tick() {" in fleet
     wait_tick = _extract_fleet_function(fleet, "inventory_refresh_wait_tick() {")
     assert "sleep" not in wait_tick
@@ -14894,7 +15111,7 @@ def test_dead_refresh_owner_cannot_orphan_a_late_publisher(
     """A Python publisher outlives a SIGKILLed Bash parent unless it holds a
     child-visible filesystem fence. Recovery must wait for that old inode, not
     unlink it and let a newer publisher race an older late commit."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     acquire = _extract_fleet_function(fleet, "inventory_refresh_lock_acquire() {")
     assert "--recover-lock" in acquire
     assert "--lock-held" not in acquire
@@ -15044,7 +15261,7 @@ def test_keyed_inventory_rejects_stale_or_dead_publisher(tmp_path: Path) -> None
     """A last-good positive record is safe only while its exact publisher is
     alive and the provider generation is recent. A killed or wedged publisher
     must fail closed without a child-scaled live API fallback."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     cloud = CLOUD_SCRIPT.read_text()
     assert "inventory_index_healthy() {" in fleet
     assert "_inventory_index_healthy() {" in cloud
@@ -15114,7 +15331,7 @@ if inventory_machine_field machine-1 state; then exit 9; fi
 
 def test_inventory_existence_distinguishes_missing_machine_from_unhealthy_index(tmp_path: Path) -> None:
     """A stale shared index cannot testify that an owned primary vanished."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     health = _extract_fleet_function(fleet, "inventory_index_healthy() {")
     path = _extract_fleet_function(fleet, "inventory_machine_record_path() {")
     exists = _extract_fleet_function(fleet, "inventory_machine_exists() {")
@@ -15159,9 +15376,10 @@ def _preflight_harness(
     publish_status: int = 0,
     pinned_snapshot: bool = False,
     state_after_hydrate: str | None = None,
+    subsequent_snapshot_read: str = "ok",
 ) -> tuple:
     """Run warm_deps_preflight with stubbed FLY/git/refresh; returns (result, calls)."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     helpers = "".join(
         _extract_fleet_function(fleet, sig)
         for sig in (
@@ -15214,6 +15432,16 @@ WARM_DEPS_STATE_FILE="$COMMON/{selected_state_name}"
 CLOUDBENCH_WARM_DEPS_AUTOREFRESH={autorefresh}
 export CALLS_FILE="$CALLS_FILE"
 FLY() {{
+  count="$(cat "$COMMON/snapshot-read-count" 2>/dev/null || echo 0)"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$COMMON/snapshot-read-count"
+  if [ "$count" -gt 1 ]; then
+    case {shlex.quote(subsequent_snapshot_read)} in
+      failed) return 1 ;;
+      empty) printf '[]\n'; return 0 ;;
+      malformed) printf 'invalid-json\n'; return 0 ;;
+    esac
+  fi
   echo '[{{"id":"snap-current","created_at":"{__import__("datetime").datetime.fromtimestamp(snap_epoch, __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}","status":"{snapshot_status}","size":9}},{{"id":"{refreshed_snapshot}","created_at":"2026-07-17T00:00:00Z","status":"created","size":9}},{{"id":"snap-unrelated-newer","created_at":"2026-07-17T00:01:00Z","status":"created","size":9}}]'
 }}
 cloudbench_node_dependency_fingerprint() {{ echo {node_fp}; }}
@@ -15240,6 +15468,57 @@ echo "SNAP_AFTER=$SNAP_ID"
         check=False,
     )
     return result, calls
+
+
+@pytest.mark.parametrize("subsequent_read", ["failed", "empty", "malformed"])
+def test_warm_deps_preflight_preserves_captured_exact_proof_when_later_read_fails(
+    tmp_path: Path, subsequent_read: str
+) -> None:
+    """A second uncertain provider read cannot invalidate an already bound snapshot."""
+    node, python = "1" * 64, "2" * 64
+    key = "rose_cloudbench_deps_" + hashlib.sha256(f"{node}\0{python}".encode()).hexdigest()[:32]
+    proof = f"{node} {python} 1000 snap-current vol_warm warm-machine bench-app"
+    inventory = [
+        {
+            "id": "warm-machine",
+            "config": {
+                "mounts": [{"volume": "vol_warm"}],
+                "metadata": {key: proof},
+            },
+        }
+    ]
+    result, calls = _preflight_harness(
+        tmp_path,
+        state_line=None,
+        dirty=False,
+        autorefresh="1",
+        snap_epoch=2000,
+        warm_inventory=inventory,
+        node_fp=node,
+        python_fp=python,
+        subsequent_snapshot_read=subsequent_read,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "restored proven donor dependency snapshot" in result.stdout
+    assert "SNAP_AFTER=snap-current" in result.stdout
+    assert calls.read_text() == "", "already verified snapshot triggered dependency maintenance"
+    assert (tmp_path / "common/snapshot-read-count").read_text().strip() == "1"
+
+
+def test_warm_deps_preflight_requires_live_verification_after_a_new_refresh(tmp_path: Path) -> None:
+    """The old captured list cannot authorize the snapshot made by maintenance."""
+    result, calls = _preflight_harness(
+        tmp_path,
+        state_line=None,
+        dirty=False,
+        autorefresh="1",
+        snap_epoch=2000,
+        subsequent_snapshot_read="failed",
+    )
+    assert result.returncode != 0
+    assert calls.read_text().count("refresh-deps --refresh-deps") == 1
+    assert "SNAP_AFTER=" not in result.stdout
+    assert int((tmp_path / "common/snapshot-read-count").read_text()) > 1
 
 
 @pytest.mark.parametrize("scenario", ["fresh", "interleaved", "volume-mismatch", "donor-mismatch", "deps-mismatch", "pending", "expired"])
@@ -15394,7 +15673,7 @@ def test_dependency_proof_publication_uses_only_machine_metadata(tmp_path: Path)
         server.shutdown()
         server.server_close()
         thread.join(timeout=10)
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     assert fleet.index("    hydrate_warm_deps_state\n") < fleet.index('    RECORDED_SNAP_ID=')
     assert 'exec bash "$ROOT_DIR/scripts/run-bench-fleet"' in RUN_BENCH_SCRIPT.read_text()
 
@@ -15596,7 +15875,7 @@ create_volume_snapshot_exact() {{ echo snapshot >> "$CALLS"; CREATED_SNAPSHOT_ID
 
 def test_refresh_deps_is_a_validated_maintenance_transaction() -> None:
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     driver = DRIVER_SCRIPT.read_text()
     refresh = cloud[cloud.index('if [ "$MODE" = "refresh-deps" ]; then') : cloud.index("# MODE: --refresh-wmh")]
     snapshot_helper = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
@@ -16322,7 +16601,7 @@ def test_refresh_deps_mode_contract() -> None:
     # flag is wired
     assert '--refresh-deps)   MODE="refresh-deps"' in cloud
     # the fleet preflight exists and runs before cloning begins
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     assert fleet.index("warm_deps_preflight || exit 1\n") < fleet.index("# ── Phase 1:")
 
 
@@ -16425,7 +16704,7 @@ def test_refresh_deps_git_sync_uses_controller_token_not_box_secret() -> None:
     live controller token path (cloudbench_controller_github_token + export).
     """
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     env_lib = (ROOT / "scripts/lib/cloudbench-env.sh").read_text()
     refresh = cloud[cloud.index('if [ "$MODE" = "refresh-deps" ]; then') : cloud.index("# MODE: --refresh-wmh")]
     refresh_wmh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
@@ -16451,7 +16730,7 @@ def test_warm_source_park_retries_fly_machine_lease() -> None:
     must retry lease conflicts instead of a single fail-closed abort.
     """
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     resize = _extract_fleet_function(cloud, "resize_stopped_warm_source() {")
     assert "lease currently held" in resize
     assert "CLOUDBENCH_WARM_RESIZE_LEASE_ATTEMPTS" in resize
@@ -16643,7 +16922,7 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     per-invocation snapshot before any long-running work. It sources that copy
     in the already-guarded process so an exec-time signal cannot strand the
     snapshot; every child run-bench-cloud invocation uses the snapshot copy."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     cloud = CLOUD_SCRIPT.read_text()
 
     # Snapshot entry happens before arg parsing / locks / machines.
@@ -16682,6 +16961,9 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
         "cloudbench-env.sh",
         "cloudbench-seed-budget.sh",
         "cloudbench-github-token.sh",
+        "cloudbench-image-publisher.sh",
+        "cloudbench-campaign-barrier.py",
+        "cloudbench-inventory.sh",
     ):
         assert f in fleet[create_at:snap_at], f"{f} missing from snapshot copy set"
     assert 'SCRIPT_SNAPSHOT_OWNER_HELPER="cloudbench-script-snapshot.py"' in fleet
@@ -16830,7 +17112,7 @@ def test_nested_controller_borrows_parent_owned_script_snapshot(tmp_path: Path) 
 
 def test_script_snapshot_cleanup_uses_sealed_self_identity(tmp_path: Path) -> None:
     """EXIT cleanup must not reject its sealed owner after a drifted ps read."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     cleanup = _extract_fleet_function(fleet, "cleanup_owned_script_snapshot() {")
     snapshot = tmp_path / f"cloudbench-scripts.{'a' * 32}"
     snapshot.mkdir()
@@ -17573,7 +17855,7 @@ def test_script_snapshot_handoff_refuses_a_mismatched_process_group_identity(
             f"group_token={'e' * 32}\n"
         )
         fleet_function = _extract_fleet_function(
-            FLEET_SCRIPT.read_text(), "terminate_script_snapshot_handoff_group() {"
+            fleet_source_text(), "terminate_script_snapshot_handoff_group() {"
         )
         attempted = subprocess.run(
             [
@@ -17828,7 +18110,7 @@ exit 0
 
 
 def test_script_snapshot_lifecycle_keeps_the_bash_32_portability_contract() -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     bash_4_only = {
         "associative arrays": r"\b(?:declare|local)\s+-A\b",
         "nameref variables": r"\b(?:declare|local)\s+-n\b",
@@ -17902,7 +18184,7 @@ def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
     until Phase 2 wrote its first real report card. The startup card is written
     and the hub started right after the controller lock, before any
     preflight/heal/machine work, and the phase updates at each stage."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     lock_at = fleet.index("if ! cloudbench_controller_lock_acquire_wait")
     card_at = fleet.index('write_startup_card "controller starting"')
     hub_at = fleet.index("start_central_hub || exit 1\n")
@@ -18083,7 +18365,7 @@ def test_foreign_central_hub_port_reuses_only_the_matching_runs_root(
         assert selection.stdout.strip() == str(base_port + 1)
         assert foreign.poll() is None, "foreign workspace hub must not be killed"
         assert own_hub.poll() is None
-        assert "cloudbench_select_central_hub_port" in FLEET_SCRIPT.read_text()
+        assert "cloudbench_select_central_hub_port" in fleet_source_text()
     finally:
         foreign.terminate()
         own_hub.terminate()
@@ -18127,7 +18409,7 @@ def test_central_hub_startup_rebinds_serves_the_run_and_never_kills_foreign_owne
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     startup = _extract_fleet_function(fleet, "start_central_hub() {")
     visibility = _extract_fleet_function(fleet, "require_central_hub_visibility() {")
     shell = f"""set -uo pipefail
@@ -18225,7 +18507,7 @@ def test_central_hub_runs_in_own_session_after_launcher_exit(tmp_path: Path) -> 
     )
     hub_context = runs_root / "_hub"
     launcher_sid_file = tmp_path / "launcher.sid"
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     startup = _extract_fleet_function(fleet, "start_central_hub() {")
     visibility = _extract_fleet_function(fleet, "require_central_hub_visibility() {")
     shell = f"""set -uo pipefail
@@ -18321,7 +18603,7 @@ def test_central_hub_startup_retries_when_foreign_process_wins_bind_race(
     competitor_root.mkdir()
     (competitor_root / "index.html").write_text("Benchmark runs bind-race winner\n")
 
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     startup = _extract_fleet_function(fleet, "start_central_hub() {")
     visibility = _extract_fleet_function(fleet, "require_central_hub_visibility() {")
     shell = f"""set -uo pipefail
@@ -18389,7 +18671,7 @@ printf 'SELECTED_PORT=%s\n' "$DASH_BASE"
 
 def test_warm_source_parks_between_maintenance_and_fleet_runs() -> None:
     """The stopped donor must not consume the config transaction's CPU margin."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     cloud = CLOUD_SCRIPT.read_text()
     park_at = fleet.index("parking warm source at $WARM_PARKED_VM_SIZE")
     fanout_at = fleet.index("# ── Phase 1:")
@@ -18406,7 +18688,7 @@ def test_warm_source_parks_between_maintenance_and_fleet_runs() -> None:
 def test_fleet_waits_for_warm_source_stopped_before_provisioning() -> None:
     """Parallel fleet launches must wait out concurrent warm maintenance instead
     of hard-failing the first non-stopped sample into INFRA."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     wait_log = fleet.index("warm source is $warm_state; waiting until stopped before fleet provisioning")
     wait_helper = fleet.index(
         'cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID"',
@@ -18435,7 +18717,7 @@ def test_controller_names_the_signal_that_killed_it() -> None:
     """Silent teardowns (children mass-TERM'd, no error, no barrier release)
     repeatedly masqueraded as infra failures when the controller was signalled
     externally. Each fatal signal trap must announce itself before exiting."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     for sig in ("HUP", "INT", "TERM"):
         assert f"controller received {sig}" in fleet, f"unannounced {sig} trap"
 
@@ -18445,7 +18727,7 @@ def test_stale_name_only_registry_survives_provider_visibility_gap(tmp_path: Pat
     lookup deadline. The name-only record is the sole durable ownership proof
     during that gap, so stale recovery must retain it and fail closed rather
     than orphaning a late machine while provisioning a replacement fleet."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     helpers = "".join(
         _extract_fleet_function(fleet, sig)
         for sig in (
@@ -18492,7 +18774,7 @@ def test_fleet_dedupes_duplicate_bench_names() -> None:
     $FLEET_DIR/$bench, so a duplicate name shared an out-dir/machine and tripped
     'isolation violation: machine … allocated twice', aborting all 31 benches at
     t+312s. The fleet must dedupe bench args (first-seen order) and run once."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     # the dedupe runs before the isolation-checked launch loop
     assert "duplicate bench" in fleet
     dedupe_at = fleet.index("_deduped_benches=()")
@@ -18578,7 +18860,7 @@ def test_refresh_wmh_publishes_the_rebuilt_volume_as_the_proven_fleet_snapshot()
 
 
 def test_fleet_retained_resources_do_not_claim_release(tmp_path: Path) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     start = fleet.index("    # Report each bench's end-to-end duration")
     end = fleet.index("    # Task failure and infrastructure failure", start)
     fallback = fleet[start:end]
@@ -18612,7 +18894,7 @@ def test_start_barrier_tolerates_infra_failures() -> None:
     ZERO results, twice. The barrier must EXCLUDE a stack that dies before ready
     (infra failure, not a benchmark verdict), keep the live set, release for the
     survivors, and fail only if EVERY stack dies."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     fn = _extract_fleet_function(fleet, "release_start_barrier() {")
     # A single dead child no longer aborts: the old `return 1` on child exit is gone.
     assert "isolated runner exited before synchronized start barrier" not in fn
@@ -18634,7 +18916,7 @@ def test_strict_barrier_and_infra_probe_fail_closed() -> None:
     substrate. --infra-probe / --strict-barrier / CLOUDBENCH_STRICT_BARRIER=1
     fails closed on any exclusion or timeout; the guest driver skips
     run_benchmark when CLOUDBENCH_INFRA_PROBE=1."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     fn = _extract_fleet_function(fleet, "release_start_barrier() {")
     assert "STRICT_BARRIER" in fn
     assert "STRICT barrier: refusing to release" in fn
@@ -18677,7 +18959,7 @@ def test_start_barrier_release_uses_authenticated_data_plane(tmp_path: Path) -> 
     import urllib.error
     import urllib.request
 
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     fn = _extract_fleet_function(fleet, "release_start_barrier() {")
     assert "FLY ssh console" not in fn
     assert "CLOUDBENCH_BARRIER_TOKEN" in fleet
@@ -18954,7 +19236,7 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
             (root / "fleet-child.log").write_text(f"status proxy: 127.0.0.1:{port} -> fly:8011\n")
             (root / "status-proxy.port").write_text(f"{port}\n")
 
-        release_fn = _extract_fleet_function(FLEET_SCRIPT.read_text(), "release_start_barrier() {")
+        release_fn = _extract_fleet_function(fleet_source_text(), "release_start_barrier() {")
         # Thirty concurrent curl subprocesses can be scheduler-delayed on a
         # shared CI host. Keep the production curl/attempt deadlines unchanged,
         # but give the enclosing test process enough wall time to observe them.
@@ -19023,7 +19305,7 @@ def test_clone_burst_is_rate_limit_resilient() -> None:
     attempts and dropped from the batch (silent coverage loss, an infra failure).
     Fix: stagger the launch burst + exponential backoff with jitter + more
     attempts, so a rate-limited clone outlasts the burst instead of giving up."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     # More attempts (was 3).
     assert 'max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-${CLOUDBENCH_CLONE_ATTEMPTS:-5}}"' in fleet
     # Launch burst is staggered, not simultaneous.
@@ -19065,7 +19347,7 @@ def test_launcher_detects_dead_onbox_driver() -> None:
     assert "driver not confirmed running (attempt" in cloud
     # Boot launches are minimally staggered (30 submissions in ~7.5s), while
     # the legacy multi-SSH path retains its conservative throttle.
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     assert "CLOUDBENCH_LAUNCH_STAGGER_SECONDS" in fleet
     assert "CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-0.25}" in fleet
     assert "CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-3.5}" in fleet
@@ -19145,7 +19427,7 @@ def test_corrupt_pool_guest_is_quarantined_instead_of_reused(tmp_path: Path) -> 
     SIGSEGV from dropdb during stack startup. Returning that guest to the pool
     makes the same corrupt runtime eligible for later benchmark runs. Require a
     high-confidence multi-binary signature and durable pool eviction."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     signature = _extract_fleet_function(fleet, "pool_machine_guest_corruption_signature() {")
     corrupt = tmp_path / "corrupt.log"
     corrupt.write_text(
@@ -19221,7 +19503,7 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     # Backgrounding the FLY() shell function records a wrapper-subshell PID and
     # can orphan its flyctl child. Autoscaler metrics tunnels must also record
     # and reap the executable PID directly.
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     assert 'flyctl proxy "$metrics_port:$BOX_HEALTH_PORT"' in fleet
     assert 'FLY proxy "$metrics_port:$BOX_HEALTH_PORT"' not in fleet
     assert 'cloudbench_terminate_and_wait 5 "${metrics_proxy_pid:-}"' in fleet
@@ -20131,7 +20413,7 @@ test "$(sort -nr {shlex.quote(str(observed))} | head -1 | tr -d ' ')" -le 4
 
 
 def test_capacity_admission_retries_live_reservation_and_refreshes_inventory() -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     wrapper = _extract_fleet_function(fleet, "admit_app_capacity_with_wait() {")
     script = f'''set -u
 APP=fixture-bench-app
@@ -20162,7 +20444,7 @@ printf 'attempts=%s sleeps=%s inventory=%s\\n' "$attempts" "$sleep_calls" "$warm
 
 
 def test_capacity_admission_does_not_retry_non_capacity_failure() -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     wrapper = _extract_fleet_function(fleet, "admit_app_capacity_with_wait() {")
     script = f'''set -u
 CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=30
@@ -20181,7 +20463,7 @@ admit_app_capacity_with_wait
 
 
 def test_capacity_admission_follows_nested_canary_and_precedes_provisioning() -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     canary = fleet.index("fleet_infra_canary_preflight || exit $?")
     refresh = fleet.index('warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)"', canary)
     admission = fleet.index("admit_app_capacity_with_wait || exit 1", canary)
@@ -20199,7 +20481,7 @@ def test_capacity_guard_reserves_machine_slots_for_boot_config_replacements(tmp_
     CPU-safe workstream can fill the app to the Machine ceiling and then fail
     every boot update before the synchronized start barrier.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     support = _fleet_primary_shape_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -20266,7 +20548,7 @@ def test_single_task_capacity_reservations_scale_with_actual_fleet_width(tmp_pat
     in-flight boot-config replacement.  A global four-update ceiling must not
     make each one-task fleet reserve four replacement Machines.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     support = _fleet_primary_shape_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -20344,7 +20626,7 @@ def test_capacity_guard_serializes_cross_workspace_reservations(tmp_path: Path) 
     peak at 58 and exceed the benchmark app's 56-Machine allocation.  Durable
     host-wide reservations must make exactly one controller lose admission.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     support = [_fleet_primary_shape_helpers(fleet)]
     for signature in (
         "available_stopped_pool_machine_count() {",
@@ -20420,7 +20702,7 @@ def test_capacity_guard_does_not_count_available_pool_machines_twice(tmp_path: P
     boot-config replacements.  Treating all four primaries as new would
     incorrectly reject the safe boundary as 58 > 56.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     support = [_fleet_primary_shape_helpers(fleet)]
     for signature in (
         "available_stopped_pool_machine_count() {",
@@ -20489,7 +20771,7 @@ def test_capacity_guard_reserves_bundled_frontend_shape_and_pool_eligibility(
     all four benches as default 2x pool-eligible work would under-reserve both
     shared CPU and fresh Machine slots.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     support = _fleet_primary_shape_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -20555,7 +20837,7 @@ def test_capacity_guard_never_subtracts_unclaimable_pool_ids(tmp_path: Path) -> 
     ``claim_pool_machine`` will skip it and fall back to cloning.  Counting such
     an ID as reusable would under-reserve a physical Machine slot.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     support = _fleet_primary_shape_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -20608,7 +20890,7 @@ enforce_app_capacity_guard
 
 def test_startup_capacity_release_requires_full_requested_width(tmp_path: Path) -> None:
     """A successful subset cannot release a whole-fleet reservation early."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     release = _extract_fleet_function(fleet, "release_capacity_reservation_after_primary_start_accounted() {")
     output = tmp_path / "only-success"
     output.mkdir()
@@ -20642,7 +20924,7 @@ def test_pool_capacity_classification_streams_full_provider_inventory_without_ex
     environment-variable name.  A large local ``machines_json`` would therefore
     be copied into Python's environment and fail before the parser could run.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     classify = _extract_fleet_function(fleet, "available_stopped_pool_machine_count() {")
     pool_file = tmp_path / "pool.ids"
     pool_file.write_text("abcd\n")
@@ -20672,7 +20954,7 @@ count="$(available_stopped_pool_machine_count "$payload")"
 
 def test_all_buffered_provider_json_names_are_unexported_before_fleet_execs() -> None:
     """Bash 3.2 must not inherit export attributes for unbounded JSON buffers."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     guard = next(line for line in fleet.splitlines() if line.startswith("export -n inventory "))
 
     assert {
@@ -20687,7 +20969,7 @@ def test_all_buffered_provider_json_names_are_unexported_before_fleet_execs() ->
 
 def test_worker_capacity_reservation_streams_full_provider_inventory_without_exec_size_limit() -> None:
     """Autoscaler admission must parse provider JSON without exporting it."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     reserve_worker = _extract_fleet_function(fleet, "reserve_worker_machine_slot() {")
     script = f"""set -u
 APP=fixture-bench-app
@@ -20718,7 +21000,7 @@ def test_pool_shape_normalization_unexports_full_provider_inventory_buffers(
     tmp_path: Path,
 ) -> None:
     """Repeated pool-shape parsing must not leak cached JSON into exec env."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     support = "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
@@ -20774,7 +21056,7 @@ def test_startup_capacity_release_streams_full_provider_inventory_without_exec_s
     release boundary with a valid inventory larger than this host's exec limit;
     it must still prove all exact primaries started and release the reservation.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     release = _extract_fleet_function(fleet, "release_capacity_reservation_after_primary_start_accounted() {")
     outputs = []
     for index in range(42):
@@ -20831,7 +21113,7 @@ def test_capacity_reservation_recovers_a_proven_dead_owner(tmp_path: Path) -> No
     birth identity are no longer live.  The successor must prune that record
     while holding the admission lock, then publish its own reservation.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     reserve = _extract_fleet_function(fleet, "capacity_reserve_slots() {")
     root = tmp_path / "reservations-root"
     records = root / "reservations"
@@ -20871,7 +21153,7 @@ def test_capacity_reservation_retains_cleanup_unconfirmed_dead_owner(
     tmp_path: Path,
 ) -> None:
     """Admission must not prune ownership while its guest cleanup is unresolved."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     reserve = _extract_fleet_function(fleet, "capacity_reserve_slots() {")
     root = tmp_path / "reservations-root"
     records = root / "reservations"
@@ -20918,7 +21200,7 @@ capacity_reserve_slots {live_token} 1 2 56 140 10 20 primary
 
 def test_autoscaler_worker_clones_take_a_serialized_machine_slot() -> None:
     """Post-start autoscaling must not bypass Machine-count admission."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     worker = _extract_fleet_function(fleet, "provision_worker() {")
 
     assert 'reserve_worker_machine_slot "$worker_capacity_token"' in worker
@@ -21390,7 +21672,7 @@ def test_boot_supervisor_keeps_data_plane_alive_after_done() -> None:
 
 def test_claimed_pool_teardown_is_parallel_with_shared_inventory() -> None:
     """Thirty serial stop-and-list loops add N teardown latency and API load."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     cleanup = _extract_fleet_function(fleet, "cleanup() {")
     claimed = cleanup[cleanup.index("pending_pool_ids=") : cleanup.index('if [ "$FLEET_REGISTRY_PUBLISHED"')]
 
@@ -21407,7 +21689,7 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown(
     tmp_path: Path,
 ) -> None:
     """Cleanup must retain enough host space to run Fly/asdf after mid-run ENOSPC."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     reserve = _extract_fleet_function(fleet, "reserve_cleanup_disk_space() {")
     release = _extract_fleet_function(fleet, "release_cleanup_disk_reserve() {")
     reserve_path = tmp_path / "cleanup-disk-reserve"
@@ -21639,7 +21921,7 @@ def test_staleness_pauses_during_barrier_wait_and_per_box_timeout() -> None:
     assert 'if [ "$progress_barrier_ready" = "1" ]' in poll_loop
     assert '&& [ "$progress_barrier_released" != "1" ]' in poll_loop
     assert poll_loop.index('if [ "$progress_barrier_ready" = "1" ]') < poll_loop.index("cloudbench_watchdog_expired")
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     assert "CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS" in fleet
     assert "did not reach the start barrier within" in fleet
 
@@ -22514,7 +22796,7 @@ def test_cloud_catalog_fails_closed_when_polar_shard_is_missing(tmp_path: Path) 
 
 
 def test_fleet_world_model_lookup_uses_fail_closed_unified_catalog() -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     catalog_lookup = _extract_fleet_function(fleet, "_catalog_modes_for_batch() {")
 
     assert "from cloudbench_catalog import" in catalog_lookup
@@ -22610,7 +22892,7 @@ def test_cloud_runner_avoids_live_run_port_collisions() -> None:
     assert "release_local_port_leases" in _extract_fleet_function(cloud, "stop_on_exit() {")
     assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT' not in cloud
     assert 'pkill -f "flyctl proxy $LIVE_BACKEND_PORT' not in cloud
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     barrier = _extract_fleet_function(fleet, "release_start_barrier() {")
     assert "status-proxy.port" in barrier
     assert 'status_port="$(cat "$release_port_file"' in barrier
@@ -22661,7 +22943,7 @@ def test_fleet_barrier_reads_the_authoritative_rotated_status_port(tmp_path: Pat
 
     Barrier release must read the atomic port handoff, not stale console output.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     release = _extract_fleet_function(fleet, "release_start_barrier() {")
     child_out = tmp_path / "child"
     child_out.mkdir()
@@ -22705,7 +22987,7 @@ def test_autoscaler_finalization_budget_covers_worker_provisioning_contract() ->
     therefore has to be derived from those same limits instead of racing them
     with an unrelated fixed timeout.
     """
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     normalized_fleet = " ".join(fleet.replace("\\\n", " ").split())
     assert 'WORKER_STAGE_ATTEMPTS="${CLOUDBENCH_WORKER_STAGE_ATTEMPTS:-40}"' in fleet
     assert 'WORKER_READY_TIMEOUT="${CLOUDBENCH_WORKER_READY_TIMEOUT:-300}"' in fleet
@@ -22756,7 +23038,7 @@ def _migration_owner_fixture(tmp_path: Path) -> tuple[Path, Path, str, str]:
 def test_owned_worker_volume_follows_exact_provider_migration(tmp_path: Path) -> None:
     """Replay the captured same-Machine/new-mount boundary before destruction."""
     registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     signatures = ["registry_meta_value() {", "fleet_registry_volume_for_id() {"]
     for signature in ("fleet_registry_resume_volume_migrations() {", "fleet_registry_reconcile_mounted_volume() {"):
         if signature in fleet:
@@ -22901,7 +23183,7 @@ def test_volume_migration_rejects_ambiguous_or_foreign_authority(tmp_path: Path,
 
 def test_guest_recovery_accepts_proven_migration_before_authenticated_shutdown(tmp_path: Path) -> None:
     registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
         "registry_meta_value() {", "fleet_registry_resume_volume_migrations() {",
         "fleet_registry_reconcile_mounted_volume() {", "machine_guest_recovery_configuration() {",
@@ -22936,7 +23218,7 @@ machine_guest_recovery_configuration {machine} vol_old {shlex.quote(str(registry
 @pytest.mark.parametrize("cleanup_exit", [None, 0, 143])
 def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(tmp_path: Path, cleanup_exit: int | None) -> None:
     registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
         "registry_meta_value() {", "fleet_registry_resume_volume_migrations() {",
         "fleet_registry_reconcile_mounted_volume() {", "reap_registry_clones() {",
@@ -23174,7 +23456,7 @@ def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, c
     fake_cloud.write_text('#!/bin/bash\nprintf "MAINTENANCE %s\\n" "$*" >> "$FIXTURE/calls"\nexit 88\n')
     fake_cloud.chmod(0o700)
     (common / "cloudbench-warm-deps.fp").write_text(f"{node} {python} 1000 vs_shared\n")
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     start = fleet.index("# ── Resolve the warm machine (clone source)")
     end = fleet.index("# Freeze one workspace patch", start)
     init = ""
@@ -23284,7 +23566,7 @@ def test_private_fleet_source_rejects_unproven_input(tmp_path: Path, corrupt: st
 
 
 def test_private_fleet_source_cannot_be_claimed_from_contaminated_pool(tmp_path: Path) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     claim = _extract_fleet_function(fleet, "claim_pool_machine() {")
     guard = _extract_fleet_function(fleet, "private_source_allows_provider_call() {")
     for source, volume in (
@@ -23338,7 +23620,7 @@ claim_pool_machine
 def test_private_fleet_source_native_identity_uses_existing_inventory(tmp_path: Path) -> None:
     result, _ = _private_source_preflight_fixture(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     helpers = "\n".join(
         _extract_fleet_function(fleet, name)
         for name in (
@@ -23400,7 +23682,7 @@ private_fleet_source_admission
 
 
 def test_private_fleet_source_provider_boundary_protects_both_bases(tmp_path: Path) -> None:
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     guard = _extract_fleet_function(fleet, "private_source_allows_provider_call() {")
     for command in (
         "machine start",
@@ -23454,7 +23736,7 @@ def test_private_fleet_source_capture_is_immutable_and_pool_scoped(tmp_path: Pat
     )
     assert result.returncode != 0
     assert captured.read_bytes() == original
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     start = fleet.index('POOL_WORKSPACE_KEY="$(printf')
     end = fleet.index("POOL_CLAIMS_DIR=", start)
     keys = []
@@ -23503,7 +23785,7 @@ def test_private_fleet_source_recovery_requires_bound_manifest_without_env(tmp_p
         f"version=1\nfleet_owner_token={owner}\nrun_id=fixture\napp=navi-whisper-lux-bench\nclone_name={clone}\nsource=fresh-clone\nsource_machine_id=feedface000001\nmachine_id={machine}\nvolume_id=vol_child\ndisposition=owned\n"
     )
     (audit / "by-machine-id" / machine).write_text(clone + "\n")
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     resolver = _extract_fleet_function(fleet, "resolve_exact_recovery_warm_identity() {")
     guard = _extract_fleet_function(fleet, "private_source_allows_provider_call() {")
     meta = _extract_fleet_function(fleet, "registry_meta_value() {")
@@ -23571,7 +23853,7 @@ def _private_source_identity_fixture(tmp_path: Path, *, private: bool = True):
 
 
 def _private_source_identity_command(registry: Path, audit: Path, body: str):
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
         "registry_meta_value() {", "fleet_audit_update_registry_clone() {",
         "registry_record_machine_identity() {", "fleet_registry_record_id() {",
@@ -23733,7 +24015,7 @@ def _private_source_guest_plan_fixture(tmp_path: Path, *, private: bool = True, 
 
 
 def _private_source_guest_plan_command(registry: Path, audit: Path, plan: Path):
-    build = _extract_fleet_function(FLEET_SCRIPT.read_text(), "fleet_registry_build_guest_recovery_plan() {")
+    build = _extract_fleet_function(fleet_source_text(), "fleet_registry_build_guest_recovery_plan() {")
     return subprocess.run(
         ["bash", "-c", f'''set -eu
 APP=navi-whisper-lux-bench
@@ -24008,7 +24290,7 @@ def test_autoscaler_runtime_handoff_preserves_collection_and_capacity(
     (out / "status-proxy.port").write_text(str(f["port"]) + "\n")
     release = tmp_path / "release-collector"
     sealed = tmp_path / "guest-sealed"
-    source = FLEET_SCRIPT.read_text()
+    source = fleet_source_text()
     q = shlex.quote
     expected_token = f["token"]
     expected_machine = f["machine"]
@@ -24180,7 +24462,7 @@ bench_autoscaler fixture-task {q(expected_machine)} fixture-workspace 0 {q(str(o
 
 
 def test_autoscaler_runtime_handoff_uses_one_owner_bound_token():
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     cloud = CLOUD_SCRIPT.read_text()
     launch = fleet.split("# ── Phase 2: launch each provisioned bench", 1)[1].split("CHILD_PIDS+=(", 1)[0]
     assert 'CLOUDBENCH_FLEET_RUN_TOKEN="$FLEET_OWNER_TOKEN-$i"' in launch
@@ -24252,7 +24534,7 @@ def test_autoscaler_runtime_handoff_fixture_cleanup_survives_faults(tmp_path, mo
 
 def _fly_with_timeout_test_source():
     return 'mktemp() { command mktemp "$TMPDIR/timeout.XXXXXXXX"; }\n' + _extract_fleet_function(
-        FLEET_SCRIPT.read_text(), "fly_with_timeout() {"
+        fleet_source_text(), "fly_with_timeout() {"
     )
 
 
@@ -24734,7 +25016,7 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
         assert result.returncode != 0, f"unsafe {fault} was accepted"
     assert (out / "runtime-evidence.pending").exists() == (fault not in ("pending", "collected", "collected-mismatch"))
     assert (registry / "runtime-evidence-unconfirmed").exists()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
         "registry_meta_value() {", "fleet_recovery_confirm_forensic_retirement() {",
     ))
@@ -24824,9 +25106,9 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
                 }
             )
         )
-    source = FLEET_SCRIPT.read_text().split("# ── ONE aggregated batch dashboard", 1)[1]
+    source = fleet_source_text().split("# ── ONE aggregated batch dashboard", 1)[1]
     aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
-    assert FLEET_SCRIPT.read_text().index('# ── ONE aggregated batch dashboard') < FLEET_SCRIPT.read_text().index('# ── Phase 1: provision'), 'live publisher begins after allocation'
+    assert fleet_source_text().index('# ── ONE aggregated batch dashboard') < fleet_source_text().index('# ── Phase 1: provision'), 'live publisher begins after allocation'
     server = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -24906,7 +25188,7 @@ def test_autoscaler_runtime_handoff_capacity_observation_pending(
     tmp_path: Path, inventory, provider_rc, expected,
 ) -> None:
     """Unknown observations allocate nothing; real serialized ceiling remains hard."""
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     functions = "\n".join(_extract_fleet_function(fleet, name + "() {") for name in (
         "capacity_reserve_slots", "reserve_worker_machine_slot", "provision_worker",
     ))

@@ -27,6 +27,94 @@ Ordinary cloud runs automatically reuse verified completed dependency snapshots,
 including from fresh checkouts. Use `scripts/run-bench --help` and CLAUDE.md's
 "Cloud startup reuse" guidance; do not rebuild dependencies for source-only changes.
 
+An explicitly requested uncached image measurement uses
+`scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`.
+The selected checkout supplies the Dockerfile and Fly config. Its receipt records
+pre-launch source/dirty status, recipe/config hashes and build/push timing;
+it does not prove artifact equivalence. The final image layer installs the
+unchanged npm/Prisma and Python dependencies concurrently and joins both before
+publication. Ordinary branch runs continue to reuse verified dependency images.
+`image-build` defaults to Fly-integrated Depot (app scope, zstd level 3,
+`linux/amd64`); `--builder native` selects an explicit native diagnostic. The
+independent `807edee9f` no-cache build/push completed in 493.6 seconds in one attempt,
+excluding activation/fleet startup. Activate the exact receipt image and verify
+guest digest/runtime consumption before the benchmark cohort.
+Image publication automatically caches a checksum-verified pinned Fly client in
+the Git common directory. Native publishing uses only the image child’s classic
+Docker/HTTPS settings (`DOCKER_BUILDKIT=0`, `--wg=false`); shared Fly/PATH and the
+benchmark runtime remain unchanged. The tiny supported CLI control took 31.6
+seconds including client installation and push, not a full cold build. No manual
+download is needed for a fresh worktree.
+
+For the existing recorded mass-demo cache diagnostic, from the repository root:
+
+```bash
+CLOUDBENCH_APP_MACHINE_CEILING=138 \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  scripts/run-bench test-mass-agent-run-0 --demo-cache \
+  -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
+```
+
+For this requested cached diagnostic, the 300-second settings are temporary
+execution controls. Independently enforce a 1,200-second deadline for each copy
+from allocation through verified release of its exact owned resources. This
+deadline supersedes the older 1,800-second proof budget only for this diagnostic;
+normal 7,200-second defaults remain unchanged. A task verdict does not establish
+resource release. On a cutoff, signal only the exact owned controller, let its
+cleanup traps run, audit its resources, and grant no acceptance credit.
+
+
+For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
+
+```bash
+scripts/run-bench image-build --builder depot --no-cache --build-context <committed-checkout> --out-dir .context/image-build
+benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/image-build/cloudbench-image-build.json"))["image_ref"])')
+scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
+```
+
+`image-activate` uses the existing app environment lock and owned warm-source setup. It strictly stops the exact existing donor before environment activation, activates the published image on the donor and this workspace's stopped pool members, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
+
+Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
+
+For this explicitly requested 50-copy cached stress run, use the command-scoped
+Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
+Machines plus 50 primaries, up to 50 optional autoscaler workers and two transient
+slots. Inspect native app inventory and headroom again before a future run;
+ordinary ceiling 56 cannot hold this current cohort, and ceiling 88 leaves only
+two worker slots. This profile creates no idle resources and changes no default
+ceiling, shared-CPU governor or production headroom. `--strict-barrier` keeps all
+50 copies in one ready cohort; controller occupancy does not prove execution overlap.
+
+Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
+seconds, then follow each job log's exact printed fleet-monitor handle through
+controller exit and owned teardown. The campaign directory itself is not a
+fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
+Foreground campaigns may print no `--controller-status` marker; use only the
+actual printed handle and read each copy's controller exit separately from
+`summary.json` → `jobs[].controller_exit_code`, keyed by `job_id`. The monitor's
+null controller fields alone do not establish liveness or completion.
+Allocation timestamps are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
+`bench-e2e.finished-epoch`. The run's `teardown-ownership.path` identifies its
+exact audit/token; while live, capture `pid` and `pid_start` from
+`<git-common>/cloudbench-fleet-ownership/<token>/meta`. Normal cleanup removes
+that active claim, so retain the captured identity and verify native process
+birth before any exact-owner signal. Audit retention is separate from liveness.
+
+These are 50 independent one-task controllers, each retaining the task's 50
+first-level general-purpose children: 2,500, with existing explore allowances unchanged.
+They are not 50 distinct tasks. The explicit flag requires an existing DEMO task
+admitted by runtime replay policy with `fast_cache:on`; task agents stay read-only
+and refuse live fallback on misses or unresolved context. The separate harness
+keeps genuine evaluation, including declared LLM judges that may call providers.
+Do not claim a recorded hit for existing cold-terminal passthrough, total zero
+provider spend, or LIVE acceptance credit. Do not edit tasks, prompts or evaluators
+to create a cheaper passing fixture. The compact mode/handoff controls run in
+the existing deploy gate; this large diagnostic remains user-requested.
+With repeated copies, `--strict-barrier` releases a bounded cohort only after
+every copy finishes its normal stack and autoscaler readiness. Startup failure
+aborts the cohort through owned cleanup; non-strict sliding scheduling remains
+unchanged. Report actual task start/terminal overlap, not controller count.
+
 Follow the exact monitoring command printed by every launch. Poll every 30 seconds;
 check controller terminal status even when the card is stale, and continue through
 owned-resource release. See CLAUDE.md's "Monitor every cloud launch" guidance.

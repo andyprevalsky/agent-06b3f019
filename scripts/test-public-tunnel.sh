@@ -68,9 +68,7 @@ trap 'rm -f "$body_file"' EXIT
 
 status=""
 for attempt in $(seq 1 60); do
-    # --noproxy '*' so an inherited proxy can neither fake a healthy tunnel with
-    # a 407/5xx nor mask a healthy one by refusing the trycloudflare host.
-    status="$(curl -sS -o "$body_file" -w '%{http_code}' --noproxy '*' \
+    status="$(curl -sS -o "$body_file" -w '%{http_code}' \
         -A "$BROWSER_USER_AGENT" "$PUBLIC_BASE_URL/test_payment" 2>/dev/null || true)"
     if [ "$status" = "200" ] && grep -qF "$APP_SHELL_MARKER" "$body_file"; then
         break

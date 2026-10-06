@@ -242,6 +242,15 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
                 os.environ[name] = value
 
 
+def test_hub_requests_preserve_external_proxy_routing():
+    from pytest import MonkeyPatch
+
+    from benchmarks.hub_upload_test import test_hub_requests_preserve_external_proxy_routing as control
+
+    with MonkeyPatch.context() as monkeypatch:
+        control(monkeypatch)
+
+
 def test_hub_upload_rejection_retains_safe_response_identity_without_retry():
     """A forbidden upload stays failed while preserving upstream correlation."""
     from benchmarks.hub_upload import HubVisibilityError, upload_run_bundle
@@ -563,7 +572,16 @@ def test_private_fleet_source_behavior_is_in_permanent_gate():
 def test_evaluated_fleet_outcomes_publish_before_teardown():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
-        [sys.executable, str(repo_root / "scripts/tests/benchmark-live-results.test.py")],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            str(repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py")
+            + "::test_fleet_publishes_evaluation_before_teardown",
+            str(repo_root / "agents/benchmarks/cloud_batch_cleanup_test.py")
+            + "::test_evaluated_outcome_is_visible_before_agent_and_phone_teardown",
+        ],
         cwd=repo_root,
         text=True,
         capture_output=True,
@@ -955,8 +973,8 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     # controller-token/private-repo auth, bounded dependency-refresh ownership,
     # isolated-backend queue alignment, exact workspace replay, and pgvector
     # installation, shared snapshot discovery, pinned controls, and the
-    # SIGPIPE-safe target-mode parse cover 44 cases.
-    assert "44 passed" in result.stdout
+    # SIGPIPE-safe target-mode parse cover 48 cases.
+    assert "48 passed" in result.stdout
 
 
 def test_run_benchmark_task_selection_suite_is_in_permanent_gate():
@@ -19870,6 +19888,7 @@ async def run_all_tests():
         "hub_upload_gzip_preserves_live_and_final_bundles_across_retry",
         test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry,
     )
+    r.record("hub_requests_preserve_external_proxy_routing", test_hub_requests_preserve_external_proxy_routing)
     r.record("evaluated_fleet_outcomes_publish_before_teardown", test_evaluated_fleet_outcomes_publish_before_teardown)
     r.record(
         "cloudbench_rejects_stale_wrong_task",

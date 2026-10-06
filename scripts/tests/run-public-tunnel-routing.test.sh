@@ -46,7 +46,6 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # preference is passed as curl args through that helper (`-4`), not inlined as
 # `curl -4` inside cloudflare_tunnel_edge_is_routing.
 awk '/^supervised_edge_probe\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/fn.sh"
-awk '/^cloudflare_quick_tunnel_edge_ipv4s\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/fn.sh"
 awk '/^cloudflare_tunnel_edge_is_routing\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/fn.sh"
 grep -q 'supervised_edge_probe' "$TMP/fn.sh" \
   || fail "could not extract supervised_edge_probe from run.sh"
@@ -58,6 +57,49 @@ grep -qE 'supervised_edge_probe "\$url" -4' "$TMP/fn.sh" \
   || fail "extracted routing check no longer prefers IPv4 (supervised_edge_probe … -4) for trycloudflare probes"
 grep -qE 'curl "\$@"' "$TMP/fn.sh" \
   || fail "supervised_edge_probe must forward curl args (including -4) via curl \"\$@\""
+
+# Model the response headers at the actual curl boundary, including a proxy's
+# CONNECT response followed by an unrelated block page.
+cat > "$TMP/edge-headers.sh" <<'STUB'
+#!/usr/bin/env bash
+status="$1"; shift
+headers=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in -D|--dump-header) headers="$2"; shift ;; esac
+  shift
+done
+[ -n "$headers" ] || exit 0
+case "${EDGE_RESPONSE_IDENTITY:-cloudflare}" in
+  cloudflare)
+    printf 'HTTP/1.1 %s Fixture\r\nServer: cloudflare\r\nCF-Ray: 0123456789abcdef-SJC\r\n\r\n' "$status" > "$headers" ;;
+  proxy)
+    printf 'HTTP/1.1 %s Blocked\r\nServer: fixture-blocker\r\n\r\n' "$status" > "$headers" ;;
+  proxy-after-connect)
+    printf 'HTTP/1.1 200 Connection established\r\nServer: cloudflare\r\nCF-Ray: 0123456789abcdef-SJC\r\n\r\nHTTP/1.1 %s Blocked\r\nServer: fixture-blocker\r\n\r\n' "$status" > "$headers" ;;
+  *) exit 98 ;;
+esac
+STUB
+
+# The public-edge probe must retain inherited proxy configuration.
+mkdir "$TMP/proxy-control"
+cat > "$TMP/proxy-control/curl" <<'STUB'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in --noproxy|--noproxy=*) exit 29 ;; esac
+done
+for key in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy; do
+  [ "${!key}" = "fixture-proxy-setting" ] || exit 30
+done
+bash "$EDGE_HEADERS_WRITER" 200 "$@"
+printf '200'
+STUB
+chmod +x "$TMP/proxy-control/curl"
+status="$(EDGE_HEADERS_WRITER="$TMP/edge-headers.sh" HTTP_PROXY=fixture-proxy-setting HTTPS_PROXY=fixture-proxy-setting ALL_PROXY=fixture-proxy-setting \
+  http_proxy=fixture-proxy-setting https_proxy=fixture-proxy-setting all_proxy=fixture-proxy-setting \
+  NO_PROXY=fixture-proxy-setting no_proxy=fixture-proxy-setting PATH="$TMP/proxy-control:$PATH" \
+  bash -c 'source "$1"; supervised_edge_probe https://fixture.invalid -4' fixture "$TMP/fn.sh")"
+[ "$status" = 200 ] || fail "public-edge probe changed or bypassed inherited proxy settings"
+echo "PASS: public-edge probe preserves inherited proxy settings"
 
 # Drive the extracted function with a stub curl whose status sequence we control.
 # STATUS_FILE holds one status per line; the stub pops one per invocation and
@@ -75,7 +117,9 @@ printf '%s\n' "$n" > "$TMPDIR_FOR_STUB/calls"
 total=$(wc -l < "$TMPDIR_FOR_STUB/statuses" | tr -d ' ')
 idx=$n
 [ "$idx" -gt "$total" ] && idx=$total
-sed -n "${idx}p" "$TMPDIR_FOR_STUB/statuses"
+status="$(sed -n "${idx}p" "$TMPDIR_FOR_STUB/statuses")"
+bash "$TMPDIR_FOR_STUB/edge-headers.sh" "$status" "$@"
+printf '%s' "$status"
 STUB
   chmod +x "$TMP/curl"
 
@@ -101,6 +145,21 @@ echo "PASS: HTTP 502 counts as routing (origin not started is not a dead tunnel)
 # --- case 3: 404 is routing -------------------------------------------------
 run_routing_check 10 404 || fail "case 3: HTTP 404 must count as routing"
 echo "PASS: HTTP 404 counts as routing"
+
+# An HTTP response through the configured proxy is not necessarily the tunnel.
+# Keep the real probe, its watchdog and all inherited proxy settings unchanged.
+for blocked_status in 200 403; do
+  if EDGE_RESPONSE_IDENTITY=proxy CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=0 \
+      run_routing_check 2 "$blocked_status"; then
+    fail "edge identity: proxy HTTP $blocked_status must not count as tunnel routing"
+  fi
+done
+echo "PASS: proxy HTTP 200 and 403 block pages are rejected"
+if EDGE_RESPONSE_IDENTITY=proxy-after-connect CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=0 \
+    run_routing_check 2 403; then
+  fail "edge identity: earlier CONNECT headers must not certify the final block page"
+fi
+echo "PASS: only the final HTTP response identifies the intended tunnel edge"
 
 # --- case 4: Cloudflare's no-live-route response is rejected ----------------
 started=$SECONDS
@@ -293,91 +352,55 @@ for name in back-end front-end agents; do
 done
 echo "PASS: only an isolated run's own account-less tunnel is load-bearing"
 
-# --- case 12: a record published after the host resolver cached NXDOMAIN ---
-# RCA cement (2026-10-01). cloudflared prints a quick-tunnel hostname a few seconds
-# before Cloudflare publishes its record. The edge probe resolved it in that window,
-# the VM's caching resolver kept serving NXDOMAIN for trycloudflare.com's 60s
-# negative TTL, and the isolated run's 10s probe discarded a healthy tunnel (3 of 4
-# isolated stacks that day). The smoke stack then lost the shared ngrok fallback to
-# a concurrent lane and fronted /test_payment with localtunnel, whose password page
-# held every payment task's cloud browser until the task timed out.
-#
-# Stubs model that cache: the record publishes PUBLISH_AFTER seconds into the case,
-# and a host-resolver lookup of the new hostname made before then is cached as
-# NXDOMAIN for the rest of the case. The edge answers by SNI at its anycast
-# addresses regardless of DNS, exactly like Cloudflare's.
+# --- case 12: preserve configured resolver/destination policy ---
+# A newly published hostname may be temporarily unavailable. Retrying through
+# the configured route is permitted; overriding DNS, destination or proxy
+# policy can bypass a user's content blocker and must never make it pass.
 mkdir -p "$TMP/dns/bin"
 cat > "$TMP/dns/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DNS_STATE/edge_args"
-[ "$EDGE_MODE" = dead ] && { printf '530'; exit 0; }
-case "$*" in
-  *--resolve*) printf '502' ;;
-  *) [ -f "$DNS_STATE/poisoned" ] && printf '000' || printf '502' ;;
-esac
+case "$*" in *--resolve*|*--connect-to*|*--noproxy*) exit 97 ;; esac
+if [ "$EDGE_MODE" = dead ]; then
+  status=530
+elif [ "$EDGE_MODE" = blocked ] || [ $(( $(date +%s) - $(cat "$DNS_STATE/started") )) -lt 3 ]; then
+  status=000
+else
+  status=502
+fi
+bash "$EDGE_HEADERS_WRITER" "$status" "$@"
+printf '%s' "$status"
 STUB
 for tool in getent dig; do
   cat > "$TMP/dns/bin/$tool" <<'STUB'
 #!/usr/bin/env bash
 printf '%s %s\n' "$(basename "$0")" "$*" >> "$DNS_STATE/host_resolver_calls"
-case "$*" in
-  *api.trycloudflare.com*)
-    [ "$EDGE_NAME" = unresolvable ] && exit 2
-    [ "$(basename "$0")" = getent ] && printf '104.16.231.132 STREAM api.trycloudflare.com\n104.16.230.132 STREAM\n' \
-      || printf '104.16.231.132\n104.16.230.132\n'
-    exit 0
-    ;;
-esac
-[ $(( $(date +%s) - $(cat "$DNS_STATE/started") )) -ge "$PUBLISH_AFTER" ] || : > "$DNS_STATE/poisoned"
-[ -f "$DNS_STATE/poisoned" ] && exit 2
-case "$(basename "$0")" in
-  getent) printf '104.16.230.132 STREAM race.trycloudflare.com\n' ;;
-  dig) printf '104.16.230.132\n' ;;
-esac
+exit 97
 STUB
 done
 chmod +x "$TMP/dns/bin/"*
-
-run_dns_case() { # run_dns_case <edge mode> <edge name> <timeout seconds>
+run_dns_case() { # <route outcome> <section seconds>
   rm -rf "$TMP/dns/state"; mkdir -p "$TMP/dns/state"
   date +%s > "$TMP/dns/state/started"
-  PATH="$TMP/dns/bin:$PATH" DNS_STATE="$TMP/dns/state" \
-    EDGE_MODE="$1" EDGE_NAME="$2" PUBLISH_AFTER=3 \
-    CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS="$3" CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=1 \
+  EDGE_HEADERS_WRITER="$TMP/edge-headers.sh" PATH="$TMP/dns/bin:$PATH" DNS_STATE="$TMP/dns/state" EDGE_MODE="$1" \
+    CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS="$2" CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=1 \
     bash -c 'set -euo pipefail; source "$1"; cloudflare_tunnel_edge_is_routing https://race.trycloudflare.com' \
     _ "$TMP/fn.sh" > "$TMP/dns/state/out"
+  local result=$?
+  grep -qE -- '--resolve|--connect-to|--noproxy' "$TMP/dns/state/edge_args" \
+    && fail "case 12: configured routing was overridden"
+  [ ! -e "$TMP/dns/state/host_resolver_calls" ] \
+    || fail "case 12: probe issued a separate resolver lookup"
+  return "$result"
 }
-resolved_new_hostname() {
-  grep -q 'race.trycloudflare.com' "$TMP/dns/state/host_resolver_calls" 2>/dev/null
-}
-
-run_dns_case routed resolvable 10 \
-  || fail "case 12a: a routing tunnel probed before its record publishes must pass ($(cat "$TMP/dns/state/out"))"
-resolved_new_hostname \
-  && fail "case 12a: the probe resolved the new hostname and seeded the cache: $(cat "$TMP/dns/state/host_resolver_calls")"
-grep -q -- '--resolve race.trycloudflare.com:443:104.16.230.132,104.16.231.132' "$TMP/dns/state/edge_args" \
-  || fail "case 12a: the probe must reach the quick-tunnel edge directly: $(cat "$TMP/dns/state/edge_args" 2>/dev/null)"
-grep -q 'edge 104.16.230.132,104.16.231.132: HTTP 502' "$TMP/dns/state/out" \
-  || fail "case 12a: the probe must log each edge result: $(cat "$TMP/dns/state/out")"
-echo "PASS: a tunnel probed before its record publishes routes without seeding the resolver cache"
-
-started=$SECONDS
-if run_dns_case dead resolvable 3; then
-  fail "case 12b: a pinned edge answering 530 (no tunnel route) must NOT count as routing"
-fi
-elapsed=$(( SECONDS - started ))
-[ "$elapsed" -le 9 ] || fail "case 12b: a dead tunnel must fail at the probe deadline, ran ${elapsed}s"
-resolved_new_hostname \
-  && fail "case 12b: the probe resolved a dead tunnel's hostname: $(cat "$TMP/dns/state/host_resolver_calls")"
-echo "PASS: a dead tunnel at the pinned edge is still rejected (${elapsed}s)"
-
-run_dns_case routed unresolvable 10 \
-  || fail "case 12c: without edge addresses the plain probe must still run ($(cat "$TMP/dns/state/out"))"
-grep -q -- '--resolve' "$TMP/dns/state/edge_args" \
-  && fail "case 12c: no edge addresses means nothing to pin: $(cat "$TMP/dns/state/edge_args")"
-grep -q 'No edge addresses for api.trycloudflare.com; probing race.trycloudflare.com through DNS' "$TMP/dns/state/out" \
-  || fail "case 12c: the unpinned probe must say why it uses DNS: $(cat "$TMP/dns/state/out")"
-echo "PASS: an unresolvable edge name falls back to the plain probe"
+run_dns_case routed 10 || fail "case 12a: default-route retry did not recover"
+echo "PASS: a newly published tunnel recovers through the configured default route"
+for outcome in dead blocked; do
+  if run_dns_case "$outcome" 5; then
+    fail "case 12: $outcome default route must remain rejected without bypass"
+  fi
+done
+echo "PASS: dead and blocked routes remain rejected without resolver or proxy overrides"
 
 # --- case 13: the public smoke certifies what a cloud browser sees ----------
 # RCA cement (2026-10-01). The smoke stack fronted /test_payment with localtunnel
@@ -393,12 +416,18 @@ grep -qF "$app_marker" "$ROOT_DIR/front-end/index.html" \
 mkdir -p "$TMP/smoke/bin" "$TMP/smoke/ctx"
 cat > "$TMP/smoke/bin/curl" <<'STUB'
 #!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in --noproxy|--noproxy=*|--resolve|--resolve=*|--connect-to|--connect-to=*) exit 97 ;; esac
+done
+for key in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
+  [ "${!key-}" = "route-sentinel-$key" ] || exit 98
+done
 out="" ua="" url=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift ;;
     -A) ua="$2"; shift ;;
-    -w|--noproxy|--max-time|--connect-timeout|-H) shift ;;
+    -w|--max-time|--connect-timeout|-H) shift ;;
     http*://*) url="$1" ;;
   esac
   shift
@@ -426,6 +455,10 @@ chmod +x "$TMP/smoke/bin/curl" "$TMP/smoke/bin/sleep"
 run_smoke() { # run_smoke <tunnel mode>
   rm -f "$TMP/smoke/ctx/user_agents"
   PATH="$TMP/smoke/bin:$PATH" STUB_STATE="$TMP/smoke/ctx" TUNNEL_MODE="$1" \
+    HTTP_PROXY=route-sentinel-HTTP_PROXY HTTPS_PROXY=route-sentinel-HTTPS_PROXY \
+    ALL_PROXY=route-sentinel-ALL_PROXY NO_PROXY=route-sentinel-NO_PROXY \
+    http_proxy=route-sentinel-http_proxy https_proxy=route-sentinel-https_proxy \
+    all_proxy=route-sentinel-all_proxy no_proxy=route-sentinel-no_proxy \
     BENCHMARK_CONTEXT_DIR="$TMP/smoke/ctx" BACKEND_PORT=28600 \
     PUBLIC_BASE_URL="https://stub-origin.trycloudflare.com" \
     bash "$SMOKE" > "$TMP/smoke/out" 2>&1

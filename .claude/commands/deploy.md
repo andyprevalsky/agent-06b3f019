@@ -492,6 +492,7 @@ their assertions or test counts:
 `python3 scripts/tests/verify-successful-llm-queries.test.py`,
 `python3 scripts/tests/cloudbench-exact-session-multi-root.test.py`,
 `python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
+`python3 scripts/tests/cloudbench-controller-linux.test.py`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
 `python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
@@ -522,6 +523,65 @@ one 50-task dispatch and production-only routing), completed LIVE-query evidence
 exact composite-root cleanup, and quiesced resource retirement offline. Larger
 paid fleet campaigns remain explicit human-requested validation; they are not
 added to this automatic gate.
+
+The same compact `benchmark-live-results.test.py` gate also covers cold-image
+CLI context/provenance, joined image installers and retained artifacts, explicit
+DEMO replay admission, task-only read-only guards, genuine replay hits, ordinary
+flag-off behavior and pooled/worker handoff. It calls the owning controls through
+the supported scripts; it adds no paid fleet stage. Explicit cold/cached startup
+experiments use `/benchmark` and CLAUDE.md's commands, without replacing deploy
+smoke outcomes. The mass-demo `-k 50 --concurrency 50 --strict-barrier` diagnostic
+means 50 controllers and 2,500 first-level children; task replay has zero LIVE proof
+credit and its unchanged declared judges may make provider calls. Ordinary
+source-only deploy benchmarks continue to reuse verified dependency snapshots.
+Cold `image-build` defaults to Fly-integrated Depot (app scope, zstd level 3,
+`linux/amd64`); explicit `--builder native` remains available for diagnostics.
+The independent `807edee9f` no-cache build/push completed in 493.6 seconds in one attempt,
+excluding activation/fleet startup. Retain its receipt, activate the exact image
+and verify guest digest/runtime consumption before the benchmark cohort.
+Image publication automatically caches its checksum-verified pinned Fly client
+in the Git common directory; native uses child-only classic Docker over HTTPS
+(`DOCKER_BUILDKIT=0`, `--wg=false`). Shared Fly/PATH and runtime remain unchanged.
+The 31.6-second tiny CLI control is not full cold-image timing. Strict repeated
+campaigns also have compact cohort readiness/abort/inverse controls here, with
+the existing startup budget and normal owned cleanup. Controller count alone
+does not prove execution overlap; ordinary non-strict scheduling is unchanged.
+
+For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
+
+```bash
+scripts/run-bench image-build --builder depot --no-cache --build-context <committed-checkout> --out-dir .context/image-build
+benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/image-build/cloudbench-image-build.json"))["image_ref"])')
+scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
+```
+
+`image-activate` uses the existing app environment lock and owned warm-source setup, activates the published image on the donor and this workspace's pool, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
+
+Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
+
+The existing recorded mass-demo diagnostic, when explicitly requested:
+
+```bash
+CLOUDBENCH_APP_MACHINE_CEILING=138 \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  scripts/run-bench test-mass-agent-run-0 --demo-cache \
+  -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
+```
+
+For this explicitly requested 50-copy cached stress run, use the command-scoped
+Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
+Machines plus 50 primaries, up to 50 optional autoscaler workers and two transient
+slots. Inspect native app inventory and headroom again before a future run;
+ordinary ceiling 56 cannot hold this current cohort, and ceiling 88 leaves only
+two worker slots. This profile creates no idle resources and changes no default
+ceiling, shared-CPU governor or production headroom. `--strict-barrier` keeps all
+50 copies in one ready cohort; controller occupancy does not prove execution overlap.
+
+Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
+seconds, then follow each job log's exact printed fleet-monitor handle through
+controller exit and owned teardown. The campaign directory itself is not a
+fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
+
 
 During deploy benchmarks, follow CLAUDE.md's "Monitor every cloud launch"
 instructions and the exact metrics command in the printed controller log.
@@ -642,7 +702,12 @@ bash scripts/tests/cloudbench-status-service-shutdown.test.sh
 bash scripts/tests/fleet-infra-canary.test.sh
 bash scripts/tests/fleet-infra-stability-proof.test.sh
 python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py
+# Linux Python3.11.9/Node22.13.0; Mac dispatches this same suite to an offline container.
+# It reuses the recipe-fingerprinted local image, building the small committed
+# scripts/tests/cloudbench-controller-linux.Dockerfile once if absent. An existing
+# verified local image may be selected with CLOUDBENCH_CONTROLLER_TEST_IMAGE.
 bash scripts/tests/cloudbench-multi-workstream.test.sh
+python3 scripts/tests/cloudbench-controller-linux.test.py
 bash scripts/tests/cloudbench-github-token.test.sh
 bash scripts/tests/seed-dump-toolchain.test.sh
 agents/venv/bin/python -m pytest -q agents/benchmarks/wall_clock_backstop_test.py

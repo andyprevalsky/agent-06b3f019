@@ -678,6 +678,21 @@ collector must never be mistaken for absent guest work.
 If a failed guest cannot seal runtime evidence, preserve its original bytes
 with `scripts/cloudbench-build-interrupted-pool-archive.py`, then run
 `scripts/run-bench-fleet --recover-stale-owner <exact-owner-token>`. A task
+owner canceled before allocation can legitimately lack a pool directory and
+execution inputs; normal recovery proves empty ledgers and absence of allocation
+markers recursively. Never fabricate missing inputs or guest receipts.
+If recovery retains a shared central Hub with
+`retained-exact-owner-transfer-required`, first prove that every controller
+borrowing that exact Hub token has retired. Keep its owner file and use the
+existing helper from modern Bash: source `scripts/lib/cloudbench-env.sh`, then
+call `cloudbench_terminate_central_hub_owner <port> <absolute-runs-root>
+<absolute-repo-root> <absolute-owner-file> 120`. The helper checks the exact
+PID birth, command, endpoint and token before signaling, and writes a read-only
+terminal receipt after verifying process-group absence. Retry the original
+`--recover-stale-owner` command to seal the remaining claim. Preserve other
+Hubs, the progress dashboard, provider inventory and the user's network settings;
+never remove a claim merely because its resource observation timed out.
+An interrupted task
 that allocated no browser session may carry a `provider-zero-manifest` plus
 its exact zero-allocation query receipt; the forensic verifier checks those
 against the original run/backend bytes before releasing the owner. Such an
@@ -917,6 +932,121 @@ not a reason to rotate keys or rebuild the image. Use `scripts/run-bench
 set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=1200` and pass `--timeout 1200`.
 The CLI flag alone sets the orchestration budget; the normal timeout remains unchanged.
 
+For an explicitly requested cold-image measurement, use the same CLI:
+`scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`.
+The selected checkout supplies both `Dockerfile.cloudbench-warm` and
+`fly.cloudbench-warm.toml`. The private receipt records its pre-launch HEAD,
+dirty status, recipe/config hashes and elapsed build/push time; those inputs
+are provenance, not artifact-equivalence proof. The shared image installer joins
+the unchanged npm/Prisma and Python installs concurrently in the final layer,
+then copies source last. Only npm download cache/logs are omitted; installed
+dependencies, npm configuration and other home assets remain. Measure native
+cold timing before claiming a speedup. Ordinary source-only runs still reuse
+their verified dependency image and snapshots.
+Build contexts exclude generated `.context` and `.llm-dumps` directories at
+every depth. Runtime source, task definitions, current metrics and task selection
+history remain available in the image. The normal image regression gate checks
+the actual Docker archive with controlled generated-state and runtime sentinels;
+do not trim runtime inputs to improve startup measurements.
+`image-build` defaults to the existing Fly-integrated Depot backend; use
+`--builder native` for an explicit native diagnostic. Setup consumes the exact
+prebuilt receipt image through `image-activate`. Depot uses app scope, zstd level 3
+and `linux/amd64`; the receipt records requested builder/scope/compression/platform.
+The independent `9efb3dfa` no-cache build/push completed in 285.5 seconds in one
+attempt; exact-image activation took 158.6 seconds (7 minutes 24 seconds of
+combined CLI stage time, excluding the gap between commands and fleet startup).
+These are measured invocations, not a guaranteed latency. Activate the exact receipt image
+and verify guest digest/runtime consumption before the benchmark cohort.
+Image publication automatically caches the checksum-verified pinned Fly client
+in the Git common directory. Native publishing uses child-only
+`DOCKER_BUILDKIT=0` and `--wg=false` for classic Docker over HTTPS; the shared
+Fly installation, PATH and benchmark runtime remain unchanged. A tiny supported
+CLI control took 31.6 seconds including initial client installation and push;
+that is not a full cold-image timing. Fresh worktrees need no manual download.
+
+**Temporary cached startup diagnostic:** reuse an existing DEMO replay task;
+do not add cache tags, prompts or seed fixtures to make a performance run pass.
+The known recorded mass demo can be run with:
+
+```bash
+CLOUDBENCH_APP_MACHINE_CEILING=138 \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  scripts/run-bench test-mass-agent-run-0 --demo-cache \
+  -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
+```
+
+For this requested cached diagnostic, the 300-second settings are temporary
+execution controls. Independently enforce a 1,200-second deadline for each copy
+from allocation through verified release of its exact owned resources. This
+deadline supersedes the older 1,800-second proof budget only for this diagnostic;
+normal 7,200-second defaults remain unchanged. A task verdict does not establish
+resource release. On a cutoff, signal only the exact owned controller, let its
+cleanup traps run, audit its resources, and grant no acceptance credit.
+
+For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
+
+```bash
+scripts/run-bench image-build --builder depot --no-cache --build-context <committed-checkout> --out-dir .context/image-build
+benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/image-build/cloudbench-image-build.json"))["image_ref"])')
+scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
+```
+
+`image-activate` uses the existing app environment lock and owned warm-source setup. It strictly stops the exact existing donor before environment activation, activates the published image on the donor and this workspace's stopped pool members, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
+
+Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
+
+For this explicitly requested 50-copy cached stress run, use the command-scoped
+Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
+Machines plus 50 primaries, up to 50 optional autoscaler workers and two transient
+slots. Inspect native app inventory and headroom again before a future run;
+ordinary ceiling 56 cannot hold this current cohort, and ceiling 88 leaves only
+two worker slots. This profile creates no idle resources and changes no default
+ceiling, shared-CPU governor or production headroom. `--strict-barrier` keeps all
+50 copies in one ready cohort; controller occupancy does not prove execution overlap.
+The default mass-task primary uses `shared-cpu-2x` / 4 GB; its optional worker
+uses `performance-1x` / 2 GB. Fifty primaries add 100 active shared CPU units.
+The unchanged governor keeps 20 of 160 shared units for production, leaving
+140 for this app. Native CPU kinds/counts and live workstream reservations
+must fit as well as the Machine count; the CLI rechecks both during admission.
+
+Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
+seconds, then follow each job log's exact printed fleet-monitor handle through
+controller exit and owned teardown. The campaign directory itself is not a
+fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
+Foreground campaigns may print no `--controller-status` marker; use only the
+actual printed handle and read each copy's controller exit separately from
+`summary.json` → `jobs[].controller_exit_code`, keyed by `job_id`. The monitor's
+null controller fields alone do not establish liveness or completion.
+Allocation timestamps are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
+`bench-e2e.finished-epoch`. The run's `teardown-ownership.path` identifies its
+exact audit/token; while live, capture `pid` and `pid_start` from
+`<git-common>/cloudbench-fleet-ownership/<token>/meta`. Normal cleanup removes
+that active claim, so retain the captured identity and verify native process
+birth before any exact-owner signal. Audit retention is separate from liveness.
+
+This requests 50 independent one-task fleet controllers. Each unchanged mass
+task spawns 50 first-level general-purpose children: 2,500 across the campaign;
+its existing explore allowance remains unchanged. It is not 50 distinct tasks.
+For repeated campaigns, `--strict-barrier` holds each bounded cohort until all
+copies finish normal stack and autoscaler readiness, then releases their existing
+start barriers together. Startup failure aborts the cohort through owned cleanup;
+ordinary non-strict campaigns retain sliding scheduling. Active controller count
+alone is not execution overlap; inspect actual task start/terminal intervals.
+`--demo-cache` keeps task-agent cache reads read-only and blocks their live
+fallback on cache misses or unresolved context. The separate benchmark harness
+retains genuine evaluation; declared LLM judges may still call providers and
+incur cost. Existing cold-terminal passthrough is not a recorded cache hit.
+Every cached diagnostic earns zero LIVE acceptance credit. Normal timeout,
+provider Fast Mode, task, evaluator and cleanup contracts remain unchanged.
+Compact CLI, replay-hit/miss, scope and pooled-handoff controls run in the
+existing `benchmark-live-results.test.py` deploy gate; this large diagnostic
+is only for an explicit user request.
+Both boot and legacy SSH handoff clear replay-only state before ordinary runs.
+External evidence requests, including redirects from loopback, follow the
+configured/default proxy route; exact loopback requests stay local. The existing
+demo-handoff, publisher-browser and Claude-session dual-write quick tests own
+these boundaries in the normal deploy gates.
+
 **Monitor every cloud launch:** the detached launcher prints the private log
 and exact controller exit marker. Its controller log's "Monitor this exact fleet"
 section prints the complete metrics command; retain it:
@@ -949,6 +1079,17 @@ The compact cache regressions are in
 benchmark blackbox domain and `/deploy` Step 4cb. They cover fresh-checkout reuse,
 donor/volume/dependency binding, incomplete snapshots, legacy receipt migration,
 and metadata-only publication without making publication a benchmark gate.
+After hydration proves a matching completed donor snapshot, reuse that captured
+inventory for its epoch check; a failed later read cannot invalidate the proof.
+New refresh snapshots still require live epoch and exact-complete verification.
+
+Controller token handoff to local dotenvs must use `cloudbench_upsert_env_key`:
+serialize each destination's full read/update with its persistent lifetime lock,
+publish changed contents atomically, and retain matching contents without a
+rewrite. Preserve unrelated keys, mode 0600 and existing dotenv symlinks. The
+hermetic concurrent-export controls run in
+`scripts/tests/cloudbench-github-token.test.sh` under `/deploy` Step 4cb and the
+cloudbench change-selected `scripts/test.sh` suite.
 
 **`agents/benchmarks/tasks.json` is the ONE canonical benchmark catalog.** Benchmark tasks and migrated long-horizon evals live here; ordinary blackbox/vitest tests do not. Each entry carries the additive eval contract: `status`, `runner` (`agent`), `bench` (`pipeline-e2e` for Rose harness plumbing vs. `rose-bench` for harness-independent capability), `description`, `environment` (mode/db_fixtures/base_images/services/secrets/live_targets/context_notes), `evaluators[]` (`static_check` | `single_turn_llm_judge` | `agentic_llm_judge`), and `source` (provenance pointers). Validated by `agents/benchmarks/long_horizon.py:validate_catalog()`. Idea kernels that haven't become evals yet live in `agents/benchmarks/long_horizon_ideas.json`.
 

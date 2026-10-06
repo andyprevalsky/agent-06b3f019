@@ -1512,9 +1512,10 @@ supervised_edge_probe() {
     shift
     local curl_timeout="${CLOUDFLARE_TUNNEL_CURL_TIMEOUT_SECONDS:-5}"
     [[ "$curl_timeout" =~ ^[1-9][0-9]*$ ]] || curl_timeout=5
-    local status_file probe_pid probe_deadline status
+    local status_file headers_file probe_pid probe_deadline status
     status_file="$(mktemp "${TMPDIR:-/tmp}/rose-cloudflare-edge.XXXXXX")"
-    curl "$@" -s -o /dev/null -w '%{http_code}' --noproxy '*' \
+    headers_file="$(mktemp "${TMPDIR:-/tmp}/rose-cloudflare-edge-headers.XXXXXX")"
+    curl "$@" -s -o /dev/null -D "$headers_file" -w '%{http_code}' \
         --connect-timeout "$curl_timeout" --max-time "$curl_timeout" "$url" \
         >"$status_file" 2>/dev/null &
     probe_pid=$!
@@ -1530,53 +1531,38 @@ supervised_edge_probe() {
     done
     wait "$probe_pid" 2>/dev/null || true
     status="$(cat "$status_file" 2>/dev/null || true)"
-    rm -f "$status_file"
-    printf '%s' "$status"
-}
-
-# The anycast addresses Cloudflare serves trycloudflare.com from, read through
-# the zone's long-lived API name.
-#
-# The edge probe must never resolve a new quick-tunnel hostname itself:
-# cloudflared prints it a few seconds before Cloudflare publishes the record, and
-# any recursive resolver asked in that window (the host's, 1.1.1.1, dns.google)
-# caches the NXDOMAIN for the zone's 60s negative TTL, longer than the probe. The
-# edge routes by SNI, so probing these addresses measures the tunnel without
-# creating that cache entry; DNS is first exercised by the public-tunnel smoke,
-# long after publication.
-cloudflare_quick_tunnel_edge_ipv4s() {
-    local name="api.trycloudflare.com"
-    if command -v getent >/dev/null 2>&1; then
-        getent ahostsv4 "$name" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true
-    elif command -v dig >/dev/null 2>&1; then
-        dig +short A "$name" 2>/dev/null | grep -E '^[0-9.]+$' | sort -u | paste -sd, - || true
+    # A configured proxy can answer with its own block page. Only the final
+    # HTTP response identifies the edge; a proxy CONNECT response is earlier.
+    if [ -n "$status" ] && [ "$status" != "000" ] && ! awk -v expected_status="$status" '
+        {
+            line = tolower($0)
+            sub(/\r$/, "", line)
+            if (line ~ /^http\/[0-9.]+[ \t]+[0-9][0-9][0-9]([ \t]|$)/) {
+                split(line, fields, /[ \t]+/)
+                response_status = fields[2]
+                server = ray = 0
+                in_headers = 1
+            } else if (line == "") {
+                in_headers = 0
+            } else if (in_headers && line ~ /^server:[ \t]*cloudflare[ \t]*$/) {
+                server = 1
+            } else if (in_headers && line ~ /^cf-ray:[ \t]*[^ \t]+/) {
+                ray = 1
+            }
+        }
+        END { exit !(response_status == expected_status && server && ray) }
+    ' "$headers_file"; then
+        status=000
     fi
+    rm -f "$status_file" "$headers_file"
+    printf '%s' "$status"
 }
 
 cloudflare_tunnel_edge_is_routing() {
     local url="$1" deadline=$((SECONDS + CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS)) status
     local retry_seconds="${CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS:-2}"
-    local started=$SECONDS
-    local host="${url#https://}"
-    host="${host%%/*}"
-    local -a pinned_address=()
-    local pinned=0 edge_addresses=""
-    if [[ "$host" == *".trycloudflare.com" ]]; then
-        edge_addresses="$(cloudflare_quick_tunnel_edge_ipv4s)"
-        if [ -n "$edge_addresses" ]; then
-            pinned_address=(--resolve "$host:443:$edge_addresses")
-            pinned=1
-        else
-            echo "   No edge addresses for api.trycloudflare.com; probing $host through DNS."
-        fi
-    fi
     while [ "$SECONDS" -lt "$deadline" ]; do
-        # --noproxy '*': this probe must measure the Cloudflare edge itself, not
-        # an inherited HTTP(S)_PROXY/ALL_PROXY. A proxy corrupts the result in
-        # BOTH directions — it can answer 407/5xx and fake a healthy tunnel, or
-        # (as on a macOS host with a content blocker configured system-wide)
-        # refuse trycloudflare.com outright and report a healthy tunnel as dead.
-        #
+        # Preserve inherited proxy settings, including content-blocker routing.
         # Prefer IPv4 (-4): some Cloud/Linux VMs resolve trycloudflare.com to
         # AAAA first and curl Happy Eyeballs reports http_code 000 on broken
         # IPv6 while the same hostname answers 200/502 over IPv4. Without -4 the
@@ -1588,12 +1574,9 @@ cloudflare_tunnel_edge_is_routing() {
         # wedged edge probe must not block quick-tunnel recycling / ngrok
         # fallback. Merge keeps both protections — IPv4-first for correctness,
         # supervision for liveness.
-        status="$(supervised_edge_probe "$url" -4 ${pinned_address[@]+"${pinned_address[@]}"})"
-        if [ "$pinned" = 0 ] && { [ -z "$status" ] || [ "$status" = "000" ]; }; then
+        status="$(supervised_edge_probe "$url" -4)"
+        if [ -z "$status" ] || [ "$status" = "000" ]; then
             status="$(supervised_edge_probe "$url")"
-        fi
-        if [ "$pinned" = 1 ]; then
-            echo "   +$((SECONDS - started))s edge $edge_addresses: HTTP ${status:-none}"
         fi
         if [ -n "$status" ] && [ "$status" != "000" ] && [ "$status" != "530" ]; then
             return 0

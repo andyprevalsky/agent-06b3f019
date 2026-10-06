@@ -701,11 +701,14 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestart-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
+       "$ROOT_DIR/scripts/cloudbench-campaign-barrier.py" \
        "$ROOT_DIR/scripts/cloudbench-forensic-retirement.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
+       "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-github-token.sh" \
+       "$ROOT_DIR/scripts/lib/cloudbench-image-publisher.sh" \
        "$CLOUDBENCH_SCRIPT_SNAPSHOT/"; then
         echo "FATAL: could not populate the fleet script snapshot" >&2
         exit 1
@@ -1435,25 +1438,9 @@ if ! command -v flyctl >/dev/null 2>&1; then
     if [ -x "$HOME/.fly/bin/flyctl" ]; then export PATH="$HOME/.fly/bin:$PATH"; else
         echo "❌ flyctl not found on PATH." >&2; exit 1; fi
 fi
-resolve_fly_token() {
-    # Prefer a real bench token. Cloud/agent shells sometimes inject a stub
-    # FLY_BENCH_API_TOKEN (len≪20) that shadows FLY_API_TOKEN and then fails
-    # every machines list with token validation 401 — refuse stubs.
-    if [ -n "${FLY_BENCH_API_TOKEN:-}" ] && [ "${#FLY_BENCH_API_TOKEN}" -ge 20 ]; then
-        echo "$FLY_BENCH_API_TOKEN"
-        return
-    fi
-    if [ -n "${FLY_BENCH_API_TOKEN:-}" ]; then
-        echo "⚠️  ignoring stub FLY_BENCH_API_TOKEN (len=${#FLY_BENCH_API_TOKEN}); falling back" >&2
-    fi
-    local cfg="$HOME/.fly/config.yml"
-    if [ -f "$cfg" ]; then
-        local t; t="$(grep -E '^access_token:' "$cfg" 2>/dev/null | head -1 | sed 's/^access_token:[[:space:]]*//; s/^["'\'']//; s/["'\'']$//')"
-        [ -n "$t" ] && { echo "$t"; return; }
-    fi
-    if [ -n "${FLY_API_TOKEN:-}" ]; then echo "$FLY_API_TOKEN"; return; fi
-    grep -E '^FLY_API_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//'
-}
+# shellcheck source=lib/cloudbench-inventory.sh
+source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-inventory.sh"
+
 FLY_API_TOKEN="$(resolve_fly_token)"
 [ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ No Fly auth token found." >&2; exit 1; }
 export FLY_API_TOKEN
@@ -1472,384 +1459,6 @@ private_source_allows_provider_call() {
     esac
 }
 FLY() { private_source_allows_provider_call "$@" && flyctl "$@"; }
-
-# ── ONE shared inventory stream for every read-only poller ──────────────────
-# A single controller-owned loop reads Fly's Machines/Volumes APIs and publishes
-# an atomic, keyed per-machine index. Hot consumers read one tiny record instead
-# of issuing N provider calls or parsing an N-machine array in each of N children.
-# Provider load stays O(1) and local index work stays O(N) at fleet width.
-# Mutating paths that need post-write freshness (reap verification, pool claims)
-# intentionally stay live and bounded.
-MACHINES_SNAPSHOT="$FLEET_DIR/machines.json"
-VOLUMES_SNAPSHOT="$FLEET_DIR/volumes.json"
-INVENTORY_INDEX="$FLEET_DIR/inventory"
-# The native app-wide list includes inline Machine files (~20 MB at width 10).
-# A five-second refresh cadence floods Fly with redundant transfer during
-# startup; readiness paths that need an immediate post-mutation view still use
-# the serialized explicit refresh below.
-SNAPSHOT_POLL="${CLOUDBENCH_SNAPSHOT_POLL_SECONDS:-15}"
-SNAPSHOT_REFRESH_TIMEOUT="${CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS:-30}"
-INVENTORY_REFRESH_LOCK="$FLEET_DIR/machines-refresh.lock"
-INVENTORY_WAIT_FIFO="$FLEET_DIR/inventory-refresh.wait"
-# A busy Fly API can stall several consecutive bounded list requests while a
-# width-10 fleet starts. Preserve the last successfully published inventory
-# through that burst; the live publisher PID/token fence and the finite expiry
-# still fail closed if the provider feed actually stops recovering.
-INVENTORY_MAX_STALE_SECONDS="${CLOUDBENCH_INVENTORY_MAX_STALE_SECONDS:-$((SNAPSHOT_REFRESH_TIMEOUT * 20))}"
-INVENTORY_CLOCK_EPOCH="$(date +%s)"
-INVENTORY_CLOCK_SECONDS="$SECONDS"
-
-inventory_refresh_diagnostic() {  # <phase> <native-status|pending> <private-output> <started-SECONDS>
-    local phase="$1" status="$2" raw="${3:-}" started="${4:-$SECONDS}"
-    local directory="$FLEET_DIR/inventory-refresh-diagnostics" temporary private_tmp
-    [ -d "$directory" ] || mkdir -m 700 "$directory" || return 1
-    [ ! -L "$directory" ] || return 1
-    temporary="$(mktemp "$directory/.latest.XXXXXX")" || return 1
-    {
-        printf 'phase=%s\nstatus=%s\nepoch=%s\nelapsed_seconds=%s\npid=%s\n' \
-            "$phase" "$status" "$(date +%s)" "$((SECONDS - started))" "${BASHPID:-$$}"
-        printf 'publisher_token=%s\n' "${SNAPSHOT_LOOP_TOKEN:-}"
-    } > "$temporary" || { rm -f "$temporary"; return 1; }
-    chmod 600 "$temporary" && mv "$temporary" "$directory/latest" || return 1
-    # Keep a compact, secret-free timeline. `latest` alone loses the reason for
-    # a provider outage when the next retry overwrites its failure status.
-    if [ "$status" != pending ]; then
-        printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$phase" "$status" "$((SECONDS - started))" \
-            >> "$directory/history" || return 1
-        chmod 600 "$directory/history" || return 1
-    fi
-    case "$status" in pending|0) return 0 ;; esac
-    private_tmp="$(mktemp "$directory/.failure.XXXXXX")" || return 1
-    if [ -f "$raw" ] && [ ! -L "$raw" ]; then
-        cp "$raw" "$private_tmp" || { rm -f "$private_tmp"; return 1; }
-    fi
-    chmod 600 "$private_tmp" && mv "$private_tmp" "$directory/failure.raw.private"
-}
-
-_refresh_inventory_snapshot_unlocked() {
-    local suffix machines_tmp volumes_tmp publish_tmp started status=0
-    # Native Machine JSON can contain configured env and files. Keep even
-    # short-lived snapshots private before any diagnostic copy is made.
-    umask 077
-    started=$SECONDS
-    suffix="${BASHPID:-$$}.$RANDOM"
-    machines_tmp="$MACHINES_SNAPSHOT.tmp.$suffix"
-    volumes_tmp="$VOLUMES_SNAPSHOT.tmp.$suffix"
-    publish_tmp="$FLEET_DIR/inventory-publish.tmp.$suffix"
-    inventory_refresh_diagnostic machines-list pending "" "$started" || true
-    fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
-        machines list -a "$APP" --json > "$machines_tmp" || status=$?
-    if [ "$status" -ne 0 ] || [ ! -s "$machines_tmp" ]; then
-        [ "$status" -ne 0 ] || status=1
-        inventory_refresh_diagnostic machines-list "$status" "$machines_tmp" "$started" || true
-        rm -f "$machines_tmp" "$volumes_tmp"
-        return 1
-    fi
-    inventory_refresh_diagnostic volumes-list pending "" "$started" || true
-    status=0
-    fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
-        volumes list -a "$APP" --json > "$volumes_tmp" || status=$?
-    if [ "$status" -ne 0 ] || [ ! -s "$volumes_tmp" ]; then
-        [ "$status" -ne 0 ] || status=1
-        inventory_refresh_diagnostic volumes-list "$status" "$volumes_tmp" "$started" || true
-        rm -f "$machines_tmp" "$volumes_tmp"
-        return 1
-    fi
-    inventory_refresh_diagnostic publish-index pending "" "$started" || true
-    status=0
-    python3 "$MACHINE_READINESS_SCRIPT" --publish-index \
-        "$machines_tmp" "$volumes_tmp" "$INVENTORY_INDEX" > "$publish_tmp" 2>&1 || status=$?
-    if [ "$status" -ne 0 ]; then
-        inventory_refresh_diagnostic publish-index "$status" "$publish_tmp" "$started" || true
-        rm -f "$machines_tmp" "$volumes_tmp" "$publish_tmp"
-        return 1
-    fi
-    rm -f "$publish_tmp"
-    if ! mv "$machines_tmp" "$MACHINES_SNAPSHOT" \
-        || ! mv "$volumes_tmp" "$VOLUMES_SNAPSHOT"; then
-        inventory_refresh_diagnostic snapshot-files 1 "" "$started" || true
-        rm -f "$machines_tmp" "$volumes_tmp"
-        return 1
-    fi
-    inventory_refresh_diagnostic complete 0 "" "$started" || true
-}
-
-inventory_refresh_wait_tick() {
-    # A read timeout on a read/write FIFO is a Bash builtin wait: no child
-    # process per clone-name waiter while another publisher owns the lock.
-    [ -p "$INVENTORY_WAIT_FIFO" ] || return 1
-    exec 19<> "$INVENTORY_WAIT_FIFO" || return 1
-    IFS= read -r -t 1 -u 19 _inventory_wait_value || true
-    exec 19>&-
-}
-
-inventory_refresh_lock_acquire() {  # inventory_refresh_lock_acquire [prior-generation]
-    # Publish complete ownership metadata as an atomic hard link. A SIGKILL can
-    # leave either no lock or a complete lock file, never the metadata-less
-    # directory window that previously outlived the waiter budget.
-    local lock="$INVENTORY_REFRESH_LOCK" prior="${1:-}" candidate=""
-    local owner_pid="" owner_start="" token="" initialized=0 current
-    local status lock_host lock_pid key value wait_seconds deadline
-    wait_seconds="${CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS:-$((SNAPSHOT_REFRESH_TIMEOUT * 3 + 5))}"
-    case "$wait_seconds" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
-    deadline=$((SECONDS + wait_seconds))
-    while :; do
-        if [ -n "$prior" ]; then
-            current="$(machines_snapshot_identity)"
-            if [ "$current" != "$prior" ]; then
-                [ -n "$candidate" ] && rm -f "$candidate"
-                return 2
-            fi
-        fi
-
-        if [ ! -e "$lock" ]; then
-            if [ "$initialized" = "0" ]; then
-                owner_pid="${BASHPID:-$$}"
-                owner_start="$(fleet_pid_start_time "$owner_pid")"
-                [ -n "$owner_start" ] || return 1
-                token="$owner_pid.$RANDOM.$RANDOM.$SECONDS"
-                candidate="$lock.candidate.$owner_pid.$RANDOM"
-                {
-                    printf 'host=%s\n' "$FLEET_OWNER_HOST"
-                    printf 'pid=%s\n' "$owner_pid"
-                    printf 'pid_start=%s\n' "$owner_start"
-                    printf 'token=%s\n' "$token"
-                } > "$candidate" || { rm -f "$candidate"; return 1; }
-                initialized=1
-            fi
-            if ln "$candidate" "$lock" 2>/dev/null; then
-                rm -f "$candidate"
-                INVENTORY_REFRESH_LOCK_TOKEN="$token"
-                INVENTORY_REFRESH_LOCK_OWNER_PID="$owner_pid"
-                INVENTORY_REFRESH_LOCK_OWNER_PID_START="$owner_start"
-                export CLOUDBENCH_INVENTORY_REFRESH_LOCK="$lock"
-                export CLOUDBENCH_INVENTORY_REFRESH_LOCK_TOKEN="$token"
-                return 0
-            fi
-        fi
-
-        lock_host=""; lock_pid=""
-        if [ -f "$lock" ]; then
-            while IFS='=' read -r key value; do
-                case "$key" in host) lock_host="$value" ;; pid) lock_pid="$value" ;; esac
-            done < "$lock"
-        fi
-        if [ -n "$lock_host" ] && [ "$lock_host" != "$FLEET_OWNER_HOST" ]; then
-            [ -n "$candidate" ] && rm -f "$candidate"
-            echo "❌ inventory refresh lock belongs to another host" >&2
-            return 1
-        fi
-        case "$lock_pid" in
-            ''|*[!0-9]*) status=1 ;;
-            *) kill -0 "$lock_pid" 2>/dev/null && status=0 || status=1 ;;
-        esac
-        if [ "$status" = "1" ]; then
-            if python3 "$MACHINE_READINESS_SCRIPT" --recover-lock "$lock"; then
-                continue
-            else
-                status=$?
-                [ "$status" -eq 1 ] || {
-                    [ -n "$candidate" ] && rm -f "$candidate"
-                    echo "❌ unsafe inventory refresh lock recovery" >&2
-                    return 1
-                }
-            fi
-        fi
-        if [ "$SECONDS" -ge "$deadline" ]; then
-            [ -n "$candidate" ] && rm -f "$candidate"
-            echo "❌ timed out waiting for the serialized inventory refresh" >&2
-            return 1
-        fi
-        inventory_refresh_wait_tick || {
-            [ -n "$candidate" ] && rm -f "$candidate"
-            return 1
-        }
-    done
-}
-
-inventory_refresh_lock_release() {
-    local lock="$INVENTORY_REFRESH_LOCK" owner_pid
-    local lock_host lock_pid lock_start lock_token
-    local sealed_owner_pid sealed_owner_start
-    owner_pid="${BASHPID:-$$}"
-    sealed_owner_pid="${INVENTORY_REFRESH_LOCK_OWNER_PID:-}"
-    sealed_owner_start="${INVENTORY_REFRESH_LOCK_OWNER_PID_START:-}"
-    lock_host="$(registry_meta_value "$lock" host)"
-    lock_pid="$(registry_meta_value "$lock" pid)"
-    lock_start="$(registry_meta_value "$lock" pid_start)"
-    lock_token="$(registry_meta_value "$lock" token)"
-    [ "$lock_host" = "$FLEET_OWNER_HOST" ] \
-        && [ "$owner_pid" = "$sealed_owner_pid" ] \
-        && [ "$lock_pid" = "$sealed_owner_pid" ] \
-        && [ "$lock_start" = "$sealed_owner_start" ] \
-        && [ "$lock_token" = "${INVENTORY_REFRESH_LOCK_TOKEN:-}" ] \
-        || return 1
-    rm -f "$lock"
-    unset INVENTORY_REFRESH_LOCK_TOKEN INVENTORY_REFRESH_LOCK_OWNER_PID \
-        INVENTORY_REFRESH_LOCK_OWNER_PID_START
-    unset CLOUDBENCH_INVENTORY_REFRESH_LOCK CLOUDBENCH_INVENTORY_REFRESH_LOCK_TOKEN
-}
-
-refresh_inventory_snapshot() {
-    local status=0
-    inventory_refresh_lock_acquire || return 1
-    _refresh_inventory_snapshot_unlocked || status=$?
-    inventory_refresh_lock_release || return 1
-    return "$status"
-}
-
-machines_snapshot_loop() {
-    local backoff=0
-    while :; do
-        if refresh_inventory_snapshot; then
-            backoff=0
-        else
-            # rate-limited/transient API failure: back off (bounded) and keep
-            # serving the last good index rather than hammering the API.
-            backoff=$(( backoff < 15 ? backoff + 5 : 15 ))
-        fi
-        sleep $(( SNAPSHOT_POLL + backoff + (RANDOM % 3) ))
-    done
-}
-
-start_machines_snapshot_loop() {
-    [ -n "${SNAPSHOT_LOOP_PID:-}" ] && kill -0 "$SNAPSHOT_LOOP_PID" 2>/dev/null \
-        && return 0
-    SNAPSHOT_LOOP_TOKEN="${SNAPSHOT_LOOP_TOKEN:-$RANDOM.$RANDOM.$$.${SECONDS}}"
-    export CLOUDBENCH_INVENTORY_PUBLISHER_TOKEN="$SNAPSHOT_LOOP_TOKEN"
-    export CLOUDBENCH_INVENTORY_MAX_STALE_SECONDS="$INVENTORY_MAX_STALE_SECONDS"
-    if [ -e "$INVENTORY_WAIT_FIFO" ] && [ ! -p "$INVENTORY_WAIT_FIFO" ]; then
-        echo "❌ invalid inventory refresh wait path" >&2
-        return 1
-    fi
-    [ -p "$INVENTORY_WAIT_FIFO" ] || mkfifo "$INVENTORY_WAIT_FIFO" || return 1
-    if ! refresh_inventory_snapshot; then
-        echo "❌ shared inventory snapshot did not initialize" >&2
-        return 1
-    fi
-    machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!
-    SNAPSHOT_LOOP_PID_START="$(fleet_pid_start_time "$SNAPSHOT_LOOP_PID")"
-    if [ -z "$SNAPSHOT_LOOP_PID_START" ]; then
-        kill "$SNAPSHOT_LOOP_PID" 2>/dev/null || true
-        SNAPSHOT_LOOP_PID=""
-        return 1
-    fi
-}
-
-inventory_index_healthy() {
-    local pid="${SNAPSHOT_LOOP_PID:-}" expected_token="${SNAPSHOT_LOOP_TOKEN:-}"
-    local key value publisher_token="" valid_until="" now
-    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-    kill -0 "$pid" 2>/dev/null || return 1
-    [ -n "$expected_token" ] && [ -s "$INVENTORY_INDEX/current/health" ] || return 1
-    while IFS='=' read -r key value; do
-        case "$key" in
-            publisher_token) publisher_token="$value" ;;
-            valid_until) valid_until="$value" ;;
-        esac
-    done < "$INVENTORY_INDEX/current/health"
-    case "$valid_until" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$publisher_token" = "$expected_token" ] || return 1
-    now=$((INVENTORY_CLOCK_EPOCH + SECONDS - INVENTORY_CLOCK_SECONDS))
-    [ "$valid_until" -ge "$now" ]
-}
-
-_fresh_snapshot_or() {  # _fresh_snapshot_or <snapshot-file> <live-cmd...>
-    # Once shared mode starts, every consumer either reads the last good snapshot
-    # or fails closed. A stale/missing snapshot must never fan out into one live
-    # provider request per child during the exact rate-limit condition we absorb.
-    local f="$1"; shift
-    if [ -n "${SNAPSHOT_LOOP_PID:-}" ]; then
-        inventory_index_healthy || return 1
-        [ -s "$f" ] || return 1
-        cat "$f"
-        return 0
-    fi
-    "$@" 2>/dev/null
-}
-fleet_machines_json() { _fresh_snapshot_or "$MACHINES_SNAPSHOT" FLY machines list -a "$APP" --json; }
-fleet_volumes_json()  { _fresh_snapshot_or "$VOLUMES_SNAPSHOT" FLY volumes list -a "$APP" --json; }
-
-machines_snapshot_identity() {
-    local key value generation="missing"
-    [ -s "$INVENTORY_INDEX/current/health" ] || { printf '%s' "$generation"; return; }
-    while IFS='=' read -r key value; do
-        [ "$key" = "generation" ] && generation="$value"
-    done < "$INVENTORY_INDEX/current/health"
-    printf '%s' "$generation"
-}
-
-refresh_machines_snapshot_after() {  # refresh_machines_snapshot_after <prior-identity>
-    # Clone output very rarely omits the target id. All exceptional resolvers
-    # coalesce behind one bounded refresh. The lock carries a process-start
-    # identity so a SIGKILLed owner can never wedge every later refresh.
-    local prior="$1" current status=0
-    current="$(machines_snapshot_identity)"
-    [ "$current" != "$prior" ] && return 0
-    if inventory_refresh_lock_acquire "$prior"; then
-        :
-    else
-        status=$?
-        [ "$status" = "2" ] && return 0
-        return 1
-    fi
-    current="$(machines_snapshot_identity)"
-    if [ "$current" = "$prior" ]; then
-        _refresh_inventory_snapshot_unlocked || status=$?
-    fi
-    inventory_refresh_lock_release || return 1
-    return "$status"
-}
-
-inventory_machine_record_path() {  # inventory_machine_record_path <id>
-    case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-    printf '%s' "$INVENTORY_INDEX/current/machines/$1"
-}
-
-inventory_machine_field() {  # inventory_machine_field <id> <field>
-    local path key value
-    inventory_index_healthy || return 1
-    path="$(inventory_machine_record_path "$1")" || return 1
-    [ -s "$path" ] || return 1
-    while IFS='=' read -r key value; do
-        [ "$key" = "$2" ] && { printf '%s' "$value"; return 0; }
-    done < "$path"
-    return 1
-}
-
-inventory_machine_exists() {
-    local path
-    # A stale publisher cannot establish Machine absence. Preserve that
-    # distinction for autoscaler diagnostics and exact-owner recovery.
-    inventory_index_healthy || return 2
-    path="$(inventory_machine_record_path "$1")" || return 2
-    [ -s "$path" ]
-}
-
-inventory_machine_id_for_name() {
-    case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-    inventory_index_healthy || return 1
-    [ -s "$INVENTORY_INDEX/current/names/$1" ] || return 1
-    IFS= read -r REPLY < "$INVENTORY_INDEX/current/names/$1"
-    printf '%s' "$REPLY"
-}
-
-# A clone ID is allocated before its snapshot-backed volume becomes mountable.
-# Keep every clone start behind the same storage lifecycle contract as the
-# per-benchmark child runner.
-machine_storage_ready() {  # machine_storage_ready <id>
-    [ "$(inventory_machine_field "$1" storage_ready 2>/dev/null || true)" = "1" ]
-}
-
-machine_storage_failed() {  # machine_storage_failed <id>
-    [ "$(inventory_machine_field "$1" storage_failed 2>/dev/null || true)" = "1" ]
-}
-
-snapshot_machine_state() {  # snapshot_machine_state <id>; 0=state, 1=absent, 2=unsafe
-    inventory_machine_field "$1" state
-}
 
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
 
@@ -2250,10 +1859,6 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
     return 1
 }
 
-registry_meta_value() {  # registry_meta_value <meta-file> <key>
-    local meta="$1" key="$2"
-    sed -n "s/^${key}=//p" "$meta" 2>/dev/null | head -1
-}
 
 cloudbench_record_worker_evidence_owner() {  # <out> <worker> <primary> <run-token> <workspace>
     python3 - "$@" <<'PY'
@@ -4605,6 +4210,7 @@ capacity_release_stale_owner_reservations() {  # <owner-meta> <exact-token>
 import fcntl
 import os
 import re
+import stat
 import sys
 
 root, app, host, pid, pid_start, owner, token = sys.argv[1:]
@@ -4614,35 +4220,52 @@ if (
 ):
     raise SystemExit(1)
 reservations = os.path.join(root, "reservations")
+if os.path.islink(root) or os.path.islink(reservations):
+    raise SystemExit(1)
 if not os.path.isdir(reservations):
     raise SystemExit(0)
 with open(os.path.join(root, "admission.lock"), "a+", encoding="utf-8") as lock_handle:
     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-    path = os.path.join(reservations, token)
-    if not os.path.exists(path):
-        raise SystemExit(0)
-    if not os.path.isfile(path):
-        raise SystemExit(1)
-    try:
-        fields = dict(
-            line.rstrip("\n").split("=", 1)
-            for line in open(path, encoding="utf-8")
-            if "=" in line
+    # Recovery already verified this exact controller's death, guest receipts
+    # and native resource retirement. A worker admission can outlive its unused
+    # clone attempt, even after the primary reservation was removed. Validate
+    # the complete owner cohort before releasing any part of it.
+    paths = []
+    for name in os.listdir(reservations):
+        if not name.startswith(f"{owner}-"):
+            continue
+        if re.fullmatch(rf"{owner}-(?:primary|worker-[0-9a-f]{{32}})", name) is None:
+            raise SystemExit(1)
+        path = os.path.join(reservations, name)
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                raise SystemExit(1)
+            with open(path, encoding="utf-8") as handle:
+                pairs = [line.rstrip("\n").split("=", 1) for line in handle if line.strip()]
+            fields = dict(pairs)
+        except (OSError, UnicodeError, ValueError):
+            raise SystemExit(1)
+        expected = (
+            len(pairs) == len(fields)
+            and fields.get("version") == "1"
+            and fields.get("app") == app
+            and fields.get("host") == host
+            and fields.get("pid") == pid
+            and fields.get("pid_start") == pid_start
+            and fields.get("fleet_owner_token") == owner
+            and fields.get("token") == name
         )
-    except OSError:
-        raise SystemExit(1)
-    expected = (
-        fields.get("version") == "1"
-        and fields.get("app") == app
-        and fields.get("host") == host
-        and fields.get("pid") == pid
-        and fields.get("pid_start") == pid_start
-        and fields.get("fleet_owner_token") == owner
-        and fields.get("token") == token
-    )
-    if not expected:
-        raise SystemExit(1)
-    os.unlink(path)
+        if not expected:
+            raise SystemExit(1)
+        paths.append(path)
+    for path in paths:
+        os.unlink(path)
+    if paths:
+        descriptor = os.open(reservations, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 PY
 }
 
@@ -5151,20 +4774,173 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
             return 1
         fi
     fi
-    for record in "$registry"/clones/*; do
-        [ -f "$record" ] || continue
-        clone_name="$(registry_meta_value "$record" name)"
-        id="$(registry_meta_value "$record" id)"
-        volume_id="$(registry_meta_value "$record" volume_id)"
-        [ -n "$clone_name" ] || { echo "❌ malformed fleet clone ownership record: $record" >&2; return 1; }
-        case "$volume_id" in *[!a-zA-Z0-9_-]*) echo "❌ malformed fleet volume ownership record: $record" >&2; return 1 ;; esac
-        if [ -z "$id" ]; then
-            if [ "$mode" = "forced" ] && [ -n "$volume_id" ]; then
-                # Exact cancellation recovery accepts only canonical v2
-                # Volume-only ownership. The provider-returned Volume ID is
-                # already complete authority; resolving its clone name would
-                # inventory unrelated Machines and cannot strengthen identity.
-                echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
+    # Only normal live-owner teardown fans out. Legacy and exact stale
+    # recovery retain their existing ordered reconciliation contract.
+    local reap_limit=1 reap_pid reap_status
+    local -a reap_pids
+    reap_pids=()
+    if [ "$mode" = current ]; then
+        reap_limit="${CLOUDBENCH_REAP_MAX_IN_FLIGHT:-4}"
+        case "$reap_limit" in ''|*[!0-9]*|0) return 1 ;; esac
+        [ "$reap_limit" -le 32 ] || return 1
+        # No mutation starts until every record in this cohort has safe local
+        # ownership and disjoint exact resource identities. Native name,
+        # mounted-volume and lifecycle verification still runs below unchanged.
+        if ! python3 - "$registry" "${WARM_ID:-}" "${WARM_VOLUME_ID:-}" <<'PYCOHORT'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+registry = Path(sys.argv[1])
+protected_machine, protected_volume = sys.argv[2:]
+try:
+    clones = registry / "clones"
+    if registry.is_symlink() or clones.is_symlink():
+        raise ValueError("linked registry")
+    machines, volumes = set(), set()
+    for record in clones.iterdir():
+        if not stat.S_ISREG(os.lstat(record).st_mode):
+            raise ValueError("non-regular ownership record")
+        with record.open(encoding="utf-8") as handle:
+            payload = handle.read(65537)
+        if len(payload) > 65536:
+            raise ValueError("oversized ownership record")
+        pairs = [line.split("=", 1) for line in payload.splitlines()]
+        fields = dict(pairs)
+        name = fields.get("name", "")
+        machine = fields.get("id", "")
+        volume = fields.get("volume_id", "")
+        if (len(pairs) != len(fields) or set(fields) - {"name", "id", "volume_id"}
+                or name != record.name or not re.fullmatch(r"[A-Za-z0-9._-]+", name)
+                or (machine and not re.fullmatch(r"[0-9a-f]+", machine))
+                or (volume and not re.fullmatch(r"[A-Za-z0-9_-]+", volume))):
+            raise ValueError("malformed ownership record")
+        if machine:
+            if machine == protected_machine or machine in machines:
+                raise ValueError("protected or duplicated Machine")
+            machines.add(machine)
+        if volume:
+            if volume == protected_volume or volume in volumes:
+                raise ValueError("protected or duplicated volume")
+            volumes.add(volume)
+except (OSError, UnicodeError, ValueError):
+    raise SystemExit(1)
+PYCOHORT
+        then
+            echo "❌ unsafe exact ownership cohort; refusing parallel provider teardown" >&2
+            return 1
+        fi
+    fi
+    reap_one_registry_record() {
+        local record clone_name id volume_id resolved details detail_status state
+        local actual_name runner_count cleanup_status terminal_disposition unresolved=0
+        for record in "$1"; do
+            [ -f "$record" ] || continue
+            clone_name="$(registry_meta_value "$record" name)"
+            id="$(registry_meta_value "$record" id)"
+            volume_id="$(registry_meta_value "$record" volume_id)"
+            [ -n "$clone_name" ] || { echo "❌ malformed fleet clone ownership record: $record" >&2; return 1; }
+            case "$volume_id" in *[!a-zA-Z0-9_-]*) echo "❌ malformed fleet volume ownership record: $record" >&2; return 1 ;; esac
+            if [ -z "$id" ]; then
+                if [ "$mode" = "forced" ] && [ -n "$volume_id" ]; then
+                    # Exact cancellation recovery accepts only canonical v2
+                    # Volume-only ownership. The provider-returned Volume ID is
+                    # already complete authority; resolving its clone name would
+                    # inventory unrelated Machines and cannot strengthen identity.
+                    echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
+                    if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+                    terminal_disposition=""
+                    [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
+                    [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
+                    if [ "$cleanup_status" -eq 75 ]; then
+                        unresolved=1
+                        continue
+                    fi
+                    [ -n "$terminal_disposition" ] || return 1
+                    fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
+                        "$terminal_disposition" || return 1
+                    rm -f "$record"
+                    continue
+                fi
+                resolved="$(registry_resolve_name "$clone_name")"
+                case $? in
+                    0)
+                        id="$resolved"
+                        ;;
+                    1)
+                        if [ -n "$volume_id" ]; then
+                            # A failed clone can create a volume without a Machine.
+                            # Its provider-returned ID in this exact-owner record is
+                            # sufficient cleanup authority; global inventory is not.
+                            echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
+                            if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+                            terminal_disposition=""
+                            [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
+                            [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
+                            if [ "$cleanup_status" -eq 75 ]; then
+                                unresolved=1
+                                continue
+                            fi
+                            [ -n "$terminal_disposition" ] || return 1
+                            fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
+                                "$terminal_disposition" || return 1
+                            rm -f "$record"
+                            continue
+                        fi
+                        # A successful Fly clone request may become list-visible only
+                        # after our lookup deadline. For the CURRENT (live-owner)
+                        # registry the name-only ledger is the sole durable ownership
+                        # proof during that gap, so keep it and fail closed — a
+                        # late-visible clone must not be orphaned while a successor
+                        # provisions another fleet.
+                        #
+                        # For STALE auto-recovery and FORCED exact recovery the owner
+                        # is already proven dead. Retain young name-only records while
+                        # a clone may still cross provider visibility, then retire an
+                        # aged, authoritatively absent phantom. Restrict this to the
+                        # two dead-owner modes: CURRENT live-owner cleanup must never
+                        # discard its only durable ownership proof.
+                        if { [ "$mode" = "stale" ] || [ "$mode" = "forced" ]; } \
+                            && registry_record_is_stale_phantom "$record"; then
+                            echo "🧹 discarding aged-out phantom name-only clone '$clone_name' (absent from Fly > ${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}s; owner proven dead)"
+                            fleet_audit_update_registry_clone "$registry" "$clone_name" "" "" \
+                                not-allocated-verified || return 1
+                            rm -f "$record"
+                            continue
+                        fi
+                        echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
+                        # This record must keep the overall cleanup fail-closed, but
+                        # it is independent of later records whose exact machine IDs
+                        # are already proven. Returning here leaked every known clone
+                        # sorted after one young name-only record. Retain this record,
+                        # continue reaping those known IDs, then report failure.
+                        unresolved=1
+                        continue
+                        ;;
+                    *) echo "❌ ambiguous/unreadable stale clone name '$clone_name'; refusing to provision" >&2; return 1 ;;
+                esac
+            fi
+            case "$id" in ''|*[!0-9a-f]*) echo "❌ malformed fleet machine ownership record: $record" >&2; return 1 ;; esac
+            if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
+                echo "❌ ownership registry points at warm source machine $id; refusing cleanup" >&2
+                return 1
+            fi
+            if [ "$legacy_batch_status" -eq 3 ] && [ -z "$volume_id" ] \
+                && registry_record_is_stale_pre_volume_id "$record"; then
+                echo "❌ stale pre-volume-ID record '$clone_name' remains unresolved because a clone volume is unattached or points at an absent machine" >&2
+                unresolved=1
+                continue
+            fi
+            details="$(registry_machine_details "$id")"
+            detail_status=$?
+            if [ "$detail_status" -eq 1 ]; then
+                if [ -z "$volume_id" ]; then
+                    echo "❌ owned fleet machine $id disappeared before exact volume ownership was durable; retaining record" >&2
+                    unresolved=1
+                    continue
+                fi
                 if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
                 terminal_disposition=""
                 [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
@@ -5174,89 +4950,63 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
                     continue
                 fi
                 [ -n "$terminal_disposition" ] || return 1
-                fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
+                fleet_audit_update_registry_clone "$registry" "$clone_name" "$id" "$volume_id" \
                     "$terminal_disposition" || return 1
                 rm -f "$record"
                 continue
             fi
-            resolved="$(registry_resolve_name "$clone_name")"
-            case $? in
-                0)
-                    id="$resolved"
-                    ;;
-                1)
-                    if [ -n "$volume_id" ]; then
-                        # A failed clone can create a volume without a Machine.
-                        # Its provider-returned ID in this exact-owner record is
-                        # sufficient cleanup authority; global inventory is not.
-                        echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
-                        if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
-                        terminal_disposition=""
-                        [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
-                        [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
-                        if [ "$cleanup_status" -eq 75 ]; then
-                            unresolved=1
-                            continue
-                        fi
-                        [ -n "$terminal_disposition" ] || return 1
-                        fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
-                            "$terminal_disposition" || return 1
-                        rm -f "$record"
-                        continue
-                    fi
-                    # A successful Fly clone request may become list-visible only
-                    # after our lookup deadline. For the CURRENT (live-owner)
-                    # registry the name-only ledger is the sole durable ownership
-                    # proof during that gap, so keep it and fail closed — a
-                    # late-visible clone must not be orphaned while a successor
-                    # provisions another fleet.
-                    #
-                    # For STALE auto-recovery and FORCED exact recovery the owner
-                    # is already proven dead. Retain young name-only records while
-                    # a clone may still cross provider visibility, then retire an
-                    # aged, authoritatively absent phantom. Restrict this to the
-                    # two dead-owner modes: CURRENT live-owner cleanup must never
-                    # discard its only durable ownership proof.
-                    if { [ "$mode" = "stale" ] || [ "$mode" = "forced" ]; } \
-                        && registry_record_is_stale_phantom "$record"; then
-                        echo "🧹 discarding aged-out phantom name-only clone '$clone_name' (absent from Fly > ${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}s; owner proven dead)"
-                        fleet_audit_update_registry_clone "$registry" "$clone_name" "" "" \
-                            not-allocated-verified || return 1
-                        rm -f "$record"
-                        continue
-                    fi
-                    echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
-                    # This record must keep the overall cleanup fail-closed, but
-                    # it is independent of later records whose exact machine IDs
-                    # are already proven. Returning here leaked every known clone
-                    # sorted after one young name-only record. Retain this record,
-                    # continue reaping those known IDs, then report failure.
+            [ "$detail_status" -eq 0 ] || { echo "❌ could not verify owned fleet machine $id; refusing to provision" >&2; return 1; }
+            state="$(printf '%s' "$details" | awk '{print $1}')"
+            actual_name="$(printf '%s' "$details" | awk '{print $2}')"
+            if [ "$actual_name" != "$clone_name" ]; then
+                echo "❌ machine identity mismatch for $id ($actual_name != $clone_name); refusing cleanup" >&2
+                return 1
+            fi
+            if [ -z "$volume_id" ]; then
+                volume_id="$(machine_volume_id "$id")"
+                if [ -z "$volume_id" ] \
+                    || ! registry_record_machine_identity "$record" "$clone_name" "$id" "$volume_id"; then
+                    echo "❌ owned fleet machine $id has no durable exact volume attribution; retaining record" >&2
                     unresolved=1
                     continue
-                    ;;
-                *) echo "❌ ambiguous/unreadable stale clone name '$clone_name'; refusing to provision" >&2; return 1 ;;
-            esac
-        fi
-        case "$id" in ''|*[!0-9a-f]*) echo "❌ malformed fleet machine ownership record: $record" >&2; return 1 ;; esac
-        if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
-            echo "❌ ownership registry points at warm source machine $id; refusing cleanup" >&2
-            return 1
-        fi
-        if [ "$legacy_batch_status" -eq 3 ] && [ -z "$volume_id" ] \
-            && registry_record_is_stale_pre_volume_id "$record"; then
-            echo "❌ stale pre-volume-ID record '$clone_name' remains unresolved because a clone volume is unattached or points at an absent machine" >&2
-            unresolved=1
-            continue
-        fi
-        details="$(registry_machine_details "$id")"
-        detail_status=$?
-        if [ "$detail_status" -eq 1 ]; then
-            if [ -z "$volume_id" ]; then
-                echo "❌ owned fleet machine $id disappeared before exact volume ownership was durable; retaining record" >&2
-                unresolved=1
-                continue
+                fi
             fi
-            if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+            if [ "$registry_version" = "2" ]; then
+                volume_id="$(fleet_registry_reconcile_mounted_volume \
+                    "$registry" "$clone_name" "$id")" || return 1
+            fi
+            if [ "$state" = "destroyed" ]; then
+                # Exact-ID provider status already proves this Machine is terminal.
+                # Reissuing Fly's destroy call can wait a full minute per clone on
+                # an already retired fleet; only its separately owned Volume needs
+                # a final exact-ID deletion receipt.
+                echo "🧹 verifying volume of already-destroyed fleet clone $id (name=$clone_name)"
+                if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+            else
+                if [ "$mode" = "stale" ]; then
+                    case "$state" in
+                        stopped) : ;;
+                        started)
+                            runner_count="$(registry_runner_count "$id")" || {
+                                echo "❌ refusing to reap stale fleet machine $id: runner probe unreadable" >&2
+                                return 1
+                            }
+                            if [ "$runner_count" != "0" ]; then
+                                echo "❌ refusing to reap stale fleet machine $id: runner count=$runner_count" >&2
+                                return 1
+                            fi
+                            ;;
+                        *)
+                            echo "❌ refusing to reap stale fleet machine $id in transitional/unknown state '$state'" >&2
+                            return 1
+                            ;;
+                    esac
+                    echo "🧹 reaping stale fleet machine $id (name=$clone_name, state=$state, dead owner proven)"
+                else
+                    echo "🧹 destroying fleet-owned clone $id (name=$clone_name)"
+                fi
+                if reap_machine "$id" "" "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+            fi
             terminal_disposition=""
             [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
             [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
@@ -5265,77 +5015,42 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
                 continue
             fi
             [ -n "$terminal_disposition" ] || return 1
+            # reap_machine already carries the exact Volume through its terminal
+            # lifecycle. A second destroy/read loop cannot strengthen that receipt.
             fleet_audit_update_registry_clone "$registry" "$clone_name" "$id" "$volume_id" \
                 "$terminal_disposition" || return 1
             rm -f "$record"
-            continue
-        fi
-        [ "$detail_status" -eq 0 ] || { echo "❌ could not verify owned fleet machine $id; refusing to provision" >&2; return 1; }
-        state="$(printf '%s' "$details" | awk '{print $1}')"
-        actual_name="$(printf '%s' "$details" | awk '{print $2}')"
-        if [ "$actual_name" != "$clone_name" ]; then
-            echo "❌ machine identity mismatch for $id ($actual_name != $clone_name); refusing cleanup" >&2
-            return 1
-        fi
-        if [ -z "$volume_id" ]; then
-            volume_id="$(machine_volume_id "$id")"
-            if [ -z "$volume_id" ] \
-                || ! registry_record_machine_identity "$record" "$clone_name" "$id" "$volume_id"; then
-                echo "❌ owned fleet machine $id has no durable exact volume attribution; retaining record" >&2
-                unresolved=1
-                continue
-            fi
-        fi
-        if [ "$registry_version" = "2" ]; then
-            volume_id="$(fleet_registry_reconcile_mounted_volume \
-                "$registry" "$clone_name" "$id")" || return 1
-        fi
-        if [ "$state" = "destroyed" ]; then
-            # Exact-ID provider status already proves this Machine is terminal.
-            # Reissuing Fly's destroy call can wait a full minute per clone on
-            # an already retired fleet; only its separately owned Volume needs
-            # a final exact-ID deletion receipt.
-            echo "🧹 verifying volume of already-destroyed fleet clone $id (name=$clone_name)"
-            if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
-        else
-            if [ "$mode" = "stale" ]; then
-                case "$state" in
-                    stopped) : ;;
-                    started)
-                        runner_count="$(registry_runner_count "$id")" || {
-                            echo "❌ refusing to reap stale fleet machine $id: runner probe unreadable" >&2
-                            return 1
-                        }
-                        if [ "$runner_count" != "0" ]; then
-                            echo "❌ refusing to reap stale fleet machine $id: runner count=$runner_count" >&2
-                            return 1
-                        fi
-                        ;;
-                    *)
-                        echo "❌ refusing to reap stale fleet machine $id in transitional/unknown state '$state'" >&2
-                        return 1
-                        ;;
-                esac
-                echo "🧹 reaping stale fleet machine $id (name=$clone_name, state=$state, dead owner proven)"
+        done
+        [ "$unresolved" = "0" ] || return 75
+    }
+    for record in "$registry"/clones/*; do
+        [ -f "$record" ] || continue
+        if [ "$reap_limit" -eq 1 ]; then
+            if reap_one_registry_record "$record"; then
+                :
             else
-                echo "🧹 destroying fleet-owned clone $id (name=$clone_name)"
+                reap_status=$?
+                [ "$reap_status" -eq 75 ] || {
+                    unset -f reap_one_registry_record
+                    return 1
+                }
+                unresolved=1
             fi
-            if reap_machine "$id" "" "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+        else
+            reap_one_registry_record "$record" &
+            reap_pids+=("$!")
+            if [ "${#reap_pids[@]}" -ge "$reap_limit" ]; then
+                for reap_pid in "${reap_pids[@]}"; do
+                    wait "$reap_pid" || unresolved=1
+                done
+                reap_pids=()
+            fi
         fi
-        terminal_disposition=""
-        [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
-        [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
-        if [ "$cleanup_status" -eq 75 ]; then
-            unresolved=1
-            continue
-        fi
-        [ -n "$terminal_disposition" ] || return 1
-        # reap_machine already carries the exact Volume through its terminal
-        # lifecycle. A second destroy/read loop cannot strengthen that receipt.
-        fleet_audit_update_registry_clone "$registry" "$clone_name" "$id" "$volume_id" \
-            "$terminal_disposition" || return 1
-        rm -f "$record"
     done
+    for reap_pid in "${reap_pids[@]}"; do
+        wait "$reap_pid" || unresolved=1
+    done
+    unset -f reap_one_registry_record
     [ "$unresolved" = "0" ]
 }
 
@@ -8092,7 +7807,7 @@ PY
     rm -f "$plan"
 }
 
-exact_recovery_is_pool_only() {  # <v2-registry>; no fresh donor topology exists
+exact_recovery_is_pool_only() {  # <v2-registry>; pool-only or no-allocation owner
     python3 - "$1" "$FLEET_AUDIT_ROOT" "$APP" <<'PY'
 from pathlib import Path
 import stat
@@ -8136,8 +7851,8 @@ for name in ('expected-fresh', 'fresh', 'by-machine-id'):
     assert directory(path) and not any(path.iterdir())
 assert not any((registry / 'clones').iterdir())
 pool = audit / 'pool'
-assert directory(pool) and any(pool.iterdir())
-for path in pool.iterdir():
+assert not pool.is_symlink() and (not pool.exists() or directory(pool))
+for path in pool.iterdir() if pool.exists() else ():
     value = fields(path)
     assert value.get('source') == 'borrowed-pool'
     assert value.get('fleet_owner_token') == owner
@@ -8427,7 +8142,7 @@ fleet_recovery_confirm_runtime_evidence() {  # <exact dead-owner registry>; veri
     fi
     mapping="$(mktemp)" || return 1
     if ! python3 - "$registry" "$FLEET_AUDIT_ROOT" "$CLOUDBENCH_SCRIPT_SNAPSHOT" > "$mapping" <<'PY'
-import json, re, runpy, sys
+import json, os, re, runpy, sys
 from pathlib import Path
 registry = Path(sys.argv[1])
 def fields(path):
@@ -8445,13 +8160,6 @@ batch = run / '_batch/benches.json'
 assert batch.is_file() and not batch.is_symlink()
 tasks = json.loads(batch.read_text())
 assert isinstance(tasks, list) and len(tasks) <= 4096
-contract = runpy.run_path(str(Path(sys.argv[3]) / 'cloudbench_execution_provenance.py'))
-matrix = contract['load_task_matrix'](run / 'execution-task-matrix.json')
-provenance_path = run / 'execution-provenance.json'
-assert provenance_path.is_file() and not provenance_path.is_symlink()
-provenance = json.loads(provenance_path.read_text())
-assert not contract['validate_task_matrix_binding'](provenance, matrix)
-assert [{'name': task['name'], 'world_model_mode': 'simulate' if task['mode'] == 'SIM' else 'real'} for task in tasks] == matrix['tasks']
 task_names = {task['name'] for task in tasks}
 assert len(task_names) == len(tasks)
 admitted_outputs = {path.name for path in run.iterdir() if path.is_dir() and any(
@@ -8460,10 +8168,10 @@ admitted_outputs = {path.name for path in run.iterdir() if path.is_dir() and any
 assert admitted_outputs <= task_names
 fresh = {row['machine_id'] for p in (audit / 'fresh').iterdir() if (row := fields(p)).get('machine_id')}
 pool_dir = audit / 'pool'
-assert pool_dir.is_dir() and not pool_dir.is_symlink()
+assert not pool_dir.is_symlink() and (not pool_dir.exists() or pool_dir.is_dir())
 pool = set()
 pool_volumes = {}
-for record in pool_dir.iterdir():
+for record in pool_dir.iterdir() if pool_dir.exists() else ():
     row = fields(record)
     assert (row.get('version') == '1'
             and row.get('fleet_owner_token') == registry.name
@@ -8474,6 +8182,30 @@ for record in pool_dir.iterdir():
     if row.get('disposition') == 'claimed':
         pool.add(record.name)
         pool_volumes[record.name] = row.get('volume_id')
+preallocation = not admitted_outputs and not pool and not any((audit / 'fresh').iterdir())
+if preallocation:
+    # Input provenance is staged after initial owner publication. A canceled
+    # preflight can have neither inputs nor a guest whose execution needs them.
+    for empty in (audit / 'fresh', audit / 'expected-fresh', audit / 'by-machine-id', registry / 'clones'):
+        assert empty.is_dir() and not empty.is_symlink() and not any(empty.iterdir())
+    assert not pool_dir.exists() or not any(pool_dir.iterdir())
+    allocation_markers = {'.cid', 'cloudbench-run.json', 'runtime-evidence.pending',
+                          'guest-never-started.confirmed', 'runtime-evidence.owner.json',
+                          'post-config-start.accepted', 'worker-runtime-evidence'}
+    def traversal_failed(error):
+        raise error
+    for parent, directories, files in os.walk(run, followlinks=False, onerror=traversal_failed):
+        for name in directories + files:
+            assert name not in allocation_markers
+            assert not (Path(parent) / name).is_symlink()
+else:
+    contract = runpy.run_path(str(Path(sys.argv[3]) / 'cloudbench_execution_provenance.py'))
+    matrix = contract['load_task_matrix'](run / 'execution-task-matrix.json')
+    provenance_path = run / 'execution-provenance.json'
+    assert provenance_path.is_file() and not provenance_path.is_symlink()
+    provenance = json.loads(provenance_path.read_text())
+    assert not contract['validate_task_matrix_binding'](provenance, matrix)
+    assert [{'name': task['name'], 'world_model_mode': 'simulate' if task['mode'] == 'SIM' else 'real'} for task in tasks] == matrix['tasks']
 for index, task in enumerate(tasks):
     name = task['name']
     assert re.fullmatch(r'[A-Za-z0-9._-]+', name) and name not in ('.', '..')
@@ -8753,66 +8485,6 @@ machine_id_for_clone_name() {  # machine_id_for_clone_name <name> <absolute-seco
 # EOF with a deadline, so completed calls do not each pay a polling interval.
 # The existing TERM/grace/KILL cleanup returns 142 on timeout for clone retries;
 # no separate watchdog process or external `timeout` command is needed.
-fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
-    local secs="$1"; shift
-    case "$secs" in ''|*[!0-9]*) return 2 ;; esac
-    while [ "${secs#0}" != "$secs" ]; do secs="${secs#0}"; done
-    [ -n "$secs" ] || return 142
-    local out notify_fd read_fd pid rc read_status=0 completed running
-    out="$(mktemp)" || return 1
-    if ! mkfifo -m 600 "$out.done"; then
-        rm -f "$out"
-        return 1
-    fi
-    # The controller already requires modern Bash. A timed FIFO read blocks
-    # until the owning shell exits, including its EXIT handlers, without a
-    # polling sleeper or an independently owned watchdog.
-    if ! exec {notify_fd}<> "$out.done"; then
-        rm -f "$out.done" "$out"
-        return 1
-    fi
-    if ! exec {read_fd}< "$out.done"; then
-        exec {notify_fd}>&-
-        rm -f "$out.done" "$out"
-        return 1
-    fi
-    rm -f "$out.done"
-    (
-        exec {read_fd}<&-
-        # Keep the writer through native exec and EXIT handlers. Production
-        # FLY owns a foreground flyctl; detached writers fail at the deadline.
-        if FLY "$@" >"$out" 2>&1; then rc=0; else rc=$?; fi
-        exit "$rc"
-    ) &
-    pid=$!
-    exec {notify_fd}>&-
-    IFS= read -r -t "$secs" -u "$read_fd" completed || read_status=$?
-    exec {read_fd}<&-
-    if [ "$read_status" -ne 1 ]; then
-        # Only EOF establishes completion. Deadline, interrupted read, and
-        # invalid/read-error statuses must never fall through to an unbounded
-        # successful wait. A shell job check avoids signalling a reused PID if
-        # an unsupported detached descendant retained a FIFO descriptor.
-        running="$(jobs -pr)"
-        if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
-            pkill -TERM -P "$pid" 2>/dev/null || true
-            kill -TERM "$pid" 2>/dev/null || true
-            sleep 2
-            running="$(jobs -pr)"
-            if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
-                pkill -KILL -P "$pid" 2>/dev/null || true
-                kill -KILL "$pid" 2>/dev/null || true
-            fi
-        fi
-        wait "$pid" 2>/dev/null || true
-        cat "$out"; rm -f "$out"
-        [ "$read_status" -gt 128 ] && return 142
-        return 1
-    fi
-    if wait "$pid"; then rc=0; else rc=$?; fi
-    cat "$out"; rm -f "$out"
-    return "$rc"
-}
 
 worker_ledger_lock_acquire() {  # worker_ledger_lock_acquire <bench-output-dir>
     local lock="$1/worker-clones.ids.lock" owner="$1/worker-clones.ids.lock/owner"
@@ -9962,9 +9634,9 @@ if [ "$RECOVER_STALE_ONLY" = "1" ]; then
     WARM_ID=""
     WARM_VOLUME_ID=""
     if exact_recovery_is_pool_only "$recovery_registry" 2>/dev/null; then
-        # Pool claims bind their own Machine and Volume identities. No donor
-        # topology was allocated by this owner, so no warm source exists to
-        # resolve or to protect from fresh-clone teardown.
+        # Pool claims bind their own Machine and Volume identities. Canonical
+        # empty ledgers also cover cancellation before the first allocation.
+        # Neither shape needs a fresh donor for exact-owner recovery.
         WARM_ID=""
         WARM_VOLUME_ID=""
     else
@@ -10378,15 +10050,19 @@ cleanup() {
     # the wrapper can publish status while that owned group is still live.
     # Capture each complete tree before TERM and reap the waitable roots before
     # provider cleanup or the detached status rendezvous can complete.
+    local snapshot_teardown_pid="${SNAPSHOT_LOOP_PID:-}"
+    [ "${INVENTORY_PUBLISHER_BORROWED:-0}" != 1 ] || snapshot_teardown_pid=""
     if ! cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \
-        "${UNIFIED_AGG_PID:-}" "${SNAPSHOT_LOOP_PID:-}"; then
+        "${UNIFIED_AGG_PID:-}" "$snapshot_teardown_pid"; then
         echo "❌ an owned aggregator/snapshot process survived local teardown" >&2
         ec=1
         teardown_failed=1
     fi
     UNIFIED_AGG_PID=""
     SNAPSHOT_LOOP_PID=""
-    [ -n "${INVENTORY_WAIT_FIFO:-}" ] && rm -f "$INVENTORY_WAIT_FIFO" 2>/dev/null || true
+    if [ "${INVENTORY_PUBLISHER_BORROWED:-0}" != 1 ]; then
+        [ -n "${INVENTORY_WAIT_FIFO:-}" ] && rm -f "$INVENTORY_WAIT_FIFO" 2>/dev/null || true
+    fi
     # Do NOT kill the central hub (UNIFIED_DASH_PID): it is THE one persistent
     # dashboard — shared across every run, carrying the user's open tab, resolving
     # "open agent" from local run data long after teardown. The next fleet run
@@ -11150,8 +10826,14 @@ fi
 # fleet's dominant cost at width. --refresh-deps records what the snapshot
 # carries in a git-common state file (shared across sibling workspaces); heal
 # centrally ONCE when it drifts.
-snapshot_created_epoch() {  # snapshot_created_epoch <snap_id>
-    FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | SID="$1" python3 -c '
+snapshot_created_epoch() {  # snapshot_created_epoch <snap_id> [captured-inventory]
+    local snapshots
+    if [ "$#" -gt 1 ]; then
+        snapshots="$2"
+    else
+        snapshots="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || true)"
+    fi
+    printf '%s' "$snapshots" | SID="$1" python3 -c '
 import json, os, sys
 from datetime import datetime
 try: snaps = json.load(sys.stdin) or []
@@ -11201,7 +10883,14 @@ warm_deps_preflight() {
     recorded_state="$(warm_deps_recorded_state 2>/dev/null || true)"
     if [ -n "$recorded_state" ]; then
         read -r s_node s_py s_epoch _rest <<< "$recorded_state" || true
-        snap_epoch="$(snapshot_created_epoch "$SNAP_ID")"
+        # Hydration already bound this exact completed snapshot and epoch to
+        # the donor, volume and manifests. Reuse that captured inventory: an
+        # uncertain later provider read is not evidence that proof went stale.
+        if [ -n "${HYDRATED_WARM_DEPS_STATE:-}" ] && [ -n "${SNAPSHOTS_JSON:-}" ]; then
+            snap_epoch="$(snapshot_created_epoch "$SNAP_ID" "$SNAPSHOTS_JSON")"
+        else
+            snap_epoch="$(snapshot_created_epoch "$SNAP_ID")"
+        fi
         if [ "$s_node" = "$node_fp" ] && [ "$s_py" = "$py_fp" ] && \
            [ "$_rest" = "$SNAP_ID" ] && \
            [ "${snap_epoch:-0}" -ge $(( ${s_epoch:-0} - 60 )) ]; then
@@ -11698,6 +11387,8 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "per_child_max_concurrency=5"
     --config-value "wmh_model_name=rose-r2-archive-anthropic"
     --config-value "benchmark_fast_mode_cache=${BENCHMARK_FAST_MODE_CACHE:-}"
+    --config-value "fast_mode_cache_disable_write_through=${FAST_MODE_CACHE_DISABLE_WRITE_THROUGH:-}"
+    --config-value "benchmark_demo_cache_read_only=${BENCHMARK_DEMO_CACHE_READ_ONLY:-}"
     --config-value "benchmark_claude_code_cache_ratchet_warn_only=${BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY:-}"
     --config-value "rose_exclude_anthropic_family=${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}"
     --config-value "task_count=${#BENCHES[@]}"
@@ -12352,6 +12043,11 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         echo "export WMH_PORT=$(printf '%q' "$BOX_WMH_PORT")"
         echo "export HEALTH_PORT=$(printf '%q' "$FLEET_WORKER_HEALTH_PORT")"
         echo "export BENCH_SIMULATE=$(printf '%q' "$sim")"
+        if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then
+            echo "export BENCHMARK_DEMO_CACHE_READ_ONLY=1"
+            echo "export FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1"
+            echo "export BENCHMARK_ISOLATED_RUN=true"
+        fi
         echo "export WORKER_READY_FILE=$(printf '%q' "$ready_file")"
         echo "rm -f $(printf '%q' "$ready_file")"
         [ -n "$FLEET_PATCH_FILE" ] && echo "export LOCAL_PATCH_FILE=/tmp/cloudbench-local.patch" || echo "unset LOCAL_PATCH_FILE"
@@ -13612,6 +13308,13 @@ release_start_barrier() {
         return 1
     else
         echo "⚖️  ${#autoscaler_ready_indices[@]}/${#autoscaler_ready_indices[@]} mandatory per-bench autoscalers ready"
+    fi
+    # A repeated strict campaign coordinates these otherwise independent
+    # one-task fleets only after their normal readiness checks. Consume this
+    # existing startup deadline; task execution and owned teardown stay intact.
+    if [ -n "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ]; then
+        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-campaign-barrier.py" \
+            --deadline "$deadline" --controller-pid "$$" || return 1
     fi
     echo "🚦 releasing synchronized start barrier on the ready machines..."
     local release_pids=() release_failed=0 release_port_file

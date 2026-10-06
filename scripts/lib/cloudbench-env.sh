@@ -1190,15 +1190,18 @@ cloudbench_github_basic_auth_header() {  # <token>
   printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 }
 
-# Upsert KEY=value in a dotenv file without printing the value.
+# Serialize sibling updates and publish complete dotenvs without printing values.
 cloudbench_upsert_env_key() {
   local dest="$1" key="$2" val="$3"
   [ -n "$dest" ] && [ -n "$key" ] || return 1
   DEST="$dest" KEY="$key" VAL="$val" python3 - <<'PYINNER'
+import fcntl
 import os
 from pathlib import Path
+import tempfile
 
-p = Path(os.environ["DEST"])
+# Resolve aliases before choosing the lock, preserving existing dotenv symlinks.
+p = Path(os.environ["DEST"]).resolve()
 key = os.environ["KEY"]
 val = os.environ["VAL"]
 if any(ch in val for ch in ' \t\n"\'#$`\\'):
@@ -1206,20 +1209,38 @@ if any(ch in val for ch in ' \t\n"\'#$`\\'):
     rendered = f'{key}="{escaped}"'
 else:
     rendered = f"{key}={val}"
-lines = p.read_text().splitlines() if p.exists() else []
-out = []
-found = False
-for line in lines:
-    if line.startswith(key + "="):
-        out.append(rendered)
-        found = True
-    else:
-        out.append(line)
-if not found:
-    out.append(rendered)
 p.parent.mkdir(parents=True, exist_ok=True)
-p.write_text("\n".join(out) + "\n")
-os.chmod(p, 0o600)
+# Keep this inode: unlinking a lock can let a later writer lock a different file.
+lock_fd = os.open(p.with_name(p.name + ".cloudbench-upsert.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+with os.fdopen(lock_fd, "a") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    original = p.read_text() if p.exists() else ""
+    out = []
+    found = False
+    for line in original.splitlines():
+        if line.startswith(key + "="):
+            out.append(rendered)
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        out.append(rendered)
+    updated = "\n".join(out) + "\n"
+    if updated == original:
+        if p.stat().st_mode & 0o777 != 0o600:
+            os.chmod(p, 0o600)
+    else:
+        fd, name = tempfile.mkstemp(dir=p.parent, prefix=p.name + ".cloudbench-upsert.")
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "w") as output:
+                os.fchmod(output.fileno(), 0o600)
+                output.write(updated)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, p)
+        finally:
+            temporary.unlink(missing_ok=True)
 PYINNER
 }
 
