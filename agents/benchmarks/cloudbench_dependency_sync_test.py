@@ -13657,6 +13657,15 @@ def test_exact_recovery_pool_only_skips_nonexistent_warm_source(tmp_path: Path) 
     assert check().returncode != 0
     (registry / "source-manifest.json").unlink()
     pool.unlink()
+    # A controller may retire before the first pool claim or clone allocation.
+    # Its canonical empty ledgers need no external donor to recover.
+    assert check().returncode == 0
+    (registry / "clones" / "cloudbench-pending").write_text("name=cloudbench-pending\n")
+    assert check().returncode != 0
+    (registry / "clones" / "cloudbench-pending").unlink()
+    (audit / "pool").rmdir()
+    assert check().returncode == 0, "preallocation audit creates pool only at its first claim"
+    (audit / "pool").symlink_to(tmp_path / "ownership", target_is_directory=True)
     assert check().returncode != 0
 
 
@@ -15295,6 +15304,7 @@ def _preflight_harness(
     publish_status: int = 0,
     pinned_snapshot: bool = False,
     state_after_hydrate: str | None = None,
+    subsequent_snapshot_read: str = "ok",
 ) -> tuple:
     """Run warm_deps_preflight with stubbed FLY/git/refresh; returns (result, calls)."""
     fleet = fleet_source_text()
@@ -15350,6 +15360,16 @@ WARM_DEPS_STATE_FILE="$COMMON/{selected_state_name}"
 CLOUDBENCH_WARM_DEPS_AUTOREFRESH={autorefresh}
 export CALLS_FILE="$CALLS_FILE"
 FLY() {{
+  count="$(cat "$COMMON/snapshot-read-count" 2>/dev/null || echo 0)"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$COMMON/snapshot-read-count"
+  if [ "$count" -gt 1 ]; then
+    case {shlex.quote(subsequent_snapshot_read)} in
+      failed) return 1 ;;
+      empty) printf '[]\n'; return 0 ;;
+      malformed) printf 'invalid-json\n'; return 0 ;;
+    esac
+  fi
   echo '[{{"id":"snap-current","created_at":"{__import__("datetime").datetime.fromtimestamp(snap_epoch, __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}","status":"{snapshot_status}","size":9}},{{"id":"{refreshed_snapshot}","created_at":"2026-07-17T00:00:00Z","status":"created","size":9}},{{"id":"snap-unrelated-newer","created_at":"2026-07-17T00:01:00Z","status":"created","size":9}}]'
 }}
 cloudbench_node_dependency_fingerprint() {{ echo {node_fp}; }}
@@ -15376,6 +15396,57 @@ echo "SNAP_AFTER=$SNAP_ID"
         check=False,
     )
     return result, calls
+
+
+@pytest.mark.parametrize("subsequent_read", ["failed", "empty", "malformed"])
+def test_warm_deps_preflight_preserves_captured_exact_proof_when_later_read_fails(
+    tmp_path: Path, subsequent_read: str
+) -> None:
+    """A second uncertain provider read cannot invalidate an already bound snapshot."""
+    node, python = "1" * 64, "2" * 64
+    key = "rose_cloudbench_deps_" + hashlib.sha256(f"{node}\0{python}".encode()).hexdigest()[:32]
+    proof = f"{node} {python} 1000 snap-current vol_warm warm-machine bench-app"
+    inventory = [
+        {
+            "id": "warm-machine",
+            "config": {
+                "mounts": [{"volume": "vol_warm"}],
+                "metadata": {key: proof},
+            },
+        }
+    ]
+    result, calls = _preflight_harness(
+        tmp_path,
+        state_line=None,
+        dirty=False,
+        autorefresh="1",
+        snap_epoch=2000,
+        warm_inventory=inventory,
+        node_fp=node,
+        python_fp=python,
+        subsequent_snapshot_read=subsequent_read,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "restored proven donor dependency snapshot" in result.stdout
+    assert "SNAP_AFTER=snap-current" in result.stdout
+    assert calls.read_text() == "", "already verified snapshot triggered dependency maintenance"
+    assert (tmp_path / "common/snapshot-read-count").read_text().strip() == "1"
+
+
+def test_warm_deps_preflight_requires_live_verification_after_a_new_refresh(tmp_path: Path) -> None:
+    """The old captured list cannot authorize the snapshot made by maintenance."""
+    result, calls = _preflight_harness(
+        tmp_path,
+        state_line=None,
+        dirty=False,
+        autorefresh="1",
+        snap_epoch=2000,
+        subsequent_snapshot_read="failed",
+    )
+    assert result.returncode != 0
+    assert calls.read_text().count("refresh-deps --refresh-deps") == 1
+    assert "SNAP_AFTER=" not in result.stdout
+    assert int((tmp_path / "common/snapshot-read-count").read_text()) > 1
 
 
 @pytest.mark.parametrize("scenario", ["fresh", "interleaved", "volume-mismatch", "donor-mismatch", "deps-mismatch", "pending", "expired"])

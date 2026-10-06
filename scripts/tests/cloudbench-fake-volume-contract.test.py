@@ -87,7 +87,8 @@ def main() -> None:
         )
         app = re.search(r'^BENCH_APP = "([^"]+)"', fake_source, re.MULTILINE).group(1)
 
-        def clone(source: str, name: str, *, identity: str | None = None) -> str:
+        def clone(source: str, name: str, *, identity: str | None = None,
+                  override_cmd: str | None = None) -> str:
             command = [
                 str(fly),
                 "machine",
@@ -99,6 +100,8 @@ def main() -> None:
                 app,
                 "--json",
             ]
+            if override_cmd is not None:
+                command += ["--override-cmd", override_cmd]
             if identity is not None:
                 # Execute the actual provider with distinct machine UUIDs that
                 # share the historical four-digit address prefix. The second
@@ -180,7 +183,24 @@ def main() -> None:
         preflight("aaaa0000000001")
         first = clone("aaaa0000000001", "cloudbench-volume-contract-primary")
         preflight(first)
-        preflight(clone(first, "cloudbench-volume-contract-worker"))
+        worker = clone(first, "cloudbench-volume-contract-worker", override_cmd="sleep infinity")
+        preflight(worker)
+        state = json.loads((base / "state.json").read_text())
+        machine_inventory, volume_inventory = base / "machines.json", base / "volumes.json"
+        machine_inventory.write_text(json.dumps(state["machines"]))
+        volume_inventory.write_text(json.dumps(state["volumes"]))
+        index = base / "index"
+        subprocess.run(
+            [sys.executable, str(ROOT / "scripts/cloudbench-machine-readiness.py"),
+             "--publish-index", str(machine_inventory), str(volume_inventory), str(index)],
+            env=env, check=True, capture_output=True, text=True, timeout=15,
+        )
+        for machine_id, expected in ((first, "0"), (worker, "1")):
+            fields = dict(line.split("=", 1) for line in
+                          (index / "current/machines" / machine_id).read_text().splitlines())
+            assert fields["clone_cmd_inert"] == expected, (
+                "fake clone must project only the requested native inert command", machine_id
+            )
         left = clone(
             "aaaa0000000001",
             "cloudbench-address-contract-left",

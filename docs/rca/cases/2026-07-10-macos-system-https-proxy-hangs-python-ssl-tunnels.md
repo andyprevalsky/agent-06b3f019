@@ -68,3 +68,20 @@ change the user's environment.
 A local process that is alive, near-0% CPU, and producing nothing is a blocked
 socket — check `scutil --proxy` for a system HTTPS proxy and force `NO_PROXY='*'`
 in harness subprocesses instead of changing the user's machine.
+
+
+## October 5, 2026 recurrence and standing instruction
+
+The current standing user instruction forbids bypassing Freedom, including
+removing inherited proxy settings or adding global proxy exceptions. The July
+solution above records the historical investigation; its bypass recommendation
+is superseded by that instruction. Local benchmark children now preserve all
+configured and absent inherited proxy variables.
+
+The first deployment unit tail found two tests still expecting the historical
+bypass (118 passed, two failed). Updating the same three owning tests to check
+configured and absent proxy inheritance, unchanged caller input, Python proxy
+discovery, and the real streamed child produced three passes in 1.05 seconds.
+The complete standard unit tail then passed all 120 tests in 36.48 seconds and
+the preserved composite agents coverage passed its normal threshold. No Freedom
+settings or production timeout changed; the original failed tail is retained.

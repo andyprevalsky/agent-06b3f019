@@ -7751,7 +7751,7 @@ PY
     rm -f "$plan"
 }
 
-exact_recovery_is_pool_only() {  # <v2-registry>; no fresh donor topology exists
+exact_recovery_is_pool_only() {  # <v2-registry>; pool-only or no-allocation owner
     python3 - "$1" "$FLEET_AUDIT_ROOT" "$APP" <<'PY'
 from pathlib import Path
 import stat
@@ -7795,8 +7795,8 @@ for name in ('expected-fresh', 'fresh', 'by-machine-id'):
     assert directory(path) and not any(path.iterdir())
 assert not any((registry / 'clones').iterdir())
 pool = audit / 'pool'
-assert directory(pool) and any(pool.iterdir())
-for path in pool.iterdir():
+assert not pool.is_symlink() and (not pool.exists() or directory(pool))
+for path in pool.iterdir() if pool.exists() else ():
     value = fields(path)
     assert value.get('source') == 'borrowed-pool'
     assert value.get('fleet_owner_token') == owner
@@ -9561,9 +9561,9 @@ if [ "$RECOVER_STALE_ONLY" = "1" ]; then
     WARM_ID=""
     WARM_VOLUME_ID=""
     if exact_recovery_is_pool_only "$recovery_registry" 2>/dev/null; then
-        # Pool claims bind their own Machine and Volume identities. No donor
-        # topology was allocated by this owner, so no warm source exists to
-        # resolve or to protect from fresh-clone teardown.
+        # Pool claims bind their own Machine and Volume identities. Canonical
+        # empty ledgers also cover cancellation before the first allocation.
+        # Neither shape needs a fresh donor for exact-owner recovery.
         WARM_ID=""
         WARM_VOLUME_ID=""
     else
@@ -10753,8 +10753,14 @@ fi
 # fleet's dominant cost at width. --refresh-deps records what the snapshot
 # carries in a git-common state file (shared across sibling workspaces); heal
 # centrally ONCE when it drifts.
-snapshot_created_epoch() {  # snapshot_created_epoch <snap_id>
-    FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | SID="$1" python3 -c '
+snapshot_created_epoch() {  # snapshot_created_epoch <snap_id> [captured-inventory]
+    local snapshots
+    if [ "$#" -gt 1 ]; then
+        snapshots="$2"
+    else
+        snapshots="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || true)"
+    fi
+    printf '%s' "$snapshots" | SID="$1" python3 -c '
 import json, os, sys
 from datetime import datetime
 try: snaps = json.load(sys.stdin) or []
@@ -10804,7 +10810,14 @@ warm_deps_preflight() {
     recorded_state="$(warm_deps_recorded_state 2>/dev/null || true)"
     if [ -n "$recorded_state" ]; then
         read -r s_node s_py s_epoch _rest <<< "$recorded_state" || true
-        snap_epoch="$(snapshot_created_epoch "$SNAP_ID")"
+        # Hydration already bound this exact completed snapshot and epoch to
+        # the donor, volume and manifests. Reuse that captured inventory: an
+        # uncertain later provider read is not evidence that proof went stale.
+        if [ -n "${HYDRATED_WARM_DEPS_STATE:-}" ] && [ -n "${SNAPSHOTS_JSON:-}" ]; then
+            snap_epoch="$(snapshot_created_epoch "$SNAP_ID" "$SNAPSHOTS_JSON")"
+        else
+            snap_epoch="$(snapshot_created_epoch "$SNAP_ID")"
+        fi
         if [ "$s_node" = "$node_fp" ] && [ "$s_py" = "$py_fp" ] && \
            [ "$_rest" = "$SNAP_ID" ] && \
            [ "${snap_epoch:-0}" -ge $(( ${s_epoch:-0} - 60 )) ]; then

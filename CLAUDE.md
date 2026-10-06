@@ -1030,6 +1030,9 @@ The compact cache regressions are in
 benchmark blackbox domain and `/deploy` Step 4cb. They cover fresh-checkout reuse,
 donor/volume/dependency binding, incomplete snapshots, legacy receipt migration,
 and metadata-only publication without making publication a benchmark gate.
+After hydration proves a matching completed donor snapshot, reuse that captured
+inventory for its epoch check; a failed later read cannot invalidate the proof.
+New refresh snapshots still require live epoch and exact-complete verification.
 
 Controller token handoff to local dotenvs must use `cloudbench_upsert_env_key`:
 serialize each destination's full read/update with its persistent lifetime lock,

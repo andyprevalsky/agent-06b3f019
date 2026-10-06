@@ -596,6 +596,8 @@ mkdir -p "$SANDBOX/back-end/scripts" "$SANDBOX/back-end/prisma" \
   "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks"
 printf '.context/\n**/.env\n' > "$SANDBOX/.gitignore"
 cp "$ROOT_DIR/agents/benchmarks/hub_upload.py" "$SANDBOX/agents/benchmarks/hub_upload.py"
+cp "$ROOT_DIR/agents/benchmarks/outcome_publication.py" \
+    "$SANDBOX/agents/benchmarks/outcome_publication.py"
 cp "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
     "$SANDBOX/agents/benchmarks/agent_link_server.py"
 # Cloud routing resolves the same two-shard task namespace as the real runner.
@@ -987,13 +989,19 @@ def run_fake_driver(mdir):
     if exit_code == 0 and (
         os.path.exists(os.path.join(FAKE_DIR, "worker-never-ready"))
         or os.path.exists(os.path.join(FAKE_DIR, "worker-ready-after-child"))
+        or os.path.exists(os.path.join(FAKE_DIR, "fail-worker-launch"))
     ):
+        launch_boundary = (
+            "worker-launch-rejected-"
+            if os.path.exists(os.path.join(FAKE_DIR, "fail-worker-launch"))
+            else "worker-launch-succeeded-"
+        )
         deadline = time.time() + 30
         launched = False
         while time.time() < deadline:
             try:
                 launched = any(
-                    entry.startswith("worker-launch-succeeded-")
+                    entry.startswith(launch_boundary)
                     for entry in os.listdir(MARKERS)
                 )
             except OSError:
@@ -1009,7 +1017,8 @@ def run_fake_driver(mdir):
     # pending; its provisioner, rather than scale-down, owns any staging-failure
     # cleanup and must not inherit the parent autoscaler's EXIT trap.
     if exit_code == 0 and (
-        os.path.exists(os.path.join(FAKE_DIR, "oscillate-worker-desired"))
+        (os.path.exists(os.path.join(FAKE_DIR, "oscillate-worker-desired"))
+         and not os.path.exists(os.path.join(FAKE_DIR, "fail-worker-launch")))
         or os.path.exists(os.path.join(FAKE_DIR, "concurrent-ready-scale-down"))
     ):
         # These fixtures wait for real fake-provider launch and teardown work.
@@ -1359,6 +1368,8 @@ elif args[:2] == ["machine", "clone"]:
                 (0xFDAA << 112) | (0xC10D << 64) | int(machine_id, 16)
             )),
             "config": {"mounts": [{"volume": volume_id, "size_gb": 40}],
+                       "init": {"cmd": shlex.split(flag_value("--override-cmd"))}
+                               if flag_value("--override-cmd") is not None else {},
                        "guest": {"cpu_kind": cpu_kind, "cpus": vm_cpus,
                                  "memory_mb": vm_memory}},
         })
@@ -1607,6 +1618,8 @@ elif args[:2] == ["ssh", "console"]:
         print(f"CLOUDBENCH_RUNNER_COUNT={found.get('runner_count', 0)}")
     elif "setsid bash /tmp/rbw.sh" in command:
         if os.path.exists(os.path.join(FAKE_DIR, "fail-worker-launch")):
+            with open(os.path.join(MARKERS, f"worker-launch-rejected-{machine_id}"), "w") as marker:
+                marker.write("1\n")
             print("injected autoscaled-worker launch failure", file=sys.stderr)
             sys.exit(1)
         worker_exit = run_fake_worker(mdir, machine_id)
@@ -1759,7 +1772,13 @@ elif args[:1] == ["proxy"]:
                     else:
                         desired = 1
                 elif os.path.exists(os.path.join(FAKE_DIR, "oscillate-worker-desired")):
-                    desired = 1 if os.path.exists(os.path.join(MARKERS, "worker-clone-id")) else 2
+                    boundary = (
+                        "worker-launch-rejected-"
+                        if os.path.exists(os.path.join(FAKE_DIR, "fail-worker-launch"))
+                        else "worker-launch-succeeded-"
+                    )
+                    crossed = any(entry.startswith(boundary) for entry in os.listdir(MARKERS))
+                    desired = 1 if crossed else 2
                 else:
                     desired = 2 if os.path.exists(os.path.join(FAKE_DIR, "desired-two")) else 1
                 body = f"desired_machine_count {desired}\n".encode()
