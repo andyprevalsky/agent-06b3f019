@@ -57,6 +57,26 @@ grep -qE 'supervised_edge_probe "\$url" -4' "$TMP/fn.sh" \
 grep -qE 'curl "\$@"' "$TMP/fn.sh" \
   || fail "supervised_edge_probe must forward curl args (including -4) via curl \"\$@\""
 
+# The public-edge probe must retain inherited proxy configuration.
+mkdir "$TMP/proxy-control"
+cat > "$TMP/proxy-control/curl" <<'STUB'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in --noproxy|--noproxy=*) exit 29 ;; esac
+done
+for key in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy; do
+  [ "${!key}" = "fixture-proxy-setting" ] || exit 30
+done
+printf '200'
+STUB
+chmod +x "$TMP/proxy-control/curl"
+status="$(HTTP_PROXY=fixture-proxy-setting HTTPS_PROXY=fixture-proxy-setting ALL_PROXY=fixture-proxy-setting \
+  http_proxy=fixture-proxy-setting https_proxy=fixture-proxy-setting all_proxy=fixture-proxy-setting \
+  NO_PROXY=fixture-proxy-setting no_proxy=fixture-proxy-setting PATH="$TMP/proxy-control:$PATH" \
+  bash -c 'source "$1"; supervised_edge_probe https://fixture.invalid -4' fixture "$TMP/fn.sh")"
+[ "$status" = 200 ] || fail "public-edge probe changed or bypassed inherited proxy settings"
+echo "PASS: public-edge probe preserves inherited proxy settings"
+
 # Drive the extracted function with a stub curl whose status sequence we control.
 # STATUS_FILE holds one status per line; the stub pops one per invocation and
 # repeats the last line once exhausted.

@@ -1525,7 +1525,7 @@ supervised_edge_probe() {
     [[ "$curl_timeout" =~ ^[1-9][0-9]*$ ]] || curl_timeout=5
     local status_file probe_pid probe_deadline status
     status_file="$(mktemp "${TMPDIR:-/tmp}/rose-cloudflare-edge.XXXXXX")"
-    curl "$@" -s -o /dev/null -w '%{http_code}' --noproxy '*' \
+    curl "$@" -s -o /dev/null -w '%{http_code}' \
         --connect-timeout "$curl_timeout" --max-time "$curl_timeout" "$url" \
         >"$status_file" 2>/dev/null &
     probe_pid=$!
@@ -1580,12 +1580,7 @@ cloudflare_tunnel_edge_is_routing() {
             sleep "$retry_seconds"
             continue
         fi
-        # --noproxy '*': this probe must measure the Cloudflare edge itself, not
-        # an inherited HTTP(S)_PROXY/ALL_PROXY. A proxy corrupts the result in
-        # BOTH directions — it can answer 407/5xx and fake a healthy tunnel, or
-        # (as on a macOS host with a content blocker configured system-wide)
-        # refuse trycloudflare.com outright and report a healthy tunnel as dead.
-        #
+        # Preserve inherited proxy settings, including content-blocker routing.
         # Prefer IPv4 (-4): some Cloud/Linux VMs resolve trycloudflare.com to
         # AAAA first and curl Happy Eyeballs reports http_code 000 on broken
         # IPv6 while the same hostname answers 200/502 over IPv4. Without -4 the
