@@ -252,6 +252,35 @@ async def test_live_schema_generation_chooses_file_for_large_goal():
     assert all("properties" not in field for field in schema["fields"] if field["type"] == "file_pointer"), schema
 
 
+async def test_live_identifier_fields_are_strings():
+    """Identifiers stay `str` in generated schemas, through the production generator.
+
+    A member number like RS-92884370 typed as `int` reaches the user as 92884370
+    (the Task Complete card drops the prefix) and fails the hosted-auth benches.
+    The generator is an LLM call and the `int` typing was intermittent, so each
+    goal is sampled more than once.
+    """
+    from helpers.llm import _generate_response_schema_with_rose
+
+    cases = [
+        ("Tell me my member number for https://shop.example.test/api/rose-shop/fd8d8c49c667/?authRealm=rose-shop-fd8d8c49c667", "member"),
+        ("Buy me a Canvas Tote from https://shop.example.test/ and tell me the order number", "order"),
+        ("Find the tracking number for my latest Nordstrom order in my email", "tracking"),
+    ]
+    samples = int(os.getenv("RESPONSE_SCHEMA_IDENTIFIER_SAMPLES", "3"))
+    failures = []
+    for goal, needle in cases:
+        for sample in range(1, samples + 1):
+            schema, _title, _usage = await _generate_response_schema_with_rose(
+                goal, agent_id="schema-gen-identifier-proof", include_title=False,
+            )
+            field = next((f for f in schema["fields"] if needle in f["name"].lower()), None)
+            assert field is not None, f"no field containing {needle!r} for {goal!r}: {schema['fields']}"
+            if field["type"] != "str":
+                failures.append(f"sample {sample}: {field['name']} is {field['type']} for {goal!r}")
+    assert not failures, "identifier fields must be str:\n" + "\n".join(failures)
+
+
 def test_prepare_schema_for_openai_nested_and_array():
     """Schema preparation handles nested models, arrays, and union types recursively."""
     from typing import List, Optional, Union
