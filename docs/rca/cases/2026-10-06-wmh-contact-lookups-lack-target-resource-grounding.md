@@ -240,6 +240,49 @@ Archive follow-up searches: `WMH unobserved not absent forms simulation policy`
 and `Founders Fund no verified route context submissions`. This continues the
 same open case; it is not a recurrence of a previously deployed fix.
 
+### Follow-up: current upstream prompt and request framing
+
+The user accepted that a no-route result can be legitimate, then asked whether
+current upstream improves these predictions and whether its architecture
+differs. Rose remains pinned to July 3 WMH 0.1.0; latest checked upstream is
+Experiential 0.7.158 at `bf75987eac5e8c984d8f3868249f84e4095d1733`, with a
+v3 text prompt last changed October 2. The original installed, artifact and
+captured prompts exactly match the July pin. Corpus refresh preserves the
+saved prompt, so the current integration has not followed those prompt updates.
+
+Twenty-four new calls used original actual `gpt-6-sol-gpt` and fixed browser
+goals, with three trials per firm in four arms: upstream instructions adapted
+to the old response format; exact upstream system/native response protocol
+with legacy evidence framing; that protocol with history/current notes removed;
+and the actual upstream request builder with an explicit captured-data adapter.
+Every arm returned 0/3 concrete routes and 0/3 submissions for each firm. Two
+cleared Precursor predictions described a vague pitch application without a
+destination or concrete fields and were blocked by accepted missing company
+facts. No execution errors occurred; all results retained $0 funding.
+
+The native builder adapter preserves task, goal, candidate, initial/current
+state, history action/observation content and five source demos, but derives
+incomplete tool schemas and labels demo prior state within initial context.
+It does not recover native artifact provenance or demo episode starts. Actual
+upstream parser and call-correlation validation passed for all 18 v3 replies.
+No upstream retrieval, packing, admission or multi-turn state loop was run.
+This is evidence of no demonstrated concrete-route improvement in the tested
+calls, not proof a fully migrated upstream engine cannot generate forms.
+
+Architectural changes include complete private JSON state, declared schemas,
+parallel call/result correlation, full task-context grounding references,
+immutable prompt/model/source identities and lineage exclusions. Rose already
+blocks synthetic observations entering retrieval. Optional-example packing
+does not compact required history. The new package/API/Python/runtime defaults
+require a deliberate migration, rather than merely swapping the dependency pin.
+
+Exact outputs, hashes, adaptations, source links and limits are preserved in
+`docs/plans/active/wmh-evidence-20261006/upstream-prediction-comparison.{md,json}`.
+Independent adversarial review verified transport controls and conversion
+limits. Archive searches were `WMH upstream prompt state_note tool_results`
+and `simulated no contact route Founders Fund`. This continues the existing
+open diagnosis; no production repair or fundraiser recovery is claimed.
+
 ## Solution
 
 No production prediction prompt, model selection, corpus artifact, seed,
@@ -268,6 +311,10 @@ remain acceptable blockers. They asked for controlled system/context/model
 comparisons and the exact browser-agent goal. They then questioned the broad
 omission rule, requested the entire WMH prompt in a browser, and explicitly
 asked to delete that one sentence and test the remaining diagnostic policy.
+They then accepted that the no-route failure is technically fine and requested
+comparison with the original upstream repository's current prompt and
+architecture. Legitimate no-route and missing-company-data blockers remain
+valid; improved submissions alone do not define simulator correctness.
 
 ## Reusable lesson
 
