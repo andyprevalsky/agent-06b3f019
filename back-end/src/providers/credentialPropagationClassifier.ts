@@ -536,6 +536,7 @@ export async function classifyCredentialOutcomesBestEffort(
       ? {
           ...fallback,
           outcome: 'unknown',
+          failureReason: null,
           reason: `${fallback.reason}; per-credential verdict unavailable`,
         }
       : fallback;

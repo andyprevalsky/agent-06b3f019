@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { runAgentCardOrgWalletMonitor } from './providers/agentcard/org-wallet-monitor';
 import { createLogger } from './providers/logger';
+import { SHARED_STEEL_IDENTITY, steelEnvironmentIdentity } from './providers/steel/sessionIdentity';
 import {
   abandonStaleFundingPending,
   reconcileAbandonedPurchaseFunding,
@@ -369,15 +370,22 @@ function scheduleSteelSessionReaper(): void {
   const cronLog = createLogger('Cron');
   // Every environment reaps only the sessions it created (sessionIdentity.ts), so
   // local stacks run this too; without a key there is nothing to list.
+  const sharedIdentity = steelEnvironmentIdentity() === SHARED_STEEL_IDENTITY;
   if (
     (process.env.STEEL_API_KEY ?? '').trim() === '' ||
-    process.env.DISABLE_STEEL_SESSION_REAPER === '1'
+    process.env.DISABLE_STEEL_SESSION_REAPER === '1' ||
+    sharedIdentity
   ) {
+    // Two stacks with nothing to tell them apart would carry the same marker and
+    // could release each other's live sessions; without a distinct identity the
+    // reaper stays off and Steel's own timeout remains the backstop.
     cronLog.info('Steel session reaper disabled', {
       reason:
         process.env.DISABLE_STEEL_SESSION_REAPER === '1'
           ? 'DISABLE_STEEL_SESSION_REAPER'
-          : 'no STEEL_API_KEY',
+          : sharedIdentity
+            ? 'no distinct environment identity'
+            : 'no STEEL_API_KEY',
     });
     return;
   }

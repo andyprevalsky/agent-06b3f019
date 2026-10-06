@@ -20,17 +20,23 @@ import { createHash, randomUUID } from 'node:crypto';
 
 const MARKER_LENGTH = 8;
 
+/** The fallback when nothing identifies this stack; it is shared, so it must never reap. */
+export const SHARED_STEEL_IDENTITY = 'local';
+
 export function steelEnvironmentIdentity(env: NodeJS.ProcessEnv = process.env): string {
+  // Most specific first. Local back-end/.env files carry RENDER_SERVICE_ID for the
+  // Render API scripts, so that id only identifies production when Render itself
+  // set RENDER=true; otherwise a developer stack would share production's marker.
   const candidates = [
-    ['render', env.RENDER_SERVICE_ID],
     ['benchmark', env.BENCHMARK_ISOLATED_RUN === 'true' ? env.BENCHMARK_RUN_ID : undefined],
     ['workspace', env.CONDUCTOR_WORKSPACE_NAME],
+    ['render', env.RENDER === 'true' ? env.RENDER_SERVICE_ID : undefined],
   ] as const;
   for (const [kind, value] of candidates) {
     const trimmed = (value ?? '').trim();
     if (trimmed !== '') return `${kind}:${trimmed}`;
   }
-  return 'local';
+  return SHARED_STEEL_IDENTITY;
 }
 
 export function steelOwnershipMarker(identity: string = steelEnvironmentIdentity()): string {

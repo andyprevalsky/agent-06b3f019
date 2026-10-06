@@ -8908,6 +8908,32 @@ async def test_browser_thinking_stream_routes_chunks_to_browser_message_list():
     assert all(item["agent_id"] == "agent-1" for item in published)
     assert all(item["sub_agent_id"] == "browser-task-1" for item in published)
     assert all(item["llm_started_at_ms"] == 123_000 for item in published)
+
+
+async def test_browser_thinking_stream_restart_closes_the_abandoned_attempt():
+    """A reply cut off at the output limit is retried; the retry must not append to
+    the abandoned attempt's stream, or the displayed decision mixes the two."""
+    from domains.spawn_browser_agent_v3.streaming import BrowserThinkingStream
+    from providers.rose import StreamChunk
+
+    stream = BrowserThinkingStream(agent_id="agent-1", task_id="browser-task-1", iteration=2)
+    with patch(
+        "domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk",
+        new_callable=AsyncMock,
+    ) as publish:
+        await stream.on_chunk(StreamChunk(kind="reasoning", data={"text": "half an ans"}))
+        first_stream_id = stream.stream_id
+        await stream.on_chunk(StreamChunk(kind="restart", data={"reason": "output_limit"}))
+        await stream.on_chunk(StreamChunk(kind="reasoning", data={"text": "full answer"}))
+        await stream.finish()
+
+    published = [call.kwargs for call in publish.await_args_list]
+    first = [item for item in published if item["stream_id"] == first_stream_id]
+    retry = [item for item in published if item["stream_id"] != first_stream_id]
+    assert first and first[-1]["done"] is True, "the abandoned stream was not closed"
+    assert "full answer" not in "".join(item["delta"] for item in first)
+    assert retry and any(item["delta"] == "full answer" for item in retry), retry
+    assert retry[-1]["done"] is True
     assert all(item["clear_on_done"] is True for item in published)
     assert any(item["is_gpt"] is True for item in published[1:])
     assert "Inspecting page" in "".join(item["delta"] for item in published)

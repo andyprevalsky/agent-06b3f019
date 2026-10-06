@@ -22,7 +22,12 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { releaseSteelRemoteSession, steel } from './session';
-import { inFlightSteelSessionIds, isOwnedSteelSessionId } from './sessionIdentity';
+import {
+  SHARED_STEEL_IDENTITY,
+  inFlightSteelSessionIds,
+  isOwnedSteelSessionId,
+  steelEnvironmentIdentity,
+} from './sessionIdentity';
 
 const log = createLogger('SteelSessionReaper');
 
@@ -42,6 +47,7 @@ export interface SteelReaperDependencies {
   heldSessionIds: (candidates: string[]) => Promise<Set<string>>;
   inFlightSessionIds: () => ReadonlySet<string>;
   isOwned: (sessionId: string) => boolean;
+  identity: () => string;
   release: (sessionId: string) => Promise<void>;
   now: () => number;
 }
@@ -80,6 +86,7 @@ function defaultDependencies(): SteelReaperDependencies {
     heldSessionIds: heldSteelSessionIds,
     inFlightSessionIds: inFlightSteelSessionIds,
     isOwned: (sessionId) => isOwnedSteelSessionId(sessionId),
+    identity: () => steelEnvironmentIdentity(),
     release: releaseSteelRemoteSession,
     now: () => Date.now(),
   };
@@ -89,6 +96,18 @@ export async function reconcileOrphanedSteelSessions(
   overrides: Partial<SteelReaperDependencies> = {}
 ): Promise<SteelReaperSummary> {
   const deps = { ...defaultDependencies(), ...overrides };
+  if (deps.identity() === SHARED_STEEL_IDENTITY) {
+    // No distinct identity means another stack may carry this marker too.
+    return {
+      live: 0,
+      owned: 0,
+      released: 0,
+      failed: 0,
+      skippedHeld: 0,
+      skippedYoung: 0,
+      releasedIds: [],
+    };
+  }
   const live = await deps.listLiveSessions();
   const owned = live.filter((session) => deps.isOwned(session.id));
   const summary: SteelReaperSummary = {

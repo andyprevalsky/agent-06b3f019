@@ -48,11 +48,30 @@ async function main(): Promise<void> {
     assert.ok(!inFlightSteelSessionIds(Date.now() + 21 * 60 * 1000).has(sessionId));
   });
 
-  await test('each environment gets its own marker, production first', () => {
+  await test('a stack with no distinct identity never reaps', async () => {
+    const summary = await reconcileOrphanedSteelSessions({
+      identity: () => 'local',
+      listLiveSessions: async () => {
+        throw new Error('must not list sessions without a distinct identity');
+      },
+    });
+    assert.strictEqual(summary.released, 0);
+    assert.strictEqual(summary.live, 0);
+  });
+
+  await test('each environment gets its own marker, most specific first', () => {
+    // Local back-end/.env carries RENDER_SERVICE_ID for the Render API scripts;
+    // only Render itself (RENDER=true) makes it production's identity, or a
+    // developer stack would share production's marker and reap its sessions.
     assert.strictEqual(
       steelEnvironmentIdentity({ RENDER_SERVICE_ID: 'srv-1', CONDUCTOR_WORKSPACE_NAME: 'ws' }),
+      'workspace:ws'
+    );
+    assert.strictEqual(
+      steelEnvironmentIdentity({ RENDER: 'true', RENDER_SERVICE_ID: 'srv-1' }),
       'render:srv-1'
     );
+    assert.strictEqual(steelEnvironmentIdentity({ RENDER_SERVICE_ID: 'srv-1' }), 'local');
     assert.strictEqual(
       steelEnvironmentIdentity({
         BENCHMARK_ISOLATED_RUN: 'true',

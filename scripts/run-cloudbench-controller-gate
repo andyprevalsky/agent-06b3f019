@@ -66,12 +66,15 @@ fi
 export FLY_API_TOKEN
 
 GATE_REF="${CLOUDBENCH_GATE_REF:-$(git rev-parse HEAD)}"
-# Local remote-tracking refs can be stale; refresh them so the check reflects GitHub.
-git fetch -q origin 2>/dev/null || true
-if ! git ls-remote --exit-code origin "refs/heads/$(git branch --show-current)" >/dev/null 2>&1 \
-  || [ -z "$(git branch -r --contains "$GATE_REF" 2>/dev/null)" ]; then
-  echo "❌ $GATE_REF is not on any remote branch; push it first (the machine fetches from GitHub)." >&2
-  exit 1
+# The machine fetches GATE_REF from REPO_URL. For the default repository that is
+# origin, so check containment here (after refreshing stale tracking refs) and
+# fail early; a fork URL is checked by the machine's own fetch (exit 90).
+if [ "$REPO_URL" = "https://github.com/Rose-Ai-Labs/rose.git" ]; then
+  git fetch -q origin 2>/dev/null || true
+  if [ -z "$(git branch -r --contains "$GATE_REF" 2>/dev/null)" ]; then
+    echo "❌ $GATE_REF is not on any origin branch; push it first (the machine fetches from GitHub)." >&2
+    exit 1
+  fi
 fi
 
 GITHUB_TOKEN_VALUE="${GITHUB_TOKEN:-}"
