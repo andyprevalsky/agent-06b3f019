@@ -1025,6 +1025,25 @@ def run_fake_driver(mdir):
         if not discarded:
             log("FATAL: the failed worker launch was never discarded while the task was running")
             exit_code = 1
+    # Likewise a worker that launched but never reaches queue readiness: hold
+    # the task until the provisioner's readiness timeout has retired it, so the
+    # scenario exercises that timeout rather than completion-time draining.
+    if exit_code == 0 and os.path.exists(os.path.join(FAKE_DIR, "worker-never-ready")):
+        runs_root = Path(os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"], ".context", "fleet", "runs")
+        deadline = time.time() + 120
+        retired = False
+        while time.time() < deadline and not retired:
+            for autoscaler_log in runs_root.glob(f"*/{bench}/autoscaler.log"):
+                try:
+                    if "did not reach queue readiness" in autoscaler_log.read_text(errors="replace"):
+                        retired = True
+                        break
+                except OSError:
+                    continue
+            time.sleep(0.1)
+        if not retired:
+            log("FATAL: the never-ready worker was not retired on its readiness timeout while the task was running")
+            exit_code = 1
     # Keep the lower-target regression alive after the in-flight worker reaches
     # its own terminal cleanup boundary. Staging remains committed while it is
     # pending; its provisioner, rather than scale-down, owns any staging-failure
@@ -4200,7 +4219,10 @@ echo "PASS: scenario 2d — failed autoscaled-worker launch fails the fleet clos
 
 # A launch command can succeed even though worker.run() never reaches its
 # Temporal queue-polling health boundary. Allocation and a live machine are not
-# capacity until the worker health endpoint becomes ready.
+# capacity until the worker health endpoint becomes ready: the provisioner
+# retires such a worker on its readiness timeout so capacity can be retried,
+# and a task that completes with demand still unmet keeps its own result while
+# the shortfall is reported explicitly (a849df3f1).
 reset_fake_state
 : > "$FAKE_DIR/journal.log"
 : > "$FAKE_DIR/desired-two"
@@ -4211,11 +4233,18 @@ CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=2 \
     CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=30 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-worker-never-ready.log" \
     autoscaler-worker-never-ready --timeout 240 || autoscale_status=$?
-[ "$autoscale_status" -ne 0 ] ||
-    fail "a fleet must fail when an autoscaled worker never reaches queue readiness"
-grep -Eq 'mandatory autoscaler.*(worker capacity (incomplete|below desired)|worker .* did not reach queue readiness)' \
+[ "$autoscale_status" -eq 0 ] ||
+    fail "a worker that never reaches readiness is retired, and the task's own result must still be reported (exit=$autoscale_status)"
+grep -qF "task finished before future worker demand was needed: 0/1 queue-ready" \
     "$TMP_ROOT/controller-autoscaler-worker-never-ready.log" ||
-    fail "a launched-but-unready worker must produce an explicit readiness failure"
+    fail "unmet worker demand at task completion must be reported explicitly"
+never_ready_stage_logs="$(find "$WS_A/.context/fleet/runs" -path '*/autoscaler-worker-never-ready/worker-*.stage.log' -type f 2>/dev/null || true)"
+[ -n "$never_ready_stage_logs" ] &&
+    printf '%s\n' "$never_ready_stage_logs" | xargs grep -lF "did not reach queue readiness" 2>/dev/null | grep -q . ||
+    fail "a launched-but-unready worker must be retired on an explicit readiness timeout"
+if find "$WS_A/.context/fleet/runs" -path '*/autoscaler-worker-never-ready/worker-*.ready' -type f -print -quit 2>/dev/null | grep -q .; then
+    fail "a worker that never reached queue readiness was published as ready capacity"
+fi
 find "$FAKE_DIR/markers" -maxdepth 1 -name 'worker-launch-succeeded-*' -print -quit |
     grep -q . ||
     fail "the launched-but-unready regression never completed the worker launch boundary"

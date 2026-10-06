@@ -94,6 +94,18 @@ print(max(images, key=stamp) if images else "")
 fi
 [ -n "$IMAGE_REF" ] || { echo "❌ No cloudbench-warm image found on $APP; set WARM_IMAGE_REF" >&2; exit 1; }
 
+# Node for the gate machine: the newest release of the current LTS line, so the
+# controller's strip-types TypeScript helpers run there as they do on this host.
+GATE_NODE_VERSION="${CLOUDBENCH_GATE_NODE_VERSION:-$(curl -fsSL --max-time 15 https://nodejs.org/dist/index.json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+    print(next(r["version"] for r in rows if r["version"].startswith("v24.") and "linux-x64" in r.get("files", [])))
+except Exception:
+    print("")
+' 2>/dev/null)}"
+GATE_NODE_VERSION="${GATE_NODE_VERSION:-v24.21.0}"
+
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 MACHINE_NAME="cloudbench-gate-${GATE_REF:0:8}-${STAMP}"
 GATE_SCRIPT="$(mktemp -t cloudbench-gate.XXXXXX)"
@@ -101,7 +113,12 @@ MACHINE_ID=""
 cleanup() {
   rm -f "$GATE_SCRIPT"
   if [ -n "$MACHINE_ID" ]; then
-    flyctl machine destroy "$MACHINE_ID" -a "$APP" --force >/dev/null 2>&1 || true
+    # A destroy of a machine still pulling its image can hang; bound it so an
+    # interrupted gate exits promptly (the machine is --rm and times out anyway).
+    flyctl machine destroy "$MACHINE_ID" -a "$APP" --force >/dev/null 2>&1 &
+    local destroy_pid=$!
+    for _ in $(seq 1 45); do kill -0 "$destroy_pid" 2>/dev/null || break; sleep 1; done
+    kill "$destroy_pid" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT INT TERM
@@ -118,16 +135,33 @@ trap cleanup EXIT INT TERM
   echo '# Dependencies are baked into the warm image; the suites only need the paths.'
   echo 'ln -s /app/node_modules node_modules; ln -s /app/back-end/node_modules back-end/node_modules'
   echo 'ln -s /app/agents/venv agents/venv; [ -d /app/front-end/node_modules ] && ln -s /app/front-end/node_modules front-end/node_modules'
+  echo '# The controller runs TypeScript helpers with `node --experimental-strip-types`,'
+  echo '# which the image'"'"'s Node 20 rejects; the controller host runs a current Node.'
+  echo 'if ! node --experimental-strip-types -e "export {}" >/dev/null 2>&1; then'
+  echo '  mkdir -p /tmp/gate/node && curl -fsSL "https://nodejs.org/dist/$GATE_NODE_VERSION/node-$GATE_NODE_VERSION-linux-x64.tar.gz" | tar -xz --strip-components=1 -C /tmp/gate/node || { echo "GATE_RESULT exit=91 node_install_failed version=$GATE_NODE_VERSION"; exit 91; }'
+  echo '  echo "GATE_NODE $(/tmp/gate/node/bin/node --version) installed (image had $(node --version))"'
+  echo 'fi'
+  echo '# The bench app injects the shared .env files as base64 secrets (what the'
+  echo '# fleet entrypoint decodes for guests); the controller suites read R2 and'
+  echo '# provider settings from those files exactly as they do on a developer host.'
+  echo '[ -z "${BACKEND_ENV_B64:-}" ] || printf "%s" "$BACKEND_ENV_B64" | base64 -d > back-end/.env'
+  echo '[ -z "${AGENTS_ENV_B64:-}" ] || printf "%s" "$AGENTS_ENV_B64" | base64 -d > agents/.env'
+  echo 'echo "GATE_ENV backend_env=$([ -s back-end/.env ] && echo yes || echo no) agents_env=$([ -s agents/.env ] && echo yes || echo no)"'
   echo 'chown -R rose:rose /tmp/gate 2>/dev/null || true'
-  echo 'export PATH="/tmp/gate/repo/agents/venv/bin:$PATH" HOME=/home/rose'
+  echo 'export PATH="/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:$PATH" HOME=/home/rose'
   echo 'overall=0'
   echo 'n=0'
   for suite in "${SUITES[@]}"; do
     printf 'n=$((n+1)); echo "GATE_STEP_START %s"\n' "$suite"
-    printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "cd /tmp/gate/repo && $suite"
-    printf 'echo "GATE_STEP %s exit=$rc"; [ $rc -eq 0 ] || { overall=1; echo "GATE_FAIL_TAIL_START $n"; tail -n 60 "/tmp/gate/step-$n.log"; echo "GATE_FAIL_TAIL_END $n"; }\n' "$suite"
+    # bash -l re-reads the profile and resets PATH, so the gate's Node and venv go on PATH inside the command.
+    printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "export PATH=/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
+    printf 'echo "GATE_STEP %s exit=$rc"; [ $rc -eq 0 ] || { overall=1; echo "GATE_STEP_FAILED $n"; echo "GATE_FAIL_TAIL_START $n"; tail -n 60 "/tmp/gate/step-$n.log"; echo "GATE_FAIL_TAIL_END $n"; }\n' "$suite"
   done
   echo 'echo "GATE_RESULT exit=$overall"'
+  echo '# Fly returns ~100 log lines per read, so a failed suite'"'"'s tail is lost in the'
+  echo '# stream. Stay alive until the controller has copied the full step logs out'
+  echo '# (it touches /tmp/gate/fetched); --rm destroys the machine on exit.'
+  echo 'if [ "$overall" -ne 0 ]; then for _ in $(seq 1 900); do [ -e /tmp/gate/fetched ] && break; sleep 1; done; fi'
   echo 'exit $overall'
 } > "$GATE_SCRIPT"
 
@@ -144,7 +178,7 @@ flyctl machine run "$IMAGE_REF" \
   --entrypoint "/bin/bash" \
   --file-local "/tmp/gate.sh=$GATE_SCRIPT" \
   -e "GATE_GITHUB_TOKEN_B64=$(printf '%s' "$GITHUB_TOKEN_VALUE" | base64 | tr -d '\n')" \
-  -e "GATE_REF=$GATE_REF" -e "GATE_REPO_URL=$REPO_URL" \
+  -e "GATE_REF=$GATE_REF" -e "GATE_REPO_URL=$REPO_URL" -e "GATE_NODE_VERSION=$GATE_NODE_VERSION" \
   "/tmp/gate.sh" 2>&1 | tee "$RUN_LOG"
 set -e
 MACHINE_ID="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}')"
@@ -196,6 +230,18 @@ if [ "$code" = "0" ]; then
   echo "✅ cloud-bench controller gate passed on Linux ($MACHINE_ID)"
 else
   echo "❌ cloud-bench controller gate failed on Linux ($MACHINE_ID): $result" >&2
-  echo "   failed suites' output (last 60 lines each) is in $MACHINE_LOG between GATE_FAIL_TAIL_START/END markers" >&2
+  # The machine waits for /tmp/gate/fetched before exiting, so the complete
+  # output of every failed suite can be copied out here.
+  for n in $(grep -oE 'GATE_STEP_FAILED [0-9]+' "$MACHINE_LOG" | awk '{print $2}' | sort -un); do
+    step_log="${MACHINE_LOG%.log}-step-$n.log"
+    rm -f "$step_log"
+    if flyctl ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$n.log" "$step_log" >/dev/null 2>&1 \
+      && [ -s "$step_log" ]; then
+      echo "   failed suite #$n full output: $step_log ($(wc -l < "$step_log") lines)" >&2
+    else
+      echo "   failed suite #$n: could not copy /tmp/gate/step-$n.log; its last 60 lines are in $MACHINE_LOG between GATE_FAIL_TAIL_START/END $n" >&2
+    fi
+  done
+  flyctl ssh console -a "$APP" --machine "$MACHINE_ID" -C "touch /tmp/gate/fetched" >/dev/null 2>&1 || true
 fi
 exit "$code"

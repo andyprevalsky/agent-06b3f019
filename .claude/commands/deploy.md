@@ -644,9 +644,10 @@ fetches the pushed HEAD and runs the suites below:
 bash scripts/run-deploy-stage cloudbench-controller -- bash scripts/run-cloudbench-controller-gate
 ```
 
-It prints `GATE_STEP <suite> exit=N` per suite and exits with the overall result; the full
-machine log (including the last 60 lines of every failed suite) lands under
-`.context/cloudbench-gate-<machine>.log`. The machine is destroyed when the gate ends. To
+It prints `GATE_STEP <suite> exit=N` per suite and exits with the overall result; the
+machine log lands under `.context/cloudbench-gate-<machine>.log` and every failed suite's
+complete output is copied to `.context/cloudbench-gate-<machine>-step-<n>.log` before the
+machine is destroyed. Run one suite with `-- "<command>"`. To
 check whether a failure is pre-existing, run the same command with
 `CLOUDBENCH_GATE_REF=$(git rev-parse origin/main)`. Only run the commands below directly on
 a Linux host; a macOS failure of the `/proc`-dependent suites does not block the deploy and
