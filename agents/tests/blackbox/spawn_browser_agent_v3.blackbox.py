@@ -8963,6 +8963,70 @@ async def test_browser_thinking_stream_restart_closes_the_abandoned_attempt():
     assert retry[-1]["done"] is True
 
 
+async def test_credential_propagation_failure_keeps_the_browser_run_outcome():
+    """A backend error while recording credential liveness is bookkeeping: the
+    finished browser run keeps its outcome instead of failing and being retried
+    (a Prisma transaction expired under load and failed a completed sign-in, 2026-10-06)."""
+    import httpx
+
+    from domains.spawn_browser_agent_v3 import handler
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from tools.base import MessageStatus
+
+    saved: list = []
+
+    async def record(**kwargs):
+        saved.append(kwargs)
+
+    request = httpx.Request("POST", "http://backend.test/api/credential-propagation/browser-run")
+    response = httpx.Response(500, request=request, text="Transaction already closed")
+    with (
+        patch.object(
+            handler,
+            "propagate_browser_run_credentials",
+            AsyncMock(side_effect=httpx.HTTPStatusError("500", request=request, response=response)),
+        ),
+        patch.object(handler, "save_browser_action_message", record),
+    ):
+        result = await handler._propagate_browser_credentials_with_progress(
+            config=MagicMock(),
+            agent_id="agent-1",
+            task_id="browser-task-1",
+            browser_url="https://shop.example/account",
+            status="completed",
+            success=True,
+            message="Signed in.",
+        )
+    assert result["outcome"] == "unknown" and result["refs"] == 0 and result["applied"] == 0, result
+    assert "500" in result["error"], result
+    assert [item["status"] for item in saved] == [MessageStatus.IN_PROGRESS, MessageStatus.ERROR], saved
+    assert saved[-1]["title"] == "Credential state update failed"
+
+    # A replaced workflow generation still stops the run.
+    with (
+        patch.object(
+            handler,
+            "propagate_browser_run_credentials",
+            AsyncMock(side_effect=WorkflowGenerationSealed("sealed")),
+        ),
+        patch.object(handler, "save_browser_action_message", record),
+    ):
+        try:
+            await handler._propagate_browser_credentials_with_progress(
+                config=MagicMock(),
+                agent_id="agent-1",
+                task_id="browser-task-1",
+                browser_url="",
+                status="completed",
+                success=True,
+                message="Signed in.",
+            )
+        except WorkflowGenerationSealed:
+            pass
+        else:
+            raise AssertionError("a sealed generation must not be swallowed as bookkeeping")
+
+
 async def test_browser_streaming_rose_client_forwards_and_folds_chunks():
     from domains.spawn_browser_agent_v3.streaming import BrowserStreamingRoseClient
     from providers.rose import RoseClient, StreamChunk
@@ -25904,6 +25968,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_thinking_stream_restart_closes_abandoned_attempt",
         test_browser_thinking_stream_restart_closes_the_abandoned_attempt,
+    )
+    await r.record_async(
+        "credential_propagation_failure_keeps_browser_run_outcome",
+        test_credential_propagation_failure_keeps_the_browser_run_outcome,
     )
     await r.record_async(
         "browser_streaming_rose_client_forwards_chunks",

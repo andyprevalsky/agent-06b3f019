@@ -134,7 +134,7 @@ dedupe_machine_log() {
 GATE_SCRIPT="$(mktemp -t cloudbench-gate.XXXXXX)"
 MACHINE_ID=""
 cleanup() {
-  rm -f "$GATE_SCRIPT" "${CLOUDBENCH_GATE_SELF_COPY:-}"
+  rm -f "$GATE_SCRIPT" "${GATE_TOKEN_FILE:-}" "${CLOUDBENCH_GATE_SELF_COPY:-}"
   if [ -n "$MACHINE_ID" ]; then
     # A destroy of a machine still pulling its image can hang; bound it so an
     # interrupted gate exits promptly (the machine is --rm and times out anyway).
@@ -153,7 +153,7 @@ trap 'exit 143' TERM
   echo '#!/usr/bin/env bash'
   echo 'set -uo pipefail'
   echo 'echo "GATE_START $(date -u +%FT%TZ) $(uname -srm)"'
-  echo 'token="$(printf "%s" "$GATE_GITHUB_TOKEN_B64" | base64 -d)"'
+  echo 'token="$(cat /tmp/gate-github-token)"; rm -f /tmp/gate-github-token'
   echo 'mkdir -p /tmp/gate && cd /tmp/gate'
   echo 'git init -q repo && cd repo'
   echo 'git -c http.extraheader="AUTHORIZATION: basic $(printf "x-access-token:%s" "$token" | base64 -w0)" fetch -q --depth 1 "$GATE_REPO_URL" "$GATE_REF" || { echo "GATE_RESULT exit=90 fetch_failed"; exit 90; }'
@@ -176,13 +176,15 @@ trap 'exit 143' TERM
   echo 'chown -R rose:rose /tmp/gate 2>/dev/null || true'
   echo 'export PATH="/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:$PATH" HOME=/home/rose'
   echo 'overall=0'
+  echo 'failed_steps=""'
   echo 'n=0'
   for suite in "${SUITES[@]}"; do
     printf 'n=$((n+1)); echo "GATE_STEP_START %s"\n' "$suite"
     # bash -l re-reads the profile and resets PATH, so the gate's Node and venv go on PATH inside the command.
     printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "export PATH=/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
-    printf 'echo "GATE_STEP %s exit=$rc"; [ $rc -eq 0 ] || { overall=1; echo "GATE_STEP_FAILED $n"; echo "GATE_FAIL_TAIL_START $n"; tail -n 60 "/tmp/gate/step-$n.log"; echo "GATE_FAIL_TAIL_END $n"; }\n' "$suite"
+    printf 'echo "GATE_STEP %s exit=$rc"; [ $rc -eq 0 ] || { overall=1; failed_steps="$failed_steps $n"; echo "GATE_STEP_FAILED $n"; echo "GATE_FAIL_TAIL_START $n"; tail -n 60 "/tmp/gate/step-$n.log"; echo "GATE_FAIL_TAIL_END $n"; }\n' "$suite"
   done
+  echo 'echo "GATE_FAILED_STEPS${failed_steps}"'
   echo 'echo "GATE_RESULT exit=$overall"'
   echo '# Fly returns ~100 log lines per read, so a failed suite'"'"'s tail is lost in the'
   echo '# stream. Stay alive until the controller has copied the full step logs out'
@@ -192,6 +194,11 @@ trap 'exit 143' TERM
 } > "$GATE_SCRIPT"
 
 echo "🖥️  Gate machine: $MACHINE_NAME  image: ${IMAGE_REF##*/}  ref: $GATE_REF"
+# The token rides to the machine as a file: a process argument (even base64)
+# is readable by every local user through the command line.
+GATE_TOKEN_FILE="$(mktemp -t cloudbench-gate-token.XXXXXX)"
+chmod 600 "$GATE_TOKEN_FILE"
+printf '%s' "$GITHUB_TOKEN_VALUE" > "$GATE_TOKEN_FILE"
 RUN_LOG="$(mktemp -t cloudbench-gate-run.XXXXXX)"
 # flyctl's own start wait is shorter than a cold 2 GB image pull and then exits
 # non-zero even though the machine comes up; the machine id in its output is
@@ -203,12 +210,12 @@ flyctl machine run "$IMAGE_REF" \
   --restart no --rm --detach \
   --entrypoint "/bin/bash" \
   --file-local "/tmp/gate.sh=$GATE_SCRIPT" \
-  -e "GATE_GITHUB_TOKEN_B64=$(printf '%s' "$GITHUB_TOKEN_VALUE" | base64 | tr -d '\n')" \
+  --file-local "/tmp/gate-github-token=$GATE_TOKEN_FILE" \
   -e "GATE_REF=$GATE_REF" -e "GATE_REPO_URL=$REPO_URL" -e "GATE_NODE_VERSION=$GATE_NODE_VERSION" \
   "/tmp/gate.sh" 2>&1 | tee "$RUN_LOG"
 set -e
 MACHINE_ID="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}')"
-rm -f "$RUN_LOG"
+rm -f "$RUN_LOG" "$GATE_TOKEN_FILE"
 [ -n "$MACHINE_ID" ] || { echo "❌ Could not read the gate machine id" >&2; exit 1; }
 echo "✅ machine $MACHINE_ID started; waiting up to ${TIMEOUT_S}s"
 
@@ -258,7 +265,11 @@ else
   echo "❌ cloud-bench controller gate failed on Linux ($MACHINE_ID): $result" >&2
   # The machine waits for /tmp/gate/fetched before exiting, so the complete
   # output of every failed suite can be copied out here.
-  for n in $(grep -oE 'GATE_STEP_FAILED [0-9]+' "$MACHINE_LOG" | awk '{print $2}' | sort -un); do
+  # The summary line is printed right before GATE_RESULT, so it is always in the
+  # final log read; per-step markers can scroll out when several suites fail.
+  failed_steps="$(grep -oE 'GATE_FAILED_STEPS( [0-9]+)*' "$MACHINE_LOG" | tail -1 | sed 's/GATE_FAILED_STEPS//')"
+  [ -n "$failed_steps" ] || failed_steps="$(grep -oE 'GATE_STEP_FAILED [0-9]+' "$MACHINE_LOG" | awk '{print $2}')"
+  for n in $(printf '%s\n' $failed_steps | sort -un); do
     step_log="${MACHINE_LOG%.log}-step-$n.log"
     rm -f "$step_log"
     if flyctl ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$n.log" "$step_log" >/dev/null 2>&1 \

@@ -110,7 +110,6 @@ async def recover_truncated(
         actual_model = ""
         finish_reason = ""
         completion_tokens = 0
-        prompt_tokens = 0
         usage_data: Dict[str, Any] = {}
         saw_tool_call = False
         async with aclosing(attempt(**current)) as stream:
@@ -122,7 +121,6 @@ async def recover_truncated(
                 elif chunk.kind == "usage":
                     finish_reason = str(chunk.data.get("finish_reason") or "")
                     completion_tokens = int(chunk.data.get("completion_tokens") or 0)
-                    prompt_tokens = int(chunk.data.get("prompt_tokens") or 0)
                     usage_data = dict(chunk.data)
                 if chunk.kind in ("usage", "done"):
                     held.append(chunk)

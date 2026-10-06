@@ -560,6 +560,11 @@ def test_cloud_fleet_controller_detaches_by_default():
     assert fleet.index("cloudbench_detach_reexec") < fleet.index("cloudbench_controller_lock_acquire")
 
 
+# Host guard for the pytest gates spawned below: alone they finish in ~13s, but
+# under the deploy host's concurrent coverage lanes they ran past 60s (2026-10-06).
+PYTEST_HOST_GUARD_S = 300
+
+
 def test_private_fleet_source_behavior_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
@@ -576,7 +581,7 @@ def test_private_fleet_source_behavior_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=60,
+        timeout=PYTEST_HOST_GUARD_S,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -597,7 +602,7 @@ def test_evaluated_fleet_outcomes_publish_before_teardown():
         cwd=repo_root,
         text=True,
         capture_output=True,
-        timeout=60,
+        timeout=PYTEST_HOST_GUARD_S,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -751,7 +756,7 @@ def test_cloudbench_pool_vm_shapes_are_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=60,
+        timeout=PYTEST_HOST_GUARD_S,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -882,7 +887,7 @@ def test_cloudbench_codex_auth_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=60,
+        timeout=PYTEST_HOST_GUARD_S,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -962,7 +967,7 @@ def test_cloudbench_log_transport_contract_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=60,
+        timeout=PYTEST_HOST_GUARD_S,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "2 passed" in result.stdout

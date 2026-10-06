@@ -55,6 +55,7 @@ from helpers.wait_condition_or_handoff import (
     sleep_or_generation_handoff,
     wait_condition_or_generation_handoff,
 )
+from helpers.workflow_generation import WorkflowGenerationSealed
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
@@ -1174,8 +1175,21 @@ async def _propagate_browser_credentials_with_progress(
             success=success,
             message=message,
         )
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
+        # Propagation is bookkeeping about the credentials the finished run used.
+        # The run's own outcome stands: a backend 500 here (a Prisma transaction
+        # expiring under load, 2026-10-06) must not turn a completed browser task
+        # into a failure that the planner then retries from scratch.
         error_message = extract_error_message(e)
+        logger.warning(
+            "Credential propagation failed; keeping the browser run's outcome",
+            agent_id=agent_id,
+            task_id=task_id,
+            status=status,
+            error=error_message,
+        )
         await save_browser_action_message(
             agent_id=agent_id,
             title="Credential state update failed",
@@ -1186,7 +1200,7 @@ async def _propagate_browser_credentials_with_progress(
             action_type="credential_propagation",
             tool_call_id=tool_call_id,
         )
-        raise
+        return {"outcome": "unknown", "refs": 0, "applied": 0, "error": error_message}
 
     outcome = result.get("outcome", "unknown")
     refs = result.get("refs", 0)

@@ -57,8 +57,7 @@ import httpx
 
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from benchmarks import auth_assistance_user, auth_test_site
-from benchmarks import cloud_batch_cleanup
+from benchmarks import auth_assistance_user, auth_test_site, cloud_batch_cleanup
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
