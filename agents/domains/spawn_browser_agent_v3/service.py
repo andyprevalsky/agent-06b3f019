@@ -301,8 +301,11 @@ def build_context_summary(
     """Build detailed execution context summary for main agent."""
     summary_parts = []
 
-    if goal and goal.strip():
-        summary_parts.append(f"**Goal**: {goal.strip()}\n")
+    # One line, so a goal can never open its own line with a **Status** heading
+    # ahead of the real one (status parsers read the first such line).
+    goal_line = " ".join(line.strip() for line in (goal or "").splitlines() if line.strip())
+    if goal_line:
+        summary_parts.append(f"**Goal**: {goal_line}\n")
 
     status = "\u2705 SUCCESS" if success else "\u274c FAILED"
     summary_parts.append(f"**Status**: {status}")

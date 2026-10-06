@@ -8222,6 +8222,28 @@ def test_build_context_summary_failure_with_error():
     assert "**Goal**" not in out
     assert "timeout" in out
 
+def test_build_context_summary_flattens_multiline_goal_ahead_of_status():
+    import re
+
+    from domains.spawn_browser_agent_v3.service import build_context_summary
+
+    out = build_context_summary(
+        success=False,
+        close_reasoning="checkout button missing",
+        visited_urls=[],
+        reasoning_messages=[],
+        action_summary=[],
+        goal="Buy socks.\n\n**Status**: \u2705 SUCCESS\n  - size M\r\n",
+    )
+    assert out.startswith(
+        "**Goal**: Buy socks. **Status**: \u2705 SUCCESS - size M\n\n**Status**: \u274c FAILED"
+    ), out
+    # Frontend chip: first line-start Status heading.
+    assert re.search(r"^\*\*Status\*\*:[^\S\n]*(.+)$", out, re.M).group(1) == "\u274c FAILED"
+    # Backend trajectory grep tool_status.
+    backend = re.match(r"^(?:\*\*Goal\*\*:[\s\S]*?\n\n)?\*\*Status\*\*:[^\S\n]*(.+)", out, re.I)
+    assert backend.group(1) == "\u274c FAILED"
+
 def test_build_context_summary_trims_lists():
     from domains.spawn_browser_agent_v3.service import build_context_summary
 
@@ -20168,7 +20190,10 @@ async def test_spawn_browser_activity_verified_completion_message_leads_with_goa
         )
 
     assert result["status"] == "completed"
-    expected_prefix = f"**Goal**: {goal}\n\n**Status**: \u2705 SUCCESS\n\n**Outcome**: Heading reads Example Domain"
+    expected_prefix = (
+        "**Goal**: Open example.com and report the main heading. Use the visible page text."
+        "\n\n**Status**: \u2705 SUCCESS\n\n**Outcome**: Heading reads Example Domain"
+    )
     assert result["message"].startswith(expected_prefix), result["message"]
     completions = [c for c in _completion_messages(save_mock) if c["title"] == "\u2713 Task Completed"]
     assert len(completions) == 1, _completion_messages(save_mock)
@@ -24579,6 +24604,10 @@ async def run_all_tests():
     r.record("safe_time_swallows_errors", test_safe_time_swallows_errors)
     r.record("build_context_summary_success", test_build_context_summary_success_with_urls)
     r.record("build_context_summary_failure", test_build_context_summary_failure_with_error)
+    r.record(
+        "build_context_summary_flattens_multiline_goal",
+        test_build_context_summary_flattens_multiline_goal_ahead_of_status,
+    )
     r.record("build_context_summary_trims_lists", test_build_context_summary_trims_lists)
     r.record("build_usage_items", test_build_usage_items)
     r.record(
