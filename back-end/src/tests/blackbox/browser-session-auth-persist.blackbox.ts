@@ -87,8 +87,8 @@ async function verifyHarvestRestoresOnOtherProvider(): Promise<void> {
   const source = await chromium.launch({ headless: true });
   const steelBrowser = await chromium.launch({ headless: true });
   const nextKernel = await chromium.launch({ headless: true });
-  await steelBrowser.newPage();
-  await nextKernel.newPage();
+    await steelBrowser.newContext();
+    await nextKernel.newContext();
   await prisma.user.create({ data: { userId, isAnonymous: true } });
   try {
     const kernelSession = await createSession({
