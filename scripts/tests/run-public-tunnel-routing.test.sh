@@ -556,6 +556,9 @@ while [ "$#" -gt 0 ]; do
 done
 case "${NGROK_RESPONSE_KIND:-pre-origin}" in
   pre-origin) status=400; printf 'HTTP/2 400\r\nNgrok-Error-Code: ERR_NGROK_8012\r\nContent-Type: text/html\r\n\r\n' > "$headers"; printf '<html>upstream not started</html>' > "$body" ;;
+  # The live ngrok edge answers 502 for ERR_NGROK_8012 before the origin listens.
+  pre-origin-502) status=502; printf 'HTTP/2 502\r\nContent-Type: text/html\r\nNgrok-Error-Code: ERR_NGROK_8012\r\nReferrer-Policy: no-referrer\r\n\r\n' > "$headers"; printf '<html>upstream not started</html>' > "$body" ;;
+  unmarked-502) status=502; printf 'HTTP/2 502\r\nContent-Type: text/html\r\n\r\n' > "$headers" ;;
   healthy|wrong-body)
     status=200; printf 'HTTP/2 200\r\nContent-Type: text/html\r\n\r\n' > "$headers"
     printf '<div id="root">own-app</div>' > "$body"
@@ -612,6 +615,9 @@ echo "PASS: the per-worktree ngrok fallback domain is still reserved and bound"
 NGROK_RESPONSE_KIND=healthy run_ngrok_fallback krakow-bench-healthy-origin \
   || fail "case 10: authentic healthy app must pass ngrok route proof"
 echo "PASS: ngrok healthy200 matches its owned local app origin"
+NGROK_RESPONSE_KIND=pre-origin-502 run_ngrok_fallback krakow-bench-pre-origin-502 \
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: the edge's 502 ERR_NGROK_8012 before the origin listens must prove routing"; }
+echo "PASS: ngrok's 502 ERR_NGROK_8012 before the origin listens proves the owned route"
 NGROK_EVENT_KIND=delayed run_ngrok_fallback krakow-bench-delayed-publication \
   || fail "case 10: initial log absence must remain pending until the current child publishes"
 echo "PASS: delayed current-child log publication remains pending then routes"
@@ -631,7 +637,7 @@ for event in foreign-url wrong-upstream; do
   [ ! -e "$TMP/ngrok-published" ] || fail "case 10: structured $event was published before ownership rejection"
 done
 echo "PASS: ngrok's structured upstream address is owned only for the requested origin and port"
-for response in offline unmarked proxy proxy-after-connect wrong-body; do
+for response in offline unmarked unmarked-502 proxy proxy-after-connect wrong-body; do
   if NGROK_RESPONSE_KIND="$response" run_ngrok_fallback krakow-bench-route-negative; then
     fail "case 10: ngrok $response must not certify routing"
   fi
