@@ -146,6 +146,13 @@ def _auth_headers(*, required: bool) -> dict[str, str] | None:
     }
 
 
+def _hub_opener(url: str):
+    """Keep loopback local and preserve configured routing for external Hubs."""
+    if urlparse(url).hostname in {"localhost", "127.0.0.1", "::1"}:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener()
+
+
 _TOOL_USAGE_TREE_KEYS = frozenset(
     {
         "root_agent_id",
@@ -282,9 +289,7 @@ def _post_run_bundle(
         headers=headers,
         method="POST",
     )
-    # Localhost hub URLs must never route through an ambient HTTP proxy
-    # (e.g. the fast-mode proxy) — same trap as archive_api's _direct_opener.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = _hub_opener(base)
     max_attempts = 4 if required else 1
     for attempt in range(1, max_attempts + 1):
         try:
@@ -549,7 +554,7 @@ def verify_run_visible(run_id: str, *, timeout: float = 30.0) -> None:
         headers=headers,
         method="GET",
     )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = _hub_opener(base)
     try:
         with opener.open(request, timeout=timeout) as response:
             payload = json.loads(response.read() or b"{}")

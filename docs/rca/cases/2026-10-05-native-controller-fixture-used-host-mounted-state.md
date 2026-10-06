@@ -19,9 +19,10 @@ tags:
   - ownership
 sources:
   - commit f447fd392e4eeb4376c8fa1324b2237b1e366243
+  - commit f1e756cea51c1946ad80ea8904d88ca0547452ce
   - task canonical cloudbench-multi-workstream deployment gate
 repro: scripts/tests/cloudbench-multi-workstream.test.sh scenario 1 through the normal Mac dispatcher
-status: mitigated
+status: fixed
 ---
 
 ## Problem
@@ -66,8 +67,12 @@ storage, private export, copy failure and exception cleanup, stop failure,
 cancellation ordering, signal-retention inverses, and CID handling. Independent
 actual TERM cancellation returned 143, exported the exact observed fake-provider
 state among 3,251 private files, proved its exact container absent, and preserved
-an unrelated inert sibling through retirement. The complete unchanged 32-scenario
-gate remains required before closing the deployment stage. Production controller policy, provider locking, retries,
+an unrelated inert sibling through retirement. The final normal Mac dispatcher
+completed all 32 scenarios with exit 0 in 1,276.170 seconds on clean
+`f1e756cea51c1946ad80ea8904d88ca0547452ce`. Its exact native container was absent;
+all 2,147 exported regular files were mode 0600 and exported directories were
+0700. The executed source hashes remained unchanged throughout that run.
+Production controller policy, provider locking, retries,
 assertions and budgets are unchanged. The distinct signal-retention predicate
 repair is recorded in
 `2026-10-05-controller-fixture-deleted-canceled-evidence.md`.
@@ -80,6 +85,15 @@ instrumented run on the corrected child contracts subsequently proved all
 retirement branches and private export in 6.212 seconds. No further exporter
 source change is justified by that successful reproduction; the original failed
 receipt is retained alongside it.
+
+Final source-bound receipts are
+`.context/deploy-runs/20261006-024302-65153/native-storage-repair-final/controller-full-normal-final-summary.json`
+and `native-storage-final-artifact-privacy.safe.json` under the same deploy-run
+directory. The strict composite coverage acceptance separately passed at 82%,
+retaining the original failed aggregates and unchanged funded successes. This
+final normal gate verifies the repaired storage/export contract; it does not
+retroactively prove either original suppressed exception or the later
+unexplained export verdict.
 
 ## Human feedback
 

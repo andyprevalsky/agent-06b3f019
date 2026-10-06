@@ -681,6 +681,17 @@ with `scripts/cloudbench-build-interrupted-pool-archive.py`, then run
 owner canceled before allocation can legitimately lack a pool directory and
 execution inputs; normal recovery proves empty ledgers and absence of allocation
 markers recursively. Never fabricate missing inputs or guest receipts.
+If recovery retains a shared central Hub with
+`retained-exact-owner-transfer-required`, first prove that every controller
+borrowing that exact Hub token has retired. Keep its owner file and use the
+existing helper from modern Bash: source `scripts/lib/cloudbench-env.sh`, then
+call `cloudbench_terminate_central_hub_owner <port> <absolute-runs-root>
+<absolute-repo-root> <absolute-owner-file> 120`. The helper checks the exact
+PID birth, command, endpoint and token before signaling, and writes a read-only
+terminal receipt after verifying process-group absence. Retry the original
+`--recover-stale-owner` command to seal the remaining claim. Preserve other
+Hubs, the progress dashboard, provider inventory and the user's network settings;
+never remove a claim merely because its resource observation timed out.
 An interrupted task
 that allocated no browser session may carry a `provider-zero-manifest` plus
 its exact zero-allocation query receipt; the forensic verifier checks those

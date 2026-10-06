@@ -18,9 +18,10 @@ tags:
   - evidence
 sources:
   - commit 07477013e5532725632ea1438237e56a2a945dc6
+  - commit f1e756cea51c1946ad80ea8904d88ca0547452ce
   - task canonical cloudbench-multi-workstream deployment gate
 repro: scripts/tests/cloudbench-controller-linux.test.py ContainerOwnership.test_actual_fixture_cleanup_retains_only_requested_failure_evidence
-status: mitigated
+status: fixed
 ---
 
 ## Problem
@@ -53,8 +54,9 @@ compact controls passed in 0.035 seconds. The unchanged independent cleanup
 reduction passed all five cases. The actual repeated TERM/export proof also
 passed: exit 143, the exact observed fake-state file retained among 3,251 private
 files, exact fixture container absent, and an inert sibling preserved through
-retirement. The full normal native gate remains required before closing deployment
-evidence. The original failed integration is retained separately.
+retirement. The original failed integration is retained separately; this TERM
+proof verifies cancellation evidence independently from the successful full
+gate below.
 
 The next full gate passed concurrent provisioning, then exposed a related
 fixture-policy interaction: two deliberate TERM cleanup contracts expected their
@@ -67,7 +69,19 @@ the inherited flag. The unchanged actual native pending-Hub and prepublication
 contracts then passed through the normal dispatcher in 6.212 seconds, preserving
 all original process and directory assertions. That bounded run also proved
 stop, private export, exact removal and native absence, with all 2,147 exported
-regular files at mode 0600. The full native gate remains pending.
+regular files at mode 0600.
+
+The final normal Mac dispatcher completed all 32 scenarios without filters or
+skips, exit 0 in 1,276.170 seconds, on clean
+`f1e756cea51c1946ad80ea8904d88ca0547452ce`. The executed fixture and helper hashes
+remained unchanged. Its exact container was absent and all 2,147 exported
+regular files were mode 0600. The successful-run export does not replace the
+separate TERM143 proof that retains the original fake state. Final receipts are
+under
+`.context/deploy-runs/20261006-024302-65153/native-storage-repair-final/`;
+the strict 82% composite acceptance preserves all earlier failed receipts and
+binds the unchanged funded successes honestly. No speculative exporter fix was
+made for the separate unexplained verdict in the earlier failed full run.
 
 ## Human feedback
 

@@ -242,6 +242,15 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
                 os.environ[name] = value
 
 
+def test_hub_requests_preserve_external_proxy_routing():
+    from pytest import MonkeyPatch
+
+    from benchmarks.hub_upload_test import test_hub_requests_preserve_external_proxy_routing as control
+
+    with MonkeyPatch.context() as monkeypatch:
+        control(monkeypatch)
+
+
 def test_hub_upload_rejection_retains_safe_response_identity_without_retry():
     """A forbidden upload stays failed while preserving upstream correlation."""
     from benchmarks.hub_upload import HubVisibilityError, upload_run_bundle
@@ -19747,6 +19756,7 @@ async def run_all_tests():
         "hub_upload_gzip_preserves_live_and_final_bundles_across_retry",
         test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry,
     )
+    r.record("hub_requests_preserve_external_proxy_routing", test_hub_requests_preserve_external_proxy_routing)
     r.record("evaluated_fleet_outcomes_publish_before_teardown", test_evaluated_fleet_outcomes_publish_before_teardown)
     r.record(
         "cloudbench_rejects_stale_wrong_task",

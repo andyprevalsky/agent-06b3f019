@@ -365,6 +365,7 @@ export async function isHubRunVisible(runId: string): Promise<boolean | null> {
 }
 
 const INDEX_LOCK_KEY = 'benchmark-hub:index';
+let indexAdmissionTail: Promise<void> = Promise.resolve();
 
 /**
  * Serialize the shared index read-modify-write across every backend process.
@@ -374,16 +375,24 @@ const INDEX_LOCK_KEY = 'benchmark-hub:index';
  * when an R2 operation throws.
  */
 async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
-  return prisma.$transaction(
-    async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${INDEX_LOCK_KEY}))`;
-      return operation();
-    },
-    // A corruption-only repair may cooperatively read the entire archive while
-    // holding this cross-process lock. Normal writes remain small, but the rare
-    // repair must finish atomically rather than timing out at the old 30s limit.
-    { maxWait: 30_000, timeout: 5 * 60_000 }
+  // Wait before borrowing a connection. Otherwise concurrent uploads occupy
+  // the SQL pool while waiting for the same cross-process advisory lock.
+  const pending = indexAdmissionTail.then(() =>
+    prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${INDEX_LOCK_KEY}))`;
+        return operation();
+      },
+      // A corruption-only repair may cooperatively read the entire archive while
+      // holding this cross-process lock. Normal writes remain small, but the rare
+      // repair must finish atomically rather than timing out at the old 30s limit.
+      { maxWait: 30_000, timeout: 5 * 60_000 }
+    )
   );
+  // A rejected mutation remains rejected for its caller and releases the next
+  // admission, just as PostgreSQL releases the transaction-scoped lock.
+  indexAdmissionTail = pending.then(() => undefined).catch(() => undefined);
+  return pending;
 }
 
 function normalizeAgentId(value: unknown): string | null {

@@ -83,6 +83,14 @@ def main() -> int:
             f"stamp missing/stale — running N={args.width} before capability fleet"
         )
         environment = os.environ.copy()
+        # This substrate check must finish before its caller can join the
+        # campaign. The nested controller does not own the caller's slot.
+        for key in (
+            "RUN_BENCH_CAMPAIGN_BARRIER_DIR",
+            "RUN_BENCH_CAMPAIGN_COHORT",
+            "RUN_BENCH_CAMPAIGN_JOB_ID",
+        ):
+            environment.pop(key, None)
         environment.update(
             {
                 "CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE": "1",
