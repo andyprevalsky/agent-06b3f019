@@ -9,7 +9,11 @@ import { prisma } from './database';
 import { createLogger } from './logger';
 import { logTruncate } from '../utils/log';
 import { archiveJson } from './traceArchive';
-import { buildMockSurgeSendResult, shouldMockBenchmarkSmsSend } from './smsTransportMock';
+import {
+  buildMockSurgeSendResult,
+  shouldMockMessagingSend,
+  type MessagingMockReason,
+} from './smsTransportMock';
 
 const log = createLogger('SMS');
 
@@ -97,9 +101,9 @@ export async function sendSms(
   };
 
   const mockSeed = `${options.archiveRootAgentId ?? 'no-agent'}:${phoneNumber}:${message}`;
-  let shouldMockSms = false;
+  let mockReason: MessagingMockReason | null = null;
   try {
-    shouldMockSms = await shouldMockBenchmarkSmsSend(options.archiveRootAgentId);
+    mockReason = await shouldMockMessagingSend('surge', options.archiveRootAgentId);
   } catch (error) {
     const messageText = error instanceof Error ? error.message : String(error);
     log.error('Benchmark SMS mock eligibility lookup failed', { error: messageText });
@@ -109,11 +113,12 @@ export async function sendSms(
       definitiveFailure: true,
     };
   }
-  if (shouldMockSms) {
+  if (mockReason !== null) {
     const mocked = await buildMockSurgeSendResult({
       phoneNumber,
       message,
       seed: mockSeed,
+      reason: mockReason,
     });
     await archiveSmsTransportBoundary({
       rootAgentId: options.archiveRootAgentId,
@@ -125,6 +130,7 @@ export async function sendSms(
         ...(options.archiveContext ?? {}),
         message_id: mocked.messageSid,
         benchmark_transport_mock: true,
+        transport_mock_reason: mockReason,
       },
     });
     return { success: true, messageSid: mocked.messageSid };
@@ -219,9 +225,9 @@ export async function sendMms(
   };
 
   const mockSeed = `${options.archiveRootAgentId ?? 'no-agent'}:${phoneNumber}:${message}:${mediaUrl}`;
-  let shouldMockMms = false;
+  let mockReason: MessagingMockReason | null = null;
   try {
-    shouldMockMms = await shouldMockBenchmarkSmsSend(options.archiveRootAgentId);
+    mockReason = await shouldMockMessagingSend('surge', options.archiveRootAgentId);
   } catch (error) {
     const messageText = error instanceof Error ? error.message : String(error);
     log.error('Benchmark MMS mock eligibility lookup failed', { error: messageText });
@@ -230,11 +236,12 @@ export async function sendMms(
       error: `Benchmark MMS mock eligibility lookup failed: ${messageText}`,
     };
   }
-  if (shouldMockMms) {
+  if (mockReason !== null) {
     const mocked = await buildMockSurgeSendResult({
       phoneNumber,
       message,
       seed: mockSeed,
+      reason: mockReason,
     });
     await archiveSmsTransportBoundary({
       rootAgentId: options.archiveRootAgentId,
@@ -246,6 +253,7 @@ export async function sendMms(
         ...(options.archiveContext ?? {}),
         message_id: mocked.messageSid,
         benchmark_transport_mock: true,
+        transport_mock_reason: mockReason,
       },
     });
     return { success: true, messageSid: mocked.messageSid };

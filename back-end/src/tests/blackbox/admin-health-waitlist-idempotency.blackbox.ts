@@ -205,8 +205,11 @@ async function testRejectedSmsBodyFailureRemainsDefinitive() {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.SURGE_API_KEY;
   const originalAccountId = process.env.SURGE_ACCOUNT_ID;
+  const originalAllowLive = process.env.ALLOW_LIVE_MESSAGING;
   process.env.SURGE_API_KEY = 'test-key';
   process.env.SURGE_ACCOUNT_ID = 'test-account';
+  // The stubbed fetch stands in for Surge, so this case opts into the live transport.
+  process.env.ALLOW_LIVE_MESSAGING = '1';
   globalThis.fetch = async () =>
     ({
       ok: false,
@@ -226,6 +229,8 @@ async function testRejectedSmsBodyFailureRemainsDefinitive() {
     else process.env.SURGE_API_KEY = originalApiKey;
     if (originalAccountId === undefined) delete process.env.SURGE_ACCOUNT_ID;
     else process.env.SURGE_ACCOUNT_ID = originalAccountId;
+    if (originalAllowLive === undefined) delete process.env.ALLOW_LIVE_MESSAGING;
+    else process.env.ALLOW_LIVE_MESSAGING = originalAllowLive;
   }
 }
 
