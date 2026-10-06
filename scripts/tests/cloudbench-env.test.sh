@@ -801,7 +801,9 @@ POOL_CLAIMS_DIR="$TMP_ROOT/mixed-shape-claims"
 CLAIMED_POOL_FILE="$FLEET_DIR/claimed.ids"
 UNAVAILABLE_POOL_IDS=()
 : > "$CLAIMED_POOL_FILE"
-machine_volume_id_from_json() { printf 'vol-mixed-shape'; }
+# Drain stdin like the real reader: under pipefail the inventory printf otherwise
+# races this fake's exit into SIGPIPE, and the claim sees no volume.
+machine_volume_id_from_json() { cat >/dev/null; printf 'vol-mixed-shape'; }
 write_pool_claim() { printf 'owned\n' > "$1"; }
 cloudbench_env_sha256() { printf '%064d' 0; }
 fleet_audit_record_pool_machine() { return 0; }
