@@ -149,6 +149,16 @@ export function buildCallAssistantConfig(
     model: {
       ...configuredModel,
       messages: [{ role: 'system', content: systemPrompt }],
+      // Hold-queue callers must not be able to hang up during a multi-hour
+      // wait. The callee persona ends the call after the live representative
+      // conversation. Mutating a copy — never DEFAULT_CALL_ASSISTANT_CONFIG.
+      ...(holdQueue
+        ? {
+            tools: (Array.isArray(configuredModel.tools) ? configuredModel.tools : []).filter(
+              (tool) => !isJsonObject(tool) || tool.type !== 'endCall'
+            ),
+          }
+        : {}),
     },
     voice: {
       ...configuredVoice,

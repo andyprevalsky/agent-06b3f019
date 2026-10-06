@@ -193,6 +193,145 @@ def _normalize_spoken_digit_sequences(text: str) -> str:
     return _DIGIT_WORD_PATTERN.sub(replace, text)
 
 
+_ONES_UNDER_TEN = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+}
+_TENS_UNDER_HUNDRED = {
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+_ORDINAL_DAY_WORDS = {
+    "first": "1",
+    "second": "2",
+    "third": "3",
+    "fourth": "4",
+    "fifth": "5",
+    "sixth": "6",
+    "seventh": "7",
+    "eighth": "8",
+    "ninth": "9",
+    "tenth": "10",
+    "eleventh": "11",
+    "twelfth": "12",
+    "thirteenth": "13",
+    "fourteenth": "14",
+    "fifteenth": "15",
+    "sixteenth": "16",
+    "seventeenth": "17",
+    "eighteenth": "18",
+    "nineteenth": "19",
+    "twentieth": "20",
+    "twenty-first": "21",
+    "twenty first": "21",
+    "twenty-second": "22",
+    "twenty second": "22",
+    "twenty-third": "23",
+    "twenty third": "23",
+    "twenty-fourth": "24",
+    "twenty fourth": "24",
+    "twenty-fifth": "25",
+    "twenty fifth": "25",
+    "twenty-sixth": "26",
+    "twenty sixth": "26",
+    "twenty-seventh": "27",
+    "twenty seventh": "27",
+    "twenty-eighth": "28",
+    "twenty eighth": "28",
+    "twenty-ninth": "29",
+    "twenty ninth": "29",
+    "thirtieth": "30",
+    "thirty-first": "31",
+    "thirty first": "31",
+}
+_MONTH_NAMES = (
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+)
+_SPOKEN_0_99_ALT = (
+    "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|"
+    "one|two|three|four|five|six|seven|eight|nine"
+)
+_SPOKEN_YEAR_THOUSAND_PATTERN = re.compile(
+    rf"\btwo thousand(?: and)?((?:[\s-]+(?:and|{_SPOKEN_0_99_ALT}))*)\b",
+    re.IGNORECASE,
+)
+_SPOKEN_YEAR_20XX_PATTERN = re.compile(
+    r"\btwenty[\s-]+((?:twenty|thirty)(?:[\s-]+(?:one|two|three|four|five|six|seven|eight|nine))?)\b",
+    re.IGNORECASE,
+)
+_SPOKEN_MONTH_DATE_PATTERN = re.compile(
+    rf"\b({'|'.join(_MONTH_NAMES)})[\s,]+(?:the\s+)?("
+    rf"{'|'.join(sorted(_ORDINAL_DAY_WORDS, key=len, reverse=True))}|\d{{1,2}}"
+    rf")(?:st|nd|rd|th)?[\s,]+(\d{{4}})\b",
+    re.IGNORECASE,
+)
+
+
+def _spoken_0_99(words: list[str]) -> int | None:
+    if not words:
+        return 0
+    if len(words) == 1:
+        if words[0] in _TENS_UNDER_HUNDRED:
+            return _TENS_UNDER_HUNDRED[words[0]]
+        return _ONES_UNDER_TEN.get(words[0])
+    if len(words) == 2 and words[0] in _TENS_UNDER_HUNDRED and words[1] in _ONES_UNDER_TEN:
+        return _TENS_UNDER_HUNDRED[words[0]] + _ONES_UNDER_TEN[words[1]]
+    return None
+
+
+def _normalize_spoken_years(text: str) -> str:
+    """Turn 'two thousand twenty seven' / 'twenty twenty-seven' into 2027."""
+
+    def from_thousand(match: re.Match[str]) -> str:
+        rest = [part.lower() for part in re.split(r"[\s-]+", match.group(1) or "") if part and part.lower() != "and"]
+        parsed = _spoken_0_99(rest)
+        return str(2000 + parsed) if parsed is not None else match.group(0)
+
+    def from_20xx(match: re.Match[str]) -> str:
+        rest = [part.lower() for part in re.split(r"[\s-]+", match.group(1) or "") if part]
+        parsed = _spoken_0_99(rest)
+        return str(2000 + parsed) if parsed is not None else match.group(0)
+
+    text = _SPOKEN_YEAR_THOUSAND_PATTERN.sub(from_thousand, text)
+    return _SPOKEN_YEAR_20XX_PATTERN.sub(from_20xx, text)
+
+
+def _normalize_spoken_calendar_dates(text: str) -> str:
+    """Turn 'October second 2027' into 'October 2, 2027' after years are digitized."""
+
+    def replace(match: re.Match[str]) -> str:
+        month, day, year = match.group(1), match.group(2), match.group(3)
+        day_key = re.sub(r"\s+", " ", day.lower())
+        day_n = _ORDINAL_DAY_WORDS.get(day_key) or _ORDINAL_DAY_WORDS.get(day_key.replace(" ", "-")) or day
+        return f"{month} {day_n}, {year}"
+
+    return _SPOKEN_MONTH_DATE_PATTERN.sub(replace, text)
+
+
 def _normalize_spoken_code_separators(text: str) -> str:
     """Treat spoken dash words like punctuation in codes such as R-O-S-E-4471."""
     return re.sub(r"\b(?:dash|hyphen|minus)\b", "-", text, flags=re.IGNORECASE)
@@ -200,7 +339,8 @@ def _normalize_spoken_code_separators(text: str) -> str:
 
 def _squash(text: str) -> str:
     """Lowercase and drop separators so spoken/extracted phone facts can match."""
-    normalized = _normalize_spoken_code_separators(_normalize_spoken_digit_sequences(text))
+    normalized = _normalize_spoken_calendar_dates(_normalize_spoken_years(text))
+    normalized = _normalize_spoken_code_separators(_normalize_spoken_digit_sequences(normalized))
     return re.sub(r"[\s\-().,/]", "", normalized.lower())
 
 

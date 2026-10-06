@@ -4650,7 +4650,7 @@
     },
     "phone_persona": {
       "first_message": "Thank you for calling Rose Test Air reservations. All representatives are currently assisting other customers. Estimated wait time is 3 hours. A representative is expected at 2:45 PM. Please stay on the line.",
-      "end_call_message": "Thank you for holding. This is Riley in customer care at Rose Test Air. I have booking L9K4QM, flight RT107, Toronto to Vancouver, passenger Jordan Miles. I have issued a flight credit of 428 dollars and 60 cents, valid until October 2, 2027. Your confirmation code is spelled letter A, letter C, letter F, letter C, dash, digit 2, digit 4, digit 5, digit 8. Goodbye.",
+      "end_call_message": "Thank you for calling Rose Test Air. Goodbye.",
       "hold_success": {
         "hold_seconds": 9900,
         "keepalive_seconds": 1200,

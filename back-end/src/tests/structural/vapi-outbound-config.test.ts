@@ -90,4 +90,17 @@ test('buildCallAssistantConfig waits for hold-queue callee to speak first', () =
   assert.equal(assistant.maxDurationSeconds, HOLD_QUEUE_MAX_DURATION_SECONDS);
   assert.equal(HOLD_QUEUE_SILENCE_TIMEOUT_SECONDS, 3600);
   assert.equal(HOLD_QUEUE_MAX_DURATION_SECONDS, 12600);
+  const holdTools = (assistant.model as { tools?: { type: string }[] }).tools ?? [];
+  assert.equal(
+    holdTools.some((tool) => tool.type === 'endCall'),
+    false,
+    `hold-queue assistants must not expose endCall, got ${JSON.stringify(holdTools)}`
+  );
+  assert.ok(holdTools.some((tool) => tool.type === 'dtmf'));
+  const defaultTools =
+    (DEFAULT_CALL_ASSISTANT_CONFIG.model as { tools?: { type: string }[] }).tools ?? [];
+  assert.ok(
+    defaultTools.some((tool) => tool.type === 'endCall'),
+    'stripping hold-queue endCall must not mutate the shared default tool list'
+  );
 });

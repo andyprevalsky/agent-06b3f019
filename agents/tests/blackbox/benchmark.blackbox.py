@@ -16478,8 +16478,9 @@ def test_phone_call_hold_queue_task_waits_real_three_hours_for_flight_credit():
     assert "remain completely silent" in persona["system_prompt"]
     assert persona["silence_timeout_seconds"] == 3600
     assert persona["max_duration_seconds"] == 12600
-    assert "letter A" in persona["end_call_message"]
-    assert "428" in persona["end_call_message"]
+    assert "ACFC-2458" not in persona["end_call_message"]
+    assert "428" not in persona["end_call_message"]
+    assert "letter A" not in persona["end_call_message"]
     assert hold.callee_checks["caller_stayed_on_hold"] is True
     assert hold.callee_checks["caller_requested_flight_credit"] is True
     assert hold.callee_checks["confirmation_code"] == "ACFC-2458"
@@ -16872,6 +16873,13 @@ def test_callee_check_failures_coerce_bools_and_match_strings_loosely():
     assert failures[0].startswith("caller_requested_name")
 
     assert callee_check_failures({"payment_completed": True}, {}) == ["payment_completed: expected True, got None"]
+    assert (
+        callee_check_failures(
+            {"credit_expiry": "October 2, 2027"},
+            {"credit_expiry": "October second two thousand twenty seven"},
+        )
+        == []
+    )
 
 
 def test_payment_audit_structured_data_since_returns_latest_successful_payment():

@@ -598,3 +598,24 @@ def test_long_hold_uses_slower_watch_poll_and_longer_analysis_wait():
     assert short.analysis_timeout_seconds() == phone_callee.CALLEE_ANALYSIS_TIMEOUT_SECONDS
     assert long._hold_watch_poll_seconds() == phone_callee.HOLD_WATCH_POLL_LONG_SECONDS
     assert long.analysis_timeout_seconds() == phone_callee.CALLEE_ANALYSIS_TIMEOUT_LONG_SECONDS
+
+
+def test_callee_checks_match_spoken_calendar_dates():
+    assert (
+        phone_callee.callee_check_failures(
+            {"credit_expiry": "October 2, 2027"},
+            {"credit_expiry": "October second two thousand twenty seven"},
+        )
+        == []
+    )
+    assert (
+        phone_callee.callee_check_failures(
+            {"credit_expiry": "October 2, 2027"},
+            {"credit_expiry": "October 2nd, twenty twenty-seven"},
+        )
+        == []
+    )
+    assert phone_callee.callee_check_failures(
+        {"credit_expiry": "October 2, 2027"},
+        {"credit_expiry": "March 4, 2026"},
+    ) == ["credit_expiry: expected to contain 'October 2, 2027', got 'March 4, 2026'"]
