@@ -492,6 +492,7 @@ their assertions or test counts:
 `python3 scripts/tests/verify-successful-llm-queries.test.py`,
 `python3 scripts/tests/cloudbench-exact-session-multi-root.test.py`,
 `python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
+`python3 scripts/tests/cloudbench-controller-linux.test.py`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
 `python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
@@ -701,7 +702,12 @@ bash scripts/tests/cloudbench-status-service-shutdown.test.sh
 bash scripts/tests/fleet-infra-canary.test.sh
 bash scripts/tests/fleet-infra-stability-proof.test.sh
 python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py
+# Linux Python3.11.9/Node22.13.0; Mac dispatches this same suite to an offline container.
+# It reuses the recipe-fingerprinted local image, building the small committed
+# scripts/tests/cloudbench-controller-linux.Dockerfile once if absent. An existing
+# verified local image may be selected with CLOUDBENCH_CONTROLLER_TEST_IMAGE.
 bash scripts/tests/cloudbench-multi-workstream.test.sh
+python3 scripts/tests/cloudbench-controller-linux.test.py
 bash scripts/tests/cloudbench-github-token.test.sh
 bash scripts/tests/seed-dump-toolchain.test.sh
 agents/venv/bin/python -m pytest -q agents/benchmarks/wall_clock_backstop_test.py

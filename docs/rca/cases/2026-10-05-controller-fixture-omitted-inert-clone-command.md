@@ -73,6 +73,25 @@ The post-supervisor variant passed its unchanged assertions on native Linux in
 worker supervisor requires Linux subreaping. The complete controller gate runs
 on the existing native Linux image before deployment.
 
+## Portable native verification
+
+Faithful post-supervisor fixtures execute the real Linux subreaper; running them
+on Mac is not a valid substitute. The standard fixture command now dispatches
+Mac hosts through the committed small Python3.11.9/Node22.13.0 Docker recipe,
+reuses its fingerprinted cache, and runs the unchanged Linux body without network
+access or writable source mounts. An explicitly selected existing image must
+pass the same platform and tool checks. The recipe itself was not rebuilt for
+this receipt; the existing local image passed those checks.
+
+The actual cached owning control passed in 6.402 seconds. An actual SIGTERM
+cancellation passed in 6.027 seconds: the exact owned container was absent and an
+unrelated control container remained live. Five compact controls protect matching
+and foreign ownership, missing and malformed CID handling, plus inherited proxy
+settings and the dispatch-to-retirement identity. Their inverse caught a private
+proxy-loop variable shadowing error before the runner was applied. Private failed
+cancellation receipts remain retained. Runtime and controller budgets did not
+change.
+
 ## Human feedback
 
 Use a compact deterministic owning reproduction, batch proven fixture causality

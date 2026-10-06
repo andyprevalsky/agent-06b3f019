@@ -29,6 +29,9 @@
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if [ "$(uname -s)" != "Linux" ]; then
+    exec python3 "$ROOT_DIR/scripts/tests/run-cloudbench-controller-linux.py" "$@"
+fi
 # shellcheck source=../lib/cloudbench-env.sh
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 

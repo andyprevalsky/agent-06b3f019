@@ -146,6 +146,17 @@ aborts through owned cleanup; ordinary non-strict sliding scheduling remains
 unchanged. Measure execution overlap from task start/terminal intervals rather
 than the campaign’s active controller count.
 
+The controller regression command is `bash scripts/tests/cloudbench-multi-workstream.test.sh`.
+It requires native Linux for the real worker supervisor’s subreaping proof. On Mac,
+the command snapshots tracked scripts and the five real helper modules into private
+artifacts, then runs the same fixture with read-only source mounts and no container
+network. Its small committed Docker recipe pins Python3.11.9 and Node22.13.0; the
+recipe fingerprint selects a reusable local image. Set
+`CLOUDBENCH_CONTROLLER_TEST_IMAGE` only to an existing local image that passes the
+same platform/toolchain check. Cancellation verifies the exact container’s ID,
+unique owner label and source mounts before stopping it. The quick dispatcher
+controls are always included in the deploy structural gate.
+
 The daily `agent-payment-new-user-journey` task exercises an isolated, fresh
 non-admin account from exhausted free credit through a real Stripe **test-mode**
 subscription Checkout, subscription-gate resolution, payment-card approval,

@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Run the unchanged controller fixture on Linux; Mac uses an offline container."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import uuid
+
+
+TOOL_CHECK = """import shutil,subprocess,sys
+assert sys.platform=='linux' and sys.version_info[:3]==(3,11,9), 'requires Linux Python3.11.9'
+assert subprocess.check_output(['node','--version'],text=True).strip()=='v22.13.0', 'requires Node22.13.0'
+assert int(subprocess.check_output(['bash','--version'],text=True).split('version ',1)[1].split('.',1)[0])>=5, 'requires Bash5+'
+assert all(shutil.which(name) for name in ('git','curl','ps','rg')), 'requires git/curl/procps/ripgrep'
+"""
+
+
+def retire_owned_container(snapshot: Path, name: str, owner: str) -> bool:
+    cidfile = snapshot / "container.cid"
+    identity = cidfile.read_text().strip() if cidfile.is_file() else name
+    if cidfile.is_file() and not re.fullmatch(r"[0-9a-f]{64}", identity):
+        return False
+    format_value = '{{.Id}}\n{{.Name}}\n{{index .Config.Labels "org.rose.controller-test-owner"}}\n{{json .Mounts}}'
+    result = subprocess.run(
+        ["docker", "inspect", identity, "--format", format_value],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        return result.returncode == 1 and any(
+            value in result.stderr.lower()
+            for value in ("no such object", "no such container")
+        )
+    fields = result.stdout.splitlines()
+    if (
+        len(fields) != 4
+        or not re.fullmatch(r"[0-9a-f]{64}", fields[0])
+        or fields[1] != "/" + name
+        or fields[2] != owner
+    ):
+        return False
+    try:
+        mounts = json.loads(fields[3])
+    except ValueError:
+        return False
+    if not isinstance(mounts, list) or not all(isinstance(row, dict) for row in mounts):
+        return False
+    expected = [
+        ("scripts", "/repo/scripts", False),
+        ("agents/benchmarks", "/repo/agents/benchmarks", False),
+        ("fixture-tmp", "/fixture-tmp", True),
+    ]
+    if not all(
+        any(
+            Path(row.get("Source", "")).resolve() == (snapshot / relative).resolve()
+            and row.get("Destination") == destination
+            and row.get("RW") is writable
+            for row in mounts
+        )
+        for relative, destination, writable in expected
+    ):
+        return False
+    stopped = subprocess.run(
+        ["docker", "stop", "--time", "30", fields[0]], capture_output=True, text=True
+    )
+    if stopped.returncode:
+        return False
+    gone = subprocess.run(
+        ["docker", "inspect", fields[0]], capture_output=True, text=True
+    )
+    return gone.returncode == 1 and any(
+        value in gone.stderr.lower()
+        for value in ("no such object", "no such container")
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check-only", action="store_true")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[2]
+    fixture = "scripts/tests/cloudbench-multi-workstream.test.sh"
+    if sys.platform == "linux":
+        subprocess.run([sys.executable, "-c", TOOL_CHECK], check=True)
+        if args.check_only:
+            return 0
+        os.execvp("bash", ["bash", str(root / fixture)])
+    recipe = root / "scripts/tests/cloudbench-controller-linux.Dockerfile"
+    fingerprint = hashlib.sha256(recipe.read_bytes()).hexdigest()
+    configured = os.environ.get("CLOUDBENCH_CONTROLLER_TEST_IMAGE", "")
+    image = configured or f"rose-cloudbench-controller-tests:{fingerprint[:16]}"
+    inspection = subprocess.run(
+        ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
+        capture_output=True,
+        text=True,
+    )
+    if inspection.returncode:
+        if configured:
+            raise RuntimeError(
+                "configured controller test image is unavailable locally"
+            )
+        with tempfile.TemporaryDirectory(
+            prefix="cloudbench-controller-image-"
+        ) as context:
+            subprocess.run(
+                [
+                    "docker",
+                    "build",
+                    "--label",
+                    f"org.rose.controller-recipe-sha256={fingerprint}",
+                    "-f",
+                    str(recipe),
+                    "-t",
+                    image,
+                    context,
+                ],
+                check=True,
+            )
+        inspection = subprocess.run(
+            ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    image_id = inspection.stdout.strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise RuntimeError("controller image identity is invalid")
+    if not configured:
+        label = subprocess.check_output(
+            [
+                "docker",
+                "image",
+                "inspect",
+                image_id,
+                "--format",
+                '{{index .Config.Labels "org.rose.controller-recipe-sha256"}}',
+            ],
+            text=True,
+        ).strip()
+        if label != fingerprint:
+            raise RuntimeError("cached controller image does not match its recipe")
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--entrypoint",
+            "python3",
+            image_id,
+            "-c",
+            TOOL_CHECK,
+        ],
+        check=True,
+    )
+    if args.check_only:
+        print(
+            json.dumps(
+                {
+                    "passed": True,
+                    "image_id": image_id,
+                    "recipe_sha256": fingerprint,
+                    "network": "none",
+                }
+            )
+        )
+        return 0
+    artifacts = root / ".context/cloudbench-controller-tests"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    snapshot = Path(tempfile.mkdtemp(prefix="native-", dir=artifacts))
+    files = subprocess.check_output(
+        ["git", "ls-files", "scripts"], cwd=root, text=True
+    ).splitlines()
+    files += [
+        f"agents/benchmarks/{name}.py"
+        for name in (
+            "agent_link_server",
+            "fleet_startup_phase",
+            "hub_upload",
+            "outcome_publication",
+            "seed_cache_path",
+        )
+    ]
+    hashes = {}
+    for name in files:
+        source = root / name
+        if not source.is_file():
+            continue
+        target = snapshot / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        hashes[name] = hashlib.sha256(target.read_bytes()).hexdigest()
+        if hashlib.sha256(source.read_bytes()).hexdigest() != hashes[name]:
+            raise RuntimeError("controller source changed during snapshot")
+    (snapshot / "source.json").write_text(
+        json.dumps({"image_id": image_id, "source_file_sha256": hashes}, indent=2)
+        + "\n"
+    )
+    writable = snapshot / "fixture-tmp"
+    writable.mkdir()
+    owner = uuid.uuid4().hex
+    name = "rose-cloudbench-controller-tests-" + owner[:16]
+    (snapshot / "container-owner.json").write_text(
+        json.dumps({"name": name, "owner": owner, "image_id": image_id}) + "\n"
+    )
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--cpus",
+        "2",
+        "--name",
+        name,
+        "--label",
+        "org.rose.controller-test-owner=" + owner,
+        "--cidfile",
+        str(snapshot / "container.cid"),
+        "--entrypoint",
+        "/bin/bash",
+        "-v",
+        f"{snapshot / 'scripts'}:/repo/scripts:ro",
+        "-v",
+        f"{snapshot / 'agents/benchmarks'}:/repo/agents/benchmarks:ro",
+        "-v",
+        f"{writable}:/fixture-tmp",
+        "--env",
+        "TMPDIR=/fixture-tmp",
+        "--env",
+        "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE=1",
+    ]
+    for proxy_key in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ):
+        if proxy_key in os.environ:
+            command += ["--env", proxy_key]
+    for key in os.environ:
+        if (
+            key.startswith("CLOUDBENCH_TEST_")
+            and key != "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE"
+        ):
+            command += ["--env", key]
+    command += [image_id, "-lc", f"bash /repo/{fixture}"]
+    print(f"Native controller artifacts: {snapshot}", flush=True)
+    process = None
+    prior = {}
+
+    def cancel(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            prior[signum] = signal.signal(signum, cancel)
+        process = subprocess.Popen(command)
+        code = process.wait()
+    finally:
+        for signum in prior:
+            signal.signal(signum, signal.SIG_IGN)
+        try:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            if not retire_owned_container(snapshot, name, owner):
+                raise RuntimeError(
+                    "exact controller container retirement was not proven; private artifacts retained"
+                )
+        finally:
+            for signum, handler in prior.items():
+                signal.signal(signum, handler)
+    return code
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        detail = str(error) if isinstance(error, RuntimeError) else type(error).__name__
+        print(f"controller Linux runner failed: {detail}", file=sys.stderr)
+        raise SystemExit(1)
