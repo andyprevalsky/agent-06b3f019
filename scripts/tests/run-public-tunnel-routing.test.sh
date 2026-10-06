@@ -493,6 +493,9 @@ echo "PASS: a 200 interstitial page fails the smoke"
 awk '/^dns_label_from_workspace\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/ngrok_fallback.sh"
 awk '/^ensure_ngrok_domain_reserved\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/ngrok_fallback.sh"
 awk '/^start_ngrok_ephemeral_tunnel\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/ngrok_fallback.sh"
+for fn in supervised_edge_probe cloudflare_tunnel_edge_is_routing ngrok_reported_owned_origin ngrok_tunnel_edge_is_routing; do
+  awk "/^${fn}\\(\\) \\{$/,/^\\}$/" "$RUN_SH" >> "$TMP/ngrok_fallback.sh"
+done
 for fn in dns_label_from_workspace ensure_ngrok_domain_reserved start_ngrok_ephemeral_tunnel; do
   grep -q "^$fn() {" "$TMP/ngrok_fallback.sh" || fail "case 10: could not extract $fn from run.sh"
 done
@@ -511,25 +514,69 @@ case "$1" in
     ;;
   http)
     domain=""
+    upstream="$2"
     while [ "$#" -gt 0 ]; do
       [ "$1" = "--domain" ] && domain="$2"
       shift
     done
-    printf '{"url":"https://%s"}\n' "${domain:-free.ngrok-free.dev}"
+    case "${NGROK_EVENT_KIND:-owned}" in
+      foreign-url) domain=foreign.ngrok.app ;;
+      wrong-upstream) upstream=3999 ;;
+    esac
+    if [ "${NGROK_EVENT_KIND:-}" = delayed ]; then
+      rm -f "$RUN_CONTEXT_DIR/ngrok-fallback.log"
+      sleep 1
+      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":"http://localhost:%s"}\n' "${domain:-free.ngrok-free.dev}" "$upstream" > "$RUN_CONTEXT_DIR/ngrok-fallback.log"
+    else
+      printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":"http://localhost:%s"}\n' "${domain:-free.ngrok-free.dev}" "$upstream"
+    fi
     exec sleep 30
     ;;
 esac
 STUB
 chmod +x "$TMP/fake-ngrok-bin/ngrok"
+cat > "$TMP/fake-ngrok-bin/curl" <<'STUB'
+#!/usr/bin/env bash
+headers=""; body=""; url=""
+for arg in "$@"; do
+  case "$arg" in --noproxy|--noproxy=*) exit 29 ;; esac
+done
+if [ "${NGROK_ASSERT_PROXY:-}" = 1 ]; then
+  for key in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy; do
+    [ "${!key}" = fixture-proxy-setting ] || exit 30
+  done
+fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in -D|--dump-header) headers="$2"; shift ;; -o) body="$2"; shift ;; http*) url="$1" ;; esac
+  shift
+done
+case "${NGROK_RESPONSE_KIND:-pre-origin}" in
+  pre-origin) status=400; printf 'HTTP/2 400\r\nNgrok-Error-Code: ERR_NGROK_8012\r\nContent-Type: text/html\r\n\r\n' > "$headers"; printf '<html>upstream not started</html>' > "$body" ;;
+  healthy|wrong-body)
+    status=200; printf 'HTTP/2 200\r\nContent-Type: text/html\r\n\r\n' > "$headers"
+    printf '<div id="root">own-app</div>' > "$body"
+    if [ "${NGROK_RESPONSE_KIND:-}" = wrong-body ] && [[ "$url" == http://127.0.0.1:* ]]; then
+      printf '<div id="root">other-app</div>' > "$body"
+    fi ;;
+  offline) status=404; printf 'HTTP/2 404\r\nNgrok-Error-Code: ERR_NGROK_3200\r\n\r\n' > "$headers" ;;
+  unmarked) status=400; printf 'HTTP/2 400\r\nContent-Type: text/html\r\n\r\n' > "$headers" ;;
+  proxy) status=200; printf 'HTTP/2 200\r\nServer: fixture-blocker\r\n\r\n' > "$headers"; printf '<html>blocked</html>' > "$body" ;;
+  proxy-after-connect) status=400; printf 'HTTP/1.1 400 Connection established\r\nNgrok-Error-Code: ERR_NGROK_8012\r\n\r\nHTTP/2 400\r\nServer: fixture-blocker\r\n\r\n' > "$headers" ;;
+  *) exit 98 ;;
+esac
+printf '%s' "$status"
+STUB
+chmod +x "$TMP/fake-ngrok-bin/curl"
 run_ngrok_fallback() { # run_ngrok_fallback <CONDUCTOR_WORKSPACE_NAME>
   : > "$TMP/ngrok-calls"
+  rm -f "$TMP/ngrok-published"
   NGROK_CALLS="$TMP/ngrok-calls" PATH="$TMP/fake-ngrok-bin:$PATH" \
     CONDUCTOR_WORKSPACE_NAME="$1" NGROK_API_KEY=test-api-key NGROK_AUTHTOKEN=test-token \
-    RUN_CONTEXT_DIR="$TMP/ngrok-run" FRONTEND_PORT=3002 \
+    RUN_CONTEXT_DIR="$TMP/ngrok-run" FRONTEND_PORT=3002 NGROK_PUBLISHED_PATH="$TMP/ngrok-published" \
+    CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS=2 CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=0 \
     bash -c "
       PIDS=(); NAMES=()
-      public_tunnel_publish_environment() { PUBLIC_BASE_URL=\"\$1\"; }
-      cloudflare_tunnel_edge_is_routing() { return 0; }
+      public_tunnel_publish_environment() { PUBLIC_BASE_URL=\"\$1\"; printf '%s' \"\$1\" > \"\$NGROK_PUBLISHED_PATH\"; }
       source '$TMP/ngrok_fallback.sh'
       start_ngrok_ephemeral_tunnel
       rc=\$?
@@ -555,5 +602,32 @@ grep -qx 'api reserved-domains create --domain rose-krakow-bench.ngrok.app --des
 grep -qx 'http 3002 --domain rose-krakow-bench.ngrok.app --log stdout --log-format json --log-level info' "$TMP/ngrok-calls" \
   || { cat "$TMP/ngrok-calls" >&2; fail "case 10: per-worktree fallback must bind its reserved domain"; }
 echo "PASS: the per-worktree ngrok fallback domain is still reserved and bound"
+
+
+# Provider-specific recurrence: exercise the actual fallback AND actual probe.
+NGROK_RESPONSE_KIND=healthy run_ngrok_fallback krakow-bench-healthy-origin \
+  || fail "case 10: authentic healthy app must pass ngrok route proof"
+echo "PASS: ngrok healthy200 matches its owned local app origin"
+NGROK_EVENT_KIND=delayed run_ngrok_fallback krakow-bench-delayed-publication \
+  || fail "case 10: initial log absence must remain pending until the current child publishes"
+echo "PASS: delayed current-child log publication remains pending then routes"
+for event in foreign-url wrong-upstream; do
+  if NGROK_EVENT_KIND="$event" run_ngrok_fallback krakow-bench-owner-negative; then
+    fail "case 10: $event emitted identity must be rejected"
+  fi
+  [ ! -e "$TMP/ngrok-published" ] || fail "case 10: $event was published before ownership rejection"
+done
+echo "PASS: foreign ngrok endpoint and wrong upstream are rejected before publication"
+for response in offline unmarked proxy proxy-after-connect wrong-body; do
+  if NGROK_RESPONSE_KIND="$response" run_ngrok_fallback krakow-bench-route-negative; then
+    fail "case 10: ngrok $response must not certify routing"
+  fi
+done
+echo "PASS: ngrok offline/unmarked/proxy/CONNECT/wrong-origin responses are rejected"
+NGROK_ASSERT_PROXY=1 HTTP_PROXY=fixture-proxy-setting HTTPS_PROXY=fixture-proxy-setting ALL_PROXY=fixture-proxy-setting \
+  http_proxy=fixture-proxy-setting https_proxy=fixture-proxy-setting all_proxy=fixture-proxy-setting \
+  NO_PROXY=fixture-proxy-setting no_proxy=fixture-proxy-setting run_ngrok_fallback krakow-bench-proxy-preservation \
+  || fail "case 10: ngrok proof changed or bypassed inherited proxy settings"
+echo "PASS: actual ngrok route proof preserves all inherited proxy aliases"
 
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

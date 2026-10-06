@@ -595,6 +595,13 @@ if [ -n "${CLOUDBENCH_CODEX_AUTH_SHA256:-}" ]; then
 fi
 
 # ── 0. Sanity: the volume + repo checkout must exist (created at box setup) ──
+if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] && [ ! -d "$REPO_DIR/.git" ]; then
+    [ "$BENCH_SIMULATE" = 0 ] && [ -n "$REF" ] || { log "FATAL: fresh checkout requires an exact REAL task ref"; finish 1; }
+    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+        log "FATAL: could not bootstrap requested ref on fresh storage"
+        finish 1
+    fi
+fi
 if [ ! -d "$REPO_DIR/.git" ]; then
     log "FATAL: $REPO_DIR is not a git checkout (expected a pre-authed volume checkout)"
     finish 1
@@ -772,11 +779,11 @@ fi
 # Prisma's generated client is compiled from schema.prisma, not just the npm
 # manifests. A warm dependency tree can therefore be package-current but
 # schema-stale when a benchmark checks out another ref or applies a local patch.
+chown -R "$APP_USER:$APP_USER" "$REPO_DIR/node_modules" "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/venv" 2>/dev/null || true
 if ! bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"; then
     log "FATAL: Prisma client synchronization failed"
     finish 1
 fi
-chown -R "$APP_USER:$APP_USER" "$REPO_DIR/node_modules" "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/venv" 2>/dev/null || true
 
 # The warm image omits local Chromium because ordinary simulated benches use
 # remote/browser-model boundaries. Hosted Stripe Checkout in this daily task

@@ -94,7 +94,7 @@ def test_local_benchmark_rejects_disabled_trace_before_allocation():
 
 
 def test_every_benchmark_run_registers_in_app_hub_before_execution():
-    """The Mac-app Hub is a fail-closed launch invariant, not best-effort save telemetry."""
+    """Local registration stays fail-closed; fleets retain their terminal writer."""
     from benchmarks.hub_upload import HubVisibilityError, require_run_visible
 
     requests = []
@@ -166,7 +166,8 @@ def test_every_benchmark_run_registers_in_app_hub_before_execution():
     poller = (repo_root / "scripts/run-bench-hub-poller").read_text()
     assert "require_run_visible" in runner
     assert "BENCHMARK_HUB_PARENT_RUN_ID" in runner
-    assert "--require-visible" in fleet
+    assert "--register-starting" in fleet
+    assert 'SELF_MANAGED_HUB_RUN="1"' in fleet
     assert "BENCHMARK_HUB_PARENT_RUN_ID" in fleet
     assert 'BENCHMARK_HUB_PARENT_RUN_ID="$hub_run_id"' in poller
 
@@ -341,13 +342,16 @@ def test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with patch.dict(
-            os.environ,
-            {
-                "BENCHMARK_HUB_UPLOAD_URL": f"http://127.0.0.1:{server.server_address[1]}",
-                "BENCHMARK_HUB_API_KEY": "gzip-fixture-key",
-            },
-        ), patch("benchmarks.hub_upload.time.sleep", lambda _delay: None):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "BENCHMARK_HUB_UPLOAD_URL": f"http://127.0.0.1:{server.server_address[1]}",
+                    "BENCHMARK_HUB_API_KEY": "gzip-fixture-key",
+                },
+            ),
+            patch("benchmarks.hub_upload.time.sleep", lambda _delay: None),
+        ):
             native_open = urllib.request.OpenerDirector.open
             timeouts = []
 
@@ -358,13 +362,21 @@ def test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry():
 
             for live in (True, False):
                 message = {
-                    "role": "TOOL", "message": "escaped \\\" 🧪 " * 512,
+                    "role": "TOOL",
+                    "message": 'escaped \\" 🧪 ' * 512,
                     "metadata": {"nested": [True, None, {"step": 3}]},
                 }
-                bundle = {"run_id": "gzip-transport", "tasks": [{
-                    "name": "wire-fixture", "agent_id": "fixture-root", "passed": False,
-                    "logs": {"messages": [message]},
-                }]}
+                bundle = {
+                    "run_id": "gzip-transport",
+                    "tasks": [
+                        {
+                            "name": "wire-fixture",
+                            "agent_id": "fixture-root",
+                            "passed": False,
+                            "logs": {"messages": [message]},
+                        }
+                    ],
+                }
                 expected = {**bundle, "source": "manual-run"}
                 with patch("urllib.request.OpenerDirector.open", observe_open):
                     assert upload_run_bundle(bundle, live=live, required=True)
@@ -643,7 +655,10 @@ def _run_owned_benchmark_commands(commands, cwd, timeout=60):
             try:
                 rows = subprocess.run(
                     ["ps", "-axo", "pid=,ppid=,pgid=,stat="],
-                    capture_output=True, text=True, check=True, timeout=5,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=5,
                 ).stdout
                 break
             except subprocess.TimeoutExpired:
@@ -657,7 +672,9 @@ def _run_owned_benchmark_commands(commands, cwd, timeout=60):
         for child, _ in children:
             assert table.get(child.pid, (None,))[0] == os.getpid(), "owned benchmark leader was reaped before cleanup"
             assert table[child.pid][1] == child.pid, "owned benchmark process group changed"
-            live[child.pid] = [pid for pid, (_, group, state) in table.items() if group == child.pid and not state.startswith("Z")]
+            live[child.pid] = [
+                pid for pid, (_, group, state) in table.items() if group == child.pid and not state.startswith("Z")
+            ]
         return table, live
 
     with contextlib.ExitStack() as stack:
@@ -666,7 +683,9 @@ def _run_owned_benchmark_commands(commands, cwd, timeout=60):
                 output = stack.enter_context(tempfile.TemporaryFile(mode="w+"))
                 child = subprocess.Popen(
                     command,
-                    cwd=cwd, stdout=output, stderr=subprocess.STDOUT,
+                    cwd=cwd,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )
                 children.append((child, output))
@@ -881,7 +900,8 @@ def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "2 passed" in result.stdout
+    # Regeneration, donor layouts, containment and isolated overlay/fallback controls.
+    assert "10 passed" in result.stdout
 
 
 def test_cloudbench_boot_payload_behavior_is_in_permanent_gate():
@@ -1205,6 +1225,234 @@ def test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail():
     from benchmarks.benchmark_tasks import get_smoke_cap
 
     assert get_smoke_cap("parallel-tool-calls") == 600
+
+
+def _live_report_producer_harness(tasks, executor, max_concurrency):
+    """Exercise main's real report/coordinator block without external task calls."""
+    import ast
+    import inspect
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+    from benchmarks.report_card import build_report_card
+
+    main = ast.parse(inspect.getsource(bench.main_async)).body[0]
+    start = next(i for i, node in enumerate(main.body)
+                 if isinstance(node, ast.ImportFrom) and node.module == "benchmarks.report_card")
+    end = next(i for i, node in enumerate(main.body)
+               if isinstance(node, ast.Assign) and any(
+                   isinstance(target, ast.Name) and target.id == "owned_batch_cleanup"
+                   for target in node.targets))
+    report_nodes = main.body[start:end]
+    ticker = next(node for node in report_nodes
+                  if isinstance(node, ast.AsyncFunctionDef) and node.name == "_report_ticker")
+    emit = next(node for node in ast.walk(ticker) if isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "_emit_report")
+    parallel = next(node for node in ast.walk(main) if isinstance(node, ast.If)
+                    and isinstance(node.test, ast.Attribute) and node.test.attr == "parallel")
+    drive = ast.AsyncFunctionDef(name="_drive_parallel", args=ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=parallel.body, decorator_list=[])
+    tick = ast.FunctionDef(name="_tick_report_once", args=ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=[emit], decorator_list=[])
+    cards = []
+
+    class CaptureEmitter:
+        def __init__(self, _context):
+            pass
+
+        def maybe_emit(self, state, **_kwargs):
+            cards.append(build_report_card(state))
+
+    namespace = dict(vars(bench))
+    namespace.update(tasks=tasks, skipped_claude_tasks=[], base_url="unused",
+                     run=bench.BenchmarkRun(run_id="report-admission-control"),
+                     args=SimpleNamespace(max_concurrency=max_concurrency, prod=False,
+                                          keep_failed_agents=False),
+                     run_single_task=executor, _fetch_wmh_usage=lambda: None)
+    with patch("benchmarks.report_card.ReportCardEmitter", CaptureEmitter):
+        exec(compile(ast.fix_missing_locations(ast.Module(
+            body=[*report_nodes, drive, tick], type_ignores=[])), "<live-report-producer>", "exec"), namespace)
+    return namespace, cards
+
+
+async def test_live_report_counts_executor_admission_and_drains_cancellation():
+    """Pending semaphore futures stay queued; admitted pre-agent work is running."""
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+
+    tasks = [SimpleNamespace(name="chat-mode", requires_browser_agent=False,
+                             world_model_mode=None, tags=[]) for _ in range(3)]
+    entered = asyncio.Event()
+    held = asyncio.Event()
+
+    async def executor(_base_url, _task, **_kwargs):
+        entered.set()
+        await held.wait()
+
+    namespace, cards = _live_report_producer_harness(tasks, executor, 1)
+    with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+        coordinator = asyncio.create_task(namespace["_drive_parallel"]())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=10)
+            namespace["_tick_report_once"]()
+            assert cards[-1]["tasks"] == {"total": 3, "running": 1, "completed": 0, "queued": 2}, cards[-1]["tasks"]
+            assert [row["status"] for row in cards[-1]["per_task"]] == ["running", "queued", "queued"]
+            assert all(row["agent_url"] is None for row in cards[-1]["per_task"])
+        finally:
+            coordinator.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await coordinator
+        namespace["_tick_report_once"]()
+        assert cards[-1]["tasks"] == {"total": 3, "running": 0, "completed": 3, "queued": 0}, cards[-1]["tasks"]
+        assert cards[-1]["results"]["failed"] == 3
+        assert all(result.status == "CANCELLED" for result in namespace["run"].task_results)
+
+
+async def test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_links():
+    """Child callbacks bind to their admitted occurrence; evaluation precedes cleanup."""
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+
+    tasks = [SimpleNamespace(name="chat-mode", index=index, requires_browser_agent=False,
+                             world_model_mode=None, tags=[]) for index in range(3)]
+    entered = [asyncio.Event() for _ in tasks]
+    evaluate = [asyncio.Event() for _ in tasks]
+    cleanup = [asyncio.Event() for _ in tasks]
+    evaluated = [asyncio.Event() for _ in tasks]
+
+    async def executor(_base_url, task, *, on_agent_created, on_task_evaluated, **_kwargs):
+        async def agent_child():
+            on_agent_created(task.name, f"report-test-{task.index}")
+        await asyncio.create_task(agent_child())
+        entered[task.index].set()
+        await evaluate[task.index].wait()
+        result = bench.TaskResult(name=task.name, passed=task.index != 2,
+            agent_id=f"report-test-{task.index}", status="COMPLETED", progress_score=1,
+            duration_seconds=1, cost_cents=0, message_count=0)
+        await on_task_evaluated(result)
+        evaluated[task.index].set()
+        await cleanup[task.index].wait()
+        return result
+
+    namespace, cards = _live_report_producer_harness(tasks, executor, 2)
+    with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+        coordinator = asyncio.create_task(namespace["_drive_parallel"]())
+        try:
+            await asyncio.wait_for(asyncio.gather(entered[0].wait(), entered[1].wait()), timeout=10)
+            evaluate[1].set()
+            await asyncio.wait_for(evaluated[1].wait(), timeout=10)
+            namespace["_tick_report_once"]()
+            assert cards[-1]["tasks"] == {"total": 3, "running": 1, "completed": 1, "queued": 1}, cards[-1]["tasks"]
+            running = [row for row in cards[-1]["per_task"] if row["status"] == "running"]
+            assert len(running) == 1 and running[0]["agent_url"].endswith("=report-test-0")
+            assert not namespace["run"].task_results and cards[-1]["results"]["passed"] == 1
+            cleanup[1].set()
+            await asyncio.wait_for(entered[2].wait(), timeout=10)
+            evaluate[2].set()
+            await asyncio.wait_for(evaluated[2].wait(), timeout=10)
+            namespace["_tick_report_once"]()
+            assert cards[-1]["tasks"] == {"total": 3, "running": 1, "completed": 2, "queued": 0}, cards[-1]["tasks"]
+            assert cards[-1]["results"]["passed"] == 1 and cards[-1]["results"]["failed"] == 1
+            assert [row["agent_url"] for row in cards[-1]["per_task"] if row["status"] == "running"][0].endswith("=report-test-0")
+            for event in [*evaluate, *cleanup]:
+                event.set()
+            await asyncio.wait_for(coordinator, timeout=10)
+            namespace["_tick_report_once"]()
+            assert cards[-1]["tasks"] == {"total": 3, "running": 0, "completed": 3, "queued": 0}
+            assert cards[-1]["results"]["passed"] == 2 and cards[-1]["results"]["failed"] == 1
+        finally:
+            if not coordinator.done():
+                coordinator.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await coordinator
+
+
+async def test_live_report_keeps_all_created_roots_for_batch_finalization():
+    """Report-row retirement preserves exact root custody for every exit path."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from benchmarks import run_benchmark as bench
+
+    root_ids = ["00000000-0000-4000-8000-000000000011",
+                "00000000-0000-4000-8000-000000000012"]
+    for exit_path in ("exception", "cancellation", "composite"):
+        entered = asyncio.Event()
+        task = SimpleNamespace(name="chat-mode", requires_browser_agent=False,
+                               world_model_mode=None, tags=[])
+
+        async def executor(_base_url, task, *, on_agent_created, **_kwargs):
+            async def child_callbacks():
+                for root_id in root_ids:
+                    on_agent_created(task.name, root_id)
+            await asyncio.create_task(child_callbacks())
+            entered.set()
+            if exit_path == "cancellation":
+                await asyncio.Event().wait()
+            if exit_path == "exception":
+                raise RuntimeError("test-owned failure after root callbacks")
+            return bench.TaskResult(name=task.name, passed=False,
+                agent_id=",".join(root_ids), status="COMPLETED", progress_score=0,
+                duration_seconds=1, cost_cents=0, message_count=0,
+                logs={str(index): {"tree": {root_id: {}},
+                    "worker_logs": [json.dumps({"agent_id": root_id})]}
+                    for index, root_id in enumerate(root_ids)})
+
+        namespace, _cards = _live_report_producer_harness([task], executor, 1)
+        with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+            coordinator = asyncio.create_task(namespace["_drive_parallel"]())
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=10)
+                if exit_path == "cancellation":
+                    namespace["_tick_report_once"]()
+                    assert _cards[-1]["per_task"][0]["agent_url"].endswith("=" + root_ids[0])
+                    coordinator.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait_for(coordinator, timeout=10)
+                else:
+                    await asyncio.wait_for(coordinator, timeout=10)
+            finally:
+                if not coordinator.done():
+                    coordinator.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await coordinator
+
+        prepared, released = [], []
+
+        def exact_root_sessions(_base_url, root_id):
+            prepared.append(root_id)
+            return {"root_user_id": "test-owned-user", "tree_agent_ids": [root_id],
+                    "browser_sessions": []}
+
+        def close_exact_root_sessions(_base_url, root_id, _before, **_kwargs):
+            released.append(root_id)
+            return {"test_owned": True}
+
+        # Force the archive boundary to fail: exact provider/payment release
+        # must still run, while incomplete evidence remains a failed verdict.
+        with patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", exact_root_sessions), \
+             patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", close_exact_root_sessions), \
+             patch.object(bench, "pause_agent", AsyncMock(return_value=True)), \
+             patch.object(bench, "delete_agent", AsyncMock(return_value=True)), \
+             patch.object(bench, "_refresh_browser_archive_snapshot",
+                          AsyncMock(side_effect=RuntimeError("test-owned archive failure"))), \
+             patch.object(bench, "_finalize_owned_root_payments", AsyncMock(return_value={})), \
+             patch.object(bench, "fetch_local_worker_logs", return_value=[]):
+            try:
+                await asyncio.wait_for(bench._finalize_owned_cloud_batch(
+                    "test-owned-no-network", namespace["run"].task_results,
+                    namespace["_live_task_agent_ids"]), timeout=10)
+            except RuntimeError:
+                pass
+            else:
+                assert exit_path == "composite", "missing evaluator identity unexpectedly accepted"
+        assert set(prepared) == set(root_ids), exit_path
+        assert set(released) == set(root_ids), exit_path
+        retained = {root_id for ids in namespace["_live_task_agent_ids"].values()
+                    for root_id in ids}
+        assert retained == set(root_ids), exit_path
+        assert all(not result.passed for result in namespace["run"].task_results)
 
 
 async def test_parallel_benchmark_scheduler_overlaps_isolated_browser_profiles():
@@ -3312,9 +3560,10 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     }
     duplicate_lifecycle = deepcopy(idempotency.expected_payment_lifecycle)
     duplicate_lifecycle["integrity"]["cardCount"] = 2
-    assert _validate_payment_lifecycle(
-        idempotency, {"_benchmark": {"payment_lifecycle": duplicate_lifecycle}}
-    ) == "payment_lifecycle.integrity.cardCount mismatch: expected 1, got 2"
+    assert (
+        _validate_payment_lifecycle(idempotency, {"_benchmark": {"payment_lifecycle": duplicate_lifecycle}})
+        == "payment_lifecycle.integrity.cardCount mismatch: expected 1, got 2"
+    )
     abandonment = get_task_by_name("agent-payment-abandonment")
     assert abandonment.payment_card_request_action == "abandon"
     assert abandonment.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
@@ -9113,9 +9362,7 @@ async def test_sibling_task_cleanup_cannot_revert_a_concurrent_run_identity():
     original_env = os.environ.pop("BENCHMARK_RUN_USER_ID", None)
     try:
         bench._apply_live_fixtures = fake_apply_live_fixtures
-        bench._benchmark_user_id_for_task = lambda name, base_url=None: (
-            scoped_user if name == owner.name else None
-        )
+        bench._benchmark_user_id_for_task = lambda name, base_url=None: scoped_user if name == owner.name else None
         base_url = "http://localhost:54121"
         sibling_run = asyncio.create_task(bench.run_single_task(base_url, sibling))
         await asyncio.sleep(0)
@@ -9133,8 +9380,7 @@ async def test_sibling_task_cleanup_cannot_revert_a_concurrent_run_identity():
     assert sibling_result.failure_reason.startswith("sibling finished")
     assert owner_result.failure_reason.startswith("owner observed its run user")
     assert observed.get("owner") == scoped_user, (
-        "the owner task must keep its own run user after a sibling finishes; "
-        f"got {observed.get('owner')!r}"
+        f"the owner task must keep its own run user after a sibling finishes; got {observed.get('owner')!r}"
     )
     assert leaked is None, "a task-scoped run user must not leak into the process environment"
     assert bench._current_benchmark_user_id() == bench.USER_ID
@@ -11075,8 +11321,11 @@ async def test_parallel_benchmark_user_scope_keeps_approval_auth_on_task_user():
 
     def fake_task(name):
         return SimpleNamespace(
-            name=name, runner=None, requires_claude_code=False,
-            production_only=False, disable_purchase_reuse=False,
+            name=name,
+            runner=None,
+            requires_claude_code=False,
+            production_only=False,
+            disable_purchase_reuse=False,
         )
 
     try:
@@ -11117,7 +11366,9 @@ async def test_benchmark_user_scope_covers_preflight_errors_and_default_tasks():
     previous_run_minted = bench.run_minted_agent_account_task
     previous_env_user = os.environ.get("BENCHMARK_RUN_USER_ID")
     expected_default = getattr(
-        bench, "_default_benchmark_user_id", previous_env_user or bench.USER_ID,
+        bench,
+        "_default_benchmark_user_id",
+        previous_env_user or bench.USER_ID,
     )
     plain_started = asyncio.Event()
     synthetic_started = asyncio.Event()
@@ -11125,8 +11376,11 @@ async def test_benchmark_user_scope_covers_preflight_errors_and_default_tasks():
 
     def fake_task(name, *, fail_preflight=False):
         return SimpleNamespace(
-            name=name, runner=None, requires_claude_code=False,
-            production_only=False, disable_purchase_reuse=fail_preflight,
+            name=name,
+            runner=None,
+            requires_claude_code=False,
+            production_only=False,
+            disable_purchase_reuse=fail_preflight,
             environment=None,
         )
 
@@ -11141,26 +11395,31 @@ async def test_benchmark_user_scope_covers_preflight_errors_and_default_tasks():
 
     try:
         bench.MINTED_AGENT_ACCOUNT_TASK_NAMES = {"plain", "synthetic"}
-        bench._benchmark_user_id_for_task = (
-            lambda name, _base_url: "synthetic-user" if name == "synthetic" else None
-        )
+        bench._benchmark_user_id_for_task = lambda name, _base_url: "synthetic-user" if name == "synthetic" else None
         bench.run_minted_agent_account_task = fake_run_minted
         try:
             await bench.run_single_task(
-                "http://localhost:3001", fake_task("synthetic", fail_preflight=True),
+                "http://localhost:3001",
+                fake_task("synthetic", fail_preflight=True),
             )
         except RuntimeError as exc:
             assert "disable_purchase_reuse requires" in str(exc)
         else:
             assert False, "Expected preflight failure"
-        assert (await bench.run_single_task(
-            "http://localhost:3001", fake_task("plain"),
-        )).user_id == expected_default
+        assert (
+            await bench.run_single_task(
+                "http://localhost:3001",
+                fake_task("plain"),
+            )
+        ).user_id == expected_default
 
         await bench.run_single_task("http://localhost:3001", fake_task("synthetic"))
-        assert (await bench.run_single_task(
-            "http://localhost:3001", fake_task("plain"),
-        )).user_id == expected_default
+        assert (
+            await bench.run_single_task(
+                "http://localhost:3001",
+                fake_task("plain"),
+            )
+        ).user_id == expected_default
 
         concurrent = True
         plain_user, synthetic_user = await asyncio.gather(
@@ -19573,9 +19832,11 @@ async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, ju
             if outcome is None:
                 continue
             name, error = outcome
+
             def report(error=error):
                 if error is not None:
                     raise error
+
             result.record(name, report)
     if interrupted is not None:
         raise interrupted
@@ -19600,6 +19861,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         assert release.wait(10), "judge did not observe two bounded native lanes"
         with admission_lock:
             active -= 1
+
     main_thread = threading.get_ident()
     judges_finished = False
 
@@ -19628,11 +19890,23 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
 
     result = BlackboxResult()
     controller_cases = [
-        ("test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate", "cloudbench_prisma_freshness_permanent_gate"),
+        (
+            "test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate",
+            "cloudbench_prisma_freshness_permanent_gate",
+        ),
         ("test_cloudbench_boot_payload_behavior_is_in_permanent_gate", "cloudbench_boot_payload_permanent_gate"),
-        ("test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate", "cloudbench_bundled_frontend_prerequisites_permanent_gate"),
-        ("test_cloudbench_log_transport_contract_is_in_permanent_gate", "cloudbench_log_transport_contract_permanent_gate"),
-        ("test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate", "cloudbench_dependency_rebuild_permanent_gate"),
+        (
+            "test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate",
+            "cloudbench_bundled_frontend_prerequisites_permanent_gate",
+        ),
+        (
+            "test_cloudbench_log_transport_contract_is_in_permanent_gate",
+            "cloudbench_log_transport_contract_permanent_gate",
+        ),
+        (
+            "test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate",
+            "cloudbench_dependency_rebuild_permanent_gate",
+        ),
         ("test_private_fleet_source_behavior_is_in_permanent_gate", "private_fleet_source_permanent_gate"),
         ("test_fly_native_completion_is_in_permanent_gate", "fly_native_completion_permanent_gate"),
         ("test_autoscaler_runtime_handoff_is_in_permanent_gate", "autoscaler_runtime_handoff_permanent_gate"),
@@ -19643,28 +19917,45 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         ("test_successful_llm_evidence_is_in_permanent_gate", "successful_llm_evidence_permanent_gate"),
     ]
     judge_cases = [
-        ("test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics", "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics"),
-        ("test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics", "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics"),
-        ("test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics", "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics"),
-        ("test_blue_bottle_tree_proof_passes_with_subagent_evidence", "blue_bottle_tree_proof_passes_with_subagent_evidence"),
+        (
+            "test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
+            "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
+        ),
+        (
+            "test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
+            "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
+        ),
+        (
+            "test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
+            "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
+        ),
+        (
+            "test_blue_bottle_tree_proof_passes_with_subagent_evidence",
+            "blue_bottle_tree_proof_passes_with_subagent_evidence",
+        ),
     ]
     invoked_controllers, invoked_judges, reported_controllers = [], [], []
     replacements = {}
     for index, (name, _) in enumerate(controller_cases):
+
         def controller(index=index, name=name):
             invoked_controllers.append(name)
             if index < 3:
                 return (native_failure, native_success, unexecuted_native)[index]()
+
         replacements[name] = controller
     for index, (name, _) in enumerate(judge_cases):
+
         async def judge(index=index, name=name):
             invoked_judges.append(name)
             if index < 3:
                 await (judge_success, judge_failure, final_judge)[index]()
+
         replacements[name] = judge
     original_record, original_async = BlackboxResult.record, BlackboxResult.record_async
     controller_names = [name for _, name in controller_cases]
     judge_names = [name for _, name in judge_cases]
+
     def record_registered(self, name, case):
         if name in controller_names:
             reported_controllers.append(name)
@@ -19673,6 +19964,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
                 original_record(result, ("native_failure", "native_success", "unexecuted_native")[index], case)
             else:
                 case()
+
     async def record_registered_async(self, name, case):
         if name in judge_names:
             index = judge_names.index(name)
@@ -19680,13 +19972,16 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
                 await original_async(result, ("judge_success", "judge_failure", "final_judge")[index], case)
             else:
                 await case()
+
     with (
         contextlib.redirect_stdout(io.StringIO()),
         contextlib.redirect_stderr(io.StringIO()),
         patch.dict(globals(), replacements),
         patch.object(BlackboxResult, "record", record_registered),
         patch.object(BlackboxResult, "record_async", record_registered_async),
-        patch.object(_test_utils, "clear_captures", side_effect=lambda: resets.append((threading.get_ident(), judges_finished))),
+        patch.object(
+            _test_utils, "clear_captures", side_effect=lambda: resets.append((threading.get_ident(), judges_finished))
+        ),
     ):
         await run_all_tests()
     assert sorted(invoked_controllers) == sorted(name for name, _ in controller_cases)
@@ -19697,7 +19992,11 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
     assert "native_failure: owned native failure" in result.errors, "native wait finished before the judge progressed"
     assert all(thread != main_thread for _, thread in seen)
     assert result.summary() == {"passed": 3, "failed": 3, "total": 6}
-    assert {error.split(":", 1)[0] for error in result.errors} == {"native_failure", "judge_failure", "unexecuted_native"}
+    assert {error.split(":", 1)[0] for error in result.errors} == {
+        "native_failure",
+        "judge_failure",
+        "unexecuted_native",
+    }
     assert all(thread == main_thread for thread, _ in resets)
     assert all(done for _, done in resets[-3:]), "native result recording reset captures during a judge"
 
@@ -19705,17 +20004,25 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
     release.clear()
     seen.clear()
     active = peak = 0
+
     def owned_native():
         native_enter()
         seen.append("drained")
+
     def forbidden_next_native():
         seen.append("started_after_cancellation")
+
     async def waiting_judge():
         await asyncio.Event().wait()
+
     with contextlib.redirect_stdout(io.StringIO()):
-        owner = asyncio.create_task(_run_benchmark_subprocess_and_judge_cases(
-            BlackboxResult(), [("owned_one", owned_native), ("owned_two", owned_native), ("forbidden", forbidden_next_native)], [("waiting", waiting_judge)],
-        ))
+        owner = asyncio.create_task(
+            _run_benchmark_subprocess_and_judge_cases(
+                BlackboxResult(),
+                [("owned_one", owned_native), ("owned_two", owned_native), ("forbidden", forbidden_next_native)],
+                [("waiting", waiting_judge)],
+            )
+        )
         try:
             assert await asyncio.to_thread(started.wait, 10)
             owner.cancel()
@@ -19769,7 +20076,9 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             owner = json.loads(descendant.read_text())
             observed = subprocess.run(
                 ["ps", "-p", str(owner["pid"]), "-o", "stat="],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             assert observed.returncode in (0, 1), "native control process observation failed"
             if observed.returncode == 1 and not observed.stdout.strip():
@@ -19782,7 +20091,9 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             except (OSError, ValueError, IndexError):
                 gone = subprocess.run(
                     ["ps", "-p", str(owner["pid"]), "-o", "stat="],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 assert (gone.returncode == 1 and not gone.stdout.strip()) or (
                     gone.returncode == 0 and gone.stdout.strip().startswith("Z")
@@ -19826,7 +20137,9 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         finally:
             if descendant_live():
                 owner = json.loads(descendant.read_text())
-                identity.main(["process-identity.py", "--expect", owner["birth"], "--signal", "KILL", str(owner["pid"])])
+                identity.main(
+                    ["process-identity.py", "--expect", owner["birth"], "--signal", "KILL", str(owner["pid"])]
+                )
             cleanup_deadline = time.monotonic() + 10
             while descendant_live() and time.monotonic() < cleanup_deadline:
                 await asyncio.sleep(0.02)
@@ -19921,25 +20234,52 @@ async def run_all_tests():
     await _run_benchmark_subprocess_and_judge_cases(
         r,
         [
-            ("cloudbench_prisma_freshness_permanent_gate", test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate),
+            (
+                "cloudbench_prisma_freshness_permanent_gate",
+                test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate,
+            ),
             ("cloudbench_boot_payload_permanent_gate", test_cloudbench_boot_payload_behavior_is_in_permanent_gate),
-            ("cloudbench_bundled_frontend_prerequisites_permanent_gate", test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate),
-            ("cloudbench_log_transport_contract_permanent_gate", test_cloudbench_log_transport_contract_is_in_permanent_gate),
-            ("cloudbench_dependency_rebuild_permanent_gate", test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate),
+            (
+                "cloudbench_bundled_frontend_prerequisites_permanent_gate",
+                test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate,
+            ),
+            (
+                "cloudbench_log_transport_contract_permanent_gate",
+                test_cloudbench_log_transport_contract_is_in_permanent_gate,
+            ),
+            (
+                "cloudbench_dependency_rebuild_permanent_gate",
+                test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate,
+            ),
             ("private_fleet_source_permanent_gate", test_private_fleet_source_behavior_is_in_permanent_gate),
             ("fly_native_completion_permanent_gate", test_fly_native_completion_is_in_permanent_gate),
             ("autoscaler_runtime_handoff_permanent_gate", test_autoscaler_runtime_handoff_is_in_permanent_gate),
             ("boot_terminal_runtime_evidence_permanent_gate", test_boot_terminal_runtime_evidence_is_in_permanent_gate),
             ("cloudbench_codex_auth_permanent_gate", test_cloudbench_codex_auth_is_in_permanent_gate),
             ("cloudbench_pool_vm_shapes_permanent_gate", test_cloudbench_pool_vm_shapes_are_in_permanent_gate),
-            ("live_query_proof_zero_spend_admission", test_live_query_proof_rejects_zero_spend_tasks_before_provisioning),
+            (
+                "live_query_proof_zero_spend_admission",
+                test_live_query_proof_rejects_zero_spend_tasks_before_provisioning,
+            ),
             ("successful_llm_evidence_permanent_gate", test_successful_llm_evidence_is_in_permanent_gate),
         ],
         [
-            ("blue_bottle_k5_trial_b217afca_passes_single_turn_semantics", test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics),
-            ("blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics", test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics),
-            ("blue_bottle_k5_trial_7d282652_passes_single_turn_semantics", test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics),
-            ("blue_bottle_tree_proof_passes_with_subagent_evidence", test_blue_bottle_tree_proof_passes_with_subagent_evidence),
+            (
+                "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
+                test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics,
+            ),
+            (
+                "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
+                test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics,
+            ),
+            (
+                "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
+                test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics,
+            ),
+            (
+                "blue_bottle_tree_proof_passes_with_subagent_evidence",
+                test_blue_bottle_tree_proof_passes_with_subagent_evidence,
+            ),
         ],
     )
     r.record(
@@ -20087,6 +20427,18 @@ async def run_all_tests():
     r.record(
         "local_benchmark_task_queue_uses_workspace",
         test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls,
+    )
+    await r.record_async(
+        "live_report_counts_executor_admission_and_drains_cancellation",
+        test_live_report_counts_executor_admission_and_drains_cancellation,
+    )
+    await r.record_async(
+        "live_report_repeated_occurrences_keep_early_outcomes_and_agent_links",
+        test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_links,
+    )
+    await r.record_async(
+        "live_report_keeps_all_created_roots_for_batch_finalization",
+        test_live_report_keeps_all_created_roots_for_batch_finalization,
     )
     await r.record_async(
         "parallel_scheduler_overlaps_isolated_browser_profiles",

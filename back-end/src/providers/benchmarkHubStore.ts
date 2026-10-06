@@ -43,6 +43,7 @@ import {
   __resetHubResolutionCachesForTest,
 } from './benchmarkHubLookup';
 import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
+import { coalesceHubRunPuts } from './benchmarkHubInFlight';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -415,8 +416,7 @@ async function withIndexLock<T>(
 }
 
 function normalizeAgentId(value: unknown): string | null {
-  const trimmed = typeof value === 'string' ? value.trim() : '';
-  return trimmed || null;
+  return (typeof value === 'string' ? value.trim() : '') || null;
 }
 
 function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
@@ -450,7 +450,9 @@ function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
 /**
  * Upsert a run bundle (live snapshot or final). Returns the stored summary.
  */
-export async function putRun(
+export const putRun = coalesceHubRunPuts(storeRun);
+
+async function storeRun(
   bundle: Record<string, unknown>,
   options: { live?: boolean; source?: string } = {}
 ): Promise<HubRunSummary> {

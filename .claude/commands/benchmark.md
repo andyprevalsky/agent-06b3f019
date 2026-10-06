@@ -63,7 +63,6 @@ normal 7,200-second defaults remain unchanged. A task verdict does not establish
 resource release. On a cutoff, signal only the exact owned controller, let its
 cleanup traps run, audit its resources, and grant no acceptance credit.
 
-
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 
 ```bash
@@ -73,6 +72,12 @@ scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse H
 ```
 
 `image-activate` uses the existing app environment lock and owned warm-source setup. It strictly stops the exact existing donor before environment activation, activates the published image on the donor and this workspace's stopped pool members, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
+
+REAL tasks now use fresh primary and worker volumes by default with the verified dependency image, exact authenticated Git checkout and the same canonical isolated database fixture. SIM tasks, including `--sim-on` overrides, retain their snapshot and cached World Model assets. `--snapshot-volumes` forces the historical restored-volume path for a provider diagnostic; generic `--provision-pool` and legacy startup keep compatible snapshot storage. Source-only changes reuse the pinned image and inject current bootstrap helpers. A successful clone command precedes storage readiness: inspect its exact owned IDs and keyed volume state when preflight waits; retain the original failed receipt and let the owning CLI finish cleanup.
+
+An accepted delete plus an exact owned-volume `pending_destroy` or `destroyed`
+terminal receipt qualifies release even when Fly retains the object. Request
+acceptance alone does not establish release.
 
 Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
 

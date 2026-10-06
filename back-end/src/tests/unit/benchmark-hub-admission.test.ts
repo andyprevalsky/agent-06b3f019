@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { coalesceHubRunPuts } from '../../providers/benchmarkHubInFlight';
 
 type Operation = () => Promise<unknown>;
 type Admission = 'foreground' | 'snapshot';
@@ -15,29 +16,101 @@ type Prisma = {
 
 /** Execute the actual storage owner's admission and transaction boundary. */
 function loadOwner(prisma: Prisma): Owner {
-  const filename = path.join(process.cwd(), 'src/providers/benchmarkHubStore.ts');
+  return loadDeclaration('withIndexLock', { prisma, Promise });
+}
+
+/** Include the owner's reachable declarations, replacing only external boundaries. */
+function loadDeclaration<T>(name: string, bindings: Record<string, unknown>): T {
+  const filename =
+    process.env.BENCHMARK_HUB_OWNER_SOURCE_PATH ??
+    path.join(process.cwd(), 'src/providers/benchmarkHubStore.ts');
   const source = readFileSync(filename, 'utf8');
   const tree = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
-  const declarations = tree.statements.filter((node) => {
-    if (ts.isFunctionDeclaration(node)) return node.name?.text === 'withIndexLock';
-    return (
-      ts.isVariableStatement(node) &&
-      node.declarationList.declarations.some((declaration) =>
-        ['INDEX_LOCK_KEY', 'indexAdmissionWaiters', 'indexAdmissionHeld'].includes(
-          declaration.name.getText(tree)
-        )
-      )
-    );
-  });
-  assert.equal(declarations.filter(ts.isFunctionDeclaration).length, 1);
+  const named = new Map<string, ts.Statement>();
+  for (const node of tree.statements) {
+    if (ts.isFunctionDeclaration(node) && node.name) named.set(node.name.text, node);
+    if (ts.isVariableStatement(node)) {
+      for (const declaration of node.declarationList.declarations) {
+        named.set(declaration.name.getText(tree), node);
+      }
+    }
+  }
+  const included = new Set<ts.Statement>();
+  const include = (identifier: string): void => {
+    if (Object.hasOwn(bindings, identifier)) return;
+    const node = named.get(identifier);
+    if (!node || included.has(node)) return;
+    included.add(node);
+    const visit = (child: ts.Node): void => {
+      if (ts.isIdentifier(child)) include(child.text);
+      ts.forEachChild(child, visit);
+    };
+    ts.forEachChild(node, visit);
+  };
+  include(name);
+  assert.ok(included.has(named.get(name)!));
+  const declarations = tree.statements.filter((node) => included.has(node));
   const compiled = ts.transpileModule(
-    declarations.map((node) => node.getText(tree)).join('\n') +
-      '\nglobalThis.owner = withIndexLock;',
+    declarations.map((node) => node.getText(tree)).join('\n') + `\nglobalThis.owner = ${name};`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }
   ).outputText;
-  const context = vm.createContext({ prisma, Promise });
+  const context = vm.createContext({ ...bindings, exports: {} });
   vm.runInContext(compiled, context);
   return context.owner;
+}
+
+type Bundle = Record<string, unknown>;
+type PutRun = (bundle: Bundle, options?: { live?: boolean; source?: string }) => Promise<Bundle>;
+
+function putBoundary(beforeWrite: (key: string) => Promise<void> = async () => {}) {
+  const database = databaseBoundary(4);
+  const objects = new Map<string, string>();
+  const writes: Array<{ key: string; value: string }> = [];
+  let transactions = 0;
+  let ancestors = 0;
+  let cacheUpdates = 0;
+  let revision = 0;
+  const putRun = loadDeclaration<PutRun>('putRun', {
+    Promise,
+    coalesceHubRunPuts,
+    prisma: {
+      $transaction: (body: (tx: Transaction) => Promise<unknown>, options: unknown) => {
+        transactions += 1;
+        return database.prisma.$transaction(body, options);
+      },
+    },
+    listRunsStrict: async () => JSON.parse(objects.get('index.json') ?? '[]'),
+    readAgentRunIndexForMutation: async () => ({ revision }),
+    agentIdsFromHubBundle: () => new Set(['fixture-agent']),
+    hubAgentIndexAfterPut: () => ({ revision: ++revision }),
+    putObject: async (key: string, value: string) => {
+      await beforeWrite(key);
+      writes.push({ key, value });
+      objects.set(key, value);
+    },
+    writeAgentRunIndex: async () => {},
+    slotHubAncestorSkeletonsFromBundle: async () => {
+      ancestors += 1;
+    },
+    applyHubRunToResolutionCaches: () => {
+      cacheUpdates += 1;
+    },
+    log: { info: () => {} },
+  });
+  return {
+    putRun,
+    objects,
+    runWrites: () => writes.filter(({ key }) => key.startsWith('runs/')),
+    stats: () => ({ transactions, ancestors, cacheUpdates, ...database.stats() }),
+  };
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 function databaseBoundary(capacity: number) {
@@ -187,4 +260,271 @@ test('separate backend admissions still serialize through the shared PostgreSQL 
   assert.equal(outcomes.length, 20);
   assert.equal(peakInside, 1);
   assert.deepEqual(database.stats(), { open: 0, peakOpen: 2, held: 0, peakHeld: 1 });
+});
+
+const packet = {
+  run_id: 'fixture-identical',
+  timestamp: '2026-10-06T11:55:18Z',
+  tasks: [{ name: 'fixture-task', passed: null, status: 'starting' }],
+};
+
+test('50 identical pending Hub packets share one publication before SQL admission', async () => {
+  const entered = deferred();
+  const gate = deferred();
+  const boundary = putBoundary(async (key) => {
+    if (key.startsWith('runs/')) {
+      entered.resolve();
+      await gate.promise;
+    }
+  });
+  const first = boundary.putRun(packet, { live: true, source: 'fixture' });
+  await entered.promise;
+  const requests = [
+    first,
+    ...Array.from({ length: 49 }, () =>
+      boundary.putRun(JSON.parse(JSON.stringify(packet)), { live: true, source: 'fixture' })
+    ),
+  ];
+  gate.resolve();
+  const results = await Promise.all(requests);
+  assert.equal(boundary.runWrites().length, 1);
+  assert.equal(boundary.stats().transactions, 1);
+  assert.equal(boundary.stats().ancestors, 1);
+  assert.equal(boundary.stats().cacheUpdates, 1);
+  assert.ok(requests.every((request) => request === first));
+  assert.ok(results.every((result) => result === results[0]));
+});
+
+test('distinct packet content, run, source and live mode retain publication order', async () => {
+  const boundary = putBoundary();
+  const requests = [
+    boundary.putRun(packet, { live: true, source: 'fixture' }),
+    boundary.putRun({ ...packet, marker: 'changed' }, { live: true, source: 'fixture' }),
+    boundary.putRun({ ...packet, run_id: 'fixture-other' }, { live: true, source: 'fixture' }),
+    boundary.putRun(packet, { live: true, source: 'other-source' }),
+    boundary.putRun(packet, { live: false, source: 'fixture' }),
+  ];
+  const results = await Promise.all(requests);
+  assert.equal(boundary.stats().transactions, 5);
+  assert.deepEqual(
+    boundary.runWrites().map(({ value }) => JSON.parse(value)),
+    [
+      packet,
+      { ...packet, marker: 'changed' },
+      { ...packet, run_id: 'fixture-other' },
+      packet,
+      packet,
+    ]
+  );
+  assert.equal(results[3].source, 'other-source');
+  assert.equal(results[4].live, false);
+});
+
+test('failed identical publication rejects every waiter and permits an unchanged retry', async () => {
+  const marker = new Error('fixture object write failure');
+  let fail = true;
+  const boundary = putBoundary(async (key) => {
+    if (key.startsWith('runs/') && fail) throw marker;
+  });
+  const outcomes = await Promise.allSettled(
+    Array.from({ length: 3 }, () => boundary.putRun(packet, { live: true }))
+  );
+  assert.ok(
+    outcomes.every((outcome) => outcome.status === 'rejected' && outcome.reason === marker)
+  );
+  assert.equal(boundary.stats().transactions, 1);
+  fail = false;
+  assert.equal((await boundary.putRun(packet, { live: true })).run_id, packet.run_id);
+  assert.equal(boundary.stats().transactions, 2);
+  assert.equal(boundary.runWrites().length, 1);
+});
+
+test('settled packets are evicted and late live packets preserve the absorbing final state', async () => {
+  const boundary = putBoundary();
+  const first = await boundary.putRun(packet, { live: true });
+  const second = await boundary.putRun(packet, { live: true });
+  assert.notEqual(first, second);
+  assert.equal(boundary.runWrites().length, 2);
+  const terminalPacket = { ...packet, tasks: [{ name: 'fixture-task', passed: false }] };
+  await boundary.putRun(terminalPacket, { live: false });
+  const lateLive = await boundary.putRun(packet, { live: true });
+  assert.equal(lateLive.live, false);
+  assert.equal(boundary.runWrites().length, 3);
+  assert.equal(boundary.stats().transactions, 4);
+  assert.deepEqual(JSON.parse(boundary.objects.get(`runs/${packet.run_id}.json`)!), terminalPacket);
+});
+
+test('nonconsecutive identical packets preserve actual A B A storage order', async (context) => {
+  const entered = deferred();
+  const gate = deferred();
+  const boundary = putBoundary(async (key) => {
+    if (key.startsWith('runs/')) {
+      entered.resolve();
+      await gate.promise;
+    }
+  });
+  const first = boundary.putRun(packet, { live: true, source: 'fixture' });
+  await entered.promise;
+  const second = boundary.putRun(
+    { ...packet, marker: 'changed' },
+    { live: true, source: 'fixture' }
+  );
+  const last = boundary.putRun(JSON.parse(JSON.stringify(packet)), {
+    live: true,
+    source: 'fixture',
+  });
+  gate.resolve();
+  await Promise.all([first, second, last]);
+  const persisted = JSON.parse(boundary.objects.get(`runs/${packet.run_id}.json`)!);
+  context.diagnostic(
+    JSON.stringify({
+      control: 'actual A B A storage',
+      firstAndLastSharePromise: first === last,
+      actualRunWrites: boundary.runWrites().length,
+      finalPacketIsLastA: JSON.stringify(persisted) === JSON.stringify(packet),
+    })
+  );
+  assert.deepEqual(
+    boundary.runWrites().map(({ value }) => JSON.parse(value)),
+    [packet, { ...packet, marker: 'changed' }, packet]
+  );
+  assert.deepEqual(persisted, packet);
+  assert.notEqual(last, first);
+});
+
+for (const mode of ['source', 'live'] as const) {
+  test(`an intervening same-run ${mode} change admits the final identical packet`, async () => {
+    const entered = deferred();
+    const gate = deferred();
+    const boundary = putBoundary(async (key) => {
+      if (key.startsWith('runs/')) {
+        entered.resolve();
+        await gate.promise;
+      }
+    });
+    const options = { live: mode === 'source', source: 'fixture' };
+    const first = boundary.putRun(packet, options);
+    await entered.promise;
+    const second = boundary.putRun(
+      packet,
+      mode === 'source' ? { ...options, source: 'other-source' } : { ...options, live: true }
+    );
+    const last = boundary.putRun(JSON.parse(JSON.stringify(packet)), options);
+    gate.resolve();
+    const results = await Promise.all([first, second, last]);
+    assert.notEqual(last, first);
+    assert.equal(boundary.stats().transactions, 3);
+    assert.equal(boundary.runWrites().length, mode === 'source' ? 3 : 2);
+    assert.equal(results[2].source, 'fixture');
+    assert.equal(results[2].live, options.live);
+    assert.deepEqual(JSON.parse(boundary.objects.get(`runs/${packet.run_id}.json`)!), packet);
+  });
+}
+
+for (const fails of [false, true]) {
+  test(`an earlier ${fails ? 'rejection' : 'success'} cannot evict the latest pending packet`, async () => {
+    const entered = deferred();
+    const firstGate = deferred();
+    const secondGate = deferred();
+    const marker = new Error('fixture earlier write failure');
+    let runWrites = 0;
+    const boundary = putBoundary(async (key) => {
+      if (!key.startsWith('runs/')) return;
+      runWrites += 1;
+      if (runWrites === 1) {
+        entered.resolve();
+        await firstGate.promise;
+        if (fails) throw marker;
+      }
+      if (runWrites === 2) await secondGate.promise;
+    });
+    const first = boundary.putRun(packet, { live: true, source: 'fixture' });
+    const firstOutcome = first.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    await entered.promise;
+    const second = boundary.putRun(
+      { ...packet, marker: 'changed' },
+      { live: true, source: 'fixture' }
+    );
+    const last = boundary.putRun(JSON.parse(JSON.stringify(packet)), {
+      live: true,
+      source: 'fixture',
+    });
+    const lastOutcome = last.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    firstGate.resolve();
+    const firstResult = await firstOutcome;
+    const peer = boundary.putRun(JSON.parse(JSON.stringify(packet)), {
+      live: true,
+      source: 'fixture',
+    });
+    const outcomes = Promise.allSettled([second, last, peer]);
+    secondGate.resolve();
+    const results = await outcomes;
+    assert.equal(firstResult, fails ? marker : undefined);
+    assert.equal(peer, last);
+    assert.equal(await lastOutcome, undefined);
+    assert.ok(results.every((result) => result.status === 'fulfilled'));
+    assert.equal(boundary.stats().transactions, 3);
+    assert.equal(boundary.runWrites().length, fails ? 2 : 3);
+    assert.deepEqual(JSON.parse(boundary.objects.get(`runs/${packet.run_id}.json`)!), packet);
+  });
+}
+
+test('a different run preserves consecutive duplicate sharing for the first run', async () => {
+  const entered = deferred();
+  const gate = deferred();
+  const boundary = putBoundary(async (key) => {
+    if (key.startsWith('runs/')) {
+      entered.resolve();
+      await gate.promise;
+    }
+  });
+  const first = boundary.putRun(packet, { live: true, source: 'fixture' });
+  await entered.promise;
+  const other = boundary.putRun(
+    { ...packet, run_id: 'fixture-other' },
+    { live: true, source: 'fixture' }
+  );
+  const last = boundary.putRun(JSON.parse(JSON.stringify(packet)), {
+    live: true,
+    source: 'fixture',
+  });
+  gate.resolve();
+  await Promise.all([first, other, last]);
+  assert.equal(last, first);
+  assert.equal(boundary.stats().transactions, 2);
+  assert.equal(boundary.runWrites().length, 2);
+});
+
+test('coalescing follows the same normalized run identity as actual persistence', async () => {
+  const entered = deferred();
+  const gate = deferred();
+  const boundary = putBoundary(async (key) => {
+    if (key.startsWith('runs/')) {
+      entered.resolve();
+      await gate.promise;
+    }
+  });
+  const firstPacket = { ...packet, run_id: 42 };
+  const first = boundary.putRun(firstPacket, { live: true, source: 'fixture' });
+  await entered.promise;
+  const second = boundary.putRun(
+    { ...firstPacket, run_id: '42', marker: 'changed' },
+    { live: true, source: 'fixture' }
+  );
+  const last = boundary.putRun(JSON.parse(JSON.stringify(firstPacket)), {
+    live: true,
+    source: 'fixture',
+  });
+  gate.resolve();
+  await Promise.all([first, second, last]);
+  assert.notEqual(last, first);
+  assert.equal(boundary.stats().transactions, 3);
+  assert.equal(boundary.runWrites().length, 3);
+  assert.deepEqual(JSON.parse(boundary.objects.get('runs/42.json')!), firstPacket);
 });

@@ -110,6 +110,7 @@ RUN bash /tmp/rose-cloudbench-install-image-deps.sh
 # changes do not invalidate installed dependencies. Local deps/secrets remain
 # excluded by .dockerignore; the complete source still supplies donor fingerprints.
 COPY --chown=rose:rose . /app
+RUN bash /tmp/rose-cloudbench-install-image-deps.sh --verify-frontend
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 # ── Keep-alive CMD ─────────────────────────────────────────────────────────
