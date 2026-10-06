@@ -1933,6 +1933,20 @@ def phone_final_result_text(data: dict) -> str:
     return "\n".join(chunks)
 
 
+def phone_parked_hold_seconds(data: dict) -> int:
+    """Longest wait_for_human parking reported on a finished call_phone_number card."""
+    parked = 0
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict) or metadata.get("toolName") != "call_phone_number":
+            continue
+        phone_call = metadata.get("phoneCall")
+        hold_seconds = phone_call.get("holdSeconds") if isinstance(phone_call, dict) else None
+        if isinstance(hold_seconds, int) and not isinstance(hold_seconds, bool):
+            parked = max(parked, hold_seconds)
+    return parked
+
+
 def _flatten_pinned_call_findings(pinned_facts: Optional[dict]) -> list[str]:
     """Return string leaves from pinned phone facts for agent-side evidence checks."""
     findings: list[str] = []
@@ -12328,6 +12342,12 @@ def _run_declared_static_check(
             failures = _tool_runtime_failures(data)
             if failures:
                 return False, f"Observed tool failure: {failures[0]}"
+            continue
+        if check_type == "phone_call_parked_on_hold":
+            parked = phone_parked_hold_seconds(data)
+            minimum = int(check.get("min_seconds", 1))
+            if parked < minimum:
+                return False, f"Phone call was parked by wait_for_human for {parked}s; expected at least {minimum}s"
             continue
         if check_type == "explore_research_not_reject_loop":
             loops = _explore_reject_loop_failures(data, min_rejects=int(check.get("min_rejects", 3)))

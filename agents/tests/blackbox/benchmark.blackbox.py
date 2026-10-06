@@ -16485,6 +16485,20 @@ def test_phone_call_hold_queue_task_waits_real_air_canada_queue_for_flight_credi
     assert {"vapi", "twilio"} <= set(hold.environment["live_targets"])
 
     hold_seconds = persona["hold_line"]["hold_seconds"]
+    # The bench is the end-to-end test of wait_for_human: most of the queue must be parked.
+    assert hold.enforce_declared_evaluators is True
+    parked_checks = [
+        check
+        for evaluator in hold.evaluators
+        if evaluator["method"] == "static_check"
+        for check in evaluator["checks"]
+        if check["type"] == "phone_call_parked_on_hold"
+    ]
+    assert parked_checks == [{"type": "phone_call_parked_on_hold", "min_seconds": int(hold_seconds * 0.9)}]
+    from benchmarks import local
+
+    assert local.needs_public_tunnel([hold.name]) is True
+    assert local.needs_public_tunnel(["phone-call-ivr-dtmf"]) is False
     # The agent's single call must outlive the hold plus the representative conversation.
     assert hold.timeout_seconds >= hold_seconds + persona["max_duration_seconds"] + 1200
     assert hold_seconds + persona["max_duration_seconds"] <= HOLD_LINE_MAX_SECONDS
@@ -16509,6 +16523,34 @@ def test_phone_call_hold_queue_task_waits_real_air_canada_queue_for_flight_credi
     assert "resolved > seconds" in backstop_source
     assert "task.timeout_seconds" in backstop_source
     assert get_timeout_floor(hold.name) == hold.timeout_seconds
+
+
+def test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card():
+    """Parked time comes from the finished call_phone_number card's holdSeconds, nothing else."""
+    from benchmarks.run_benchmark import _run_declared_static_check, phone_parked_hold_seconds
+
+    def card(**phone_call):
+        return {"role": "TOOL", "metadata": {"toolName": "call_phone_number", "phoneCall": phone_call}}
+
+    evaluator = {"checks": [{"type": "phone_call_parked_on_hold", "min_seconds": 8100}]}
+    parked = {"messages": [card(status="in-progress"), card(status="on-hold"), card(status="ended", holdSeconds=8820)]}
+    assert phone_parked_hold_seconds(parked) == 8820
+    assert _run_declared_static_check(evaluator, parked) == (True, "All declared static checks passed")
+
+    stayed_live = {"messages": [card(status="ended", duration=9600)]}
+    assert _run_declared_static_check(evaluator, stayed_live) == (
+        False,
+        "Phone call was parked by wait_for_human for 0s; expected at least 8100s",
+    )
+    assert _run_declared_static_check(evaluator, {"messages": [card(status="ended", holdSeconds=600)]})[0] is False
+    foreign = {
+        "messages": [
+            {"metadata": {"toolName": "wait_for", "phoneCall": {"holdSeconds": 9000}}},
+            card(status="ended", holdSeconds=True),
+            card(status="ended", holdSeconds="9000"),
+        ]
+    }
+    assert phone_parked_hold_seconds(foreign) == 0
 
 
 def _run_pytest_style_case(case):
@@ -19946,6 +19988,10 @@ async def run_all_tests():
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
     r.record("phone_call_ivr_dtmf_task", test_phone_call_ivr_dtmf_task_defines_call_tree_verification)
     r.record("phone_call_hold_queue_task", test_phone_call_hold_queue_task_waits_real_air_canada_queue_for_flight_credit)
+    r.record(
+        "phone_call_parked_on_hold_static_check",
+        test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card,
+    )
     from benchmarks import phone_callee_test, phone_hold_line_test
 
     for module, prefix in ((phone_hold_line_test, "phone_hold_line_"), (phone_callee_test, "phone_callee_")):

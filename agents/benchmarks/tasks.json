@@ -4694,6 +4694,17 @@
       "credit_amount_usd": "428.60",
       "credit_expiry": "October 2, 2027"
     },
+    "evaluators": [
+      {
+        "id": "hold-parked-by-wait-for-human",
+        "method": "static_check",
+        "criteria": [
+          "The voice agent parked the call with wait_for_human for at least 90% of the 2.5 hour queue instead of keeping a live voice assistant on the hold music"
+        ],
+        "checks": [{"type": "phone_call_parked_on_hold", "min_seconds": 8100}]
+      }
+    ],
+    "enforce_declared_evaluators": true,
     "description": "Real outbound phone call into a controlled Air Canada hold queue. The line plays the recorded Air Canada greeting and queue announcement, then the recorded hold music on loop for 9000 seconds (2.5 hours) before transferring the live call to a representative persona who issues the flight credit.",
     "environment": {
       "mode": "live",
@@ -4709,14 +4720,14 @@
         "R2_SECRET_ACCESS_KEY"
       ],
       "live_targets": ["vapi", "twilio"],
-      "context_notes": "Real wall-clock hold on a leased Twilio hold line (friendly name rose-benchmark-hold-line*). phone_persona.hold_line plays the air-canada-2026-10-06 recording from private R2 (benchmarks/fixtures/phone_hold manifest) and transfers the connected caller to the persona Vapi number after 9000 seconds (2.5 hours). The agent's voice call must survive the queue on one connected call; the backend wait_for_human hold parking is the intended path, but the bench only observes the line. caller_stayed_on_hold comes from the hold line's own record (transfer after the full hold with no earlier hang-up), not from the persona. The local stack needs a public https URL (PHONE_HOLD_PUBLIC_URL or PUBLIC_BASE_URL) for hold parking. Catalog timeout is 12600s (3.5 hours). Cloud fleet requires a BENCHMARK_CALLEE_PHONE_NUMBER_IDS assignment for phone-call-hold-queue. Pass when the single call is transferred after the full hold and the final answer reports ACFC-2458, $428.60, and October 2, 2027."
+      "context_notes": "Real wall-clock hold on a leased Twilio hold line (friendly name rose-benchmark-hold-line*). phone_persona.hold_line plays the air-canada-2026-10-06 recording from private R2 (benchmarks/fixtures/phone_hold manifest) and transfers the connected caller to the persona Vapi number after 9000 seconds (2.5 hours). The agent's voice call must survive the queue on one connected call, parked by the backend's wait_for_human hold line: the finished call card must report at least 8100 seconds parked (90% of the hold). caller_stayed_on_hold comes from the hold line's own record (transfer after the full hold with no earlier hang-up), not from the persona. Twilio must reach the backend's hold webhooks and media stream, so local stacks for hold-line tasks open the public tunnel (PUBLIC_BASE_URL); PHONE_HOLD_PUBLIC_URL overrides it. Catalog timeout is 12600s (3.5 hours). Cloud fleet requires a BENCHMARK_CALLEE_PHONE_NUMBER_IDS assignment for phone-call-hold-queue. Pass when the single call is transferred after the full hold and the final answer reports ACFC-2458, $428.60, and October 2, 2027."
     },
     "group": "daily",
     "human_time": "2.5h",
     "world_surface": "live",
     "fast_cache": "off",
     "anti_bot": "no",
-    "label_eval": "Root completes; calls the Air Canada hold line exactly once; stays connected through the real 2.5-hour recorded queue; final answer reports ACFC-2458, $428.60, and October 2, 2027.",
+    "label_eval": "Root completes; calls the Air Canada hold line exactly once; stays connected through the real 2.5-hour recorded queue, parked by wait_for_human for at least 90% of it; final answer reports ACFC-2458, $428.60, and October 2, 2027.",
     "label_notes": "Phone hold-queue harness. The wait is a real 9000s live call on recorded Air Canada queue audio, not a compressed simulation. The representative picks up only after the full hold.",
     "bench": "pipeline-e2e",
     "source": [
