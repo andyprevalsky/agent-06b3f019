@@ -74,4 +74,33 @@ expect_flag injected-false-overwrites-stale-true false
 run_cloud_init injected-true-overwrites-stale-false false BROWSER_AGENT_BROWSER_USE_ENABLED=true
 expect_flag injected-true-overwrites-stale-false true
 
+# Failed dependency setup + unseeded DB: npx without --no-install blocks on a
+# hidden install prompt. The stub models that prompt as an indefinite wait.
+NPX_STUB_BIN="$TMP_ROOT/npx-bin"
+mkdir -p "$NPX_STUB_BIN"
+printf '#!/bin/sh\necho\n' >"$NPX_STUB_BIN/psql"
+cat >"$NPX_STUB_BIN/npx" <<'NPX'
+#!/bin/sh
+[ "$1" = "--no-install" ] && exit 1
+exec sleep 600
+NPX
+chmod +x "$NPX_STUB_BIN"/*
+seed_repo="$TMP_ROOT/unseeded-without-deps"
+mkdir -p "$seed_repo/scripts" "$seed_repo/agents" "$seed_repo/back-end/scripts"
+cp "$ROOT_DIR/scripts/cloud-init.sh" "$seed_repo/scripts/cloud-init.sh"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$seed_repo/scripts/cloud-build.sh"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$seed_repo/back-end/scripts/apply-local-workflow-ddl.sh"
+: >"$seed_repo/agents/.env"
+: >"$seed_repo/back-end/.env"
+if ! env -i HOME="$TMP_ROOT/home" PATH="$NPX_STUB_BIN:$STUB_BIN:/usr/bin:/bin" BROWSER_PROVIDER=kernel \
+  timeout 60 "$BASH" "$seed_repo/scripts/cloud-init.sh" >"$seed_repo/cloud-init.log" 2>&1; then
+  cat "$seed_repo/cloud-init.log" >&2
+  fail "unseeded-without-deps: cloud-init.sh did not finish (npx install prompt?)"
+fi
+grep -q 'WARN: seed-local.ts failed' "$seed_repo/cloud-init.log" ||
+  fail "unseeded-without-deps: missing seed failure warning"
+grep -q 'cloud-init complete' "$seed_repo/cloud-init.log" ||
+  fail "unseeded-without-deps: cloud-init.sh did not run to completion"
+echo "PASS: unseeded-without-deps"
+
 echo "All cloud-init env tests passed."
