@@ -2558,6 +2558,47 @@ def test_build_world_model_from_archives_runs_actual_upstream_build_with_fake_pr
             restore()
 
 
+def test_native_wmh_ingestion_preserves_completed_pairs_with_equal_or_regressing_clocks():
+    from benchmarks.world_model_harness import (
+        CanonicalAction,
+        CanonicalObservation,
+        RoseTransition,
+        jsonl_line,
+        transitions_to_otel_spans,
+    )
+    from wmh.ingest.otel_genai import OtelGenAIAdapter
+
+    timestamps = [1783099905246] * 16 + list(range(1783099905245, 1783099905237, -1)) + [None, None, 0]
+    transitions = [
+        RoseTransition(
+            state_before={"root_agent_id": "equal-clock-root", "row": row},
+            scratchpad=f"state-{row}",
+            action=CanonicalAction(
+                category="explore", name="spawn_explore_agent",
+                arguments={"goal": f"request-{row}"}, tool_call_id=f"call-{row}",
+                timestamp_ms=timestamp,
+            ),
+            observation=CanonicalObservation(
+                category="explore", content=f"completed-result-{row}", timestamp_ms=timestamp,
+            ),
+        )
+        for row, timestamp in enumerate(timestamps)
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "paired.otel.jsonl"
+        spans = transitions_to_otel_spans("equal-clock-root", transitions)
+        path.write_text("\n".join(jsonl_line(json.dumps(span)) for span in spans) + "\n")
+        traces = OtelGenAIAdapter().from_file(str(path))
+        assert len(traces) == 1
+        steps = traces[0].steps
+        assert len(steps) == len(transitions), "native ingestion fabricated unmatched empty Steps"
+        for step, transition in zip(steps, transitions):
+            assert step.action.arguments == transition.action.to_arguments()
+            assert json.loads(step.observation.content) == json.loads(transition.observation.to_output_text())
+            assert step.state_before.structured == transition.state_before
+            assert step.state_before.scratchpad == transition.scratchpad
+
+
 def test_compare_real_vs_world_model_benchmark_outcomes():
     from benchmarks.world_model_harness import compare_real_vs_world_model_benchmark
 
@@ -5155,6 +5196,10 @@ async def run_all_tests():
     r.record(
         "build_world_model_from_archives_runs_actual_upstream_build_with_fake_provider",
         test_build_world_model_from_archives_runs_actual_upstream_build_with_fake_provider,
+    )
+    r.record(
+        "native_wmh_ingestion_preserves_completed_pairs_with_equal_or_regressing_clocks",
+        test_native_wmh_ingestion_preserves_completed_pairs_with_equal_or_regressing_clocks,
     )
     r.record(
         "compare_real_vs_world_model_benchmark_outcomes",

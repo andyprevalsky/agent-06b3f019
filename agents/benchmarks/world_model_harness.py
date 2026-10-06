@@ -54,7 +54,7 @@ _WMH_REFERENCE_ROOT = _REPO_ROOT / ".context" / "reference" / "world-model-harne
 _DEFAULT_WMH_BUILD_ROOT = _REPO_ROOT / ".context" / "world-model"
 _BENCHMARK_TASKS_FILE = Path(__file__).with_name("tasks.json")
 # Increment whenever cached per-bundle OTel/session output changes independently of archive bytes.
-_WMH_EXPORT_SCHEMA_VERSION = 10
+_WMH_EXPORT_SCHEMA_VERSION = 11
 
 _SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret|"
@@ -2615,10 +2615,20 @@ def transitions_to_otel_spans(
         trace_metadata["task"] = task
 
     spans: list[JsonObject] = []
+    next_pair_start = 0
     for index, transition in enumerate(transitions):
         action_id = _stable_hex(f"{root_agent_id}:{index}:action:{transition.action.tool_call_id}", 16)
         obs_id = _stable_hex(f"{root_agent_id}:{index}:observation:{transition.action.tool_call_id}", 16)
-        base_ms = transition.action.timestamp_ms or transition.observation.timestamp_ms
+        base_ms = (
+            transition.action.timestamp_ms
+            if transition.action.timestamp_ms is not None
+            else transition.observation.timestamp_ms
+        )
+        # Native ingestion sorts by start time and pairs consecutive action/result
+        # spans. Reserve disjoint intervals even for equal or regressing archive
+        # clocks; original timestamps remain in the canonical payloads.
+        pair_start = max(int(_timestamp_nano(base_ms, 0)), next_pair_start)
+        next_pair_start = pair_start + 4
         action_attrs = [
             _otel_attr("gen_ai.operation.name", "chat"),
             _otel_attr("gen_ai.tool.name", transition.action.to_wmh_tool_name()),
@@ -2649,8 +2659,8 @@ def transitions_to_otel_spans(
                 "traceId": trace_id,
                 "spanId": action_id,
                 "name": f"chat {transition.action.to_wmh_tool_name()}",
-                "startTimeUnixNano": _timestamp_nano(base_ms, index * 2),
-                "endTimeUnixNano": _timestamp_nano(base_ms, index * 2 + 1),
+                "startTimeUnixNano": str(pair_start),
+                "endTimeUnixNano": str(pair_start + 1),
                 "attributes": action_attrs,
                 "status": _span_status(False),
             }
@@ -2661,8 +2671,8 @@ def transitions_to_otel_spans(
                 "spanId": obs_id,
                 "parentSpanId": action_id,
                 "name": f"execute_tool {transition.action.to_wmh_tool_name()}",
-                "startTimeUnixNano": _timestamp_nano(base_ms, index * 2 + 2),
-                "endTimeUnixNano": _timestamp_nano(base_ms, index * 2 + 3),
+                "startTimeUnixNano": str(pair_start + 2),
+                "endTimeUnixNano": str(pair_start + 3),
                 "attributes": obs_attrs,
                 "status": _span_status(transition.observation.is_error),
             }

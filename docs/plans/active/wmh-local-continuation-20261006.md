@@ -37,6 +37,21 @@ changing decoded content. The exact authorized run has been restarted; no new
 fundraising or production outcome is established yet. See the October 6
 full-build JSONL framing RCA.
 
+The new diagnostic run is `22da47fc-6ac7-4ab2-8cb7-ac2a3ca57b5f`, root
+`67885bdc-fd0f-4023-aa65-d3687df7f2ec`, in isolated context
+`.context/benchmarks/1791316596-41932-98492`. Its production shared FE transcript
+was independently rendered and reloaded in a fresh browser; a session-owned
+updater publishes live transcript snapshots. This is inspection evidence, not
+terminal replay or benchmark acceptance. A subsequent full native-index audit
+found 280 empty rows caused by overlapping projected timestamps. The native
+adapter owning repro has unchanged red/green proof; schema-11 export reserves
+disjoint causal intervals and keeps recorded timestamps in canonical payloads.
+A corrected complete index is being built under
+`.context/world-model-grounded`; the running diagnostic retains its original
+in-memory index. See the October 6 OTel clock-interval RCA. Its server has also
+reported SSL bad-record-MAC errors on some predictions; these remain an open
+transport investigation, not a proven configuration or provider diagnosis.
+
 Open operational TODO: cancellation of the first coverage stage after ENOSPC
 left its bash controller holding the stdout pipe after npm exited. The exact
 owned controller was terminated and cleanup finished. `run_deploy_stage.py`
