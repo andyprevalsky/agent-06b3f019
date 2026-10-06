@@ -133,6 +133,13 @@ mount_fresh_dependency_overlay() {
     fi
     (umask 077; mkdir -p "$state/upper" "$state/work") || return 1
     chmod 700 "$base"
+    # Overlay exposes the upper root's metadata, including before the driver
+    # changes ownership. Preserve the donor's runtime-user access on every tree.
+    if ! chown --reference="$donor_tree" "$state/upper" \
+        || ! chmod --reference="$donor_tree" "$state/upper"; then
+        rm -rf "$state"
+        return 1
+    fi
     printf '%s\n' "$donor_tree" "$repo_tree" > "$state/owner"
     chmod 600 "$state/owner"
     # Record before mount so TERM during its syscall can retire the same target.

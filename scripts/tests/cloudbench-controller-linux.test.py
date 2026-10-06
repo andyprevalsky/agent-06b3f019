@@ -8,6 +8,7 @@ import os
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -21,6 +22,63 @@ spec.loader.exec_module(runner)
 
 
 class ContainerOwnership(unittest.TestCase):
+    def test_tool_preflight_rejects_missing_or_broken_package_runners(self):
+        # Execute the actual preflight with isolated executable tools. No host
+        # npm or network can rescue an absent or nonfunctional package runner.
+        for failure in (
+            None,
+            "missing-npm",
+            "missing-npx",
+            "broken-npm",
+            "broken-npx",
+            "invalid-npm",
+            "mismatch-npx",
+        ):
+            with (
+                self.subTest(failure=failure),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                binary = Path(temporary)
+                versions = {
+                    "node": "v22.13.0",
+                    "bash": "GNU bash, version 5.2.0",
+                    "npm": "10.9.2",
+                    "npx": "10.9.2",
+                }
+                for name in ("node", "bash", "git", "curl", "ps", "rg", "npm", "npx"):
+                    if failure == "missing-" + name:
+                        continue
+                    body = (
+                        "exit 7"
+                        if failure == "broken-" + name
+                        else "printf '%s\\n' '" + versions.get(name, "fixture") + "'"
+                    )
+                    if failure == "invalid-" + name:
+                        body = "printf '%s\\n' 'not-a-version'"
+                    elif failure == "mismatch-" + name:
+                        body = "printf '%s\\n' '10.9.1'"
+                    executable = binary / name
+                    executable.write_text("#!/bin/sh\n" + body + "\n")
+                    executable.chmod(0o700)
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys;sys.platform='linux';sys.version_info=(3,11,9)\n"
+                        + runner.TOOL_CHECK,
+                    ],
+                    env={**os.environ, "PATH": str(binary)},
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if failure is None:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assertNotEqual(
+                        result.returncode, 0, "preflight admitted " + failure
+                    )
+
     def check_retirement(
         self,
         *,
