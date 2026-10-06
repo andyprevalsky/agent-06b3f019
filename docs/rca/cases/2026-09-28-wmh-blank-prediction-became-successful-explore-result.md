@@ -56,6 +56,8 @@ Not implemented. A general fix must reject blank or incomplete WMH provider comp
 
 ## Human feedback
 
+October 6 continuation: the HTTP regression now rejects six invalid completions, including empty output with a state note and state-note-only objects. Rejection happens before cache `done`; usage remains metered. The fixture also verifies object output, errors, scratchpad notes, production receipts and plaintext braces. A shared parser preserves fields the pinned parser would discard; runtime and benchmark mapping share one implementation. `.context/wmh-empty-contract-before.log` records three failures before repair, while `.context/wmh-empty-contract-after.log`, `.context/wmh-object-output-after.log` and the full WMH blackbox pass afterward. These contracts do not establish fundraiser success; this case remains open.
+
 The user noticed that the main agent seemed confused by tool results and asked what was happening. They previously required WMH same-session LLM parallelism and a valid 10-minute trajectory, and asked that the timeout transition be considered separately.
 
 ## Reusable lesson

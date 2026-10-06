@@ -146,8 +146,15 @@ class _WMHInvalidPrediction(ValueError):
         self.actual_model = actual_model
 
 
-def _require_wmh_prediction(has_content: bool, usage: dict, actual_model: str) -> None:
-    reason = "empty visible content" if not has_content else None
+def _require_wmh_prediction(content: str, usage: dict, actual_model: str) -> None:
+    from helpers.world_model_runtime import parse_world_model_prediction
+
+    reason = "empty visible content" if not content.strip() else None
+    if reason is None:
+        observation = parse_world_model_prediction(content)
+        observation_content = observation["content"]
+        if not observation_content.strip():
+            reason = "empty observation content"
     if reason is None and usage.get("finish_reason") == "length":
         reason = "completion token limit reached"
     if reason is not None:
@@ -160,13 +167,13 @@ class _WMHCacheSafeRoseClient(RoseClient):
 
     async def _complete_impl(self, **kwargs):
         is_wmh = kwargs.get("call_site") == "wmh_world_model"
-        has_content = False
+        content_parts = []
         usage = {}
         actual_model = ""
         async for chunk in super()._complete_impl(**kwargs):
             if is_wmh:
                 if chunk.kind == "content":
-                    has_content = has_content or bool(chunk.data.get("text", "").strip())
+                    content_parts.append(chunk.data.get("text", ""))
                 elif chunk.kind == "metadata":
                     actual_model = chunk.data.get("actual_model", "")
                 elif chunk.kind == "usage":
@@ -174,7 +181,7 @@ class _WMHCacheSafeRoseClient(RoseClient):
                 elif chunk.kind == "done":
                     # Rose writes the DEMO cache on done. Reject unusable output
                     # before that marker, and before WMH can commit a step.
-                    _require_wmh_prediction(has_content, usage, actual_model)
+                    _require_wmh_prediction("".join(content_parts), usage, actual_model)
             if is_wmh and chunk.kind == "usage":
                 token = chunk.data.get("compute_token_used")
                 if isinstance(token, dict):
@@ -449,7 +456,7 @@ class RoseWMHProvider:
         input_tokens, output_tokens = self._record_usage(usage, response.actual_model or "")
         # Cached responses bypass _complete_impl; validate them at the provider
         # boundary as well. A rejected prediction never reaches parse_observation.
-        _require_wmh_prediction(bool(response.content.strip()), usage, response.actual_model or "")
+        _require_wmh_prediction(response.content, usage, response.actual_model or "")
 
         return Completion(
             text=response.content,

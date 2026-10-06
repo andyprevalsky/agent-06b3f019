@@ -147,7 +147,12 @@ def test_wmh_cache_stream_never_contains_leased_access_token(monkeypatch):
     assert other_chunks[0].data["compute_token_used"]["accessToken"] == "secret-lease"
 
 
-@pytest.mark.parametrize("content,finish", [("", "length"), (" \n\t", "stop"), ('{"output":"unfinished', "length")])
+@pytest.mark.parametrize("content,finish", [
+    ("", "length"), (" \n\t", "stop"), ('{"output":"unfinished', "length"),
+    ('{"output":"","is_error":false,"state_note":"research complete"}', "stop"),
+    ('{"output":"","is_error":false}', "stop"),
+    ('{"state_note":"research complete"}', "stop"),
+])
 def test_invalid_prediction_is_rejected_before_cache_done(monkeypatch, content, finish):
     from providers.rose import RoseClient
     from providers.rose.types import StreamChunk
@@ -195,9 +200,15 @@ def test_stream_rejection_retains_usage_without_credentials(monkeypatch):
     assert "secret" not in str(error.usage)
 
 
-def test_default_budget_leaves_room_for_reasoning_and_terminal_json(monkeypatch):
+@pytest.mark.parametrize("content", [
+    '{"output":"complete"}',
+    'Observation with {unstructured braces}.',
+    '{"success":false,"output":"declined","metadata":{"source":"payment"}}',
+    '{"success":true,"output":"","metadata":{"source":"query"}}',
+])
+def test_default_budget_leaves_room_for_reasoning_and_terminal_json(monkeypatch, content):
     fake_client = _FakeRoseClient(
-        _canned_response(content='{"output":"complete"}', prompt=10, completion=20, token_used=None)
+        _canned_response(content=content, prompt=10, completion=20, token_used=None)
     )
 
     async def fake_lease(self):
@@ -207,7 +218,7 @@ def test_default_budget_leaves_room_for_reasoning_and_terminal_json(monkeypatch)
     provider = RoseWMHProvider(client=fake_client)
     completion = provider.complete("SYS", [Message(role="user", content="go")])
 
-    assert completion.text == '{"output":"complete"}'
+    assert completion.text == content
     assert _WMH_MAX_TOKENS == 16_384
     assert fake_client.calls[0]["max_tokens"] == 16_384
 

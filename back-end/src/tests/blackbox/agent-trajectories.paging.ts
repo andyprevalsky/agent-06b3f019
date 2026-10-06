@@ -9,7 +9,12 @@ type Grep = (userId: string, body: Record<string, unknown>) => Promise<Response>
 
 export async function proveCharacterBoundedPaging(grep: Grep, ownerId: string): Promise<void> {
   const root = await prisma.agent.create({
-    data: { userId: ownerId, goal: 'Character-bounded cursor regression', source: 'WEB' },
+    data: {
+      userId: ownerId,
+      goal: 'Character-bounded cursor regression',
+      source: 'WEB',
+      status: 'COMPLETED',
+    },
   });
   const messages = Array.from({ length: 3 }, (_, index) => ({
     id: randomUUID(),

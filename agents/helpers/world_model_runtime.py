@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -174,10 +175,22 @@ class WMHHttpClient:
 
     async def step(self, world_model: str, session_id: str, action: CanonicalAction | JsonObject) -> JsonObject:
         wmh_action = action.to_wmh_action() if isinstance(action, CanonicalAction) else action
+        # Native activity -> stable invocation header -> shared session receipt.
+        # Attempt numbers and generated wall timestamps are not operation identity.
+        headers = {}
+        if activity.in_activity():
+            info = activity.info()
+            arguments = dict(wmh_action.get("arguments") or {})
+            arguments.pop("timestamp_ms", None)
+            identity = [info.workflow_id, info.workflow_run_id, info.activity_id, {**wmh_action, "arguments": arguments}]
+            headers["X-Rose-WMH-Invocation"] = hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
                 f"{self.base_url}/world_models/{world_model}/sessions/{session_id}/step",
                 json={"action": wmh_action},
+                headers=headers,
             )
             response.raise_for_status()
             data = response.json()
@@ -343,6 +356,7 @@ class WorldModelToolExecutionAdapter:
         self.world_model_name = world_model_name
         self.session_id = session_id
         self.agent_id = agent_id
+        self._explicit_session_scope = bool(session_scope_id)
         self.session_scope_id = session_scope_id or agent_id
         self.timestamp_ms = timestamp_ms
 
@@ -397,6 +411,22 @@ class WorldModelToolExecutionAdapter:
             return self.session_id
         if not self.client or not self.world_model_name:
             raise RuntimeError("WMH simulation requires WMH_BASE_URL and WMH_MODEL_NAME")
+        # Activity actor -> durable agent tree -> root-scoped WMH session.
+        # Workflow tracing contextvars are not inherited by Temporal activities.
+        if not self._explicit_session_scope and activity.in_activity():
+            from providers.fast_cache.client import resolve_agent_fast_mode
+
+            if not self.agent_id:
+                raise RuntimeError("WMH activity requires its acting agent identity")
+            _read, _goal, _write, root_id, root_goal, _fast = await resolve_agent_fast_mode(self.agent_id)
+            if not root_id:
+                raise RuntimeError("WMH activity could not resolve its durable root agent")
+            self.session_scope_id = root_id
+            if seed_state is not None:
+                structured = {**seed_state.get("structured", {}), "root_agent_id": root_id}
+                if root_goal:
+                    structured.setdefault("root_goal", root_goal)
+                seed_state = {**seed_state, "structured": structured}
         self.session_id = await ensure_world_model_session(
             self.client,
             self.world_model_name,
@@ -491,12 +521,53 @@ def predicted_latency_ms_from_observation(observation: JsonObject) -> int | None
     return None
 
 
+def _world_model_content_payload(content: Any) -> Any:
+    if not isinstance(content, str) or "{" not in content:
+        return None
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(content[content.index("{"):])
+    except json.JSONDecodeError:
+        return None
+    return payload
+
+
+def parse_world_model_prediction(content: str) -> JsonObject:
+    """Preserve production receipts before the pinned parser drops extra fields."""
+    from wmh.core.parsing import parse_observation
+
+    payload = _world_model_content_payload(content)
+    if isinstance(payload, dict) and not set(payload).issubset({"output", "is_error", "state_note"}):
+        return {"content": content.strip(), "is_error": payload.get("is_error") is True, "metadata": {}}
+    return normalize_world_model_observation(parse_observation(content).model_dump(mode="json"))
+
+
+def normalize_world_model_observation(observation: JsonObject) -> JsonObject:
+    """Decode only WMH's outer output contract, preserving its state/error fields."""
+    payload = _world_model_content_payload(observation.get("content"))
+    if not isinstance(payload, dict) or not set(payload).issubset({"output", "is_error", "state_note"}):
+        return observation
+    output = payload.get("output")
+    if not isinstance(output, (str, dict, list)):
+        return observation
+    metadata = dict(observation.get("metadata") or {})
+    if isinstance(payload.get("state_note"), str) and payload["state_note"].strip():
+        metadata["state_note"] = payload["state_note"]
+    return {
+        **observation,
+        "content": output if isinstance(output, str) else json.dumps(output, ensure_ascii=False, sort_keys=True),
+        "is_error": bool(observation.get("is_error")) or payload.get("is_error") is True,
+        "metadata": metadata,
+    }
+
+
 def world_model_observation_to_tool_result(
     observation: JsonObject,
     *,
     simulated: bool,
     wall_elapsed_ms: int | None = None,
 ) -> JsonObject:
+    original_observation = observation
+    observation = normalize_world_model_observation(observation)
     is_error = bool(observation.get("is_error") or observation.get("error"))
     content = observation.get("content")
     if not isinstance(content, str):
@@ -530,7 +601,7 @@ def world_model_observation_to_tool_result(
         else:
             result.setdefault("success", True)
         result.setdefault("message", content)
-        result.setdefault("world_model_observation", observation)
+        result.setdefault("world_model_observation", original_observation)
     else:
         result = {
             "success": not is_error,

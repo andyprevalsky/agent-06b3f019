@@ -28,6 +28,7 @@ import threading
 import time
 import uuid
 from collections import Counter, defaultdict
+from concurrent.futures import Future
 
 import numpy as np
 import structlog
@@ -37,6 +38,9 @@ logger = structlog.get_logger(__name__)
 _ROSE_SESSION_SCOPE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "rose_wmh_session_scope",
     default=None,
+)
+_ROSE_STEP_INVOCATION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "rose_wmh_step_invocation", default=None,
 )
 
 _RETRIEVAL_STOPWORDS = frozenset(
@@ -290,27 +294,27 @@ class RetrievalAuditRetriever:
         }
 
 
-def _parallel_pinned_wmh_step(world_model, session_id, action, session_lock):
+def _parallel_pinned_wmh_step(world_model, session_id, action, session_lock, on_commit=None):
     """Run the pinned WMH prediction on a snapshot, then commit under the session lock.
 
     Parallel DAG actions share the state visible when each request starts. Their
     observations and state notes are appended in completion order. Keep this
     adapter aligned with the pinned `WorldModel.step` in agents/requirements.txt.
     """
-    from wmh.core.parsing import parse_observation
-    from wmh.core.types import Step
+    from wmh.core.types import Observation, Step
     from wmh.engine.prompts import build_env_prompt
     from wmh.providers.base import Message
     from wmh.telemetry import capture
     from wmh.tracking import Phase
+    from helpers.world_model_runtime import parse_world_model_prediction
 
     started = time.monotonic()
     step_id = uuid.uuid4().hex
     action_args = action.arguments if isinstance(action.arguments, dict) else {}
-    nested_args = action_args.get("arguments")
-    nested_args = nested_args if isinstance(nested_args, dict) else action_args
-    agent_id = nested_args.get("agent_id")
+    agent_id = action_args.get("agent_id")
     agent_id = agent_id if isinstance(agent_id, str) else None
+    tool_call_id = action_args.get("tool_call_id")
+    tool_call_id = tool_call_id if isinstance(tool_call_id, str) else None
     with session_lock:
         snapshot_lock_wait_ms = round((time.monotonic() - started) * 1000)
         session = world_model._sessions[session_id]
@@ -325,6 +329,7 @@ def _parallel_pinned_wmh_step(world_model, session_id, action, session_lock):
         step_id=step_id,
         session_id=session_id,
         agent_id=agent_id,
+        tool_call_id=tool_call_id,
         action_name=action.name,
         snapshot_lock_wait_ms=snapshot_lock_wait_ms,
         snapshot_ms=snapshot_ms,
@@ -338,12 +343,14 @@ def _parallel_pinned_wmh_step(world_model, session_id, action, session_lock):
             root=world_model._telemetry_root,
         )
         raise
-    observation = parse_observation(completion.text)
+    observation = Observation.model_validate(parse_world_model_prediction(completion.text))
     prediction_ms = round((time.monotonic() - prediction_started) * 1000)
 
     commit_queued_at = time.monotonic()
     with session_lock:
         commit_lock_wait_ms = round((time.monotonic() - commit_queued_at) * 1000)
+        if world_model._sessions.get(session_id) is not session:
+            raise KeyError("WMH session ended before prediction committed")
         tracker = world_model._trackers.get(session_id)
         usage_cost_usd = None
         if tracker is not None:
@@ -354,6 +361,8 @@ def _parallel_pinned_wmh_step(world_model, session_id, action, session_lock):
         step = Step(action=action, observation=observation, state_before=snapshot.state, task=snapshot.task)
         session.history.append(step)
         world_model._update_state(session, step)
+        if on_commit is not None:
+            on_commit(observation)
         world_model._retriever.add(step)
         session_step_count = len(session.history)
 
@@ -362,6 +371,7 @@ def _parallel_pinned_wmh_step(world_model, session_id, action, session_lock):
         step_id=step_id,
         session_id=session_id,
         agent_id=agent_id,
+        tool_call_id=tool_call_id,
         action_name=action.name,
         snapshot_ms=snapshot_ms,
         snapshot_lock_wait_ms=snapshot_lock_wait_ms,
@@ -399,7 +409,9 @@ def _install_root_scoped_sessions(app, world_model_name: str, world_model) -> No
     original_new_session = world_model.new_session
     original_step = world_model.step
     scope_sessions: dict[str, object] = {}
+    session_scopes: dict[str, str] = {}
     session_locks: dict[str, threading.Lock] = {}
+    invocation_receipts: dict[str, dict[str, Future]] = {}
     state_lock = threading.Lock()
 
     def scoped_new_session(task=None, seed_state=None):
@@ -412,23 +424,75 @@ def _install_root_scoped_sessions(app, world_model_name: str, world_model) -> No
                 return existing
             session = original_new_session(task=task, seed_state=seed_state)
             scope_sessions[scope] = session
+            session_scopes[str(session.id)] = scope
             session_locks.setdefault(str(session.id), threading.Lock())
             return session
 
     def concurrent_step(session_id, action):
+        # Native retry -> session invocation receipt -> one prediction/commit.
+        # Distinct native activities still predict concurrently in the same world.
+        invocation = _ROSE_STEP_INVOCATION.get()
+        session_key = str(session_id)
         with state_lock:
-            step_lock = session_locks.setdefault(str(session_id), threading.Lock())
-        if isinstance(world_model, WorldModel):
-            return _parallel_pinned_wmh_step(world_model, session_id, action, step_lock)
-        with step_lock:
-            return original_step(session_id, action)
+            step_lock = session_locks.setdefault(session_key, threading.Lock())
+            receipts = invocation_receipts.setdefault(session_key, {}) if invocation else {}
+            receipt = receipts.get(invocation) if invocation else None
+            owns_prediction = receipt is None
+            if invocation and owns_prediction:
+                receipt = Future()
+                receipts[invocation] = receipt
+        if not owns_prediction:
+            return receipt.result()
+        try:
+            if isinstance(world_model, WorldModel):
+                observation = _parallel_pinned_wmh_step(
+                    world_model, session_id, action, step_lock,
+                    on_commit=receipt.set_result if receipt is not None else None,
+                )
+            else:
+                with step_lock:
+                    observation = original_step(session_id, action)
+        except BaseException as exc:
+            if invocation and not receipt.done():
+                with state_lock:
+                    receipts.pop(invocation, None)
+                receipt.set_exception(exc)
+            raise
+        if receipt is not None and not receipt.done():
+            receipt.set_result(observation)
+        return observation
 
     world_model.new_session = scoped_new_session
     world_model.step = concurrent_step
+    original_end_session = getattr(world_model, "end_session", None)
+    if original_end_session is not None:
+        def scoped_end_session(session_id):
+            session_key = str(session_id)
+            with state_lock:
+                step_lock = session_locks.setdefault(session_key, threading.Lock())
+            with step_lock:
+                result = original_end_session(session_id)
+                with state_lock:
+                    scope = session_scopes.pop(session_key, None)
+                    if scope:
+                        scope_sessions.pop(scope, None)
+                    session_locks.pop(session_key, None)
+                    invocation_receipts.pop(session_key, None)
+                return result
+
+        world_model.end_session = scoped_end_session
     session_path = f"/world_models/{world_model_name}/sessions"
 
     @app.middleware("http")
     async def bind_root_session_scope(request: Request, call_next):
+        if request.method == "POST" and request.url.path.startswith(session_path + "/") and request.url.path.endswith("/step"):
+            invocation = request.headers.get("X-Rose-WMH-Invocation")
+            if invocation:
+                token = _ROSE_STEP_INVOCATION.set(invocation)
+                try:
+                    return await call_next(request)
+                finally:
+                    _ROSE_STEP_INVOCATION.reset(token)
         if request.method != "POST" or request.url.path != session_path:
             return await call_next(request)
         try:

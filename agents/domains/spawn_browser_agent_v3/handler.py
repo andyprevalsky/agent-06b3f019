@@ -322,7 +322,7 @@ async def _lookup_payment_purchase(
     fingerprint = str(payment_payload.get("fingerprint") or "")
     activity_args = [user_id, fingerprint]
     if world_model_mode not in {None, "real"}:
-        activity_args.append(world_model_mode)
+        activity_args.extend([world_model_mode, payment_payload.get("agentId")])
     result = await workflow.execute_activity(
         "lookup_purchase_activity",
         args=activity_args,
@@ -4565,7 +4565,8 @@ async def spawn_browser_agent_activity_v3(
     # The tool-call namespace remains stable across write-lock resumes, whose
     # payload also restores the exact browser session id.
     world_model = WorldModelToolExecutionAdapter.from_env(
-        agent_id=f"{agent_id}:browser:{tool_call_id}",
+        agent_id=agent_id,
+        session_scope_id=f"{agent_id}:browser:{tool_call_id}",
         inherit_explicit_session=False,
         mode=world_model_mode,
     )

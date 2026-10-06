@@ -10,6 +10,21 @@ For a checkout from another branch, use the local Git worktree command in
 
 ## Goal and user decisions
 
+October 6 local continuation uses the isolated worktree
+`/Users/andyprevalsky/Developer/rose-wmh-continuation`, branch
+`codex/wmh-continuation-20261006`. Main `8ed0c776d` and portable handoff
+`e5e0ff622` are integrated. The new uncapped rebuild is local and pending;
+historical conformance remains historical evidence only.
+
+Open operational TODO: cancellation of the first coverage stage after ENOSPC
+left its bash controller holding the stdout pipe after npm exited. The exact
+owned controller was terminated and cleanup finished. `run_deploy_stage.py`
+currently skips signal forwarding when its direct child has exited; whether
+that explains the retained descendant is unproved. Preserve this as an open
+ownership/observability issue, reproduce with a direct child that exits while
+its descendant retains stdout, then verify bounded cleanup without signaling
+unowned processes. Do not report it as fixed.
+
 Build the World Model Harness (also called WHM in the conversation) from real
 archived tool results and make its simulation useful for the
 `raise-5m-rose-labs-brex` benchmark. A valid run must show actual simulated

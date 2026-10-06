@@ -69,12 +69,13 @@ async def lookup_purchase_activity(
     user_id: str,
     fingerprint: str,
     world_model_mode: str | None = None,
+    agent_id: str | None = None,
 ) -> Dict[str, Any]:
     async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
         return await _lookup_purchase_real(user_id, fingerprint)
 
     return await _world_model_adapter().from_env(
-        agent_id=user_id,
+        agent_id=agent_id,
         mode=world_model_mode,
     ).execute(
         "payment_lookup",

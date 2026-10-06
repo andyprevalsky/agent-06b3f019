@@ -287,7 +287,7 @@ export async function findAgentAcrossRuns(agentId: string): Promise<HubAgentView
     if (view !== null) return view;
     agentRunCache.delete(agentId);
   }
-  if (childIdToRun === null) {
+  if (childIdToRun === null || (!agentIndexComplete && !childIdToRun.has(agentId))) {
     const load = await startCompactIndexLoad();
     if (load.kind === 'legacy') scheduleLegacyBackfill(load.seed);
     if (load.kind !== 'ready' && (load.kind !== 'legacy' || childIdToRun === null)) {

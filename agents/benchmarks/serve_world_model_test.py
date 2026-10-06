@@ -79,6 +79,9 @@ def test_root_scoped_sessions_are_idempotent_at_served_wmh_boundary(monkeypatch)
         def step(self, session_id, action):
             return {"session_id": session_id, "action": action}
 
+        def end_session(self, session_id):
+            return {"ended": session_id}
+
     app = FastAPI()
     world_model = FakeWorldModel()
     _install_root_scoped_sessions(app, "rose", world_model)
@@ -105,6 +108,12 @@ def test_root_scoped_sessions_are_idempotent_at_served_wmh_boundary(monkeypatch)
     assert first == child == {"session_id": "session-1"}
     assert other_root == {"session_id": "session-2"}
     assert world_model.created == 2
+    world_model.end_session(first["session_id"])
+    reopened = client.post(
+        "/world_models/rose/sessions",
+        json={"task": "next root run", "session_scope_id": "root-1"},
+    ).json()
+    assert reopened == {"session_id": "session-3"}, "root scope returned an ended session"
 
 
 def test_root_scoped_session_uses_only_requested_seed_state(monkeypatch):

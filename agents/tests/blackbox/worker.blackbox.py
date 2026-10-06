@@ -528,6 +528,7 @@ def _check_stack_worker_cleanup(worker_exit, bad_receipt=False):
                 f"SCRIPT_DIR={shlex.quote(str(repository / 'scripts'))}",
                 'source "$SCRIPT_DIR/lib/run-process-cleanup.sh"',
                 function("kill_tree"),
+                function("descendant_pids"),
                 function("kill_tree_hard"),
                 function("remove_isolated_frontend_build"),
                 function("cleanup"),

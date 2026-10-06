@@ -21813,6 +21813,16 @@ async def test_payment_lookup_reuses_backend_matched_legacy_fingerprint():
     assert calls == [
         ("lookup_purchase_activity", ["user-1", "canonical-fingerprint"]),
     ]
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.workflow.execute_activity",
+        side_effect=fake_execute_activity,
+    ):
+        await _lookup_payment_purchase(
+            "user-1", {"fingerprint": "canonical-fingerprint", "agentId": "browser-child"}, "simulate"
+        )
+    assert calls[-1] == (
+        "lookup_purchase_activity", ["user-1", "canonical-fingerprint", "simulate", "browser-child"]
+    )
 
 class _FakePaymentGateHandle:
     """Awaitable activity handle returning a fixed result (matches manager fake)."""
