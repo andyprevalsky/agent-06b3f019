@@ -125,6 +125,57 @@ def test_cold_image_activation_propagates_owned_setup_failure(tmp_path):
     assert result.returncode == 29
 
 
+@pytest.mark.parametrize("initial", ["started", "stopped", "stop-failed"])
+def test_cold_image_activation_quiesces_existing_donor_before_environment(tmp_path, initial):
+    cloud = (ROOT / "scripts/run-bench-cloud").read_text()
+    functions = []
+    for name in ("activate_machine_environment", "inject_secrets"):
+        start = cloud.index(name + "() {")
+        end = cloud.index("\n}\n", start) + 3
+        functions.append(cloud[start:end])
+    events = tmp_path / "events"
+    state = tmp_path / "state"
+    state.write_text("stopped" if initial == "stopped" else "started")
+    script = "\n".join(functions) + r'''
+MODE=setup
+APP=fixture
+CLOUDBENCH_HOLD_APP_ENV_LOCK=1
+acquire_app_environment_lock() { echo lock >> "$EVENTS"; LOCKED=1; }
+release_app_environment_lock() { echo unlock >> "$EVENTS"; }
+assert_app_environment_lock_ownership() { [ "$LOCKED" = 1 ]; }
+resolve_machine_id() { echo warm-1; }
+environment_activation_targets() { printf 'warm\twarm-1\npool\tpool-1\n'; }
+machine_state_for_activation() { [ "$1" = warm-1 ] && cat "$STATE"; }
+stop_machine_strict() {
+    assert_app_environment_lock_ownership || return 1
+    [ "$1" = warm-1 ] || return 1
+    echo stop >> "$EVENTS"
+    [ "$INITIAL" != stop-failed ] || return 1
+    echo stopped > "$STATE"
+}
+FLY() { echo update >> "$EVENTS"; }
+_inject_secrets_locked() {
+    echo inject >> "$EVENTS"
+    activate_machine_environment warm-1 warm
+}
+inject_secrets
+'''
+    result = subprocess.run(
+        [BASH, "-c", script],
+        env={**os.environ, "EVENTS": str(events), "STATE": str(state), "INITIAL": initial},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    observed = events.read_text().splitlines()
+    if initial == "stop-failed":
+        assert result.returncode != 0
+        assert observed == ["lock", "stop", "unlock"], result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert observed == (["lock", "stop"] if initial == "started" else ["lock"]) + ["inject", "update"]
+
+
 def _publisher_fixture(tmp_path, version="0.4.112"):
     client = (
         "#!/usr/bin/env bash\n"

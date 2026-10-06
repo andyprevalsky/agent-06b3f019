@@ -6166,7 +6166,9 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
     wrapper_end = cloud.index("\n}\n", wrapper_start)
     wrapper = cloud[wrapper_start:wrapper_end]
     assert wrapper.index("acquire_app_environment_lock") < wrapper.index("( _inject_secrets_locked )")
-    assert wrapper.index("( _inject_secrets_locked )") < wrapper.index("release_app_environment_lock")
+    # The normal release follows injection; pre-injection failure branches also
+    # release the lock, and the owning activation controls exercise those paths.
+    assert wrapper.index("( _inject_secrets_locked )") < wrapper.rindex("release_app_environment_lock")
     locked_start = cloud.index("_inject_secrets_locked() {")
     locked_end = cloud.index("\n}\n", locked_start)
     assert 'FLY secrets set --stage -a "$APP"' in cloud[locked_start:locked_end]

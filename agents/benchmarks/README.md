@@ -103,7 +103,7 @@ benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/im
 scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
 ```
 
-`image-activate` uses the existing app environment lock and owned warm-source setup, activates the published image on the donor and this workspace's pool, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
+`image-activate` uses the existing app environment lock and owned warm-source setup. It strictly stops the exact existing donor before environment activation, activates the published image on the donor and this workspace's stopped pool members, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
 
 Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
 
@@ -120,6 +120,16 @@ Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
 seconds, then follow each job log's exact printed fleet-monitor handle through
 controller exit and owned teardown. The campaign directory itself is not a
 fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
+Foreground campaigns may print no `--controller-status` marker; use only the
+actual printed handle and read each copy's controller exit separately from
+`summary.json` → `jobs[].controller_exit_code`, keyed by `job_id`. The monitor's
+null controller fields alone do not establish liveness or completion.
+Allocation timestamps are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
+`bench-e2e.finished-epoch`. The run's `teardown-ownership.path` identifies its
+exact audit/token; while live, capture `pid` and `pid_start` from
+`<git-common>/cloudbench-fleet-ownership/<token>/meta`. Normal cleanup removes
+that active claim, so retain the captured identity and verify native process
+birth before any exact-owner signal. Audit retention is separate from liveness.
 
 This launches 50 independent one-task controllers, each with the unchanged 50
 first-level general-purpose children: 2,500, with existing explore allowances unchanged,
