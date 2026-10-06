@@ -3,9 +3,13 @@
  * Signed-in Kernel/Steel state must survive session close and land on the
  * other provider (and on a later browser-agent call) via CookieBundle inject.
  */
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer, type AddressInfo } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { chromium, type Browser } from 'playwright';
 import { prisma } from '../../providers/database';
 import { persistSignedInBrowserState } from '../../providers/browser/sessionAuthPersist';
@@ -171,20 +175,50 @@ async function verifyHarvestRestoresOnOtherProvider(): Promise<void> {
   }
 }
 
+async function waitForCdp(port: number): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+      if (response.ok) return;
+    } catch {
+      // Chromium is still binding the debug port.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Chrome CDP on 127.0.0.1:${port} did not start`);
+}
+
 async function verifyFreshCdpHarvestsSignedInLocalStorage(): Promise<void> {
   const userId = `auth-persist-cdp-${randomUUID()}`;
   const fixture = await listen();
   const port = await freePort();
-  const launched = await chromium.launch({
-    headless: true,
-    args: [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1'],
-  });
+  const userDataDir = await mkdtemp(join(tmpdir(), 'auth-persist-cdp-'));
+  const chrome = spawn(
+    chromium.executablePath(),
+    [
+      '--headless=new',
+      '--no-sandbox',
+      '--disable-gpu',
+      `--user-data-dir=${userDataDir}`,
+      `--remote-debugging-port=${port}`,
+      '--remote-debugging-address=127.0.0.1',
+      'about:blank',
+    ],
+    { stdio: 'ignore' }
+  );
   await prisma.user.create({ data: { userId, isAnonymous: true } });
   try {
-    await signIn(launched, fixture.origin);
-    const signedInPage = launched.contexts()[0]?.pages()[0];
-    assert(signedInPage !== undefined, 'source browser lost the signed-in page');
-    await signedInPage.goto('about:blank');
+    await waitForCdp(port);
+    const first = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+    try {
+      await signIn(first, fixture.origin);
+      const signedInPage = first.contexts()[0]?.pages()[0];
+      assert(signedInPage !== undefined, 'source browser lost the signed-in page');
+      await signedInPage.goto('about:blank');
+    } finally {
+      await first.close();
+    }
     const harvestBrowser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
     try {
       const kernelSession = await createSession({
@@ -217,9 +251,27 @@ async function verifyFreshCdpHarvestsSignedInLocalStorage(): Promise<void> {
       await harvestBrowser.close().catch(() => undefined);
     }
   } finally {
-    await launched.close().catch(() => undefined);
+    if (chrome.pid !== undefined) {
+      try {
+        process.kill(chrome.pid, 'SIGTERM');
+      } catch {
+        // Chromium already exited.
+      }
+    }
+    await new Promise<void>((resolve) => {
+      if (chrome.exitCode !== null || chrome.signalCode !== null) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(resolve, 2_000);
+      chrome.once('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
     await fixture.close();
     await cleanup(userId);
+    await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
