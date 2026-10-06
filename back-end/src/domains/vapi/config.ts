@@ -15,6 +15,8 @@ export const OUTBOUND_PHONE_NUMBER_POOL = [
 // (PRESET_VOICES[0]). Used when the user has not selected a custom voice.
 export const DEFAULT_OUTBOUND_VOICE_ID = '6fZce9LFNG3iEITDfqZZ';
 
+export const OUTBOUND_ASSISTANT_MODEL = 'gpt-4.1-mini';
+
 // Base system prompt that gets combined with the LLM-defined system_prompt
 export const BASE_SYSTEM_PROMPT = `You are making an outbound phone call. Be polite, professional, and conversational.
 If the person is busy or uninterested, thank them for their time and end the call.
@@ -61,7 +63,7 @@ export const DEFAULT_CALL_ASSISTANT_CONFIG: JsonObject = {
   name: 'Rose Outbound Call Agent',
   model: {
     provider: 'openai',
-    model: 'gpt-4o',
+    model: OUTBOUND_ASSISTANT_MODEL,
     tools: [{ type: 'endCall' }, { type: 'dtmf' }],
   },
   voice: {

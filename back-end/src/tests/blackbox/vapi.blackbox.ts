@@ -375,8 +375,8 @@ async function testBoundary_vapiCallCreation() {
   if (assistant.name !== 'Rose Outbound Call Agent') {
     throw new Error(`Expected assistant name to be code-controlled, got ${assistant.name}`);
   }
-  if (assistant.model?.provider !== 'openai' || assistant.model.model !== 'gpt-4o') {
-    throw new Error(`Expected openai/gpt-4o model, got ${JSON.stringify(assistant.model)}`);
+  if (assistant.model?.provider !== 'openai' || assistant.model.model !== 'gpt-4.1-mini') {
+    throw new Error(`Expected openai/gpt-4.1-mini model, got ${JSON.stringify(assistant.model)}`);
   }
   const systemMessage = assistant.model.messages?.find((m) => m.role === 'system')?.content;
   if (!systemMessage?.startsWith('You are Rose.')) {
