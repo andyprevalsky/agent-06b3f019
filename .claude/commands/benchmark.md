@@ -27,6 +27,11 @@ Ordinary cloud runs automatically reuse verified completed dependency snapshots,
 including from fresh checkouts. Use `scripts/run-bench --help` and CLAUDE.md's
 "Cloud startup reuse" guidance; do not rebuild dependencies for source-only changes.
 
+Follow the exact monitoring command printed by every launch. Poll every 30 seconds;
+check controller terminal status even when the card is stale, and continue through
+owned-resource release. See CLAUDE.md's "Monitor every cloud launch" guidance.
+Task verdicts appear before cleanup; observation timeouts never authorize a restart.
+
 Keep the ordinary 7,200-second backstops. For an explicitly requested five-minute validation, set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300` and pass `--timeout 300`; the environment setting bounds task execution and the flag bounds the controller path. Preserve terminal task grading, meaningful real execution, exact resource cleanup and the separately monitored E2E deadline. Recovered errors and inner latency measurements remain diagnostics for an infrastructure-only campaign; an ordinary task failure can satisfy that campaign without satisfying the deploy smoke gate.
 
 For an explicitly requested twenty-minute task window, use

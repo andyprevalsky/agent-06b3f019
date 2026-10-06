@@ -51,6 +51,12 @@ Suite selection (`run_benchmark.py --suite ...`) runs only `status: "ready"` ben
 
 ## Quick Start
 
+Every detached launcher prints the private log and exact controller exit marker.
+The controller log prints `scripts/run-bench monitor <run-directory>` for its
+own run. Poll that command every 30 seconds; its `--controller-status` marker
+reports the actual controller exit independently of card freshness and cleanup.
+Follow CLAUDE.md's "Monitor every cloud launch" guidance through resource release.
+
 The daily `agent-payment-new-user-journey` task exercises an isolated, fresh
 non-admin account from exhausted free credit through a real Stripe **test-mode**
 subscription Checkout, subscription-gate resolution, payment-card approval,

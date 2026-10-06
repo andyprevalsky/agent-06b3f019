@@ -45,9 +45,10 @@ clone_or_refresh() {
 clone_or_refresh openclaw https://github.com/openclaw/openclaw.git
 clone_or_refresh hermes-agent https://github.com/nousresearch/hermes-agent.git
 clone_or_refresh codex https://github.com/openai/codex.git
+clone_or_refresh prime-agent https://github.com/PrimeIntellect-ai/prime-agent.git
 
 # Refuse to rewrite the tip-record file unless every clone has .ref-sha.
-for dir in openclaw hermes-agent codex; do
+for dir in openclaw hermes-agent codex prime-agent; do
   if [ ! -f "$dir/.ref-sha" ]; then
     echo "Missing $dir/.ref-sha; refusing to rewrite prompt-review/REF_SHAS.txt" >&2
     echo "Pass --force to re-clone, or restore .ref-sha from the previous tip record." >&2
@@ -57,11 +58,11 @@ done
 
 {
   echo "# Tip record of gitignored reference harness clones used for golden prompt"
-  echo "# snapshots under prompt-review/rendered/{openclaw,hermes-agent,codex}/."
+  echo "# snapshots under prompt-review/rendered/{openclaw,hermes-agent,codex,prime-agent}/."
   echo "# This is NOT a checkout pin — --force re-clones current tip and updates"
   echo "# this file; re-run prompt-review renderers and commit rendered/ together."
   echo "# Refresh with: bash scripts/sync-reference-repos.sh --force"
-  for dir in openclaw hermes-agent codex; do
+  for dir in openclaw hermes-agent codex prime-agent; do
     echo "$dir $(cat "$dir/.ref-sha")"
   done
 } > prompt-review/REF_SHAS.txt

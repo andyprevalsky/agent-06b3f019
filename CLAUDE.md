@@ -38,9 +38,19 @@ codex/            → Cloned OpenAI Codex CLI (READ-ONLY reference, gitignored,
                     Re-clone with
                     `git clone --depth 1 https://github.com/openai/codex.git`
                     if missing locally.
+prime-agent/      → Cloned Prime Intellect prime-agent (READ-ONLY reference,
+                    gitignored, MIT). Recursive-language-model harness: one
+                    persistent Python REPL tool, every other tool/subagent a
+                    Python call, plus self-edited memories/skills. System
+                    prompt layers live under
+                    `crates/pa-core/src/prompts/layers/`, skills under
+                    `skills/`, the kernel under `prime-agent-runtime/src/rlm/`.
+                    Re-clone with
+                    `git clone --depth 1 https://github.com/PrimeIntellect-ai/prime-agent.git`
+                    if missing locally.
 ```
 
-> **Reference repos policy:** `openclaw/`, `hermes-agent/`, and `codex/` are gitignored
+> **Reference repos policy:** `openclaw/`, `hermes-agent/`, `codex/`, and `prime-agent/` are gitignored
 > (sit alongside `claude-code-src/` but are NOT committed). Treat as
 > read-only research material — do not edit them. If they're missing on a
 > fresh clone, run `bash scripts/sync-reference-repos.sh` to restore.
@@ -49,7 +59,7 @@ codex/            → Cloned OpenAI Codex CLI (READ-ONLY reference, gitignored,
 
 `prompt-review/` ships a small local web app for reviewing every prompt in
 this repo against reference codebases side by side. Columns:
-**current → ~1 month ago → Claude Code → OpenClaw → Hermes → Codex**. Notes are
+**current → ~1 month ago → Claude Code → OpenClaw → Hermes → Codex → Prime Agent**. Notes are
 saved per prompt; checkpoint state persists across reloads.
 
 ```bash
@@ -59,7 +69,7 @@ PROMPT_REVIEW_PORT=9000 bash prompt-review/run.sh   # custom port
 
 - Catalog: `prompt-review/catalog.json` (edit to add/remove prompts).
   Each OUR entry has a `matches` field with hand-picked semantic pairings
-  for each reference repo (`claude`, `openclaw`, `hermes`, `codex`); a value of
+  for each reference repo (`claude`, `openclaw`, `hermes`, `codex`, `prime`); a value of
   `null` means "no equivalent in that repo" and the column shows
   "no equivalent" instead of a low-quality keyword match. Edit
   `prompt-review/render/apply_explicit_mappings.py` to refine pairings.
@@ -898,9 +908,31 @@ the requested code after boot. Dependency hashes, the donor Machine/volume, and
 the exact completed snapshot are checked before reuse. A changed dependency set
 refreshes once centrally; it is not installed independently on every task box.
 Cache metadata publication failures warn and retain the existing verified local
-receipt rather than reject an otherwise usable run. Use `scripts/run-bench
---help` for current flags. `--timeout 1200` is a per-run twenty-minute task
-execution override; the normal timeout remains unchanged.
+receipt rather than reject an otherwise usable run. Publication refreshes the
+selected Fly session through `flyctl auth token --json --quiet`; do not copy its
+short-lived output into env files. A raw env token returning HTTP 403 while the
+same selected session works through `flyctl` indicates stale session discharges,
+not a reason to rotate keys or rebuild the image. Use `scripts/run-bench
+--help` for current flags. For a per-run twenty-minute task execution window,
+set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=1200` and pass `--timeout 1200`.
+The CLI flag alone sets the orchestration budget; the normal timeout remains unchanged.
+
+**Monitor every cloud launch:** the detached launcher prints the private log
+and exact controller exit marker. Its controller log's "Monitor this exact fleet"
+section prints the complete metrics command; retain it:
+`scripts/run-bench monitor <run-directory> --controller-status <exit-marker>`
+(the exit marker is available with or without `--wait`). Poll every 30 seconds and inspect
+terminal status on every observation, even when the progress card stops changing.
+The read-only command reports exclusive stage counts, card age, task outcomes,
+final lifecycle cleanup and controller exit separately, without dumping private
+trajectories. An early task PASS/FAIL does not mean teardown finished. Continue
+until the controller exits and exact owned resources are released. Stale or
+missing observations are warnings: reconcile exact owner liveness and private
+diagnostics, never reset a run based on an observation timeout. The compact
+monitor controls run in the existing `benchmark-live-results.test.py` deploy gate.
+The startup tracker recognizes both legacy SSH and current boot-launch producer
+messages. An accepted boot start displays stack booting; a provider-rejected
+start does not advance it. These compact regressions run in that same gate.
 
 To skip fresh volume restoration on repeated runs, prepare an explicitly sized
 workspace pool with `scripts/run-bench --provision-pool N --wait`. Ordinary runs

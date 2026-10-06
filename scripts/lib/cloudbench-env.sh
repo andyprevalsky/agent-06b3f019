@@ -1764,12 +1764,43 @@ cloudbench_publish_warm_deps_state() {
   # The metadata-only endpoint does not update, start, or restart a Machine.
   # Auth stays in the process environment, never in argv or output.
   python3 -c '
-import json, os, sys, urllib.error, urllib.parse, urllib.request
+import json, os, shutil, subprocess, sys, urllib.error, urllib.parse, urllib.request
 
 app, machine, volume, node, python, epoch, snapshot, key = sys.argv[1:]
 token = os.environ.get("FLY_API_TOKEN", "")
 if not token:
     raise SystemExit(1)
+scheme = "Bearer"
+for prefix in ("Bearer ", "FlyV1 "):
+    if token.startswith(prefix):
+        scheme, token = prefix.strip(), token[len(prefix):].strip()
+        break
+# Fly sessions can contain expired third-party discharges. Refresh the same
+# selected credential through flyctl rather than posting its raw .env value.
+# Short-lived refreshed auth stays in memory; publication remains optional.
+if token.startswith(("fm1r_", "fm1a_", "fm2_")):
+    fly = shutil.which("flyctl") or shutil.which("fly")
+    if not fly:
+        raise SystemExit(1)
+    auth_env = os.environ.copy()
+    auth_env.pop("FLY_ACCESS_TOKEN", None)
+    try:
+        auth = subprocess.run([fly, "auth", "token", "--json", "--quiet"],
+                              env=auth_env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, check=True, timeout=60)
+        refreshed = json.loads(auth.stdout).get("token")
+        if not isinstance(refreshed, str) or not refreshed.strip():
+            raise ValueError("missing refreshed auth")
+        token = refreshed.strip()
+        scheme = "FlyV1"
+        for prefix in ("Bearer ", "FlyV1 "):
+            if token.startswith(prefix):
+                scheme, token = prefix.strip(), token[len(prefix):].strip()
+                break
+        if not token:
+            raise ValueError("empty refreshed auth")
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        raise SystemExit(1)
 host = os.environ.get("FLY_API_HOSTNAME", "https://api.machines.dev").rstrip("/")
 if not host.startswith(("https://", "http://")):
     host = "https://" + host
@@ -1780,11 +1811,11 @@ if endpoint.scheme != "https" and not (
     raise SystemExit(1)
 path = "/v1/apps/{}/machines/{}/metadata/{}".format(*(urllib.parse.quote(part, safe="") for part in (app, machine, key)))
 value = " ".join((node, python, epoch, snapshot, volume, machine, app))
-request = urllib.request.Request(host + path, data=json.dumps({"value": value}).encode(), method="POST", headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+request = urllib.request.Request(host + path, data=json.dumps({"value": value}).encode(), method="POST", headers={"Authorization": scheme + " " + token, "Content-Type": "application/json"})
 try:
     with urllib.request.urlopen(request, timeout=60) as response:
         raise SystemExit(0 if response.status == 204 else 1)
-except (urllib.error.URLError, OSError):
+except (urllib.error.URLError, OSError, ValueError):
     raise SystemExit(1)
 ' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$key"
 }

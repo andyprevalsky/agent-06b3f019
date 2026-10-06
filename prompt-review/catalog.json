@@ -1,5 +1,5 @@
 {
-  "_doc": "Catalog of every prompt to review. Each entry has: repo (ours|claude-code-src|openclaw|hermes-agent|codex), path (relative to repo root), id (stable name \u2014 variable name, function, or basename), category, summary, keywords. The build script extracts text using id (regex anchor) with line-range as fallback. To add a prompt, append to the relevant list \u2014 no schema changes needed.",
+  "_doc": "Catalog of every prompt to review. Each entry has: repo (ours|claude-code-src|openclaw|hermes-agent|codex|prime-agent), path (relative to repo root), id (stable name \u2014 variable name, function, or basename), category, summary, keywords. The build script extracts text using id (regex anchor) with line-range as fallback. To add a prompt, append to the relevant list \u2014 no schema changes needed.",
   "ours": [
     {
       "path": "agents/utils/user_facing_writing_prompt.py",
@@ -20,7 +20,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       }
     },
     {
@@ -42,7 +43,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       }
     },
     {
@@ -152,7 +154,8 @@
         "claude": "claude_getSystemPrompt",
         "openclaw": "openclaw_buildAgentSystemPrompt",
         "hermes": "hermes_default_agent_identity",
-        "codex": "codex_base_instructions"
+        "codex": "codex_base_instructions",
+        "prime": "prime_core_harness"
       },
       "agent": "main_shared"
     },
@@ -218,7 +221,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "verifier"
     },
@@ -253,7 +257,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "planner"
     },
@@ -275,7 +280,8 @@
         "claude": "claude_builtin_explore_agent",
         "openclaw": "openclaw_subagent_system_prompt",
         "hermes": "hermes_explore_reference",
-        "codex": "codex_multi_agent_subagent"
+        "codex": "codex_multi_agent_subagent",
+        "prime": null
       },
       "agent": "explore"
     },
@@ -296,7 +302,8 @@
         "claude": "claude_tool_exit_plan_mode",
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": "prime_skill_goal"
       },
       "agent": "main_shared"
     },
@@ -317,7 +324,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "main_execute"
     },
@@ -338,7 +346,8 @@
         "claude": "claude_tool_grep",
         "openclaw": null,
         "hermes": "hermes_search_files_tool",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "explore"
     },
@@ -360,7 +369,8 @@
         "claude": "claude_tool_brief",
         "openclaw": "openclaw_message_tool",
         "hermes": "hermes_send_message_tool",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "main_execute"
     },
@@ -380,7 +390,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "main_execute"
     },
@@ -402,7 +413,8 @@
         "claude": "claude_tool_brief",
         "openclaw": "openclaw_message_tool",
         "hermes": "hermes_send_message_tool",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "main_plan"
     },
@@ -423,7 +435,8 @@
         "claude": "claude_tool_brief",
         "openclaw": "openclaw_message_tool",
         "hermes": "hermes_send_message_tool",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "main_execute"
     },
@@ -444,7 +457,8 @@
         "claude": "claude_tool_enter_plan_mode",
         "openclaw": "openclaw_update_plan",
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": "prime_skill_factory"
       },
       "agent": "main_plan"
     },
@@ -466,7 +480,8 @@
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool",
-        "codex": "codex_orchestrator"
+        "codex": "codex_orchestrator",
+        "prime": "prime_subagents"
       },
       "agent": "main_shared"
     },
@@ -488,7 +503,8 @@
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool",
-        "codex": "codex_orchestrator"
+        "codex": "codex_orchestrator",
+        "prime": "prime_subagents"
       },
       "agent": "main_execute"
     },
@@ -510,7 +526,8 @@
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool",
-        "codex": "codex_orchestrator"
+        "codex": "codex_orchestrator",
+        "prime": "prime_subagents"
       },
       "agent": "main_execute"
     },
@@ -532,7 +549,8 @@
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool",
-        "codex": "codex_orchestrator"
+        "codex": "codex_orchestrator",
+        "prime": "prime_subagents"
       },
       "agent": "main_shared"
     },
@@ -553,7 +571,8 @@
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool",
-        "codex": "codex_orchestrator"
+        "codex": "codex_orchestrator",
+        "prime": "prime_subagents"
       },
       "agent": "main_execute"
     },
@@ -575,7 +594,8 @@
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool",
-        "codex": "codex_orchestrator"
+        "codex": "codex_orchestrator",
+        "prime": "prime_skill_factory"
       },
       "agent": "main_execute"
     },
@@ -596,7 +616,8 @@
         "claude": "claude_tool_sleep",
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": "prime_skill_rlm_heartbeat"
       },
       "agent": "main_execute"
     },
@@ -618,7 +639,8 @@
         "claude": "claude_tool_web_fetch",
         "openclaw": "openclaw_web_fetch",
         "hermes": "hermes_web_extract_tool",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "explore"
     },
@@ -640,7 +662,8 @@
         "claude": "claude_tool_web_search",
         "openclaw": "openclaw_web_search",
         "hermes": "hermes_web_search_tool",
-        "codex": null
+        "codex": null,
+        "prime": "prime_skill_websearch"
       },
       "agent": "explore"
     },
@@ -661,7 +684,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -682,7 +706,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_snapshot",
         "hermes": "hermes_browser_snapshot",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -703,7 +728,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -725,7 +751,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_act_click",
         "hermes": "hermes_browser_click",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -746,7 +773,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_act_fill",
         "hermes": "hermes_browser_type",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -767,7 +795,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_act_type",
         "hermes": "hermes_browser_type",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -788,7 +817,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_act_press",
         "hermes": "hermes_browser_press",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -808,7 +838,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_navigate",
         "hermes": "hermes_browser_navigate",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -827,7 +858,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": "hermes_browser_scroll",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -847,7 +879,8 @@
         "claude": "claude_tool_sleep",
         "openclaw": "openclaw_browser_action_act_wait",
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -867,7 +900,8 @@
         "claude": "claude_tool_exit_plan_mode",
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -887,7 +921,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_screenshot",
         "hermes": "hermes_browser_vision",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -908,7 +943,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_snapshot_aria",
         "hermes": "hermes_browser_snapshot",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -928,7 +964,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": "hermes_browser_back",
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -948,7 +985,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_act_clickCoords",
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -968,7 +1006,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "main_execute"
     },
@@ -989,7 +1028,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "browser"
     },
@@ -1082,7 +1122,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "planner"
     },
@@ -1117,7 +1158,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": "codex_compact_prompt"
+        "codex": "codex_compact_prompt",
+        "prime": "prime_compaction_prompt"
       },
       "agent": "shared"
     },
@@ -1138,7 +1180,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": "codex_compact_prompt"
+        "codex": "codex_compact_prompt",
+        "prime": "prime_compaction_prompt"
       }
     },
     {
@@ -1172,7 +1215,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "chat"
     },
@@ -1193,7 +1237,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "chat"
     },
@@ -1213,7 +1258,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "chat"
     },
@@ -1234,7 +1280,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "voice"
     },
@@ -1255,7 +1302,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "sms"
     },
@@ -1305,7 +1353,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null,
-        "codex": null
+        "codex": null,
+        "prime": null
       },
       "agent": "shared"
     },
@@ -2714,6 +2763,422 @@
         "review",
         "rubric",
         "code-review"
+      ]
+    }
+  ],
+  "prime-agent": [
+    {
+      "path": "prime-agent/crates/pa-core/src/prompts/layers/core.md",
+      "anchor": "# prime-agent harness",
+      "id": "prime_core_harness",
+      "category": "system_prompt",
+      "summary": "Core system-prompt layer \u2014 one `ipython` REPL tool; every other tool, subagent, memory and skill is a Python call.",
+      "keywords": [
+        "system",
+        "core",
+        "harness",
+        "repl",
+        "ipython",
+        "programmatic",
+        "tools",
+        "identity"
+      ]
+    },
+    {
+      "path": "prime-agent/crates/pa-core/src/prompts/layers/usage.md",
+      "anchor": "The following are mandatory rules",
+      "id": "prime_usage_rules",
+      "category": "system_prompt",
+      "summary": "Mandatory usage rules \u2014 background bash, variables over re-reading, Python as the orchestration language, delegation, refinement.",
+      "keywords": [
+        "rules",
+        "usage",
+        "repl",
+        "variables",
+        "bash",
+        "delegation",
+        "orchestration"
+      ]
+    },
+    {
+      "path": "prime-agent/crates/pa-core/src/prompts/layers/opinionated.md",
+      "anchor": "The following guidelines to agents",
+      "id": "prime_opinionated_guidelines",
+      "category": "system_prompt",
+      "summary": "Opinionated defaults \u2014 spawn wrappers, plain technical English, coding pitfalls to avoid.",
+      "keywords": [
+        "guidelines",
+        "writing",
+        "style",
+        "coding",
+        "pitfalls",
+        "spawn"
+      ]
+    },
+    {
+      "path": "prime-agent/crates/pa-core/src/prompts/layers/core.md",
+      "anchor": "## Core tools",
+      "id": "prime_core_tools",
+      "category": "tool_description",
+      "summary": "Core programmatic tools: background `bash` handles, exact-match `edit`, `websearch`, `attach_image`.",
+      "keywords": [
+        "tool",
+        "bash",
+        "edit",
+        "websearch",
+        "image",
+        "background",
+        "handle"
+      ]
+    },
+    {
+      "path": "prime-agent/crates/pa-core/src/prompts/layers/core.md",
+      "anchor": "## Subagents",
+      "id": "prime_subagents",
+      "category": "tool_description",
+      "summary": "Recursive subagents \u2014 `rlm.spawn` returns a handle, results arrive by agent_message; collect, progress notes, a2a messaging.",
+      "keywords": [
+        "tool",
+        "spawn",
+        "subagent",
+        "agent",
+        "delegate",
+        "recursive",
+        "message",
+        "parallel",
+        "child"
+      ]
+    },
+    {
+      "path": "prime-agent/crates/pa-core/src/prompts/layers/core.md",
+      "anchor": "## Continual Harness",
+      "id": "prime_continual_harness",
+      "category": "tool_description",
+      "summary": "Continual harness API \u2014 CRUD over prompt notes, memories, skills and subagent specs; refinement events and search.",
+      "keywords": [
+        "tool",
+        "memory",
+        "harness",
+        "refine",
+        "skill",
+        "prompt",
+        "persist",
+        "search"
+      ]
+    },
+    {
+      "path": "prime-agent/skills/refine/SKILL.md",
+      "anchor": "# Refine",
+      "id": "prime_skill_refine",
+      "category": "tool_description",
+      "summary": "Skill: schedule continual-harness refinement from the trajectory at the next turn boundary.",
+      "keywords": [
+        "tool",
+        "skill",
+        "refine",
+        "memory",
+        "self-improve",
+        "harness",
+        "trajectory"
+      ]
+    },
+    {
+      "path": "prime-agent/skills/compact/SKILL.md",
+      "anchor": "# Compact",
+      "id": "prime_skill_compact",
+      "category": "tool_description",
+      "summary": "Skill: agent-triggered context compaction; REPL variables survive the summary.",
+      "keywords": [
+        "tool",
+        "skill",
+        "compact",
+        "context",
+        "summary",
+        "compression"
+      ]
+    },
+    {
+      "path": "prime-agent/skills/goal/SKILL.md",
+      "anchor": "# Goal",
+      "id": "prime_skill_goal",
+      "category": "tool_description",
+      "summary": "Skill: persistent thread goal the harness keeps re-prompting until `goal.complete()` is called.",
+      "keywords": [
+        "tool",
+        "skill",
+        "goal",
+        "complete",
+        "completion",
+        "budget",
+        "persistent"
+      ]
+    },
+    {
+      "path": "prime-agent/skills/factory/SKILL.md",
+      "anchor": "# Factory",
+      "id": "prime_skill_factory",
+      "category": "tool_description",
+      "summary": "Skill: stored state-machine / DAG workflows of spawned child agents \u2014 fan-out, bounded loops, joins, foreach.",
+      "keywords": [
+        "tool",
+        "skill",
+        "factory",
+        "dag",
+        "plan",
+        "state",
+        "machine",
+        "workflow",
+        "foreach",
+        "spawn"
+      ]
+    },
+    {
+      "path": "prime-agent/skills/agent-message/SKILL.md",
+      "anchor": "name: agent-message",
+      "id": "prime_skill_agent_message",
+      "category": "tool_description",
+      "summary": "Skill: direct agent-to-agent messages to parent, siblings or children.",
+      "keywords": [
+        "tool",
+        "skill",
+        "message",
+        "agent",
+        "parent",
+        "sibling",
+        "child",
+        "send"
+      ]
+    },
+    {
+      "path": "prime-agent/skills/agent-observe/SKILL.md",
+      "anchor": "name: agent-observe",
+      "id": "prime_skill_agent_observe",
+      "category": "tool_description",
+      "summary": "Skill: inspect the nuclear family \u2014 agent status and recent transcript previews.",
+      "keywords": [
+        "tool",
+        "skill",
+        "observe",
+        "agent",
+        "status",
+        "transcript",
+        "list"
+      ]
+    },
+    {
+      "path": "prime-agent/skills/rlm-heartbeat/SKILL.md",
+      "anchor": "name: rlm-heartbeat",
+      "id": "prime_skill_rlm_heartbeat",
+      "category": "tool_description",
+      "summary": "Skill: recurring heartbeat that re-enters the session on a schedule with remembered instructions.",
+      "keywords": [
+        "tool",
+        "skill",
+        "heartbeat",
+        "wait",
+        "schedule",
+        "wake",
+        "interval",
+        "sleep"
+      ]
+    },
+    {
+      "path": "prime-agent/skills/websearch/SKILL.md",
+      "anchor": "name: websearch",
+      "id": "prime_skill_websearch",
+      "category": "tool_description",
+      "summary": "Skill: web search returning text the agent slices in Python.",
+      "keywords": [
+        "tool",
+        "skill",
+        "web",
+        "search",
+        "query",
+        "results"
+      ]
+    },
+    {
+      "path": "prime-agent/skills/edit/SKILL.md",
+      "anchor": "name: edit",
+      "id": "prime_skill_edit",
+      "category": "tool_description",
+      "summary": "Skill: exact-unique-match file edit.",
+      "keywords": [
+        "tool",
+        "skill",
+        "edit",
+        "file",
+        "replace",
+        "string"
+      ]
+    },
+    {
+      "path": "prime-agent/skills/mcp/SKILL.md",
+      "anchor": "name: mcp",
+      "id": "prime_skill_mcp",
+      "category": "tool_description",
+      "summary": "Skill: discover and call MCP tools programmatically; schemas are looked up at runtime, not loaded into context.",
+      "keywords": [
+        "tool",
+        "skill",
+        "mcp",
+        "connections",
+        "plugins",
+        "schema",
+        "call"
+      ]
+    },
+    {
+      "path": "prime-agent/skills/skill-creator/SKILL.md",
+      "anchor": "name: skill-creator",
+      "id": "prime_skill_skill_creator",
+      "category": "tool_description",
+      "summary": "Skill: package a recurring workflow as an importable Python skill.",
+      "keywords": [
+        "tool",
+        "skill",
+        "creator",
+        "python",
+        "package",
+        "workflow",
+        "reuse"
+      ]
+    },
+    {
+      "path": "prime-agent/prime-agent-runtime/src/rlm/machines/builder/MACHINE.md",
+      "anchor": "name:",
+      "id": "prime_machine_builder",
+      "category": "tool_description",
+      "summary": "Factory machine seed: builder workflow of subagent states.",
+      "keywords": [
+        "factory",
+        "machine",
+        "builder",
+        "workflow",
+        "states",
+        "subagent"
+      ]
+    },
+    {
+      "path": "prime-agent/prime-agent-runtime/src/rlm/machines/pr-manager/MACHINE.md",
+      "anchor": "name:",
+      "id": "prime_machine_pr_manager",
+      "category": "tool_description",
+      "summary": "Factory machine seed: PR manager workflow of subagent states.",
+      "keywords": [
+        "factory",
+        "machine",
+        "pr",
+        "review",
+        "workflow",
+        "states",
+        "subagent"
+      ]
+    },
+    {
+      "path": "prime-agent/prime-agent-runtime/src/rlm/machines/review-sweep/MACHINE.md",
+      "anchor": "name:",
+      "id": "prime_machine_review_sweep",
+      "category": "tool_description",
+      "summary": "Factory machine seed: review/fix sweep loop until a verdict approves.",
+      "keywords": [
+        "factory",
+        "machine",
+        "review",
+        "sweep",
+        "loop",
+        "verdict",
+        "subagent"
+      ]
+    },
+    {
+      "path": "prime-agent/crates/pa-core/src/refinement/planner.rs",
+      "anchor": "REFINEMENT_SYSTEM_PROMPT",
+      "id": "prime_refinement_system",
+      "category": "system_prompt",
+      "summary": "/refine system prompt \u2014 a second model emits small evidence-backed create/update/delete edits to harness state.",
+      "keywords": [
+        "refine",
+        "system",
+        "harness",
+        "memory",
+        "skill",
+        "edits",
+        "trajectory",
+        "self-improve"
+      ]
+    },
+    {
+      "path": "prime-agent/crates/pa-core/src/refinement/planner.rs",
+      "anchor": "AUTO_REFINE_REVIEW_SYSTEM_PROMPT",
+      "id": "prime_auto_refine_review",
+      "category": "system_prompt",
+      "summary": "Auto-refine review gate \u2014 decides whether a post-compaction checkpoint should run /refine.",
+      "keywords": [
+        "refine",
+        "review",
+        "gate",
+        "auto",
+        "checkpoint",
+        "compaction"
+      ]
+    },
+    {
+      "path": "prime-agent/crates/pa-core/src/session_engine/compaction_utils.rs",
+      "anchor": "SUMMARIZATION_SYSTEM_PROMPT",
+      "id": "prime_compaction_system",
+      "category": "system_prompt",
+      "summary": "Compaction summarizer system prompt.",
+      "keywords": [
+        "compaction",
+        "summary",
+        "system",
+        "context",
+        "compression"
+      ]
+    },
+    {
+      "path": "prime-agent/crates/pa-core/src/session_engine/compaction.rs",
+      "anchor": "SUMMARIZATION_PROMPT",
+      "id": "prime_compaction_prompt",
+      "category": "system_prompt",
+      "summary": "Compaction prompt \u2014 structured context checkpoint another LLM continues from.",
+      "keywords": [
+        "compaction",
+        "summary",
+        "checkpoint",
+        "context",
+        "compression",
+        "history"
+      ]
+    },
+    {
+      "path": "prime-agent/crates/pa-core/src/session_engine/compaction.rs",
+      "anchor": "UPDATE_SUMMARIZATION_PROMPT",
+      "id": "prime_compaction_update_prompt",
+      "category": "system_prompt",
+      "summary": "Incremental compaction prompt \u2014 fold new messages into the previous summary.",
+      "keywords": [
+        "compaction",
+        "summary",
+        "update",
+        "incremental",
+        "context"
+      ]
+    },
+    {
+      "path": "prime-agent/crates/pa-core/src/autonomous/mod.rs",
+      "anchor": "DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT",
+      "id": "prime_autonomous_continuation",
+      "category": "system_prompt",
+      "summary": "Autonomous-mode continuation \u2014 keep working until the host evaluator or configured quality gates pass.",
+      "keywords": [
+        "autonomous",
+        "continue",
+        "verifier",
+        "evaluator",
+        "gates",
+        "quality"
       ]
     }
   ]

@@ -32,13 +32,18 @@ PHASES = [
 _ORDER = [p[0] for p in PHASES]
 _EXPECTED = {p[0]: p[2] for p in PHASES}
 _LABEL = {p[0]: p[1] for p in PHASES}
+_BOOT_LAUNCH_MARKERS = {
+    "staging": "boot-launch: injecting boot script",
+    "booting": "post-config start accepted — booting into the driver",
+}
 
 
 def current_phase(child_log_text: str) -> str:
     """The latest startup phase whose marker is present (default 'cloning')."""
     cur = "cloning"
     for key, _label, _exp, marker in PHASES:
-        if marker and marker in child_log_text:
+        boot_marker = _BOOT_LAUNCH_MARKERS.get(key)
+        if (marker and marker in child_log_text) or (boot_marker and boot_marker in child_log_text):
             cur = key
     return cur
 
@@ -78,11 +83,25 @@ def startup_state(child_log: Path, state_file: Path, now: Optional[float] = None
             steps.append({"key": key, "label": _LABEL[key], "expected_s": exp, "elapsed_s": 0.0, "status": "pending"})
         elif i < cur_idx:
             end = seen.get(_ORDER[i + 1], now)
-            steps.append({"key": key, "label": _LABEL[key], "expected_s": exp,
-                          "elapsed_s": round(max(0.0, end - seen[key]), 1), "status": "done"})
+            steps.append(
+                {
+                    "key": key,
+                    "label": _LABEL[key],
+                    "expected_s": exp,
+                    "elapsed_s": round(max(0.0, end - seen[key]), 1),
+                    "status": "done",
+                }
+            )
         elif key == cur:
-            steps.append({"key": key, "label": _LABEL[key], "expected_s": exp,
-                          "elapsed_s": round(max(0.0, now - seen[key]), 1), "status": "active"})
+            steps.append(
+                {
+                    "key": key,
+                    "label": _LABEL[key],
+                    "expected_s": exp,
+                    "elapsed_s": round(max(0.0, now - seen[key]), 1),
+                    "status": "active",
+                }
+            )
         else:
             steps.append({"key": key, "label": _LABEL[key], "expected_s": exp, "elapsed_s": 0.0, "status": "pending"})
 

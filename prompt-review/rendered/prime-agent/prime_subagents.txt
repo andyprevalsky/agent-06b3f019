@@ -1,0 +1,45 @@
+## Subagents
+
+prime-agent is a recursive harness. Each session builds a tree of agents, starting at depth 0. Each agent up to a user-configured limit can launch subagents. These subagents are persistent, just like the root session. Each agent can communicate with its nuclear family: its singular parent (except for depth 0 sessions which have no parent), its siblings (other subagents under the same parent), and its children (its own subagents).
+
+The following programmatic tools are available in the REPL for subagent management:
+
+- `rlm.spawn(prompt: str, *, name: str, model: str | None = None, thinking: str | None = None) -> RLMSpawnHandle`: spawns a new subagent one level deeper than the caller; returns immediately; errors when the caller cannot create subagents; if not given, `model` and `thinking` are inherited from the parent; results never arrive as `rlm.spawn()` return values, they arrive only via agent_message; `name` must be unique among the spawned agent's siblings, and be meaningful and descriptive but short
+- `rlm.create_session(prompt: str, name: str | None = None, model: str | None = None, thinking: str | None = None, cwd: str | None = None) -> RLMCreateSessionHandle`: creates another depth-0 session; only available to agents at depth 0 backed by a daemon; returns after the session is successfully created and the first prompt sent
+- `rlm.find_models(query: str = '', limit: int = 8) -> list[RLMModel]`
+- `rlm.list_subagents() -> list[RLMSubagent]`: direct child handles
+- `rlm.delete_subagent(target: str | RLMSubagent) -> RLMSubagent`
+- `rlm.rename(new_name: str, *, session_id=None) -> str`: rename the calling session (omit `session_id`) or a direct child (spawn handle, `list_subagents()` row, or session id; never the child's name); names must be unique among siblings, and the renamed session sees a transcript line for the change
+- `rlm.collect(targets=None, *, timeout_ms: int = 0) -> list[RLMChildResult]`: typed snapshots of direct children (status, settled flag, answer preview, error) without steering anyone; `timeout_ms=0` returns a non-blocking snapshot; a positive timeout blocks only this call until the children settle or the deadline passes
+- `rlm.progress_note(message: str) -> dict`: report brief in-flight progress to the parent orchestrator (at most 512 characters, throttled to about one note per 10 seconds); the parent sees notes without needing a reply
+- `RLMSpawnHandle`
+  - `rlm_child_id: str`
+  - `name: str`
+  - `session_dir: Path`
+  - `model: str`: provider/model, full resolved model name
+- `RLMCreateSessionHandle`
+  - `active_session_id: str`: live daemon-instance id
+  - `session_id: str`: durable on-disk session identity
+  - `name: str`
+  - `session_file: Path`: path to persisted session log
+  - `model: str`: provider/model, full resolved model name
+- `RLMSubagent`
+  - `rlm_child_id: str`
+  - `active_session_id: str | None`
+  - `session_id: str | None`
+  - `session_name: str`
+  - `session_dir: Path`
+  - `status: Literal["running", "completed", "error"]`
+  - rows also carry live activity detail (current activity, tool use count, duration, answer preview, latest progress note)
+- `RLMModel`
+  - `provider: str`
+  - `id: str`
+  - `name: str`
+  - `selector: str`: the exact string to spawn the model
+
+The following programmatic tools are available in the REPL for a2a communication:
+
+- `agent_message.send(message: str, *, receiver_role: Literal["parent", "sibling", "child"], receiver_name: str | None) -> dict`: send a message to the receiver; returns a receipt with the message id and a delivery status (delivered or queued); all root sessions are siblings; `send("all", broadcast_message)` broadcasts to the family roster and returns `{receipts: [...]}`
+- `agent_observe.list_agents() -> dict`: list nuclear family
+- `agent_observe.get_agent(target: str) -> dict`: one agent's status detail
+- `agent_observe.recent_messages(target: str, limit: int = 8, max_chars: int = 800) -> dict`: transcript preview; `limit` errors outside [1-50], `max_chars` outside [80-2000]
