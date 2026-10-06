@@ -529,8 +529,8 @@ DEMO replay admission, task-only read-only guards, genuine replay hits, ordinary
 flag-off behavior and pooled/worker handoff. It calls the owning controls through
 the supported scripts; it adds no paid fleet stage. Explicit cold/cached startup
 experiments use `/benchmark` and CLAUDE.md's commands, without replacing deploy
-smoke outcomes. The mass-demo `-k 50 --concurrency 50` diagnostic means 50
-controllers and up to 2,500 first-level children; task replay has zero LIVE proof
+smoke outcomes. The mass-demo `-k 50 --concurrency 50 --strict-barrier` diagnostic
+means 50 controllers and 2,500 first-level children; task replay has zero LIVE proof
 credit and its unchanged declared judges may make provider calls. Ordinary
 source-only deploy benchmarks continue to reuse verified dependency snapshots.
 The optional cold `image-build --builder depot` path changes only that requested
@@ -538,6 +538,13 @@ build (app scope, zstd level 3, `linux/amd64`); native is still the default and
 setup stays native. Retain its requested-option receipt and verify image
 resolution/runtime compatibility before using it. Do not assume a measured
 speedup or a cost guarantee, or change shared builder settings.
+Image publication automatically caches its checksum-verified pinned Fly client
+in the Git common directory; native uses child-only classic Docker over HTTPS
+(`DOCKER_BUILDKIT=0`, `--wg=false`). Shared Fly/PATH and runtime remain unchanged.
+The 31.6-second tiny CLI control is not full cold-image timing. Strict repeated
+campaigns also have compact cohort readiness/abort/inverse controls here, with
+the existing startup budget and normal owned cleanup. Controller count alone
+does not prove execution overlap; ordinary non-strict scheduling is unchanged.
 
 During deploy benchmarks, follow CLAUDE.md's "Monitor every cloud launch"
 instructions and the exact metrics command in the printed controller log.

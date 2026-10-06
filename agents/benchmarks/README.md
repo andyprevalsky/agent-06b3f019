@@ -70,17 +70,23 @@ Fly-integrated Depot with app scope, zstd level 3 and `linux/amd64`, and records
 those requested options in the receipt. Native remains the default; setup stays
 native. Verify image tag resolution and runtime compatibility before activation;
 the opt-in does not change shared builder settings or guarantee speed/cost.
+Image publication automatically caches a checksum-verified pinned Fly client in
+the Git common directory. Native publishing uses child-only classic Docker over
+HTTPS (`DOCKER_BUILDKIT=0`, `--wg=false`); shared Fly/PATH and the benchmark
+runtime remain unchanged. A tiny CLI control took 31.6 seconds including client
+installation and push; it is not a full cold-image measurement. No manual
+download is needed for fresh worktrees.
 
 The existing recorded mass-demo cache diagnostic uses:
 
 ```bash
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
   scripts/run-bench test-mass-agent-run-0 --demo-cache \
-  -k 50 --concurrency 50 --timeout 300
+  -k 50 --concurrency 50 --strict-barrier --timeout 300
 ```
 
 This launches 50 independent one-task controllers, each with the unchanged 50
-first-level general-purpose children: up to 2,500 plus existing explore fan-out,
+first-level general-purpose children: 2,500, with existing explore allowances unchanged,
 not 50 distinct tasks. Task-agent replay is read-only and refuses live fallback
 on misses or unresolved context. The separate harness keeps genuine declared
 evaluation; LLM judges may call providers. Existing cold-terminal passthrough
@@ -88,6 +94,11 @@ is not a recorded hit, and cached diagnostics earn zero LIVE acceptance credit.
 Keep tasks, prompts and evaluators unchanged and follow the printed monitor command.
 These compact regression controls run in the existing deploy gate; large cached
 campaigns remain explicitly requested experiments.
+Repeated `--strict-barrier` campaigns wait for every copy’s unchanged stack and
+autoscaler readiness before releasing each bounded cohort. A startup failure
+aborts through owned cleanup; ordinary non-strict sliding scheduling remains
+unchanged. Measure execution overlap from task start/terminal intervals rather
+than the campaign’s active controller count.
 
 The daily `agent-payment-new-user-journey` task exercises an isolated, fresh
 non-admin account from exhausted free credit through a real Stripe **test-mode**

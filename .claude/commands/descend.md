@@ -188,6 +188,13 @@ Do not automatically rebuild images during ordinary branch runs. Cached DEMO
 copies earn zero LIVE acceptance credit and retain genuine evaluation; declared
 judges may call providers. The mass-demo fifty-copy command means fifty
 controllers and up to 2,500 first-level children, not fifty distinct tasks.
+Use its documented `--strict-barrier` to coordinate all ready copies in each
+bounded cohort; controller count alone is not execution overlap. Ordinary
+non-strict scheduling stays unchanged. Cold image publication automatically
+caches a checksum-verified pinned client in the Git common directory and uses
+child-only native classic Docker over HTTPS; no manual download or shared Fly
+installation change is needed. The 31.6-second tiny CLI control is not full
+cold-image timing.
 
 Follow CLAUDE.md's "Monitor every cloud launch" instructions and the exact command
 printed at launch. Poll every 30 seconds, check terminal status on every poll, and

@@ -16804,6 +16804,7 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
         "cloudbench-seed-budget.sh",
         "cloudbench-github-token.sh",
         "cloudbench-image-publisher.sh",
+        "cloudbench-campaign-barrier.py",
     ):
         assert f in fleet[create_at:snap_at], f"{f} missing from snapshot copy set"
     assert 'SCRIPT_SNAPSHOT_OWNER_HELPER="cloudbench-script-snapshot.py"' in fleet

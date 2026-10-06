@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -84,9 +85,11 @@ def main() -> int:
 
     root = args.root.resolve()
     requested_id = os.environ.get("RUN_BENCH_CAMPAIGN_ID")
-    campaign_id = requested_id or datetime.now(timezone.utc).strftime(
-        "campaign-%Y%m%d-%H%M%S"
-    ) + f"-{os.getpid()}"
+    campaign_id = (
+        requested_id
+        or datetime.now(timezone.utc).strftime("campaign-%Y%m%d-%H%M%S")
+        + f"-{os.getpid()}"
+    )
     safe_id = "".join(
         character if character.isalnum() or character in "._-" else "-"
         for character in campaign_id
@@ -140,6 +143,46 @@ def main() -> int:
         "peak_concurrency": 0,
         "jobs": jobs,
     }
+    strict_start = (
+        "--strict-barrier" in args.forward_arg
+        or os.environ.get("CLOUDBENCH_STRICT_BARRIER") == "1"
+    )
+    cohorts: list[dict[str, object]] = []
+    parent_lock = None
+    if strict_start:
+        if os.environ.get("CLOUDBENCH_SYNCHRONIZED_START", "1") != "1":
+            raise SystemExit(
+                "strict campaign startup requires synchronized fleet start"
+            )
+        barrier_root = campaign_dir / "startup-cohorts"
+        barrier_root.mkdir(mode=0o700)
+        parent_lock = (barrier_root / "parent.lock").open("w")
+        fcntl.flock(parent_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for offset in range(0, len(jobs), args.concurrency):
+            cohort_id = f"c{len(cohorts) + 1:03d}"
+            members = jobs[offset : offset + args.concurrency]
+            directory = barrier_root / cohort_id
+            (directory / "ready").mkdir(parents=True, mode=0o700)
+            cohort = {
+                "cohort_id": cohort_id,
+                "status": "queued",
+                "ready_count": 0,
+                "expected_count": len(members),
+                "released_at": None,
+                "_directory": directory,
+                "_jobs": members,
+                "_manifest": {
+                    "cohort_id": cohort_id,
+                    "jobs": {str(job["job_id"]): None for job in members},
+                },
+            }
+            cohorts.append(cohort)
+            write_json_atomic(directory / "manifest.json", cohort["_manifest"])
+            for job in members:
+                job["startup_cohort"] = cohort_id
+                job["startup_ready_at"] = None
+                job["_cohort"] = cohort
+        state["startup_cohorts"] = cohorts
     write_json_atomic(summary_path, state)
     print(
         f"🧪 benchmark campaign: tasks={len(args.task)} runs={args.runs} "
@@ -161,10 +204,85 @@ def main() -> int:
     started = time.monotonic()
     next_heartbeat = started + 10
     first_failure = 0
+    barrier_failure = False
+    current_cohort: dict[str, object] | None = None
+
+    def abort_startup_cohort(cohort: dict[str, object], reason: str) -> None:
+        if cohort["status"] == "released":
+            return
+        cohort["status"] = "aborted"
+        write_json_atomic(
+            cohort["_directory"] / "abort.json",
+            {
+                "cohort_id": cohort["cohort_id"],
+                "reason": reason,
+                "aborted_at": utc_now(),
+            },
+        )
+        # Waiting fleets observe the marker and exit through their existing
+        # owned teardown. Booting fleets do the same on reaching the gate. Do
+        # not turn an ordinary cohort startup failure into the user's explicit
+        # signal-cancellation path, which can escalate to SIGKILL after 30s.
+        for job in cohort["_jobs"]:
+            if "_process" in job:
+                job["_aborted_by_campaign"] = True
+
+    def release_ready_cohort(cohort: dict[str, object]) -> None:
+        if cohort["status"] != "waiting":
+            return
+        ready_count = 0
+        for job in cohort["_jobs"]:
+            process = job.get("_process")
+            if not isinstance(process, subprocess.Popen) or process.poll() is not None:
+                return
+            ready = cohort["_directory"] / "ready" / f"{job['job_id']}.json"
+            if not ready.is_file():
+                continue
+            receipt = json.loads(ready.read_text())
+            if (
+                receipt.get("cohort_id") != cohort["cohort_id"]
+                or receipt.get("job_id") != job["job_id"]
+                or receipt.get("controller_pid") != process.pid
+            ):
+                raise ValueError(
+                    "startup readiness does not belong to this campaign job"
+                )
+            ready_count += 1
+            job["startup_ready_at"] = receipt["ready_at"]
+        if cohort["ready_count"] != ready_count:
+            cohort["ready_count"] = ready_count
+            print(
+                f"⏸️ campaign startup {cohort['cohort_id']}: "
+                f"{ready_count}/{cohort['expected_count']} copies ready"
+            )
+            write_json_atomic(summary_path, state)
+        if ready_count != cohort["expected_count"]:
+            return
+        cohort["released_at"] = utc_now()
+        write_json_atomic(
+            cohort["_directory"] / "release.json",
+            {"cohort_id": cohort["cohort_id"], "released_at": cohort["released_at"]},
+        )
+        cohort["status"] = "released"
+        print(
+            f"🚦 campaign startup {cohort['cohort_id']}: releasing "
+            f"all {ready_count} ready copies"
+        )
+        write_json_atomic(summary_path, state)
 
     try:
         while pending or active:
-            while pending and len(active) < args.concurrency and not stop_signal:
+            if strict_start and not active and not barrier_failure:
+                current_cohort = pending[0]["_cohort"] if pending else None
+                if current_cohort:
+                    current_cohort["status"] = "waiting"
+            while (
+                pending
+                and len(active) < args.concurrency
+                and not stop_signal
+                and not barrier_failure
+                and (not strict_start or pending[0]["_cohort"] is current_cohort)
+            ):
                 job = pending.popleft()
                 environment = os.environ.copy()
                 # The campaign is only a local scheduler and does not create an
@@ -178,11 +296,25 @@ def main() -> int:
                         "RUN_BENCH_CAMPAIGN_JOB_ID": str(job["job_id"]),
                         "RUN_BENCH_CAMPAIGN_RUN": str(job["run"]),
                         "RUN_BENCH_CAMPAIGN_TASK": str(job["task"]),
-                        "CLOUDBENCH_CONTROLLER_LOCK_NAME": str(
-                            job["controller_lock"]
-                        ),
+                        "CLOUDBENCH_CONTROLLER_LOCK_NAME": str(job["controller_lock"]),
                     }
                 )
+                if strict_start:
+                    environment.update(
+                        {
+                            "RUN_BENCH_CAMPAIGN_BARRIER_DIR": str(
+                                current_cohort["_directory"]
+                            ),
+                            "RUN_BENCH_CAMPAIGN_COHORT": str(
+                                current_cohort["cohort_id"]
+                            ),
+                        }
+                    )
+                else:
+                    # A new ordinary campaign must not inherit a prior child's
+                    # diagnostic rendezvous from the calling shell.
+                    environment.pop("RUN_BENCH_CAMPAIGN_BARRIER_DIR", None)
+                    environment.pop("RUN_BENCH_CAMPAIGN_COHORT", None)
                 command = [
                     "bash",
                     str(root / "scripts" / "run-bench"),
@@ -205,6 +337,14 @@ def main() -> int:
                 job["started_at"] = utc_now()
                 job["status"] = "running"
                 active[process.pid] = job
+                if strict_start:
+                    current_cohort["_manifest"]["jobs"][str(job["job_id"])] = (
+                        process.pid
+                    )
+                    write_json_atomic(
+                        current_cohort["_directory"] / "manifest.json",
+                        current_cohort["_manifest"],
+                    )
                 state["peak_concurrency"] = max(
                     int(state["peak_concurrency"]), len(active)
                 )
@@ -216,6 +356,8 @@ def main() -> int:
 
             if stop_signal and not termination_requested:
                 termination_requested = True
+                if current_cohort:
+                    abort_startup_cohort(current_cohort, "user cancelled campaign")
                 terminate_owned_children(active)
 
             for process_id, job in list(active.items()):
@@ -229,9 +371,24 @@ def main() -> int:
                 handle = job.pop("_log_handle")
                 handle.close()
                 job.pop("_process")
+                exited_before_release = strict_start and job["_cohort"][
+                    "status"
+                ] not in {"released", "aborted"}
+                if exited_before_release:
+                    barrier_failure = True
+                    first_failure = first_failure or exit_code or 1
+                    abort_startup_cohort(
+                        job["_cohort"], "controller exited before cohort release"
+                    )
                 job["status"] = (
-                    "cancelled" if job.pop("_terminated_by_campaign", False)
-                    else "passed" if exit_code == 0 else "failed"
+                    "cancelled"
+                    if job.pop("_terminated_by_campaign", False)
+                    or job.pop("_aborted_by_campaign", False)
+                    else "failed"
+                    if exited_before_release
+                    else "passed"
+                    if exit_code == 0
+                    else "failed"
                 )
                 job["controller_exit_code"] = exit_code
                 job["finished_at"] = utc_now()
@@ -247,6 +404,9 @@ def main() -> int:
                     f"wall={job['wall_clock_seconds']}s"
                 )
                 write_json_atomic(summary_path, state)
+
+            if current_cohort and not barrier_failure and not stop_signal:
+                release_ready_cohort(current_cohort)
 
             now = time.monotonic()
             if active and now >= next_heartbeat:
@@ -264,17 +424,24 @@ def main() -> int:
                     f"pending={len(pending)} {' '.join(evidence)}"
                 )
                 next_heartbeat = now + (10 if now - started < 60 else 60)
-            if stop_signal and not active:
+            if (stop_signal or barrier_failure) and not active:
                 break
             time.sleep(0.1)
     finally:
         if active and not termination_requested:
+            if current_cohort:
+                abort_startup_cohort(current_cohort, "campaign parent is exiting")
             terminate_owned_children(active)
         for job in active.values():
             handle = job.get("_log_handle")
             if handle is not None:
                 handle.close()
+        if parent_lock is not None:
+            parent_lock.close()
 
+    if barrier_failure:
+        for job in pending:
+            job["status"] = "cancelled"
     if stop_signal:
         for job in pending:
             job["status"] = "cancelled"

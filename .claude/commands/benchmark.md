@@ -39,17 +39,23 @@ Depot (app scope, zstd level 3, `linux/amd64`); native remains the default and
 setup stays native. The receipt records these requested options. No shared
 builder setting changes or speed/cost guarantee; verify image tag resolution
 and runtime compatibility before activation.
+Image publication automatically caches a checksum-verified pinned Fly client in
+the Git common directory. Native publishing uses only the image child’s classic
+Docker/HTTPS settings (`DOCKER_BUILDKIT=0`, `--wg=false`); shared Fly/PATH and the
+benchmark runtime remain unchanged. The tiny supported CLI control took 31.6
+seconds including client installation and push, not a full cold build. No manual
+download is needed for a fresh worktree.
 
 For the existing recorded mass-demo cache diagnostic, from the repository root:
 
 ```bash
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
   scripts/run-bench test-mass-agent-run-0 --demo-cache \
-  -k 50 --concurrency 50 --timeout 300
+  -k 50 --concurrency 50 --strict-barrier --timeout 300
 ```
 
 These are 50 independent one-task controllers, each retaining the task's 50
-first-level general-purpose children: up to 2,500, plus existing explore fan-out.
+first-level general-purpose children: 2,500, with existing explore allowances unchanged.
 They are not 50 distinct tasks. The explicit flag requires an existing DEMO task
 admitted by runtime replay policy with `fast_cache:on`; task agents stay read-only
 and refuse live fallback on misses or unresolved context. The separate harness
@@ -58,6 +64,10 @@ Do not claim a recorded hit for existing cold-terminal passthrough, total zero
 provider spend, or LIVE acceptance credit. Do not edit tasks, prompts or evaluators
 to create a cheaper passing fixture. The compact mode/handoff controls run in
 the existing deploy gate; this large diagnostic remains user-requested.
+With repeated copies, `--strict-barrier` releases a bounded cohort only after
+every copy finishes its normal stack and autoscaler readiness. Startup failure
+aborts the cohort through owned cleanup; non-strict sliding scheduling remains
+unchanged. Report actual task start/terminal overlap, not controller count.
 
 Follow the exact monitoring command printed by every launch. Poll every 30 seconds;
 check controller terminal status even when the card is stale, and continue through

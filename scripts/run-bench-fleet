@@ -687,6 +687,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestart-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
+       "$ROOT_DIR/scripts/cloudbench-campaign-barrier.py" \
        "$ROOT_DIR/scripts/cloudbench-forensic-retirement.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh" \
@@ -13675,6 +13676,13 @@ release_start_barrier() {
         return 1
     else
         echo "⚖️  ${#autoscaler_ready_indices[@]}/${#autoscaler_ready_indices[@]} mandatory per-bench autoscalers ready"
+    fi
+    # A repeated strict campaign coordinates these otherwise independent
+    # one-task fleets only after their normal readiness checks. Consume this
+    # existing startup deadline; task execution and owned teardown stay intact.
+    if [ -n "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ]; then
+        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-campaign-barrier.py" \
+            --deadline "$deadline" --controller-pid "$$" || return 1
     fi
     echo "🚦 releasing synchronized start barrier on the ready machines..."
     local release_pids=() release_failed=0 release_port_file

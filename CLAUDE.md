@@ -934,6 +934,12 @@ default. Setup remains native. Depot uses app scope, zstd level 3 and
 `linux/amd64`; the receipt records requested builder/scope/compression/platform.
 This does not change a shared builder setting or promise speed/cost savings.
 Verify the resulting image tag resolves and runs before donor activation.
+Image publication automatically caches the checksum-verified pinned Fly client
+in the Git common directory. Native publishing uses child-only
+`DOCKER_BUILDKIT=0` and `--wg=false` for classic Docker over HTTPS; the shared
+Fly installation, PATH and benchmark runtime remain unchanged. A tiny supported
+CLI control took 31.6 seconds including initial client installation and push;
+that is not a full cold-image timing. Fresh worktrees need no manual download.
 
 **Temporary cached startup diagnostic:** reuse an existing DEMO replay task;
 do not add cache tags, prompts or seed fixtures to make a performance run pass.
@@ -942,12 +948,17 @@ The known recorded mass demo can be run with:
 ```bash
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
   scripts/run-bench test-mass-agent-run-0 --demo-cache \
-  -k 50 --concurrency 50 --timeout 300
+  -k 50 --concurrency 50 --strict-barrier --timeout 300
 ```
 
 This requests 50 independent one-task fleet controllers. Each unchanged mass
-task spawns 50 first-level general-purpose children: up to 2,500 across the
-campaign, plus its existing explore fan-out. It is not 50 distinct tasks.
+task spawns 50 first-level general-purpose children: 2,500 across the campaign;
+its existing explore allowance remains unchanged. It is not 50 distinct tasks.
+For repeated campaigns, `--strict-barrier` holds each bounded cohort until all
+copies finish normal stack and autoscaler readiness, then releases their existing
+start barriers together. Startup failure aborts the cohort through owned cleanup;
+ordinary non-strict campaigns retain sliding scheduling. Active controller count
+alone is not execution overlap; inspect actual task start/terminal intervals.
 `--demo-cache` keeps task-agent cache reads read-only and blocks their live
 fallback on cache misses or unresolved context. The separate benchmark harness
 retains genuine evaluation; declared LLM judges may still call providers and
