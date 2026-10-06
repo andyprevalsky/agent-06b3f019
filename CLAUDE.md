@@ -1031,6 +1031,14 @@ benchmark blackbox domain and `/deploy` Step 4cb. They cover fresh-checkout reus
 donor/volume/dependency binding, incomplete snapshots, legacy receipt migration,
 and metadata-only publication without making publication a benchmark gate.
 
+Controller token handoff to local dotenvs must use `cloudbench_upsert_env_key`:
+serialize each destination's full read/update with its persistent lifetime lock,
+publish changed contents atomically, and retain matching contents without a
+rewrite. Preserve unrelated keys, mode 0600 and existing dotenv symlinks. The
+hermetic concurrent-export controls run in
+`scripts/tests/cloudbench-github-token.test.sh` under `/deploy` Step 4cb and the
+cloudbench change-selected `scripts/test.sh` suite.
+
 **`agents/benchmarks/tasks.json` is the ONE canonical benchmark catalog.** Benchmark tasks and migrated long-horizon evals live here; ordinary blackbox/vitest tests do not. Each entry carries the additive eval contract: `status`, `runner` (`agent`), `bench` (`pipeline-e2e` for Rose harness plumbing vs. `rose-bench` for harness-independent capability), `description`, `environment` (mode/db_fixtures/base_images/services/secrets/live_targets/context_notes), `evaluators[]` (`static_check` | `single_turn_llm_judge` | `agentic_llm_judge`), and `source` (provenance pointers). Validated by `agents/benchmarks/long_horizon.py:validate_catalog()`. Idea kernels that haven't become evals yet live in `agents/benchmarks/long_horizon_ideas.json`.
 
 **Pre-Deploy bench selection (auto-attach):** `/deploy` does **not** run the full daily suite. `agents/benchmarks/select_predeploy_benches.py` builds a bounded set every deploy:
