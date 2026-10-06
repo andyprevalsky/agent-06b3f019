@@ -1087,7 +1087,9 @@ def needs_public_tunnel(tasks: Sequence[str]) -> bool:
     provider's network — but a bench that never opens a browser does not, and
     trycloudflare rate-limits per IP: back-to-back local runs start getting 429s,
     run.sh exits 1, and a task that never wanted a tunnel is recorded as failed.
-    Only pay that dependency when a task's own contract asks for it.
+    Only pay that dependency when a task's own contract asks for it. A phone
+    hold-line task needs it too: wait_for_human parks the call on the backend,
+    so Twilio must reach the hold webhooks and media stream from outside.
     """
     selected = set(tasks)
     if os.environ.get("BENCHMARK_PUBLIC_TUNNEL") == "1":
@@ -1100,6 +1102,8 @@ def needs_public_tunnel(tasks: Sequence[str]) -> bool:
         if task.requires_browser_agent:
             return True
         if "{frontend_url}" in task.prompt:
+            return True
+        if isinstance(task.phone_persona, dict) and task.phone_persona.get("hold_line"):
             return True
     return False
 
