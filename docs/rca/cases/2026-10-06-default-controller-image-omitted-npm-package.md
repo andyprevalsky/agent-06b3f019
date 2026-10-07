@@ -109,3 +109,38 @@ image; this offline fixture repair must not delay or restart it.
 A copied language executable does not establish the package-runner capabilities
 needed by the actual consumer. Package the pinned toolchain and test those local
 commands at image admission before allocating the workload.
+
+### 2026-10-07 recurrence: extracted cache-parent owner imported pytest
+
+Synchronizing deployment source with `a07d44ab5` exposed a new framework
+dependency at the extraction boundary. The ordinary
+`python3 scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown`
+failed with `ModuleNotFoundError: No module named 'pytest'` before its three
+cache-parent permission cases. The recipe-labeled offline image deliberately
+has no pytest dependency; the extracted owner only uses that framework's skip
+primitive. Its actual permission body and decorator-derived cases need the
+standard library. The first bad boundary was importing the full framework to
+adapt that one primitive, rather than a missing production dependency.
+
+The existing compact controller owner now executes the actual extracted block
+with pytest unavailable and the native permission capability absent. On the
+unchanged fixture it failed at the pytest import. The identical test passes
+after the extraction boundary supplies a standard-library `SkipTest` adapter.
+It requires all three skips to be counted and rejects an all-states PASS claim
+when no native case ran. The fixture preserves the actual permission bodies,
+their derived cases, all assertions, and ordinary exception propagation.
+
+The full existing compact owner passed 13 tests in 2.872 seconds. The unchanged
+ordinary Linux dispatcher command then passed: all three actual root/Linux
+cache-parent permission cases ran, with `3 passed, 0 skipped`, followed by the
+existing generation-publication and authenticated shutdown controls. The normal
+dispatcher verified retirement of both exact owned containers. Original RED,
+identical-test GREEN, source/recipe hashes, and native custody are retained in
+`.context/registry-checkpoint-deploy.private/controller-cache-skip-boundary-proof.safe.json`
+in `rose-registry-handoff-deploy-2fd-20261007`.
+
+The same registered controller owner remains in ordinary `/deploy` structural
+and controller gates. This is one fixture-local adapter and bounded case
+accounting; the offline recipe, production runtime, model/provider path, budgets,
+and the running LIVE50 source are unchanged. The earlier missing-package RED and
+this framework-import RED remain separate evidence, with zero benchmark credit.
