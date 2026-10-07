@@ -54,6 +54,12 @@ if TIMEOUT_BIN="$(command -v timeout || command -v gtimeout)"; then
 else
   BOUNDED=(/usr/bin/perl -e 'alarm shift; exec @ARGV' 60)
 fi
+# cloud-init.sh bounds its own `docker info` probe with timeout, so the scripts
+# under test need the command on their stub PATH where the system has none.
+if [ ! -x /usr/bin/timeout ] && [ ! -x /bin/timeout ]; then
+  printf '#!/bin/sh\nexec /usr/bin/perl -e '\''alarm shift; exec @ARGV'\'' "$@"\n' >"$STUB_BIN/timeout"
+  chmod +x "$STUB_BIN/timeout"
+fi
 
 # run_cloud_init <case> <stale-value> [VAR=value ...]
 run_cloud_init() {
