@@ -5856,11 +5856,25 @@ async def test_client_direct_auth_stall_falls_through_immediately():
     killed connections before the model flushed. The new 45s TTFT covers
     cold-start jitter on its own.
     """
+    from types import SimpleNamespace
+
+    from _rose_stream_progress_fixture import _VirtualClock
+
+    # Keep the real event loop while the existing stream fixture owns the
+    # client's deadline clock; host scheduling cannot exhaust a 10ms budget.
+    clock = _VirtualClock()
+    clock_asyncio = SimpleNamespace(
+        wait=clock.wait,
+        ensure_future=asyncio.ensure_future,
+        CancelledError=asyncio.CancelledError,
+        create_task=asyncio.create_task,
+        wait_for=asyncio.wait_for,
+    )
     attempts: list[float] = []
 
     async def always_stalls(**kwargs):
         attempts.append(kwargs.get("ttft_timeout_s"))
-        await asyncio.sleep(1.0)  # never produces a chunk
+        await clock.sleep(1.0)  # never produces a chunk within the client's budget
         yield StreamChunk(kind="metadata", data={"actual_model": "claude-x-claude"})
 
     async def waterfall_ok(**kwargs):
@@ -5881,6 +5895,8 @@ async def test_client_direct_auth_stall_falls_through_immediately():
     with (
         patch("providers.rose.client._try_claude_auth", always_stalls),
         patch("providers.rose.client.waterfall_complete", single_step_waterfall(waterfall_ok)),
+        patch("providers.rose.client.time", SimpleNamespace(monotonic=clock.monotonic)),
+        patch("providers.rose.client.asyncio", clock_asyncio),
     ):
         chunks = await _drain(
             client.complete(

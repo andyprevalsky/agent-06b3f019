@@ -245,10 +245,39 @@ epoch 1791385524 after 2,830 seconds. Both automatic activation watchers were
 joined and their process absence verified before the selected activation; both
 native CLI collectors and their owned callers were also joined after terminal.
 
-This case remains open for the publication visibility cause and a fresh,
-uninterrupted ordinary cold pipeline. Later image-only qualification earns no
-campaign credit and does not erase the 411-second original or 412-second
-repair-trial failures. The latest user-requested campaign remains five consecutive runs of 50 random
+Control6 then qualified a fresh ordinary cold pipeline on `5051c059`, whose
+parent runtime was `0ed5a7eb`. Its first and only normal `--no-cache` image
+invocation ran from epoch 1791387827 through 1791388306: 479 seconds, CLI exit
+zero, with no extra build or observer publication. The fixed helper first read
+the exact tag as 404, obtained metadata with POST 200, and attempted one
+hash-proven original manifest PUT. That PUT returned 400 with six
+`MANIFEST_BLOB_UNKNOWN` errors. The same invocation retained the same acquired
+credentials and continued with read-only polls until the exact tag and digest
+both returned 200 with body SHA matching
+`sha256:a16bcc26e4aa29e98cb0fc6afc52076fbe374db92e2c87611c74fc20cfb1875b`.
+The original response-file observations span 55.539 seconds from the first 404
+to the first 200, inside the existing 180-second budget. No request-start timing
+is invented. `manifest_republished` remains false because the PUT was not
+acknowledged with 201. Independent image receipt SHA is
+`acf4b00f3a9c7408287f96c09158acaa1b971c97687382567e568c5a1ad13392`.
+
+Normal exact-image activation began at epoch 1791388328 and produced terminal
+output at 1791388503.955715, about 175.956 seconds later. Its original session
+returned zero; normal source fetch, readiness and snapshot-safe parking
+completed on the same `a16bcc26` digest, and the activation actor retired.
+Independent activation receipt SHA is
+`e5a45f12b231e4e1a28502d554298366db13d6e4d16bff5040c4133de3888cf0`.
+These original clocks include image preparation in the whole-run budget.
+
+This fresh image and native-consumer qualification closes the cold-pipeline
+qualification gap. It demonstrates negative-to-positive registry visibility
+using the same held normal token for this current artifact and supports the
+premature-abort repair. The provider-internal visibility cause and the original
+failed credential bundle remain unknown, so this case stays open for that
+cause. At these observations the 50-task campaign remained active and earned
+zero completed-run credit. Neither this qualification nor later campaign
+results rewrite the original 411-second, 412-second or 409-second failed
+boundaries. The latest user-requested campaign remains five consecutive runs of 50 random
 DAILY tasks with the unchanged 1,200-second task and 3,600-second whole-run limits;
 historical 50-task artifacts remain historical. Private request bodies, logs,
 credential material and all original scalar receipts remain outside the archive.
