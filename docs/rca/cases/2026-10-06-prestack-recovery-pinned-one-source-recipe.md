@@ -139,6 +139,28 @@ remain pending. This repairs policy authority and source-equivalent admission,
 not historical performance, interrupted-run acceptance or resource-credit
 semantics. Status remains mitigated until root's final integration/outcome.
 
+### October 7 source registration follow-up
+
+The normal PR1440 command gate rejected the composed CLI recipe because its
+content fingerprint had not been added to the existing trusted policy. The
+canonical `BootstrapRecoveryTest.native_recipe` derives fingerprint
+`075458631494b2dcd44a06e877ab8f4b9687d3fa1501c5bc0c07259417cb3cac`;
+all 36 actual filesystem and committed inputs match independently qualified
+composition `a015f2e81e989de1c1f5bc2414c0eaa6fc2f3a9a`. Root independently
+invoked the same recipe and certified `before-stack-launch` and
+`agent-network-index-bootstrap` in its immutable private receipt
+`root-c968-native-source-policy-certification.safe.json`.
+
+The existing forensic owner
+`PreServiceArchiveTest.test_original_ack_and_absence_admit_source_bound_pre_service_endpoint`
+reproduced the missing registration before the policy change. The repair adds
+only that independently certified fingerprint and its two phases to the
+existing table, preserving all prior entries, validators and inverse controls.
+This is source qualification, not acceptance credit or a replacement for
+original resource receipts. The original failed aggregate gate remains
+preserved; its failed scopes require requalification after registration and
+host-space recovery. Status remains mitigated.
+
 ### October 7 review recurrence: direct native input closure
 
 Review found that the complete packed executable recipe was bound, but native
