@@ -157,10 +157,19 @@ def main() -> None:
                             entry["services_status"] = services["status"]
                             count = services["env"]["worker_processes"]
                             assert type(count) is int and 1 <= count <= 1024
+                            absent_logs = []
                             for number in range(count):
                                 relative = "repo/.context/cloudbench/logs/worker" + (f".{number}" if number else "") + ".log"
                                 if relative not in seen:
                                     entry["missing"].append(relative)
+                                    if number:
+                                        absent_logs.append(relative)
+                            if absent_logs and "worker-log-absence-original.json" not in seen:
+                                add("worker-log-absence-original.json", json.dumps({
+                                    "version": 1, "machine_id": machine,
+                                    "services_status": entry["services_status"],
+                                    "missing": absent_logs,
+                                }, sort_keys=True).encode())
                         else:
                             entry["services_status"] = None
                             for relative in (services_name, "repo/.context/cloudbench/stack.log",

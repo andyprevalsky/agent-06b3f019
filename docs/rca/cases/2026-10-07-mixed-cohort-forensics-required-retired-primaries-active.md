@@ -134,6 +134,50 @@ and the Cloud Benchmark Lifecycle suite in `scripts/test.sh:344`. The standard
 deploy command invokes the same owning dependency-sync suite. No new gate or
 timing assertion was introduced.
 
+## Follow-up: numbered-worker absence provenance was missing in the fresh builder
+
+PR1440's exact-source review exposed a producer/consumer gap in the same
+fresh-capture builder. Its earlier mixed-fleet fixture used one worker, so it
+never exercised the verifier's existing numbered-worker absence contract.
+The first bad boundary was the builder's missing-path list: it retained absent
+numbered paths without their required `worker-log-absence-original.json`.
+The canonical forensic consumer already requires that exact machine, service
+status and missing-path record; its validator was unchanged.
+
+The existing builder control now uses a three-worker original capture with
+`worker.1.log` absent and `worker.2.log` present, alongside a normally retired
+primary. It also supplies an existing absence record with deliberately different
+JSON whitespace and requires those original bytes to survive unchanged. The
+missing-record case failed on the unchanged source with
+`filename 'fixture-task/worker-log-absence-original.json' not found`.
+The frozen command selecting this builder and the monitor's owning control
+failed 3 cases, passed 11 in 4.06 seconds; the identical test bytes passed all
+14 in 2.53 seconds after the two producer fixes.
+
+Derive the numbered absence record from the same bounded loop that records
+missing worker paths. Publish it only when the original capture lacks it;
+otherwise preserve the supplied original bytes for the existing strict consumer
+to validate. This record discloses absent logs; it does not invent a clean ACK,
+repair a missing log, mutate a source capture or certify an original run. The
+raw-tar hash, audit bytes, missing driver/ACK fields, mixed retirement and
+missing/corrupt/foreign refusal assertions remain in the same control. Existing
+`failed_fleet_forensic` deploy selection discovers both new cases.
+
+Archive searches were `worker-log-absence-original missing numbered worker
+archive` and `fresh capture numbered worker log missing provenance`. This is a
+recurrence of this producer/consumer contract; the cache-policy provenance case
+is a relative. Golden references were reread: OpenClaw
+`src/agents/bash-process-registry.ts:56,170` separates retained history from
+live records; Hermes `gateway/lifecycle_ledger.py:1` retains diagnostic exit
+history; Claude Code `src/utils/cleanupRegistry.ts:14` owns unregisterable
+cleanup; Codex `codex-rs/core/src/unified_exec/async_watcher.rs:183` at
+`3342ee8c` waits for terminal monitor evidence before classification. None has
+the Fly original-worker-log absence protocol. Rose's existing strict consumer
+is the source of truth for that record. The repair adds one bounded list in the
+existing per-capture pass, no extra fleet scan or execution hot-path work.
+Private unchanged-test/source/log bindings accompany this batch. This proves
+the owning mechanism only; all original campaign acceptance remains unchanged.
+
 ## Human feedback
 
 The user required a general mixed-cohort repair, immutable original evidence,

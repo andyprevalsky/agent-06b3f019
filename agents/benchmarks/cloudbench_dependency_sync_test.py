@@ -27907,7 +27907,7 @@ fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
     assert 'fleet_recovery_confirm_forensic_retirement "$registry"' in fleet
 
 
-@pytest.mark.parametrize("fault", ["none", "missing-raw", "corrupt-normal", "foreign-owner"])
+@pytest.mark.parametrize("fault", ["none", "missing-raw", "corrupt-normal", "foreign-owner", "missing-numbered-log", "original-log-absence"])
 def test_failed_fleet_forensic_archive_builder_preserves_mixed_originals(tmp_path: Path, fault: str) -> None:
     """The existing builder feeds ordinary recovery without rewriting original history."""
     test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence(tmp_path, "retired-absent")
@@ -27920,14 +27920,32 @@ def test_failed_fleet_forensic_archive_builder_preserves_mixed_originals(tmp_pat
     (run / "fixture-task/.cid").write_text(f"clone {machine}\n")
     captures = tmp_path / "captures"
     captures.mkdir()
+    absence = {
+        "version": 1, "machine_id": machine, "services_status": "running",
+        "missing": ["repo/.context/cloudbench/logs/worker.1.log"],
+    }
+    original_absence = json.dumps(absence, indent=2).encode()
     with tarfile.open(retained / "originals.tar.gz", "r:gz") as original:
         with tarfile.open(captures / f"{machine}.tar.gz", "w:gz") as raw:
             for member in original:
                 if member.name.startswith("fixture-task/"):
                     data = original.extractfile(member).read()
+                    if fault in ("missing-numbered-log", "original-log-absence") and member.name.endswith("/services.json"):
+                        services = json.loads(data)
+                        services["env"]["worker_processes"] = 3
+                        data = json.dumps(services).encode()
                     info = tarfile.TarInfo(member.name.partition("/")[2])
                     info.size = len(data)
                     raw.addfile(info, io.BytesIO(data))
+            if fault in ("missing-numbered-log", "original-log-absence"):
+                data = b"original worker two log\n"
+                info = tarfile.TarInfo("repo/.context/cloudbench/logs/worker.2.log")
+                info.size = len(data)
+                raw.addfile(info, io.BytesIO(data))
+            if fault == "original-log-absence":
+                info = tarfile.TarInfo("worker-log-absence-original.json")
+                info.size = len(original_absence)
+                raw.addfile(info, io.BytesIO(original_absence))
         driver = original.extractfile("retired-task/bench.log").read()
     (run / "retired-task/remote-logs/cloudbench-driver.log").write_bytes(driver)
     before_audit = {p.name: p.read_bytes() for p in (audit / "fresh").iterdir()}
@@ -27948,7 +27966,7 @@ def test_failed_fleet_forensic_archive_builder_preserves_mixed_originals(tmp_pat
     assert before_audit == {p.name: p.read_bytes() for p in (audit / "fresh").iterdir()}
     assert (retained / "originals.tar.gz").is_file()
     assert (registry / "runtime-evidence-unconfirmed").exists()
-    if fault != "none":
+    if fault not in ("none", "missing-numbered-log", "original-log-absence"):
         assert result.returncode != 0, f"unsafe builder {fault} was admitted"
         assert not (run / "_forensic/manifest.json").exists()
         return
@@ -27957,7 +27975,17 @@ def test_failed_fleet_forensic_archive_builder_preserves_mixed_originals(tmp_pat
     manifest = json.loads((run / "_forensic/manifest.json").read_text())
     assert manifest["schema"] == "cloudbench-forensic-retirement-v1" and len(manifest["tasks"]) == 2
     assert manifest["proof_credit"] == 0
-    assert manifest["tasks"][0]["missing"] == [f"repo/.context/cloudbench/run.json", "cloudbench-driver.pid", f"cloudbench-driver-clean-{owner}-0.ack"]
+    expected_missing = ["repo/.context/cloudbench/run.json", "cloudbench-driver.pid"]
+    if fault in ("missing-numbered-log", "original-log-absence"):
+        expected_missing.extend(absence["missing"])
+    expected_missing.append(f"cloudbench-driver-clean-{owner}-0.ack")
+    assert manifest["tasks"][0]["missing"] == expected_missing
+    if fault in ("missing-numbered-log", "original-log-absence"):
+        with tarfile.open(run / "_forensic/originals.tar.gz", "r:gz") as built:
+            captured_absence = built.extractfile("fixture-task/worker-log-absence-original.json").read()
+        assert json.loads(captured_absence) == absence
+        if fault == "original-log-absence":
+            assert captured_absence == original_absence
     assert {row["machine_id"] for row in manifest["tasks"]} == {machine, retired_machine}
     verified = subprocess.run([
         sys.executable, str(FORENSIC_RETIREMENT_SCRIPT), "--registry", str(registry), "--run", str(run),

@@ -126,7 +126,7 @@ def observe(directory, controller_status=None):
         "next_action": "inspect_terminal_and_owned_resources"
         if exit_code is not None or lifecycle_terminal
         else "inspect_task_warnings_and_continue"
-        if task_controller_warnings
+        if task_controller_warnings and not invalid_rows
         else "observe_again",
     }
 

@@ -212,3 +212,29 @@ deploy wrapper's `fleet_monitor` selection; there is no new paid or long gate.
 Source/test/log hash bindings and the independent receipt are private under
 `.context/monitor-rca.private/`. No LIVE50 or production-deployment credit follows
 from this warning-only repair.
+
+## Follow-up: invalid-row advice must retain its precedence
+
+PR1440 review found that an abnormal child exit could override the monitor's
+existing invalid-row advice. The warning still said to inspect this exact
+owner, while `next_action` incorrectly invited continuation. Earlier tests
+covered malformed rows and abnormal children separately, masking their joint
+boundary. The existing abnormal-exit control now crosses exits0/1/125/143 with
+valid and invalid rows through the same supported CLI. Both invalid-row cases
+with abnormal exits failed with `inspect_task_warnings_and_continue` instead
+of the existing `observe_again`; ordinary outcomes and valid rows passed.
+The unchanged combined14-case command passed after the next-action selector
+requires valid rows. Terminal parent/lifecycle inspection still takes priority,
+invalid-row warnings retain the existing exact-owner advice, and healthy-row
+outcomes/occupancy are unchanged. No acceptance or cancellation policy changes.
+
+Searches `monitor invalid task rows warning next action` and `fleet monitor
+malformed rows child controller warning` identify this as a recurrence of the
+same observation contract. The reread OpenClaw process registry, Hermes lifecycle
+ledger and Claude Code cleanup registry retain authoritative lifetime ownership;
+Codex `codex-rs/core/src/unified_exec/async_watcher.rs:183` at `3342ee8c` settles
+terminal monitoring before classifying its result. None defines Rose's row
+advice vocabulary. Keeping the existing invalid-row branch ahead of advisory
+child continuation removes the conflicting precedence without another state,
+channel, registry or timing gate. The same `fleet_monitor` deploy selection
+runs every added case; original LIVE50 outcomes and credit stay unchanged.
